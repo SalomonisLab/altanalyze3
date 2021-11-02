@@ -8,7 +8,7 @@ The testing exampels and code will be in [test folder](./test)
 
 ## Contribution rules
 
-If you are a memeber of the development team, to contribute, please follow the steps below:
+If you are a member of the development team, to contribute, please follow the steps below:
 
 ```bash
 # if you haven't cloned before
@@ -25,3 +25,10 @@ git push origin HEAD:frank_branch
 ```
 
 Then, on the GitHub, go to your branch, and click contribute, issue a pull request with clear messages on what you have changed. Then the managers will review your pull requests and deciding whether to merge to the main branch or not (At each standing meeting).
+
+If you are not a member of development team, to contribute, please follow the steps below:
+
+1. fork the repository to your account
+2. make the changes in your forked repository
+3. create a pull request
+4. the managers will review your codes and decide how to merge into the main branch (At each standing meeting)
