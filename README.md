@@ -1,7 +1,10 @@
 # altanalyze3
 
-The source codes will be in [src](./src)
-The documentation will be in [doc](./doc)
+The source codes will be in [src folder](./src)
+
+The documentation will be in [doc folder](./doc)
+
+The testing exampels and code will be in [test folder](./test)
 
 ## Contribution rules
 
@@ -21,4 +24,4 @@ git pull origina frank_branch
 git push origin HEAD:frank_branch
 ```
 
-Then, on the GitHub, go to your branch, and click contribute, issue a pull request with clear messages on what you have changed. Then the manager will review your pull requests and deciding whether to merge to the main branch or not.
+Then, on the GitHub, go to your branch, and click contribute, issue a pull request with clear messages on what you have changed. Then the managers will review your pull requests and deciding whether to merge to the main branch or not (At each standing meeting).
