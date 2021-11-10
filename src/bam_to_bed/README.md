@@ -10,7 +10,9 @@ The current program conducted the following steps:
 
 1. For each alignment record in bam file, if its CIGAR string contains "N" (potentially supportive reads for splicing junctions), we store its start and end position in the reference genome (GRCh38). After this step, we should have a dictionary-like object {`FILL THE BLANK`} storing the start and end position of all junction reads.
 
-2. Merge reads that are overlapping {`FILL THE BLANK`} in a certain region, write it to a bed file as a feature.
+2. Merge reads that are overlapping in a certain {`FILL THE BLANK`} region, write it to a bed file as a feature.
+
+The above description should verbose enough, and programming language-agnostic, a nice [example](https://timoast.github.io/sinto/basic_usage.html#how-the-fragment-file-is-generated) I liked a lot.
 
 Potential ideas for making it faster:
 
@@ -20,4 +22,4 @@ Potential ideas for making it faster:
 
 ## Output
 
-Each bam file will have a corresponding bed file (or two bed files) {`FILL THE BLANK`}
+Each bam file will have a corresponding bed file (or two bed files) {`FILL THE BLANK`}, the schema of the bed file can be found in this [altanalyze link](https://altanalyze.readthedocs.io/en/latest/RNASeq_sample_data/).
