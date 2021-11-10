@@ -1,0 +1,2 @@
+- To add new unit tests see example in `test_example.py`
+- To run unit tests in Docker container, use `run_unit_tests_in_docker.sh`. Optionally, provide `UBUNTU_VERSION`, `PYTHON_VERSION`, and `ALTANALYZE_VERSION` as script arguments
