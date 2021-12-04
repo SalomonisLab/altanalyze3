@@ -51,7 +51,7 @@ def arg_parser():
     general_parser = argparse.ArgumentParser()
     general_parser.add_argument("--bam",     help="Path to the coordinate-sorted indexed BAM file", type=str, required=True)
     general_parser.add_argument("--threads", help="Number of threads to decompress BAM file", type=int, default=1)
-    general_parser.add_argument("--cpus",    help="Number processes to run in parallel", type=int, default=1)
+    general_parser.add_argument("--cpus",    help="Number of processes to run in parallel", type=int, default=1)
     general_parser.add_argument("--output",  help="Output file prefix", type=str, default="spliced")
     return general_parser
 
