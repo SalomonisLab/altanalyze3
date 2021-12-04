@@ -1,10 +1,10 @@
 # altanalyze3
 
-The source codes will be in [src folder](./src)
+The source code is in [src folder](./src)
 
-The documentation will be in [doc folder](./doc)
+The documentation is in [doc folder](./doc)
 
-The testing exampels and code will be in [test folder](./test)
+The testing exampels and code are in [test folder](./test)
 
 ## Contribution rules
 
