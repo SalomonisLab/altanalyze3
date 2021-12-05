@@ -1,4 +1,4 @@
-# Development guide
+# Explanation for how the old Python2 code base work
 
 ## Input
 
@@ -28,10 +28,9 @@ So the end goal through this iteration is to generate this `junction_db`. In eac
 
 ![splice_site](splice_site.png)
 
-3. After having this `junction_db`, we are going to write them to a bed file. See example output [Here](junction_bed.csv). (**How does the junction definition (4 infomation) transform to the bed file? Need to chat with Nathan**)
+3. After having this `junction_db`, we are going to write them to a bed file. See example output [Here](junction_bed.csv). The start and end position for the junction are stored in the `name` column, while the `start` and `end` values represent the left-most and right-most ends for mapped junction reads.
 
-
-4. Additionally, we identify the intron retention event. This is a new round of iteration through all the alignment records in the bam file. The definition of the intron comes from the exonReference file (**Still need to be more specific, need to chat with Nathan**). And to call a intron retention event out, it needs to meet some critetia specified in the image below. See exmaple output [Here](intron_bed.csv).
+4. Additionally, we identify the intron retention event. This is a new round of iteration through all the alignment records in the bam file. The definition of the intron comes from the exonReference file. And to call a intron retention event out, it needs to meet some critetia specified in the image below. See exmaple output [Here](intron_bed.csv).
 
 If we are dealing with single-end data:
 
