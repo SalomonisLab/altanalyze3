@@ -29,7 +29,7 @@ from multiprocessing import Pool
 ###############################################################################################################################################################
 
 
-class Category (enum.Enum):
+class Cat (enum.Enum):
 
     PRIME_5 = 1
     PRIME_3 = 2
@@ -45,14 +45,8 @@ class Overlaps:
     def reset(self):
         self.overlaps = {}
 
-    def __getitem__(self, contig, start, end, name):
-        return self.overlaps.setdefault(
-            (contig, start, end, name),
-            {
-                "p5": 0,
-                "p3": 0
-            }
-        )
+    def __getitem__(self, key):                                          # key is a tuple (contig, start, end, name)
+        return self.overlaps.setdefault(key, {"p5": 0, "p3": 0})
 
     def __iter__(self):
         for (contig, start, end, name), value in self.overlaps.items():
@@ -60,17 +54,10 @@ class Overlaps:
 
     def increment(self, contig, start, end, name, category, step=None):
         step = 1 if step is None else step
-        current = self.__getitem__(contig, start, end, name)
-        if category == Category.PRIME_5:
-            self.overlaps[(contig, start, end, name)] = {
-                "p5": current["p5"] + step,
-                "p3": current["p3"]
-            }
-        elif category == Category.PRIME_3:
-            self.overlaps[(contig, start, end, name)] = {
-                "p5": current["p5"],
-                "p3": current["p3"] + step
-            }
+        if category is Cat.PRIME_5:
+            self[(contig, start, end, name)]["p5"] += step
+        elif category is Cat.PRIME_3:
+            self[(contig, start, end, name)]["p3"] += step
 
 
 class Counter:
@@ -89,13 +76,13 @@ class Counter:
     def get_category(self, read, intron, span=None):
         span = 0 if span is None else span
         if read.reference_end - intron.start >= span and intron.start - read.reference_start >= span:
-            return Category.PRIME_5
+            return Cat.PRIME_5
         elif read.reference_start - intron.start >= 0 and intron.end - read.reference_end >= 0:
-            return Category.INTRON
+            return Cat.INTRON
         elif read.reference_end - intron.end >= span and intron.end - read.reference_start >= span:
-            return Category.PRIME_3
+            return Cat.PRIME_3
         else:
-            return Category.DISCARD
+            return Cat.DISCARD
 
     def __is_paired(self, n_reads=None):
         n_reads = 20 if n_reads is None else n_reads
@@ -114,9 +101,9 @@ class Counter:
             self.overlaps.increment(contig, start, end, name, category)
         else:
             cached_contig, cached_start, cached_end, cached_name, cached_category = cached_data
-            if cached_category is Category.INTRON:
+            if cached_category is Cat.INTRON:
                 self.overlaps.increment(contig, start, end, name, category)
-            elif category is Category.INTRON:
+            elif category is Cat.INTRON:
                 self.overlaps.increment(cached_contig, cached_start, cached_end, cached_name, cached_category)
 
     def calculate(self, contig, span):
@@ -150,11 +137,11 @@ class Counter:
                             except KeyError:
                                 pass
 
-    def export(self, out):
-        print(f"Export temporary results to {out}")
-        with open(out, "w") as out_handler:
+    def export(self, location):
+        print(f"Export temporary results to {location}")
+        with open(location, "w") as out_handler:
             for contig, start, end, name, p5, p3 in self.overlaps:
-                out_handler.write(f"""{contig}\t{start}\t{end}\t{name}\t0\t{p5}\t{p3}\n""")
+                out_handler.write(f"{contig}\t{start}\t{end}\t{name}\t0\t{p5}\t{p3}\n")
 
 
 def get_jobs(args):
@@ -169,9 +156,18 @@ def get_jobs(args):
 
 
 def process_contig(args, job):
-    counter = Counter(args.bam, args.ref, args.threads)
-    counter.calculate(contig=job[0], span=args.span)
-    counter.export(out=job[1]+"__"+job[0])
+    counter = Counter(
+        bam=args.bam,
+        ref=args.ref,
+        threads=args.threads
+    )
+    counter.calculate(
+        contig=job[0],
+        span=args.span
+    )
+    counter.export(
+        location=job[1]+"__"+job[0]
+    )
 
 
 def collect_results(args, jobs):
