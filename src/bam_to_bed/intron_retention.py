@@ -24,14 +24,54 @@ from multiprocessing import Pool
 # 2. Convert to BED format excluding all not intron records
 #    cat Hs_Ensembl_exon.txt | grep -v "gene" | awk '$2 ~ /^I/ {print $3"\t"$5"\t"$6"\t"$2"-"$1"\t"0"\t"$4}' | sort -k1,1 -k2,2n -k3,3n | bgzip > hs_ref.bed.gz
 #    tabix -p bed hs_ref.bed.gz
+#
+# If input BAM file is paired-end, it should include only primary alignment (only two reads should have identical names)
 ###############################################################################################################################################################
 
-class Segment (enum.Enum):
+
+class Category (enum.Enum):
 
     PRIME_5 = 1
     PRIME_3 = 2
     INTRON = 3
-    UKNOWN = 4
+    DISCARD = 4
+
+
+class Overlaps:
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.overlaps = {}
+
+    def __getitem__(self, contig, start, end, name):
+        return self.overlaps.setdefault(
+            (contig, start, end, name),
+            {
+                "p5": 0,
+                "p3": 0
+            }
+        )
+
+    def __iter__(self):
+        for (contig, start, end, name), value in self.overlaps.items():
+            yield contig, start, end, name, value["p5"], value["p3"]
+
+    def increment(self, contig, start, end, name, category, step=None):
+        step = 1 if step is None else step
+        current = self.__getitem__(contig, start, end, name)
+        if category == Category.PRIME_5:
+            self.overlaps[(contig, start, end, name)] = {
+                "p5": current["p5"] + step,
+                "p3": current["p3"]
+            }
+        elif category == Category.PRIME_3:
+            self.overlaps[(contig, start, end, name)] = {
+                "p5": current["p5"],
+                "p3": current["p3"] + step
+            }
+
 
 class Counter:
 
@@ -43,19 +83,19 @@ class Counter:
         self.reset()
 
     def reset(self):
-        self.overlaps = {}
-        self.cached_reads = {}
+        self.cache = {}
+        self.overlaps = Overlaps()
 
-    def get_segment(self, read, intron, span=None):
+    def get_category(self, read, intron, span=None):
         span = 0 if span is None else span
         if read.reference_end - intron.start >= span and intron.start - read.reference_start >= span:
-            return Segment.PRIME_5
+            return Category.PRIME_5
         elif read.reference_start - intron.start >= 0 and intron.end - read.reference_end >= 0:
-            return Segment.INTRON
+            return Category.INTRON
         elif read.reference_end - intron.end >= span and intron.end - read.reference_start >= span:
-            return Segment.PRIME_3
+            return Category.PRIME_3
         else:
-            return Segment.UKNOWN
+            return Category.DISCARD
 
     def __is_paired(self, n_reads=None):
         n_reads = 20 if n_reads is None else n_reads
@@ -68,76 +108,22 @@ class Counter:
                     return False
             return True
 
-    def update_overlaps(self, current_data, cached_data):
-        current_contig, current_intron_start, current_intron_end, current_intron_name, current_segment = current_data
-        if cached_data is not None:
-            cached_contig, cached_intron_start, cached_intron_end, cached_intron_name, cached_segment = cached_data
-            assert(current_contig == cached_contig)
-            if current_segment != cached_segment and current_segment in [Segment.PRIME_5, Segment.INTRON] and cached_segment in [Segment.PRIME_5, Segment.INTRON]:
-                contig = current_contig if cached_segment == Segment.INTRON else cached_contig
-                intron_start = current_intron_start if cached_segment == Segment.INTRON else cached_intron_start
-                intron_end = current_intron_end if cached_segment == Segment.INTRON else cached_intron_end
-                intron_name = current_intron_name if cached_segment == Segment.INTRON else cached_intron_name
-                default_or_current_value = self.overlaps.get(
-                    (contig, intron_start, intron_end),
-                    {
-                        "name": intron_name,
-                        "p5_count": 0,
-                        "p3_count": 0
-                    }
-                )
-                self.overlaps[(contig, intron_start, intron_end)] = {
-                    "name": intron_name,
-                    "p5_count": default_or_current_value["p5_count"] + 1,
-                    "p3_count": default_or_current_value["p3_count"]
-                }
-            elif current_segment != cached_segment and current_segment in [Segment.PRIME_3, Segment.INTRON] and cached_segment in [Segment.PRIME_3, Segment.INTRON]:
-                contig = current_contig if cached_segment == Segment.INTRON else cached_contig
-                intron_start = current_intron_start if cached_segment == Segment.INTRON else cached_intron_start
-                intron_end = current_intron_end if cached_segment == Segment.INTRON else cached_intron_end
-                intron_name = current_intron_name if cached_segment == Segment.INTRON else cached_intron_name
-                default_or_current_value = self.overlaps.get(
-                    (contig, intron_start, intron_end),
-                    {
-                        "name": intron_name,
-                        "p5_count": 0,
-                        "p3_count": 0
-                    }
-                )
-                self.overlaps[(contig, intron_start, intron_end)] = {
-                    "name": intron_name,
-                    "p5_count": default_or_current_value["p5_count"],
-                    "p3_count": default_or_current_value["p3_count"] + 1
-                }
-            else:
-                pass
+    def process_overlaps(self, intron_data, cached_data):
+        contig, start, end, name, category = intron_data
+        if cached_data is None:
+            self.overlaps.increment(contig, start, end, name, category)
         else:
-            default_or_current_value = self.overlaps.get(
-                (current_contig, current_intron_start, current_intron_end),
-                {
-                    "name": current_intron_name,
-                    "p5_count": 0,
-                    "p3_count": 0
-                }
-            )
-            if current_segment == Segment.PRIME_5:
-                self.overlaps[(current_contig, current_intron_start, current_intron_end)] = {
-                    "name": current_intron_name,
-                    "p5_count": default_or_current_value["p5_count"] + 1,
-                    "p3_count": default_or_current_value["p3_count"]
-                }
-            elif current_segment == Segment.PRIME_3:
-                self.overlaps[(current_contig, current_intron_start, current_intron_end)] = {
-                    "name": current_intron_name,
-                    "p5_count": default_or_current_value["p5_count"],
-                    "p3_count": default_or_current_value["p3_count"] + 1
-                }
+            cached_contig, cached_start, cached_end, cached_name, cached_category = cached_data
+            if cached_category is Category.INTRON:
+                self.overlaps.increment(contig, start, end, name, category)
+            elif category is Category.INTRON:
+                self.overlaps.increment(cached_contig, cached_start, cached_end, cached_name, cached_category)
 
     def calculate(self, contig, span):
         with pysam.AlignmentFile(self.bam, mode="rb", threads=self.threads) as bam_handler:
             with pysam.TabixFile(self.ref, mode="r", parser=pysam.asBed(), threads=self.threads) as ref_handler:
                 intron_iter = ref_handler.fetch(contig)
-                intron = next(intron_iter)                                                                           # get initial value from intron iterator
+                intron = next(intron_iter)                         # get initial value from intron iterator
                 for read in bam_handler.fetch(contig):
                     if read.reference_start - intron.end >= 0:
                         try:
@@ -145,50 +131,30 @@ class Counter:
                         except StopIteration:
                             break
                     else:
-                        current_data = (
+                        intron_data = (
                             contig,
                             intron.start,
                             intron.end,
                             intron.name,
-                            self.get_segment(read, intron, span)
+                            self.get_category(read, intron, span)
                         )
-                        if self.paired and read.query_name not in self.cached_reads:
-                            self.cached_reads[read.query_name] = current_data
+                        if self.paired and read.query_name not in self.cache:
+                            self.cache[read.query_name] = intron_data
                         else:
-                            self.update_overlaps(
-                                current_data,
-                                self.cached_reads.get(read.query_name, None)
+                            self.process_overlaps(
+                                intron_data,
+                                self.cache.get(read.query_name, None)
                             )
                             try:
-                                del self.cached_reads[read.query_name]
+                                del self.cache[read.query_name]
                             except KeyError:
                                 pass
-
-    def calculate_se_old(self, contig, span):
-        with pysam.AlignmentFile(self.bam, mode="rb", threads=self.threads) as bam_handler:
-            with pysam.TabixFile(self.ref, mode="r", parser=pysam.asBed(), threads=self.threads) as ref_handler:
-                for intron in ref_handler.fetch(contig):
-                    fiv_p, thr_p = [
-                        bam_handler.count(
-                            contig=contig,
-                            start=pos,
-                            end=pos+1,
-                            read_callback=lambda r: r.reference_end - pos >= span or pos - r.reference_start >= span
-                        )
-                        for pos in [intron.start, intron.end]
-                    ]
-                    if fiv_p > 0 or thr_p > 0:
-                        self.overlaps[(contig, intron.start, intron.end)] = {
-                            "name": intron.name,
-                            "p5_count": fiv_p,
-                            "p3_count": thr_p
-                        }
 
     def export(self, out):
         print(f"Export temporary results to {out}")
         with open(out, "w") as out_handler:
-            for (contig, start, end), v in self.overlaps.items():
-                out_handler.write(f"""{contig}\t{start}\t{end}\t{v["name"]}\t0\t{v["p5_count"]}\t{v["p3_count"]}\n""")
+            for contig, start, end, name, p5, p3 in self.overlaps:
+                out_handler.write(f"""{contig}\t{start}\t{end}\t{name}\t0\t{p5}\t{p3}\n""")
 
 
 def get_jobs(args):
