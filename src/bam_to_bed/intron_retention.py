@@ -25,7 +25,6 @@ from multiprocessing import Pool
 #    cat Hs_Ensembl_exon.txt | grep -v "gene" | awk '$2 ~ /^I/ {print $3"\t"$5"\t"$6"\t"$2"-"$1"\t"0"\t"$4}' | sort -k1,1 -k2,2n -k3,3n | bgzip > hs_ref.bed.gz
 #    tabix -p bed hs_ref.bed.gz
 #
-# If input BAM file is paired-end, it should include only primary alignment (only two reads should have identical names)
 ###############################################################################################################################################################
 
 
@@ -35,7 +34,6 @@ class Cat (enum.Enum):
     PRIME_3 = 2
     INTRON = 3
     DISCARD = 4
-
 
 class Overlaps:
 
@@ -73,8 +71,38 @@ class Counter:
         self.cache = {}
         self.overlaps = Overlaps()
 
-    def get_category(self, read, intron, span=None):
+    def get_category(self, read, intron, span=None, strandness=None):
         span = 0 if span is None else span
+        if strandness=="forward":
+            if self.__is_paired:
+                if read.is_read1:
+                    if intron.strand=="+" and read.is_reverse:
+                        return Cat.DISCARD
+                    if intron.strand=="-" and not read.is_reverse:
+                        return Cat.DISCARD
+                elif read.is_read2:
+                    if intron.strand=="+" and not read.is_reverse:
+                        return Cat.DISCARD
+                    if intron.strand=="-" and read.is_reverse:
+                        return Cat.DISCARD
+            else:
+                if intron.strand=="+" and read.is_reverse:
+                    return Cat.DISCARD
+        elif strandness=="reverse":
+            if self.__is_paired:
+                if read.is_read1:
+                    if intron.strand=="+" and not read.is_reverse:
+                        return Cat.DISCARD
+                    if intron.strand=="-" and read.is_reverse:
+                        return Cat.DISCARD
+                elif read.is_read2:
+                    if intron.strand=="+" and read.is_reverse:
+                        return Cat.DISCARD
+                    if intron.strand=="-" and not read.is_reverse:
+                        return Cat.DISCARD
+            else:
+                if intron.strand=="-" and not read.is_reverse:
+                    return Cat.DISCARD
         if read.reference_end - intron.start >= span and intron.start - read.reference_start >= span:
             return Cat.PRIME_5
         elif read.reference_start - intron.start >= 0 and intron.end - read.reference_end >= 0:
@@ -106,12 +134,21 @@ class Counter:
             elif category is Cat.INTRON:
                 self.overlaps.increment(cached_contig, cached_start, cached_end, cached_name, cached_category)
 
-    def calculate(self, contig, span):
+    def skip_read(self, read):
+        return read.is_secondary or \
+               read.is_duplicate or \
+               read.is_unmapped or \
+               read.is_supplementary or \
+               (read.is_paired and read.mate_is_unmapped)
+
+    def calculate(self, contig, span, strandness):
         with pysam.AlignmentFile(self.bam, mode="rb", threads=self.threads) as bam_handler:
             with pysam.TabixFile(self.ref, mode="r", parser=pysam.asBed(), threads=self.threads) as ref_handler:
                 intron_iter = ref_handler.fetch(contig)
                 intron = next(intron_iter)                         # get initial value from intron iterator
                 for read in bam_handler.fetch(contig):
+                    if self.skip_read(read):                       # skip all "bad" reads
+                        continue
                     if read.reference_start - intron.end >= 0:
                         try:
                             intron = next(intron_iter)
@@ -123,7 +160,7 @@ class Counter:
                             intron.start,
                             intron.end,
                             intron.name,
-                            self.get_category(read, intron, span)
+                            self.get_category(read, intron, span, strandness)
                         )
                         if self.paired and read.query_name not in self.cache:
                             self.cache[read.query_name] = intron_data
@@ -163,7 +200,8 @@ def process_contig(args, job):
     )
     counter.calculate(
         contig=job[0],
-        span=args.span
+        span=args.span,
+        strandness=args.strandness
     )
     counter.export(
         location=job[1]+"__"+job[0]
@@ -205,6 +243,19 @@ def arg_parser():
     general_parser.add_argument("--bam",     help="Path to the coordinate-sorted indexed BAM file (should include only mapped reads)", type=str, required=True)
     general_parser.add_argument("--ref",     help="Path to the coordinate-sorted indexed gene model reference BED file", type=str, required=True)
     general_parser.add_argument("--span",    help="5' and 3' overlap that read should have over a splice-site to be counted", type=int, default=10)
+    general_parser.add_argument("--strandness",
+        help=" ".join(
+            [
+                "Takes strand information into account when counting overlaps.",
+                "For 'forward' and single-end reads, the read has to be mapped",
+                "to the same strand as intron. For paired-end reads, the first",
+                "read has to be on the same strand as intron and the second read",
+                "on the opposite strand. For 'reverse', these rules are reversed.",
+                "Default: strand information is ignored"
+            ]
+        ),
+        choices=["forward", "reverse"]
+    )
     general_parser.add_argument("--threads", help="Number of threads to decompress BAM file", type=int, default=1)
     general_parser.add_argument("--cpus",    help="Number of processes to run in parallel", type=int, default=1)
     general_parser.add_argument("--chr",     help="Select chromosomes to process. Default: all available", type=str, nargs="*", default=[])
@@ -216,7 +267,7 @@ def main(argsl=None):
     if argsl is None:
         argsl = sys.argv[1:]
     args, _ = arg_parser().parse_known_args(argsl)
-    args = assert_args(normalize_args(args, ["span", "threads", "cpus", "chr"]))
+    args = assert_args(normalize_args(args, ["span", "threads", "cpus", "chr", "strandness"]))
     start = time.time()
     jobs = get_jobs(args)
     with Pool(args.cpus) as pool:
