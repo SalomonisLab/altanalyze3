@@ -141,13 +141,22 @@ class Counter:
                read.is_supplementary or \
                (read.is_paired and read.mate_is_unmapped)
 
+    def correct_contig(self, contig, handler):
+        try:
+            handler.fetch(contig)
+            return contig
+        except ValueError:
+            return contig.lstrip("chr")
+
     def calculate(self, contig, span, strandness):
         with pysam.AlignmentFile(self.bam, mode="rb", threads=self.threads) as bam_handler:
             with pysam.TabixFile(self.ref, mode="r", parser=pysam.asBed(), threads=self.threads) as ref_handler:
-                intron_iter = ref_handler.fetch(contig)
-                intron = next(intron_iter)                         # get initial value from intron iterator
-                for read in bam_handler.fetch(contig):
-                    if self.skip_read(read):                       # skip all "bad" reads
+                contig_ref = self.correct_contig(contig, ref_handler)  # contig can be with or without 'chr' prefix so we need to try to fetch both and see which one works
+                contig_bam = self.correct_contig(contig, bam_handler)
+                intron_iter = ref_handler.fetch(contig_ref)
+                intron = next(intron_iter)                             # get initial value from intron iterator
+                for read in bam_handler.fetch(contig_bam):
+                    if self.skip_read(read):                           # skip all "bad" reads
                         continue
                     if read.reference_start - intron.end >= 0:
                         try:
@@ -181,18 +190,32 @@ class Counter:
                 out_handler.write(f"{contig}\t{start}\t{end}\t{name}\t0\t{p5}\t{p3}\n")
 
 
+def chr_decorator(function):
+    """
+    Decorator to prepend any str or [str] with 'chr' prefix if it was missing
+    """
+    def __prefix(c):
+        return c if c.startswith("chr") else f"chr{c}"
+    def __wrapper(contig):
+        raw_res = function(contig)
+        if isinstance(raw_res, list):
+            return [__prefix(c) for c in raw_res]
+        else:
+            return __prefix(raw_res)
+    return __wrapper
+
+
 def get_jobs(args):
     marker = "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
-    with pysam.AlignmentFile(args.bam, mode="rb", threads=args.threads) as bam_handler:
-        with pysam.TabixFile(args.ref, mode="r", parser=pysam.asBed(), threads=args.threads) as ref_handler:
-            return [
-                (_.contig, args.output + "__" + marker)
-                    for _ in bam_handler.get_index_statistics()
-                        if _.contig in ref_handler.contigs and _.contig in args.chr       # safety measure to include only chromosomes present in BAM, BED, and --chr
-            ]
+    return [
+        (contig, args.output + "__" + marker)                                # contig is always prepended with 'chr'
+            for contig in get_all_bam_chr(args)
+                if contig in get_all_ref_chr(args) and contig in args.chr    # safety measure to include only chromosomes present in BAM, BED, and --chr
+    ]
 
 
 def process_contig(args, job):
+    print(f"Process {job[0]}")
     counter = Counter(
         bam=args.bam,
         ref=args.ref,
@@ -218,13 +241,20 @@ def collect_results(args, jobs):
                 os.remove(chunk)
 
 
-def get_default_chr(args):
+@chr_decorator
+def get_all_bam_chr(args):
     with pysam.AlignmentFile(args.bam, mode="rb", threads=args.threads) as bam_handler:
         return [_.contig for _ in bam_handler.get_index_statistics()]
 
 
+@chr_decorator
+def get_all_ref_chr(args):
+    with pysam.TabixFile(args.ref, mode="r", parser=pysam.asBed(), threads=args.threads) as ref_handler:
+        return ref_handler.contigs
+
+
 def assert_args(args):
-    args.chr = get_default_chr(args) if len(args.chr) == 0 else args.chr
+    args.chr = get_all_bam_chr(args) if len(args.chr) == 0 else [c if c.startswith("chr") else f"chr{c}" for c in args.chr]
     return args
 
 
@@ -256,10 +286,10 @@ def arg_parser():
         ),
         choices=["forward", "reverse"]
     )
-    general_parser.add_argument("--threads", help="Number of threads to decompress BAM file", type=int, default=1)
-    general_parser.add_argument("--cpus",    help="Number of processes to run in parallel", type=int, default=1)
-    general_parser.add_argument("--chr",     help="Select chromosomes to process. Default: all available", type=str, nargs="*", default=[])
-    general_parser.add_argument("--output",  help="Output file prefix", type=str, default="intron")
+    general_parser.add_argument("--threads",  help="Number of threads to decompress BAM file", type=int, default=1)
+    general_parser.add_argument("--cpus",     help="Number of processes to run in parallel", type=int, default=1)
+    general_parser.add_argument("--chr",      help="Select chromosomes to process. Default: all available", type=str, nargs="*", default=[])
+    general_parser.add_argument("--output",   help="Output file prefix", type=str, default="intron")
     return general_parser
 
 
