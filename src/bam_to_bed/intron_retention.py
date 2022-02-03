@@ -47,22 +47,24 @@ class Overlaps:
         return self.overlaps.setdefault(key, {"p5": 0, "p3": 0})
 
     def __iter__(self):
-        for (contig, start, end, name), value in self.overlaps.items():
-            yield contig, start, end, name, value["p5"], value["p3"]
+        for (contig, start, end, name, strand), value in self.overlaps.items():
+            yield contig, start, end, name, strand, value["p5"], value["p3"]
 
-    def increment(self, contig, start, end, name, category, step=None):
+    def increment(self, contig, start, end, name, strand, category, step=None):
         step = 1 if step is None else step
         if category is Cat.PRIME_5:
-            self[(contig, start, end, name)]["p5"] += step
+            self[(contig, start, end, name, strand)]["p5"] += step
         elif category is Cat.PRIME_3:
-            self[(contig, start, end, name)]["p3"] += step
+            self[(contig, start, end, name, strand)]["p3"] += step
 
 
 class Counter:
 
-    def __init__(self, bam, ref, threads=None):
+    def __init__(self, bam, ref, span, strandness, threads=None):
         self.bam = bam
         self.ref = ref
+        self.span = span
+        self.strandness = strandness
         self.threads = 1 if threads is None else threads
         self.paired = self.__is_paired()
         self.reset()
@@ -124,15 +126,15 @@ class Counter:
             return True
 
     def process_overlaps(self, intron_data, cached_data):
-        contig, start, end, name, category = intron_data
+        contig, start, end, name, strand, category = intron_data
         if cached_data is None:
-            self.overlaps.increment(contig, start, end, name, category)
+            self.overlaps.increment(contig, start, end, name, strand, category)
         else:
-            cached_contig, cached_start, cached_end, cached_name, cached_category = cached_data
+            cached_contig, cached_start, cached_end, cached_name, cached_strand, cached_category = cached_data
             if cached_category is Cat.INTRON:
-                self.overlaps.increment(contig, start, end, name, category)
+                self.overlaps.increment(contig, start, end, name, strand, category)
             elif category is Cat.INTRON:
-                self.overlaps.increment(cached_contig, cached_start, cached_end, cached_name, cached_category)
+                self.overlaps.increment(cached_contig, cached_start, cached_end, cached_name, cached_strand, cached_category)
 
     def skip_read(self, read):
         return read.is_secondary or \
@@ -148,7 +150,7 @@ class Counter:
         except ValueError:
             return contig.lstrip("chr")
 
-    def calculate(self, contig, span, strandness):
+    def calculate(self, contig):
         with pysam.AlignmentFile(self.bam, mode="rb", threads=self.threads) as bam_handler:
             with pysam.TabixFile(self.ref, mode="r", parser=pysam.asBed(), threads=self.threads) as ref_handler:
                 contig_ref = self.correct_contig(contig, ref_handler)  # contig can be with or without 'chr' prefix so we need to try to fetch both and see which one works
@@ -169,7 +171,8 @@ class Counter:
                             intron.start,
                             intron.end,
                             intron.name,
-                            self.get_category(read, intron, span, strandness)
+                            intron.strand,
+                            self.get_category(read, intron, self.span, self.strandness)
                         )
                         if self.paired and read.query_name not in self.cache:
                             self.cache[read.query_name] = intron_data
@@ -186,8 +189,10 @@ class Counter:
     def export(self, location):
         print(f"Export temporary results to {location}")
         with open(location, "w") as out_handler:
-            for contig, start, end, name, p5, p3 in self.overlaps:
-                out_handler.write(f"{contig}\t{start}\t{end}\t{name}\t0\t{p5}\t{p3}\n")
+            for contig, start, end, name, strand, p5, p3 in self.overlaps:
+                # out_handler.write(f"{contig}\t{start}\t{end}\t{name}\t0\t{p5}\t{p3}\n")
+                out_handler.write(f"{contig}\t{start-self.span}\t{start+self.span}\t{name}-{start}\t{p5}\t{strand}\n")
+                out_handler.write(f"{contig}\t{end-self.span}\t{end+self.span}\t{name}-{end}\t{p3}\t{strand}\n")
 
 
 def chr_decorator(function):
@@ -219,16 +224,12 @@ def process_contig(args, job):
     counter = Counter(
         bam=args.bam,
         ref=args.ref,
+        span=args.span,
+        strandness=args.strandness,
         threads=args.threads
     )
-    counter.calculate(
-        contig=job[0],
-        span=args.span,
-        strandness=args.strandness
-    )
-    counter.export(
-        location=job[1]+"__"+job[0]
-    )
+    counter.calculate(job[0])
+    counter.export(job[1]+"__"+job[0])
 
 
 def collect_results(args, jobs):
