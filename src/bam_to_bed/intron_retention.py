@@ -86,6 +86,8 @@ class IntronOverlaps:
             self[key]["p5"] += step
         elif category is Cat.PRIME_3:
             self[key]["p3"] += step
+        else:
+            logging.debug(f"""Do not increment counter. Ignore {category}""")
 
 
 class Counter:
@@ -131,15 +133,26 @@ class Counter:
                 if current_data[4] == current_data[8]:
                     if cached_data is None or cached_data[4] == cached_data[8]:
                         function(self, current_data, cached_data)
+                    else:
+                        logging.debug(f"""Strandness guard blocked the overlap for""")
+                        logging.debug(f"""{current_data}""")
+                        logging.debug(f"""{cached_data}""")
+                else:
+                    logging.debug(f"""Strandness guard blocked the overlap for""")
+                    logging.debug(f"""{current_data}""")
             elif self.strandness is Cat.UNSTRANDED:
                 function(self, current_data, cached_data)
         return check
 
     def guard_distance(function):
-        def __check(self, current_data, cached_data=None):
+        def check(self, current_data, cached_data=None):
             if cached_data is None or current_data[0:5] == cached_data[0:5]:            # make sure we didn't accidentally jumped to the next intron
                 function(self, current_data, cached_data)
-        return __check
+            else:
+                logging.debug(f"""Distance guard blocked the overlap for""")
+                logging.debug(f"""{current_data}""")
+                logging.debug(f"""{cached_data}""")
+        return check
     
     @guard_distance
     @guard_strandness
@@ -151,6 +164,8 @@ class Counter:
             i_end=current_data[2]
         )
         if cached_data is None:                                                         # working with single read data as we didn't store any cache
+            logging.debug("Process overlaps as single read")
+            logging.debug(current_data, current_category)
             self.overlaps.update(current_data[0:5], current_category)
         else:
             cached_category = self.get_overlap_category(
@@ -159,6 +174,9 @@ class Counter:
                 i_start=cached_data[1],
                 i_end=cached_data[2]
             )
+            logging.debug("Process overlaps as paired-end")
+            logging.debug(current_data, current_category)
+            logging.debug(cached_category, cached_category)
             if cached_category is Cat.INTRON:
                 self.overlaps.update(
                     current_data[0:5],
@@ -169,6 +187,8 @@ class Counter:
                     cached_data[0:5],
                     cached_category
                 )
+            else:
+                logging.debug("Overlap wasn't processed: unknown condition")
 
     def skip_read(self, read):
         return read.is_secondary or \
@@ -192,15 +212,23 @@ class Counter:
                 intron = next(intron_iter)                                                                          # get initial value from intron iterator
                 no_introns = False                                                                                  # to break the outer fetching reads loop
                 for read in bam_handler.fetch(contig_bam):                                                          # fetches only mapped reads
+                    logging.debug(f"""Fetch a read {read.query_name} {contig_bam}:{read.reference_start}-{read.reference_end} {"-" if read.is_reverse else "+"}""")
                     if self.skip_read(read):                                                                        # gate to skip all "bad" reads
+                        logging.debug(f"""Skip a read {read.query_name}""")
+                        logging.debug(f"""is_secondary: {read.is_secondary}""")
+                        logging.debug(f"""is_duplicate: {read.is_duplicate}""")
+                        logging.debug(f"""is_supplementary: {read.is_supplementary}""")
+                        logging.debug(f"""is_paired and mate_is_unmapped: {read.is_paired and read.mate_is_unmapped}""")
                         continue
                     while read.reference_start - intron.end >= 0:
                         try:
                             intron = next(intron_iter)
+                            logging.debug(f"""Switched to a new intron {intron.name} {contig_ref}:{intron.start}-{intron.end} {intron.strand}""")
                         except StopIteration:
                             no_introns = True
                             break
                     if no_introns:                                                                              # no need to iterate over the reads if no introns left
+                        logging.debug("Halt read iteration - run out of introns")
                         break
                     transcript_strand = None
                     try:
@@ -222,9 +250,12 @@ class Counter:
                         cached_data = self.cache[read.query_name]
                         self.update_overlaps(collected_data, cached_data)
                         del self.cache[read.query_name]
+                        logging.debug(f"""Remove cached data for {read.query_name}""")
                     except KeyError:
+                        logging.debug(f"""Failed to find cached data by {read.query_name}""")
                         if self.paired:
                             self.cache[read.query_name] = collected_data
+                            logging.debug(f"""Add cached data for {read.query_name}""")
                         else:
                             self.update_overlaps(collected_data)
 
@@ -238,15 +269,15 @@ class Counter:
 
 
 def guard_chr(function):
-    def __prefix(c):
+    def prefix(c):
         return c if c.startswith("chr") else f"chr{c}"
-    def __wrapper(contig):
+    def wrapper(contig):
         raw_res = function(contig)
         if isinstance(raw_res, list):
-            return [__prefix(c) for c in raw_res]
+            return [prefix(c) for c in raw_res]
         else:
-            return __prefix(raw_res)
-    return __wrapper
+            return prefix(raw_res)
+    return wrapper
 
 
 def get_jobs(args):
@@ -359,6 +390,8 @@ def main(argsl=None):
     args, _ = arg_parser().parse_known_args(argsl)
     args = assert_args(normalize_args(args, ["span", "threads", "cpus", "chr", "strandness", "loglevel"]))
     setup_logger(logging.root, args.loglevel)
+    logging.info("Run intron retention with the following parameteres")
+    logging.info(args)
     start = time.time()
     jobs = get_jobs(args)
     logging.info(f"Span {len(jobs)} job(s) among a pool of size {args.cpus}")
