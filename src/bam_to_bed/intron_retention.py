@@ -29,32 +29,26 @@ from functools import partial
 ###############################################################################################################################################################
 
 
-def setup_logger(logger, log_level, log_format=None):
-    log_format = "%(processName)12s (%(asctime)s): %(message)s" if log_format is None else log_format
-    for log_handler in logger.handlers:
-        logger.removeHandler(log_handler)
-    for log_filter in logger.filters:
-        logger.removeFilter(log_filter)
-    logging.basicConfig(level=log_level, format=log_format)
-
-
-class Cat (enum.Enum):
+class Cat (enum.IntEnum):
     """
     A class to include any categorical infromation to be used intead of
     string or other data types comparison.
     """
     
     # to define categories of overlap
-    PRIME_5 = 1
-    PRIME_3 = 2
-    INTRON = 3
-    DISCARD = 4
+    PRIME_5 = enum.auto()
+    PRIME_3 = enum.auto()
+    INTRON = enum.auto()
+    DISCARD = enum.auto()
     
     # to define strand specificity of RNA library
-    AUTO = 5
-    FORWARD = 6
-    REVERSE = 7
-    UNSTRANDED = 8
+    AUTO = enum.auto()
+    FORWARD = enum.auto()
+    REVERSE = enum.auto()
+    UNSTRANDED = enum.auto()
+
+    def __str__(self):
+        return self.name
 
 class IntronOverlaps:
     """
@@ -165,7 +159,7 @@ class Counter:
         )
         if cached_data is None:                                                         # working with single read data as we didn't store any cache
             logging.debug("Process overlaps as single read")
-            logging.debug(current_data, current_category)
+            logging.debug(f"""{current_data}, {current_category}""")
             self.overlaps.update(current_data[0:5], current_category)
         else:
             cached_category = self.get_overlap_category(
@@ -175,8 +169,8 @@ class Counter:
                 i_end=cached_data[2]
             )
             logging.debug("Process overlaps as paired-end")
-            logging.debug(current_data, current_category)
-            logging.debug(cached_category, cached_category)
+            logging.debug(f"""{current_data}, {current_category}""")
+            logging.debug(f"""{cached_data}, {cached_category}""")
             if cached_category is Cat.INTRON:
                 self.overlaps.update(
                     current_data[0:5],
@@ -268,16 +262,84 @@ class Counter:
                 out_handler.write(f"{contig}\t{end-self.span}\t{end+self.span}\t{name}-{end}\t{p3}\t{strand}\n")
 
 
-def guard_chr(function):
-    def prefix(c):
-        return c if c.startswith("chr") else f"chr{c}"
-    def wrapper(contig):
-        raw_res = function(contig)
-        if isinstance(raw_res, list):
-            return [prefix(c) for c in raw_res]
-        else:
-            return prefix(raw_res)
-    return wrapper
+class ArgsParser():
+
+    def __init__(self, args):
+        self.args, _ = self.get_parser().parse_known_args(args)
+        self.normalize_args(
+            skip_list=["span", "threads", "cpus", "chr", "strandness", "loglevel"]
+        )
+        self.assert_args()
+        self.set_args_as_attributes()
+        logging.debug("Parse arguments")
+        logging.debug(self.args)
+
+    def set_args_as_attributes(self):
+        for arg, value in vars(self.args).items():
+            setattr(self, arg, value)
+
+    def get_parser(self):
+        general_parser = argparse.ArgumentParser()
+        general_parser.add_argument("--bam",     help="Path to the coordinate-sorted indexed BAM file (should include only mapped reads)", type=str, required=True)
+        general_parser.add_argument("--ref",     help="Path to the coordinate-sorted indexed gene model reference BED file", type=str, required=True)
+        general_parser.add_argument("--span",    help="5' and 3' overlap that read should have over a splice-site to be counted", type=int, default=10)
+        general_parser.add_argument("--strandness",
+            help=" ".join(
+                [
+                    "Strand specificty of the RNA library."
+                    "Default: first 'auto' (try to detect strand from the XS tag",
+                    "of the read), then downgrade to 'unstranded'"
+                ]
+            ),
+            type=str,
+            default="auto",
+            choices=["auto", "forward", "reverse", "unstranded"]
+        )
+        general_parser.add_argument("--threads",  help="Number of threads to decompress BAM file", type=int, default=1)
+        general_parser.add_argument("--cpus",     help="Number of processes to run in parallel", type=int, default=1)
+        general_parser.add_argument("--chr",      help="Select chromosomes to process. Default: all available", type=str, nargs="*", default=[])
+        general_parser.add_argument("--loglevel",
+                help="Logging level. Default: info",
+                type=str,
+                default="info",
+                choices=["fatal", "error", "warning", "info", "debug"]
+        )
+        general_parser.add_argument("--output",   help="Output file prefix", type=str, default="intron")
+        return general_parser
+
+    def normalize_args(self, skip_list=[]):
+        normalized_args = {}
+        for key,value in self.args.__dict__.items():
+            if key not in skip_list:
+                normalized_args[key] = value if not value or os.path.isabs(value) else os.path.normpath(os.path.join(os.getcwd(), value))
+            else:
+                normalized_args[key]=value
+        self.args = argparse.Namespace (**normalized_args)
+
+    def assert_args(self):
+        self.args.chr = get_all_bam_chr(self.args) if len(self.args.chr) == 0 else [c if c.startswith("chr") else f"chr{c}" for c in self.args.chr]
+        self.args.strandness = {
+            "auto": Cat.AUTO,
+            "forward": Cat.FORWARD,
+            "reverse": Cat.REVERSE,
+            "unstranded": Cat.UNSTRANDED
+        }[self.args.strandness]
+        self.args.loglevel = {
+            "fatal": logging.FATAL,
+            "error": logging.ERROR,
+            "warning": logging.WARNING,
+            "info": logging.INFO,
+            "debug": logging.DEBUG
+        }[self.args.loglevel]
+
+
+def setup_logger(logger, log_level, log_format=None):
+    log_format = "%(processName)12s (%(asctime)s): %(message)s" if log_format is None else log_format
+    for log_handler in logger.handlers:
+        logger.removeHandler(log_handler)
+    for log_filter in logger.filters:
+        logger.removeFilter(log_filter)
+    logging.basicConfig(level=log_level, format=log_format)
 
 
 def get_jobs(args):
@@ -308,10 +370,23 @@ def collect_results(args, jobs):
     with open(args.output + ".bed", "w") as output_stream:
         for contig, location in jobs:
             chunk = location + "__" + contig
-            logging.info(f"Collect results from {chunk}")
+            logging.info(f"""Collect results from {chunk}""")
             with open(chunk, "r") as input_stream:
                 output_stream.write(input_stream.read())
+                logging.debug(f"""Remove {chunk}""")
                 os.remove(chunk)
+
+
+def guard_chr(function):
+    def prefix(c):
+        return c if c.startswith("chr") else f"chr{c}"
+    def wrapper(contig):
+        raw_res = function(contig)
+        if isinstance(raw_res, list):
+            return [prefix(c) for c in raw_res]
+        else:
+            return prefix(raw_res)
+    return wrapper
 
 
 @guard_chr
@@ -326,75 +401,12 @@ def get_all_ref_chr(args):
         return ref_handler.contigs
 
 
-def assert_args(args):
-    args.chr = get_all_bam_chr(args) if len(args.chr) == 0 else [c if c.startswith("chr") else f"chr{c}" for c in args.chr]
-    args.strandness = {
-        "auto": Cat.AUTO,
-        "forward": Cat.FORWARD,
-        "reverse": Cat.REVERSE,
-        "unstranded": Cat.UNSTRANDED
-    }[args.strandness]
-    args.loglevel = {
-        "fatal": logging.FATAL,
-        "error": logging.ERROR,
-        "warning": logging.WARNING,
-        "info": logging.INFO,
-        "debug": logging.DEBUG
-    }[args.loglevel]
-    return args
-
-
-def normalize_args(args, skip_list=[]):
-    normalized_args = {}
-    for key,value in args.__dict__.items():
-        if key not in skip_list:
-            normalized_args[key] = value if not value or os.path.isabs(value) else os.path.normpath(os.path.join(os.getcwd(), value))
-        else:
-            normalized_args[key]=value
-    return argparse.Namespace (**normalized_args)
-
-
-def arg_parser():
-    general_parser = argparse.ArgumentParser()
-    general_parser.add_argument("--bam",     help="Path to the coordinate-sorted indexed BAM file (should include only mapped reads)", type=str, required=True)
-    general_parser.add_argument("--ref",     help="Path to the coordinate-sorted indexed gene model reference BED file", type=str, required=True)
-    general_parser.add_argument("--span",    help="5' and 3' overlap that read should have over a splice-site to be counted", type=int, default=10)
-    general_parser.add_argument("--strandness",
-        help=" ".join(
-            [
-                "Strand specificty of the RNA library."
-                "Default: first 'auto' (try to detect strand from the XS tag",
-                "of the read), then downgrade to 'unstranded'"
-            ]
-        ),
-        type=str,
-        default="auto",
-        choices=["auto", "forward", "reverse", "unstranded"]
-    )
-    general_parser.add_argument("--threads",  help="Number of threads to decompress BAM file", type=int, default=1)
-    general_parser.add_argument("--cpus",     help="Number of processes to run in parallel", type=int, default=1)
-    general_parser.add_argument("--chr",      help="Select chromosomes to process. Default: all available", type=str, nargs="*", default=[])
-    general_parser.add_argument("--loglevel",
-            help="Logging level. Default: info",
-            type=str,
-            default="info",
-            choices=["fatal", "error", "warning", "info", "debug"]
-    )
-    general_parser.add_argument("--output",   help="Output file prefix", type=str, default="intron")
-    return general_parser
-
-
 def main(argsl=None):
-    if argsl is None:
-        argsl = sys.argv[1:]
-    args, _ = arg_parser().parse_known_args(argsl)
-    args = assert_args(normalize_args(args, ["span", "threads", "cpus", "chr", "strandness", "loglevel"]))
+    args = ArgsParser(sys.argv[1:] if argsl is None else argsl)
     setup_logger(logging.root, args.loglevel)
-    logging.info("Run intron retention with the following parameteres")
-    logging.info(args)
     start = time.time()
     jobs = get_jobs(args)
-    logging.info(f"Span {len(jobs)} job(s) among a pool of size {args.cpus}")
+    logging.info(f"""Span {len(jobs)} job(s) among a pool of size {args.cpus}""")
     with multiprocessing.Pool(args.cpus) as pool:
         pool.map(partial(process_contig, args), jobs)
     collect_results(args, jobs)
