@@ -29,13 +29,29 @@ from multiprocessing import Pool
 
 
 class Cat (enum.Enum):
-
+    """
+    A class to include any categorical infromation to be used intead of
+    string or other data types comparison.
+    """
+    
+    # to define categories of overlap
     PRIME_5 = 1
     PRIME_3 = 2
     INTRON = 3
     DISCARD = 4
+    
+    # to define strand specificity of RNA library
+    AUTO = 5
+    FORWARD = 6
+    REVERSE = 7
+    UNSTRANDED = 8
 
-class Overlaps:
+
+class IntronOverlaps:
+    """
+    Class to store counters for each inron overlapped with at least one read.
+    The instance of this class can be used as Iterator.
+    """
 
     def __init__(self):
         self.reset()
@@ -43,19 +59,24 @@ class Overlaps:
     def reset(self):
         self.overlaps = {}
 
-    def __getitem__(self, key):                                          # key is a tuple (contig, start, end, name)
+    def __getitem__(self, key):                                                    # key is a tuple (contig, start, end, name, strand)
         return self.overlaps.setdefault(key, {"p5": 0, "p3": 0})
 
     def __iter__(self):
         for (contig, start, end, name, strand), value in self.overlaps.items():
             yield contig, start, end, name, strand, value["p5"], value["p3"]
 
-    def increment(self, contig, start, end, name, strand, category, step=None):
+    def update(self, key, category, step=None):                                    # key is a tuple (contig, start, end, name, strand)
+        """
+        Increments 'p5' or 'p3' overlap counter by 'step' value.
+        Any other categories except PRIME_5 and PRIME_3 are ignored
+        """
+
         step = 1 if step is None else step
         if category is Cat.PRIME_5:
-            self[(contig, start, end, name, strand)]["p5"] += step
+            self[key]["p5"] += step
         elif category is Cat.PRIME_3:
-            self[(contig, start, end, name, strand)]["p3"] += step
+            self[key]["p3"] += step
 
 
 class Counter:
@@ -66,55 +87,25 @@ class Counter:
         self.span = span
         self.strandness = strandness
         self.threads = 1 if threads is None else threads
-        self.paired = self.__is_paired()
+        self.paired = self.is_paired()
         self.reset()
 
     def reset(self):
         self.cache = {}
-        self.overlaps = Overlaps()
+        self.overlaps = IntronOverlaps()
 
-    def get_category(self, read, intron, span=None, strandness=None):
-        span = 0 if span is None else span
-        if strandness=="forward":
-            if self.__is_paired:
-                if read.is_read1:
-                    if intron.strand=="+" and read.is_reverse:
-                        return Cat.DISCARD
-                    if intron.strand=="-" and not read.is_reverse:
-                        return Cat.DISCARD
-                elif read.is_read2:
-                    if intron.strand=="+" and not read.is_reverse:
-                        return Cat.DISCARD
-                    if intron.strand=="-" and read.is_reverse:
-                        return Cat.DISCARD
-            else:
-                if intron.strand=="+" and read.is_reverse:
-                    return Cat.DISCARD
-        elif strandness=="reverse":
-            if self.__is_paired:
-                if read.is_read1:
-                    if intron.strand=="+" and not read.is_reverse:
-                        return Cat.DISCARD
-                    if intron.strand=="-" and read.is_reverse:
-                        return Cat.DISCARD
-                elif read.is_read2:
-                    if intron.strand=="+" and read.is_reverse:
-                        return Cat.DISCARD
-                    if intron.strand=="-" and not read.is_reverse:
-                        return Cat.DISCARD
-            else:
-                if intron.strand=="-" and not read.is_reverse:
-                    return Cat.DISCARD
-        if read.reference_end - intron.start >= span and intron.start - read.reference_start >= span:
+    def get_overlap_category(self, r_start, r_end, i_start, i_end, span=None):
+        span = self.span if span is None else span
+        if r_end - i_start >= span and i_start - r_start >= span:
             return Cat.PRIME_5
-        elif read.reference_start - intron.start >= 0 and intron.end - read.reference_end >= 0:
+        elif r_start - i_start >= span and i_end - r_end >= span:
             return Cat.INTRON
-        elif read.reference_end - intron.end >= span and intron.end - read.reference_start >= span:
+        elif r_end - i_end >= span and i_end - r_start >= span:
             return Cat.PRIME_3
         else:
             return Cat.DISCARD
 
-    def __is_paired(self, n_reads=None):
+    def is_paired(self, n_reads=None):
         n_reads = 20 if n_reads is None else n_reads
         with pysam.AlignmentFile(self.bam, mode="rb", threads=self.threads) as bam_handler:
             bam_iter = bam_handler.fetch()
@@ -125,25 +116,55 @@ class Counter:
                     return False
             return True
 
-    def process_overlaps(self, intron_data, cached_data):
-        contig, start, end, name, strand, category = intron_data
-        if cached_data is None:
-            self.overlaps.increment(contig, start, end, name, strand, category)
+    def guard_strandness(function):
+        def __check(self, current_data, cached_data=None):
+            # need to add some logic here
+            # and call function only if all checks are passed
+            function(self, current_data, cached_data)
+        return __check
+
+    def guard_distance(function):
+        def __check(self, current_data, cached_data=None):
+            if cached_data is None or current_data[0:5] == cached_data[0:5]:            # make sure we didn't accidentally jumped to the next intron
+                function(self, current_data, cached_data)
+        return __check
+    
+    @guard_distance
+    @guard_strandness
+    def update_overlaps(self, current_data, cached_data=None):
+        current_category = self.get_overlap_category(
+            r_start=current_data[5],
+            r_end=current_data[6],
+            i_start=current_data[1],
+            i_end=current_data[2]
+        )
+        if cached_data is None:                                                         # working with single read data as we didn't store any cache
+            self.overlaps.update(current_data[0:5], current_category)
         else:
-            cached_contig, cached_start, cached_end, cached_name, cached_strand, cached_category = cached_data
+            cached_category = self.get_overlap_category(
+                r_start=cached_data[5],
+                r_end=cached_data[6],
+                i_start=cached_data[1],
+                i_end=cached_data[2]
+            )
             if cached_category is Cat.INTRON:
-                self.overlaps.increment(contig, start, end, name, strand, category)
-            elif category is Cat.INTRON:
-                self.overlaps.increment(cached_contig, cached_start, cached_end, cached_name, cached_strand, cached_category)
+                self.overlaps.update(
+                    current_data[0:5],
+                    current_category
+                )
+            elif current_category is Cat.INTRON:
+                self.overlaps.update(
+                    cached_data[0:5],
+                    cached_category
+                )
 
     def skip_read(self, read):
         return read.is_secondary or \
                read.is_duplicate or \
-               read.is_unmapped or \
                read.is_supplementary or \
                (read.is_paired and read.mate_is_unmapped)
 
-    def correct_contig(self, contig, handler):
+    def get_correct_contig(self, contig, handler):
         try:
             handler.fetch(contig)
             return contig
@@ -153,12 +174,12 @@ class Counter:
     def calculate(self, contig):
         with pysam.AlignmentFile(self.bam, mode="rb", threads=self.threads) as bam_handler:
             with pysam.TabixFile(self.ref, mode="r", parser=pysam.asBed(), threads=self.threads) as ref_handler:
-                contig_ref = self.correct_contig(contig, ref_handler)  # contig can be with or without 'chr' prefix so we need to try to fetch both and see which one works
-                contig_bam = self.correct_contig(contig, bam_handler)
+                contig_ref = self.get_correct_contig(contig, ref_handler)                                           # contig in the file can be both with or without 'chr' prefix
+                contig_bam = self.get_correct_contig(contig, bam_handler)                                           # the same as above
                 intron_iter = ref_handler.fetch(contig_ref)
-                intron = next(intron_iter)                             # get initial value from intron iterator
-                for read in bam_handler.fetch(contig_bam):
-                    if self.skip_read(read):                           # skip all "bad" reads
+                intron = next(intron_iter)                                                                          # get initial value from intron iterator
+                for read in bam_handler.fetch(contig_bam):                                                          # fetches only mapped reads
+                    if self.skip_read(read):                                                                        # gate to skip all "bad" reads
                         continue
                     if read.reference_start - intron.end >= 0:
                         try:
@@ -166,39 +187,43 @@ class Counter:
                         except StopIteration:
                             break
                     else:
-                        intron_data = (
+                        transcript_strand = None
+                        try:
+                            transcript_strand = read.get_tag("XS")
+                        except KeyError:
+                            pass
+                        collected_data = (                                                                          # tuple takes the smallest amount of memory
                             contig,
                             intron.start,
                             intron.end,
                             intron.name,
                             intron.strand,
-                            self.get_category(read, intron, self.span, self.strandness)
+                            read.reference_start,
+                            read.reference_end,
+                            "-" if read.is_reverse else "+",                                                        # to which strand the read was mapped
+                            transcript_strand
                         )
-                        if self.paired and read.query_name not in self.cache:
-                            self.cache[read.query_name] = intron_data
-                        else:
-                            self.process_overlaps(
-                                intron_data,
-                                self.cache.get(read.query_name, None)
-                            )
-                            try:
-                                del self.cache[read.query_name]
-                            except KeyError:
-                                pass
+                        try:
+                            cached_data = self.cache[read.query_name]
+                            self.update_overlaps(collected_data, cached_data)
+                            del self.cache[read.query_name]
+                        except KeyError:
+                            if self.paired:
+                                self.cache[read.query_name] = collected_data
+                            else:
+                                self.update_overlaps(collected_data)
+
 
     def export(self, location):
         print(f"Export temporary results to {location}")
         with open(location, "w") as out_handler:
             for contig, start, end, name, strand, p5, p3 in self.overlaps:
                 # out_handler.write(f"{contig}\t{start}\t{end}\t{name}\t0\t{p5}\t{p3}\n")
-                out_handler.write(f"{contig}\t{start-self.span}\t{start+self.span}\t{name}-{start}\t{p5}\t{strand}\n")
-                out_handler.write(f"{contig}\t{end-self.span}\t{end+self.span}\t{name}-{end}\t{p3}\t{strand}\n")
+                out_handler.write(f"{contig}\t{start}\t{start+1}\t{name}-{start}\t{p5}\t{strand}\n")
+                out_handler.write(f"{contig}\t{end}\t{end+1}\t{name}-{end}\t{p3}\t{strand}\n")
 
 
-def chr_decorator(function):
-    """
-    Decorator to prepend any str or [str] with 'chr' prefix if it was missing
-    """
+def guard_chr(function):
     def __prefix(c):
         return c if c.startswith("chr") else f"chr{c}"
     def __wrapper(contig):
@@ -242,13 +267,13 @@ def collect_results(args, jobs):
                 os.remove(chunk)
 
 
-@chr_decorator
+@guard_chr
 def get_all_bam_chr(args):
     with pysam.AlignmentFile(args.bam, mode="rb", threads=args.threads) as bam_handler:
         return [_.contig for _ in bam_handler.get_index_statistics()]
 
 
-@chr_decorator
+@guard_chr
 def get_all_ref_chr(args):
     with pysam.TabixFile(args.ref, mode="r", parser=pysam.asBed(), threads=args.threads) as ref_handler:
         return ref_handler.contigs
@@ -256,6 +281,12 @@ def get_all_ref_chr(args):
 
 def assert_args(args):
     args.chr = get_all_bam_chr(args) if len(args.chr) == 0 else [c if c.startswith("chr") else f"chr{c}" for c in args.chr]
+    args.strandness = {
+        "auto": Cat.AUTO,
+        "forward": Cat.FORWARD,
+        "reverse": Cat.REVERSE,
+        "unstranded": Cat.UNSTRANDED
+    }[args.strandness]
     return args
 
 
@@ -277,15 +308,13 @@ def arg_parser():
     general_parser.add_argument("--strandness",
         help=" ".join(
             [
-                "Takes strand information into account when counting overlaps.",
-                "For 'forward' and single-end reads, the read has to be mapped",
-                "to the same strand as intron. For paired-end reads, the first",
-                "read has to be on the same strand as intron and the second read",
-                "on the opposite strand. For 'reverse', these rules are reversed.",
-                "Default: strand information is ignored"
+                "Strand specificty of the RNA library."
+                "Default: first 'auto' (try to detect strand from the XS tag",
+                "of the read), then downgrade to 'unstranded'"
             ]
         ),
-        choices=["forward", "reverse"]
+        default="auto",
+        choices=["auto", "forward", "reverse", "unstranded"]
     )
     general_parser.add_argument("--threads",  help="Number of threads to decompress BAM file", type=int, default=1)
     general_parser.add_argument("--cpus",     help="Number of processes to run in parallel", type=int, default=1)
