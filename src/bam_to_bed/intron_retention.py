@@ -238,7 +238,8 @@ class Counter:
                         read.reference_start,
                         read.reference_end,
                         "-" if read.is_reverse else "+",                                                        # to which strand the read was mapped
-                        transcript_strand
+                        transcript_strand,
+                        read.query_name
                     )
                     try:
                         cached_data = self.cache[read.query_name]
