@@ -117,11 +117,14 @@ class Counter:
             return True
 
     def guard_strandness(function):
-        def __check(self, current_data, cached_data=None):
-            # need to add some logic here
-            # and call function only if all checks are passed
-            function(self, current_data, cached_data)
-        return __check
+        def check(self, current_data, cached_data=None):
+            if self.strandness is Cat.AUTO:
+                if current_data[4] == current_data[8]:
+                    if cached_data is None or cached_data[4] == cached_data[8]:
+                        function(self, current_data, cached_data)
+            elif self.strandness is Cat.UNSTRANDED:
+                function(self, current_data, cached_data)
+        return check
 
     def guard_distance(function):
         def __check(self, current_data, cached_data=None):
@@ -178,49 +181,51 @@ class Counter:
                 contig_bam = self.get_correct_contig(contig, bam_handler)                                           # the same as above
                 intron_iter = ref_handler.fetch(contig_ref)
                 intron = next(intron_iter)                                                                          # get initial value from intron iterator
+                no_introns = False                                                                                  # to break the outer fetching reads loop
                 for read in bam_handler.fetch(contig_bam):                                                          # fetches only mapped reads
                     if self.skip_read(read):                                                                        # gate to skip all "bad" reads
                         continue
-                    if read.reference_start - intron.end >= 0:
+                    while read.reference_start - intron.end >= 0:
                         try:
                             intron = next(intron_iter)
                         except StopIteration:
+                            no_introns = True
                             break
-                    else:
-                        transcript_strand = None
-                        try:
-                            transcript_strand = read.get_tag("XS")
-                        except KeyError:
-                            pass
-                        collected_data = (                                                                          # tuple takes the smallest amount of memory
-                            contig,
-                            intron.start,
-                            intron.end,
-                            intron.name,
-                            intron.strand,
-                            read.reference_start,
-                            read.reference_end,
-                            "-" if read.is_reverse else "+",                                                        # to which strand the read was mapped
-                            transcript_strand
-                        )
-                        try:
-                            cached_data = self.cache[read.query_name]
-                            self.update_overlaps(collected_data, cached_data)
-                            del self.cache[read.query_name]
-                        except KeyError:
-                            if self.paired:
-                                self.cache[read.query_name] = collected_data
-                            else:
-                                self.update_overlaps(collected_data)
+                    if no_introns:                                                                              # no need to iterate over the reads if no introns left
+                        break
+                    transcript_strand = None
+                    try:
+                        transcript_strand = read.get_tag("XS")
+                    except KeyError:
+                        pass
+                    collected_data = (                                                                          # tuple takes the smallest amount of memory
+                        contig,
+                        intron.start,
+                        intron.end,
+                        intron.name,
+                        intron.strand,
+                        read.reference_start,
+                        read.reference_end,
+                        "-" if read.is_reverse else "+",                                                        # to which strand the read was mapped
+                        transcript_strand
+                    )
+                    try:
+                        cached_data = self.cache[read.query_name]
+                        self.update_overlaps(collected_data, cached_data)
+                        del self.cache[read.query_name]
+                    except KeyError:
+                        if self.paired:
+                            self.cache[read.query_name] = collected_data
+                        else:
+                            self.update_overlaps(collected_data)
 
 
     def export(self, location):
         print(f"Export temporary results to {location}")
         with open(location, "w") as out_handler:
             for contig, start, end, name, strand, p5, p3 in self.overlaps:
-                # out_handler.write(f"{contig}\t{start}\t{end}\t{name}\t0\t{p5}\t{p3}\n")
-                out_handler.write(f"{contig}\t{start}\t{start+1}\t{name}-{start}\t{p5}\t{strand}\n")
-                out_handler.write(f"{contig}\t{end}\t{end+1}\t{name}-{end}\t{p3}\t{strand}\n")
+                out_handler.write(f"{contig}\t{start-self.span-1}\t{start+self.span-1}\t{name}-{start}\t{p5}\t{strand}\n")
+                out_handler.write(f"{contig}\t{end-self.span}\t{end+self.span}\t{name}-{end}\t{p3}\t{strand}\n")
 
 
 def guard_chr(function):
