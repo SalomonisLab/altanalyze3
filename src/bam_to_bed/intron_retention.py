@@ -5,9 +5,10 @@ import enum
 import pysam
 import string
 import random
+import logging
 import argparse
+import multiprocessing
 from functools import partial
-from multiprocessing import Pool
 
 
 ###############################################################################################################################################################
@@ -28,6 +29,15 @@ from multiprocessing import Pool
 ###############################################################################################################################################################
 
 
+def setup_logger(logger, log_level, log_format=None):
+    log_format = "%(processName)12s (%(asctime)s): %(message)s" if log_format is None else log_format
+    for log_handler in logger.handlers:
+        logger.removeHandler(log_handler)
+    for log_filter in logger.filters:
+        logger.removeFilter(log_filter)
+    logging.basicConfig(level=log_level, format=log_format)
+
+
 class Cat (enum.Enum):
     """
     A class to include any categorical infromation to be used intead of
@@ -45,7 +55,6 @@ class Cat (enum.Enum):
     FORWARD = 6
     REVERSE = 7
     UNSTRANDED = 8
-
 
 class IntronOverlaps:
     """
@@ -221,7 +230,7 @@ class Counter:
 
 
     def export(self, location):
-        print(f"Export temporary results to {location}")
+        logging.info(f"Export results to {location}")
         with open(location, "w") as out_handler:
             for contig, start, end, name, strand, p5, p3 in self.overlaps:
                 out_handler.write(f"{contig}\t{start-self.span-1}\t{start+self.span-1}\t{name}-{start}\t{p5}\t{strand}\n")
@@ -250,7 +259,9 @@ def get_jobs(args):
 
 
 def process_contig(args, job):
-    print(f"Process {job[0]}")
+    multiprocessing.current_process().name = job[0]                          # mostly for logging purposes
+    setup_logger(multiprocessing.get_logger(), args.loglevel)
+    logging.info(f"Process chromosome {job[0]}")
     counter = Counter(
         bam=args.bam,
         ref=args.ref,
@@ -266,7 +277,7 @@ def collect_results(args, jobs):
     with open(args.output + ".bed", "w") as output_stream:
         for contig, location in jobs:
             chunk = location + "__" + contig
-            print(f"Collect results from {chunk}")
+            logging.info(f"Collect results from {chunk}")
             with open(chunk, "r") as input_stream:
                 output_stream.write(input_stream.read())
                 os.remove(chunk)
@@ -292,6 +303,13 @@ def assert_args(args):
         "reverse": Cat.REVERSE,
         "unstranded": Cat.UNSTRANDED
     }[args.strandness]
+    args.loglevel = {
+        "fatal": logging.FATAL,
+        "error": logging.ERROR,
+        "warning": logging.WARNING,
+        "info": logging.INFO,
+        "debug": logging.DEBUG
+    }[args.loglevel]
     return args
 
 
@@ -318,12 +336,19 @@ def arg_parser():
                 "of the read), then downgrade to 'unstranded'"
             ]
         ),
+        type=str,
         default="auto",
         choices=["auto", "forward", "reverse", "unstranded"]
     )
     general_parser.add_argument("--threads",  help="Number of threads to decompress BAM file", type=int, default=1)
     general_parser.add_argument("--cpus",     help="Number of processes to run in parallel", type=int, default=1)
     general_parser.add_argument("--chr",      help="Select chromosomes to process. Default: all available", type=str, nargs="*", default=[])
+    general_parser.add_argument("--loglevel",
+            help="Logging level. Default: info",
+            type=str,
+            default="info",
+            choices=["fatal", "error", "warning", "info", "debug"]
+    )
     general_parser.add_argument("--output",   help="Output file prefix", type=str, default="intron")
     return general_parser
 
@@ -332,13 +357,15 @@ def main(argsl=None):
     if argsl is None:
         argsl = sys.argv[1:]
     args, _ = arg_parser().parse_known_args(argsl)
-    args = assert_args(normalize_args(args, ["span", "threads", "cpus", "chr", "strandness"]))
+    args = assert_args(normalize_args(args, ["span", "threads", "cpus", "chr", "strandness", "loglevel"]))
+    setup_logger(logging.root, args.loglevel)
     start = time.time()
     jobs = get_jobs(args)
-    with Pool(args.cpus) as pool:
+    logging.info(f"Span {len(jobs)} job(s) among a pool of size {args.cpus}")
+    with multiprocessing.Pool(args.cpus) as pool:
         pool.map(partial(process_contig, args), jobs)
     collect_results(args, jobs)
-    print (f"""Elapsed time: {time.time() - start}""")
+    logging.info (f"""Elapsed time: {round(time.time() - start)} sec""")
 
 
 if __name__ == "__main__":
