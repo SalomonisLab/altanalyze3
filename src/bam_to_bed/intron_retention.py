@@ -33,7 +33,7 @@ from collections import namedtuple
 Job = namedtuple("Job", "contig location")
 RawData = namedtuple(
     "RawData",
-    "contig intron_start intron_end intron_name intron_strand read_start read_end read_strand xs_strand read_name"
+    "contig intron_start intron_end intron_name intron_strand read_start read_end read_strand xs_strand read_name read_1 read_2"
 )
 
 
@@ -135,28 +135,61 @@ class Counter:
     def guard_strandness(function):
         def check(self, current_data, cached_data=None):
             if self.strandness is Cat.AUTO:
-                if current_data[4] == current_data[8]:
-                    if cached_data is None or cached_data[4] == cached_data[8]:
-                        return function(self, current_data, cached_data)
-                    else:
-                        logging.debug(f"""Strandness guard blocked the overlap for""")
-                        logging.debug(f"""{current_data}""")
-                        logging.debug(f"""{cached_data}""")
-                        return Cat.DISCARD
+                if self.paired and \
+                    (
+                        current_data.xs_strand == cached_data.xs_strand == None or                                                    # downgrade to "unstranded"
+                        current_data.xs_strand == cached_data.xs_strand == current_data.intron_strand == cached_data.intron_strand    # pass strandness check
+                    ):
+                    return function(self, current_data, cached_data)
+                elif not self.paired and \
+                    (
+                        current_data.xs_strand is None or                                                                             # downgrade to "unstranded"
+                        current_data.xs_strand == current_data.intron_strand                                                          # pass strandness check
+                    ):
+                    return function(self, current_data)
                 else:
-                    logging.debug(f"""Strandness guard blocked the overlap for""")
+                    logging.debug("Strandness guard blocked the overlap for")
                     logging.debug(f"""{current_data}""")
                     return Cat.DISCARD
             elif self.strandness is Cat.UNSTRANDED:
-                return function(self, current_data, cached_data)
+                if self.paired:
+                    return function(self, current_data, cached_data)
+                else:
+                    return function(self, current_data)
+            elif self.strandness is Cat.FORWARD:
+                if self.paired and current_data.intron_strand == "+" and \
+                    current_data.read_1 and current_data.read_strand == "+" and \
+                        cached_data.read_2 and cached_data.read_strand == "-":
+                    return function(self, current_data, cached_data)
+                elif not self.paired and current_data.intron_strand == "+" and \
+                    current_data.read_strand == "+":                                                           # all of the reads came from the "+" strand
+                    return function(self, current_data)
+                else:
+                    logging.debug("Strandness guard blocked the overlap for")
+                    logging.debug(f"""{current_data}""")
+                    return Cat.DISCARD
+            elif self.strandness is Cat.REVERSE:
+                if self.paired and current_data.intron_strand == "-" and \
+                    current_data.read_1 and current_data.read_strand == "-" and \
+                        cached_data.read_2 and cached_data.read_strand == "+":
+                    return function(self, current_data, cached_data)
+                elif not self.paired and current_data.intron_strand == "-" and \
+                    current_data.read_strand == "-":                                                           # all of the reads came from the "-" strand
+                    return function(self, current_data)
+                else:
+                    logging.debug("Strandness guard blocked the overlap for")
+                    logging.debug(f"""{current_data}""")
+                    return Cat.DISCARD
         return check
 
     def guard_distance(function):
         def check(self, current_data, cached_data=None):
-            if cached_data is None or current_data[0:5] == cached_data[0:5]:            # make sure we didn't accidentally jumped to the next intron
+            if not self.paired:
+                return function(self, current_data)
+            elif self.paired and current_data[0:5] == cached_data[0:5]:
                 return function(self, current_data, cached_data)
             else:
-                logging.debug(f"""Distance guard blocked the overlap for""")
+                logging.debug("Distance guard blocked the overlap for")
                 logging.debug(f"""{current_data}""")
                 logging.debug(f"""{cached_data}""")
                 return Cat.DISCARD
@@ -173,7 +206,7 @@ class Counter:
             current_data.intron_name,
             current_data.intron_strand
         )
-        if cached_data is None:
+        if not self.paired:
             logging.debug("Check overlap for single read")
             logging.debug(f"""{current_data}, {current_category}""")
             if current_category is Cat.PRIME_5:
@@ -182,6 +215,7 @@ class Counter:
                 self.overlaps.increment_p3(intron_key)
             return current_category
         else:
+            assert(cached_data != None)
             logging.debug("Check overlap for paired-end")
             cached_category = self.get_overlap_category(cached_data)
             logging.debug(f"""{current_data}, {current_category}""")
@@ -203,7 +237,8 @@ class Counter:
         return read.is_secondary or \
                read.is_duplicate or \
                read.is_supplementary or \
-               (read.is_paired and read.mate_is_unmapped)
+               (read.is_paired and read.mate_is_unmapped) or \
+               (read.is_paired and not read.is_proper_pair)
 
     def get_correct_contig(self, contig, handler):
         try:
@@ -258,7 +293,9 @@ class Counter:
                         read_end = read.reference_end,
                         read_strand = "-" if read.is_reverse else "+",
                         xs_strand = xs_strand,
-                        read_name = read.query_name
+                        read_name = read.query_name,
+                        read_1 = read.is_read1,
+                        read_2 = read.is_read2,
                     )
                     if self.paired:
                         if read.query_name in self.cache:
@@ -329,6 +366,20 @@ class ArgsParser():
             help=" ".join(
                 [
                     "Strand specificty of the RNA library."
+                    "'unstranded' - reads from the left-most end of the fragment",
+                    "(in transcript coordinates) map to the transcript strand, and",
+                    "the right-most end maps to the opposite strand.",
+                    "'forward' - same as 'unstranded' except we enforce the rule that",
+                    "the left-most end of the fragment (in transcript coordinates) is",
+                    "the first sequenced (or only sequenced for single-end reads).",
+                    "Equivalently, it is assumed that only the strand generated",
+                    "during second strand synthesis is sequenced. Used for Ligation and",
+                    "Standard SOLiD.",
+                    "'reverse' - same as 'unstranded' except we enforce the rule that",
+                    "the right-most end of the fragment (in transcript coordinates) is",
+                    "the first sequenced (or only sequenced for single-end reads).",
+                    "Equivalently, it is assumed that only the strand generated during",
+                    "first strand synthesis is sequenced. Used for dUTP, NSR, and NNSR.",
                     "Default: first 'auto' (try to detect strand from the XS tag",
                     "of the read), then downgrade to 'unstranded'"
                 ]
