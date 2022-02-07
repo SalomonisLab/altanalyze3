@@ -124,16 +124,13 @@ class Counter:
         else:
             return Cat.DISCARD
 
-    def is_paired(self, n_reads=None):
-        n_reads = 20 if n_reads is None else n_reads
+    def is_paired(self):
         with pysam.AlignmentFile(self.bam, mode="rb", threads=self.threads) as bam_handler:
-            bam_iter = bam_handler.fetch()
-            for i in range(n_reads):
-                try:
-                    bam_handler.mate(next(bam_iter))
-                except ValueError:
-                    return False
-            return True
+            for read in bam_handler.fetch():                                                 # this fetches only mapped reads
+                if self.skip_read(read):
+                    continue
+                logging.info(f"""BAM file is identified as {"paired-end" if read.is_paired else "single read"}""")
+                return read.is_paired
 
     def guard_strandness(function):
         def check(self, current_data, cached_data=None):
