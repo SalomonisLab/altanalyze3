@@ -129,7 +129,7 @@ class Counter:
             for read in bam_handler.fetch():                                                 # this fetches only mapped reads
                 if self.skip_read(read):
                     continue
-                logging.info(f"""BAM file is identified as {"paired-end" if read.is_paired else "single read"}""")
+                logging.info(f"""Alignments are in {"paired-end" if read.is_paired else "single read"} format""")
                 return read.is_paired
 
     def guard_strandness(function):
