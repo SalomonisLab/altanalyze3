@@ -260,20 +260,19 @@ class Counter:
                         xs_strand = xs_strand,
                         read_name = read.query_name
                     )
-                    try:
-                        cached_data = self.cache[read.query_name]
-                        overlapped_as = self.update_overlaps(current_data, cached_data)
-                        self.used_reads[overlapped_as].append(read.query_name)
-                        del self.cache[read.query_name]
-                        logging.debug(f"""Remove cached data for {read.query_name}""")
-                    except KeyError:
-                        logging.debug(f"""Failed to find cached data by {read.query_name}""")
-                        if self.paired:
+                    if self.paired:
+                        if read.query_name in self.cache:
+                            cached_data = self.cache[read.query_name]
+                            overlapped_as = self.update_overlaps(current_data, cached_data)
+                            self.used_reads[overlapped_as].append(read.query_name)
+                            del self.cache[read.query_name]
+                            logging.debug(f"""Remove cached data for {read.query_name}""")
+                        else:
                             self.cache[read.query_name] = current_data
                             logging.debug(f"""Add cached data for {read.query_name}""")
-                        else:
-                            overlapped_as = self.update_overlaps(current_data)
-                            self.used_reads[overlapped_as].append(read.query_name)
+                    else:
+                        overlapped_as = self.update_overlaps(current_data)
+                        self.used_reads[overlapped_as].append(read.query_name)
 
     def export_counts(self):
         logging.info(f"""Save counts to {self.location}""")
