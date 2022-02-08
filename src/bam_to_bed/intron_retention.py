@@ -221,12 +221,12 @@ class Counter:
             logging.debug(f"""{current_data}, {current_category}""")
             logging.debug(f"""{cached_data}, {cached_category}""")
             if Cat.DISCARD in [current_category, cached_category] or \
-                    current_category == cached_category == Cat.INTRON:
+                    current_category == cached_category:                                                           # both introns, both 5', or both 3'
                 return Cat.DISCARD
-            elif current_category in [Cat.PRIME_5, Cat.INTRON] and cached_category in [Cat.PRIME_5, Cat.INTRON]:
+            elif current_category in [Cat.PRIME_5, Cat.INTRON] and cached_category in [Cat.PRIME_5, Cat.INTRON]:   # 5' and intron or intron and 5'
                 self.overlaps.increment_p5(intron_key)
                 return Cat.PRIME_5
-            elif current_category in [Cat.PRIME_3, Cat.INTRON] and cached_category in [Cat.PRIME_3, Cat.INTRON]:
+            elif current_category in [Cat.PRIME_3, Cat.INTRON] and cached_category in [Cat.PRIME_3, Cat.INTRON]:   # 3' and intron or intron and 3'
                 self.overlaps.increment_p3(intron_key)
                 return Cat.PRIME_3
             else:
