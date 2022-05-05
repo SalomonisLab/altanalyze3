@@ -21,7 +21,7 @@ def get_all_bam_chr(location, threads):
 
 @guard_chr
 def get_all_ref_chr(location, threads):
-    with pysam.TabixFile(location, mode="r", parser=pysam.asBed(), threads=threads) as ref_handler:
+    with pysam.TabixFile(str(location), mode="r", parser=pysam.asBed(), threads=threads) as ref_handler:
         return ref_handler.contigs
 
 

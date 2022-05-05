@@ -214,7 +214,7 @@ class Counter:
 
     def calculate(self, contig):
         with pysam.AlignmentFile(self.bam, mode="rb", threads=self.threads) as bam_handler:
-            with pysam.TabixFile(self.ref, mode="r", parser=pysam.asBed(), threads=self.threads) as ref_handler:
+            with pysam.TabixFile(str(self.ref), mode="r", parser=pysam.asBed(), threads=self.threads) as ref_handler:
                 contig_ref = self.get_correct_contig(contig, ref_handler)                                           # contig in the file can be both with or without 'chr' prefix
                 contig_bam = self.get_correct_contig(contig, bam_handler)                                           # the same as above
                 intron_iter = ref_handler.fetch(contig_ref)
@@ -360,8 +360,8 @@ def collect_results(args, jobs):
                             out_bam_handler.write(read)
                         logging.debug(f"""Remove {bam_location}""")
                         bam_location.unlink()
-        pysam.sort("-o", args.output.with_suffix(".bam"), tmp_bam)
-        pysam.index(args.output.with_suffix(".bam"))
+        pysam.sort("-o", str(args.output.with_suffix(".bam")), str(tmp_bam))
+        pysam.index(str(args.output.with_suffix(".bam")))
         tmp_bam.unlink()
 
 

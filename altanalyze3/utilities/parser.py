@@ -185,7 +185,7 @@ class ArgsParser():
             pass
 
     def assert_args_for_count_junctions(self):
-        self.args.strandness = IntRetCat[self.args.strandedness.upper()]
+        self.args.strandness = IntRetCat[self.args.strandness.upper()]
 
     def assert_args_for_count_introns(self):
         pass                                                 # nothing to check yet
