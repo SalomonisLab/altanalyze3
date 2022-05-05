@@ -22,9 +22,24 @@ setup(
     license="Apache-2.0",
     include_package_data=True,
     packages=find_packages(
-        exclude=["doc", "test"]
+        exclude=["docs", "tests"]
     ),
-    install_requires=[],
+    install_requires=[
+        "pysam"
+    ],
     zip_safe=False,
-    classifiers=[]
+    scripts=["altanalyze3/bin/altanalyze3"],
+    classifiers=[
+        "Environment :: Console",
+        "Intended Audience :: Developers",
+        "Intended Audience :: Science/Research",
+        "Intended Audience :: Healthcare Industry",
+        "License :: OSI Approved :: Apache Software License",
+        "Natural Language :: English",
+        "Topic :: Scientific/Engineering",
+        "Topic :: Scientific/Engineering :: Bio-Informatics",
+        "Topic :: Scientific/Engineering :: Chemistry",
+        "Topic :: Scientific/Engineering :: Information Analysis",
+        "Topic :: Scientific/Engineering :: Medical Science Apps."
+    ]
 )

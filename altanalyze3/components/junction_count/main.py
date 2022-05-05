@@ -1,15 +1,25 @@
 import os
-import sys
-import time
-import enum
 import pysam
-import string
-import random
 import logging
-import argparse
 import multiprocessing
 from functools import partial
-from collections import namedtuple
+
+from altanalyze3.utilities.logger import setup_logger
+from altanalyze3.utilities.constants import (
+    IntRetCat,
+    IntRetRawData,
+    Job
+)
+from altanalyze3.utilities.helpers import (
+    get_tmp_marker,
+    TimeIt
+)
+from altanalyze3.utilities.io import (
+    get_all_bam_chr,
+    get_all_ref_chr,
+    skip_bam_read,
+    is_bam_paired
+)
 
 
 ###############################################################################################################################################################
@@ -28,35 +38,6 @@ from collections import namedtuple
 #    tabix -p bed hs_ref.bed.gz
 #
 ###############################################################################################################################################################
-
-
-Job = namedtuple("Job", "contig location")
-RawData = namedtuple(
-    "RawData",
-    "contig intron_start intron_end intron_name intron_strand read_start read_end read_strand xs_strand read_name read_1 read_2"
-)
-
-
-class Cat (enum.IntEnum):
-    """
-    A class to include any categorical infromation to be used intead of
-    string or other data types comparison.
-    """
-    
-    # to define categories of overlap
-    PRIME_5 = enum.auto()
-    PRIME_3 = enum.auto()
-    INTRON = enum.auto()
-    DISCARD = enum.auto()
-    
-    # to define strand specificity of RNA library
-    AUTO = enum.auto()
-    FORWARD = enum.auto()
-    REVERSE = enum.auto()
-    UNSTRANDED = enum.auto()
-
-    def __str__(self):
-        return self.name
 
 
 class IntronOverlaps:
@@ -98,43 +79,35 @@ class Counter:
         self.strandness = strandness
         self.location = location
         self.threads = 1 if threads is None else threads
-        self.paired = self.is_paired()
+        self.paired = is_bam_paired(self.bam, self.threads)
         self.reset()
 
     def reset(self):
         self.cache = {}
         self.overlaps = IntronOverlaps()
         self.used_reads = {
-            Cat.PRIME_5: [],
-            Cat.PRIME_3: [],
-            Cat.DISCARD: []
+            IntRetCat.PRIME_5: [],
+            IntRetCat.PRIME_3: [],
+            IntRetCat.DISCARD: []
         }
 
     def get_overlap_category(self, raw_data, span=None):
         span = self.span if span is None else span
         if raw_data.read_end - raw_data.intron_start >= span and \
                 raw_data.intron_start - raw_data.read_start >= span:
-            return Cat.PRIME_5
+            return IntRetCat.PRIME_5
         elif raw_data.read_start - raw_data.intron_start >= 0 and \
                 raw_data.intron_end - raw_data.read_end >= 0:
-            return Cat.INTRON
+            return IntRetCat.INTRON
         elif raw_data.read_end - raw_data.intron_end >= span and \
                 raw_data.intron_end - raw_data.read_start >= span:
-            return Cat.PRIME_3
+            return IntRetCat.PRIME_3
         else:
-            return Cat.DISCARD
-
-    def is_paired(self):
-        with pysam.AlignmentFile(self.bam, mode="rb", threads=self.threads) as bam_handler:
-            for read in bam_handler.fetch():                                                 # this fetches only mapped reads
-                if self.skip_read(read):
-                    continue
-                logging.info(f"""Alignments are in {"paired-end" if read.is_paired else "single read"} format""")
-                return read.is_paired
+            return IntRetCat.DISCARD
 
     def guard_strandness(function):
         def check(self, current_data, cached_data=None):
-            if self.strandness is Cat.AUTO:
+            if self.strandness is IntRetCat.AUTO:
                 if self.paired and \
                     (
                         current_data.xs_strand == cached_data.xs_strand == None or                                                    # downgrade to "unstranded"
@@ -150,13 +123,13 @@ class Counter:
                 else:
                     logging.debug("Strandness guard blocked the overlap for")
                     logging.debug(f"""{current_data}""")
-                    return Cat.DISCARD
-            elif self.strandness is Cat.UNSTRANDED:
+                    return IntRetCat.DISCARD
+            elif self.strandness is IntRetCat.UNSTRANDED:
                 if self.paired:
                     return function(self, current_data, cached_data)
                 else:
                     return function(self, current_data)
-            elif self.strandness is Cat.FORWARD:
+            elif self.strandness is IntRetCat.FORWARD:
                 if self.paired and current_data.intron_strand == "+" and \
                     current_data.read_1 and current_data.read_strand == "+" and \
                         cached_data.read_2 and cached_data.read_strand == "-":
@@ -167,8 +140,8 @@ class Counter:
                 else:
                     logging.debug("Strandness guard blocked the overlap for")
                     logging.debug(f"""{current_data}""")
-                    return Cat.DISCARD
-            elif self.strandness is Cat.REVERSE:
+                    return IntRetCat.DISCARD
+            elif self.strandness is IntRetCat.REVERSE:
                 if self.paired and current_data.intron_strand == "-" and \
                     current_data.read_1 and current_data.read_strand == "-" and \
                         cached_data.read_2 and cached_data.read_strand == "+":
@@ -179,7 +152,7 @@ class Counter:
                 else:
                     logging.debug("Strandness guard blocked the overlap for")
                     logging.debug(f"""{current_data}""")
-                    return Cat.DISCARD
+                    return IntRetCat.DISCARD
         return check
 
     def guard_distance(function):
@@ -192,7 +165,7 @@ class Counter:
                 logging.debug("Distance guard blocked the overlap for")
                 logging.debug(f"""{current_data}""")
                 logging.debug(f"""{cached_data}""")
-                return Cat.DISCARD
+                return IntRetCat.DISCARD
         return check
     
     @guard_distance
@@ -209,9 +182,9 @@ class Counter:
         if not self.paired:
             logging.debug("Check overlap for single read")
             logging.debug(f"""{current_data}, {current_category}""")
-            if current_category is Cat.PRIME_5:
+            if current_category is IntRetCat.PRIME_5:
                 self.overlaps.increment_p5(intron_key)
-            elif current_category is Cat.PRIME_3:
+            elif current_category is IntRetCat.PRIME_3:
                 self.overlaps.increment_p3(intron_key)
             return current_category
         else:
@@ -220,25 +193,18 @@ class Counter:
             cached_category = self.get_overlap_category(cached_data)
             logging.debug(f"""{current_data}, {current_category}""")
             logging.debug(f"""{cached_data}, {cached_category}""")
-            if Cat.DISCARD in [current_category, cached_category] or \
+            if IntRetCat.DISCARD in [current_category, cached_category] or \
                     current_category == cached_category:                                                           # both introns, both 5', or both 3'
-                return Cat.DISCARD
-            elif current_category in [Cat.PRIME_5, Cat.INTRON] and cached_category in [Cat.PRIME_5, Cat.INTRON]:   # 5' and intron or intron and 5'
+                return IntRetCat.DISCARD
+            elif current_category in [IntRetCat.PRIME_5, IntRetCat.INTRON] and cached_category in [IntRetCat.PRIME_5, IntRetCat.INTRON]:   # 5' and intron or intron and 5'
                 self.overlaps.increment_p5(intron_key)
-                return Cat.PRIME_5
-            elif current_category in [Cat.PRIME_3, Cat.INTRON] and cached_category in [Cat.PRIME_3, Cat.INTRON]:   # 3' and intron or intron and 3'
+                return IntRetCat.PRIME_5
+            elif current_category in [IntRetCat.PRIME_3, IntRetCat.INTRON] and cached_category in [IntRetCat.PRIME_3, IntRetCat.INTRON]:   # 3' and intron or intron and 3'
                 self.overlaps.increment_p3(intron_key)
-                return Cat.PRIME_3
+                return IntRetCat.PRIME_3
             else:
                 logging.debug(f"""Not implemented combination of {current_category} and {cached_category} categories""")
-                return Cat.DISCARD
-
-    def skip_read(self, read):
-        return read.is_secondary or \
-               read.is_duplicate or \
-               read.is_supplementary or \
-               (read.is_paired and read.mate_is_unmapped) or \
-               (read.is_paired and not read.is_proper_pair)
+                return IntRetCat.DISCARD
 
     def get_correct_contig(self, contig, handler):
         try:
@@ -259,7 +225,7 @@ class Counter:
                     logging.debug(
                         f"""Fetch a read {read.query_name} {contig_bam}:{read.reference_start}-{read.reference_end} {"-" if read.is_reverse else "+"}"""
                     )
-                    if self.skip_read(read):                                                                        # gate to skip all "bad" reads
+                    if skip_bam_read(read):                                                                        # gate to skip all "bad" reads
                         logging.debug(f"""Skip a read {read.query_name}""")
                         logging.debug(f"""is_secondary: {read.is_secondary}""")
                         logging.debug(f"""is_duplicate: {read.is_duplicate}""")
@@ -283,7 +249,7 @@ class Counter:
                         xs_strand = read.get_tag("XS")
                     except KeyError:
                         pass
-                    current_data = RawData(
+                    current_data = IntRetRawData(
                         contig = contig,
                         intron_start = intron.start,
                         intron_end = intron.end,
@@ -325,16 +291,16 @@ class Counter:
             with pysam.AlignmentFile(bam_location, "wb", threads=self.threads, template=in_bam_handler) as out_bam_handler:
                 for read in in_bam_handler.fetch():
                     logging.debug(f"""Fetch read {read.query_name}""")
-                    if self.skip_read(read):
+                    if skip_bam_read(read):
                         logging.debug("Skip")
                         continue
-                    if read.query_name in self.used_reads[Cat.PRIME_5]:
+                    if read.query_name in self.used_reads[IntRetCat.PRIME_5]:
                         read.set_tag("XI", "P5")
                         logging.debug("Assign XI=P5")
-                    elif read.query_name in self.used_reads[Cat.PRIME_3]:
+                    elif read.query_name in self.used_reads[IntRetCat.PRIME_3]:
                         read.set_tag("XI", "P3")
                         logging.debug("Assign XI=P3")
-                    elif read.query_name in self.used_reads[Cat.DISCARD]:
+                    elif read.query_name in self.used_reads[IntRetCat.DISCARD]:
                         read.set_tag("XI", "D")
                         logging.debug("Assign XI=D")
                     else:
@@ -343,109 +309,14 @@ class Counter:
                     out_bam_handler.write(read)
 
 
-class ArgsParser():
-
-    def __init__(self, args):
-        self.args, _ = self.get_parser().parse_known_args(args)
-        self.normalize_args(["span", "threads", "cpus", "chr", "strandness", "loglevel", "savereads"])
-        self.assert_args()
-        self.set_args_as_attributes()
-        logging.debug("Use argument")
-        logging.debug(self.args)
-
-    def set_args_as_attributes(self):
-        for arg, value in vars(self.args).items():
-            setattr(self, arg, value)
-
-    def get_parser(self):
-        general_parser = argparse.ArgumentParser()
-        general_parser.add_argument("--bam",      help="Path to the coordinate-sorted indexed BAM file (should include only mapped reads)", type=str, required=True)
-        general_parser.add_argument("--ref",      help="Path to the coordinate-sorted indexed gene model reference BED file", type=str, required=True)
-        general_parser.add_argument("--span",     help="5' and 3' overlap that read should have over a splice-site to be counted", type=int, default=10)
-        general_parser.add_argument("--strandness",
-            help=" ".join(
-                [
-                    "Strand specificty of the RNA library."
-                    "'unstranded' - reads from the left-most end of the fragment",
-                    "(in transcript coordinates) map to the transcript strand, and",
-                    "the right-most end maps to the opposite strand.",
-                    "'forward' - same as 'unstranded' except we enforce the rule that",
-                    "the left-most end of the fragment (in transcript coordinates) is",
-                    "the first sequenced (or only sequenced for single-end reads).",
-                    "Equivalently, it is assumed that only the strand generated",
-                    "during second strand synthesis is sequenced. Used for Ligation and",
-                    "Standard SOLiD.",
-                    "'reverse' - same as 'unstranded' except we enforce the rule that",
-                    "the right-most end of the fragment (in transcript coordinates) is",
-                    "the first sequenced (or only sequenced for single-end reads).",
-                    "Equivalently, it is assumed that only the strand generated during",
-                    "first strand synthesis is sequenced. Used for dUTP, NSR, and NNSR.",
-                    "Default: first 'auto' (try to detect strand from the XS tag",
-                    "of the read), then downgrade to 'unstranded'"
-                ]
-            ),
-            type=str,
-            default="auto",
-            choices=["auto", "forward", "reverse", "unstranded"]
-        )
-        general_parser.add_argument("--threads",   help="Number of threads to decompress BAM file", type=int, default=1)
-        general_parser.add_argument("--cpus",      help="Number of processes to run in parallel", type=int, default=1)
-        general_parser.add_argument("--chr",       help="Select chromosomes to process. Default: all available", type=str, nargs="*", default=[])
-        general_parser.add_argument("--loglevel",
-                help="Logging level. Default: info",
-                type=str,
-                default="info",
-                choices=["fatal", "error", "warning", "info", "debug"]
-        )
-        general_parser.add_argument("--savereads", help="Export processed reads into the BAM file. Default: False", action="store_true")
-        general_parser.add_argument("--output",    help="Output file prefix", type=str, default="intron")
-        return general_parser
-
-    def normalize_args(self, skip=None):
-        skip = [] if skip is None else skip
-        normalized_args = {}
-        for key,value in self.args.__dict__.items():
-            if key not in skip:
-                normalized_args[key] = value if not value or os.path.isabs(value) else os.path.normpath(os.path.join(os.getcwd(), value))
-            else:
-                normalized_args[key]=value
-        self.args = argparse.Namespace (**normalized_args)
-
-    def assert_args(self):
-        self.args.chr = get_all_bam_chr(self.args) if len(self.args.chr) == 0 else [c if c.startswith("chr") else f"chr{c}" for c in self.args.chr]
-        self.args.strandness = {
-            "auto": Cat.AUTO,
-            "forward": Cat.FORWARD,
-            "reverse": Cat.REVERSE,
-            "unstranded": Cat.UNSTRANDED
-        }[self.args.strandness]
-        self.args.loglevel = {
-            "fatal": logging.FATAL,
-            "error": logging.ERROR,
-            "warning": logging.WARNING,
-            "info": logging.INFO,
-            "debug": logging.DEBUG
-        }[self.args.loglevel]
-
-
-def setup_logger(logger, log_level, log_format=None):
-    log_format = "%(processName)12s (%(asctime)s): %(message)s" if log_format is None else log_format
-    for log_handler in logger.handlers:
-        logger.removeHandler(log_handler)
-    for log_filter in logger.filters:
-        logger.removeFilter(log_filter)
-    logging.basicConfig(level=log_level, format=log_format)
-
-
 def get_jobs(args):
-    tmp_marker = "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
     return [
         Job(
-            contig=contig,                                                      # contig is always prepended with 'chr'
-            location=args.output + "__" + contig + "__" + tmp_marker + ".bed"
+            contig=contig,                                                            # contig is always prepended with 'chr'
+            location=args.output + "__" + contig + "__" + get_tmp_marker() + ".bed"
         )
         for contig in get_all_bam_chr(args)
-            if contig in get_all_ref_chr(args) and contig in args.chr           # safety measure to include only chromosomes present in BAM, BED, and --chr
+            if contig in get_all_ref_chr(args) and contig in args.chr                 # safety measure to include only chromosomes present in BAM, BED, and --chr
     ]
 
 
@@ -479,7 +350,7 @@ def collect_results(args, jobs):
                 logging.debug(f"""Remove {job.location}""")
                 os.remove(job.location)
     if args.savereads:
-        tmp_bam = args.output + "".join(random.choices(string.ascii_uppercase + string.digits, k=10)) + ".bam"
+        tmp_bam = args.output + get_tmp_marker() + ".bam"
         with pysam.AlignmentFile(args.bam, mode="rb", threads=args.threads) as template_handler:
             with pysam.AlignmentFile(tmp_bam, "wb", threads=args.threads, template=template_handler) as out_bam_handler:
                 for job in jobs:
@@ -495,41 +366,10 @@ def collect_results(args, jobs):
         os.remove(tmp_bam)
 
 
-def guard_chr(function):
-    def prefix(c):
-        return c if c.startswith("chr") else f"chr{c}"
-    def wrapper(contig):
-        raw_res = function(contig)
-        if isinstance(raw_res, list):
-            return [prefix(c) for c in raw_res]
-        else:
-            return prefix(raw_res)
-    return wrapper
-
-
-@guard_chr
-def get_all_bam_chr(args):
-    with pysam.AlignmentFile(args.bam, mode="rb", threads=args.threads) as bam_handler:
-        return [_.contig for _ in bam_handler.get_index_statistics()]
-
-
-@guard_chr
-def get_all_ref_chr(args):
-    with pysam.TabixFile(args.ref, mode="r", parser=pysam.asBed(), threads=args.threads) as ref_handler:
-        return ref_handler.contigs
-
-
-def main(args=None):
-    args = ArgsParser(sys.argv[1:] if args is None else args)
-    setup_logger(logging.root, args.loglevel)
-    start = time.time()
-    jobs = get_jobs(args)
-    logging.info(f"""Span {len(jobs)} job(s) between {args.cpus} CPU(s)""")
-    with multiprocessing.Pool(args.cpus) as pool:
-        pool.map(partial(process_contig, args), jobs)
-    collect_results(args, jobs)
-    logging.info (f"""Elapsed time: {round(time.time() - start)} sec""")
-
-
-if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+def count_junctions(args):
+    with TimeIt:
+        jobs = get_jobs(args)
+        logging.info(f"""Span {len(jobs)} job(s) between {args.cpus} CPU(s)""")
+        with multiprocessing.Pool(args.cpus) as pool:
+            pool.map(partial(process_contig, args), jobs)
+        collect_results(args, jobs)

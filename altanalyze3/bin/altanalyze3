@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+import sys
+import logging
+from altanalyze3.utilities.parser import ArgsParser
+from altanalyze3.utilities.logger import setup_logger
+
+
+def main(args=None):
+    args = ArgsParser(sys.argv[1:] if args is None else args)
+    setup_logger(logging.root, args.loglevel)
+    args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
