@@ -35,36 +35,11 @@ class ArgsParser():
         subparsers = general_parser.add_subparsers()
         subparsers.required = True
         # Global parameters for all components of the tool
-        general_parser.add_argument(
-            "--loglevel",
-            help="Logging level. Default: info",
-            type=str,
-            default="info",
-            choices=["fatal", "error", "warning", "info", "debug"]
-        )
-        general_parser.add_argument(
-            "--threads",
-            help="Number of threads to run in parallel where applicable",
-            type=int,
-            default=1
-        )
-        general_parser.add_argument(
-            "--cpus",
-            help="Number of processes to run in parallel where applicable",
-            type=int,
-            default=1
-        )
         general_parser.add_argument(                       
             "--version",
             action="version",
             version=get_version(),
             help="Print current version and exit"
-        )
-        general_parser.add_argument(
-            "--output",
-            help="Output prefix",
-            type=str,
-            default="results"
         )
         # Junction count parameters
         junction_parser = subparsers.add_parser(
@@ -130,6 +105,31 @@ class ArgsParser():
             help="Export processed reads into the BAM file. Default: False",
             action="store_true"
         )
+        junction_parser.add_argument(
+            "--loglevel",
+            help="Logging level. Default: info",
+            type=str,
+            default="info",
+            choices=["fatal", "error", "warning", "info", "debug"]
+        )
+        junction_parser.add_argument(
+            "--threads",
+            help="Number of threads to run in parallel where applicable",
+            type=int,
+            default=1
+        )
+        junction_parser.add_argument(
+            "--cpus",
+            help="Number of processes to run in parallel where applicable",
+            type=int,
+            default=1
+        )
+        junction_parser.add_argument(
+            "--output",
+            help="Output prefix",
+            type=str,
+            default="results"
+        )
 
         # Intron count parameters
         intron_parser = subparsers.add_parser(
@@ -150,6 +150,36 @@ class ArgsParser():
             type=str,
             nargs="*",
             default=[]
+        )
+        intron_parser.add_argument(
+            "--savereads",
+            help="Export processed reads into the BAM file. Default: False",
+            action="store_true"
+        )
+        intron_parser.add_argument(
+            "--loglevel",
+            help="Logging level. Default: info",
+            type=str,
+            default="info",
+            choices=["fatal", "error", "warning", "info", "debug"]
+        )
+        intron_parser.add_argument(
+            "--threads",
+            help="Number of threads to run in parallel where applicable",
+            type=int,
+            default=1
+        )
+        intron_parser.add_argument(
+            "--cpus",
+            help="Number of processes to run in parallel where applicable",
+            type=int,
+            default=1
+        )
+        intron_parser.add_argument(
+            "--output",
+            help="Output prefix",
+            type=str,
+            default="results"
         )
         return general_parser
 
@@ -181,7 +211,7 @@ class ArgsParser():
         set parameters in case the later ones depend on other
         parameters that should be first parsed by argparser
         """
-        self.assert_general_args()
+        self.assert_common_args()
         if self.args.func == count_junctions:
             self.assert_args_for_count_junctions()
         elif self.args.func == count_introns:
@@ -201,7 +231,7 @@ class ArgsParser():
     def assert_args_for_count_introns(self):
         self.args.chr = get_all_bam_chr(self.args.bam, self.args.threads) if len(self.args.chr) == 0 else [c if c.startswith("chr") else f"chr{c}" for c in self.args.chr]
 
-    def assert_general_args(self):
+    def assert_common_args(self):
         self.args.loglevel = {
             "fatal": logging.FATAL,
             "error": logging.ERROR,
