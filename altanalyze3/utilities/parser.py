@@ -25,6 +25,22 @@ class ArgsParser():
         for arg, value in vars(self.args).items():
             setattr(self, arg, value)
 
+    def add_common_arguments(self, parser):
+        self.common_arguments = [
+            ("--loglevel", "Logging level. Default: info", str, "info", ["fatal", "error", "warning", "info", "debug"]),
+            ("--threads", "Number of threads to run in parallel where applicable", int, 1, None),
+            ("--cpus", "Number of processes to run in parallel where applicable", int, 1, None),
+            ("--output", "Output prefix", str, "results", None)
+        ]
+        for param in self.common_arguments:
+            parser.add_argument(
+                param[0],
+                help=param[1],
+                type=param[2],
+                default=param[3],
+                choices=param[4]
+            )
+
     def get_parser(self):
         """
         Defines arguments for parser. Inlcudes subparsers for
@@ -105,31 +121,7 @@ class ArgsParser():
             help="Export processed reads into the BAM file. Default: False",
             action="store_true"
         )
-        junction_parser.add_argument(
-            "--loglevel",
-            help="Logging level. Default: info",
-            type=str,
-            default="info",
-            choices=["fatal", "error", "warning", "info", "debug"]
-        )
-        junction_parser.add_argument(
-            "--threads",
-            help="Number of threads to run in parallel where applicable",
-            type=int,
-            default=1
-        )
-        junction_parser.add_argument(
-            "--cpus",
-            help="Number of processes to run in parallel where applicable",
-            type=int,
-            default=1
-        )
-        junction_parser.add_argument(
-            "--output",
-            help="Output prefix",
-            type=str,
-            default="results"
-        )
+        self.add_common_arguments(junction_parser)
 
         # Intron count parameters
         intron_parser = subparsers.add_parser(
@@ -156,31 +148,7 @@ class ArgsParser():
             help="Export processed reads into the BAM file. Default: False",
             action="store_true"
         )
-        intron_parser.add_argument(
-            "--loglevel",
-            help="Logging level. Default: info",
-            type=str,
-            default="info",
-            choices=["fatal", "error", "warning", "info", "debug"]
-        )
-        intron_parser.add_argument(
-            "--threads",
-            help="Number of threads to run in parallel where applicable",
-            type=int,
-            default=1
-        )
-        intron_parser.add_argument(
-            "--cpus",
-            help="Number of processes to run in parallel where applicable",
-            type=int,
-            default=1
-        )
-        intron_parser.add_argument(
-            "--output",
-            help="Output prefix",
-            type=str,
-            default="results"
-        )
+        self.add_common_arguments(intron_parser)
         return general_parser
 
     def normalize_args(self, skip=None):
@@ -220,7 +188,6 @@ class ArgsParser():
             pass
 
     def assert_args_for_count_junctions(self):
-        self.args.chr = get_all_bam_chr(self.args.bam, self.args.threads) if len(self.args.chr) == 0 else [c if c.startswith("chr") else f"chr{c}" for c in self.args.chr]
         self.args.strandness = {
             "auto": IntRetCat.AUTO,
             "forward": IntRetCat.FORWARD,
@@ -229,13 +196,9 @@ class ArgsParser():
         }[self.args.strandness]
 
     def assert_args_for_count_introns(self):
-        self.args.chr = get_all_bam_chr(self.args.bam, self.args.threads) if len(self.args.chr) == 0 else [c if c.startswith("chr") else f"chr{c}" for c in self.args.chr]
+        pass                                                 # nothing to check yet
 
     def assert_common_args(self):
-        self.args.loglevel = {
-            "fatal": logging.FATAL,
-            "error": logging.ERROR,
-            "warning": logging.WARNING,
-            "info": logging.INFO,
-            "debug": logging.DEBUG
-        }[self.args.loglevel]
+        self.args.chr = get_all_bam_chr(self.args.bam, self.args.threads) \
+            if len(self.args.chr) == 0 else [c if c.startswith("chr") else f"chr{c}" for c in self.args.chr]
+        self.args.loglevel = getattr(logging, self.args.loglevel.upper())
