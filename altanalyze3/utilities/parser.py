@@ -1,9 +1,7 @@
 import logging
+import pathlib
 import argparse
-from altanalyze3.utilities.helpers import (
-    get_absolute_path,
-    get_version
-)
+from altanalyze3.utilities.helpers import get_version
 from altanalyze3.components.junction_count.main import count_junctions
 from altanalyze3.components.intron_count.main import count_introns
 from altanalyze3.utilities.io import get_all_bam_chr
@@ -15,7 +13,7 @@ class ArgsParser():
     def __init__(self, args):
         args = args + [""] if len(args) == 0 else args
         self.args, _ = self.get_parser().parse_known_args(args)
-        self.normalize_args(["func", "span", "threads", "cpus", "chr", "strandness", "loglevel", "savereads"])
+        self.resolve_path(["bam", "ref", "output"])
         self.assert_args()
         self.set_args_as_attributes()
         logging.debug("Loaded parameters")
@@ -151,23 +149,22 @@ class ArgsParser():
         self.add_common_arguments(intron_parser)
         return general_parser
 
-    def normalize_args(self, skip=None):
+    def resolve_path(self, selected=None):
         """
-        Converts all relative path arguments to absolute ones relatively
-        to the current working directory. Skipped arguments and None will
-        be returned unchanged.
+        Resolves path of the "selected" parameters.
+        The other parameters remain unchanged
         """
-        skip = [] if skip is None else skip
+        selected = [] if selected is None else selected
         normalized_args = {}
-        for key,value in self.args.__dict__.items():
-            if key not in skip and value is not None:
+        for key, value in self.args.__dict__.items():
+            if key in selected:
                 if isinstance(value, list):
                     for v in value:
                         normalized_args.setdefault(key, []).append(
-                            get_absolute_path(v)
+                            pathlib.Path(v).resolve()
                         )
                 else:
-                    normalized_args[key] = get_absolute_path(value)
+                    normalized_args[key] = pathlib.Path(value).resolve()
             else:
                 normalized_args[key] = value
         self.args = argparse.Namespace(**normalized_args)

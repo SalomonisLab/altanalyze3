@@ -1,4 +1,3 @@
-import os
 import pysam
 import logging
 import multiprocessing
@@ -11,7 +10,7 @@ from altanalyze3.utilities.constants import (
     Job
 )
 from altanalyze3.utilities.helpers import (
-    get_tmp_marker,
+    get_tmp_suffix,
     TimeIt
 )
 from altanalyze3.utilities.io import (
@@ -279,13 +278,13 @@ class Counter:
 
     def export_counts(self):
         logging.info(f"""Save counts to {self.location}""")
-        with open(self.location, "w") as out_handler:
+        with self.location.open("w") as out_handler:
             for contig, start, end, name, strand, p5, p3 in self.overlaps:
                 out_handler.write(f"{contig}\t{start-self.span-1}\t{start+self.span-1}\t{name}-{start}\t{p5}\t{strand}\n")
                 out_handler.write(f"{contig}\t{end-self.span}\t{end+self.span}\t{name}-{end}\t{p3}\t{strand}\n")
 
     def export_reads(self):
-        bam_location = os.path.splitext(self.location)[0] + ".bam"
+        bam_location = self.location.with_suffix(".bam")
         logging.info(f"""Save reads to {bam_location}""")
         with pysam.AlignmentFile(self.bam, mode="rb", threads=self.threads) as in_bam_handler:
             with pysam.AlignmentFile(bam_location, "wb", threads=self.threads, template=in_bam_handler) as out_bam_handler:
@@ -313,7 +312,7 @@ def get_jobs(args):
     return [
         Job(
             contig=contig,                                                            # contig is always prepended with 'chr'
-            location=args.output + "__" + contig + "__" + get_tmp_marker() + ".bed"
+            location=args.output.with_suffix(get_tmp_suffix())
         )
         for contig in get_all_bam_chr(args.bam, args.threads)
             if contig in get_all_ref_chr(args.ref, args.threads) and contig in args.chr                 # safety measure to include only chromosomes present in BAM, BED, and --chr
@@ -342,28 +341,28 @@ def process_contig(args, job):
 
 
 def collect_results(args, jobs):
-    with open(args.output + ".bed", "w") as output_stream:
+    with args.output.with_suffix(".bed").open("w") as output_stream:
         for job in jobs:
             logging.info(f"""Collect counts from {job.location}""")
-            with open(job.location, "r") as input_stream:
+            with job.location.open("r") as input_stream:
                 output_stream.write(input_stream.read())
                 logging.debug(f"""Remove {job.location}""")
-                os.remove(job.location)
+                job.location.unlink()
     if args.savereads:
-        tmp_bam = args.output + get_tmp_marker() + ".bam"
+        tmp_bam = args.output.with_suffix(get_tmp_suffix() + ".bam")
         with pysam.AlignmentFile(args.bam, mode="rb", threads=args.threads) as template_handler:
             with pysam.AlignmentFile(tmp_bam, "wb", threads=args.threads, template=template_handler) as out_bam_handler:
                 for job in jobs:
-                    bam_location = os.path.splitext(job.location)[0] + ".bam"
+                    bam_location = job.location.with_suffix(".bam")
                     logging.info(f"""Collect reads from {bam_location}""")
                     with pysam.AlignmentFile(bam_location, mode="rb", threads=args.threads) as in_bam_handler:
                         for read in in_bam_handler.fetch(until_eof=True):                                         # we don't need index because of until_eof
                             out_bam_handler.write(read)
                         logging.debug(f"""Remove {bam_location}""")
-                        os.remove(bam_location)
-        pysam.sort("-o", args.output + ".bam", tmp_bam)
-        pysam.index(args.output + ".bam")
-        os.remove(tmp_bam)
+                        bam_location.unlink()
+        pysam.sort("-o", args.output.with_suffix(".bam"), tmp_bam)
+        pysam.index(args.output.with_suffix(".bam"))
+        tmp_bam.unlink()
 
 
 def count_junctions(args):
