@@ -4,8 +4,8 @@ import pysam
 def guard_chr(function):
     def prefix(c):
         return c if c.startswith("chr") else f"chr{c}"
-    def wrapper(contig):
-        raw_res = function(contig)
+    def wrapper(location, threads):
+        raw_res = function(location, threads)
         if isinstance(raw_res, list):
             return [prefix(c) for c in raw_res]
         else:

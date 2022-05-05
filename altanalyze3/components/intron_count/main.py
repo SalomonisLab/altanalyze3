@@ -30,7 +30,7 @@ def process_contig(args, job):
 
 
 def collect_results(args, jobs):
-    with open(args.output + ".bed", "wb") as output_stream:
+    with open(args.output + ".bed", "w") as output_stream:
         for job in jobs:
             logging.info(f"""Collect counts from {job.location}""")
             with open(job.location, "r") as input_stream:
@@ -45,12 +45,12 @@ def get_jobs(args):
             contig=contig,                                                            # contig is always prepended with 'chr'
             location=args.output + "__" + contig + "__" + get_tmp_marker() + ".bed"
         )
-        for contig in get_all_bam_chr(args) if  contig in args.chr                    # safety measure to include only chromosomes present in BAM and --chr
+        for contig in get_all_bam_chr(args.bam, args.threads) if  contig in args.chr                    # safety measure to include only chromosomes present in BAM and --chr
     ]
 
 
 def count_introns(args):
-    with TimeIt:
+    with TimeIt():
         jobs = get_jobs(args)
         logging.info(f"""Span {len(jobs)} job(s) between {args.cpus} CPU(s)""")
         with multiprocessing.Pool(args.cpus) as pool:

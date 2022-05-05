@@ -315,8 +315,8 @@ def get_jobs(args):
             contig=contig,                                                            # contig is always prepended with 'chr'
             location=args.output + "__" + contig + "__" + get_tmp_marker() + ".bed"
         )
-        for contig in get_all_bam_chr(args)
-            if contig in get_all_ref_chr(args) and contig in args.chr                 # safety measure to include only chromosomes present in BAM, BED, and --chr
+        for contig in get_all_bam_chr(args.bam, args.threads)
+            if contig in get_all_ref_chr(args.ref, args.threads) and contig in args.chr                 # safety measure to include only chromosomes present in BAM, BED, and --chr
     ]
 
 
@@ -367,7 +367,7 @@ def collect_results(args, jobs):
 
 
 def count_junctions(args):
-    with TimeIt:
+    with TimeIt():
         jobs = get_jobs(args)
         logging.info(f"""Span {len(jobs)} job(s) between {args.cpus} CPU(s)""")
         with multiprocessing.Pool(args.cpus) as pool:

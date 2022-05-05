@@ -27,7 +27,7 @@ def get_tmp_marker(length=None):
     Returns random string of "length" length
     """
     length = 10 if length is None else length
-    return "".join(random.choices(string.ascii_uppercase + string.digits, length=10))
+    return "".join(random.choices(string.ascii_uppercase + string.digits, k=length))
 
 
 class TimeIt():
