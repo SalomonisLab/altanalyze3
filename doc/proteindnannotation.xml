@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE Query>
+<Query  virtualSchemaName = "default" formatter = "TSV" header = "0" uniqueRows = "0" count = "" datasetConfigVersion = "0.6" >
+			
+	<Dataset name = "hsapiens_gene_ensembl" interface = "default" >
+		<Filter name = "transcript_biotype" value = "protein_coding"/>
+		<Filter name = "chromosome_name" value = "6"/>
+		<Attribute name = "ensembl_exon_id" />
+		<Attribute name = "ensembl_peptide_id" />
+		<Attribute name = "transcript_start" />
+		<Attribute name = "transcript_end" />
+		<Attribute name = "interpro" />
+		<Attribute name = "interpro_short_description" />
+		<Attribute name = "interpro_start" />
+		<Attribute name = "interpro_end" />
+	</Dataset>
+</Query>
