@@ -2,6 +2,7 @@ import time
 import random
 import string
 import logging
+import hashlib
 import pkg_resources
 
 
@@ -20,6 +21,16 @@ def get_tmp_suffix(length=None):
     length = 10 if length is None else length
     return "." + "".join(random.choices(string.ascii_uppercase + string.digits, k=length))
 
+
+def get_md5_sum(location, block_size=2**20):
+    md5_sum = hashlib.md5()
+    with open(location , "rb") as input_stream:
+        while True:
+            buf = input_stream.read(block_size)
+            if not buf:
+                break
+            md5_sum.update(buf)
+    return md5_sum.hexdigest()
 
 class TimeIt():
     """
