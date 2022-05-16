@@ -8,3 +8,5 @@ pytest --cov=altanalyze3 --cov-append --cov-report xml:cov.xml --forked $DIR/uni
 pytest --cov=altanalyze3 --cov-append --cov-report xml:cov.xml --forked $DIR/unit_tests/test_data.py
 pytest --cov=altanalyze3 --cov-append --cov-report xml:cov.xml --forked $DIR/unit_tests/test_io.py
 pytest --cov=altanalyze3 --cov-append --cov-report xml:cov.xml --forked $DIR/unit_tests/test_parser.py
+pytest --cov=altanalyze3 --cov-append --cov-report xml:cov.xml --forked $DIR/unit_tests/test_intron_count.py
+
