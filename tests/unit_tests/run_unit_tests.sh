@@ -6,3 +6,4 @@ $DIR/../prepare_data_for_tests.sh
 
 pytest --cov=altanalyze --cov-append --forked $DIR/test_helpers.py
 pytest --cov=altanalyze --cov-append --forked $DIR/test_data.py
+pytest --cov=altanalyze --cov-append --forked $DIR/test_io.py

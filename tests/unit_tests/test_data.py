@@ -5,9 +5,11 @@ from altanalyze3.utilities.helpers import get_md5_sum
 DATA_FOLDER = pathlib.Path(__file__).resolve().parents[1].joinpath("data")
 
 CONTROL_MD5_SUMS = {
-    "Mm_Ensembl_exon_Mm10.tsv": "6a3a934a6520b5f07e10f5aa8ef7f7cf",
-    "Mm_Ensembl_exon_Mm10_filtered.bed.gz": "5a11a3d012655c47b0436bc047193c9f",
-    "Mm_Ensembl_exon_Mm10_filtered.bed.gz.tbi": "05500da64f0bbd43c1de19caeb3ba843"
+    "hg19_ref.tsv": "cb3093cbaeb5a27d95fc09add352641a",
+    "hg19_ref_introns.bed.gz": "a9f441a78f87d47100fb4f18c827a976",
+    "hg19_ref_introns.bed.gz.tbi": "007a8d670d47f2c54d97f3b26c9c054c",
+    "hg19_pe.bam": "016704992a644f8c48d943c09d8bc2ce",
+    "hg19_pe.bam.bai": "566547efad2c85af4c2dc465d23b1471",
 }
 
 
