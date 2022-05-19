@@ -22,7 +22,7 @@ docker run --rm -it -v ${WORKING_DIR}:${WORKING_DIR} \
                     --workdir ${WORKING_DIR} \
                     --env TMPDIR=${TMP_DIR} \
                     altanalyze:latest \
-                    ${WORKING_DIR}/test/unit_tests/run_unit_tests.sh
+                    ${WORKING_DIR}/test/unit_tests.sh
 
 echo "Cleaning temporary directory $TMP_DIR"
 rm -rf $TMP_DIR
