@@ -354,7 +354,29 @@ class Dataset(ServerBase):
             attributes = {a.name: a for a in self._attributes_from_xml(xml)}
 
             return filters, attributes
+    @staticmethod
+    def _filters_from_xml(xml):
+        for node in xml.iter('FilterDescription'):
+            attrib = node.attrib
+            yield Filter(
+                name=attrib['internalName'], type=attrib.get('type', ''))
 
+    @staticmethod
+    def _attributes_from_xml(xml):
+        for page_index, page in enumerate(xml.iter('AttributePage')):
+            for desc in page.iter('AttributeDescription'):
+                attrib = desc.attrib
+
+                # Default attributes can only be from the first page.
+                default = (page_index == 0 and
+                           attrib.get('default', '') == 'true')
+
+                yield Attribute(
+                    name=attrib['internalName'],
+                    display_name=attrib.get('displayName', ''),
+                    description=attrib.get('description', ''),
+                    default=default)
+                    
     def query(self,
                 attributes=None,
                 filters=None,
