@@ -4,7 +4,7 @@ This is a generalized python module for getting data from Ensemble using Biomart
 
 import requests
 from xml.etree import ElementTree
-import pandas as pd
+# import pandas as pd
 from io import StringIO
 from xml.etree.ElementTree import fromstring as xml_from_string
 
@@ -13,6 +13,8 @@ DEFAULT_PATH = '/biomart/martservice'
 DEFAULT_PORT = 80
 DEFAULT_SCHEMA = 'default'
 
+ensemble_server = 'http://www.ensembl.org'
+species = 'hsapiens_gene_ensembl'
 
 class ServerBase(object):
     """Base class that handles requests to the biomart server.
@@ -359,4 +361,9 @@ class Dataset(ServerBase):
 
             return result
 
+
+
+
+dataset = Dataset(name = species,host = ensemble_server)
+dataset.query(attributes = ["ensembl_exon_id", "ensembl_peptide_id", "transcript_start","transcript_end","interpro","interpro_short_description","interpro_start","interpro_end"])
 
