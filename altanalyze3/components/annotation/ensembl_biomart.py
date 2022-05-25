@@ -4,7 +4,7 @@ This is a generalized python module for getting data from Ensemble using Biomart
 
 import requests
 from xml.etree import ElementTree
-# import pandas as pd
+import pandas as pd
 from io import StringIO
 from xml.etree.ElementTree import fromstring as xml_from_string
 
@@ -229,7 +229,7 @@ class Dataset(ServerBase):
             self._display_name = display_name
             self._virtual_schema = virtual_schema
 
-            self._filters = None
+            
             self._attributes = None
             self._default_attributes = None
 
@@ -245,18 +245,9 @@ class Dataset(ServerBase):
 
             # Get filters and attributes from xml.
             xml = ElementTree.fromstring(response.content)
-
-            filters = {f.name: f for f in self._filters_from_xml(xml)}
             attributes = {a.name: a for a in self._attributes_from_xml(xml)}
-
-            return filters, attributes
-    @staticmethod
-    def _filters_from_xml(xml):
-        for node in xml.iter('FilterDescription'):
-            attrib = node.attrib
-            yield Filter(
-                name=attrib['internalName'], type=attrib.get('type', ''))
-
+            return attributes
+    
     @staticmethod
     def _attributes_from_xml(xml):
         for page_index, page in enumerate(xml.iter('AttributePage')):
@@ -275,7 +266,6 @@ class Dataset(ServerBase):
 
     def query(self,
                 attributes=None,
-                filters=None,
                 only_unique=True,
                 use_attr_names=False,
                 dtypes = None
@@ -285,10 +275,6 @@ class Dataset(ServerBase):
                 attributes (list[str]): Names of attributes to fetch in query.
                     Attribute names must correspond to valid attributes. See
                     the attributes property for a list of valid attributes.
-                filters (dict[str,any]): Dictionary of filters --> values
-                    to filter the dataset by. Filter names and values must
-                    correspond to valid filters and filter values. See the
-                    filters property for a list of valid filters.
                 only_unique (bool): Whether to return only rows containing
                     unique values (True) or to include duplicate rows (False).
                 use_attr_names (bool): Whether to use the attribute names
@@ -325,17 +311,7 @@ class Dataset(ServerBase):
                     raise BiomartException(
                         'Unknown attribute {}, check dataset attributes '
                         'for a list of valid attributes.'.format(name))
-            if filters is not None:
-                # Add filter elements.
-                for name, value in filters.items():
-                    try:
-                        filter_ = self.filters[name]
-                        self._add_filter_node(dataset, filter_, value)
-                    except KeyError:
-                        raise BiomartException(
-                            'Unknown filter {}, check dataset filters '
-                            'for a list of valid filters.'.format(name))
-
+           
             # Fetch response.
             response = self.get(query=ElementTree.tostring(root))
             print(response)
@@ -362,8 +338,57 @@ class Dataset(ServerBase):
             return result
 
 
+class Attribute(object):
+    """Biomart dataset attribute.
+    Attributes:
+        name (str): Attribute name.
+        display_name (str): Attribute display name.
+        description (str): Attribute description.
+    """
+
+    def __init__(self, name, display_name='', description='', default=False):
+        """Attribute constructor.
+        Args:
+            name (str): Attribute name.
+            display_name (str): Attribute display name.
+            description (str): Attribute description.
+            default (bool): Whether the attribute is a default
+                attribute of the corresponding datasets.
+        """
+        self._name = name
+        self._display_name = display_name
+        self._description = description
+        self._default = default
+
+    @property
+    def name(self):
+        """Name of the attribute."""
+        return self._name
+
+    @property
+    def display_name(self):
+        """Display name of the attribute."""
+        return self._display_name
+
+    @property
+    def description(self):
+        """Description of the attribute."""
+        return self._description
+
+    @property
+    def default(self):
+        """Whether this is a default attribute."""
+        return self._default
+
+    def __repr__(self):
+        return (('<biomart.Attribute name={!r},'
+                 ' display_name={!r}, description={!r}>')
+                .format(self._name, self._display_name, self._description))
+
+
 
 
 dataset = Dataset(name = species,host = ensemble_server)
-dataset.query(attributes = ["ensembl_exon_id", "ensembl_peptide_id", "transcript_start","transcript_end","interpro","interpro_short_description","interpro_start","interpro_end"])
+print(dataset)
+#dataset.query(attributes = ["ensembl_exon_id", "ensembl_peptide_id", "transcript_start","transcript_end","interpro","interpro_short_description","interpro_start","interpro_end"])
 
