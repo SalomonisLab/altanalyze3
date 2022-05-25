@@ -8,6 +8,7 @@ import pandas as pd
 from io import StringIO
 from xml.etree.ElementTree import fromstring as xml_from_string
 
+
 DEFAULT_HOST = 'http://www.biomart.org'
 DEFAULT_PATH = '/biomart/martservice'
 DEFAULT_PORT = 80
@@ -15,6 +16,7 @@ DEFAULT_SCHEMA = 'default'
 
 ensemble_server = 'http://www.ensembl.org'
 species = 'hsapiens_gene_ensembl'
+
 
 class ServerBase(object):
     """Base class that handles requests to the biomart server.
@@ -84,19 +86,18 @@ class ServerBase(object):
         return url
 
     def get(self, **params):
-            """Performs get request to the biomart service.
-            Args:
-                **params (dict of str: any): Arbitrary keyword arguments, which
-                    are added as parameters to the get request to biomart.
-            Returns:
-                requests.models.Response: Response from biomart for the request.
-            """
-          
-            r = requests.get(self.url, params=params)   
-            r.raise_for_status()
-            return r
+        """Performs get request to the biomart service.
+        Args:
+            **params (dict of str: any): Arbitrary keyword arguments, which
+                are added as parameters to the get request to biomart.
+        Returns:
+            requests.models.Response: Response from biomart for the request.
+        """
 
-  
+        r = requests.get(self.url, params=params)
+        r.raise_for_status()
+        return r
+
 
 class BiomartException(Exception):
     """Basic exception class for biomart exceptions."""
@@ -175,7 +176,7 @@ class Server(ServerBase):
             for k, v in node.attrib.items()
             if k not in set(self._MART_XML_MAP.values())
         }
-        return Mart( **params)
+        return Mart(**params)
 
     def __repr__(self):
         return ('<biomart.Server host={!r}, path={!r}, port={!r}>'
@@ -215,39 +216,39 @@ class Dataset(ServerBase):
             >>> dataset.filters
             >>> dataset.list_filters()
     """
+
     def __init__(self,
-                    name,
-                    display_name='',
-                    host=None,
-                    path=None,
-                    port=None,
-                    use_cache=True,
-                    virtual_schema=DEFAULT_SCHEMA):
-            super().__init__(host=host, path=path, port=port, use_cache=use_cache)
+                 name,
+                 display_name='',
+                 host=None,
+                 path=None,
+                 port=None,
 
-            self._name = name
-            self._display_name = display_name
-            self._virtual_schema = virtual_schema
+                 virtual_schema=DEFAULT_SCHEMA):
+        super().__init__(host=host, path=path, port=port)
 
-            
-            self._attributes = None
-            self._default_attributes = None
+        self._name = name
+        self._display_name = display_name
+        self._virtual_schema = virtual_schema
 
+        self._attributes = None
+        self._default_attributes = None
 
     def _fetch_configuration(self):
-            # Get datasets using biomart.
-            response = ServerBase.get(type='configuration', dataset=self._name)
+        # Get datasets using biomart.
+        response = ServerBase.get(type='configuration', dataset=self._name)
+        print(response)
 
-            # Check response for problems.
-            if 'Problem retrieving configuration' in response.text:
-                raise BiomartException('Failed to retrieve dataset configuration, '
-                                    'check the dataset name and schema.')
+        # Check response for problems.
+        if 'Problem retrieving configuration' in response.text:
+            raise BiomartException('Failed to retrieve dataset configuration, '
+                                   'check the dataset name and schema.')
 
-            # Get filters and attributes from xml.
-            xml = ElementTree.fromstring(response.content)
-            attributes = {a.name: a for a in self._attributes_from_xml(xml)}
-            return attributes
-    
+        # Get filters and attributes from xml.
+        xml = ElementTree.fromstring(response.content)
+        attributes = {a.name: a for a in self._attributes_from_xml(xml)}
+        return attributes
+
     @staticmethod
     def _attributes_from_xml(xml):
         for page_index, page in enumerate(xml.iter('AttributePage')):
@@ -265,77 +266,84 @@ class Dataset(ServerBase):
                     default=default)
 
     def query(self,
-                attributes=None,
-                only_unique=True,
-                use_attr_names=False,
-                dtypes = None
-                ):
-            """Queries the dataset to retrieve the contained data.
-            Args:
-                attributes (list[str]): Names of attributes to fetch in query.
-                    Attribute names must correspond to valid attributes. See
-                    the attributes property for a list of valid attributes.
-                only_unique (bool): Whether to return only rows containing
-                    unique values (True) or to include duplicate rows (False).
-                use_attr_names (bool): Whether to use the attribute names
-                    as column names in the result (True) or the attribute
-                    display names (False).
-                dtypes (dict[str,any]): Dictionary of attributes --> data types
-                    to describe to pandas how the columns should be handled
-            Returns:
-                pandas.DataFrame: DataFrame containing the query results.
-            """
+              attributes=None,
+              only_unique=True,
+              use_attr_names=False,
+              dtypes=None
+              ):
+        """Queries the dataset to retrieve the contained data.
+        Args:
+            attributes (list[str]): Names of attributes to fetch in query.
+                Attribute names must correspond to valid attributes. See
+                the attributes property for a list of valid attributes.
+            only_unique (bool): Whether to return only rows containing
+                unique values (True) or to include duplicate rows (False).
+            use_attr_names (bool): Whether to use the attribute names
+                as column names in the result (True) or the attribute
+                display names (False).
+            dtypes (dict[str,any]): Dictionary of attributes --> data types
+                to describe to pandas how the columns should be handled
+        Returns:
+            pandas.DataFrame: DataFrame containing the query results.
+        """
 
-            root = ElementTree.Element('Query')
-            root.set('virtualSchemaName', self._virtual_schema)
-            root.set('formatter', 'TSV')
-            root.set('header', '1')
-            root.set('uniqueRows', str(int(only_unique)))
-            root.set('datasetConfigVersion', '0.6')
+        root = ElementTree.Element('Query')
+        root.set('virtualSchemaName', self._virtual_schema)
+        root.set('formatter', 'TSV')
+        root.set('header', '1')
+        root.set('uniqueRows', str(int(only_unique)))
+        root.set('datasetConfigVersion', '0.6')
 
-            # Add dataset element.
-            dataset = ElementTree.SubElement(root, 'Dataset')
-            dataset.set('name', self.name)
-            dataset.set('interface', 'default')
+        # Add dataset element.
+        dataset = ElementTree.SubElement(root, 'Dataset')
+        dataset.set('name', self._name)
+        dataset.set('interface', 'default')
 
-            # Default to default attributes if none requested.
-            if attributes is None:
-                attributes = list(self.default_attributes.keys())
+        # Default to default attributes if none requested.
+        if attributes is None:
+            attributes = list(self.default_attributes.keys())
 
-            # Add attribute elements.
-            for name in attributes:
-                try:
-                    attr = self.attributes[name]
-                    self._add_attr_node(dataset, attr)
-                except KeyError:
-                    raise BiomartException(
-                        'Unknown attribute {}, check dataset attributes '
-                        'for a list of valid attributes.'.format(name))
-           
-            # Fetch response.
-            response = self.get(query=ElementTree.tostring(root))
-            print(response)
-
-            # Raise exception if an error occurred.
-            if 'Query ERROR' in response.text:
-                raise BiomartException(response.text)
-
-            # Parse results into a DataFrame.
+        # Add attribute elements.
+        for name in attributes:
+            print(name)
             try:
-                result = pd.read_csv(StringIO(response.text), sep='\t', dtype=dtypes)
-            #Type error is raised of a data type is not understood by pandas
-            except TypeError as err:
-                raise ValueError("Non valid data type is used in dtypes")
+                attr = name
+                self._add_attr_node(dataset, attr)
+            except KeyError:
+                raise BiomartException(
+                    'Unknown attribute {}, check dataset attributes '
+                    'for a list of valid attributes.'.format(name))
 
-            if use_attr_names:
-                # Rename columns with attribute names instead of display names.
-                column_map = {
-                    self.attributes[attr].display_name: attr
-                    for attr in attributes
-                }
-                result.rename(columns=column_map, inplace=True)
+        # Fetch response.
+        response = self.get(query=ElementTree.tostring(root))
 
-            return result
+        # Raise exception if an error occurred.
+        if 'Query ERROR' in response.text:
+            raise BiomartException(response.text)
+
+        # Parse results into a DataFrame.
+        try:
+            result = pd.read_csv(StringIO(response.text),
+                                 sep='\t', dtype=dtypes)
+
+        # Type error is raised of a data type is not understood by pandas
+        except TypeError as err:
+            raise ValueError("Non valid data type is used in dtypes")
+
+        # if use_attr_names:
+        #     # Rename columns with attribute names instead of display names.
+        #     column_map = {
+        #         self.attributes[attr].display_name: attr
+        #         for attr in attributes
+        #     }
+        #     result.rename(columns=column_map, inplace=True)
+
+        return result
+
+    @ staticmethod
+    def _add_attr_node(root, attr):
+        attr_el = ElementTree.SubElement(root, 'Attribute')
+        attr_el.set('name', attr)
 
 
 class Attribute(object):
@@ -360,22 +368,22 @@ class Attribute(object):
         self._description = description
         self._default = default
 
-    @property
+    @ property
     def name(self):
         """Name of the attribute."""
         return self._name
 
-    @property
+    @ property
     def display_name(self):
         """Display name of the attribute."""
         return self._display_name
 
-    @property
+    @ property
     def description(self):
         """Description of the attribute."""
         return self._description
 
-    @property
+    @ property
     def default(self):
         """Whether this is a default attribute."""
         return self._default
@@ -386,9 +394,8 @@ class Attribute(object):
                 .format(self._name, self._display_name, self._description))
 
 
+dataset = Dataset(name=species, host=ensemble_server)
+# dataset.query(attributes=["ensembl_exon_id", "ensembl_peptide_id", "transcript_start",
+#               "transcript_end", "interpro", "interpro_short_description", "interpro_start", "interpro_end"])
 
-
-dataset = Dataset(name = species,host = ensemble_server)
-print(dataset)
-#dataset.query(attributes = ["ensembl_exon_id", "ensembl_peptide_id", "transcript_start","transcript_end","interpro","interpro_short_description","interpro_start","interpro_end"])
-
+dataset.query(attributes=['ensembl_gene_id', 'external_gene_name'])
