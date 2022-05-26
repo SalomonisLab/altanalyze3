@@ -2,7 +2,11 @@
 This is a generalized python module for getting data from Ensemble using Biomart server.
 """
 
+from __future__ import absolute_import, division, print_function
 import requests
+
+from future.utils import native_str
+from builtins import *
 from xml.etree import ElementTree
 import pandas as pd
 from io import StringIO
@@ -183,6 +187,113 @@ class Server(ServerBase):
                 .format(self.host, self.path, self.port))
 
 
+class Mart(ServerBase):
+
+    """Class representing a biomart mart.
+    Used to represent specific mart instances on the server. Provides
+    functionality for listing and loading the datasets that are available
+    in the corresponding mart.
+    Args:
+        name (str): Name of the mart.
+        database_name (str): ID of the mart on the host.
+        display_name (str): Display name of the mart.
+        host (str): Url of host to connect to.
+        path (str): Path on the host to access to the biomart service.
+        port (int): Port to use for the connection.
+        use_cache (bool): Whether to cache requests.
+        virtual_schema (str): The virtual schema of the dataset.
+    Examples:
+        Listing datasets:
+            >>> server = Server(host='http://www.ensembl.org')
+            >>> mart = server['ENSEMBL_MART_ENSEMBL']
+            >>> mart.list_datasets()
+        Selecting a dataset:
+            >>> dataset = mart['hsapiens_gene_ensembl']
+    """
+
+    RESULT_COLNAMES = ['type', 'name', 'display_name', 'unknown', 'unknown2',
+                       'unknown3', 'unknown4', 'virtual_schema', 'unknown5']
+
+    def __init__(self, name, database_name, display_name,
+                 host=None, path=None, port=None,
+                 virtual_schema=DEFAULT_SCHEMA, extra_params=None):
+        super().__init__(host=host, path=path,
+                         port=port)
+
+        self._name = name
+        self._database_name = database_name
+        self._display_name = display_name
+
+        self._virtual_schema = virtual_schema
+        self._extra_params = extra_params
+
+        self._datasets = None
+
+    def __getitem__(self, name):
+        return self.datasets[name]
+
+    @property
+    def name(self):
+        """Name of the mart (used as id)."""
+        return self._name
+
+    @property
+    def display_name(self):
+        """Display name of the mart."""
+        return self._display_name
+
+    @property
+    def database_name(self):
+        """Database name of the mart on the host."""
+        return self._database_name
+
+    @property
+    def datasets(self):
+        """List of datasets in this mart."""
+        if self._datasets is None:
+            self._datasets = self._fetch_datasets()
+        return self._datasets
+
+    def list_datasets(self):
+        """Lists available datasets in a readable DataFrame format.
+        Returns:
+            pd.DataFrame: Frame listing available datasets.
+        """
+        def _row_gen(attributes):
+            for attr in attributes.values():
+                yield (attr.name, attr.display_name)
+
+        return pd.DataFrame.from_records(
+            _row_gen(self.datasets),
+            columns=['name', 'display_name'])
+
+    def _fetch_datasets(self):
+        # Get datasets using biomart.
+        response = self.get(type='datasets', mart=self._name)
+
+        # Read result frame from response.
+        result = pd.read_csv(StringIO(response.text), sep='\t',
+                             header=None, names=self.RESULT_COLNAMES)
+
+        # Convert result to a dict of datasets.
+        datasets = (self._dataset_from_row(row)
+                    for _, row in result.iterrows())
+
+        return {d.name: d for d in datasets}
+
+    def _dataset_from_row(self, row):
+        return Dataset(name=row['name'], display_name=row['display_name'],
+                       host=self.host, path=self.path,
+                       port=self.port,
+                       virtual_schema=row['virtual_schema'])
+
+    def __repr__(self):
+        return (('<biomart.Mart name={!r}, display_name={!r},'
+                 ' database_name={!r}>')
+                .format(self._name, self._display_name,
+                        self._database_name))
+
+
 class Dataset(ServerBase):
     """Class representing a biomart dataset.
     This class is responsible for handling queries to biomart
@@ -231,13 +342,75 @@ class Dataset(ServerBase):
         self._display_name = display_name
         self._virtual_schema = virtual_schema
 
+        self._filters = None
         self._attributes = None
         self._default_attributes = None
 
+    @property
+    def name(self):
+        """Name of the dataset (used as dataset id)."""
+        return self._name
+
+    @property
+    def display_name(self):
+        """Display name of the dataset."""
+        return self._display_name
+
+    @property
+    def filters(self):
+        """List of filters available for the dataset."""
+        if self._filters is None:
+            self._filters, self._attributes = self._fetch_configuration()
+        return self._filters
+
+    @property
+    def attributes(self):
+        """List of attributes available for the dataset (cached)."""
+        if self._attributes is None:
+            self._filters, self._attributes = self._fetch_configuration()
+        return self._attributes
+
+    @property
+    def default_attributes(self):
+        """List of default attributes for the dataset."""
+        if self._default_attributes is None:
+            self._default_attributes = {
+                name: attr
+                for name, attr in self.attributes.items()
+                if attr.default is True
+            }
+        return self._default_attributes
+
+    def list_attributes(self):
+        """Lists available attributes in a readable DataFrame format.
+        Returns:
+            pd.DataFrame: Frame listing available attributes.
+        """
+
+        def _row_gen(attributes):
+            for attr in attributes.values():
+                yield (attr.name, attr.display_name, attr.description)
+
+        return pd.DataFrame.from_records(
+            _row_gen(self.attributes),
+            columns=['name', 'display_name', 'description'])
+
+    def list_filters(self):
+        """Lists available filters in a readable DataFrame format.
+        Returns:
+            pd.DataFrame: Frame listing available filters.
+        """
+
+        def _row_gen(attributes):
+            for attr in attributes.values():
+                yield (attr.name, attr.type, attr.description)
+
+        return pd.DataFrame.from_records(
+            _row_gen(self.filters), columns=['name', 'type', 'description'])
+
     def _fetch_configuration(self):
         # Get datasets using biomart.
-        response = ServerBase.get(type='configuration', dataset=self._name)
-        print(response)
+        response = self.get(type='configuration', dataset=self._name)
 
         # Check response for problems.
         if 'Problem retrieving configuration' in response.text:
@@ -246,8 +419,18 @@ class Dataset(ServerBase):
 
         # Get filters and attributes from xml.
         xml = ElementTree.fromstring(response.content)
+
+        filters = {f.name: f for f in self._filters_from_xml(xml)}
         attributes = {a.name: a for a in self._attributes_from_xml(xml)}
-        return attributes
+
+        return filters, attributes
+
+    @staticmethod
+    def _filters_from_xml(xml):
+        for node in xml.iter('FilterDescription'):
+            attrib = node.attrib
+            yield Filter(
+                name=attrib['internalName'], type=attrib.get('type', ''))
 
     @staticmethod
     def _attributes_from_xml(xml):
@@ -267,6 +450,7 @@ class Dataset(ServerBase):
 
     def query(self,
               attributes=None,
+              filters=None,
               only_unique=True,
               use_attr_names=False,
               dtypes=None
@@ -276,6 +460,10 @@ class Dataset(ServerBase):
             attributes (list[str]): Names of attributes to fetch in query.
                 Attribute names must correspond to valid attributes. See
                 the attributes property for a list of valid attributes.
+            filters (dict[str,any]): Dictionary of filters --> values
+                to filter the dataset by. Filter names and values must
+                correspond to valid filters and filter values. See the
+                filters property for a list of valid filters.
             only_unique (bool): Whether to return only rows containing
                 unique values (True) or to include duplicate rows (False).
             use_attr_names (bool): Whether to use the attribute names
@@ -287,16 +475,32 @@ class Dataset(ServerBase):
             pandas.DataFrame: DataFrame containing the query results.
         """
 
+        # Example query from Ensembl biomart:
+        #
+        # <?xml version="1.0" encoding="UTF-8"?>
+        # <!DOCTYPE Query>
+        # <Query  virtualSchemaName = "default" formatter = "TSV" header = "0"
+        #  uniqueRows = "0" count = "" datasetConfigVersion = "0.6" >
+        #   <Dataset name = "hsapiens_gene_ensembl" interface = "default" >
+        #       <Filter name = "chromosome_name" value = "1,2"/>
+        #       <Filter name = "end" value = "10000000"/>
+        #       <Filter name = "start" value = "1"/>
+        #       <Attribute name = "ensembl_gene_id" />
+        #       <Attribute name = "ensembl_transcript_id" />
+        #   </Dataset>
+        # </Query>
+
+        # Setup query element.
         root = ElementTree.Element('Query')
         root.set('virtualSchemaName', self._virtual_schema)
         root.set('formatter', 'TSV')
         root.set('header', '1')
-        root.set('uniqueRows', str(int(only_unique)))
+        root.set('uniqueRows', native_str(int(only_unique)))
         root.set('datasetConfigVersion', '0.6')
 
         # Add dataset element.
         dataset = ElementTree.SubElement(root, 'Dataset')
-        dataset.set('name', self._name)
+        dataset.set('name', self.name)
         dataset.set('interface', 'default')
 
         # Default to default attributes if none requested.
@@ -305,14 +509,24 @@ class Dataset(ServerBase):
 
         # Add attribute elements.
         for name in attributes:
-            print(name)
             try:
-                attr = name
+                attr = self.attributes[name]
                 self._add_attr_node(dataset, attr)
             except KeyError:
                 raise BiomartException(
                     'Unknown attribute {}, check dataset attributes '
                     'for a list of valid attributes.'.format(name))
+
+        if filters is not None:
+            # Add filter elements.
+            for name, value in filters.items():
+                try:
+                    filter_ = self.filters[name]
+                    self._add_filter_node(dataset, filter_, value)
+                except KeyError:
+                    raise BiomartException(
+                        'Unknown filter {}, check dataset filters '
+                        'for a list of valid filters.'.format(name))
 
         # Fetch response.
         response = self.get(query=ElementTree.tostring(root))
@@ -325,25 +539,52 @@ class Dataset(ServerBase):
         try:
             result = pd.read_csv(StringIO(response.text),
                                  sep='\t', dtype=dtypes)
-
+            result.to_csv('data.csv')
         # Type error is raised of a data type is not understood by pandas
         except TypeError as err:
             raise ValueError("Non valid data type is used in dtypes")
 
-        # if use_attr_names:
-        #     # Rename columns with attribute names instead of display names.
-        #     column_map = {
-        #         self.attributes[attr].display_name: attr
-        #         for attr in attributes
-        #     }
-        #     result.rename(columns=column_map, inplace=True)
+        if use_attr_names:
+            # Rename columns with attribute names instead of display names.
+            column_map = {
+                self.attributes[attr].display_name: attr
+                for attr in attributes
+            }
+            result.rename(columns=column_map, inplace=True)
 
         return result
 
-    @ staticmethod
+    @staticmethod
     def _add_attr_node(root, attr):
         attr_el = ElementTree.SubElement(root, 'Attribute')
-        attr_el.set('name', attr)
+        attr_el.set('name', attr.name)
+
+    @staticmethod
+    def _add_filter_node(root, filter_, value):
+        """Adds filter xml node to root."""
+        filter_el = ElementTree.SubElement(root, 'Filter')
+        filter_el.set('name', filter_.name)
+
+        # Set filter value depending on type.
+        if filter_.type == 'boolean':
+            # Boolean case.
+            if value is True or value.lower() in {'included', 'only'}:
+                filter_el.set('excluded', '0')
+            elif value is False or value.lower() == 'excluded':
+                filter_el.set('excluded', '1')
+            else:
+                raise ValueError('Invalid value for boolean filter ({})'
+                                 .format(value))
+        elif isinstance(value, list) or isinstance(value, tuple):
+            # List case.
+            filter_el.set('value', ','.join(map(str, value)))
+        else:
+            # Default case.
+            filter_el.set('value', str(value))
+
+    def __repr__(self):
+        return ('<biomart.Dataset name={!r}, display_name={!r}>'
+                .format(self._name, self._display_name))
 
 
 class Attribute(object):
@@ -368,22 +609,22 @@ class Attribute(object):
         self._description = description
         self._default = default
 
-    @ property
+    @property
     def name(self):
         """Name of the attribute."""
         return self._name
 
-    @ property
+    @property
     def display_name(self):
         """Display name of the attribute."""
         return self._display_name
 
-    @ property
+    @property
     def description(self):
         """Description of the attribute."""
         return self._description
 
-    @ property
+    @property
     def default(self):
         """Whether this is a default attribute."""
         return self._default
@@ -394,8 +635,59 @@ class Attribute(object):
                 .format(self._name, self._display_name, self._description))
 
 
-dataset = Dataset(name=species, host=ensemble_server)
-# dataset.query(attributes=["ensembl_exon_id", "ensembl_peptide_id", "transcript_start",
-#               "transcript_end", "interpro", "interpro_short_description", "interpro_start", "interpro_end"])
+class Filter(object):
+    """Biomart dataset filter.
+    Attributes:
+        name (str): Filter name.
+        type (str): Type of the filter (boolean, int, etc.).
+        description (str): Filter description.
+    """
 
-dataset.query(attributes=['ensembl_gene_id', 'external_gene_name'])
+    def __init__(self, name, type, description=''):
+        """ Filter constructor.
+        Args:
+            name (str): Filter name.
+            type (str): Type of the filter (boolean, int, etc.).
+            description (str): Filter description.
+        """
+        self._name = name
+        self._type = type
+        self._description = description
+
+    @property
+    def name(self):
+        """Filter name."""
+        return self._name
+
+    @property
+    def type(self):
+        """Filter type."""
+        return self._type
+
+    @property
+    def description(self):
+        """Filter description."""
+        return self._description
+
+    def __repr__(self):
+        return ('<biomart.Filter name={!r}, type={!r}>'
+                .format(self.name, self.type))
+
+
+# dataset = Dataset(name=species, host=ensemble_server)
+
+
+# dataset.query(attributes=['ensembl_gene_id', 'external_gene_name'])
+
+
+# server = Server(host='http://www.ensembl.org')
+# mart = server['ENSEMBL_MART_ENSEMBL']
+# ds = mart.list_datasets()
+
+dataset = Dataset(name='apolyacanthus_gene_ensembl',
+                  host='http://www.ensembl.org')
+# # dataset = mart['hsapiens_gene_ensembl']
+
+
+dataset.query(attributes=["ensembl_exon_id", "ensembl_peptide_id", "transcript_start",
+              "transcript_end", "interpro", "interpro_short_description", "interpro_start", "interpro_end"])
