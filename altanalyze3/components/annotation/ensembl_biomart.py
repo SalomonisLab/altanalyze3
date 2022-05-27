@@ -227,17 +227,16 @@ class Dataset(ServerBase):
                  host=None,
                  path=None,
                  port=None,
-
                  virtual_schema=DEFAULT_SCHEMA):
         super().__init__(host=host, path=path, port=port)
 
         self._name = name
         self._display_name = display_name
         self._virtual_schema = virtual_schema
-
         self._filters = None
         self._attributes = None
         self._default_attributes = None
+        self._datatype = None
 
     @property
     def name(self):
@@ -346,7 +345,8 @@ class Dataset(ServerBase):
               filters=None,
               only_unique=True,
               use_attr_names=False,
-              dtypes=None
+              dtypes=None,
+              datatype=None
               ):
         """Queries the dataset to retrieve the contained data.
         Args:
@@ -432,7 +432,12 @@ class Dataset(ServerBase):
         try:
             result = pd.read_csv(StringIO(response.text),
                                  sep='\t', dtype=dtypes)
-            result.to_csv('data.csv')
+            if (datatype == "protein_coordinates"):
+                result.to_csv(
+                    'Hs_ProteinCoordinates_build_100_38.csv', sep='\t')
+            elif(datatype == "protein_features"):
+                result.to_csv(
+                    'Hs_ProteinFeatures_build_100_38.csv', sep='\t')
         # Type error is raised of a data type is not understood by pandas
         except TypeError as err:
             raise ValueError("Non valid data type is used in dtypes")
@@ -567,20 +572,14 @@ class Filter(object):
                 .format(self.name, self.type))
 
 
-# dataset = Dataset(name=species, host=ensemble_server)
-
-
-# dataset.query(attributes=['ensembl_gene_id', 'external_gene_name'])
-
-
-# server = Server(host='http://www.ensembl.org')
-# mart = server['ENSEMBL_MART_ENSEMBL']
-# ds = mart.list_datasets()
-
 dataset = Dataset(name='apolyacanthus_gene_ensembl',
                   host='http://www.ensembl.org')
-# # dataset = mart['hsapiens_gene_ensembl']
+
+# Protein Coordinates
+# dataset.query(attributes=["ensembl_transcript_id", "ensembl_exon_id", "ensembl_peptide_id", "start_position",
+#               "end_position", "transcript_start", "transcript_end", "cdd", "cdd_start", "cdd_end"], datatype='protein_coordinates')
 
 
-dataset.query(attributes=["ensembl_exon_id", "ensembl_peptide_id", "transcript_start",
-              "transcript_end", "interpro", "interpro_short_description", "interpro_start", "interpro_end"])
+# # Protein Features
+dataset.query(attributes=["ensembl_gene_id", "ensembl_gene_id_version", "ensembl_transcript_id_version",
+              "interpro", "interpro_description", "interpro_start", "interpro_end", "cdd", "cdd_start", "cdd_end"], datatype='protein_feature')
