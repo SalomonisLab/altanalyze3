@@ -18,9 +18,6 @@ DEFAULT_PATH = '/biomart/martservice'
 DEFAULT_PORT = 80
 DEFAULT_SCHEMA = 'default'
 
-ensemble_server = 'http://www.ensembl.org'
-species = 'hsapiens_gene_ensembl'
-
 
 class ServerBase(object):
     """Base class that handles requests to the biomart server.
@@ -497,10 +494,10 @@ dataset = Dataset(name='apolyacanthus_gene_ensembl',
                   host='http://www.ensembl.org')
 
 # Protein Coordinates
-# dataset.query(attributes=["ensembl_transcript_id", "ensembl_exon_id", "ensembl_peptide_id", "start_position",
-#               "end_position", "transcript_start", "transcript_end", "cdd", "cdd_start", "cdd_end"], datatype='protein_coordinates')
+dataset.query(attributes=["ensembl_transcript_id", "ensembl_exon_id", "ensembl_peptide_id", "start_position",
+              "end_position", "transcript_start", "transcript_end", "cdd", "cdd_start", "cdd_end"], datatype='protein_coordinates')
 
 
-# # Protein Features
+# Protein Features
 dataset.query(attributes=["ensembl_gene_id", "ensembl_gene_id_version", "ensembl_transcript_id_version",
               "interpro", "interpro_description", "interpro_start", "interpro_end", "cdd", "cdd_start", "cdd_end"], datatype='protein_feature')
