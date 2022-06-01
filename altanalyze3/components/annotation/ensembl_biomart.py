@@ -80,8 +80,7 @@ class ServerBase(object):
 
     @staticmethod
     def _remove_trailing_slash(url):
-        if url.endswith('/'):
-            url = url[:-1]
+        url.strip("/")
         return url
 
     def get(self, **params):
