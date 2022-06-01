@@ -36,9 +36,9 @@ class ServerBase(object):
             use_cache (bool): Whether to cache requests.
         """
         # Use defaults if arg is None.
-        host = host or DEFAULT_HOST
-        path = path or DEFAULT_PATH
-        port = port or DEFAULT_PORT
+        host = DEFAULT_HOST if host is None else host
+        path = DEFAULT_PATH if path is None else path
+        port = DEFAULT_PORT if port is None else port
 
         # Add http prefix and remove trailing slash.
         host = self._add_http_prefix(host)
