@@ -2,11 +2,9 @@
 This is a generalized python module for getting data from Ensemble using Biomart server.
 """
 
-from __future__ import absolute_import, division, print_function
-import requests
 
+import requests
 from future.utils import native_str
-from builtins import *
 from xml.etree import ElementTree
 import pandas as pd
 from io import StringIO
@@ -369,6 +367,18 @@ class Dataset(ServerBase):
             result.rename(columns=column_map, inplace=True)
 
         return result
+
+        # on loop for each exon in one transcript
+    # by default initialize the first aa start, aa_nt_start = 1
+    def calculate_aa_positions(enst_id_new, enst_id_old, cds_start, cds_stop):
+        # check if new transcript
+        aa_stop = math.ceil((cds_stop - cds_start + 1) / 3)
+        if enst_id_new != enst_id_old:
+            aa_start = 1
+        # check if the last codon has less than three neucleotides
+        elif (cds_stop - cds_start + 1) % 3 != 0:
+            aa_start = aa_stop
+        return aa_stop, aa_start
 
     @staticmethod
     def _add_attr_node(root, attr):
