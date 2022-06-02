@@ -4,6 +4,7 @@ import argparse
 from altanalyze3.utilities.helpers import get_version
 from altanalyze3.components.junction_count.main import count_junctions
 from altanalyze3.components.intron_count.main import count_introns
+from altanalyze3.components.annotation.main import protein_coordinates
 from altanalyze3.utilities.io import get_all_bam_chr
 from altanalyze3.utilities.constants import IntRetCat
 
@@ -25,7 +26,8 @@ class ArgsParser():
 
     def add_common_arguments(self, parser):
         self.common_arguments = [
-            ("--loglevel", "Logging level. Default: info", str, "info", ["fatal", "error", "warning", "info", "debug"]),
+            ("--loglevel", "Logging level. Default: info", str,
+             "info", ["fatal", "error", "warning", "info", "debug"]),
             ("--threads", "Number of threads to run in parallel where applicable", int, 1, None),
             ("--cpus", "Number of processes to run in parallel where applicable", int, 1, None),
             ("--output", "Output prefix", str, "results", None)
@@ -49,7 +51,7 @@ class ArgsParser():
         subparsers = general_parser.add_subparsers()
         subparsers.required = True
         # Global parameters for all components of the tool
-        general_parser.add_argument(                       
+        general_parser.add_argument(
             "--version",
             action="version",
             version=get_version(),
@@ -147,6 +149,35 @@ class ArgsParser():
             action="store_true"
         )
         self.add_common_arguments(intron_parser)
+
+        # Protein Domain Annotation parser
+        protein_coordinates_parser = subparsers.add_parser(
+            "proteincoordinates",
+            parents=[parent_parser],
+            help="Get Protein to Domain annotations"
+        )
+        protein_coordinates_parser.set_defaults(func=get_protein_coordinates)
+        protein_coordinates_parser.add_argument(
+            "--name",
+            help="name of species eg. apolyacanthus_gene_ensembl",
+            type=str,
+            required=True,
+        )
+        protein_coordinates_parser.add_argument(
+            "--host",
+            help="Select the host from where you want to import data",
+            type=str,
+            default="http://www.ensembl.org"
+        )
+        protein_coordinates_parser.add_argument(
+            "--attributes",
+            help="Export certain coordinates or features from Ensembl",
+            type=str,
+            default=["ensembl_transcript_id", "ensembl_exon_id", "ensembl_peptide_id", "start_position",
+                     "end_position", "transcript_start", "transcript_end", "cdd", "cdd_start", "cdd_end"]
+        )
+        self.add_common_arguments(protein_coordinates_parser)
+
         return general_parser
 
     def resolve_path(self, selected=None):
