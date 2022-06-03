@@ -350,6 +350,11 @@ class Dataset(ServerBase):
             result = pd.read_csv(StringIO(response.text),
                                  sep='\t', dtype=dtypes)
             # calculate the aa_nt_start and end positions
+            cds_start = result["cdd_start"]
+            cds_end = result["cdd_end"]
+            enst_id_old = result["Exon stable ID"]
+            calculate_aa_positions(
+                enst_id_new, enst_id_old, cds_start, cds_stop)
 
             if (datatype == "protein_coordinates"):
                 result.to_csv(
@@ -368,16 +373,13 @@ class Dataset(ServerBase):
                 for attr in attributes
             }
             result.rename(columns=column_map, inplace=True)
-
         return result
 
         # on loop for each exon in one transcript
     # by default initialize the first aa start, aa_nt_start = 1
-    def calculate_aa_positions(enst_id_new, enst_id_old, cds_start, cds_stop):
+    def calculate_aa_positions(cds_start, cds_stop):
         # check if new transcript
         aa_stop = math.ceil((cds_stop - cds_start + 1) / 3)
-        if enst_id_new != enst_id_old:
-            aa_start = 1
         # check if the last codon has less than three neucleotides
         elif (cds_stop - cds_start + 1) % 3 != 0:
             aa_start = aa_stop

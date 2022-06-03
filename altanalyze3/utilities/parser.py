@@ -167,14 +167,14 @@ class ArgsParser():
             "--host",
             help="Select the host from where you want to import data",
             type=str,
-            default="http://www.ensembl.org"
+            default="https://www.ensembl.org"
         )
         protein_coordinates_parser.add_argument(
             "--attributes",
             help="Export certain coordinates or features from Ensembl",
-            type=str,
+            nargs="*",
             default=["ensembl_transcript_id", "ensembl_exon_id", "ensembl_peptide_id", "start_position",
-                     "end_position", "transcript_start", "transcript_end", "cdd", "cdd_start", "cdd_end"]
+                     "end_position", "transcript_start", "transcript_end", "cds_start", "cds_end"]
         )
         self.add_common_arguments(protein_coordinates_parser)
 
