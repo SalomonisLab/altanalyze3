@@ -9,9 +9,10 @@ from xml.etree import ElementTree
 import pandas as pd
 from io import StringIO
 from xml.etree.ElementTree import fromstring as xml_from_string
-from altanalyze3.utilities.helpers import (
-    TimeIt
-)
+import math
+# from altanalyze3.utilities.helpers import (
+#     TimeIt
+# )
 
 DEFAULT_HOST = 'http://www.biomart.org'
 DEFAULT_PATH = '/biomart/martservice'
@@ -257,6 +258,13 @@ class Dataset(ServerBase):
                     description=attrib.get('description', ''),
                     default=default)
 
+    # on loop for each exon in one transcript
+    def calculate_aa_positions(self, cds_pos):
+        # check if new transcript
+
+        aa_position = math.ceil((cds_pos) / 3)
+        return aa_position
+
     def query(self,
               attributes=None,
               filters=None,
@@ -349,12 +357,20 @@ class Dataset(ServerBase):
         try:
             result = pd.read_csv(StringIO(response.text),
                                  sep='\t', dtype=dtypes)
+
             # calculate the aa_nt_start and end positions
-            cds_start = result["cdd_start"]
-            cds_end = result["cdd_end"]
-            enst_id_old = result["Exon stable ID"]
-            calculate_aa_positions(
-                enst_id_new, enst_id_old, cds_start, cds_stop)
+
+            result = result.dropna(subset=['CDS start'])
+            result = result.dropna(subset=['CDS end'])
+            cds_start = result['CDS start'].astype(int)
+            cds_stop = result['CDS end'].astype(int)
+            result["aa_start"] = cds_start.apply(
+                lambda x: math.ceil((x) / 3))
+            result["aa_stop"] = cds_stop.apply(
+                lambda x: math.ceil((x) / 3))
+            # aa_start = self.calculate_aa_positions(cds_start).astype(float)
+            # aa_stop = self.calculate_aa_positions(cds_stop)
+            # aa_start = result["aa_start"]
 
             if (datatype == "protein_coordinates"):
                 result.to_csv(
@@ -374,16 +390,6 @@ class Dataset(ServerBase):
             }
             result.rename(columns=column_map, inplace=True)
         return result
-
-        # on loop for each exon in one transcript
-    # by default initialize the first aa start, aa_nt_start = 1
-    def calculate_aa_positions(cds_start, cds_stop):
-        # check if new transcript
-        aa_stop = math.ceil((cds_stop - cds_start + 1) / 3)
-        # check if the last codon has less than three neucleotides
-        elif (cds_stop - cds_start + 1) % 3 != 0:
-            aa_start = aa_stop
-        return aa_stop, aa_start
 
     @staticmethod
     def _add_attr_node(root, attr):
@@ -505,9 +511,17 @@ class Filter(object):
                 .format(self.name, self.type))
 
 
-def protein_coordinates(args):
-    with TimeIt():
-        dataset = Dataset(name={args.name}, host={args.host})
-        logging.info(
-            f"""Getting Data from {args.host} for given species {args.name}""")
-        dataset.query(attributes=args.attributes)
+# def protein_coordinates(args):
+#     with TimeIt():
+#         dataset = Dataset(name={args.name}, host={args.host})
+#         logging.info(
+#             f"""Getting Data from {args.host} for given species {args.name}""")
+#         dataset.query(attributes=args.attributes)
+
+
+dataset = Dataset(name='apolyacanthus_gene_ensembl',
+                  host='http://www.ensembl.org')
+
+# Protein Coordinates
+dataset.query(attributes=["ensembl_transcript_id", "ensembl_exon_id", "start_position",
+              "end_position", "transcript_start", "transcript_end", "cds_start", "cds_end"], datatype='protein_coordinates')
