@@ -10,9 +10,9 @@ import pandas as pd
 from io import StringIO
 from xml.etree.ElementTree import fromstring as xml_from_string
 import math
-# from altanalyze3.utilities.helpers import (
-#     TimeIt
-# )
+from altanalyze3.utilities.helpers import (
+    TimeIt
+)
 
 DEFAULT_HOST = 'http://www.biomart.org'
 DEFAULT_PATH = '/biomart/martservice'
@@ -368,13 +368,10 @@ class Dataset(ServerBase):
                 lambda x: math.ceil((x) / 3))
             result["aa_stop"] = cds_stop.apply(
                 lambda x: math.ceil((x) / 3))
-            # aa_start = self.calculate_aa_positions(cds_start).astype(float)
-            # aa_stop = self.calculate_aa_positions(cds_stop)
-            # aa_start = result["aa_start"]
 
             if (datatype == "protein_coordinates"):
                 result.to_csv(
-                    'Hs_ProteinCoordinates_build_100_38.csv', sep='\t')
+                    'Hs_ProteinCoordinates_build_100_38.csv')
             elif(datatype == "protein_feature"):
                 result.to_csv(
                     'Hs_ProteinFeatures_build_100_38.csv', sep='\t')
@@ -511,17 +508,9 @@ class Filter(object):
                 .format(self.name, self.type))
 
 
-# def protein_coordinates(args):
-#     with TimeIt():
-#         dataset = Dataset(name={args.name}, host={args.host})
-#         logging.info(
-#             f"""Getting Data from {args.host} for given species {args.name}""")
-#         dataset.query(attributes=args.attributes)
-
-
-dataset = Dataset(name='apolyacanthus_gene_ensembl',
-                  host='http://www.ensembl.org')
-
-# Protein Coordinates
-dataset.query(attributes=["ensembl_transcript_id", "ensembl_exon_id", "start_position",
-              "end_position", "transcript_start", "transcript_end", "cds_start", "cds_end"], datatype='protein_coordinates')
+def protein_coordinates(args):
+    with TimeIt():
+        dataset = Dataset(name={args.name}, host={args.host})
+        logging.info(
+            f"""Getting Data from {args.host} for given species {args.name}""")
+        dataset.query(attributes=args.attributes)
