@@ -156,7 +156,7 @@ class ArgsParser():
             parents=[parent_parser],
             help="Get Protein to Domain annotations"
         )
-        protein_coordinates_parser.set_defaults(func=get_protein_coordinates)
+        protein_coordinates_parser.set_defaults(func=protein_coordinates)
         protein_coordinates_parser.add_argument(
             "--name",
             help="name of species eg. apolyacanthus_gene_ensembl",
