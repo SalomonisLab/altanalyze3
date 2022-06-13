@@ -357,24 +357,16 @@ class Dataset(ServerBase):
         try:
             result = pd.read_csv(StringIO(response.text),
                                  sep='\t', dtype=dtypes)
-
             # calculate the aa_nt_start and end positions
-
             result = result.dropna(subset=['CDS start'])
             result = result.dropna(subset=['CDS end'])
             cds_start = result['CDS start'].astype(int)
             cds_stop = result['CDS end'].astype(int)
-            result["aa_start"] = cds_start.apply(
-                lambda x: math.ceil((x) / 3))
-            result["aa_stop"] = cds_stop.apply(
-                lambda x: math.ceil((x) / 3))
+            result["aa_start"] = cds_start.apply(lambda x: math.ceil((x) / 3))
+            result["aa_stop"] = cds_stop.apply(lambda x: math.ceil((x) / 3))
+            result.to_csv('Hs_ProteinCoordinates_build_100_38.csv', sep='\t')
+            result.to_csv('Hs_ProteinFeatures_build_100_38.csv', sep='\t')
 
-            if (datatype == "protein_coordinates"):
-                result.to_csv(
-                    'Hs_ProteinCoordinates_build_100_38.csv')
-            elif(datatype == "protein_feature"):
-                result.to_csv(
-                    'Hs_ProteinFeatures_build_100_38.csv', sep='\t')
         # Type error is raised of a data type is not understood by pandas
         except TypeError as err:
             raise ValueError("Non valid data type is used in dtypes")
