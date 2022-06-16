@@ -2,7 +2,6 @@
 This is a generalized python module for getting data from Ensemble using Biomart server.
 """
 
-
 import requests
 from future.utils import native_str
 from xml.etree import ElementTree
@@ -27,7 +26,6 @@ class ServerBase(object):
         path (str): Path to the biomart service on the host.
         port (str): Port to connect to on the host.
         url (str): Url used to connect to the biomart service.
-        use_cache (bool): Whether to cache requests to biomart.
     """
 
     def __init__(self, host=None, path=None, port=None):
@@ -121,22 +119,7 @@ class Dataset(ServerBase):
         host (str): Url of host to connect to.
         path (str): Path on the host to access to the biomart service.
         port (int): Port to use for the connection.
-        use_cache (bool): Whether to cache requests.
         virtual_schema (str): The virtual schema of the dataset.
-    Examples:
-        Directly connecting to a dataset:
-            >>> dataset = Dataset(name='hsapiens_gene_ensembl',
-            >>>                   host='http://www.ensembl.org')
-        Querying the dataset:
-            >>> dataset.query(attributes=['ensembl_gene_id',
-            >>>                           'external_gene_name'],
-            >>>               filters={'chromosome_name': ['1','2']})
-        Listing available attributes:
-            >>> dataset.attributes
-            >>> dataset.list_attributes()
-        Listing available filters:
-            >>> dataset.filters
-            >>> dataset.list_filters()
     """
 
     def __init__(self,
@@ -145,7 +128,7 @@ class Dataset(ServerBase):
                  host=None,
                  path=None,
                  port=None,
-                 virtual_schema=DEFAULT_SCHEMA):
+                 virtual_schema=DEFAULT_SCHEMA, location):
         super().__init__(host=host, path=path, port=port)
 
         self._name = name
@@ -155,6 +138,7 @@ class Dataset(ServerBase):
         self._attributes = None
         self._default_attributes = None
         self._datatype = None
+        self.location = location
 
     @property
     def name(self):
@@ -271,7 +255,7 @@ class Dataset(ServerBase):
               only_unique=True,
               use_attr_names=False,
               dtypes=None,
-              datatype=None
+              datatype=None,
               ):
         """Queries the dataset to retrieve the contained data.
         Args:
@@ -321,6 +305,8 @@ class Dataset(ServerBase):
         dataset.set('name', self.name)
         dataset.set('interface', 'default')
 
+        csv_location = self.location.with_suffix(".csv")
+        logging.info(f"""Save protein coordinates reads to {csv_location}""")
         # Default to default attributes if none requested.
         if attributes is None:
             attributes = list(self.default_attributes.keys())
@@ -364,10 +350,10 @@ class Dataset(ServerBase):
             cds_stop = result['CDS end'].astype(int)
             result["aa_start"] = cds_start.apply(lambda x: math.ceil((x) / 3))
             result["aa_stop"] = cds_stop.apply(lambda x: math.ceil((x) / 3))
-            result.to_csv('Hs_ProteinCoordinates_build_100_38.csv', sep='\t')
-            result.to_csv('Hs_ProteinFeatures_build_100_38.csv', sep='\t')
+            with csv_location.open("w") as out_handler:
+                out_handler.write(result)
 
-        # Type error is raised of a data type is not understood by pandas
+        # Type error is raised of a data type is not understood by Pandas
         except TypeError as err:
             raise ValueError("Non valid data type is used in dtypes")
 
