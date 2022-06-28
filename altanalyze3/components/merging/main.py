@@ -21,7 +21,7 @@ def splicesite_annotations(self):
                        "gene_id", "chr", "exon_region_id", "exon_start", "exon_stop", "exon_annotations"])
     self.chr = data.chr
     self.position = data.exon_start
-    return self.chr, self.position
+    return {self.chr, self.position}
 
 
 def intron_annotations(self):
@@ -30,5 +30,9 @@ def intron_annotations(self):
     """
     data = pd.read_csv(self.genemodel, header=None, names=[
         "gene_id", "chr", "exon_region_id", "exon_start", "exon_stop", "exon_annotations"])
-    
-    if(data.exon_region_id.startswith("I"))
+
+    if (data.exon_region_id.startswith("I")):
+        intron_start = data.exon_start
+        intron_stop = data.exon_stop
+        intron_chr = data.chr
+    return {intron_start, intron_stop, intron_chr}
