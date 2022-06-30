@@ -62,13 +62,13 @@ class JunctionCoordinates:
     def getUniqueExonJunctionKey(self, df):
         return df.gene + df.chr + df.strand
 
-    def findUniqueExons(self, junction_data):
+    def findUniqueJunctions(self, junction_data):
         dataframe = pd.read_csv(junction_data)
         unique_junction_object = {}
-        if(dataframe['exon-id'].startswith('E')):
-            if (dataframe['exon-region-start'].unique() and dataframe['exon-region-end'].unique()):
-                unique_junction_object[self.getUniqueExonJunctionKey(dataframe)] = [
-                    dataframe['exon-region-start'], dataframe['exon-region-end']]
+
+        if (dataframe['exon-region-start'].unique() and dataframe['exon-region-end'].unique()):
+            unique_junction_object[self.getUniqueExonJunctionKey(dataframe)] = [
+                dataframe['exon-region-start'], dataframe['exon-region-end']]
         return unique_junction_object
 
     def findUniqueExonExonJunctions(self, all_samples_dir):
@@ -78,11 +78,22 @@ class JunctionCoordinates:
         file_list = os.listdir(all_samples_dir)
         all_samples_count = len(file_list)
         dataframes_list = []
-        unique_junction_objects = []
+        unique_exon_junction_objects = []
+        unique_intron_junction_objects = []
 
         for i in range(all_samples_count):
-            temp_df = pd.read_csv("./csv/" + all_samples_dires[i])
+            temp_df = pd.read_csv("./csv/" + all_samples_dir[i])
             dataframes_list.append(temp_df)
 
         for eachSample in dataframes_list:
-            unique_junction_objects.app(self.findUniqueExons(eachSample))
+            if(eachSample.exon_region_id.startswith('E')):
+                unique_exon_junction_objects.append(
+                    self.findUniqueJunctions(eachSample))
+            if (eachSample.exon_region_id.startswith('I')):
+                unique_intron_junction_objects.append(
+                    self.findUniqueJunctions(eachSample))
+
+        return {'uniqueexons': unique_exon_junction_objects, 'uniqueintrons': unique_intron_junction_objects}
+
+    def findFullMatches(self, junction1df, junction2df):
+        if(junction1df.exon_region_start == junction2df.exon_region_start and junction1df.exon_region_stop == junction2df.exon_region_stop)
