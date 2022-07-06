@@ -14,18 +14,29 @@ class SparseMatrix:
     '''
 
     def __int__(self, junctioncounts):
-        self.
+        self.junctionfiles
         self.junctioncounts,
         self.chr,
         self.sample,
         self.exon_region_start,
         self.exon_region_stop
 
-    def getUniqueExonJunctionCoordinates(self):
+    def getAllUniqueExonJunctionCoordinates(self):
         '''
         Iterate over a exon junction count file(outputed from Misha's juncount)
-        And save all the unique coordinates as a map
+        And concat all the unique coordinates in one dataframe
         '''
-        for file in files:
+        junctionfiles = ['intcount_results.bed']
+        main_dataframe = pd.DataFrame(pd.read_csv(junctionfiles[0]))
+
+        for i in range(1, len(junctionfiles)):
             # get unique juncitons
-            uniqueJunction = unique(file.junction)
+            data = pd.read_csv(junctionfiles[i])
+            df = pd.DataFrame(data)
+            df.drop_duplicates(subset=["junction"])
+            #concat all the junctions in one file
+            main_dataframe = pd.concat([main_dataframe,df],axis =1)
+        
+        return main_dataframe
+
+ 
