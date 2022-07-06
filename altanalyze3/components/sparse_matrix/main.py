@@ -26,5 +26,6 @@ class SparseMatrix:
         Iterate over a exon junction count file(outputed from Misha's juncount)
         And save all the unique coordinates as a map
         '''
-        
-
+        for file in files:
+            # get unique juncitons
+            uniqueJunction = unique(file.junction)
