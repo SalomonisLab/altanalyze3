@@ -1,6 +1,8 @@
 import pandas as pd
 import os
-
+from multiprocessing import Pool
+import numpy as np
+from scipy.sparse import csr_matrix
 
 class SparseMatrix:
 
@@ -57,12 +59,71 @@ class SparseMatrix:
                     junctionCoordinateMap[uniqueCoordinates[j]] += df['counts']
         return junctionCoordinateMap
 
+
+class JunctionCoordinateCalculation:
+
+    '''
+    This class is a structure to divide a bed (junction) file into chunks (by chromosome)
+    and multi-process them (multi-CPU cores). 
+
+    chunk-size = based on chromosome
+    '''
     
-    def createSparseMatrix(self):
+    def __init__(self):
+        self.chunksize = 50
+    
+    def read_chunk(self):
+        with open("/Users/sin9gp/altanalyze3/tests/data/intcount_results.bed") as f:
+            count = 0
+            lines = []
+            for line in f:
+                count +=1
+                lines.append(line)
+                if count % self.chunksize == 0:
+                    self.createSparseMatrix(lines) 
+
+
+    def createSparseMatrix(self,dataarray, sampleFileArray):
         '''
-        This function will take 
+        This function will take each sample file (junction coordinates) and divide them by chromosome 
+        csr_matrix(row,col)
         '''
-        print("i am going to make sparse matrix")
+        rowCount = self.uniqueJunctionCoordinatecount(dataarray)
+        colCount = self.calculateTotalSampleFiles(sampleFileArray)
+
+        # creating sparse matrix
+        sparseMatrix = csr_matrix((dataarray, (rowCount, colCount)), 
+                          shape = (3, 3)).toarray()
+        print(sparseMatrix)
+
+    def uniqueJunctionCoordinatecount(self, dataarray):
+        '''
+        this function will take the chunks of files and count them
+        This will be used to determine the number of rows of the sparse matrix.
+        '''
+        return len(dataarray)
+
+    def calculateTotalSampleFiles(self,sampleFileArray):
+        '''
+        this funnction calculates total number of sample files and returns it.
+        This will determine the number of columns of sparse matrix
+        '''
+        return len(sampleFileArray)
+        
+    
+    if __name__ == '__main__':
+        '''
+        Pool object which offers a convenient means of parallelizing the execution of a function across 
+        multiple input values, distributing the input data across processes
+
+        Map() - This method chops the iterable into a number of chunks which it submits to the process pool as separate tasks.
+        The (approximate) size of these chunks can be specified by setting chunksize to a positive integer.
+        '''
+        with Pool(5) as p:
+            print(p.map(createSparseMatrix,[1,2,3]))
+
+        
+
             
             
 
