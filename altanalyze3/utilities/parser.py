@@ -1,3 +1,4 @@
+import pysam
 import logging
 import pathlib
 import argparse
@@ -177,6 +178,7 @@ class ArgsParser():
         set parameters in case the later ones depend on other
         parameters that should be first parsed by argparser
         """
+        pysam.index(str(self.args.bam))                       # attemts to create bai index (will raise if something went wrong)
         self.assert_common_args()
         if self.args.func == count_junctions:
             self.assert_args_for_count_junctions()

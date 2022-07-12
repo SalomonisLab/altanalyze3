@@ -101,6 +101,14 @@ def test_get_jobs(monkeypatch, args, control_chr):
                 "--ref", "hg19_ref_introns.bed.gz"
             ],
             "7d8c35eb9ce89bcfe0a487b00ef490c5"
+        ),
+        (
+            [
+                "intcount",
+                "--bam", "hg19_pe_not_indexed.bam",
+                "--ref", "hg19_ref_introns.bed.gz"
+            ],
+            "7d8c35eb9ce89bcfe0a487b00ef490c5"
         )
     ]
 )
