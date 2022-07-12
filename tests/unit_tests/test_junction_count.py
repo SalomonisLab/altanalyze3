@@ -15,7 +15,6 @@ DATA_FOLDER = pathlib.Path(__file__).resolve().parents[1].joinpath("data")
             [
                 "juncount",
                 "--bam", "hg19_pe.bam",
-                "--ref", "hg19_ref_introns.bed.gz",
                 "--chr", "chr1", "chr2", "chr3"
             ],
             [
@@ -26,7 +25,6 @@ DATA_FOLDER = pathlib.Path(__file__).resolve().parents[1].joinpath("data")
             [
                 "juncount",
                 "--bam", "hg19_pe.bam",
-                "--ref", "hg19_ref_introns.bed.gz",
                 "--chr", "chr1", "chr2", "chr3", "chr99"
             ],
             [
@@ -37,7 +35,6 @@ DATA_FOLDER = pathlib.Path(__file__).resolve().parents[1].joinpath("data")
             [
                 "juncount",
                 "--bam", "hg19_pe.bam",
-                "--ref", "hg19_ref_introns.bed.gz",
                 "--chr", "chr99"
             ],
             []
@@ -45,14 +42,13 @@ DATA_FOLDER = pathlib.Path(__file__).resolve().parents[1].joinpath("data")
         (
             [
                 "juncount",
-                "--bam", "hg19_pe.bam",
-                "--ref", "hg19_ref_introns.bed.gz"
+                "--bam", "hg19_pe.bam"
             ],
             [
                 "chr1", "chr10", "chr11", "chr12", "chr13", "chr14", "chr15",
                 "chr16", "chr17", "chr18", "chr19", "chr2", "chr20", "chr21",
                 "chr22", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8", "chr9",
-                "chrX", "chrY"
+                "chrM", "chrX", "chrY"
             ]
         )
     ]
@@ -71,25 +67,22 @@ def test_get_jobs(monkeypatch, args, control_chr):
             [
                 "juncount",
                 "--bam", "hg19_pe.bam",
-                "--ref", "hg19_ref_introns.bed.gz",
                 "--chr", "chr1", "chr2", "chr3"
             ],
-            "d41d8cd98f00b204e9800998ecf8427e"
+            "c07bd4635e7ef81751286ab2153876b4"
         ),
         (
             [
                 "juncount",
                 "--bam", "hg19_pe.bam",
-                "--ref", "hg19_ref_introns.bed.gz",
                 "--chr", "chr1", "chr2", "chr3", "chr99"
             ],
-            "d41d8cd98f00b204e9800998ecf8427e"
+            "c07bd4635e7ef81751286ab2153876b4"
         ),
         (
             [
                 "juncount",
                 "--bam", "hg19_pe.bam",
-                "--ref", "hg19_ref_introns.bed.gz",
                 "--chr", "chr99"
             ],
             "d41d8cd98f00b204e9800998ecf8427e"
@@ -97,14 +90,13 @@ def test_get_jobs(monkeypatch, args, control_chr):
         (
             [
                 "juncount",
-                "--bam", "hg19_pe.bam",
-                "--ref", "hg19_ref_introns.bed.gz"
+                "--bam", "hg19_pe.bam"
             ],
-            "7d8c35eb9ce89bcfe0a487b00ef490c5"
+            "3296e12115560e73f9d9dd2b062a61d3"
         )
     ]
 )
-def test_count_introns(monkeypatch, args, control_md5_sum):             # tests all function from intron_count.main file
+def test_count_junctions(monkeypatch, args, control_md5_sum):             # tests all function from junction_count.main file
     monkeypatch.chdir(DATA_FOLDER)
     args = ArgsParser(args)
     args.func(args)

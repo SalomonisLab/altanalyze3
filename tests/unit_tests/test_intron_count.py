@@ -15,6 +15,7 @@ DATA_FOLDER = pathlib.Path(__file__).resolve().parents[1].joinpath("data")
             [
                 "intcount",
                 "--bam", "hg19_pe.bam",
+                "--ref", "hg19_ref_introns.bed.gz",
                 "--chr", "chr1", "chr2", "chr3"
             ],
             [
@@ -25,6 +26,7 @@ DATA_FOLDER = pathlib.Path(__file__).resolve().parents[1].joinpath("data")
             [
                 "intcount",
                 "--bam", "hg19_pe.bam",
+                "--ref", "hg19_ref_introns.bed.gz",
                 "--chr", "chr1", "chr2", "chr3", "chr99"
             ],
             [
@@ -35,6 +37,7 @@ DATA_FOLDER = pathlib.Path(__file__).resolve().parents[1].joinpath("data")
             [
                 "intcount",
                 "--bam", "hg19_pe.bam",
+                "--ref", "hg19_ref_introns.bed.gz",
                 "--chr", "chr99"
             ],
             []
@@ -42,13 +45,14 @@ DATA_FOLDER = pathlib.Path(__file__).resolve().parents[1].joinpath("data")
         (
             [
                 "intcount",
-                "--bam", "hg19_pe.bam"
+                "--bam", "hg19_pe.bam",
+                "--ref", "hg19_ref_introns.bed.gz"
             ],
             [
                 "chr1", "chr10", "chr11", "chr12", "chr13", "chr14", "chr15",
                 "chr16", "chr17", "chr18", "chr19", "chr2", "chr20", "chr21",
                 "chr22", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8", "chr9",
-                "chrM", "chrX", "chrY"
+                "chrX", "chrY"
             ]
         )
     ]
@@ -67,22 +71,25 @@ def test_get_jobs(monkeypatch, args, control_chr):
             [
                 "intcount",
                 "--bam", "hg19_pe.bam",
+                "--ref", "hg19_ref_introns.bed.gz",
                 "--chr", "chr1", "chr2", "chr3"
             ],
-            "c07bd4635e7ef81751286ab2153876b4"
+            "d41d8cd98f00b204e9800998ecf8427e"
         ),
         (
             [
                 "intcount",
                 "--bam", "hg19_pe.bam",
+                "--ref", "hg19_ref_introns.bed.gz",
                 "--chr", "chr1", "chr2", "chr3", "chr99"
             ],
-            "c07bd4635e7ef81751286ab2153876b4"
+            "d41d8cd98f00b204e9800998ecf8427e"
         ),
         (
             [
                 "intcount",
                 "--bam", "hg19_pe.bam",
+                "--ref", "hg19_ref_introns.bed.gz",
                 "--chr", "chr99"
             ],
             "d41d8cd98f00b204e9800998ecf8427e"
@@ -90,9 +97,10 @@ def test_get_jobs(monkeypatch, args, control_chr):
         (
             [
                 "intcount",
-                "--bam", "hg19_pe.bam"
+                "--bam", "hg19_pe.bam",
+                "--ref", "hg19_ref_introns.bed.gz"
             ],
-            "3296e12115560e73f9d9dd2b062a61d3"
+            "7d8c35eb9ce89bcfe0a487b00ef490c5"
         )
     ]
 )
