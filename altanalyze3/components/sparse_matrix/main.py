@@ -1,8 +1,10 @@
+from xml.etree.ElementTree import tostring
 import pandas as pd
 import os
 from multiprocessing import Pool
 import numpy as np
-from scipy.sparse import csr_matrix
+from scipy.sparse import csr_matrix, dok_matrix
+
 
 class SparseMatrix:
 
@@ -96,31 +98,76 @@ class JunctionCoordinateCalculation:
                           shape = (3, 3)).toarray()
         print(sparseMatrix)
 
-    def uniqueJunctionCoordinatecount(self, dataarray):
+    def totalJunctionCoordinatecount(self, dataarray):
         '''
         this function will take the chunks of files and count them
         This will be used to determine the number of rows of the sparse matrix.
         '''
         return len(dataarray)
 
-    def calculateTotalSampleFiles(self,sampleFileArray):
+    def totalSampleFiles(self,sampleFileArray):
         '''
         this funnction calculates total number of sample files and returns it.
         This will determine the number of columns of sparse matrix
         '''
         return len(sampleFileArray)
+    
+    def getJunctionAndCounts(self,sampleFile):
+        '''
+        args: sample file
+        output: all unique junctions 
+        '''
+        bamdata = pd.read_csv(sampleFile, sep='\t')
+        junctions = pd.DataFrame(bamdata).iloc[:,[3]].values.tolist()
+        counts = pd.DataFrame(bamdata).iloc[:,[4]].values.tolist()
+        return [{'junction1':1},{'junction2':2},{'junction3':1},{'junction4':0},{'junction5':0},{'junction6':0},
+        {'junction7':0},{'junction8':0},{'junction9':0},{'junction10':0},{'junction11':0}]
+
+
+
         
     
-    if __name__ == '__main__':
-        '''
-        Pool object which offers a convenient means of parallelizing the execution of a function across 
-        multiple input values, distributing the input data across processes
+    def readBamFiles(self):
+        bamfiles = ['/Users/sin9gp/altanalyze3/tests/data/sample1.bed','/Users/sin9gp/altanalyze3/tests/data/sample2.bed']
+        sampleids = []
+        for file in bamfiles:
+            # print(sampleids)
+            bamdata = pd.read_csv(file, sep='\t')
+            df = pd.DataFrame(bamdata)
+            sampleids = [os.path.basename(file)]
+            junctionCoordinates = self.getJunctionAndCounts(file)
+            # calculate matrix dimensions
+            M = self.totalJunctionCoordinatecount(df.iloc[:,[3]]) #number of rows
+            N = self.totalSampleFiles(bamfiles) #number of columns
+            S = dok_matrix((M,N), dtype=np.float32)
+            # for i in range(N):
+            #     for j in range(M):
+            #         S[j,i] = 2
+            for index in range(len(junctionCoordinates)):
+                for keyjunction in junctionCoordinates[index]:
+                    junctionid = keyjunction
+                    count = junctionCoordinates[index][keyjunction]
+                    S[index,junctionid] = count
+            print(S)                
 
-        Map() - This method chops the iterable into a number of chunks which it submits to the process pool as separate tasks.
-        The (approximate) size of these chunks can be specified by setting chunksize to a positive integer.
-        '''
-        with Pool(5) as p:
-            print(p.map(createSparseMatrix,[1,2,3]))
+            
+            
+            
+
+        
+    
+    # if __name__ == '__main__':
+    #     '''
+    #     Pool object which offers a convenient means of parallelizing the execution of a function across 
+    #     multiple input values, distributing the input data across processes
+
+    #     Map() - This method chops the iterable into a number of chunks which it submits to the process pool as separate tasks.
+    #     The (approximate) size of these chunks can be specified by setting chunksize to a positive integer.
+    #     '''
+    #     with Pool(5) as p:
+    #         print(p.map(createSparseMatrix,[1,2,3],[1,2,3,4]))
+
+        
 
         
 
@@ -132,7 +179,9 @@ class JunctionCoordinateCalculation:
 
         
 sparseM = SparseMatrix()
-sparseM.getAllUniqueExonJunctionCoordinates()
+
+junctionCoordinates = JunctionCoordinateCalculation()
+junctionCoordinates.readBamFiles()
 
 
 
