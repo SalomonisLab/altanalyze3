@@ -139,16 +139,17 @@ class JunctionCoordinateCalculation:
             # calculate matrix dimensions
             M = self.totalJunctionCoordinatecount(df.iloc[:,[3]]) #number of rows
             N = self.totalSampleFiles(bamfiles) #number of columns
-            S = dok_matrix((M,N), dtype=np.float32)
-            # for i in range(N):
-            #     for j in range(M):
-            #         S[j,i] = 2
-            for index in range(len(junctionCoordinates)):
-                for keyjunction in junctionCoordinates[index]:
-                    junctionid = keyjunction
-                    count = junctionCoordinates[index][keyjunction]
-                    S[index,junctionid] = count
-            print(S)                
+        dok_sparse = dok_matrix((M,N))
+        data = []
+        for row in range(len(bamfiles)):
+            for junction in junctionCoordinates:
+                for val in junction.values():
+                    data.append(val)
+                    dok_sparse[val,row] = val
+        
+        dense = dok_sparse.todense()
+        print(dense)
+                      
 
             
             
