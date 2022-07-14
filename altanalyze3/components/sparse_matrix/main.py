@@ -141,16 +141,18 @@ class JunctionCoordinateCalculation:
             N = self.totalSampleFiles(bamfiles) #number of columns
         dok_sparse = dok_matrix((M,N))
         data = []
-        for row in range(len(bamfiles)):
+        for col in range(len(bamfiles)):
             for junction in junctionCoordinates:
                 for val in junction.values():
                     data.append(val)
-                    dok_sparse[val,row] = val
+                    dok_sparse[junction,col] = val
         
         dense = dok_sparse.todense()
         print(dense)
                       
-
+# benchmark - time the matrix conversion 
+# convert to csr_matrix?
+# test this with 6-8 samples (run on the cluster)
             
             
             
