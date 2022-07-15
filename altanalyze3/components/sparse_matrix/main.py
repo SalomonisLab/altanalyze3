@@ -141,7 +141,7 @@ class JunctionCoordinateCalculation:
             N = self.totalSampleFiles(bamfiles) #number of columns
         dok_sparse = dok_matrix((M,N))
         data = []
-        for col in range(len(bamfiles)):
+        for col in sampleids:
             for junction in junctionCoordinates:
                 for val in junction.values():
                     data.append(val)
