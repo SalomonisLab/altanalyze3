@@ -149,6 +149,16 @@ class JunctionCoordinateCalculation:
         
         dense = dok_sparse.todense()
         print(dense)
+
+
+    def readSampleFiles(self):
+        '''
+        Use Python filesystem to load the sample files
+        Use Multi-processing to read and divide them by chromosome
+        call sparse matrix function on each process
+        '''
+        
+
                       
 # benchmark - time the matrix conversion 
 # convert to csr_matrix?
