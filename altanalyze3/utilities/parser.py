@@ -1,9 +1,10 @@
+import pysam
 import logging
 import pathlib
 import argparse
 from altanalyze3.utilities.helpers import get_version
-from altanalyze3.components.junction_count.main import count_junctions
 from altanalyze3.components.intron_count.main import count_introns
+from altanalyze3.components.junction_count.main import count_junctions
 from altanalyze3.utilities.io import get_all_bam_chr
 from altanalyze3.utilities.constants import IntRetCat
 
@@ -55,32 +56,33 @@ class ArgsParser():
             version=get_version(),
             help="Print current version and exit"
         )
-        # Junction count parameters
-        junction_parser = subparsers.add_parser(
-            "juncount",
+
+        # Intron count parameters
+        intron_parser = subparsers.add_parser(
+            "intcount",
             parents=[parent_parser],
-            help="Count reads for junctions"
+            help="Count introns reads"
         )
-        junction_parser.set_defaults(func=count_junctions)
-        junction_parser.add_argument(
+        intron_parser.set_defaults(func=count_introns)
+        intron_parser.add_argument(
             "--bam",
             help="Path to the coordinate-sorted indexed BAM file",
             type=str,
             required=True
         )
-        junction_parser.add_argument(
+        intron_parser.add_argument(
             "--ref",
             help="Path to the coordinate-sorted indexed gene model reference BED file",
             type=str,
             required=True
         )
-        junction_parser.add_argument(
+        intron_parser.add_argument(
             "--span",
             help="5' and 3' overlap that read should have over a splice-site to be counted",
             type=int,
             default=10
         )
-        junction_parser.add_argument(
+        intron_parser.add_argument(
             "--strandness",
             help=" ".join(
                 [
@@ -107,33 +109,6 @@ class ArgsParser():
             default="auto",
             choices=["auto", "forward", "reverse", "unstranded"]
         )
-        junction_parser.add_argument(
-            "--chr",
-            help="Select chromosomes to process. Default: all available",
-            type=str,
-            nargs="*",
-            default=[]
-        )
-        junction_parser.add_argument(
-            "--savereads",
-            help="Export processed reads into the BAM file. Default: False",
-            action="store_true"
-        )
-        self.add_common_arguments(junction_parser)
-
-        # Intron count parameters
-        intron_parser = subparsers.add_parser(
-            "intcount",
-            parents=[parent_parser],
-            help="Count reads for introns"
-        )
-        intron_parser.set_defaults(func=count_introns)
-        intron_parser.add_argument(
-            "--bam",
-            help="Path to the coordinate-sorted indexed BAM file",
-            type=str,
-            required=True
-        )
         intron_parser.add_argument(
             "--chr",
             help="Select chromosomes to process. Default: all available",
@@ -147,6 +122,33 @@ class ArgsParser():
             action="store_true"
         )
         self.add_common_arguments(intron_parser)
+
+        # Junction count parameters
+        junction_parser = subparsers.add_parser(
+            "juncount",
+            parents=[parent_parser],
+            help="Count junctions reads"
+        )
+        junction_parser.set_defaults(func=count_junctions)
+        junction_parser.add_argument(
+            "--bam",
+            help="Path to the coordinate-sorted indexed BAM file",
+            type=str,
+            required=True
+        )
+        junction_parser.add_argument(
+            "--chr",
+            help="Select chromosomes to process. Default: all available",
+            type=str,
+            nargs="*",
+            default=[]
+        )
+        junction_parser.add_argument(
+            "--savereads",
+            help="Export processed reads into the BAM file. Default: False",
+            action="store_true"
+        )
+        self.add_common_arguments(junction_parser)
         return general_parser
 
     def resolve_path(self, selected=None):
@@ -176,6 +178,7 @@ class ArgsParser():
         set parameters in case the later ones depend on other
         parameters that should be first parsed by argparser
         """
+        pysam.index(str(self.args.bam))                       # attemts to create bai index (will raise if something went wrong)
         self.assert_common_args()
         if self.args.func == count_junctions:
             self.assert_args_for_count_junctions()
@@ -184,10 +187,10 @@ class ArgsParser():
         else:
             pass
 
-    def assert_args_for_count_junctions(self):
+    def assert_args_for_count_introns(self):
         self.args.strandness = IntRetCat[self.args.strandness.upper()]
 
-    def assert_args_for_count_introns(self):
+    def assert_args_for_count_junctions(self):
         pass                                                 # nothing to check yet
 
     def assert_common_args(self):
