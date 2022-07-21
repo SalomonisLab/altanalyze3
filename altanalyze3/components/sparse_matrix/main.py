@@ -1,10 +1,11 @@
 from xml.etree.ElementTree import tostring
 import pandas as pd
 import os
-from multiprocessing import Pool
 import numpy as np
 from scipy.sparse import csr_matrix, dok_matrix
-
+import time
+from timeit import default_timer as timer
+from multiprocessing import Pool, cpu_count
 
 class SparseMatrix:
 
@@ -179,15 +180,32 @@ def readBamFiles(self):
 #     df_list = pool.map(reader, file_list) #creates a list of the loaded df's
 #     df = pd.concat(df_list) # concatenates all the df's into a single df
 
-    # for file in file_list:
-    #     if file.endswith(".bed"):
-    #         print("hello", file)
+#     for file in file_list:
+#         if file.endswith(".bed"):
+#             print("hello", file)
 
    
-# benchmark - time the matrix conversion 
-# convert to csr_matrix?
-# test this with 6-8 samples (run on the cluster)
-            
+def square(n):
+
+    time.sleep(2)
+
+    return n * n
+
+
+def main():
+
+    start = timer()
+
+    print(f'starting computations on {cpu_count()} cores')
+
+    values = (2, 4, 6, 8)
+
+    with Pool() as pool:
+        res = pool.map(square, values)
+        print(res)
+
+    end = timer()
+    print(f'elapsed time: {end - start}')
             
             
 
@@ -203,14 +221,18 @@ if __name__ == '__main__':
     '''
     
     
-    junctionCoordinates = JunctionCoordinateCalculation()
-    file_list = os.listdir("/Users/sin9gp/altanalyze3/tests/data/bed")
-    print(file_list)
-    junctionCoordinates.reader(file_list)
+    # junctionCoordinates = JunctionCoordinateCalculation()
+    # file_list = os.listdir("/Users/sin9gp/altanalyze3/tests/data/bed")
+    # print(file_list)
+    # junctionCoordinates.reader(file_list)
+    main()
 
         
    
-
+# benchmark - time the matrix conversion 
+# convert to csr_matrix?
+# test this with 6-8 samples (run on the cluster)
+            
         
 
 
