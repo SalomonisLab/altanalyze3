@@ -6,7 +6,10 @@ from altanalyze3.utilities.helpers import get_version
 from altanalyze3.components.intron_count.main import count_introns
 from altanalyze3.components.junction_count.main import count_junctions
 from altanalyze3.utilities.io import get_all_bam_chr
-from altanalyze3.utilities.constants import IntRetCat
+from altanalyze3.utilities.constants import (
+    IntRetCat,
+    MAIN_CRH
+)
 
 
 class ArgsParser():
@@ -113,7 +116,7 @@ class ArgsParser():
             help="Select chromosomes to process. Default: all available",
             type=str,
             nargs="*",
-            default=[]
+            default=MAIN_CRH
         )
         intron_parser.add_argument(
             "--savereads",
@@ -140,7 +143,7 @@ class ArgsParser():
             help="Select chromosomes to process. Default: all available",
             type=str,
             nargs="*",
-            default=[]
+            default=MAIN_CRH
         )
         junction_parser.add_argument(
             "--savereads",
