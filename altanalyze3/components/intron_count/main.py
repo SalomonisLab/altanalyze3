@@ -16,6 +16,7 @@ from altanalyze3.utilities.helpers import (
 from altanalyze3.utilities.io import (
     get_all_bam_chr,
     get_all_ref_chr,
+    get_correct_contig,
     skip_bam_read,
     is_bam_paired
 )
@@ -205,18 +206,11 @@ class Counter:
                 logging.debug(f"""Not implemented combination of {current_category} and {cached_category} categories""")
                 return IntRetCat.DISCARD
 
-    def get_correct_contig(self, contig, handler):
-        try:
-            handler.fetch(contig)
-            return contig
-        except ValueError:
-            return contig.lstrip("chr")
-
     def calculate(self, contig):
         with pysam.AlignmentFile(self.bam, mode="rb", threads=self.threads) as bam_handler:
             with pysam.TabixFile(str(self.ref), mode="r", parser=pysam.asBed(), threads=self.threads) as ref_handler:
-                contig_ref = self.get_correct_contig(contig, ref_handler)                                           # contig in the file can be both with or without 'chr' prefix
-                contig_bam = self.get_correct_contig(contig, bam_handler)                                           # the same as above
+                contig_ref = get_correct_contig(contig, ref_handler)                                                # contig in the file can be both with or without 'chr' prefix
+                contig_bam = get_correct_contig(contig, bam_handler)                                                # the same as above
                 intron_iter = ref_handler.fetch(contig_ref)
                 intron = next(intron_iter)                                                                          # get initial value from intron iterator
                 no_introns = False                                                                                  # to break the outer fetching reads loop
@@ -312,7 +306,7 @@ def get_jobs(args):
     return [
         Job(
             contig=contig,                                                            # contig is always prepended with 'chr'
-            location=args.output.with_suffix(get_tmp_suffix())
+            location=args.tmp.joinpath(get_tmp_suffix())
         )
         for contig in get_all_bam_chr(args.bam, args.threads)
             if contig in get_all_ref_chr(args.ref, args.threads) and contig in args.chr                 # safety measure to include only chromosomes present in BAM, BED, and --chr

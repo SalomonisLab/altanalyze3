@@ -3,7 +3,10 @@ import logging
 import multiprocessing
 from functools import partial
 
-from altanalyze3.utilities.io import get_all_bam_chr
+from altanalyze3.utilities.io import (
+    get_all_bam_chr,
+    get_correct_contig
+)
 from altanalyze3.utilities.logger import setup_logger
 from altanalyze3.utilities.constants import Job
 from altanalyze3.utilities.helpers import (
@@ -21,7 +24,7 @@ def process_contig(args, job):
     logging.info(f"""Process chromosome {job.contig} to {job.location}""")
     with job.location.open("wt") as output_stream:
         with pysam.AlignmentFile(args.bam, mode="rb", threads=args.threads) as handler:
-            introns = handler.find_introns((r for r in handler.fetch(job.contig)))           # need () instead of [] to use as iterator
+            introns = handler.find_introns((r for r in handler.fetch(get_correct_contig(job.contig, handler))))           # need () instead of [] to use as iterator
             for position, score in introns.items():
                 output_stream.write(
                     f"""{job.contig}\t{position[0]}\t{position[1]}\tJUNC:{job.contig}-{position[0]}-{position[1]}\t{score}\n"""
@@ -42,7 +45,7 @@ def get_jobs(args):
     return [
         Job(
             contig=contig,                                                            # contig is always prepended with 'chr'
-            location=args.output.with_suffix(get_tmp_suffix())
+            location=args.tmp.joinpath(get_tmp_suffix())
         )
         for contig in get_all_bam_chr(args.bam, args.threads) if contig in args.chr   # safety measure to include only chromosomes present in BAM and --chr
     ]

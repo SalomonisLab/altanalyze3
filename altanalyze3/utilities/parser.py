@@ -14,11 +14,9 @@ class ArgsParser():
     def __init__(self, args):
         args = args + [""] if len(args) == 0 else args
         self.args, _ = self.get_parser().parse_known_args(args)
-        self.resolve_path(["bam", "ref", "output"])
+        self.resolve_path(["bam", "ref", "tmp", "output"])
         self.assert_args()
         self.set_args_as_attributes()
-        logging.debug("Loaded parameters")
-        logging.debug(self.args)
 
     def set_args_as_attributes(self):
         for arg, value in vars(self.args).items():
@@ -29,6 +27,7 @@ class ArgsParser():
             ("--loglevel", "Logging level. Default: info", str, "info", ["fatal", "error", "warning", "info", "debug"]),
             ("--threads", "Number of threads to run in parallel where applicable", int, 1, None),
             ("--cpus", "Number of processes to run in parallel where applicable", int, 1, None),
+            ("--tmp", "Temporary files location", str, "tmp", None),
             ("--output", "Output prefix", str, "results", None)
         ]
         for param in self.common_arguments:
@@ -194,6 +193,8 @@ class ArgsParser():
         pass                                                 # nothing to check yet
 
     def assert_common_args(self):
+        self.args.tmp.mkdir(parents=True, exist_ok=True)                                  # safety measure, shouldn't fail
+        self.args.output.parent.mkdir(parents=True, exist_ok=True)                        # safety measure, shouldn't fail
         self.args.chr = get_all_bam_chr(self.args.bam, self.args.threads) \
             if len(self.args.chr) == 0 else [c if c.startswith("chr") else f"chr{c}" for c in self.args.chr]
         self.args.loglevel = getattr(logging, self.args.loglevel.upper())
