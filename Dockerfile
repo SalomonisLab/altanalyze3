@@ -42,14 +42,14 @@ RUN echo "Installing dependencies" && \
     make install && \
     cd .. && \
     pip3 install -U pip && \
-    echo "Install htslib" && \
+    echo "Installing htslib" && \
     wget -q -O - $URL_HTSLIB | tar -jxv && \
     cd htslib-${VERSION_HTSLIB} && \
     ./configure --prefix=/usr/local/ && \
     make -j 4 && \
     make install && \
     cd .. && \
-    echo "Install samtools" && \
+    echo "Installing samtools" && \
     wget -q -O - $URL_SAMTOOLS | tar -jxv && \
     cd samtools-${VERSION_SAMTOOLS} && \
     ./configure --prefix=/usr/local/ && \
@@ -62,7 +62,7 @@ RUN echo "Installing dependencies" && \
     git checkout ${ALTANALYZE_VERSION} && \
     pip3 install . && \
     cd .. && \
-    # cleaning up
+    echo "Cleaning up" && \
     apt-get clean && \
     apt-get purge && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /usr/share/doc/* && \
