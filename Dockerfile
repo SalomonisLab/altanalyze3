@@ -1,6 +1,6 @@
 #####################################################################################
 # Docker image with AltAnalyze (currently mostly for running tests)                 #
-# with custom UBUNTU_VERSION, PYTHON_VERSION, ALTANALYZE_VERSION                    #
+# with custom UBUNTU_VERSION, PYTHON_VERSION, ALTANALYZE_VERSION, ALTANALYZE_URL    #
 #####################################################################################
 # Build Cmd:        docker build --no-cache --rm -t altanalyze:latest .             #
 #####################################################################################
@@ -9,6 +9,7 @@
 ARG UBUNTU_VERSION="20.04"
 ARG PYTHON_VERSION="3.8.10"
 ARG ALTANALYZE_VERSION="master"
+ARG ALTANALYZE_URL="https://github.com/SalomonisLab/altanalyze3.git"
 
 FROM ubuntu:${UBUNTU_VERSION}
 LABEL maintainer="misha.kotliar@gmail.com"
@@ -18,9 +19,9 @@ WORKDIR /tmp
 
 ARG PYTHON_VERSION
 ARG ALTANALYZE_VERSION
+ARG ALTANALYZE_URL
 
 ENV PYTHON_URL "https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tgz"
-ENV ALTANALYZE_URL "https://github.com/SalomonisLab/altanalyze3.git"
 
 ENV VERSION_HTSLIB 1.15.1
 ENV URL_HTSLIB "https://github.com/samtools/htslib/releases/download/${VERSION_HTSLIB}/htslib-${VERSION_HTSLIB}.tar.bz2"
