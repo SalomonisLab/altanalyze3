@@ -28,10 +28,10 @@ class ArgsParser():
     def add_common_arguments(self, parser):
         self.common_arguments = [
             ("--loglevel", "Logging level. Default: info", str, "info", ["fatal", "error", "warning", "info", "debug"]),
-            ("--threads", "Number of threads to run in parallel where applicable", int, 1, None),
-            ("--cpus", "Number of processes to run in parallel where applicable", int, 1, None),
-            ("--tmp", "Temporary files location", str, "tmp", None),
-            ("--output", "Output prefix", str, "results", None)
+            ("--threads", "Number of threads to run in parallel where applicable. Default: 1", int, 1, None),
+            ("--cpus", "Number of processes to run in parallel where applicable. Default: 1", int, 1, None),
+            ("--tmp", "Temporary files location. Default: tmp", str, "tmp", None),
+            ("--output", "Output prefix. Default: results", str, "results", None)
         ]
         for param in self.common_arguments:
             parser.add_argument(
@@ -113,7 +113,7 @@ class ArgsParser():
         )
         intron_parser.add_argument(
             "--chr",
-            help="Select chromosomes to process. Default: all available",
+            help="Select chromosomes to process. Default: only main chromosomes",
             type=str,
             nargs="*",
             default=MAIN_CRH
@@ -140,7 +140,7 @@ class ArgsParser():
         )
         junction_parser.add_argument(
             "--chr",
-            help="Select chromosomes to process. Default: all available",
+            help="Select chromosomes to process. Default: only main chromosomes",
             type=str,
             nargs="*",
             default=MAIN_CRH

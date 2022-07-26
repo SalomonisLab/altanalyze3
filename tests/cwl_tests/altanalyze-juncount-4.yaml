@@ -1,0 +1,14 @@
+alignment_file:
+  class: File
+  location: "../data/hg19_pe.bam"
+  secondaryFiles:
+  - class: File
+    location: "../data/hg19_pe.bam.bai"
+chrom_list:
+- "1"
+- "2"
+- "3"
+log_level: "debug"
+threads: 2
+processes: 2
+output_prefix: "junc"
