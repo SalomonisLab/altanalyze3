@@ -27,6 +27,17 @@ DATA_FOLDER = pathlib.Path(__file__).resolve().parents[1].joinpath("data")
                 "intcount",
                 "--bam", "hg19_pe.bam",
                 "--ref", "hg19_ref_introns.bed.gz",
+                "--chr", "1", "2", "3"
+            ],
+            [
+                "chr1", "chr2", "chr3"
+            ]
+        ),
+        (
+            [
+                "intcount",
+                "--bam", "hg19_pe.bam",
+                "--ref", "hg19_ref_introns.bed.gz",
                 "--chr", "chr1", "chr2", "chr3", "chr99"
             ],
             [
@@ -73,6 +84,15 @@ def test_get_jobs(monkeypatch, args, control_chr):
                 "--bam", "hg19_pe.bam",
                 "--ref", "hg19_ref_introns.bed.gz",
                 "--chr", "chr1", "chr2", "chr3"
+            ],
+            "d41d8cd98f00b204e9800998ecf8427e"
+        ),
+        (
+            [
+                "intcount",
+                "--bam", "hg19_pe.bam",
+                "--ref", "hg19_ref_introns.bed.gz",
+                "--chr", "1", "2", "3"
             ],
             "d41d8cd98f00b204e9800998ecf8427e"
         ),

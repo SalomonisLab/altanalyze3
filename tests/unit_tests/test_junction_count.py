@@ -25,6 +25,16 @@ DATA_FOLDER = pathlib.Path(__file__).resolve().parents[1].joinpath("data")
             [
                 "juncount",
                 "--bam", "hg19_pe.bam",
+                "--chr", "1", "2", "3"
+            ],
+            [
+                "chr1", "chr2", "chr3"
+            ]
+        ),
+        (
+            [
+                "juncount",
+                "--bam", "hg19_pe.bam",
                 "--chr", "chr1", "chr2", "chr3", "chr99"
             ],
             [
@@ -80,6 +90,14 @@ def test_get_jobs(monkeypatch, args, control_chr):
                 "juncount",
                 "--bam", "hg19_pe.bam",
                 "--chr", "chr1", "chr2", "chr3"
+            ],
+            "c07bd4635e7ef81751286ab2153876b4"
+        ),
+        (
+            [
+                "juncount",
+                "--bam", "hg19_pe.bam",
+                "--chr", "1", "2", "3"
             ],
             "c07bd4635e7ef81751286ab2153876b4"
         ),
