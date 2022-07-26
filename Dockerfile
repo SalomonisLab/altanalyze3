@@ -22,9 +22,16 @@ ARG ALTANALYZE_VERSION
 ENV PYTHON_URL "https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tgz"
 ENV ALTANALYZE_URL "https://github.com/SalomonisLab/altanalyze3.git"
 
+ENV VERSION_HTSLIB 1.15.1
+ENV URL_HTSLIB "https://github.com/samtools/htslib/releases/download/${VERSION_HTSLIB}/htslib-${VERSION_HTSLIB}.tar.bz2"
+
+ENV VERSION_SAMTOOLS 1.15.1
+ENV URL_SAMTOOLS "https://github.com/samtools/samtools/releases/download/${VERSION_SAMTOOLS}/samtools-${VERSION_SAMTOOLS}.tar.bz2"
+
+
 RUN echo "Installing dependencies" && \
     apt-get update && \
-    apt-get install -y gcc build-essential git wget curl zlib1g-dev libffi-dev libssl-dev libsqlite3-dev && \
+    apt-get install -y gcc build-essential git wget curl zlib1g-dev libffi-dev libssl-dev libsqlite3-dev libbz2-dev liblzma-dev libncurses5-dev && \
     echo "Installing Python" && \
     wget ${PYTHON_URL} && \
     tar xzf Python-${PYTHON_VERSION}.tgz && \
@@ -34,6 +41,20 @@ RUN echo "Installing dependencies" && \
     make install && \
     cd .. && \
     pip3 install -U pip && \
+    echo "Install htslib" && \
+    wget -q -O - $URL_HTSLIB | tar -jxv && \
+    cd htslib-${VERSION_HTSLIB} && \
+    ./configure --prefix=/usr/local/ && \
+    make -j 4 && \
+    make install && \
+    cd .. && \
+    echo "Install samtools" && \
+    wget -q -O - $URL_SAMTOOLS | tar -jxv && \
+    cd samtools-${VERSION_SAMTOOLS} && \
+    ./configure --prefix=/usr/local/ && \
+    make -j 4 && \
+    make install && \
+    cd .. && \
     echo "Installing AltAnalyze" && \
     git clone ${ALTANALYZE_URL} && \
     cd altanalyze3 && \

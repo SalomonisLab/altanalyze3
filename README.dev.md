@@ -23,3 +23,11 @@
    ```
 
 Note, for proper AltAnalyze functionality, you need to have [samtools](https://formulae.brew.sh/formula/samtools) intalled.
+
+# Testing
+
+```
+cd tests
+./unit_tests_in_docker.sh
+```
+
