@@ -16,7 +16,8 @@ CONTROL_MD5_SUMS = {
 def test_all_md5_sums():
     collected_md5_sums = {}
     for location in DATA_FOLDER.glob("**/*"):
-        collected_md5_sums[location.name] = get_md5_sum(location)
+        if location.is_file():
+            collected_md5_sums[location.name] = get_md5_sum(location)
     for filename, control_md5_sum in CONTROL_MD5_SUMS.items():
         assert filename in collected_md5_sums, "missing file"
         assert collected_md5_sums[filename] == control_md5_sum, "wrong MD5 sum"
