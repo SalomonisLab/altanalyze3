@@ -29,5 +29,6 @@ Note, for proper AltAnalyze functionality, you need to have [samtools](https://f
 ```
 cd tests
 ./unit_tests_in_docker.sh
+./cwl_tests_in_docker.sh
 ```
 
