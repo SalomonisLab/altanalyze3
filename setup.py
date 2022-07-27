@@ -22,7 +22,7 @@ setup(
     license="Apache-2.0",
     include_package_data=True,
     packages=find_packages(
-        exclude=["docs", "tests", "cwls"]
+        exclude=["docs", "tests", "cwls", "tmp"]
     ),
     install_requires=[
         "pysam"

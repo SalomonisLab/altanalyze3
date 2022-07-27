@@ -22,4 +22,4 @@ docker run --rm -it -v /var/run/docker.sock:/var/run/docker.sock \
                     --workdir ${WORKING_DIR}/tests \
                     cwltool:latest \
                     ${WORKING_DIR}/tests/cwl_tests.sh -j2 RUNNER=cwltool \
-                    EXTRA="--tmpdir-prefix=${WORKING_DIR}/tests/temp/tmp --tmp-outdir-prefix=${WORKING_DIR}/tests/temp/tmp"
+                    EXTRA="--tmpdir-prefix=${WORKING_DIR}/tests/tmp/tmp --tmp-outdir-prefix=${WORKING_DIR}/tests/tmp/tmp"
