@@ -26,12 +26,19 @@ ENV PYTHON_URL "https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYT
 ENV CWLTOOL_URL "https://github.com/common-workflow-language/cwltool.git"
 ENV CWLTEST_URL "https://github.com/common-workflow-language/cwltest.git"
 
+ENV VERSION_HTSLIB 1.15.1
+ENV URL_HTSLIB "https://github.com/samtools/htslib/releases/download/${VERSION_HTSLIB}/htslib-${VERSION_HTSLIB}.tar.bz2"
+
+ENV VERSION_SAMTOOLS 1.15.1
+ENV URL_SAMTOOLS "https://github.com/samtools/samtools/releases/download/${VERSION_SAMTOOLS}/samtools-${VERSION_SAMTOOLS}.tar.bz2"
+
 RUN echo "Installing dependencies" && \
     apt-get update && \
     apt-get install -y gcc build-essential \
                        git wget curl zlib1g-dev libmysqlclient-dev libffi-dev libssl-dev \
                        ca-certificates \
-                       nodejs mysql-client apt-transport-https libsqlite3-dev \
+                       nodejs mysql-client apt-transport-https libsqlite3-dev libbz2-dev \
+                       liblzma-dev libncurses5-dev \
                        gnupg-agent software-properties-common && \
     echo "Installing Python" && \
     wget ${PYTHON_URL} && \
@@ -42,6 +49,20 @@ RUN echo "Installing dependencies" && \
     make install && \
     cd .. && \
     pip3 install -U pip && \
+    echo "Installing htslib" && \
+    wget -q -O - $URL_HTSLIB | tar -jxv && \
+    cd htslib-${VERSION_HTSLIB} && \
+    ./configure --prefix=/usr/local/ && \
+    make -j 4 && \
+    make install && \
+    cd .. && \
+    echo "Installing samtools" && \
+    wget -q -O - $URL_SAMTOOLS | tar -jxv && \
+    cd samtools-${VERSION_SAMTOOLS} && \
+    ./configure --prefix=/usr/local/ && \
+    make -j 4 && \
+    make install && \
+    cd .. && \
     echo "Installing docker-ce-cli" && \
     curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add - && \
     add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" && \
@@ -59,7 +80,6 @@ RUN echo "Installing dependencies" && \
     git checkout ${CWLTEST_VERSION} && \
     pip3 install . && \
     cd .. && \
-    # cleaning up
     apt-get clean && \
     apt-get purge && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /usr/share/doc/* && \
