@@ -72,27 +72,16 @@ if __name__ == '__main__':
     for file in sampleFiles:
         with open('/Users/sin9gp/altanalyze3/tests/data/bed/' + file) as eachsamplefile:
             for line in eachsamplefile:
-                print(line.split('\t')[3])
-                giant_dict[line.split('\t')[3]] = {'sampleid':file,'spliceevents':line.split('\t')[4].rstrip()}
-                # temp = map(int,line.split('\t'))
-                
-    print(giant_dict)
-            # df = pd.DataFrame(r)
-            # junctioncoordinates = df.iloc[:,[3]]
-            # spliceEvents = df.iloc[:,[4]]
-            # concatenateddfs.append(df)
-            # for i in len(junctioncoordinates):
-            #     dok_sparse
-
-
-
-
+                junctionCoordinateKey = line.split('\t')[3]
+                if(junctionCoordinateKey in giant_dict.keys()):
+                    #if the junction already exists in the dictionary           
+                    updatedspliceeventcount = giant_dict[junctionCoordinateKey]['spliceevents'] + line.split('\t')[4].rstrip()
+                    giant_dict[junctionCoordinateKey] = {'sampleid':file,'spliceevents':line.split('\t')[4].rstrip()}
+                giant_dict[junctionCoordinateKey] = {'sampleid':file,'spliceevents':line.split('\t')[4].rstrip()}
     
+    #print(giant_dict)
+           
 
-
-
-
-            #results = p.map(createSparseMatrix, 1, eachsamplefile)
 
 
 
