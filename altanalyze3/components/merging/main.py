@@ -5,7 +5,7 @@ import os
 
 
 def sampleBEDFileAnnotation(gene_model_all, junction_dir, intron_dir):
-    junction_dict,exon_dict,gene_dict = importJunctionInfo(gene_model_all)
+    exon_dict, gene_dict,junction_dict = importJunctionInfo(gene_model_all)
     importJunctionFromBED(junction_dir, junction_dict)
 
 
@@ -35,8 +35,9 @@ def importJunctionInfo(gene_model_all):
         else:
             exon_dict[row.gene_id] = [exon_annotation]
             gene_dict[row.gene_id] = [row.start,row.stop]
-    for gene in gene_dict:
-        gene_dict[gene].sort()
+    # for gene in gene_dict:
+    #     gene_dict[gene].sort()
+    #print(junction_dict)
     return exon_dict, gene_dict, junction_dict
 
    
@@ -50,21 +51,39 @@ def importJunctionFromBED(junction_dir, junction_dict):
     This function imports junction data from BAM derived exon junction text files
     '''
     junction_coordinate_BAM_dict = {}
+    
     for junctionfilename in os.listdir(junction_dir):
         junctionfile = os.path.join(junction_dir, junctionfilename)
-        initialBAMJunctionImport(junctionfile)
+        junction_coordinate_BAM_dict = initialBAMJunctionImport(junctionfile)
 
+    for (chr,start, stop) in junction_coordinate_BAM_dict.keys():
+        unprefixedchr = chr.removeprefix('chr')
+        startAnnotation = None
+        stopAnnotation = None
+        #print(unprefixedchr,start)
+        #print(junction_dict)
+        tar_start_tup = (unprefixedchr,start)
+        tar_stop_tup = (unprefixedchr,stop)
+        if junction_dict.get(tar_start_tup) != None:
+            print("exists")
+            startAnnotation = junction_dict[chr,start]
+        if junction_dict.get(tar_stop_tup) != None:
+            stopAnnotation = junction_dict[chr,stop]
+        junctionAnnotation = getJunctionAnnotation(startAnnotation,stopAnnotation)
+        junction_coordinate_BAM_dict[chr,start,stop] = junctionAnnotation
+        #print(junctionAnnotation)
+
+def getJunctionAnnotation(startannotation, stopannotation):
+    return 1
 
 def initialBAMJunctionImport(junctionfile):
     interimJunctionCoordinates={}
     junction_df = pd.read_csv(junctionfile,sep='\t',header=None, names=[
             "chr", "start", "stop","annotation", "counts","strand"])
     for idx,row in junction_df.iterrows():
-        #check if it's chrfehrkh
+        # check if it's a valid chr
         if(len(row.chr) <= 5):
             interimJunctionCoordinates[(row.chr,row.start,row.stop)] = []
-    
-    print(interimJunctionCoordinates)
     return interimJunctionCoordinates
     
 
