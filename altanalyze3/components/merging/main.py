@@ -2,12 +2,10 @@ import pandas as pd
 import os
 
 #path for gene_model and junction files
-genemodelpath = "/Users/sin9gp/altanalyze3/tests/data/"
+
 
 def sampleBEDFileAnnotation(gene_model_all, junction_dir, intron_dir):
-    file = 'gene_model_ENSG00000223972.txt'
-    gene_model_file = f"{genemodelpath}/{file}"
-    junction_dict,exon_dict,gene_dict = importJunctionInfo(gene_model_all=gene_model_file)
+    junction_dict,exon_dict,gene_dict = importJunctionInfo(gene_model_all)
     importJunctionFromBED(junction_dir, junction_dict)
 
 
@@ -47,22 +45,36 @@ def get_exon_annotation(chr, start,stop,exonid):
         return exonid + '.' + str(chr) + '_' + str(start) + '_'+  str(stop)
 
 
-# def importJunctionFromBED(junction_dir, junction_dict):
-#     '''
-#     This function imports junction data from BAM derived text files
-#     '''
-#     junction_coordinate_BAM_dict = {}
-#     for junction in junction_dir:
-#         initialBAMJunctionImport(junction)
+def importJunctionFromBED(junction_dir, junction_dict):
+    '''
+    This function imports junction data from BAM derived exon junction text files
+    '''
+    junction_coordinate_BAM_dict = {}
+    for junctionfilename in os.listdir(junction_dir):
+        junctionfile = os.path.join(junction_dir, junctionfilename)
+        initialBAMJunctionImport(junctionfile)
 
 
-# def initialBAMJunctionImport(junctionfile):
-#     interimJunctionCoordinates={}
-
+def initialBAMJunctionImport(junctionfile):
+    interimJunctionCoordinates={}
+    junction_df = pd.read_csv(junctionfile,sep='\t',header=None, names=[
+            "chr", "start", "stop","annotation", "counts","strand"])
+    for idx,row in junction_df.iterrows():
+        #check if it's chrfehrkh
+        if(len(row.chr) <= 5):
+            interimJunctionCoordinates[(row.chr,row.start,row.stop)] = []
+    
+    print(interimJunctionCoordinates)
+    return interimJunctionCoordinates
+    
 
 
 if __name__ == '__main__':
-
+    genemodelpath = "/Users/sin9gp/altanalyze3/tests/data/" 
     file = 'gene_model_ENSG00000223972.txt'
     gene_model_file = f"{genemodelpath}/{file}"
-    importJunctionInfo(gene_model_all=gene_model_file)
+    junction_dir = "/Users/sin9gp/altanalyze3/tests/data/junction_dir/"
+    intron_dir = "/Users/sin9gp/altanalyze3/tests/data/intron_dir/"
+    sampleBEDFileAnnotation(gene_model_file, junction_dir, intron_dir)
+    # importJunctionInfo(gene_model_all=gene_model_file)
+    # importJunctionFromBED(junctiondir)
