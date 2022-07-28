@@ -8,52 +8,95 @@ from timeit import default_timer as timer
 from multiprocessing import Pool, cpu_count
 from csv import DictReader
 from csv import reader
+import argparse
 
-def createMatrix(row):
-    #print('/Users/sin9gp/altanalyze3/tests/data/bed/' + lines)
-    M = len(row) #number of rows
-    N = 5 #number of columns
-    dok_sparse = dok_matrix((M,N))
-    data = []
-    file_list = os.listdir("/Users/sin9gp/altanalyze3/tests/data/bed")
-    for i in range(0,len(file_list)):
-        for junction in row[3]:
-            data.append(junction)
-            dok_sparse[junction,i] = row[3]
-    return dok_sparse
 
-    
 
-def main():
+def grouper():
     '''
-    Pool object which offers a means of parallelizing the execution of a function across 
-    multiple input values, distributing the input data across processes
-
-    Map() - This method chops the iterable into a number of chunks which it submits to the process pool as separate tasks.
-    The (approximate) size of these chunks can be specified by setting chunksize to a positive integer.
+    Reads one sample file line by line and yeilds the data along with the sample name 
     '''
-    start = timer()
-    print(f'starting computations on {cpu_count()} cores')
-    file_list = os.listdir("/Users/sin9gp/altanalyze3/tests/data/bed")
+    return 1
+
+def createSparseMatrix(count, samplefile):
+    '''
+    Input: takes one file at a time and puts it into sparse matrix
+
+    dok_matrix - subclass of Python dict
+        keys are (row, column) index tuples (no duplicate entries allowed)
+        values are corresponding non-zero values
     
-    p = Pool(processes=cpu_count() - 7)
-    print(p)
-    for file in file_list:
-        with open('/Users/sin9gp/altanalyze3/tests/data/bed/' + file) as f:
-            csv_dict_reader = reader(f, delimiter='\t')
-            #print(row[0])
-            with Pool() as pool:
-                res = pool.map(createMatrix, csv_dict_reader)
-                print(res)
-
-    end = timer()
-    print(f'elapsed time: {end - start}')
-
-
-#fix this divide process - divide by sample (each sample has two files (intron and junction files))
-            
-
-        
+    in our case row - junction id, column - sample id
+    '''
+    bedfolder = '/Users/sin9gp/altanalyze3/tests/data/bed'
+    #challenges to solve - figure out how to get the dimensions of matrix
+    bamdata = pd.read_csv(file,sep='\t')
+    df = pd.DataFrame(bamdata)
+    M = len(df.iloc[:,[3]])
+    N = len(os.listdir(bedfolder))
+    print("M,N", M, N)
     
+    
+
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser(description='Build Gene Model from GTF')
+    parser.add_argument('--samplebam',type=str,default=None,help='the path to the bed/txt folder')
+    args = parser.parse_args()
+    p = Pool(4)
+    '''
+    # Use 'sampleFileReader' to split test data into
+	# groups you can process without using a
+	# ton of RAM. You'll probably want to 
+	# increase the chunk size considerably
+	# to something like 1000 lines per core.
+    '''
+    sampleFiles = os.listdir("/Users/sin9gp/altanalyze3/tests/data/bed/")
+    totaljunctions = 0
+    samplefileticker = 0
+    for file in sampleFiles:
+        samplefileticker += 1
+        with open('/Users/sin9gp/altanalyze3/tests/data/bed/' + file) as eachsamplefile:
+            r = pd.read_csv(eachsamplefile, sep='\t')
+            df = pd.DataFrame(r)
+            junctioncoordinates = df.iloc[:,[3]]
+            junctioncoordinatesCount = len(junctioncoordinates)
+            totaljunctions+=junctioncoordinatesCount
+            #print(file, junctioncoordinatesCount, totaljunctions)
+    M = totaljunctions
+    N = samplefileticker
+    #print(M,N)
+    dok_sparse = dok_matrix((M,N))
+    concatenateddfs = []
+    for file in sampleFiles:
+        with open('/Users/sin9gp/altanalyze3/tests/data/bed/' + file) as eachsamplefile:
+            r = pd.read_csv(eachsamplefile, sep='\t')
+            df = pd.DataFrame(r)
+            junctioncoordinates = df.iloc[:,[3]]
+            spliceEvents = df.iloc[:,[4]]
+            concatenateddfs.append(df)
+            #print(spliceEvents)
+            # for junction in range(0,len(junctioncoordinates)):
+            #     for i in range(0,len(spliceEvents)):
+            #         print(junctioncoordinates[junction],i)
+                    #dok_sparse[junction,file] = spliceEvents[i]
+    
+    
+  
+
+
+
+    
+
+
+
+
+            #results = p.map(createSparseMatrix, 1, eachsamplefile)
+
+
+
+
+
+
+
+    
+
