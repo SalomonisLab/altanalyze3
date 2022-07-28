@@ -2,7 +2,7 @@ from xml.etree.ElementTree import tostring
 import pandas as pd
 import os
 import numpy as np
-from scipy.sparse import csr_matrix, dok_matrix
+from scipy.sparse import dok_matrix, dok_array, coo_matrix
 import time
 from timeit import default_timer as timer
 from multiprocessing import Pool, cpu_count
@@ -65,23 +65,25 @@ if __name__ == '__main__':
     M = totaljunctions
     N = samplefileticker
     #print(M,N)
-    dok_sparse = dok_matrix((M,N))
+    dok_sparse = dok_array((M,N))
     concatenateddfs = []
+    row, col, data = [],[],[]
+    giant_dict = {}
     for file in sampleFiles:
         with open('/Users/sin9gp/altanalyze3/tests/data/bed/' + file) as eachsamplefile:
-            r = pd.read_csv(eachsamplefile, sep='\t')
-            df = pd.DataFrame(r)
-            junctioncoordinates = df.iloc[:,[3]]
-            spliceEvents = df.iloc[:,[4]]
-            concatenateddfs.append(df)
-            #print(spliceEvents)
-            # for junction in range(0,len(junctioncoordinates)):
-            #     for i in range(0,len(spliceEvents)):
-            #         print(junctioncoordinates[junction],i)
-                    #dok_sparse[junction,file] = spliceEvents[i]
-    
-    
-  
+            for line in eachsamplefile:
+                print(line.split('\t')[3])
+                giant_dict[line.split('\t')[3]] = {'sampleid':file,'spliceevents':line.split('\t')[4].rstrip()}
+                # temp = map(int,line.split('\t'))
+                
+    print(giant_dict)
+            # df = pd.DataFrame(r)
+            # junctioncoordinates = df.iloc[:,[3]]
+            # spliceEvents = df.iloc[:,[4]]
+            # concatenateddfs.append(df)
+            # for i in len(junctioncoordinates):
+            #     dok_sparse
+
 
 
 
