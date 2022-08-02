@@ -35,7 +35,9 @@ def createSparseMatrix(giant_dictionary):
     N = len(os.listdir(data_path))
     S = dok_matrix((M,N), dtype=np.float32)
     junctions = giant_dict.keys()
-    print(junctions)
+    for i in range(junctions):
+        for j in range(N):
+            print(junctions)
         
             
            
@@ -72,21 +74,22 @@ if __name__ == '__main__':
             #print(file, junctioncoordinatesCount, totaljunctions)
     M = totaljunctions
     N = samplefileticker
-    #print(M,N)
-    dok_sparse = dok_array((M,N))
+ 
+    dok_sparse = dok_matrix((N,M))
     concatenateddfs = []
     row, col, data = [],[],[]
     giant_dict = {}
-    for file in sampleFiles:
-        with open(data_path + file) as eachsamplefile:
+    for i in range(0,len(sampleFiles)):
+        with open(data_path + sampleFiles[i]) as eachsamplefile:
+            j = 0
             for line in eachsamplefile:
                 junctionCoordinateKey = line.split('\t')[3]
-                if(junctionCoordinateKey in giant_dict.keys()):
-                    #if the junction already exists in the dictionary           
-                    updatedspliceeventcount = giant_dict[junctionCoordinateKey]['spliceevents'] + line.split('\t')[4].rstrip()
-                    giant_dict[junctionCoordinateKey] = {'sampleid':file,'spliceevents':line.split('\t')[4].rstrip()}
-                giant_dict[junctionCoordinateKey] = {'sampleid':file,'spliceevents':line.split('\t')[4].rstrip()}
-    createSparseMatrix(giant_dict)
+                spliceevents = line.split('\t')[4]
+                print(i, j, spliceevents)
+                dok_sparse[i,j] = spliceevents
+                print(dok_sparse.todense())
+                j+=1
+    print(dok_sparse.todense())
 
            
 
