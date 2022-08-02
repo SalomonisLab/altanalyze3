@@ -148,6 +148,7 @@ class JunctionAnnotation:
                         continue
                 else:
                     if candidateFound:
+                        print("candidate gene found")
                         ### annotated as a novel intron splice in the last loop
                         return annotation 
                     pass
