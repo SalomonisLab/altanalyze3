@@ -72,7 +72,7 @@ if __name__ == '__main__':
             junctioncoordinatesCount = len(junctioncoordinates)
             totaljunctions+=junctioncoordinatesCount
             #print(file, junctioncoordinatesCount, totaljunctions)
-    M = totaljunctions
+    M = totaljunctions +1
     N = samplefileticker
  
     dok_sparse = dok_matrix((N,M))
@@ -81,14 +81,13 @@ if __name__ == '__main__':
     giant_dict = {}
     for i in range(0,len(sampleFiles)):
         with open(data_path + sampleFiles[i]) as eachsamplefile:
-            j = 0
+            j = -1
             for line in eachsamplefile:
+                j+=1
                 junctionCoordinateKey = line.split('\t')[3]
                 spliceevents = line.split('\t')[4]
-                print(i, j, spliceevents)
                 dok_sparse[i,j] = spliceevents
-                print(dok_sparse.todense())
-                j+=1
+                   
     print(dok_sparse.todense())
 
            
