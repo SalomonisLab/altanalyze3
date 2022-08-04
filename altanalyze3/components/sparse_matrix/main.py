@@ -142,6 +142,8 @@ class JunctionCoordinateCalculation:
                         print("read first 50 lines")
                     
             
+  
+
 
         
     
@@ -180,15 +182,17 @@ class JunctionCoordinateCalculation:
         adata.write('test.h5ad')
 
 
+    # def main():
+
 
 # benchmark - time the matrix conversion - cant run it on cluster/ 
 # convert to csr_matrix? - Done
 # test this with 6-8 samples (run on the cluster)
             
 #July 21: 
-# module2 - annotation -> row id  -> divide by chromosome (per process)
+# module2 - annotation -> row id  -> divide by chromosome (per process) -
 # module1 -  sparse matrix - (read one file per process) divide by samples (per process)
-# benchmark on cluster
+# benchmark on cluster - 
 # use csr_array and dok_array instead of matrix
 # __junction.txt - function should be able to handle __
 # there will be two files per sample - so get the file names only once - you can use set(file_list)
