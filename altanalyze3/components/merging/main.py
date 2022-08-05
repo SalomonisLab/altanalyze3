@@ -8,6 +8,7 @@ junction_dict = {}
 exon_dict = {}
 gene_dict = {}
 
+class 
 def sampleBEDFileAnnotation(gene_model_all, junction_dir, intron_dir):
     exon_dict, gene_dict,junction_dict = importJunctionInfo(gene_model_all)
     importJunctionFromBED(junction_dir, junction_dict)
@@ -58,7 +59,7 @@ def importJunctionFromBED(junction_dir, junction_dict):
 
     for junctionfilename in os.listdir(junction_dir):
         junctionfile = os.path.join(junction_dir, junctionfilename)
-        junction_coordinate_BAM_dict = initialBAMJunctionImport(junctionfile)
+        junction_coordinate_BAM_dict.append(initialBAMJunctionImport(junctionfile))
 
     for (chr,start, stop) in junction_coordinate_BAM_dict.keys():
         unprefixedchr = chr.removeprefix('chr')
