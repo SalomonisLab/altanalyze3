@@ -44,7 +44,7 @@ class DataCollection:
         return exon_dict, gene_dict, junction_dict
 
     
-    def get_exon_annotation(chr, start,stop,exonid):
+    def get_exon_annotation(self,chr, start,stop,exonid):
         exon_start = start
         exon_stop = stop
         exon_id =  exonid
@@ -60,37 +60,39 @@ class DataCollection:
 
         for junctionfilename in os.listdir(junction_dir):
             junctionfile = os.path.join(junction_dir, junctionfilename)
-            junction_coordinate_BAM_dict.append(self.initialBAMJunctionImport(junctionfile))
+            # TO DO - check if junctions of all bam files are added
+            junction_coordinate_BAM_dict = self.initialBAMJunctionImport(junctionfile)
         
         print(junction_coordinate_BAM_dict)
 
         for (chr,start, stop) in junction_coordinate_BAM_dict.keys():
-            unprefixedchr = chr.removeprefix('chr')
+            
+            #unprefixedchr = chr.removeprefix('chr')
             startAnnotation = None
             stopAnnotation = None
             #print(unprefixedchr,start)
             #print(junction_dict)
-            tar_start_tup = (unprefixedchr,start)
-            tar_stop_tup = (unprefixedchr,stop)
+            tar_start_tup = (chr,start)
+            tar_stop_tup = (chr,stop)
             if junction_dict.get(tar_start_tup) != None:
                 print("exists")
                 startAnnotation = junction_dict[chr,start]
             if junction_dict.get(tar_stop_tup) != None:
                 stopAnnotation = junction_dict[chr,stop]
-            junctionAnnotation = JunctionAnnotation(startAnnotation,stopAnnotation)
+            junctionAnnotation = JunctionAnnotation(chr,start,stop,startAnnotation,stopAnnotation)
+            
             junction_coordinate_BAM_dict[chr,start,stop] = junctionAnnotation
-            print(junctionAnnotation)
+            print(junction_coordinate_BAM_dict)
         return junction_coordinate_BAM_dict
 
 
-    def initialBAMJunctionImport(junctionfile):
+    def initialBAMJunctionImport(self,junctionfile):
         interimJunctionCoordinates={}
         junction_df = pd.read_csv(junctionfile,sep='\t',header=None, names=[
                 "chr", "start", "stop","annotation", "counts","strand"])
         for idx,row in junction_df.iterrows():
             # check if it's a valid chr
-            if(len(row.chr) <= 5):
-                interimJunctionCoordinates[(row.chr,row.start,row.stop)] = []
+            interimJunctionCoordinates[(row.chr,row.start,row.stop)] = []
         return interimJunctionCoordinates
         
 class JunctionAnnotation:
@@ -138,11 +140,10 @@ class JunctionAnnotation:
                     intron_status = False
                     buffer = 50
                 inRange = self.coordinateInRange(coordinate,exon_start,exon_stop, buffer)
-                if inRange:
+                while inRange:
                     annotation = exon_id + '_' + coordinate
                     if intron_status == False:
                         return annotation
-                        break
                     else:
                         ### This means that the junction is within intron 
                         # but we need to check if it is in the next exon with 50nt spacer
@@ -153,9 +154,10 @@ class JunctionAnnotation:
                         print("candidate gene found")
                         ### annotated as a novel intron splice in the last loop
                         return annotation 
-                    pass
+                    
         else:
             inRange = self.coordinateInRange(coordinate,gene_start,gene_stop,buffer = 2000)
+            
 
     def coordinateInRange(coordinate, start,stop, buffer):
         if start < stop:
