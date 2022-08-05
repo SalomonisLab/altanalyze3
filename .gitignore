@@ -46,3 +46,6 @@ coverage.xml
 *,cover
 .hypothesis/
 ../tests/
+../../../tests/hg19_ref.tsv
+../../../tests/hg19_ref.tsv.gz
+../../../tests/hg19_ref_introns.bed.gz
