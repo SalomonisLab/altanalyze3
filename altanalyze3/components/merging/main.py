@@ -43,10 +43,11 @@ def importJunctionInfo(gene_model_all):
 
    
 def get_exon_annotation(chr, start,stop,exonid):
-    exon_start = chr + ':' + str(start) 
-    exon_stop = chr + ':' + str(stop)
-    exon_id =  exonid + '.' + str(chr)
-    return {'exon_start':exon_start, 'exon_stop': exon_stop,'exon_id':exon_id}
+    exon_start = start
+    exon_stop = stop
+    exon_id =  exonid
+    chr = chr
+    return {'exon_start':exon_start, 'exon_stop': exon_stop,'exon_id':exon_id,'chr':chr}
 
 
 def importJunctionFromBED(junction_dir, junction_dict):
@@ -120,9 +121,6 @@ class JunctionAnnotation:
 
         inRange = self.coordinateInRange(coordinate,gene_start,gene_stop, buffer = 0)
 
-        if inRange == False:
-            self.coordinateInRange(coordinate,gene_start,gene_stop,buffer = 2000)
-
         if inRange: ### Yes the candidate gene is the correct gene
             candidateFound = False ### preset when initially looking (always false to start)
             for ea in exon_dict[candidateGene]:
@@ -152,6 +150,8 @@ class JunctionAnnotation:
                         ### annotated as a novel intron splice in the last loop
                         return annotation 
                     pass
+        else:
+            inRange = self.coordinateInRange(coordinate,gene_start,gene_stop,buffer = 2000)
 
     def coordinateInRange(coordinate, start,stop, buffer):
         if coordinate >= start - buffer and coordinate <= stop + buffer:
