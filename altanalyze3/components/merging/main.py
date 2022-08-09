@@ -4,9 +4,7 @@ import os
 
 #path for gene_model and junction files
 
-junction_dict = {}
-exon_dict = {}
-gene_dict = {}
+
 
 class DataCollection:
     
@@ -22,7 +20,9 @@ class DataCollection:
         2. exon_dict
         3. gene_dict
         '''
-        
+        junction_dict = {}
+        exon_dict = {}
+        gene_dict = {}
 
         gene_model_df = pd.read_csv(gene_model_all,sep='\t',header=None, names=[
                 "gene_id", "chr", "strand","exon_region_id", "start", "stop", "exon_annotations"])    
@@ -121,6 +121,7 @@ class JunctionAnnotation:
         return str.split(exonAnnotation,':')[0]
     
     def annotateSpliceSite(self,chr,coordinate,candidateGene):
+        gene_dict, exon_dict,junction_dict = DataCollection.importJunctionInfo()
         gene_start = gene_dict[candidateGene][0]
         gene_stop = gene_dict[candidateGene][-1]
         print("we are gene start and stop inside annotat splice site", gene_start, gene_stop)
