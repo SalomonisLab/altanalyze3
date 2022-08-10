@@ -49,11 +49,7 @@ class   JunctionAnnotation:
         for idx,row in gene_model_df.iterrows():
             junction_dict[(row.chr,row.start)] = {'gene_id':row.gene_id, 'exon_region_id':row.exon_region_id}
             junction_dict[(row.chr,row.stop)] = {'gene_id':row.gene_id, 'exon_region_id':row.exon_region_id}
-        print(junction_dict)
-        tar_tup = ('15', 79923490)
-        res = False
-        res = junction_dict.get(tar_tup) != None
-        print("Does tuple exists as dictionary key ? : " + str(res))
+        
         return junction_dict
     
     def splice_annotations(self,start_ann,stop_ann):
