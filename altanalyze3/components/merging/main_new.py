@@ -2,12 +2,13 @@ from genericpath import exists
 from operator import truediv
 import pandas as pd
 import os
-from functools import lru_cache
+from functools import cache
 
 class   JunctionAnnotation:
     def __init__(self):
         self.start_annotation = {},
         self.stop_annotation = {},
+        self.junction_coordinate_BAM_dict = {}
 
     def each_junction_annotation(self,junction_dir, gene_model_all):
         '''
@@ -20,6 +21,7 @@ class   JunctionAnnotation:
         for junction_file in junction_files:
             print("Reading junction file" + '' + junction_file)
             with open(junction_dir + junction_file) as f:
+                
                 for junction in f:
                     chr = junction.split('\t')[0]
                     junction_start = int(junction.split('\t')[1])
@@ -28,6 +30,7 @@ class   JunctionAnnotation:
                     stop_tar_tup = (chr, junction_stop)
                     #print(start_tar_tup)
                     if junction_dict.get(start_tar_tup) != None:
+                        
                         self.start_annotation = {'exon_region_id':junction_dict[start_tar_tup]['exon_region_id'],
                         'gene_id':junction_dict[start_tar_tup]['gene_id'],'start':junction_start}
                         #print(self.start_annotation)
@@ -35,26 +38,30 @@ class   JunctionAnnotation:
                         self.stop_annotation = {'exon_region_id':junction_dict[stop_tar_tup]['exon_region_id'],
                         'gene_id':junction_dict[stop_tar_tup]['gene_id'],'stop':junction_stop}
                     #print(self.start_annotation,self.stop_annotation)
-                    junction_coordinate_BAM_dict = self.splice_annotations(self.start_annotation,self.stop_annotation)
-                    junction_coordinate_BAM_listof_dicts.append(junction_coordinate_BAM_dict)
-        return junction_coordinate_BAM_listof_dicts
+                    self.junction_coordinate_BAM_dict[(chr,junction_start,junction_stop)] = self.splice_annotations(self.start_annotation,self.stop_annotation)
+        #print(self.junction_coordinate_BAM_dict)
+                   
+        return self.junction_coordinate_BAM_dict
 
    
-    @lru_cache
+    @cache
     def generate_junction_dict(self,gene_model_all):
         junction_dict = {}
         gene_model_df = pd.read_csv(gene_model_all,sep='\t',header=None, names=[
                 "gene_id", "chr", "strand","exon_region_id", "start", "stop", "exon_annotations"]) 
-        print("Generating gene model map.....")
+        print("Generating junction dictionary from gene model(hg38).....")
+        
         for idx,row in gene_model_df.iterrows():
+            
             junction_dict[(row.chr,row.start)] = {'gene_id':row.gene_id, 'exon_region_id':row.exon_region_id}
             junction_dict[(row.chr,row.stop)] = {'gene_id':row.gene_id, 'exon_region_id':row.exon_region_id}
         
+        print("Finished generating junction map from gene model")
         return junction_dict
     
     def splice_annotations(self,start_ann,stop_ann):
         annotations = {}
-        print("splice annotation")
+        #print("splice annotation")
         return annotations
     
 
