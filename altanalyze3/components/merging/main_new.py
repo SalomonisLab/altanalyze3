@@ -53,18 +53,19 @@ class   JunctionAnnotation:
         ea = []
         gene_model_df = pd.read_csv(gene_model_all,sep='\t',header=None, names=[
                 "gene_id", "chr", "strand","exon_region_id", "start", "stop", "exon_annotations"])
-        print(gene_model_df)
+        #print(gene_model_df)
         logging.info("Generating junction dictionary from gene model(hg38).....")
         
         for idx,row in gene_model_df.iterrows():           
             gene_model_dict[(row.chr,row.start)] = {'gene_id':row.gene_id, 'exon_region_id':row.exon_region_id, 'start':row.start}
             gene_model_dict[(row.chr,row.stop)] = {'gene_id':row.gene_id, 'exon_region_id':row.exon_region_id,'stop':row.stop}
-            ea = [row.chr,row.exon_id,row.start,row.stop]
+            ea = [row.chr,row.exon_region_id,row.start,row.stop]
             if(row.gene_id in gene_model_exon_dict):
-                gene_model_exon_dict[row.gene_id].append(ea)
+                gene_model_exon_dict[row.gene_id.split(' ')[0]].append(ea)
             else:
-                gene_model_exon_dict[row.gene_id] = [ea]
+                gene_model_exon_dict[row.gene_id.split(' ')[0]] = [ea]
         print("hello")
+        print(gene_model_exon_dict)
         logging.info("Finished generating junction map from gene model")
         return gene_model_dict
     
@@ -96,10 +97,6 @@ class Splice_Site_Annotation:
     def find_gene(start_annotation):
         return start_annotation['gene_id']
     
-    
-
-
-
     def splice_annotations(self,start_ann,stop_ann):
         annotations = {}
         junction_start = start_ann['junction_start']
