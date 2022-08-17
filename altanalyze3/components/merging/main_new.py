@@ -1,5 +1,6 @@
 from genericpath import exists
 from operator import truediv
+from tracemalloc import stop
 import pandas as pd
 import os
 from functools import cache
@@ -51,22 +52,29 @@ class   JunctionAnnotation:
                             
                         else:
                             print("junction cannot be associated with a gene - do not annotate")
+                        
 
-                        if not stop_annotation:
+                        if not bool(stop_annotation) and bool(start_annotation):
+                            print("stop annotation is empty and start annotation exists")
+                            print(start_annotation)
+                            print(stop_annotation)
+                            print(bool(start_annotation))
+                            print(bool(stop_annotation))
                            
                             annotation = self.annotate_splice_site(chr = row.chr, junction_coordinate = junction_start, candidate_gene = start_annotation[start_tar_tup]['candidate_gene'])
                             annotation_key = 'chr' + str(chr) + ':' + str(junction_stop) + '-' + str(junction_start)
                             annotation_keys.append(annotation_key)
-                            # annotations.append(annotation)
+                            annotations.append(annotation)
 
-                        if not start_annotation:
+                        elif not bool(start_annotation) and bool(stop_annotation):
                             annotation = self.annotate_splice_site(chr = row.chr, junction_coordinate = junction_stop, candidate_gene = stop_annotation[stop_tar_tup]['candidate_gene'])
                             annotation_key = 'chr' + str(chr) + ':' + str(junction_stop) + '-' + str(junction_start)
                             annotation_keys.append(annotation_key)
-                            # annotations.append(annotation)
-                        # else:
-                        #     annotation = self.annotate_splice_site(chr = row.chr, junction_coordinate = junction_stop, candidate_gene = stop_annotation[stop_tar_tup]['candidate_gene'])
-
+                            annotations.append(annotation)
+                        
+                        else:
+                            print(start_annotation)
+                            print(stop_annotation)
                         
         #print(annotation_keys)
         data = { 'annotation_key':annotation_keys,'annotations':annotations}
