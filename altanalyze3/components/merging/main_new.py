@@ -22,70 +22,63 @@ class   JunctionAnnotation:
         self.generate_gene_model_dict(gene_model_all)
         junction_coordinate_BAM_listof_dicts = []
         print(junction_files)
+        annotation_keys = []
+        annotations = []
         for junction_file in junction_files:
             if not junction_file.startswith('.'):
                 print("Reading junction file " + ' ' + junction_file)
                 with open(junction_dir + junction_file) as f:
                     junction_df = pd.read_csv(f,sep='\t',header=None, 
                     names=["chr", "start", "stop", "annotation", "splice_count"])
-
+                    
                     for idx,row in junction_df.iterrows():
+                        
                         start_annotation = {}
                         stop_annotation = {}
                         chr = row.chr
                         junction_start = row.start
-                        junction_stop = row.stop
+                        junction_stop = row.stop + 1
                         start_tar_tup = (chr, junction_start)
                         stop_tar_tup = (chr, junction_stop)
                         
                         if self.gene_model_dict.get(start_tar_tup) != None:
-                            #print(start_tar_tup)
                             start_annotation[start_tar_tup] = { 'exon_region_id':self.gene_model_dict[start_tar_tup]['exon_region_id'],
                             'junction_start':junction_start, 'candidate_gene':self.gene_model_dict[start_tar_tup]['gene_id']}
-                            #print(self.start_annotation)
-
+                         
                         elif self.gene_model_dict.get(stop_tar_tup) != None:
                             stop_annotation[stop_tar_tup] = { 'exon_region_id':self.gene_model_dict[stop_tar_tup]['exon_region_id'],
                             'junction_stop':junction_stop, 'candidate_gene':self.gene_model_dict[stop_tar_tup]['gene_id']}
-                            # print(stop_annotation)
-                        
+                            
                         else:
                             print("junction cannot be associated with a gene - do not annotate")
-                            # self.start_annotation[start_tar_tup] = 'NA'
-                            # self.stop_annotation[stop_tar_tup] = 'NA'
-                        
-                        #print(str(len(self.start_annotation)) + " len of start annotation")
-                        
-                        if not stop_annotation and start_annotation:
-                            # print("i am start in first if")
-                            # print(start_annotation)
-                            # print("i am stop in first if")
-                            # print(stop_annotation)
-                            # print(" I am annotating the start splice sites for " + str(start_annotation[start_tar_tup]['candidate_gene']))
+
+                        if not stop_annotation:
+                           
                             annotation = self.annotate_splice_site(chr = row.chr, junction_coordinate = junction_start, candidate_gene = start_annotation[start_tar_tup]['candidate_gene'])
-                            # print(annotation)
+                            annotation_key = 'chr' + str(chr) + ':' + str(junction_stop) + '-' + str(junction_start)
+                            annotation_keys.append(annotation_key)
+                            # annotations.append(annotation)
 
-                        if not start_annotation and stop_annotation:
-                            # print("i am start")
-                            # print(start_annotation)
-                            # print("i am stop")
-                            # print(stop_annotation)
-                            # print(" I am annotating the stop splice sites for " + str(stop_annotation[stop_tar_tup]['candidate_gene']))
+                        if not start_annotation:
                             annotation = self.annotate_splice_site(chr = row.chr, junction_coordinate = junction_stop, candidate_gene = stop_annotation[stop_tar_tup]['candidate_gene'])
-                            # print(annotation)
+                            annotation_key = 'chr' + str(chr) + ':' + str(junction_stop) + '-' + str(junction_start)
+                            annotation_keys.append(annotation_key)
+                            # annotations.append(annotation)
+                        # else:
+                        #     annotation = self.annotate_splice_site(chr = row.chr, junction_coordinate = junction_stop, candidate_gene = stop_annotation[stop_tar_tup]['candidate_gene'])
 
-                    #self.junction_coordinate_BAM_dict[(chr,junction_start,junction_stop)] = Splice_Site_Annotation(self.start_annotation,self.stop_annotation)
-                    
+                        
+        #print(annotation_keys)
+        data = { 'annotation_key':annotation_keys,'annotations':annotations}
+        df1 = pd.DataFrame(data)
+        df1.to_csv('annotations.txt',sep='\t')
+
         return self.junction_coordinate_BAM_dict
     
     def annotate_splice_site(self,chr,junction_coordinate,candidate_gene):
-        annotations = {}
-        # print("annotating")
-        # print(self.gene_model_exon_dict[candidate_gene][0])
+       
         ref_gene_start = self.gene_model_exon_dict[candidate_gene][0][0]
         ref_gene_stop = self.gene_model_exon_dict[candidate_gene][-1][-1]
-        #print(str(ref_gene_start) + '  ' + str(ref_gene_stop) + " I am ref gene _start and stop")
-        
         status = self.coordinate_in_range(junction_coordinate, ref_gene_stop,ref_gene_start, buffer = 0)
         
         #? - this might run indefinitely until status is True ?? - should we just return the annotation?
@@ -101,7 +94,6 @@ class   JunctionAnnotation:
         else: #yes candidate gene found
             candidate_found = False #preset when initially looking (always false to start with)
             
-
             for ea in self.gene_model_exon_dict[candidate_gene]:
                 exon_start = ea[0]
                 exon_stop = ea[-1]
@@ -115,7 +107,7 @@ class   JunctionAnnotation:
                     buffer = 50
                 status = self.coordinate_in_range(junction_coordinate, exon_start, exon_stop, buffer)
                 if(status):
-                    annotation = str(exon_id) + '_' + str(junction_coordinate)
+                    annotation = candidate_gene + ':'+ str(exon_id) + '_' + str(junction_coordinate)
                     
                     if intron_status == False:
                         return annotation
@@ -125,8 +117,6 @@ class   JunctionAnnotation:
                     if candidate_found:
                         return annotation
         
-        # if(inRange):
-        #     annotation = start_ann['exon_region_id'] + '_' + start_ann['junction_start']   
         print(annotation)
         return annotation
     
