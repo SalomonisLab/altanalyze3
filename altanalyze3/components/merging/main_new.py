@@ -97,7 +97,13 @@ class   JunctionAnnotation:
                         if  stop_annotation and not start_annotation:
                             print("annotate stop site")
                             print(stop_annotation)
-                        
+                            strand = self.gene_model_dict[stop_tar_tup]['strand']
+                            splice_site = self.annotate_splice_site(chr = row.chr, junction_coordinate = junction_start,
+                            candidate_gene = stop_annotation[stop_tar_tup]['candidate_gene'], exon_region_id = self.gene_model_dict[stop_tar_tup]['exon_region_id'], strand = strand)
+                            splice_site_annotation = stop_annotation[stop_tar_tup]['candidate_gene'] + ':' + stop_annotation[stop_tar_tup]['exon_region_id'] + '-'+  splice_site
+                            annotations.append(splice_site_annotation)
+                            annotation_key = 'chr' + str(chr) + ':' + str(junction_start) + '-' + str(junction_stop)
+                            annotation_keys.append(annotation_key)
                             
                         elif not stop_annotation and not start_annotation:
                             print("nothing gets annotated")
@@ -148,10 +154,12 @@ class   JunctionAnnotation:
         if status == False:
             print('status is false')
             status = self.coordinate_in_range(junction_coordinate, ref_gene_start,ref_gene_stop, buffer = 2000 )
-            annotation = annotation = candidate_gene + ':' + str(exon_region_id) + '_' + str(junction_coordinate)
+            #annotation = str(exon_region_id) + '_' + str(junction_coordinate)
             if status == True:
+                print("strand is" + strand)
                 #TO_DO if strand is - or + then
                 if(strand == '-'): #if upstream
+                    print('I am negative strand')
                     annotation = 'U1' + '.1_' + str(junction_coordinate)
                     
                 else:
@@ -193,7 +201,8 @@ class   JunctionAnnotation:
         return annotation
     
     def coordinate_in_range(self,junction_coordinate, ref_gene_start,ref_gene_stop, buffer):
-        if junction_coordinate >= int(ref_gene_start) and junction_coordinate <= int(ref_gene_stop):
+        
+        if junction_coordinate >= int(ref_gene_start) - buffer and junction_coordinate <= int(ref_gene_stop) + buffer:
             return True
         else:
             return False
