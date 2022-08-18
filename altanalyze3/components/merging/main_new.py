@@ -86,11 +86,13 @@ class   JunctionAnnotation:
                         if start_annotation and not stop_annotation:
                             print("start needs to be annotated")
                             print(start_annotation)
-                            print(stop_annotation)
-                            # strand = self.gene_model_dict[start_tar_tup]['strand']
-                            # annotation = self.annotate_splice_site(chr = row.chr, junction_coordinate = junction_start,
-                            # candidate_gene = start_annotation[start_tar_tup]['candidate_gene'], exon_region_id = self.gene_model_dict[start_tar_tup]['exon_region_id'], strand = strand)                         
-                            
+                            strand = self.gene_model_dict[start_tar_tup]['strand']
+                            splice_site = self.annotate_splice_site(chr = row.chr, junction_coordinate = junction_stop,
+                            candidate_gene = start_annotation[start_tar_tup]['candidate_gene'], exon_region_id = self.gene_model_dict[start_tar_tup]['exon_region_id'], strand = strand)                         
+                            splice_site_annotation = start_annotation[start_tar_tup]['candidate_gene'] + ':' + start_annotation[start_tar_tup]['exon_region_id'] + '-'+  splice_site
+                            annotations.append(splice_site_annotation)
+                            annotation_key = 'chr' + str(chr) + ':' + str(junction_start) + '-' + str(junction_stop)
+                            annotation_keys.append(annotation_key)
 
                         if  stop_annotation and not start_annotation:
                             print("annotate stop site")
@@ -104,13 +106,7 @@ class   JunctionAnnotation:
                             continue
 
 
-                        # if not bool(stop_annotation) and bool(start_annotation):
-                        #     strand = self.gene_model_dict[start_tar_tup]['strand']
-                            
-                        #     #a1 = start_annotation[start_tar_tup]['candidate_gene'] + ':' + annotation + '-' + start_annotation[start_tar_tup]['exon_region_id']
-                        #     annotations.append(annotation)
-                        #     annotation_key = 'chr' + str(chr) + ':' + str(junction_start)
-                        #     annotation_keys.append(annotation_key)                     
+                       
 
                         # elif not bool(start_annotation) and bool(stop_annotation):
                         #     strand = self.gene_model_dict[stop_tar_tup]['strand']
@@ -143,7 +139,9 @@ class   JunctionAnnotation:
         buffer = 0
         ref_gene_start = self.gene_model_exon_dict[candidate_gene][0][0]
         ref_gene_stop = self.gene_model_exon_dict[candidate_gene][-1][-1]
-        status = self.coordinate_in_range(junction_coordinate, ref_gene_stop,ref_gene_start, buffer)
+        print(ref_gene_start)
+        print(ref_gene_stop)
+        status = self.coordinate_in_range(junction_coordinate, ref_gene_start,ref_gene_stop, buffer = 0)
         print(status)
         
         #? - this might run indefinitely until status is True ?? - should we just return the annotation?
@@ -151,15 +149,15 @@ class   JunctionAnnotation:
             print('status is false')
             status = self.coordinate_in_range(junction_coordinate, ref_gene_start,ref_gene_stop, buffer = 2000 )
             annotation = annotation = candidate_gene + ':' + str(exon_region_id) + '_' + str(junction_coordinate)
-            # if status == True:
-            #     #TO_DO if strand is - or + then
-            #     if(strand == '-'): #if upstream
-            #         annotation = 'U1' + '.1_' + str(junction_coordinate)
+            if status == True:
+                #TO_DO if strand is - or + then
+                if(strand == '-'): #if upstream
+                    annotation = 'U1' + '.1_' + str(junction_coordinate)
                     
-            #     else:
-            #         print(strand + ' strand')
-            #         annotation = 'U100' + '.1_' + str(junction_coordinate)
-        else: 
+                else:
+                    print(strand + ' strand')
+                    annotation = 'U100' + '.1_' + str(junction_coordinate)
+        else:
             print('#yes candidate gene found')
             candidate_found = False #preset when initially looking (always false to start with)
             
@@ -167,7 +165,9 @@ class   JunctionAnnotation:
                 exon_start = ea[0]
                 exon_stop = ea[-1]
                 exon_id = ea[2]
-
+                print(exon_start)
+                print(exon_stop)
+                print(exon_id)
                 if 'I' in exon_id:
                     intron_status = True
                     buffer = 0
@@ -176,9 +176,12 @@ class   JunctionAnnotation:
                     buffer = 50
                 status = self.coordinate_in_range(junction_coordinate, exon_start, exon_stop, buffer)
                 if(status):
-                    annotation = candidate_gene + ':' + str(exon_id) + '_' + str(junction_coordinate)
+                    print("found in range of exons of given gene")
+                    annotation = str(exon_id) + "_" + str(junction_coordinate)
+                    print(annotation)
                     
                     if intron_status == False:
+                        print("i am returning annotation, its not a intron")
                         return annotation
                     else:
                         candidate_found = True
@@ -190,11 +193,6 @@ class   JunctionAnnotation:
         return annotation
     
     def coordinate_in_range(self,junction_coordinate, ref_gene_start,ref_gene_stop, buffer):
-        #this will take care if the strand is negative as well.
-        print(type(int(ref_gene_start)))
-        print(type(int(ref_gene_stop)))
-        # if int(ref_gene_stop) < int(ref_gene_start):
-        #     ref_gene_start, ref_gene_stop = ref_gene_stop, ref_gene_start
         if junction_coordinate >= int(ref_gene_start) and junction_coordinate <= int(ref_gene_stop):
             return True
         else:
