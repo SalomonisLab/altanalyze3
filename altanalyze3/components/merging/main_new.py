@@ -50,21 +50,25 @@ class   JunctionAnnotation:
                         print(stop_tar_tup)
                         
                         if self.gene_model_dict.get(start_tar_tup) != None:
-                            print(start_tar_tup)
+                            
                             print("calculating start annotation")
                             start_annotation[start_tar_tup] = { 'exon_region_id':self.gene_model_dict[start_tar_tup]['exon_region_id'],
                             'junction_start':junction_start, 'candidate_gene':self.gene_model_dict[start_tar_tup]['gene_id']}
                             print(start_annotation)
                         
                         if self.gene_model_dict.get(stop_tar_tup) != None:
-                            print(stop_tar_tup)
+    
                             print("calculating stop annotation")
                             stop_annotation[stop_tar_tup] = { 'exon_region_id':self.gene_model_dict[stop_tar_tup]['exon_region_id'],
                             'junction_stop':junction_stop, 'candidate_gene':self.gene_model_dict[stop_tar_tup]['gene_id']}
                             print(stop_annotation)
-                        else:
+
+                        elif self.gene_model_dict.get(start_tar_tup) == None and self.gene_model_dict.get(stop_tar_tup) == None:
+                            print(start_annotation)
+                            print(stop_annotation)
                             print("none found, nothing gets annotated")
                             continue
+
                         
                         if start_annotation and stop_annotation:
                             print("both need to be annotated")
@@ -79,7 +83,7 @@ class   JunctionAnnotation:
                             annotation_keys.append(annotation_key)     
 
                         
-                        elif start_annotation and not stop_annotation:
+                        if start_annotation and not stop_annotation:
                             print("start needs to be annotated")
                             print(start_annotation)
                             print(stop_annotation)
@@ -88,12 +92,12 @@ class   JunctionAnnotation:
                             # candidate_gene = start_annotation[start_tar_tup]['candidate_gene'], exon_region_id = self.gene_model_dict[start_tar_tup]['exon_region_id'], strand = strand)                         
                             
 
-                        elif not start_annotation and stop_annotation:
+                        if  stop_annotation and not start_annotation:
                             print("annotate stop site")
                             print(stop_annotation)
                         
                             
-                        else:
+                        elif not stop_annotation and not start_annotation:
                             print("nothing gets annotated")
                             print(start_annotation)
                             print(stop_annotation)
