@@ -78,7 +78,10 @@ class   JunctionAnnotation:
                                 gene_id = start_annotation[(start_tar_tup)]['candidate_gene']
                             start_exon_id = start_annotation[(start_tar_tup)]['exon_region_id']
                             stop_exon_id = stop_annotation[(stop_tar_tup)]['exon_region_id']
-                            annotation = gene_id + ':' + start_exon_id + '-' + stop_exon_id
+                            if(self.gene_model_dict[start_tar_tup]['strand'] == '-'):
+                                annotation = gene_id + ':' + stop_exon_id + '-' + start_exon_id
+                            else:
+                                annotation = gene_id + ':' + start_exon_id + '-' + stop_exon_id
                             annotations.append(annotation)
                             annotation_key = 'chr' + str(chr) + ':' + str(junction_start) + '-' + str(junction_stop)
                             annotation_keys.append(annotation_key)     
