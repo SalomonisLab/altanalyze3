@@ -43,7 +43,8 @@ class   JunctionAnnotation:
                         elif row.chr == 'Y':
                             chr = 24
                         junction_start = row.start
-                        junction_stop = row.stop
+                        junction_stop = row.stop + 1
+                        print(chr)
                         start_tar_tup = (int(chr), junction_start)
                         stop_tar_tup = (int(chr), junction_stop)
                         print(start_tar_tup)
@@ -243,7 +244,7 @@ class   JunctionAnnotation:
 
 gene_model_all = '/Users/sin9gp/altanalyze3/tests/data/gene_model_all.txt'
 gene_model_ENSG00000223972 = '/Users/sin9gp/altanalyze3/tests/data/gene_model_ENSG00000223972.txt'
-gene_model_1 = '/Users/sin9gp/altanalyze3/tests/data/gene_model_ensg0000014824.txt'
+gene_model_1 = '/Users/sin9gp/altanalyze3/tests/data/gene_model_132141.txt'
 junction_dir = '/Users/sin9gp/altanalyze3/tests/data/junction_dir/'
 subset_dir = '/Users/sin9gp/altanalyze3/tests/data/subset/'
 junction_annot = JunctionAnnotation()
