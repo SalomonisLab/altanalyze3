@@ -56,7 +56,7 @@ class   JunctionAnnotation:
                             'junction_start':junction_start, 'candidate_gene':self.gene_model_dict[start_tar_tup]['gene_id']}
                             print(start_annotation)
                         
-                        elif self.gene_model_dict.get(stop_tar_tup) != None:
+                        if self.gene_model_dict.get(stop_tar_tup) != None:
                             print(stop_tar_tup)
                             print("calculating stop annotation")
                             stop_annotation[stop_tar_tup] = { 'exon_region_id':self.gene_model_dict[stop_tar_tup]['exon_region_id'],
@@ -81,9 +81,11 @@ class   JunctionAnnotation:
                         
                         elif start_annotation and not stop_annotation:
                             print("start needs to be annotated")
-                            strand = self.gene_model_dict[start_tar_tup]['strand']
-                            annotation = self.annotate_splice_site(chr = row.chr, junction_coordinate = junction_start,
-                            candidate_gene = start_annotation[start_tar_tup]['candidate_gene'], exon_region_id = self.gene_model_dict[start_tar_tup]['exon_region_id'], strand = strand)                         
+                            print(start_annotation)
+                            print(stop_annotation)
+                            # strand = self.gene_model_dict[start_tar_tup]['strand']
+                            # annotation = self.annotate_splice_site(chr = row.chr, junction_coordinate = junction_start,
+                            # candidate_gene = start_annotation[start_tar_tup]['candidate_gene'], exon_region_id = self.gene_model_dict[start_tar_tup]['exon_region_id'], strand = strand)                         
                             
 
                         elif not start_annotation and stop_annotation:
