@@ -1,9 +1,10 @@
 from genericpath import exists
 from operator import truediv
-from tracemalloc import stop
+from tracemalloc import start, stop
 from unittest import skip
 import pandas as pd
 import os
+import re
 from functools import cache
 import logging
 
@@ -37,26 +38,33 @@ class   JunctionAnnotation:
                         start_annotation = {}
                         stop_annotation = {}
                         chr = row.chr
+                        if row.chr == 'X':
+                            chr = 23
+                        elif row.chr == 'Y':
+                            chr = 24
                         junction_start = row.start
-                        junction_stop = row.stop 
-                        start_tar_tup = (chr, junction_start)
-                        stop_tar_tup = (chr, junction_stop)
+                        junction_stop = row.stop
+                        start_tar_tup = (int(chr), junction_start)
+                        stop_tar_tup = (int(chr), junction_stop)
                         print(start_tar_tup)
                         print(stop_tar_tup)
+                        
                         if self.gene_model_dict.get(start_tar_tup) != None:
+                            print(start_tar_tup)
                             print("calculating start annotation")
                             start_annotation[start_tar_tup] = { 'exon_region_id':self.gene_model_dict[start_tar_tup]['exon_region_id'],
                             'junction_start':junction_start, 'candidate_gene':self.gene_model_dict[start_tar_tup]['gene_id']}
                             print(start_annotation)
                         
-                        if self.gene_model_dict.get(stop_tar_tup) != None:
+                        elif self.gene_model_dict.get(stop_tar_tup) != None:
+                            print(stop_tar_tup)
                             print("calculating stop annotation")
                             stop_annotation[stop_tar_tup] = { 'exon_region_id':self.gene_model_dict[stop_tar_tup]['exon_region_id'],
                             'junction_stop':junction_stop, 'candidate_gene':self.gene_model_dict[stop_tar_tup]['gene_id']}
                             print(stop_annotation)
                         else:
-                            start_annotation = {}
-                            stop_annotation = {} 
+                            print("none found, nothing gets annotated")
+                            continue
                         
                         if start_annotation and stop_annotation:
                             print("both need to be annotated")
@@ -71,10 +79,28 @@ class   JunctionAnnotation:
                             annotation_keys.append(annotation_key)     
 
                         
+                        elif start_annotation and not stop_annotation:
+                            print("start needs to be annotated")
+                            strand = self.gene_model_dict[start_tar_tup]['strand']
+                            annotation = self.annotate_splice_site(chr = row.chr, junction_coordinate = junction_start,
+                            candidate_gene = start_annotation[start_tar_tup]['candidate_gene'], exon_region_id = self.gene_model_dict[start_tar_tup]['exon_region_id'], strand = strand)                         
+                            
+
+                        elif not start_annotation and stop_annotation:
+                            print("annotate stop site")
+                            print(stop_annotation)
+                        
+                            
+                        else:
+                            print("nothing gets annotated")
+                            print(start_annotation)
+                            print(stop_annotation)
+                            continue
+
+
                         # if not bool(stop_annotation) and bool(start_annotation):
                         #     strand = self.gene_model_dict[start_tar_tup]['strand']
-                        #     annotation = self.annotate_splice_site(chr = row.chr, junction_coordinate = junction_start,
-                        #     candidate_gene = start_annotation[start_tar_tup]['candidate_gene'], exon_region_id = self.gene_model_dict[start_tar_tup]['exon_region_id'], strand = strand)                         
+                            
                         #     #a1 = start_annotation[start_tar_tup]['candidate_gene'] + ':' + annotation + '-' + start_annotation[start_tar_tup]['exon_region_id']
                         #     annotations.append(annotation)
                         #     annotation_key = 'chr' + str(chr) + ':' + str(junction_start)
@@ -178,10 +204,17 @@ class   JunctionAnnotation:
         #print(gene_model_df)
         print("Generating reference junction dictionary from gene model(hg38).....")
         
-        for idx,row in gene_model_df.iterrows():           
-            self.gene_model_dict[(row.chr,row.start)] = {'gene_id':row.gene_id, 'exon_region_id':row.exon_region_id, 'start':row.start, 'strand':row.strand}
-            self.gene_model_dict[(row.chr,row.stop)] = {'gene_id':row.gene_id, 'exon_region_id':row.exon_region_id,'stop':row.stop,  'strand':row.strand}
-            ea = [row.start,row.chr,row.exon_region_id,row.stop]
+        for idx,row in gene_model_df.iterrows():
+            chr = row.chr
+            # if row.chr == 'X':
+            #     chr = 23
+            # elif row.chr == 'Y':
+            #     chr = 24
+            # elif re.search("^[a-zA-Z]", row.chr) is not None:
+            #     continue
+            self.gene_model_dict[(int(chr),row.start)] = {'gene_id':row.gene_id, 'exon_region_id':row.exon_region_id, 'start':row.start, 'strand':row.strand}
+            self.gene_model_dict[(int(chr),row.stop)] = {'gene_id':row.gene_id, 'exon_region_id':row.exon_region_id,'stop':row.stop,  'strand':row.strand}
+            ea = [row.start,chr,row.exon_region_id,row.stop]
             #ea store as object?
             if(row.gene_id in self.gene_model_exon_dict):
                 self.gene_model_exon_dict[row.gene_id].append(ea)
@@ -190,15 +223,16 @@ class   JunctionAnnotation:
         
         #print(self.gene_model_exon_dict['ENSG00000117335'][0], self.gene_model_exon_dict['ENSG00000117335'][-1])
         print("Finished generating junction map from gene model")
-        # print("gene dict for (4, 42067192)", self.gene_model_dict[(4, 42067192)])
-        # print("gene dict for (4, 42070525)",self.gene_model_dict[(4, 42070525)])
+        # print("gene dict for (1, 17619445)", self.gene_model_dict[(1, 17619445)])
+        # print("gene dict for (1, 17621863)",self.gene_model_dict[(1, 17621863)])
         return self.gene_model_dict,self.gene_model_exon_dict
 
 
 gene_model_all = '/Users/sin9gp/altanalyze3/tests/data/gene_model_all.txt'
 gene_model_ENSG00000223972 = '/Users/sin9gp/altanalyze3/tests/data/gene_model_ENSG00000223972.txt'
 gene_model_1 = '/Users/sin9gp/altanalyze3/tests/data/gene_model_ensg0000014824.txt'
-junction_dir = '/Users/sin9gp/altanalyze3/tests/data/junction_dir/subset/'
+junction_dir = '/Users/sin9gp/altanalyze3/tests/data/junction_dir/'
+subset_dir = '/Users/sin9gp/altanalyze3/tests/data/subset/'
 junction_annot = JunctionAnnotation()
-junction_annot.each_junction_annotation(junction_dir=junction_dir,gene_model_all=gene_model_1)
-#junction_annot.generate_gene_model_dict(gene_model_1)
+junction_annot.each_junction_annotation(junction_dir=subset_dir,gene_model_all=gene_model_1)
+#junction_annot.generate_gene_model_dict(gene_model_all)
