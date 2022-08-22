@@ -75,7 +75,7 @@ class   JunctionAnnotation:
                             print("both need to be annotated")
                             gene_id = ''
                             if start_annotation[(start_tar_tup)]['candidate_gene'] == stop_annotation[(stop_tar_tup)]['candidate_gene']:
-                                gene_id = start_annotation[(start_tar_tup)]['candidate_gene']
+                                gene_id = self.gene_model_dict[(start_tar_tup)]['gene_id']
                             start_exon_id = start_annotation[(start_tar_tup)]['exon_region_id']
                             stop_exon_id = stop_annotation[(stop_tar_tup)]['exon_region_id']
                             if(self.gene_model_dict[start_tar_tup]['strand'] == '-'):
@@ -155,21 +155,8 @@ class   JunctionAnnotation:
         print(status)
         
         #? - this might run indefinitely until status is True ?? - should we just return the annotation?
-        if status == False:
-            print('status is false')
-            status = self.coordinate_in_range(junction_coordinate, ref_gene_start,ref_gene_stop, buffer = 2000 )
-            #annotation = str(exon_region_id) + '_' + str(junction_coordinate)
-            if status == True:
-                print("strand is" + strand)
-                #TO_DO if strand is - or + then
-                if(strand == '-'): #if upstream
-                    print('I am negative strand')
-                    annotation = 'U1' + '.1_' + str(junction_coordinate)
-                    
-                else:
-                    print(strand + ' strand')
-                    annotation = 'U100' + '.1_' + str(junction_coordinate)
-        else:
+        
+        if status == True:
             print('#yes candidate gene found')
             candidate_found = False #preset when initially looking (always false to start with)
             
@@ -200,6 +187,27 @@ class   JunctionAnnotation:
                 else:
                     if candidate_found:
                         return annotation
+        else:
+            print("status is false - figuring out")
+            status = self.coordinate_in_range(junction_coordinate, ref_gene_start,ref_gene_stop, buffer = 20000 )
+            region_numbers = []
+            for ea in self.gene_model_exon_dict[candidate_gene]:
+                region_numbers.append(int(str.split(ea[2][1:],'.')[0]))
+            print(region_numbers)
+            
+            if status == True:
+                print("strand is" + strand)
+                
+                if(strand == '+'): #applicable to 3'UTR
+                    print('I am negative strand')
+                    annotation = 'U'+str(region_numbers[-1])+'.1_'+str(junction_coordinate)
+                    # annotation = 'U1' + '.1_' + str(junction_coordinate)
+                    # print("utr_id", utr_id)
+                    
+                else:
+                    print(strand + ' strand')
+                    annotation = 'U0.1' + '_' + str(junction_coordinate)
+
         
         print(annotation)
         return annotation
@@ -247,9 +255,9 @@ class   JunctionAnnotation:
 
 gene_model_all = '/Users/sin9gp/altanalyze3/tests/data/gene_model_all.txt'
 gene_model_ENSG00000223972 = '/Users/sin9gp/altanalyze3/tests/data/gene_model_ENSG00000223972.txt'
-gene_model_1 = '/Users/sin9gp/altanalyze3/tests/data/gene_model_132141.txt'
+gene_model_1 = '/Users/sin9gp/altanalyze3/tests/data/gene_model_chr17_U.txt'
 junction_dir = '/Users/sin9gp/altanalyze3/tests/data/junction_dir/'
-subset_dir = '/Users/sin9gp/altanalyze3/tests/data/subset/'
+subset_dir = '/Users/sin9gp/altanalyze3/tests/data/subset/newsubset/'
 junction_annot = JunctionAnnotation()
 junction_annot.each_junction_annotation(junction_dir=subset_dir,gene_model_all=gene_model_1)
 #junction_annot.generate_gene_model_dict(gene_model_all)
