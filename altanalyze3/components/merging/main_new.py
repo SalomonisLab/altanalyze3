@@ -11,8 +11,7 @@ import logging
 
 class   JunctionAnnotation:
     def __init__(self):
-        self.start_annotation = {},
-        self.stop_annotation = {},
+        
         self.junction_coordinate_BAM_dict = {}
         self.gene_model_dict = {}
         self.gene_model_exon_dict = {}
@@ -42,20 +41,19 @@ class   JunctionAnnotation:
                             chr = 23
                         elif row.chr == 'Y':
                             chr = 24
-                        junction_start = row.start
-                        junction_stop = row.stop + 1
-                        start_tar_tup = (int(chr), junction_start)
-                        stop_tar_tup = (int(chr), junction_stop)
+                        
+                        start_tar_tup = (int(chr), row.start)
+                        stop_tar_tup = (int(chr), row.stop + 1)
                         
                         
                         if self.gene_model_dict.get(start_tar_tup) != None:
                             start_annotation[start_tar_tup] = { 'exon_region_id':self.gene_model_dict[start_tar_tup]['exon_region_id'],
-                            'junction_start':junction_start, 'candidate_gene':self.gene_model_dict[start_tar_tup]['gene_id']}
+                            'junction_start':row.start, 'candidate_gene':self.gene_model_dict[start_tar_tup]['gene_id']}
                          
                         
                         if self.gene_model_dict.get(stop_tar_tup) != None:
                             stop_annotation[stop_tar_tup] = { 'exon_region_id':self.gene_model_dict[stop_tar_tup]['exon_region_id'],
-                            'junction_stop':junction_stop, 'candidate_gene':self.gene_model_dict[stop_tar_tup]['gene_id']}
+                            'junction_stop':row.stop + 1, 'candidate_gene':self.gene_model_dict[stop_tar_tup]['gene_id']}
                         
 
                         elif self.gene_model_dict.get(start_tar_tup) == None and self.gene_model_dict.get(stop_tar_tup) == None:
@@ -78,40 +76,34 @@ class   JunctionAnnotation:
 
 
                             annotations.append(annotation)
-                            annotation_key = 'chr' + str(chr) + ':' + str(junction_start) + '-' + str(junction_stop)
+                            annotation_key = 'chr' + str(chr) + ':' + str(row.start) + '-' + str(row.stop + 1)
                             annotation_keys.append(annotation_key)     
 
                         
                         if start_annotation and not stop_annotation:
                             strand = self.gene_model_dict[start_tar_tup]['strand']
-                            splice_site = self.annotate_splice_site(chr = row.chr, junction_coordinate = junction_stop,
+                            splice_site = self.annotate_splice_site(chr = row.chr, junction_coordinate = row.stop + 1,
                             candidate_gene = start_annotation[start_tar_tup]['candidate_gene'], exon_region_id = self.gene_model_dict[start_tar_tup]['exon_region_id'], strand = strand)                         
                             
-                            splice_site_annotation = start_annotation[start_tar_tup]['candidate_gene'] + ':' + start_annotation[start_tar_tup]['exon_region_id'] + '-'+  splice_site
-                            annotations.append(splice_site_annotation)
-                            annotation_key = 'chr' + str(chr) + ':' + str(junction_start) + '-' + str(junction_stop)
+                           
+                            annotations.append(start_annotation[start_tar_tup]['candidate_gene'] + ':' + start_annotation[start_tar_tup]['exon_region_id'] + '-'+  splice_site)
+                            annotation_key = 'chr' + str(chr) + ':' + str(row.start) + '-' + str(row.stop + 1)
                             annotation_keys.append(annotation_key)
 
                         if  stop_annotation and not start_annotation:
-                            strand = self.gene_model_dict[stop_tar_tup]['strand']
-                            splice_site = self.annotate_splice_site(chr = row.chr, junction_coordinate = junction_start,
-                            candidate_gene = stop_annotation[stop_tar_tup]['candidate_gene'], exon_region_id = self.gene_model_dict[stop_tar_tup]['exon_region_id'], strand = strand)
-                          
-                            splice_site_annotation = stop_annotation[stop_tar_tup]['candidate_gene'] + ':' + stop_annotation[stop_tar_tup]['exon_region_id'] + '-'+  splice_site
-                            annotations.append(splice_site_annotation)
-                            annotation_key = 'chr' + str(chr) + ':' + str(junction_start) + '-' + str(junction_stop)
+                            splice_site = self.annotate_splice_site(chr = row.chr, junction_coordinate = row.start,
+                            candidate_gene = stop_annotation[stop_tar_tup]['candidate_gene'], exon_region_id = self.gene_model_dict[stop_tar_tup]['exon_region_id'], strand = self.gene_model_dict[stop_tar_tup]['strand'])
+
+                            annotations.append(stop_annotation[stop_tar_tup]['candidate_gene'] + ':' + stop_annotation[stop_tar_tup]['exon_region_id'] + '-'+  splice_site)
+                            annotation_key = 'chr' + str(chr) + ':' + str(row.start) + '-' + str(row.stop + 1)
                             annotation_keys.append(annotation_key)
                             
                         elif not stop_annotation and not start_annotation:
-                         
                             continue
-             
-                        
-        #print(annotation_keys)
+
         data = { 'annotation_key':annotation_keys,'annotations':annotations}
         df1 = pd.DataFrame(data)
         df1.to_csv('annotations_all.txt',sep='\t')
-        return self.junction_coordinate_BAM_dict
     
     def annotate_splice_site(self,chr,junction_coordinate,candidate_gene, exon_region_id, strand):
         annotation = ''
