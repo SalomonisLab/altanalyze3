@@ -1,4 +1,5 @@
 from genericpath import exists
+from json.encoder import INFINITY
 from operator import truediv
 from tracemalloc import start, stop
 from unittest import skip
@@ -27,6 +28,7 @@ class   JunctionAnnotation:
         print(junction_files)
         annotation_keys = []
         annotations = []
+        print("hello")
         for junction_file in junction_files:
             if not junction_file.startswith('.'):
                 print("Reading junction file " + ' ' + junction_file)
@@ -99,6 +101,7 @@ class   JunctionAnnotation:
                             strand = self.gene_model_dict[start_tar_tup]['strand']
                             splice_site = self.annotate_splice_site(chr = row.chr, junction_coordinate = junction_stop,
                             candidate_gene = start_annotation[start_tar_tup]['candidate_gene'], exon_region_id = self.gene_model_dict[start_tar_tup]['exon_region_id'], strand = strand)                         
+                            
                             splice_site_annotation = start_annotation[start_tar_tup]['candidate_gene'] + ':' + start_annotation[start_tar_tup]['exon_region_id'] + '-'+  splice_site
                             annotations.append(splice_site_annotation)
                             annotation_key = 'chr' + str(chr) + ':' + str(junction_start) + '-' + str(junction_stop)
@@ -110,6 +113,7 @@ class   JunctionAnnotation:
                             strand = self.gene_model_dict[stop_tar_tup]['strand']
                             splice_site = self.annotate_splice_site(chr = row.chr, junction_coordinate = junction_start,
                             candidate_gene = stop_annotation[stop_tar_tup]['candidate_gene'], exon_region_id = self.gene_model_dict[stop_tar_tup]['exon_region_id'], strand = strand)
+                            print("Annotated the far start", splice_site)
                             splice_site_annotation = stop_annotation[stop_tar_tup]['candidate_gene'] + ':' + stop_annotation[stop_tar_tup]['exon_region_id'] + '-'+  splice_site
                             annotations.append(splice_site_annotation)
                             annotation_key = 'chr' + str(chr) + ':' + str(junction_start) + '-' + str(junction_stop)
@@ -125,7 +129,7 @@ class   JunctionAnnotation:
         #print(annotation_keys)
         data = { 'annotation_key':annotation_keys,'annotations':annotations}
         df1 = pd.DataFrame(data)
-        df1.to_csv('annotations.txt',sep='\t')
+        df1.to_csv('annotations_all.txt',sep='\t')
         return self.junction_coordinate_BAM_dict
     
     def annotate_splice_site(self,chr,junction_coordinate,candidate_gene, exon_region_id, strand):
@@ -133,38 +137,26 @@ class   JunctionAnnotation:
         buffer = 0
         ref_gene_start = self.gene_model_exon_dict[candidate_gene][0][0]
         ref_gene_stop = self.gene_model_exon_dict[candidate_gene][-1][-1]
-        print(ref_gene_start)
-        print(ref_gene_stop)
-        status = self.coordinate_in_range(junction_coordinate, ref_gene_start,ref_gene_stop, buffer = 0)
-        print(status)
-        
-        #? - this might run indefinitely until status is True ?? - should we just return the annotation?
+        status = self.coordinate_in_range(junction_coordinate, ref_gene_start,ref_gene_stop, buffer = 0, strand=strand)
         
         if status == True:
-            print('#yes candidate gene found')
             candidate_found = False #preset when initially looking (always false to start with)
             
             for ea in self.gene_model_exon_dict[candidate_gene]:
                 exon_start = ea[0]
                 exon_stop = ea[-1]
                 exon_id = ea[2]
-                print(exon_start)
-                print(exon_stop)
-                print(exon_id)
                 if 'I' in exon_id:
                     intron_status = True
                     buffer = 0
                 else:
                     intron_status = False
                     buffer = 50
-                status = self.coordinate_in_range(junction_coordinate, exon_start, exon_stop, buffer)
+                status = self.coordinate_in_range(junction_coordinate, exon_start, exon_stop, buffer, strand)
                 if(status):
-                    print("found in range of exons of given gene")
                     annotation = str(exon_id) + "_" + str(junction_coordinate)
-                    print(annotation)
                     
                     if intron_status == False:
-                        print("i am returning annotation, its not a intron")
                         return annotation
                     else:
                         candidate_found = True
@@ -172,34 +164,68 @@ class   JunctionAnnotation:
                     if candidate_found:
                         return annotation
         else:
-            print("status is false - figuring out")
-            status = self.coordinate_in_range(junction_coordinate, ref_gene_start,ref_gene_stop, buffer = 20000 )
+            status = self.coordinate_in_range(junction_coordinate, ref_gene_start,ref_gene_stop, buffer = 20000, strand = strand)
             region_numbers = []
             for ea in self.gene_model_exon_dict[candidate_gene]:
                 region_numbers.append(int(str.split(ea[2][1:],'.')[0]))
-            print(region_numbers)
             
             if status == True:
-                print("strand is" + strand)
-                
                 if(strand == '+'): #applicable to 3'UTR
-                    print('I am negative strand')
                     annotation = 'U'+str(region_numbers[-1])+'.1_'+str(junction_coordinate)
-                    
                 else:
-                    print(strand + ' strand')
                     annotation = 'U0.1' + '_' + str(junction_coordinate)
+            else:
+                #iterate over all the genes and fine which junction in gene model is nearest to this coordinate
+                # should be in the same gene
+                print("annotting the weird junction")
+                print(junction_coordinate)
+                
+                for (chrom, junction), value in self.gene_model_dict.items():
+                    if chr == chrom:
+                        
+                        # if(self.shortestgap(junction_coordinate,self.gene_model_dict[(chr,junction)]['start'],self.gene_model_dict[(chr,junction)['stop']])):    
+                        if(chrom,junction) == (1,14502):
+                            print(self.gene_model_dict[(chrom,junction)]['start'])
+                            print(self.gene_model_dict[(chrom,junction)]['stop'])
+                            if(junction_coordinate > self.gene_model_dict[(chrom,junction)]['start'] and junction_coordinate < self.gene_model_dict[(chrom,junction)]['stop']):
+                                print("condition being met")
+                        if junction_coordinate >=self.gene_model_dict[(chrom,junction)]['start'] and junction_coordinate <=self.gene_model_dict[(chrom,junction)]['stop']:
+                            print("this worked")
+                            print(self.gene_model_dict[(chrom,junction)]['gene_id'] + ':' + self.gene_model_dict[(chrom,junction)]['exon_region_id'] + '_' + str(junction_coordinate))
+                            return self.gene_model_dict[(chrom,junction)]['gene_id'] + ':' + self.gene_model_dict[(chrom,junction)]['exon_region_id'] + '_' + str(junction_coordinate)
+                          
+                    else:
+                        continue  
+                            
+
+                    
+                      
+
+                
+                print("annotated the weird junction", annotation)
+
+        return annotation
+
+                
+    
+    def coordinate_in_range(self,junction_coordinate, ref_gene_start,ref_gene_stop, buffer, strand):
+        if ref_gene_start <= ref_gene_stop or strand == '+':
+            start = int(ref_gene_start) - buffer
+            stop = int(ref_gene_stop) + buffer
+            if junction_coordinate in range(start, stop):
+                return True
+            else:
+                return False
+        elif ref_gene_start > ref_gene_stop or strand == '-':
+            start = int(ref_gene_start) + buffer
+            stop = int(ref_gene_stop) - buffer
+            if junction_coordinate in range(stop, start):
+                return True
+            else:
+                return False
 
         
-        print(annotation)
-        return annotation
-    
-    def coordinate_in_range(self,junction_coordinate, ref_gene_start,ref_gene_stop, buffer):
-        
-        if junction_coordinate >= int(ref_gene_start) - buffer and junction_coordinate <= int(ref_gene_stop) + buffer:
-            return True
-        else:
-            return False
+
 
     def generate_gene_model_dict(self,gene_model_all):
         '''
@@ -219,9 +245,9 @@ class   JunctionAnnotation:
                 chr = 24
             elif re.search("^[a-zA-Z]", row.chr) is not None:
                 continue
-            self.gene_model_dict[(int(chr),row.start)] = {'gene_id':row.gene_id, 'exon_region_id':row.exon_region_id, 'start':row.start, 'strand':row.strand}
-            self.gene_model_dict[(int(chr),row.stop)] = {'gene_id':row.gene_id, 'exon_region_id':row.exon_region_id,'stop':row.stop,  'strand':row.strand}
-            ea = [row.start,chr,row.exon_region_id,row.stop]
+            self.gene_model_dict[(int(chr),row.start)] = {'gene_id':row.gene_id, 'exon_region_id':row.exon_region_id, 'start':row.start, 'stop':row.stop,'strand':row.strand}
+            self.gene_model_dict[(int(chr),row.stop)] = {'gene_id':row.gene_id, 'exon_region_id':row.exon_region_id,'stop':row.stop, 'start':row.start, 'strand':row.strand}
+            ea = [row.start,chr,row.exon_region_id,row.strand,row.stop]
             #ea store as object?
             if(row.gene_id in self.gene_model_exon_dict):
                 self.gene_model_exon_dict[row.gene_id].append(ea)
@@ -239,7 +265,7 @@ gene_model_all = '/Users/sin9gp/altanalyze3/tests/data/gene_model_all.txt'
 gene_model_ENSG00000223972 = '/Users/sin9gp/altanalyze3/tests/data/gene_model_ENSG00000223972.txt'
 gene_model_1 = '/Users/sin9gp/altanalyze3/tests/data/gene_model_chr17_U.txt'
 junction_dir = '/Users/sin9gp/altanalyze3/tests/data/junction_dir/'
-subset_dir = '/Users/sin9gp/altanalyze3/tests/data/subset/newsubset/'
+subset_dir = '/Users/sin9gp/altanalyze3/tests/data/subset/newsubset/new_newsubset/'
 junction_annot = JunctionAnnotation()
-junction_annot.each_junction_annotation(junction_dir=junction_dir,gene_model_all=gene_model_all)
+junction_annot.each_junction_annotation(junction_dir=subset_dir,gene_model_all=gene_model_all)
 #junction_annot.generate_gene_model_dict(gene_model_all)
