@@ -7,6 +7,7 @@ import pandas as pd
 import os
 import re
 from functools import cache
+import timeit
 # import pysam
 # import multiprocessing
 
@@ -212,7 +213,8 @@ class   JunctionAnnotation:
         return self.gene_model_dict,self.gene_model_exon_dict
 
 if __name__ == '__main__':
-
+    starttime = timeit.default_timer()
+    print("The start time is :",starttime)
     gene_model_all = '/Users/sin9gp/altanalyze3/tests/data/gene_model_all.txt'
     # gene_model_ENSG00000223972 = '/Users/sin9gp/altanalyze3/tests/data/gene_model_ENSG00000223972.txt'
     # gene_model_1 = '/Users/sin9gp/altanalyze3/tests/data/gene_model_chr17_U.txt'
@@ -220,4 +222,5 @@ if __name__ == '__main__':
     subset_dir = '/Users/sin9gp/altanalyze3/tests/data/subset/newsubset/new_newsubset/'
     junction_annot = JunctionAnnotation()
     junction_annot.each_junction_annotation(junction_dir=junction_dir,gene_model_all=gene_model_all)
+    print("The time difference is :", timeit.default_timer() - starttime)
 
