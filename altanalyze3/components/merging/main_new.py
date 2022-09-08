@@ -87,6 +87,31 @@ class   JunctionAnnotation:
                         elif not stop_annotation and not start_annotation:
                             continue
 
+    
+    def junctions_to_gene_model_mapping(self, junction_file):
+        with open(junction_dir + junction_file) as f:
+                    junction_df = pd.read_csv(f,sep='\t',header=None, 
+                    names=["chr", "start", "stop", "annotation", "splice_count"])
+                    for idx,row in junction_df.iterrows():
+                                    start_annotation = {}
+                                    stop_annotation = {}
+                                    chr = row.chr
+                                    start_tar_tup = (chr, row.start)
+                                    stop_tar_tup = (chr, row.stop + 1)
+                                    annotation_key = ''.join(['chr', row.chr, ':', str(row.start),'-',str(row.stop + 1)])
+                                    if self.gene_model_dict.get(start_tar_tup) != None:
+                                        start_annotation[start_tar_tup] = { 'exon_region_id':self.gene_model_dict[start_tar_tup]['exon_region_id'],
+                                        'junction_start':row.start, 'candidate_gene':self.gene_model_dict[start_tar_tup]['gene_id']}
+                                    
+                                    
+                                    if self.gene_model_dict.get(stop_tar_tup) != None:
+                                        stop_annotation[stop_tar_tup] = { 'exon_region_id':self.gene_model_dict[stop_tar_tup]['exon_region_id'],
+                                        'junction_stop':row.stop + 1, 'candidate_gene':self.gene_model_dict[stop_tar_tup]['gene_id']}
+                                    
+
+                                    elif self.gene_model_dict.get(start_tar_tup) == None and self.gene_model_dict.get(stop_tar_tup) == None:
+                                        continue
+                    return start_annotation, stop_annotation
 
     def each_junction_annotation(self,junction_dir, gene_model_all):
         '''
@@ -112,7 +137,7 @@ class   JunctionAnnotation:
                        
                         start_tar_tup = (chr, row.start)
                         stop_tar_tup = (chr, row.stop + 1)
-                        annotation_key = ''.join(['chr', row.chr, ':', str(row.start),'-',str(row.stop + 1)])
+                        annotation_key = ''.join(['chr', str(row.chr), ':', str(row.start),'-',str(row.stop + 1)])
                         if self.gene_model_dict.get(start_tar_tup) != None:
                             start_annotation[start_tar_tup] = { 'exon_region_id':self.gene_model_dict[start_tar_tup]['exon_region_id'],
                             'junction_start':row.start, 'candidate_gene':self.gene_model_dict[start_tar_tup]['gene_id']}
@@ -255,37 +280,25 @@ class   JunctionAnnotation:
         1. gene_model dictionary where key is (chr, coordinate) and value has gene_id, exon_region_id, strand
         2. gene_model_exon dictionary where key is (gene_id)
         '''
-        ea = []
-        gene_model_df = pd.read_csv(gene_model_all,sep='\t',header=None, names=[
-                "gene_id", "chr", "strand","exon_region_id", "start", "stop", "exon_annotations"])
+        
         logging.info("Generating reference junction dictionary from gene model(hg38).....")
         starttime = timeit.default_timer()
         print("The start time is :",starttime)
-        #use Cprofile to find what's taking long
-        #readlines instead of df
-        for idx,row in gene_model_df.iterrows():
-            chr = row.chr
-            #dont convert into X and Y
-            # if row.chr == 'X':
-            #     chr = 23
-            # elif row.chr == 'Y':
-            #     chr = 24
-            #in future we might have more species (frank's code)
-            # elif re.search("^[a-zA-Z]", row.chr) is not None:
-            #     continue
-            #no need of int conversion
-            self.gene_model_dict[(chr,row.start)] = {'gene_id':row.gene_id, 'exon_region_id':row.exon_region_id, 'start':row.start, 'stop':row.stop,'strand':row.strand}
-            self.gene_model_dict[(chr,row.stop)] = {'gene_id':row.gene_id, 'exon_region_id':row.exon_region_id,'stop':row.stop, 'start':row.start, 'strand':row.strand}
-            ea = [row.start,chr,row.exon_region_id,row.strand,row.stop]
-            #ea store as object?
-            if(row.gene_id in self.gene_model_exon_dict):
-                self.gene_model_exon_dict[row.gene_id].append(ea)
-            else:
-                self.gene_model_exon_dict[row.gene_id] = [ea]
-        logging.info("Finished generating junction map from gene model")
+        
+        with open(gene_model_all) as f:
+            for line in f:
+                (gene_id,chr,strand,exon_region_id, start,stop,annotation) = line.split('\t')
+                self.gene_model_dict[(chr,start)] =  {'gene_id':gene_id, 'exon_region_id':exon_region_id, 'start':start, 'stop':stop,'strand':strand}
+                self.gene_model_dict[(chr,stop)] =  {'gene_id':gene_id, 'exon_region_id':exon_region_id, 'start':start, 'stop':stop,'strand':strand}
+                ea = {'exon_region_id':exon_region_id, 'start':start, 'stop':stop,'strand':strand, 'chr':chr}
+            #ea store as map - more efficient than list.
+                if(gene_id in self.gene_model_exon_dict):
+                    self.gene_model_exon_dict[gene_id].append(ea)
+                else:
+                    self.gene_model_exon_dict[gene_id] = [ea]
+        # print(self.gene_model_exon_dict)
+        logging.info("Gene Model dictionary generated")
         print("The time difference is :", timeit.default_timer() - starttime)
-
-        return self.gene_model_dict,self.gene_model_exon_dict
 
 if __name__ == '__main__':
     print("Number of processors: ", mp.cpu_count())
@@ -295,10 +308,11 @@ if __name__ == '__main__':
     print("The start time is :",starttime)
     gene_model_all = '/Users/sin9gp/altanalyze3/tests/data/gene_model_all.txt'
     junction_dir = '/Users/sin9gp/altanalyze3/tests/data/junction_dir/'
+    # pysam.sort("-o", str(args.output.with_suffix(".bam")), str(tmp_bam))
     subset_dir = '/Users/sin9gp/altanalyze3/tests/data/subset/'
     junction_annot = JunctionAnnotation()
-    junction_annot.generate_gene_model_dict(gene_model_all=gene_model_all)
-    #junction_annot.each_junction_annotation(junction_dir=junction_dir,gene_model_all=gene_model_all)
+    #junction_annot.generate_gene_model_dict(gene_model_all=gene_model_all)
+    junction_annot.each_junction_annotation(junction_dir=junction_dir,gene_model_all=gene_model_all)
 
     print("The time difference is :", timeit.default_timer() - starttime)
 
