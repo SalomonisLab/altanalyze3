@@ -29,88 +29,51 @@ class   JunctionAnnotation:
                     
                     for line in f:
                         (chr, start, stop, annotation, splice_count) = line.split('\t')
-
-                        start_annotation = {}
-                        stop_annotation = {}
                         stop = int(stop)
                         start_tar_tup = (str(chr), int(start))
                         stop_tar_tup = (str(chr), int(stop) + 1)
-                        
-                        
                         annotation_key = ''.join(['chr', str(chr), ':', str(start),'-',str(stop + 1)])
-                        if self.gene_model_dict.get(start_tar_tup) != None:
-                            #print("i found start")
-                            start_annotation[start_tar_tup] = { 'exon_region_id':self.gene_model_dict[start_tar_tup]['exon_region_id'],
-                            'junction_start':start, 'candidate_gene':self.gene_model_dict[start_tar_tup]['gene_id']}
-                         
-                        
-                        if self.gene_model_dict.get(stop_tar_tup) != None:
-                            #print("i found stop")
-                            stop_annotation[stop_tar_tup] = { 'exon_region_id':self.gene_model_dict[stop_tar_tup]['exon_region_id'],
-                            'junction_stop':stop + 1, 'candidate_gene':self.gene_model_dict[stop_tar_tup]['gene_id']}
-                        
 
-                        elif self.gene_model_dict.get(start_tar_tup) == None and self.gene_model_dict.get(stop_tar_tup) == None:  
-                            continue
+                        if self.gene_model_dict.get(start_tar_tup) != None and self.gene_model_dict.get(stop_tar_tup) != None:
+                            # both start and stop annotation are present in gene model
+                            gene_id = ''
+                            if self.gene_model_dict[start_tar_tup]['gene_id'] == self.gene_model_dict[stop_tar_tup]['gene_id']:
+                                gene_id = self.gene_model_dict[(start_tar_tup)]['gene_id']
 
-                        annotation = self.annotate_splice_site_junction(start_annotation,stop_annotation, start_tar_tup,stop_tar_tup)
-                        if annotation != None:
+                                if(self.gene_model_dict[start_tar_tup]['strand'] == '-'):
+                                    annotation = ''.join([gene_id, ':', self.gene_model_dict[stop_tar_tup]['exon_region_id'], '-', self.gene_model_dict[start_tar_tup]['exon_region_id']])
+                                else:
+                                    annotation = ''.join([gene_id,':',self.gene_model_dict[start_tar_tup]['exon_region_id'],'-', self.gene_model_dict[start_tar_tup]['exon_region_id']])
+                            else:
+                                start_gene_id = self.gene_model_dict[(start_tar_tup)]['gene_id']
+                                stop_gene_id = self.gene_model_dict[(stop_tar_tup)]['gene_id']
+                                annotation = ''.join([start_gene_id, ':', self.gene_model_dict[(start_tar_tup)]['exon_region_id'], '-', stop_gene_id, ":",self.gene_model_dict[(stop_tar_tup)]['exon_region_id']])
+                            print("both start and stop")
                             annotations.append(annotation)
                             annotation_keys.append(annotation_key)
+                        
+                        elif self.gene_model_dict.get(start_tar_tup) != None and self.gene_model_dict.get(stop_tar_tup) == None:
+                            # if start is present in gene model but stop is not
+                            annotated_splice_site = self.annotate_splice_site(chr = chr, junction_coordinate = stop_tar_tup[1],
+                            candidate_gene = self.gene_model_dict[start_tar_tup]['gene_id'], exon_region_id = self.gene_model_dict[start_tar_tup]['exon_region_id'], strand = self.gene_model_dict[start_tar_tup]['strand'])
+                            annotation = ''.join([self.gene_model_dict[start_tar_tup]['gene_id'],':', self.gene_model_dict[start_tar_tup]['exon_region_id'],'-',  annotated_splice_site])
+                            print("only start, no stop")
+                            annotations.append(annotation)
+                            annotation_keys.append(annotation_key)
+                        
+                        elif self.gene_model_dict.get(start_tar_tup) == None and self.gene_model_dict.get(stop_tar_tup) != None:
+                            # if start is not found but stop exists in gene model
+                            annotated_splice_site = self.annotate_splice_site(chr = chr, junction_coordinate = int(start),
+                            candidate_gene = self.gene_model_dict[stop_tar_tup]['gene_id'], exon_region_id = self.gene_model_dict[stop_tar_tup]['exon_region_id'], strand = self.gene_model_dict[stop_tar_tup]['strand'])
+                            print("no stop only start")
+                            annotations.append(''.join([self.gene_model_dict[stop_tar_tup]['gene_id'],':', self.gene_model_dict[stop_tar_tup]['exon_region_id'], '-',  annotated_splice_site]))
+                            annotation_keys.append(annotation_key)
+
                         else:
                             continue
 
-                        
-                       
-
-        #self.write_to_file(annotation_keys, annotations)
+        self.write_to_file(annotation_keys, annotations)
     
-    def annotate_splice_site_junction(self,start_annotation,stop_annotation,start_tar_tup,stop_tar_tup):
-        if start_annotation and stop_annotation:
-            gene_id = ''
-            if start_annotation[(start_tar_tup)]['candidate_gene'] == stop_annotation[(stop_tar_tup)]['candidate_gene']:
-                gene_id = self.gene_model_dict[(start_tar_tup)]['gene_id']
-
-                if(self.gene_model_dict[start_tar_tup]['strand'] == '-'):
-                    annotation = ''.join([gene_id, ':', stop_annotation[(stop_tar_tup)]['exon_region_id'], '-', start_annotation[(start_tar_tup)]['exon_region_id']])
-                else:
-                    annotation = ''.join([gene_id,':',start_annotation[(start_tar_tup)]['exon_region_id'],'-', stop_annotation[(stop_tar_tup)]['exon_region_id']])
-            else:
-                start_gene_id = self.gene_model_dict[(start_tar_tup)]['gene_id']
-                stop_gene_id = self.gene_model_dict[(stop_tar_tup)]['gene_id']
-                annotation = ''.join([start_gene_id, ':', self.gene_model_dict[(start_tar_tup)]['exon_region_id'], '-', stop_gene_id, ":",self.gene_model_dict[(stop_tar_tup)]['exon_region_id']])
-            
-            return annotation
-        else:
-            return None
-            # annotations.append(annotation)
-            # annotation_keys.append(annotation_key)
-            # print("both start and stop were found")
-            # print(annotation_key)     
-            
-
-                        
-            # if start_annotation and not stop_annotation:
-            #     annotated_splice_site = self.annotate_splice_site(chr = chr, junction_coordinate = int(stop) + 1,
-            #     candidate_gene = start_annotation[start_tar_tup]['candidate_gene'], exon_region_id = self.gene_model_dict[start_tar_tup]['exon_region_id'], strand = self.gene_model_dict[start_tar_tup]['strand'])                         
-            #     annotations.append(''.join([start_annotation[start_tar_tup]['candidate_gene'],':', start_annotation[start_tar_tup]['exon_region_id'],'-',  annotated_splice_site]))
-            #     annotation_keys.append(annotation_key)
-            #     # print("start was found not stop")
-            #     # print(annotation_key)  
-                           
-
-            # if  stop_annotation and not start_annotation:
-            #     annotated_splice_site = self.annotate_splice_site(chr = chr, junction_coordinate = int(start),
-            #     candidate_gene = stop_annotation[stop_tar_tup]['candidate_gene'], exon_region_id = self.gene_model_dict[stop_tar_tup]['exon_region_id'], strand = self.gene_model_dict[stop_tar_tup]['strand'])
-            #     annotations.append(''.join([stop_annotation[stop_tar_tup]['candidate_gene'],':', stop_annotation[stop_tar_tup]['exon_region_id'], '-',  annotated_splice_site]))
-            #     annotation_keys.append(annotation_key)
-            #     # print(annotation_key)  
-            #     # print("stop was found but not start")
-            #     return annotated_splice_site
-                            
-            # elif not stop_annotation and not start_annotation:
-            #     return
-
     
     def write_to_file(self, annotation_keys, annotations):
         data = { 'annotation_key':annotation_keys,'annotations':annotations}
@@ -171,6 +134,7 @@ class   JunctionAnnotation:
                         if int(junction_coordinate) >= int(self.gene_model_dict[(chrom,junction)]['start']) and int(junction_coordinate) <= int(self.gene_model_dict[(chrom,junction)]['stop']):
                             annotation =  ''.join([self.gene_model_dict[(chrom,junction)]['gene_id'], ':', self.gene_model_dict[(chrom,junction)]['exon_region_id'], '_', str(junction_coordinate)])
                         else:
+                            #print("none of the conditions met, second junction not even on same chromosome or smaller/bigger - may be its negative strand??")
                             continue
                     else:
                         continue  
