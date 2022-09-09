@@ -26,28 +26,29 @@ class   JunctionAnnotation:
             if not junction_file.startswith('.'):
                 logging.info("Reading junction file " + ' ' + junction_file)
                 with open(junction_dir + junction_file) as f:
-                    junction_df = pd.read_csv(f,sep='\t',header=None, 
-                    names=["chr", "start", "stop", "annotation", "splice_count"])
                     
-                    for idx,row in junction_df.iterrows():
+                    for line in f:
+                        (chr, start, stop, annotation, splice_count) = line.split('\t')
+                    
+                    
                         start_annotation = {}
                         stop_annotation = {}
-                        chr = str(row.chr)
-                        start_tar_tup = (chr, row.start)
-                        stop_tar_tup = (chr, row.stop + 1)
+                        stop = int(stop)
+                        start_tar_tup = (str(chr), int(start))
+                        stop_tar_tup = (str(chr), int(stop) + 1)
                         
                         
-                        annotation_key = ''.join(['chr', str(row.chr), ':', str(row.start),'-',str(row.stop + 1)])
+                        annotation_key = ''.join(['chr', str(chr), ':', str(start),'-',str(stop + 1)])
                         if self.gene_model_dict.get(start_tar_tup) != None:
                             #print("i found start")
                             start_annotation[start_tar_tup] = { 'exon_region_id':self.gene_model_dict[start_tar_tup]['exon_region_id'],
-                            'junction_start':row.start, 'candidate_gene':self.gene_model_dict[start_tar_tup]['gene_id']}
+                            'junction_start':start, 'candidate_gene':self.gene_model_dict[start_tar_tup]['gene_id']}
                          
                         
                         if self.gene_model_dict.get(stop_tar_tup) != None:
                             #print("i found stop")
                             stop_annotation[stop_tar_tup] = { 'exon_region_id':self.gene_model_dict[stop_tar_tup]['exon_region_id'],
-                            'junction_stop':row.stop + 1, 'candidate_gene':self.gene_model_dict[stop_tar_tup]['gene_id']}
+                            'junction_stop':stop + 1, 'candidate_gene':self.gene_model_dict[stop_tar_tup]['gene_id']}
                         
 
                         elif self.gene_model_dict.get(start_tar_tup) == None and self.gene_model_dict.get(stop_tar_tup) == None:
@@ -76,7 +77,7 @@ class   JunctionAnnotation:
 
                         
                         if start_annotation and not stop_annotation:
-                            annotated_splice_site = self.annotate_splice_site(chr = row.chr, junction_coordinate = row.stop + 1,
+                            annotated_splice_site = self.annotate_splice_site(chr = chr, junction_coordinate = int(stop) + 1,
                             candidate_gene = start_annotation[start_tar_tup]['candidate_gene'], exon_region_id = self.gene_model_dict[start_tar_tup]['exon_region_id'], strand = self.gene_model_dict[start_tar_tup]['strand'])                         
                             annotations.append(''.join([start_annotation[start_tar_tup]['candidate_gene'],':', start_annotation[start_tar_tup]['exon_region_id'],'-',  annotated_splice_site]))
                             annotation_keys.append(annotation_key)
@@ -85,7 +86,7 @@ class   JunctionAnnotation:
                             continue
 
                         if  stop_annotation and not start_annotation:
-                            annotated_splice_site = self.annotate_splice_site(chr = row.chr, junction_coordinate = row.start,
+                            annotated_splice_site = self.annotate_splice_site(chr = chr, junction_coordinate = int(start),
                             candidate_gene = stop_annotation[stop_tar_tup]['candidate_gene'], exon_region_id = self.gene_model_dict[stop_tar_tup]['exon_region_id'], strand = self.gene_model_dict[stop_tar_tup]['strand'])
                             annotations.append(''.join([stop_annotation[stop_tar_tup]['candidate_gene'],':', stop_annotation[stop_tar_tup]['exon_region_id'], '-',  annotated_splice_site]))
                             annotation_keys.append(annotation_key)
@@ -154,7 +155,7 @@ class   JunctionAnnotation:
                 # is nearest to this coordinate         
                 for (chrom, junction), value in self.gene_model_dict.items():
                     if chr == chrom:
-                        if junction_coordinate >=self.gene_model_dict[(chrom,junction)]['start'] and junction_coordinate <=self.gene_model_dict[(chrom,junction)]['stop']:
+                        if int(junction_coordinate) >= int(self.gene_model_dict[(chrom,junction)]['start']) and int(junction_coordinate) <= int(self.gene_model_dict[(chrom,junction)]['stop']):
                             annotation =  ''.join([self.gene_model_dict[(chrom,junction)]['gene_id'], ':', self.gene_model_dict[(chrom,junction)]['exon_region_id'], '_', str(junction_coordinate)])
                         else:
                             continue
@@ -173,7 +174,7 @@ class   JunctionAnnotation:
             start = int(ref_gene_start) + buffer
             stop = int(ref_gene_stop) - buffer
 
-        if start <= junction_coordinate <= stop:
+        if int(start) <= int(junction_coordinate) <= int(stop):
             return True
         else:
             return False
