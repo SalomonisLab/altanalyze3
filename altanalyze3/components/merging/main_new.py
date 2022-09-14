@@ -34,7 +34,9 @@ class   JunctionAnnotation:
                         stop_tar_tup = (str(chr), int(stop) + 1)
                         annotation_key = ''.join(['chr', str(chr), ':', str(start),'-',str(stop + 1)])
 
-                        if self.gene_model_dict.get(start_tar_tup) != None and self.gene_model_dict.get(stop_tar_tup) != None:
+                        if start_tar_tup in self.gene_model_dict and stop_tar_tup in self.gene_model_dict == None:
+                            continue
+                        elif self.gene_model_dict.get(start_tar_tup) != None and self.gene_model_dict.get(stop_tar_tup) != None:
                             # both start and stop annotation are present in gene model
                             gene_id = ''
                             if self.gene_model_dict[start_tar_tup]['gene_id'] == self.gene_model_dict[stop_tar_tup]['gene_id']:
@@ -69,9 +71,6 @@ class   JunctionAnnotation:
                             annotations.append(''.join([self.gene_model_dict[stop_tar_tup]['gene_id'],':', self.gene_model_dict[stop_tar_tup]['exon_region_id'], '-',  annotated_splice_site]))
                             annotation_keys.append(annotation_key)
 
-                        else:
-                            continue
-
         self.write_to_file(annotation_keys, annotations)
     
     
@@ -82,7 +81,7 @@ class   JunctionAnnotation:
 
 
     def annotate_splice_site(self,chr,junction_coordinate,candidate_gene, exon_region_id, strand):
-        annotation = ''
+        annotated_splice_site = ''
         buffer = 0
         ref_gene_start = self.gene_model_exon_dict[candidate_gene][0]['start']
         ref_gene_stop = self.gene_model_exon_dict[candidate_gene][-1]['stop']
@@ -104,15 +103,15 @@ class   JunctionAnnotation:
                     buffer = 50
                 status = self.coordinate_in_range(junction_coordinate, exon_start, exon_stop, buffer, strand)
                 if(status):
-                    annotation = ''.join([str(exon_id), "_", str(junction_coordinate)])
+                    annotated_splice_site = ''.join([str(exon_id), "_", str(junction_coordinate)])
                     
                     if intron_status == False:
-                        return annotation
+                        return annotated_splice_site
                     else:
                         candidate_found = True
                 else:
                     if candidate_found:
-                        return annotation
+                        return annotated_splice_site
         else:
             status = self.coordinate_in_range(junction_coordinate, ref_gene_start,ref_gene_stop, buffer = 20000, strand = strand)
             region_numbers = []
@@ -122,24 +121,24 @@ class   JunctionAnnotation:
             if status == True:
                 # applicable to 3'UTR
                 if(strand == '+'): 
-                    annotation =  ''.join(['U', str(region_numbers[-1]),'.1_', str(junction_coordinate)])
+                    annotated_splice_site =  ''.join(['U', str(region_numbers[-1]),'.1_', str(junction_coordinate)])
                 # applicable to 5'UTR
                 else: 
-                    annotation =  ''.join(['U0.1', '_', str(junction_coordinate)])
+                    annotated_splice_site =  ''.join(['U0.1', '_', str(junction_coordinate)])
             else:
                 # iterate over all the genes on same chromosome and find which junction in gene model 
                 # is nearest to this coordinate         
                 for (chrom, junction), value in self.gene_model_dict.items():
                     if chr == chrom:
                         if int(junction_coordinate) >= int(self.gene_model_dict[(chrom,junction)]['start']) and int(junction_coordinate) <= int(self.gene_model_dict[(chrom,junction)]['stop']):
-                            annotation =  ''.join([self.gene_model_dict[(chrom,junction)]['gene_id'], ':', self.gene_model_dict[(chrom,junction)]['exon_region_id'], '_', str(junction_coordinate)])
+                            annotated_splice_site =  ''.join([self.gene_model_dict[(chrom,junction)]['gene_id'], ':', self.gene_model_dict[(chrom,junction)]['exon_region_id'], '_', str(junction_coordinate)])
                         else:
                             #print("none of the conditions met, second junction not even on same chromosome or smaller/bigger - may be its negative strand??")
                             continue
                     else:
                         continue  
 
-        return annotation
+        return annotated_splice_site
     
     def coordinate_in_range(self,junction_coordinate, ref_gene_start,ref_gene_stop, buffer, strand):
         #needs refactoring
