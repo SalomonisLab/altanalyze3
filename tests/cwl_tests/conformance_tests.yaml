@@ -1,0 +1,111 @@
+# ========================================================
+# altanalyze-juncount.cwl
+# ========================================================
+
+- job: ./altanalyze-juncount-1.yaml
+  tool: ../../cwls/tools/altanalyze-juncount.cwl
+  output:
+    junction_bed_file:
+      class: File
+      location: results.bed
+    stdout_log:
+      class: File
+      location: juncount_stdout.log
+    stderr_log:
+      class: File
+      location: juncount_stderr.log
+
+- job: ./altanalyze-juncount-2.yaml
+  tool: ../../cwls/tools/altanalyze-juncount.cwl
+  output:
+    junction_bed_file:
+      class: File
+      location: results.bed
+    stdout_log:
+      class: File
+      location: juncount_stdout.log
+    stderr_log:
+      class: File
+      location: juncount_stderr.log
+
+- job: ./altanalyze-juncount-3.yaml
+  tool: ../../cwls/tools/altanalyze-juncount.cwl
+  output:
+    junction_bed_file:
+      class: File
+      location: results.bed
+    stdout_log:
+      class: File
+      location: juncount_stdout.log
+    stderr_log:
+      class: File
+      location: juncount_stderr.log
+
+- job: ./altanalyze-juncount-4.yaml
+  tool: ../../cwls/tools/altanalyze-juncount.cwl
+  output:
+    junction_bed_file:
+      class: File
+      location: junc.bed
+    stdout_log:
+      class: File
+      location: juncount_stdout.log
+    stderr_log:
+      class: File
+      location: juncount_stderr.log
+
+# ========================================================
+# altanalyze-intcount.cwl
+# ========================================================
+
+- job: ./altanalyze-intcount-1.yaml
+  tool: ../../cwls/tools/altanalyze-intcount.cwl
+  output:
+    intron_bed_file:
+      class: File
+      location: results.bed
+    stdout_log:
+      class: File
+      location: intcount_stdout.log
+    stderr_log:
+      class: File
+      location: intcount_stderr.log
+
+- job: ./altanalyze-intcount-2.yaml
+  tool: ../../cwls/tools/altanalyze-intcount.cwl
+  output:
+    intron_bed_file:
+      class: File
+      location: results.bed
+    stdout_log:
+      class: File
+      location: intcount_stdout.log
+    stderr_log:
+      class: File
+      location: intcount_stderr.log
+
+- job: ./altanalyze-intcount-3.yaml
+  tool: ../../cwls/tools/altanalyze-intcount.cwl
+  output:
+    intron_bed_file:
+      class: File
+      location: results.bed
+    stdout_log:
+      class: File
+      location: intcount_stdout.log
+    stderr_log:
+      class: File
+      location: intcount_stderr.log
+
+- job: ./altanalyze-intcount-4.yaml
+  tool: ../../cwls/tools/altanalyze-intcount.cwl
+  output:
+    intron_bed_file:
+      class: File
+      location: int.bed
+    stdout_log:
+      class: File
+      location: intcount_stdout.log
+    stderr_log:
+      class: File
+      location: intcount_stderr.log
