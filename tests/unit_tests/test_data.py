@@ -9,6 +9,8 @@ CONTROL_MD5_SUMS = {
     "hg19_ref_introns.bed.gz": "a9f441a78f87d47100fb4f18c827a976",
     "hg19_pe.bam": "b94ee144a2bc4f9764e54aa367a5a42e",
     "hg19_pe.bam.bai": "efc5314e764a8ac3ce7ad060c92fad3f",
+    "hg19_pe_copy.bam": "b94ee144a2bc4f9764e54aa367a5a42e",
+    "hg19_pe_copy.bam.bai": "efc5314e764a8ac3ce7ad060c92fad3f"
 }
 
 

@@ -7,52 +7,52 @@
   output:
     junction_bed_file:
       class: File
-      location: results.bed
+      location: hg19_pe_jun.bed
     stdout_log:
       class: File
-      location: juncount_stdout.log
+      location: hg19_pe_jun_stdout.log
     stderr_log:
       class: File
-      location: juncount_stderr.log
+      location: hg19_pe_jun_stderr.log
 
 - job: ./altanalyze-juncount-2.yaml
   tool: ../../cwls/tools/altanalyze-juncount.cwl
   output:
     junction_bed_file:
       class: File
-      location: results.bed
+      location: hg19_pe_jun.bed
     stdout_log:
       class: File
-      location: juncount_stdout.log
+      location: hg19_pe_jun_stdout.log
     stderr_log:
       class: File
-      location: juncount_stderr.log
+      location: hg19_pe_jun_stderr.log
 
 - job: ./altanalyze-juncount-3.yaml
   tool: ../../cwls/tools/altanalyze-juncount.cwl
   output:
     junction_bed_file:
       class: File
-      location: results.bed
+      location: hg19_pe.bed
     stdout_log:
       class: File
-      location: juncount_stdout.log
+      location: hg19_pe_jun_stdout.log
     stderr_log:
       class: File
-      location: juncount_stderr.log
+      location: hg19_pe_jun_stderr.log
 
 - job: ./altanalyze-juncount-4.yaml
   tool: ../../cwls/tools/altanalyze-juncount.cwl
   output:
     junction_bed_file:
       class: File
-      location: junc.bed
+      location: junc_jun.bed
     stdout_log:
       class: File
-      location: juncount_stdout.log
+      location: junc_jun_stdout.log
     stderr_log:
       class: File
-      location: juncount_stderr.log
+      location: junc_jun_stderr.log
 
 # ========================================================
 # altanalyze-intcount.cwl
@@ -63,49 +63,109 @@
   output:
     intron_bed_file:
       class: File
-      location: results.bed
+      location: hg19_pe_int.bed
     stdout_log:
       class: File
-      location: intcount_stdout.log
+      location: hg19_pe_int_stdout.log
     stderr_log:
       class: File
-      location: intcount_stderr.log
+      location: hg19_pe_int_stderr.log
 
 - job: ./altanalyze-intcount-2.yaml
   tool: ../../cwls/tools/altanalyze-intcount.cwl
   output:
     intron_bed_file:
       class: File
-      location: results.bed
+      location: hg19_pe_int.bed
     stdout_log:
       class: File
-      location: intcount_stdout.log
+      location: hg19_pe_int_stdout.log
     stderr_log:
       class: File
-      location: intcount_stderr.log
+      location: hg19_pe_int_stderr.log
 
 - job: ./altanalyze-intcount-3.yaml
   tool: ../../cwls/tools/altanalyze-intcount.cwl
   output:
     intron_bed_file:
       class: File
-      location: results.bed
+      location: hg19_pe_int.bed
     stdout_log:
       class: File
-      location: intcount_stdout.log
+      location: hg19_pe_int_stdout.log
     stderr_log:
       class: File
-      location: intcount_stderr.log
+      location: hg19_pe_int_stderr.log
 
 - job: ./altanalyze-intcount-4.yaml
   tool: ../../cwls/tools/altanalyze-intcount.cwl
   output:
     intron_bed_file:
       class: File
-      location: int.bed
+      location: int_int.bed
     stdout_log:
       class: File
-      location: intcount_stdout.log
+      location: int_int_stdout.log
     stderr_log:
       class: File
-      location: intcount_stderr.log
+      location: int_int_stderr.log
+
+# ========================================================
+# altanalyze-count.cwl
+# ========================================================
+
+- job: ./altanalyze-count-1.yaml
+  tool: ../../cwls/workflows/altanalyze-count.cwl
+  output:
+    intron_bed_file:
+    - class: File
+      location: hg19_pe_int.bed
+    intcount_stdout_log:
+    - class: File
+      location: hg19_pe_int_stdout.log
+    intcount_stderr_log:
+    - class: File
+      location: hg19_pe_int_stderr.log
+    junction_bed_file:
+    - class: File
+      location: hg19_pe_jun.bed
+    juncount_stdout_log:
+    - class: File
+      location: hg19_pe_jun_stdout.log
+    juncount_stderr_log:
+    - class: File
+      location: hg19_pe_jun_stderr.log
+
+- job: ./altanalyze-count-2.yaml
+  tool: ../../cwls/workflows/altanalyze-count.cwl
+  output:
+    intron_bed_file:
+    - class: File
+      location: hg19_pe_int.bed
+    - class: File
+      location: hg19_pe_copy_int.bed
+    intcount_stdout_log:
+    - class: File
+      location: hg19_pe_int_stdout.log
+    - class: File
+      location: hg19_pe_copy_int_stdout.log
+    intcount_stderr_log:
+    - class: File
+      location: hg19_pe_int_stderr.log
+    - class: File
+      location: hg19_pe_copy_int_stderr.log
+    junction_bed_file:
+    - class: File
+      location: hg19_pe_jun.bed
+    - class: File
+      location: hg19_pe_copy_jun.bed
+    juncount_stdout_log:
+    - class: File
+      location: hg19_pe_jun_stdout.log
+    - class: File
+      location: hg19_pe_copy_jun_stdout.log
+    juncount_stderr_log:
+    - class: File
+      location: hg19_pe_jun_stderr.log
+    - class: File
+      location: hg19_pe_copy_jun_stderr.log
