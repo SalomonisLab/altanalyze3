@@ -4,6 +4,11 @@ CROMWELL_VERSION=${2:-"84"}
 
 WORKING_DIR=$( cd ../"$( dirname "${BASH_SOURCE[0]}" )" && pwd )
 
+if [[ "$(docker images -q altanalyze:latest 2> /dev/null)" == "" ]]; then
+  echo "Exiting. You need to build altanalyze:latest docker image first"
+  exit 1
+fi
+
 echo "Running wdl tests with Cromwell ${CROMWELL_VERSION} in dockerized Ubuntu $UBUNTU_VERSION"
 echo "Working directory $WORKING_DIR"
 

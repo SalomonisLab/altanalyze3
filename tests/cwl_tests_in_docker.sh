@@ -6,6 +6,11 @@ CWLTEST_VERSION=${4:-"main"}
 
 WORKING_DIR=$( cd ../"$( dirname "${BASH_SOURCE[0]}" )" && pwd )
 
+if [[ "$(docker images -q altanalyze:latest 2> /dev/null)" == "" ]]; then
+  echo "Exiting. You need to build altanalyze:latest docker image first"
+  exit 1
+fi
+
 echo "Running cwl tests with Python ${PYTHON_VERSION} in dockerized Ubuntu $UBUNTU_VERSION"
 echo "Using cwltool==${CWLTOOL_VERSION} and cwltest==${CWLTEST_VERSION}"
 echo "Working directory $WORKING_DIR"

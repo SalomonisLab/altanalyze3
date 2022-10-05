@@ -33,7 +33,7 @@
   output:
     junction_bed_file:
       class: File
-      location: hg19_pe.bed
+      location: hg19_pe_jun.bed
     stdout_log:
       class: File
       location: hg19_pe_jun_stdout.log
