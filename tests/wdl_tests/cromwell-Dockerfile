@@ -57,8 +57,8 @@ RUN echo "Installing dependencies" && \
     apt-get -y install docker-ce-cli && \
     echo "Installing cromwell and womtool" && \
     cd /usr/local/bin && \
-    wget ${CROMWELL_URL} && \
-    wget ${WOMTOOL_URL} && \
+    wget ${CROMWELL_URL} -O cromwell.jar && \
+    wget ${WOMTOOL_URL} -O womtool.jar && \
     cd /tmp && \
     echo "Cleaning" && \
     apt-get clean && \
