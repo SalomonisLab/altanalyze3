@@ -1,3 +1,4 @@
+import sys
 import pysam
 import logging
 import pathlib
@@ -5,6 +6,7 @@ import argparse
 from altanalyze3.utilities.helpers import get_version
 from altanalyze3.components.intron_count.main import count_introns
 from altanalyze3.components.junction_count.main import count_junctions
+from altanalyze3.components.aggregate.main import aggregate
 from altanalyze3.utilities.io import get_all_bam_chr
 from altanalyze3.utilities.constants import (
     IntRetCat,
@@ -17,7 +19,7 @@ class ArgsParser():
     def __init__(self, args):
         args = args + [""] if len(args) == 0 else args
         self.args, _ = self.get_parser().parse_known_args(args)
-        self.resolve_path(["bam", "ref", "tmp", "output"])
+        self.resolve_path(["bam", "ref", "tmp", "output", "juncounts", "intcounts"])
         self.assert_args()
         self.set_args_as_attributes()
 
@@ -151,6 +153,49 @@ class ArgsParser():
             action="store_true"
         )
         self.add_common_arguments(junction_parser)
+
+        # Aggregate parameters
+        aggregate_parser = subparsers.add_parser(
+            "aggregate",
+            parents=[parent_parser],
+            help="Aggregate read counts produced by intcount and juncount"
+        )
+        aggregate_parser.set_defaults(func=aggregate)
+        aggregate_parser.add_argument(
+            "--juncounts",
+            help="Path the junction counts files. Number and order should correspond to --intcounts",
+            type=str,
+            nargs="+",
+            required=True   # safety measure
+        )
+        aggregate_parser.add_argument(
+            "--intcounts",
+            help="Path the intron counts files. Number and order should correspond to --juncounts",
+            type=str,
+            nargs="+",
+            required=True   # safety measure
+        )
+        aggregate_parser.add_argument(
+            "--aliases",
+            help=" ".join(
+                [
+                    "Column names to be used for the loaded counts.",
+                    "The number of provided aliases should be equal to the number of",
+                    "--intcounts and --juncounts files."
+                    "Default: rootname of --intcounts files."
+                ]
+            ),
+            type=str,
+            nargs="*"
+        )
+        aggregate_parser.add_argument(
+            "--ref",
+            help="Path to the coordinate-sorted indexed gene model reference BED file",
+            type=str,
+            required=True
+        )
+        self.add_common_arguments(aggregate_parser)
+
         return general_parser
 
     def resolve_path(self, selected=None):
@@ -180,24 +225,37 @@ class ArgsParser():
         set parameters in case the later ones depend on other
         parameters that should be first parsed by argparser
         """
-        pysam.index(str(self.args.bam))                       # attemts to create bai index (will raise if something went wrong)
         self.assert_common_args()
         if self.args.func == count_junctions:
             self.assert_args_for_count_junctions()
         elif self.args.func == count_introns:
             self.assert_args_for_count_introns()
-        else:
-            pass
-
-    def assert_args_for_count_introns(self):
-        self.args.strandness = IntRetCat[self.args.strandness.upper()]
+        elif self.args.func == aggregate:
+            self.assert_args_for_aggregate()
 
     def assert_args_for_count_junctions(self):
-        pass                                                 # nothing to check yet
+        self.assert_chr_names()
 
-    def assert_common_args(self):
-        self.args.tmp.mkdir(parents=True, exist_ok=True)                                  # safety measure, shouldn't fail
-        self.args.output.parent.mkdir(parents=True, exist_ok=True)                        # safety measure, shouldn't fail
+    def assert_args_for_count_introns(self):
+        self.assert_chr_names()
+        self.args.strandness = IntRetCat[self.args.strandness.upper()]
+
+    def assert_args_for_aggregate(self):
+        if len(self.args.juncounts) != len(self.args.intcounts):
+            logging.error("Number of the provided files for --juncounts and --intcounts should be equal")
+            sys.exit(1)
+        if self.args.aliases is None:
+            self.args.aliases = [location.stem for location in self.args.intcounts]
+        elif len(self.args.aliases) != len(self.args.intcounts):
+            logging.error("Number of the provided --aliases and --intcounts/--juncounts should be equal")
+            sys.exit(1)
+
+    def assert_chr_names(self):
+        pysam.index(str(self.args.bam))                      # attemts to create bai index (will raise if bam is not sorted)
         self.args.chr = get_all_bam_chr(self.args.bam, self.args.threads) \
             if len(self.args.chr) == 0 else [c if c.startswith("chr") else f"chr{c}" for c in self.args.chr]
+
+    def assert_common_args(self):
         self.args.loglevel = getattr(logging, self.args.loglevel.upper())
+        self.args.tmp.mkdir(parents=True, exist_ok=True)                                  # safety measure, shouldn't fail
+        self.args.output.parent.mkdir(parents=True, exist_ok=True)                        # safety measure, shouldn't fail

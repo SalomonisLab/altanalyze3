@@ -46,3 +46,6 @@ coverage.xml
 .hypothesis/
 cromwell-executions
 cromwell-workflow-logs
+
+# IDE
+.vscode
