@@ -2,16 +2,16 @@
 This is a generalized python module for getting data from Ensemble using Biomart server.
 """
 
-from __future__ import absolute_import, division, print_function
 import requests
-
 from future.utils import native_str
-from builtins import *
 from xml.etree import ElementTree
 import pandas as pd
 from io import StringIO
 from xml.etree.ElementTree import fromstring as xml_from_string
-
+import math
+from altanalyze3.utilities.helpers import (
+    TimeIt
+)
 
 DEFAULT_HOST = 'http://www.biomart.org'
 DEFAULT_PATH = '/biomart/martservice'
@@ -26,7 +26,6 @@ class ServerBase(object):
         path (str): Path to the biomart service on the host.
         port (str): Port to connect to on the host.
         url (str): Url used to connect to the biomart service.
-        use_cache (bool): Whether to cache requests to biomart.
     """
 
     def __init__(self, host=None, path=None, port=None):
@@ -38,9 +37,9 @@ class ServerBase(object):
             use_cache (bool): Whether to cache requests.
         """
         # Use defaults if arg is None.
-        host = host or DEFAULT_HOST
-        path = path or DEFAULT_PATH
-        port = port or DEFAULT_PORT
+        host = DEFAULT_HOST if host is None else host
+        path = DEFAULT_PATH if path is None else path
+        port = DEFAULT_PORT if port is None else port
 
         # Add http prefix and remove trailing slash.
         host = self._add_http_prefix(host)
@@ -82,8 +81,7 @@ class ServerBase(object):
 
     @staticmethod
     def _remove_trailing_slash(url):
-        if url.endswith('/'):
-            url = url[:-1]
+        url.strip("/")
         return url
 
     def get(self, **params):
@@ -121,22 +119,7 @@ class Dataset(ServerBase):
         host (str): Url of host to connect to.
         path (str): Path on the host to access to the biomart service.
         port (int): Port to use for the connection.
-        use_cache (bool): Whether to cache requests.
         virtual_schema (str): The virtual schema of the dataset.
-    Examples:
-        Directly connecting to a dataset:
-            >>> dataset = Dataset(name='hsapiens_gene_ensembl',
-            >>>                   host='http://www.ensembl.org')
-        Querying the dataset:
-            >>> dataset.query(attributes=['ensembl_gene_id',
-            >>>                           'external_gene_name'],
-            >>>               filters={'chromosome_name': ['1','2']})
-        Listing available attributes:
-            >>> dataset.attributes
-            >>> dataset.list_attributes()
-        Listing available filters:
-            >>> dataset.filters
-            >>> dataset.list_filters()
     """
 
     def __init__(self,
@@ -145,7 +128,7 @@ class Dataset(ServerBase):
                  host=None,
                  path=None,
                  port=None,
-                 virtual_schema=DEFAULT_SCHEMA):
+                 virtual_schema=DEFAULT_SCHEMA, location):
         super().__init__(host=host, path=path, port=port)
 
         self._name = name
@@ -155,6 +138,7 @@ class Dataset(ServerBase):
         self._attributes = None
         self._default_attributes = None
         self._datatype = None
+        self.location = location
 
     @property
     def name(self):
@@ -258,13 +242,20 @@ class Dataset(ServerBase):
                     description=attrib.get('description', ''),
                     default=default)
 
+    # on loop for each exon in one transcript
+    def calculate_aa_positions(self, cds_pos):
+        # check if new transcript
+
+        aa_position = math.ceil((cds_pos) / 3)
+        return aa_position
+
     def query(self,
               attributes=None,
               filters=None,
               only_unique=True,
               use_attr_names=False,
               dtypes=None,
-              datatype=None
+              datatype=None,
               ):
         """Queries the dataset to retrieve the contained data.
         Args:
@@ -314,6 +305,8 @@ class Dataset(ServerBase):
         dataset.set('name', self.name)
         dataset.set('interface', 'default')
 
+        csv_location = self.location.with_suffix(".csv")
+        logging.info(f"""Save protein coordinates reads to {csv_location}""")
         # Default to default attributes if none requested.
         if attributes is None:
             attributes = list(self.default_attributes.keys())
@@ -350,13 +343,17 @@ class Dataset(ServerBase):
         try:
             result = pd.read_csv(StringIO(response.text),
                                  sep='\t', dtype=dtypes)
-            if (datatype == "protein_coordinates"):
-                result.to_csv(
-                    'Hs_ProteinCoordinates_build_100_38.csv', sep='\t')
-            elif(datatype == "protein_feature"):
-                result.to_csv(
-                    'Hs_ProteinFeatures_build_100_38.csv', sep='\t')
-        # Type error is raised of a data type is not understood by pandas
+            # calculate the aa_nt_start and end positions
+            result = result.dropna(subset=['CDS start'])
+            result = result.dropna(subset=['CDS end'])
+            cds_start = result['CDS start'].astype(int)
+            cds_stop = result['CDS end'].astype(int)
+            result["aa_start"] = cds_start.apply(lambda x: math.ceil((x) / 3))
+            result["aa_stop"] = cds_stop.apply(lambda x: math.ceil((x) / 3))
+            with csv_location.open("w") as out_handler:
+                out_handler.write(result)
+
+        # Type error is raised of a data type is not understood by Pandas
         except TypeError as err:
             raise ValueError("Non valid data type is used in dtypes")
 
@@ -367,7 +364,6 @@ class Dataset(ServerBase):
                 for attr in attributes
             }
             result.rename(columns=column_map, inplace=True)
-
         return result
 
     @staticmethod
@@ -490,14 +486,9 @@ class Filter(object):
                 .format(self.name, self.type))
 
 
-dataset = Dataset(name='apolyacanthus_gene_ensembl',
-                  host='http://www.ensembl.org')
-
-# Protein Coordinates
-dataset.query(attributes=["ensembl_transcript_id", "ensembl_exon_id", "ensembl_peptide_id", "start_position",
-              "end_position", "transcript_start", "transcript_end", "cdd", "cdd_start", "cdd_end"], datatype='protein_coordinates')
-
-
-# Protein Features
-dataset.query(attributes=["ensembl_gene_id", "ensembl_gene_id_version", "ensembl_transcript_id_version",
-              "interpro", "interpro_description", "interpro_start", "interpro_end", "cdd", "cdd_start", "cdd_end"], datatype='protein_feature')
+def protein_coordinates(args):
+    with TimeIt():
+        dataset = Dataset(name={args.name}, host={args.host})
+        logging.info(
+            f"""Getting Data from {args.host} for given species {args.name}""")
+        dataset.query(attributes=args.attributes)
