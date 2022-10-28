@@ -4,6 +4,7 @@ import os
 import timeit
 import logging
 import multiprocessing as mp
+import gzip
 # Parallel Computing
 
 from joblib import Parallel, delayed
@@ -29,7 +30,7 @@ class   JunctionAnnotation:
         for junction_file in junction_files:
             if not junction_file.startswith('.'):
                 logging.info("Reading junction file " + ' ' + junction_file)
-                with open(junction_dir + junction_file) as f:
+                with gzip.open(junction_dir + junction_file, 'rb') as f:
                     junction_df = pd.read_csv(f,sep='\t',header=None, 
                     names=["chr", "start", "stop", "annotation", "splice_count"])
                     
@@ -204,10 +205,10 @@ if __name__ == '__main__':
     print("The start time is :",starttime)
     gene_model_all = '/Users/sin9gp/altanalyze3/tests/data/gene_model_all.txt'
     junction_dir = '/Users/sin9gp/altanalyze3/tests/data/junction_dir/'
-    subset_dir = '/Users/sin9gp/altanalyze3/tests/data/junction_dir/subset/'
+    subset_dir = '/Users/sin9gp/altanalyze3/tests/data/junction_dir/'
     junction_annot = JunctionAnnotation()
-    #junction_annot.generate_gene_model_dict(gene_model_all=gene_model_all)
-    junction_annot.each_junction_annotation(junction_dir=subset_dir,gene_model_all=gene_model_all)
+    junction_annot.generate_gene_model_dict(gene_model_all=gene_model_all)
+    #junction_annot.each_junction_annotation(junction_dir=subset_dir,gene_model_all=gene_model_all)
 
     print("The time difference is :", timeit.default_timer() - starttime)
 
