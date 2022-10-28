@@ -1,0 +1,22 @@
+alignment_file:
+  class: File
+  location: "../data/hg19_pe.bam"
+  secondaryFiles:
+  - class: File
+    location: "../data/hg19_pe.bam.bai"
+reference_file:
+  class: File
+  location: "../data/hg19_ref_introns.bed.gz"
+  secondaryFiles:
+  - class: File
+    location: "../data/hg19_ref_introns.bed.gz.tbi"
+chrom_list:
+- "1"
+- "2"
+- "3"
+overlap_bp: 15
+strandness: "forward"
+log_level: "debug"
+threads: 2
+processes: 2
+output_prefix: "int"

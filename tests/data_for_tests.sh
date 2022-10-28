@@ -14,3 +14,4 @@ tabix -p bed hg19_ref_introns.bed.gz
 
 wget -q --show-progress https://github.com/michael-kotliar/altanalyze3_data/raw/main/data/hg19_pe.bam -O hg19_pe.bam
 wget -q --show-progress https://github.com/michael-kotliar/altanalyze3_data/raw/main/data/hg19_pe.bam.bai -O hg19_pe.bam.bai
+cp hg19_pe.bam hg19_pe_not_indexed.bam

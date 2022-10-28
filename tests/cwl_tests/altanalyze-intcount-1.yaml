@@ -1,0 +1,12 @@
+alignment_file:
+  class: File
+  location: "../data/hg19_pe.bam"
+  secondaryFiles:
+  - class: File
+    location: "../data/hg19_pe.bam.bai"
+reference_file:
+  class: File
+  location: "../data/hg19_ref_introns.bed.gz"
+  secondaryFiles:
+  - class: File
+    location: "../data/hg19_ref_introns.bed.gz.tbi"
