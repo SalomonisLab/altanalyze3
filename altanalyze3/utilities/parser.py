@@ -4,11 +4,8 @@ import pathlib
 import argparse
 from altanalyze3.utilities.helpers import get_version
 from altanalyze3.components.intron_count.main import count_introns
-<<<<<<< HEAD
-from altanalyze3.components.annotation.main import protein_coordinates
-=======
 from altanalyze3.components.junction_count.main import count_junctions
->>>>>>> master
+# from altanalyze3.components.junction_count.main import protein_coordinates
 from altanalyze3.utilities.io import get_all_bam_chr
 from altanalyze3.utilities.constants import (
     IntRetCat,
@@ -31,19 +28,11 @@ class ArgsParser():
 
     def add_common_arguments(self, parser):
         self.common_arguments = [
-<<<<<<< HEAD
-            ("--loglevel", "Logging level. Default: info", str,
-             "info", ["fatal", "error", "warning", "info", "debug"]),
-            ("--threads", "Number of threads to run in parallel where applicable", int, 1, None),
-            ("--cpus", "Number of processes to run in parallel where applicable", int, 1, None),
-            ("--output", "Output prefix", str, "results", None)
-=======
             ("--loglevel", "Logging level. Default: info", str, "info", ["fatal", "error", "warning", "info", "debug"]),
             ("--threads", "Number of threads to run in parallel where applicable. Default: 1", int, 1, None),
             ("--cpus", "Number of processes to run in parallel where applicable. Default: 1", int, 1, None),
             ("--tmp", "Temporary files location. Default: tmp", str, "tmp", None),
             ("--output", "Output prefix. Default: results", str, "results", None)
->>>>>>> master
         ]
         for param in self.common_arguments:
             parser.add_argument(
@@ -162,7 +151,6 @@ class ArgsParser():
             help="Export processed reads into the BAM file. Default: False",
             action="store_true"
         )
-<<<<<<< HEAD
         self.add_common_arguments(intron_parser)
 
         # Protein Domain Annotation parser
@@ -171,31 +159,30 @@ class ArgsParser():
             parents=[parent_parser],
             help="Get Protein to Domain annotations"
         )
-        protein_coordinates_parser.set_defaults(func=protein_coordinates)
-        protein_coordinates_parser.add_argument(
-            "--name",
-            help="name of species eg. apolyacanthus_gene_ensembl",
-            type=str,
-            required=True,
-        )
-        protein_coordinates_parser.add_argument(
-            "--host",
-            help="Select the host from where you want to import data",
-            type=str,
-            default="https://www.ensembl.org"
-        )
-        protein_coordinates_parser.add_argument(
-            "--attributes",
-            help="Export certain coordinates or features from Ensembl",
-            nargs="*",
-            default=["ensembl_transcript_id", "ensembl_exon_id", "ensembl_peptide_id", "start_position",
-                     "end_position", "transcript_start", "transcript_end", "cds_start", "cds_end"]
-        )
-        self.add_common_arguments(protein_coordinates_parser)
+        #TO-DO
+        # protein_coordinates_parser.set_defaults(func=protein_coordinates)
+        # protein_coordinates_parser.add_argument(
+        #     "--name",
+        #     help="name of species eg. apolyacanthus_gene_ensembl",
+        #     type=str,
+        #     required=True,
+        # )
+        # protein_coordinates_parser.add_argument(
+        #     "--host",
+        #     help="Select the host from where you want to import data",
+        #     type=str,
+        #     default="https://www.ensembl.org"
+        # )
+        # protein_coordinates_parser.add_argument(
+        #     "--attributes",
+        #     help="Export certain coordinates or features from Ensembl",
+        #     nargs="*",
+        #     default=["ensembl_transcript_id", "ensembl_exon_id", "ensembl_peptide_id", "start_position",
+        #              "end_position", "transcript_start", "transcript_end", "cds_start", "cds_end"]
+        # )
+        # self.add_common_arguments(protein_coordinates_parser)
 
-=======
         self.add_common_arguments(junction_parser)
->>>>>>> master
         return general_parser
 
     def resolve_path(self, selected=None):
