@@ -197,6 +197,9 @@ class   JunctionAnnotation:
         print("The time difference is :", timeit.default_timer() - starttime)
 
         
+        # each_junction_annotation() needs to be modified to take only chr,start,stop. 
+        # This code is assuming that junction files are indexed by chr,start,stop
+
 
         def parallelize_annotations_process(self,junction_dir, gene_model_all,cpu_pool_count):
             pool = mp.Pool(cpu_pool_count)
@@ -210,8 +213,10 @@ class   JunctionAnnotation:
                     with open(junction_dir + junction_file) as f:    
                         for i, row in enumerate(f):
                             pool.apply_async(self.each_junction_annotation, args = (i,row,start,stop), callback=self.collect_results(annotation_keys,annotations))
+            pool.close()
+            pool.join()
 
-
+            
 if __name__ == '__main__':
     cpu_pool_count = mp.cpu_count()
     logging.basicConfig(level=logging.INFO)
