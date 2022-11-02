@@ -66,4 +66,4 @@ def sort_index_junctions(filename):
 #when these two subprocesses are finished, 
 #tabix_index(out_zipped) 
 
-tabix_index("/Users/sin9gp/altanalyze3/tests/data/junction_dir/subset/Cal27P5-1__junction.bed")
+tabix_index_junctions("/Users/sin9gp/altanalyze3/tests/data/junction_dir/subset/Cal27P5-1__junction.bed")
