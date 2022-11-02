@@ -45,6 +45,17 @@ DATA_FOLDER = pathlib.Path(__file__).resolve().parents[1].joinpath("data")
             [
                 "chr1", "chr2", "chr3"
             ]
+        ),
+        (
+            [
+                "juncount",
+                "--bam", "hg19_pe.bam",
+                "--ref", "hg19_ref_introns.bed.gz",
+                "--chr", "1", "2", "3"
+            ],
+            [
+                "chr1", "chr2", "chr3"
+            ]
         )
     ]
 )

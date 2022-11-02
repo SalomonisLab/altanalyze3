@@ -1,0 +1,6 @@
+alignment_file:
+  class: File
+  location: "../data/hg19_pe.bam"
+  secondaryFiles:
+  - class: File
+    location: "../data/hg19_pe.bam.bai"

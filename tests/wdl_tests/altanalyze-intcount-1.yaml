@@ -1,0 +1,4 @@
+IntCountWorkflow.alignment_file: "/Users/kot4or/workspaces/nathan/altanalyze3/tests/data/hg19_pe.bam"
+IntCountWorkflow.alignment_file_index: "/Users/kot4or/workspaces/nathan/altanalyze3/tests/data/hg19_pe.bam.bai"
+IntCountWorkflow.reference_file: "/Users/kot4or/workspaces/nathan/altanalyze3/tests/data/hg19_ref_introns.bed.gz"
+IntCountWorkflow.reference_file_index: "/Users/kot4or/workspaces/nathan/altanalyze3/tests/data/hg19_ref_introns.bed.gz.tbi"

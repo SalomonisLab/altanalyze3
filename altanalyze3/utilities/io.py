@@ -26,6 +26,14 @@ def get_all_ref_chr(location, threads):
         return ref_handler.contigs
 
 
+def get_correct_contig(contig, handler):   # Attempting to fetch both types of choromosome names
+    try:
+        handler.fetch(contig)
+        return contig
+    except ValueError:
+        return contig.lstrip("chr")
+
+
 def skip_bam_read(read):
     """
     Returns true of read should be skipped based on the

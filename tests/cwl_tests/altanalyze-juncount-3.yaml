@@ -1,0 +1,10 @@
+alignment_file:
+  class: File
+  location: "../data/hg19_pe.bam"
+  secondaryFiles:
+  - class: File
+    location: "../data/hg19_pe.bam.bai"
+chrom_list:
+- "chr1"
+- "chr2"
+- "chr3"
