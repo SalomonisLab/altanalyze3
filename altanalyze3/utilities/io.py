@@ -25,6 +25,14 @@ def get_all_ref_chr(location, threads):
         return ref_handler.contigs
 
 
+def get_indexed_bed(location):
+    compressed_location = location.with_suffix(".bed.gz")
+    pysam.tabix_compress(location, compressed_location)
+    location.unlink()                                            # removing not compressed BED file
+    pysam.tabix_index(str(compressed_location), preset="bed")    # index file will be saved alongside the compressed_location
+    return compressed_location
+
+
 def get_correct_contig(contig, handler):   # Attempting to fetch both types of choromosome names
     try:
         handler.fetch(contig)

@@ -61,3 +61,9 @@ IntRetRawData = namedtuple(
     "IntRetRawData",
     "contig intron_start intron_end intron_name intron_strand read_start read_end read_strand xs_strand read_name read_1 read_2"
 )
+
+
+Annotation = namedtuple(
+    "Annotation",
+    "gene exon strand position name"
+)

@@ -163,14 +163,14 @@ class ArgsParser():
         aggregate_parser.set_defaults(func=aggregate)
         aggregate_parser.add_argument(
             "--juncounts",
-            help="Path the junction counts files. Number and order should correspond to --intcounts",
+            help="Path the junction counts files. Coordinates are treated as 0-based. Number and order should correspond to --intcounts",
             type=str,
             nargs="+",
             required=True   # safety measure
         )
         aggregate_parser.add_argument(
             "--intcounts",
-            help="Path the intron counts files. Number and order should correspond to --juncounts",
+            help="Path the intron counts files. Coordinates are treated as 0-based. Number and order should correspond to --juncounts",
             type=str,
             nargs="+",
             required=True   # safety measure
@@ -190,9 +190,16 @@ class ArgsParser():
         )
         aggregate_parser.add_argument(
             "--ref",
-            help="Path to the coordinate-sorted indexed gene model reference BED file",
+            help="Path to the gene model reference file. Coordinates are treated as 1-based.",
             type=str,
             required=True
+        )
+        aggregate_parser.add_argument(
+            "--chr",
+            help="Select chromosomes to process. Default: only main chromosomes",
+            type=str,
+            nargs="*",
+            default=MAIN_CRH
         )
         self.add_common_arguments(aggregate_parser)
 
@@ -241,6 +248,10 @@ class ArgsParser():
         self.args.strandness = IntRetCat[self.args.strandness.upper()]
 
     def assert_args_for_aggregate(self):
+        # we can't check if the chromosomes from the --chr list are present in our
+        # input data without loading all the files, so we will correct
+        # only chr prefix
+        self.args.chr = [c if c.startswith("chr") else f"chr{c}" for c in self.args.chr]
         if len(self.args.juncounts) != len(self.args.intcounts):
             logging.error("Number of the provided files for --juncounts and --intcounts should be equal")
             sys.exit(1)
