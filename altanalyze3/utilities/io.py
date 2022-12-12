@@ -1,4 +1,6 @@
 import pysam
+import pandas
+import anndata
 
 
 def guard_chr(function):
@@ -62,3 +64,18 @@ def is_bam_paired(location, threads):
             if skip_bam_read(read):
                 continue
             return read.is_paired
+
+
+def export_counts_df_to_csr_anndata(counts_df, location, counts_columns=None, metadata_columns=None, sparse_dtype=None, fill_value=None):
+    counts_columns = counts_df.columns.values if counts_columns is None else counts_columns
+    sparse_dtype = "uint32" if sparse_dtype is None else sparse_dtype
+    fill_value = 0 if fill_value is None else fill_value
+    csr_matrix = counts_df.loc[:, counts_columns].astype(pandas.SparseDtype(sparse_dtype, fill_value)).T.sparse.to_coo().tocsr()
+    adata = anndata.AnnData(csr_matrix, dtype=sparse_dtype)
+    adata.obs_names = counts_columns
+    adata.var_names = counts_df.index.to_frame(index=False).astype(str)[["chr", "start", "end"]].agg("-".join, axis=1)
+    if metadata_columns is not None:
+        adata_var = counts_df.copy().loc[:, metadata_columns]
+        adata_var.index = adata.var.index.copy()
+        adata.var = adata_var
+    adata.write(location)

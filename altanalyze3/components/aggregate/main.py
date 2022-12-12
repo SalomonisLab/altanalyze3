@@ -19,7 +19,8 @@ from altanalyze3.utilities.constants import (
 from altanalyze3.utilities.io import (
     get_all_ref_chr,
     get_correct_contig,
-    get_indexed_bed
+    get_indexed_bed,
+    export_counts_df_to_csr_anndata
 )
 
 
@@ -258,7 +259,7 @@ def load_reference_data(args, shift_start_by=None):
     references_df = pandas.read_csv(
         args.ref,
         usecols=[0, 1, 2, 3, 4, 5],
-        names=["gene", "exon", "chr", "strand", "start", "end"],
+        names=["gene", "chr", "strand", "exon", "start", "end"],
         converters={"chr": lambda_chr_converter},
         skiprows=1,
         sep="\t",
@@ -291,7 +292,7 @@ def load_reference_data(args, shift_start_by=None):
     return references_location
 
 
-def get_jun_annotation_results(args, jobs):
+def get_jun_anndata(args, jobs):
     collected_annotations_df = None
     for job in jobs:
         logging.info(f"""Loading annotated junctions coordinates from {job.location}""")
@@ -311,25 +312,17 @@ def get_jun_annotation_results(args, jobs):
 
     logging.info(f"""Loading pickled junctions counts from {args.jun_counts_location}""")
     counts_df = pandas.read_pickle(args.jun_counts_location)
+    counts_columns = counts_df.columns.values                                                   # before we added a name column
     counts_df = counts_df.join(collected_annotations_df, how="left")
-
-    var_index = counts_df.index.to_frame(index=False).astype(str)
-    var_index.insert(0, "name", counts_df["name"].values)
-    var_index = var_index["name"] + " " + var_index["chr"] + ":" + var_index["start"] + "-" + var_index["end"]
-    counts_df.drop(columns=["name"], inplace=True)
-
-    logging.info("Converting junction counts to csr matrix")
-    jun_adata = anndata.AnnData(
-        counts_df.T.sparse.to_coo().tocsr(),                                        # csr matrix with intervals as columns, and samples as rows
-        obs=pandas.DataFrame(index=counts_df.columns),                              # how is it different from creating a columns with the name sample?
-        var=pandas.DataFrame(index=var_index),                                      # the same question as above
-        dtype="uint32"
-    )
 
     jun_adata_location = args.tmp.joinpath(get_tmp_suffix()).with_suffix(".h5ad")
     logging.info(f"""Exporting junctions counts to {jun_adata_location}""")
-    jun_adata.write(jun_adata_location)                                             # no need to compress temporary file (should be faster)
-
+    export_counts_df_to_csr_anndata(
+        counts_df=counts_df,
+        location=jun_adata_location,
+        counts_columns=counts_columns,
+        metadata_columns=["name"]
+    )
     return jun_adata_location
 
 
@@ -348,7 +341,7 @@ def aggregate(args):
         logging.info(f"""Span {len(jun_annotation_jobs)} junctions annotation job(s) between {args.cpus} CPU(s)""")
         with multiprocessing.Pool(args.cpus) as pool:
             pool.map(partial(process_jun_annotation, args), jun_annotation_jobs)
-        jun_adata_location = get_jun_annotation_results(args, jun_annotation_jobs)
+        jun_adata_location = get_jun_anndata(args, jun_annotation_jobs)
         logging.info(f"""Annotated junctions are saved to {jun_adata_location}""")
 
         logging.info("Processing introns counts")
