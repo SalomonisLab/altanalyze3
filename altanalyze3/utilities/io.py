@@ -82,9 +82,11 @@ def get_reference_as_bed(args, shift_start_by=None, only_introns=None):
         skiprows=1,
         sep="\t",
     )
+    logging.debug(f"""Loaded {len(references_df.index)} lines""")
     if only_introns:
         logging.info("Filtering references to include only introns")
         references_df = references_df[references_df["exon"].str.contains("^I")]
+        logging.debug(f"""After filtering {len(references_df.index)} lines remained""")
 
     if shift_start_by is not None:
         logging.debug(f"""Shifting start coordinates by {shift_start_by}""")
