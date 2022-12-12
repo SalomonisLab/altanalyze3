@@ -2,7 +2,6 @@ import sys
 import pysam
 import numpy
 import pandas
-import anndata
 import logging
 import multiprocessing
 from functools import partial
@@ -39,7 +38,7 @@ def get_jun_annotation_jobs(args):
             location=args.tmp.joinpath(get_tmp_suffix())
         )
         for contig in get_all_ref_chr(args.jun_coords_location, args.threads)
-            if contig in get_all_ref_chr(args.references, args.threads) and contig in args.chr
+            if contig in get_all_ref_chr(args.ref, args.threads) and contig in args.chr
     ]
 
 
@@ -159,7 +158,7 @@ def process_jun_annotation(args, job):
     start_annotations = get_annotation(
         job=job,
         query_location=args.jun_starts_location,
-        references_location=args.references,
+        references_location=args.ref,
         threads=args.threads
     )
 
@@ -167,7 +166,7 @@ def process_jun_annotation(args, job):
     end_annotations = get_annotation(
         job=job,
         query_location=args.jun_ends_location,
-        references_location=args.references,
+        references_location=args.ref,
         threads=args.threads
     )
 
@@ -254,44 +253,6 @@ def load_query_data(query_locations, query_aliases, selected_chr, tmp_location, 
     return (counts_location, coords_location, starts_location, ends_location)
 
 
-def load_reference_data(args, shift_start_by=None):
-    logging.info(f"""Loading references from {args.ref}""")
-    references_df = pandas.read_csv(
-        args.ref,
-        usecols=[0, 1, 2, 3, 4, 5],
-        names=["gene", "chr", "strand", "exon", "start", "end"],
-        converters={"chr": lambda_chr_converter},
-        skiprows=1,
-        sep="\t",
-    )
-    
-    if shift_start_by is not None:
-        logging.debug("Shifting start coordinates by {shift_start_by}")
-        references_df["start"] = references_df["start"] + shift_start_by                         # to correct 1-based coordinates
-
-    references_df.set_index(["chr", "start", "end"], inplace=True)
-    references_df = references_df[references_df.index.get_level_values("chr").isin(args.chr)]    # subset only to those chromosomes that are provided in --chr
-
-    logging.info("Sorting references by coordinates in ascending order")
-    references_df.sort_index(ascending=True, inplace=True)                                       # this may potentially mix overlapping genes from different strands
-    references_df["name"] = references_df["gene"] + ":" + references_df["exon"]
-    references_df["score"] = 0                                                                   # dummy column to correspond to BED format
-    references_df.drop(["gene", "exon"], axis=1, inplace=True)                                   # droping unused columns
-
-    references_location = args.tmp.joinpath(get_tmp_suffix()).with_suffix(".bed")
-    logging.info(f"""Saving references as a temporary BED file to {references_location}""")
-    references_df.to_csv(
-        references_location,
-        sep="\t",
-        columns=["name", "score", "strand"],                                                     # we have "chr", "start", "end" in the index
-        header=False,
-        index=True
-    )
-    references_location = get_indexed_bed(references_location)
-
-    return references_location
-
-
 def get_jun_anndata(args, jobs):
     collected_annotations_df = None
     for job in jobs:
@@ -336,7 +297,6 @@ def aggregate(args):
             tmp_location=args.tmp,
             save_coords=True
         )
-        args.references = load_reference_data(args, shift_start_by=-1)        # need to shift start position to make 0-based half-open coordinates
         jun_annotation_jobs = get_jun_annotation_jobs(args)
         logging.info(f"""Span {len(jun_annotation_jobs)} junctions annotation job(s) between {args.cpus} CPU(s)""")
         with multiprocessing.Pool(args.cpus) as pool:
@@ -358,4 +318,3 @@ def aggregate(args):
         # args.jun_coords_location.unlink()
         # args.jun_starts_location.unlink()
         # args.jun_ends_location.unlink()
-        # args.references.unlink()

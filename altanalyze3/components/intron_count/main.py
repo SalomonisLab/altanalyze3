@@ -22,24 +22,6 @@ from altanalyze3.utilities.io import (
 )
 
 
-###############################################################################################################################################################
-# CURRENT INSTRUCTIONS
-#
-# To obtain properly formatted coordinate sorted indexed gene model reference BED file
-# that includes only introns, do the following actions with your AltAnalyze formatted
-# Hs_Ensembl_exon.txt (for example) file.
-#
-# 1. Make sure you have these columns in you input Hs_Ensembl_exon.txt file
-#    head -n 1 Hs_Ensembl_exon.txt
-#    gene	exon-id	chromosome	strand	exon-region-start(s)	exon-region-stop(s)	constitutive_call	ens_exon_ids	splice_events	splice_junctions
-#
-# 2. Convert to BED format excluding all not intron records
-#    cat Hs_Ensembl_exon.txt | grep -v "gene" | awk '$2 ~ /^I/ {print $3"\t"$5"\t"$6"\t"$2"-"$1"\t"0"\t"$4}' | sort -k1,1 -k2,2n -k3,3n | bgzip > hs_ref.bed.gz
-#    tabix -p bed hs_ref.bed.gz
-#
-###############################################################################################################################################################
-
-
 class IntronOverlaps:
     """
     Class to store counters for each inron overlapped with at least one read.
@@ -167,7 +149,7 @@ class Counter:
                 logging.debug(f"""{cached_data}""")
                 return IntRetCat.DISCARD
         return check
-    
+
     @guard_distance
     @guard_strandness
     def update_overlaps(self, current_data, cached_data=None):
@@ -274,8 +256,8 @@ class Counter:
         logging.info(f"""Save counts to {self.location}""")
         with self.location.open("w") as out_handler:
             for contig, start, end, name, strand, p5, p3 in self.overlaps:
-                out_handler.write(f"{contig}\t{start-self.span-1}\t{start+self.span-1}\t{name}-{start}\t{p5}\t{strand}\n")
-                out_handler.write(f"{contig}\t{end-self.span}\t{end+self.span}\t{name}-{end}\t{p3}\t{strand}\n")
+                out_handler.write(f"{contig}\t{start-self.span-1}\t{start+self.span-1}\t{name}_{start}\t{p5}\t{strand}\n")
+                out_handler.write(f"{contig}\t{end-self.span}\t{end+self.span}\t{name}_{end}\t{p3}\t{strand}\n")
 
     def export_reads(self):
         bam_location = self.location.with_suffix(".bam")
