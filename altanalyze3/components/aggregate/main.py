@@ -251,7 +251,7 @@ def load_counts_data(query_locations, query_aliases, selected_chr, tmp_location,
     return (counts_location, coords_location, starts_location, ends_location)
 
 
-def get_jun_anndata(args, jobs):
+def export_to_anndata(args, jobs, location):
     collected_annotations_df = None
     for job in jobs:
         logging.info(f"""Loading annotated junctions coordinates from {job.location}""")
@@ -267,22 +267,27 @@ def get_jun_anndata(args, jobs):
         logging.debug(f"""Removing {job.location}""")
         job.location.unlink()
 
-    collected_annotations_df.sort_index(ascending=True, inplace=True)
-
     logging.info(f"""Loading pickled junctions counts from {args.jun_counts_location}""")
     counts_df = pandas.read_pickle(args.jun_counts_location)
     counts_columns = counts_df.columns.values                                                   # before we added a name column
+    logging.info("Joining pickled junctions counts with annotations")
     counts_df = counts_df.join(collected_annotations_df, how="left")
 
-    jun_adata_location = args.tmp.joinpath(get_tmp_suffix()).with_suffix(".h5ad")
-    logging.info(f"""Exporting junctions counts to {jun_adata_location}""")
+    logging.info(f"""Loading pickled introns counts from {args.int_counts_location}""")
+    int_counts_df = pandas.read_pickle(args.int_counts_location)
+    int_counts_df["annotation"] = int_counts_df.index.to_frame(index=False).name.values
+    if "strand" not in int_counts_df.columns:
+        int_counts_df["strand"] = "."                                                           # need to update intcount to save strand information
+    logging.info("Concatenating annotated junctions and introns counts from")
+    counts_df = pandas.concat([counts_df, int_counts_df])
+    counts_df.sort_index(ascending=True, inplace=True)
+
     export_counts_df_to_csr_anndata(
         counts_df=counts_df,
-        location=jun_adata_location,
+        location=location,
         counts_columns=counts_columns,
         metadata_columns=["annotation", "strand"]
     )
-    return jun_adata_location
 
 
 def aggregate(args):
@@ -298,8 +303,6 @@ def aggregate(args):
     logging.info(f"""Span {len(jun_annotation_jobs)} junctions annotation job(s) between {args.cpus} CPU(s)""")
     with multiprocessing.Pool(args.cpus) as pool:
         pool.map(partial(process_jun_annotation, args), jun_annotation_jobs)
-    jun_adata_location = get_jun_anndata(args, jun_annotation_jobs)
-    logging.info(f"""Annotated junctions are saved to {jun_adata_location}""")
 
     logging.info("Processing introns counts")
     args.int_counts_location, _, _, _ = load_counts_data(
@@ -309,6 +312,11 @@ def aggregate(args):
         tmp_location=args.tmp,
         save_bed=False
     )
+
+    adata_location = args.output.with_suffix(".h5ad")
+    logging.info(f"""Exporting aggregated counts to {adata_location}""")
+    export_to_anndata(args, jun_annotation_jobs, adata_location)
+
 
     # logging.debug("Removing temporary files")
     # args.jun_counts_location.unlink()
