@@ -2,6 +2,7 @@ import sys
 import pysam
 import numpy
 import pandas
+import shutil
 import logging
 import multiprocessing
 from functools import partial
@@ -317,9 +318,5 @@ def aggregate(args):
     logging.info(f"""Exporting aggregated counts to {adata_location}""")
     export_to_anndata(args, jun_annotation_jobs, adata_location)
 
-
-    # logging.debug("Removing temporary files")
-    # args.jun_counts_location.unlink()
-    # args.jun_coords_location.unlink()
-    # args.jun_starts_location.unlink()
-    # args.jun_ends_location.unlink()
+    logging.debug("Removing temporary directory")
+    shutil.rmtree(args.tmp)
