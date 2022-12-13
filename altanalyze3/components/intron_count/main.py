@@ -9,10 +9,7 @@ from altanalyze3.utilities.constants import (
     IntRetRawData,
     Job
 )
-from altanalyze3.utilities.helpers import (
-    get_tmp_suffix,
-    TimeIt
-)
+from altanalyze3.utilities.helpers import get_tmp_suffix
 from altanalyze3.utilities.io import (
     get_all_bam_chr,
     get_all_ref_chr,
@@ -342,9 +339,8 @@ def collect_results(args, jobs):
 
 
 def count_introns(args):
-    with TimeIt():
-        jobs = get_jobs(args)
-        logging.info(f"""Span {len(jobs)} job(s) between {args.cpus} CPU(s)""")
-        with multiprocessing.Pool(args.cpus) as pool:
-            pool.map(partial(process_contig, args), jobs)
-        collect_results(args, jobs)
+    jobs = get_jobs(args)
+    logging.info(f"""Span {len(jobs)} job(s) between {args.cpus} CPU(s)""")
+    with multiprocessing.Pool(args.cpus) as pool:
+        pool.map(partial(process_contig, args), jobs)
+    collect_results(args, jobs)

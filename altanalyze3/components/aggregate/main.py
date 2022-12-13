@@ -8,8 +8,7 @@ from functools import partial
 from altanalyze3.utilities.logger import setup_logger
 from altanalyze3.utilities.helpers import (
     lambda_chr_converter,
-    get_tmp_suffix,
-    TimeIt
+    get_tmp_suffix
 )
 from altanalyze3.utilities.constants import (
     Job,
@@ -66,7 +65,7 @@ def get_annotation(job, query_location, references_location, threads=None):
                             exon=current_exon,
                             strand=current_reference.strand,
                             position=current_position,
-                            name=int(current_query.name)
+                            order=int(current_query.score)
                         )
                         break
                     elif current_position > current_reference.end:
@@ -81,7 +80,7 @@ def get_annotation(job, query_location, references_location, threads=None):
                                 exon=numpy.nan,
                                 strand=numpy.nan,
                                 position=numpy.nan,
-                                name=int(current_query.name)
+                                order=int(current_query.score)
                             )
                             run_out_of_references = True
                     elif current_type == "E":
@@ -94,7 +93,7 @@ def get_annotation(job, query_location, references_location, threads=None):
                                     exon=current_exon,
                                     strand=current_reference.strand,
                                     position=0,
-                                    name=int(current_query.name)
+                                    order=int(current_query.score)
                                 )
                             else:
                                 logging.debug("Not exact match")
@@ -103,7 +102,7 @@ def get_annotation(job, query_location, references_location, threads=None):
                                     exon=current_exon,
                                     strand=current_reference.strand,
                                     position=current_position,
-                                    name=int(current_query.name)
+                                    order=int(current_query.score)
                                 )
                             break
                     elif current_type == "I":
@@ -114,7 +113,7 @@ def get_annotation(job, query_location, references_location, threads=None):
                                 exon=current_exon,
                                 strand=current_reference.strand,
                                 position=current_position,
-                                name=int(current_query.name)
+                                order=int(current_query.score)
                             )
                             break
                         elif current_position == current_reference.start or current_position == current_reference.end:
@@ -129,7 +128,7 @@ def get_annotation(job, query_location, references_location, threads=None):
                                     exon=numpy.nan,
                                     strand=numpy.nan,
                                     position=numpy.nan,
-                                    name=int(current_query.name)
+                                    order=int(current_query.score)
                                 )
                                 run_out_of_references = True
                         else:
@@ -140,7 +139,7 @@ def get_annotation(job, query_location, references_location, threads=None):
                 logging.debug(f"""Assigning {current_annotation}""")
                 collected_annotations.append(current_annotation)
 
-    collected_annotations.sort(key = lambda i:i.name)    # need to sort the results so the order corresponds to the jun_coords_location
+    collected_annotations.sort(key = lambda i:i.order)    # need to sort the results so the order corresponds to the jun_coords_location
     return collected_annotations
 
 
@@ -178,26 +177,26 @@ def process_jun_annotation(args, job):
                 start_shift = "" if start_annotation.position == 0 else f"""_{start_annotation.position}"""
                 end_shift = "" if end_annotation.position == 0 else f"""_{end_annotation.position}"""
                 gene = (f"""{start_annotation.gene}:""", "") if start_annotation.gene == end_annotation.gene else (f"""{start_annotation.gene}:""", f"""{end_annotation.gene}:""")
-                name = f"""{gene[0]}{start_annotation.exon}{start_shift}-{gene[1]}{end_annotation.exon}{end_shift}"""
+                annotation = f"""{gene[0]}{start_annotation.exon}{start_shift}-{gene[1]}{end_annotation.exon}{end_shift}"""
                 strand = start_annotation.strand if start_annotation.strand == start_annotation.strand else "."
                 output_stream.write(
-                    f"""{job.contig}\t{current_coords.start}\t{current_coords.end}\t{name}\t0\t{strand}\n"""
+                    f"""{job.contig}\t{current_coords.start}\t{current_coords.end}\t{current_coords.name}\t{annotation}\t{strand}\n"""   # no reason to keep it BED-formatted
                 )
 
 
-def load_query_data(query_locations, query_aliases, selected_chr, tmp_location, save_coords=None):
-    save_coords = False if save_coords is None else save_coords
+def load_counts_data(query_locations, query_aliases, selected_chr, tmp_location, save_bed=None):
+    save_bed = False if save_bed is None else save_bed
     counts_df = None
     for query_location, query_alias in zip(query_locations, query_aliases):
         logging.info(f"""Loading counts from {query_location} as {query_alias}""")
         current_df = pandas.read_csv(
             query_location,
-            usecols=[0, 1, 2, 4],
-            names=["chr", "start", "end", query_alias],
+            usecols = [0, 1, 2, 3, 4],
+            names = ["chr", "start", "end", "name", query_alias],
             converters={"chr": lambda_chr_converter},
             sep="\t",
         )
-        current_df.set_index(["chr", "start", "end"], inplace=True)
+        current_df.set_index(["chr", "start", "end", "name"], inplace=True)
         current_df = current_df[current_df.index.get_level_values("chr").isin(selected_chr)]                         # subset only to those chromosomes that are provided in --chr
         counts_df = current_df if counts_df is None else counts_df.join(current_df, how="outer").fillna(0)
         counts_df = counts_df.astype(pandas.SparseDtype("uint32", 0))                                                # saves memory and is required before exporting to h5ad
@@ -210,8 +209,9 @@ def load_query_data(query_locations, query_aliases, selected_chr, tmp_location, 
     counts_df.to_pickle(counts_location)
 
     coords_location, starts_location, ends_location = None, None, None
-    if save_coords:
+    if save_bed:                                                                                                     # no need to allow to save BED when we alreade have intron annotations
         coords_df = counts_df.index.to_frame(index=False)
+        coords_df["score"] = range(0, len(coords_df.index))
         coords_location = tmp_location.joinpath(get_tmp_suffix()).with_suffix(".bed")
         logging.info(f"""Saving only coordinates as a temporary BED file to {coords_location}""")
         coords_df.to_csv(
@@ -223,9 +223,8 @@ def load_query_data(query_locations, query_aliases, selected_chr, tmp_location, 
         coords_location = get_indexed_bed(coords_location)
 
         start_coords_df = coords_df.copy()
-        start_coords_df["name"] = range(0, len(start_coords_df.index))
         start_coords_df["end"] = start_coords_df["start"]
-        start_coords_df.sort_values(by=["chr", "start", "end"], ascending=True, inplace=True)
+        start_coords_df.sort_values(by=["chr", "start", "end", "name"], ascending=True, inplace=True)
         starts_location = tmp_location.joinpath(get_tmp_suffix()).with_suffix(".bed")
         logging.info(f"""Saving only start coordinates as a temporary BED file to {starts_location}""")
         start_coords_df.to_csv(
@@ -237,9 +236,8 @@ def load_query_data(query_locations, query_aliases, selected_chr, tmp_location, 
         starts_location = get_indexed_bed(starts_location)
 
         end_coords_df = coords_df.copy()
-        end_coords_df["name"] = range(0, len(end_coords_df.index))
         end_coords_df["start"] = end_coords_df["end"]
-        end_coords_df.sort_values(by=["chr", "start", "end"], ascending=True, inplace=True)
+        end_coords_df.sort_values(by=["chr", "start", "end", "name"], ascending=True, inplace=True)
         ends_location = tmp_location.joinpath(get_tmp_suffix()).with_suffix(".bed")
         logging.info(f"""Saving only end coordinates as a temporary BED file to {ends_location}""")
         end_coords_df.to_csv(
@@ -259,12 +257,12 @@ def get_jun_anndata(args, jobs):
         logging.info(f"""Loading annotated junctions coordinates from {job.location}""")
         annotations_df = pandas.read_csv(
             job.location,
-            usecols=[0, 1, 2, 3],
-            names=["chr", "start", "end", "name"],
+            usecols=[0, 1, 2, 3, 4, 5],
+            names=["chr", "start", "end", "name", "annotation", "strand"],
             converters={"chr": lambda_chr_converter},
             sep="\t",
         )
-        annotations_df.set_index(["chr", "start", "end"], inplace=True)
+        annotations_df.set_index(["chr", "start", "end", "name"], inplace=True)
         collected_annotations_df = annotations_df if collected_annotations_df is None else pandas.concat([collected_annotations_df, annotations_df])
         logging.debug(f"""Removing {job.location}""")
         job.location.unlink()
@@ -282,39 +280,38 @@ def get_jun_anndata(args, jobs):
         counts_df=counts_df,
         location=jun_adata_location,
         counts_columns=counts_columns,
-        metadata_columns=["name"]
+        metadata_columns=["annotation", "strand"]
     )
     return jun_adata_location
 
 
 def aggregate(args):
-    with TimeIt():
-        logging.info("Processing junctions counts")
-        args.jun_counts_location, args.jun_coords_location, args.jun_starts_location, args.jun_ends_location = load_query_data(
-            query_locations=args.juncounts,
-            query_aliases=args.aliases,
-            selected_chr=args.chr,
-            tmp_location=args.tmp,
-            save_coords=True
-        )
-        jun_annotation_jobs = get_jun_annotation_jobs(args)
-        logging.info(f"""Span {len(jun_annotation_jobs)} junctions annotation job(s) between {args.cpus} CPU(s)""")
-        with multiprocessing.Pool(args.cpus) as pool:
-            pool.map(partial(process_jun_annotation, args), jun_annotation_jobs)
-        jun_adata_location = get_jun_anndata(args, jun_annotation_jobs)
-        logging.info(f"""Annotated junctions are saved to {jun_adata_location}""")
+    logging.info("Processing junctions counts")
+    args.jun_counts_location, args.jun_coords_location, args.jun_starts_location, args.jun_ends_location = load_counts_data(
+        query_locations=args.juncounts,
+        query_aliases=args.aliases,
+        selected_chr=args.chr,
+        tmp_location=args.tmp,
+        save_bed=True
+    )
+    jun_annotation_jobs = get_jun_annotation_jobs(args)
+    logging.info(f"""Span {len(jun_annotation_jobs)} junctions annotation job(s) between {args.cpus} CPU(s)""")
+    with multiprocessing.Pool(args.cpus) as pool:
+        pool.map(partial(process_jun_annotation, args), jun_annotation_jobs)
+    jun_adata_location = get_jun_anndata(args, jun_annotation_jobs)
+    logging.info(f"""Annotated junctions are saved to {jun_adata_location}""")
 
-        logging.info("Processing introns counts")
-        args.int_counts_location, _, _, _ = load_query_data(
-            query_locations=args.intcounts,
-            query_aliases=args.aliases,
-            selected_chr=args.chr,
-            tmp_location=args.tmp,
-            save_coords=False                    # no need to save intron coordinates as we are not going to annotate them
-        )
+    logging.info("Processing introns counts")
+    args.int_counts_location, _, _, _ = load_counts_data(
+        query_locations=args.intcounts,
+        query_aliases=args.aliases,
+        selected_chr=args.chr,
+        tmp_location=args.tmp,
+        save_bed=False
+    )
 
-        # logging.debug("Removing temporary files")
-        # args.jun_counts_location.unlink()
-        # args.jun_coords_location.unlink()
-        # args.jun_starts_location.unlink()
-        # args.jun_ends_location.unlink()
+    # logging.debug("Removing temporary files")
+    # args.jun_counts_location.unlink()
+    # args.jun_coords_location.unlink()
+    # args.jun_starts_location.unlink()
+    # args.jun_ends_location.unlink()

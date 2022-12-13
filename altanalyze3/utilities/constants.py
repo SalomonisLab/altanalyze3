@@ -65,5 +65,5 @@ IntRetRawData = namedtuple(
 
 Annotation = namedtuple(
     "Annotation",
-    "gene exon strand position name"
+    "gene exon strand position order"
 )

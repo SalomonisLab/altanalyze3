@@ -3,7 +3,6 @@ import pysam
 import logging
 import pathlib
 import argparse
-import multiprocessing
 from altanalyze3.utilities.logger import setup_logger
 from altanalyze3.utilities.helpers import get_version
 from altanalyze3.components.intron_count.main import count_introns
@@ -275,6 +274,6 @@ class ArgsParser():
 
     def assert_common_args(self):
         self.args.loglevel = getattr(logging, self.args.loglevel.upper())
-        setup_logger(multiprocessing.get_logger(), self.args.loglevel)
+        setup_logger(logging.root, self.args.loglevel)
         self.args.tmp.mkdir(parents=True, exist_ok=True)                                  # safety measure, shouldn't fail
         self.args.output.parent.mkdir(parents=True, exist_ok=True)                        # safety measure, shouldn't fail
