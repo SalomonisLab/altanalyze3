@@ -1,0 +1,4 @@
+{
+    "JunCountWorkflow.alignment_file": "../data/hg19_pe.bam",
+    "JunCountWorkflow.alignment_file_index": "../data/hg19_pe.bam.bai"
+}

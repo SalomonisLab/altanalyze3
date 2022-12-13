@@ -1,0 +1,7 @@
+{
+    "JunCountWorkflow.alignment_file": "../data/hg19_pe.bam",
+    "JunCountWorkflow.alignment_file_index": "../data/hg19_pe.bam.bai",
+    "JunCountWorkflow.threads": 2,
+    "JunCountWorkflow.processes": 2,
+    "JunCountWorkflow.output_prefix": "junc"
+}

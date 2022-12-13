@@ -9,10 +9,7 @@ from altanalyze3.utilities.io import (
 )
 from altanalyze3.utilities.logger import setup_logger
 from altanalyze3.utilities.constants import Job
-from altanalyze3.utilities.helpers import (
-    get_tmp_suffix,
-    TimeIt
-)
+from altanalyze3.utilities.helpers import get_tmp_suffix
 
 
 def process_contig(args, job):
@@ -52,9 +49,8 @@ def get_jobs(args):
 
 
 def count_junctions(args):
-    with TimeIt():
-        jobs = get_jobs(args)
-        logging.info(f"""Span {len(jobs)} job(s) between {args.cpus} CPU(s)""")
-        with multiprocessing.Pool(args.cpus) as pool:
-            pool.map(partial(process_contig, args), jobs)
-        collect_results(args, jobs)
+    jobs = get_jobs(args)
+    logging.info(f"""Span {len(jobs)} job(s) between {args.cpus} CPU(s)""")
+    with multiprocessing.Pool(args.cpus) as pool:
+        pool.map(partial(process_contig, args), jobs)
+    collect_results(args, jobs)

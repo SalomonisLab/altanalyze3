@@ -6,6 +6,9 @@ import hashlib
 import pkg_resources
 
 
+lambda_chr_converter = lambda c: c if c.startswith("chr") else f"chr{c}"
+
+
 def get_version():
     """
     Returns current version of the package if it's installed

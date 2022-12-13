@@ -44,3 +44,8 @@ nosetests.xml
 coverage.xml
 *,cover
 .hypothesis/
+cromwell-executions
+cromwell-workflow-logs
+
+# IDE
+.vscode

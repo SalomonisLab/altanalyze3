@@ -25,7 +25,8 @@ setup(
         exclude=["docs", "tests", "cwls", "tmp"]
     ),
     install_requires=[
-        "pysam"
+        "pysam",
+        "bioframe"
     ],
     zip_safe=False,
     scripts=["altanalyze3/bin/altanalyze3"],

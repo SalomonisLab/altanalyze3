@@ -6,6 +6,14 @@ requirements:
 - class: DockerRequirement
   dockerPull: altanalyze:latest
 - class: InlineJavascriptRequirement
+  expressionLib:
+  - var get_output_prefix = function(ext) {
+        if (inputs.output_prefix) {
+          return inputs.output_prefix+ext;
+        }
+        var root = inputs.alignment_file.basename.split('.').slice(0,-1).join('.');
+        return (root == "")?inputs.alignment_file.basename+ext:root+ext;
+    };
 - class: InitialWorkDirRequirement
   listing: |
     ${
@@ -76,8 +84,10 @@ inputs:
 
   output_prefix:
     type: string?
+    default: ""
     inputBinding:
       prefix: "--output"
+      valueFrom: $(get_output_prefix("_jun"))
     doc: |
       Output prefix.
       Default: results
@@ -99,8 +109,8 @@ outputs:
 
 baseCommand: ["altanalyze3", "juncount"]
 
-stdout: juncount_stdout.log
-stderr: juncount_stderr.log
+stdout: $(get_output_prefix("_jun_stdout.log"))
+stderr: $(get_output_prefix("_jun_stderr.log"))
 
 
 $namespaces:
