@@ -19,7 +19,7 @@ from altanalyze3.utilities.io import (
     get_all_ref_chr,
     get_correct_contig,
     get_indexed_bed,
-    export_counts_df_to_csr_anndata
+    export_counts_to_anndata
 )
 
 
@@ -221,7 +221,7 @@ def load_counts_data(query_locations, query_aliases, selected_chr, tmp_location,
             header=False,
             index=False
         )
-        coords_location = get_indexed_bed(coords_location)
+        coords_location = get_indexed_bed(coords_location, keep_original=False, force=True)
 
         start_coords_df = coords_df.copy()
         start_coords_df["end"] = start_coords_df["start"]
@@ -234,7 +234,7 @@ def load_counts_data(query_locations, query_aliases, selected_chr, tmp_location,
             header=False,
             index=False
         )
-        starts_location = get_indexed_bed(starts_location)
+        starts_location = get_indexed_bed(starts_location, keep_original=False, force=True)
 
         end_coords_df = coords_df.copy()
         end_coords_df["start"] = end_coords_df["end"]
@@ -247,7 +247,7 @@ def load_counts_data(query_locations, query_aliases, selected_chr, tmp_location,
             header=False,
             index=False
         )
-        ends_location = get_indexed_bed(ends_location)
+        ends_location = get_indexed_bed(ends_location, keep_original=False, force=True)
 
     return (counts_location, coords_location, starts_location, ends_location)
 
@@ -283,7 +283,7 @@ def export_to_anndata(args, jobs, location):
     counts_df = pandas.concat([counts_df, int_counts_df])
     counts_df.sort_index(ascending=True, inplace=True)
 
-    export_counts_df_to_csr_anndata(
+    export_counts_to_anndata(
         counts_df=counts_df,
         location=location,
         counts_columns=counts_columns,

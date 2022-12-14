@@ -2,10 +2,7 @@ import pysam
 import pandas
 import anndata
 import logging
-from altanalyze3.utilities.helpers import (
-    lambda_chr_converter,
-    get_tmp_suffix
-)
+from altanalyze3.utilities.helpers import lambda_chr_converter
 
 
 def guard_chr(function):
@@ -32,12 +29,15 @@ def get_all_ref_chr(location, threads):
         return ref_handler.contigs
 
 
-def get_indexed_bed(location):
-    compressed_location = location.with_suffix(".bed.gz")
-    pysam.tabix_compress(location, compressed_location)
-    location.unlink()                                            # removing not compressed BED file
-    pysam.tabix_index(str(compressed_location), preset="bed")    # index file will be saved alongside the compressed_location
-    return compressed_location
+def get_indexed_bed(location, keep_original=None, force=None):
+    keep_original = True if keep_original is None else keep_original
+    force = False if force is None else force
+    return pysam.tabix_index(
+        str(location),
+        preset="bed",
+        keep_original=keep_original,
+        force=force
+    )
 
 
 def get_correct_contig(contig, handler):   # Attempting to fetch both types of choromosome names
@@ -71,11 +71,11 @@ def is_bam_paired(location, threads):
             return read.is_paired
 
 
-def get_reference_as_bed(args, shift_start_by=None, only_introns=None):
+def get_indexed_reference(location, selected_chr_list=None, shift_start_by=None, only_introns=None):
     only_introns = False if only_introns is None else only_introns
-    logging.info(f"""Loading references from {args.ref}""")
+    logging.info(f"""Loading references from {location}""")
     references_df = pandas.read_csv(
-        args.ref,
+        location,
         usecols=[0, 1, 2, 3, 4, 5],
         names=["gene", "chr", "strand", "exon", "start", "end"],
         converters={"chr": lambda_chr_converter},
@@ -83,6 +83,11 @@ def get_reference_as_bed(args, shift_start_by=None, only_introns=None):
         sep="\t",
     )
     logging.debug(f"""Loaded {len(references_df.index)} lines""")
+    
+    selected_chr_list = references_df.chr.unique().tolist()
+    if selected_chr_list is not None:
+        selected_chr_list = list(map(lambda_chr_converter, selected_chr_list))
+
     if only_introns:
         logging.info("Filtering references to include only introns")
         references_df = references_df[references_df["exon"].str.contains("^I")]
@@ -90,32 +95,31 @@ def get_reference_as_bed(args, shift_start_by=None, only_introns=None):
 
     if shift_start_by is not None:
         logging.debug(f"""Shifting start coordinates by {shift_start_by}""")
-        references_df["start"] = references_df["start"] + shift_start_by                         # to correct 1-based coordinates
+        references_df["start"] = references_df["start"] + shift_start_by                                  # to correct 1-based coordinates
 
     references_df.set_index(["chr", "start", "end"], inplace=True)
-    references_df = references_df[references_df.index.get_level_values("chr").isin(args.chr)]    # subset only to those chromosomes that are provided in --chr
+    references_df = references_df[references_df.index.get_level_values("chr").isin(selected_chr_list)]    # subset to the selected chromosomes
 
     logging.info("Sorting references by coordinates in ascending order")
-    references_df.sort_index(ascending=True, inplace=True)                                       # this may potentially mix overlapping genes from different strands
+    references_df.sort_index(ascending=True, inplace=True)                                                # this may potentially mix overlapping genes from different strands
     references_df["name"] = references_df["gene"] + ":" + references_df["exon"]
-    references_df["score"] = 0                                                                   # dummy column to correspond to BED format
-    references_df.drop(["gene", "exon"], axis=1, inplace=True)                                   # droping unused columns
+    references_df["score"] = 0                                                                            # dummy column to correspond to BED format
+    references_df.drop(["gene", "exon"], axis=1, inplace=True)                                            # droping unused columns
 
-    references_location = args.tmp.joinpath(get_tmp_suffix()).with_suffix(".bed")
-    logging.info(f"""Saving references as a temporary BED file to {references_location}""")
+    target_location = location.with_suffix(".bed")
+    logging.info(f"""Saving references as a BED file to {target_location}""")
     references_df.to_csv(
-        references_location,
+        target_location,
         sep="\t",
-        columns=["name", "score", "strand"],                                                     # we have "chr", "start", "end" in the index
+        columns=["name", "score", "strand"],                                                              # we have "chr", "start", "end" in the index
         header=False,
         index=True
     )
-    references_location = get_indexed_bed(references_location)
 
-    return references_location
+    return get_indexed_bed(target_location, keep_original=False, force=True)
 
 
-def export_counts_df_to_csr_anndata(counts_df, location, counts_columns=None, metadata_columns=None, sparse_dtype=None, fill_value=None):
+def export_counts_to_anndata(counts_df, location, counts_columns=None, metadata_columns=None, sparse_dtype=None, fill_value=None):
     counts_columns = counts_df.columns.values if counts_columns is None else counts_columns
     sparse_dtype = "uint32" if sparse_dtype is None else sparse_dtype
     fill_value = 0 if fill_value is None else fill_value

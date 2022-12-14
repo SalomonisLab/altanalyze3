@@ -14,7 +14,7 @@ DATA_FOLDER = pathlib.Path(__file__).resolve().parents[1].joinpath("data")
         (
             [
                 "juncount",
-                "--bam", "hg19_pe.bam",
+                "--bam", "Cal27P5-1.bam",
                 "--chr", "chr1", "chr2", "chr3"
             ],
             [
@@ -24,7 +24,7 @@ DATA_FOLDER = pathlib.Path(__file__).resolve().parents[1].joinpath("data")
         (
             [
                 "juncount",
-                "--bam", "hg19_pe.bam",
+                "--bam", "Cal27P5-1.bam",
                 "--chr", "1", "2", "3"
             ],
             [
@@ -34,7 +34,7 @@ DATA_FOLDER = pathlib.Path(__file__).resolve().parents[1].joinpath("data")
         (
             [
                 "juncount",
-                "--bam", "hg19_pe.bam",
+                "--bam", "Cal27P5-1.bam",
                 "--chr", "chr1", "chr2", "chr3", "chr99"
             ],
             [
@@ -44,7 +44,7 @@ DATA_FOLDER = pathlib.Path(__file__).resolve().parents[1].joinpath("data")
         (
             [
                 "juncount",
-                "--bam", "hg19_pe.bam",
+                "--bam", "Cal27P5-1.bam",
                 "--chr", "chr99"
             ],
             []
@@ -52,25 +52,25 @@ DATA_FOLDER = pathlib.Path(__file__).resolve().parents[1].joinpath("data")
         (
             [
                 "juncount",
-                "--bam", "hg19_pe.bam"
+                "--bam", "Cal27P5-1.bam"
             ],
             [
                 "chr1", "chr10", "chr11", "chr12", "chr13", "chr14", "chr15",
                 "chr16", "chr17", "chr18", "chr19", "chr2", "chr20", "chr21",
                 "chr22", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8", "chr9",
-                "chrM", "chrX", "chrY"
+                "chrX", "chrY"
             ]
         ),
         (
             [
                 "juncount",
-                "--bam", "hg19_pe_not_indexed.bam"
+                "--bam", "Cal27P5-1-copy.bam"
             ],
             [
                 "chr1", "chr10", "chr11", "chr12", "chr13", "chr14", "chr15",
                 "chr16", "chr17", "chr18", "chr19", "chr2", "chr20", "chr21",
                 "chr22", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8", "chr9",
-                "chrM", "chrX", "chrY"
+                "chrX", "chrY"
             ]
         )
     ]
@@ -88,31 +88,31 @@ def test_get_jobs(monkeypatch, args, control_chr):
         (
             [
                 "juncount",
-                "--bam", "hg19_pe.bam",
+                "--bam", "Cal27P5-1.bam",
                 "--chr", "chr1", "chr2", "chr3"
             ],
-            "c07bd4635e7ef81751286ab2153876b4"
+            "b36a9ae685b3d90bbbeac4a16216c7e2"
         ),
         (
             [
                 "juncount",
-                "--bam", "hg19_pe.bam",
+                "--bam", "Cal27P5-1.bam",
                 "--chr", "1", "2", "3"
             ],
-            "c07bd4635e7ef81751286ab2153876b4"
+            "b36a9ae685b3d90bbbeac4a16216c7e2"
         ),
         (
             [
                 "juncount",
-                "--bam", "hg19_pe.bam",
+                "--bam", "Cal27P5-1.bam",
                 "--chr", "chr1", "chr2", "chr3", "chr99"
             ],
-            "c07bd4635e7ef81751286ab2153876b4"
+            "b36a9ae685b3d90bbbeac4a16216c7e2"
         ),
         (
             [
                 "juncount",
-                "--bam", "hg19_pe.bam",
+                "--bam", "Cal27P5-1.bam",
                 "--chr", "chr99"
             ],
             "d41d8cd98f00b204e9800998ecf8427e"
@@ -120,9 +120,9 @@ def test_get_jobs(monkeypatch, args, control_chr):
         (
             [
                 "juncount",
-                "--bam", "hg19_pe.bam"
+                "--bam", "Cal27P5-1.bam"
             ],
-            "3296e12115560e73f9d9dd2b062a61d3"
+            "4a3629ca257483547f1c1d035883f942"
         )
     ]
 )

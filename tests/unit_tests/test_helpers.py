@@ -12,7 +12,7 @@ DATA_FOLDER = pathlib.Path(__file__).resolve().parents[1].joinpath("data")
 @pytest.mark.parametrize(
     "location, control_md5_sum",
     [
-        ("hg19_ref.tsv", "cb3093cbaeb5a27d95fc09add352641a")
+        ("gene_model_all.tsv", "2b8531420d7916b9da21102586a96015")
     ]
 )
 def test_get_md5_sum(location, control_md5_sum):
