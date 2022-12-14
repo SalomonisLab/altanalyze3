@@ -1,15 +1,12 @@
 alignment_file:
   class: File
-  location: "../data/hg19_pe.bam"
+  location: "../data/Cal27P5-1.bam"
   secondaryFiles:
   - class: File
-    location: "../data/hg19_pe.bam.bai"
+    location: "../data/Cal27P5-1.bam.bai"
 reference_file:
   class: File
-  location: "../data/hg19_ref_introns.bed.gz"
-  secondaryFiles:
-  - class: File
-    location: "../data/hg19_ref_introns.bed.gz.tbi"
+  location: "../data/gene_model_all.tsv"
 chrom_list:
 - "chr1"
 - "chr2"

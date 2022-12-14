@@ -21,10 +21,8 @@ inputs:
 
   reference_file:
     type: File
-    secondaryFiles:
-    - .tbi
     doc: |
-      Path to the coordinate-sorted indexed gene model reference BED file
+      Path to the gene model reference file. Coordinates are treated as 1-based.
 
   overlap_bp:
     type: int?

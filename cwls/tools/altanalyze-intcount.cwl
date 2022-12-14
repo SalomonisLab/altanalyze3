@@ -22,6 +22,11 @@ requirements:
           "entry": inputs.alignment_file,
           "entryname": inputs.alignment_file.basename,
           "writable": true
+        },
+        {
+          "entry": inputs.reference_file,
+          "entryname": inputs.reference_file.basename,
+          "writable": true
         }
       ]
     }
@@ -41,12 +46,10 @@ inputs:
 
   reference_file:
     type: File
-    secondaryFiles:
-    - .tbi
     inputBinding:
       prefix: "--ref"
     doc: |
-      Path to the coordinate-sorted indexed gene model reference BED file
+      Path to the gene model reference file. Coordinates are treated as 1-based.
 
   overlap_bp:
     type: int?
@@ -219,7 +222,7 @@ s:about: |
   optional arguments:
     -h, --help            show this help message and exit
     --bam BAM             Path to the coordinate-sorted indexed BAM file
-    --ref REF             Path to the coordinate-sorted indexed gene model reference BED file
+    --ref REF             Path to the gene model reference file. Coordinates are treated as 1-based.
     --span SPAN           5' and 3' overlap that read should have over a splice-site to be
                           counted
     --strandness {auto,forward,reverse,unstranded}
