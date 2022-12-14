@@ -91,7 +91,7 @@ def test_get_jobs(monkeypatch, args, control_chr):
                 "--bam", "Cal27P5-1.bam",
                 "--chr", "chr1", "chr2", "chr3"
             ],
-            "b36a9ae685b3d90bbbeac4a16216c7e2"
+            "849c5a8479892e291e17af2aaa09dedd"
         ),
         (
             [
@@ -99,7 +99,7 @@ def test_get_jobs(monkeypatch, args, control_chr):
                 "--bam", "Cal27P5-1.bam",
                 "--chr", "1", "2", "3"
             ],
-            "b36a9ae685b3d90bbbeac4a16216c7e2"
+            "849c5a8479892e291e17af2aaa09dedd"
         ),
         (
             [
@@ -107,7 +107,7 @@ def test_get_jobs(monkeypatch, args, control_chr):
                 "--bam", "Cal27P5-1.bam",
                 "--chr", "chr1", "chr2", "chr3", "chr99"
             ],
-            "b36a9ae685b3d90bbbeac4a16216c7e2"
+            "849c5a8479892e291e17af2aaa09dedd"
         ),
         (
             [
@@ -122,7 +122,7 @@ def test_get_jobs(monkeypatch, args, control_chr):
                 "juncount",
                 "--bam", "Cal27P5-1.bam"
             ],
-            "4a3629ca257483547f1c1d035883f942"
+            "24f6a6ac5f831c7709102c235db03ec5"
         )
     ]
 )

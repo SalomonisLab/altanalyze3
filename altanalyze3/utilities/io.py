@@ -139,7 +139,7 @@ def export_counts_to_anndata(counts_df, location, counts_columns=None, metadata_
     csr_matrix = counts_df.loc[:, counts_columns].astype(pandas.SparseDtype(sparse_dtype, fill_value)).T.sparse.to_coo().tocsr()
     adata = anndata.AnnData(csr_matrix, dtype=sparse_dtype)
     adata.obs_names = counts_columns
-    adata.var_names = counts_df.index.to_frame(index=False).astype(str)[counts_df.index.names].agg("-".join, axis=1)
+    adata.var_names = counts_df.index.to_frame(index=False).astype(str)[["chr", "start", "end"]].agg("-".join, axis=1)
     if metadata_columns is not None:
         adata_var = counts_df.copy().loc[:, metadata_columns]
         adata_var.index = adata.var.index.copy()
