@@ -6,14 +6,12 @@ from altanalyze3.utilities.helpers import lambda_chr_converter
 
 
 def guard_chr(function):
-    def prefix(c):
-        return c if c.startswith("chr") else f"chr{c}"
     def wrapper(location, threads):
         raw_res = function(location, threads)
         if isinstance(raw_res, list):
-            return [prefix(c) for c in raw_res]
+            return list(map(lambda_chr_converter, raw_res))
         else:
-            return prefix(raw_res)
+            return lambda_chr_converter(raw_res)
     return wrapper
 
 
@@ -60,10 +58,11 @@ def skip_bam_read(read):
            (read.is_paired and not read.is_proper_pair)
 
 
-def is_bam_paired(location, threads):
+def is_bam_paired(location, threads=None):
     """
-    Returns true of alignments in the BAM file are paired-end
+    Returns true if alignments in the BAM file are paired-end
     """
+    threads = 1 if threads is None else threads
     with pysam.AlignmentFile(location, mode="rb", threads=threads) as bam_handler:
         for read in bam_handler.fetch():                                                 # this fetches only mapped reads
             if skip_bam_read(read):
@@ -71,7 +70,16 @@ def is_bam_paired(location, threads):
             return read.is_paired
 
 
-def get_indexed_reference(location, selected_chr_list=None, shift_start_by=None, only_introns=None):
+def is_bam_indexed(location, threads=None):
+    """
+    Returns true if BAM file is indexed
+    """
+    threads = 1 if threads is None else threads
+    with pysam.AlignmentFile(location, mode="rb", threads=threads) as bam_handler:
+        return bam_handler.has_index()
+
+
+def get_indexed_reference(location, selected_chr=None, shift_start_by=None, only_introns=None):
     only_introns = False if only_introns is None else only_introns
     logging.info(f"""Loading references from {location}""")
     references_df = pandas.read_csv(
@@ -83,10 +91,14 @@ def get_indexed_reference(location, selected_chr_list=None, shift_start_by=None,
         sep="\t",
     )
     logging.debug(f"""Loaded {len(references_df.index)} lines""")
-    
-    selected_chr_list = references_df.chr.unique().tolist()
-    if selected_chr_list is not None:
-        selected_chr_list = list(map(lambda_chr_converter, selected_chr_list))
+
+    selected_chr = references_df.chr.unique().tolist()
+
+    if selected_chr is not None:
+        if isinstance(selected_chr, list):
+            selected_chr = list(map(lambda_chr_converter, selected_chr))
+        else:
+            selected_chr = lambda_chr_converter(selected_chr)
 
     if only_introns:
         logging.info("Filtering references to include only introns")
@@ -98,7 +110,7 @@ def get_indexed_reference(location, selected_chr_list=None, shift_start_by=None,
         references_df["start"] = references_df["start"] + shift_start_by                                  # to correct 1-based coordinates
 
     references_df.set_index(["chr", "start", "end"], inplace=True)
-    references_df = references_df[references_df.index.get_level_values("chr").isin(selected_chr_list)]    # subset to the selected chromosomes
+    references_df = references_df[references_df.index.get_level_values("chr").isin(selected_chr)]    # subset to the selected chromosomes
 
     logging.info("Sorting references by coordinates in ascending order")
     references_df.sort_index(ascending=True, inplace=True)                                                # this may potentially mix overlapping genes from different strands

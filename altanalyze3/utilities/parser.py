@@ -4,13 +4,16 @@ import logging
 import pathlib
 import argparse
 from altanalyze3.utilities.logger import setup_logger
-from altanalyze3.utilities.helpers import get_version
+from altanalyze3.utilities.helpers import (
+    get_version,
+    lambda_chr_converter
+)
 from altanalyze3.components.intron_count.main import count_introns
 from altanalyze3.components.junction_count.main import count_junctions
 from altanalyze3.components.aggregate.main import aggregate
 from altanalyze3.utilities.io import (
-    get_all_bam_chr,
-    get_indexed_reference
+    get_indexed_reference,
+    is_bam_indexed
 )
 from altanalyze3.utilities.constants import (
     IntRetCat,
@@ -245,26 +248,21 @@ class ArgsParser():
             self.assert_args_for_aggregate()
 
     def assert_args_for_count_junctions(self):
-        self.assert_chr_names()
+        pass
 
     def assert_args_for_count_introns(self):
-        self.assert_chr_names()
         self.args.ref = get_indexed_reference(
             location=self.args.ref,
-            selected_chr_list=self.args.chr,
+            selected_chr=self.args.chr,
             shift_start_by=-1,
             only_introns=True
         )
         self.args.strandness = IntRetCat[self.args.strandness.upper()]
 
     def assert_args_for_aggregate(self):
-        # we can't check if the chromosomes from the --chr list are present in our
-        # input data without loading all the files, so we will correct
-        # only chr prefix
-        self.args.chr = [c if c.startswith("chr") else f"chr{c}" for c in self.args.chr]
         self.args.ref = get_indexed_reference(
             location=self.args.ref,
-            selected_chr_list=self.args.chr,
+            selected_chr=self.args.chr,
             shift_start_by=-1,
             only_introns=False
         )
@@ -277,13 +275,16 @@ class ArgsParser():
             logging.error("Number of the provided --aliases and --intcounts/--juncounts should be equal")
             sys.exit(1)
 
-    def assert_chr_names(self):
-        pysam.index(str(self.args.bam))                      # attemts to create bai index (will raise if bam is not sorted)
-        self.args.chr = get_all_bam_chr(self.args.bam, self.args.threads) \
-            if len(self.args.chr) == 0 else [c if c.startswith("chr") else f"chr{c}" for c in self.args.chr]
-
     def assert_common_args(self):
         self.args.loglevel = getattr(logging, self.args.loglevel.upper())
         setup_logger(logging.root, self.args.loglevel)
-        self.args.tmp.mkdir(parents=True, exist_ok=True)                                  # safety measure, shouldn't fail
-        self.args.output.parent.mkdir(parents=True, exist_ok=True)                        # safety measure, shouldn't fail
+        self.args.tmp.mkdir(parents=True, exist_ok=True)                          # safety measure, shouldn't fail
+        self.args.output.parent.mkdir(parents=True, exist_ok=True)                # safety measure, shouldn't fail
+        self.args.chr = list(map(lambda_chr_converter, self.args.chr))
+        if hasattr(self.args, "bam"):
+            if not is_bam_indexed(self.args.bam):
+                try:
+                    pysam.index(str(self.args.bam))                               # attempts to create bai index (will raise if bam is not sorted)
+                except pysam.SamtoolsError:
+                    logging.error(f"""Failed to index {self.args.bam}. Exiting""")
+                    sys.exit(1)
