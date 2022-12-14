@@ -1,4 +1,5 @@
 import pysam
+import shutil
 import logging
 import multiprocessing
 from functools import partial
@@ -24,7 +25,7 @@ def process_contig(args, job):
             introns = handler.find_introns((r for r in handler.fetch(get_correct_contig(job.contig, handler))))           # need () instead of [] to use as iterator
             for position, score in introns.items():
                 output_stream.write(
-                    f"""{job.contig}\t{position[0]}\t{position[1]}\tJUNC:{job.contig}-{position[0]}-{position[1]}\t{score}\n"""
+                    f"""{job.contig}\t{position[0]}\t{position[1]}\tJUNC:{job.contig}-{position[0]}-{position[1]}\t{score}\t.\n"""
                 )
 
 
@@ -54,3 +55,6 @@ def count_junctions(args):
     with multiprocessing.Pool(args.cpus) as pool:
         pool.map(partial(process_contig, args), jobs)
     collect_results(args, jobs)
+
+    logging.debug("Removing temporary directory")
+    shutil.rmtree(args.tmp)
