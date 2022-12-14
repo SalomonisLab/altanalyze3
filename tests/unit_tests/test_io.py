@@ -4,6 +4,7 @@ from altanalyze3.utilities.io import (
     get_all_bam_chr,
     get_all_ref_chr,
     is_bam_paired,
+    is_bam_indexed,
     get_indexed_reference
 )
 
@@ -65,3 +66,14 @@ def test_get_all_bam_chr(location, control_bam_chr):                           #
 def test_is_bam_paired(location, control_is_paired):                           # this will also check skip_bam_read function
     calculated_is_paired = is_bam_paired(DATA_FOLDER.joinpath(location), 1)
     assert calculated_is_paired == control_is_paired
+
+
+@pytest.mark.parametrize(
+    "location, control_is_indexed",
+    [
+        ("Cal27P5-1.bam", True)
+    ]
+)
+def test_is_bam_indexed(location, control_is_indexed):
+    calculated_is_indexed = is_bam_indexed(DATA_FOLDER.joinpath(location), 1)
+    assert calculated_is_indexed == control_is_indexed
