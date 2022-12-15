@@ -87,8 +87,14 @@ def get_indexed_reference(location, selected_chr=None, shift_start_by=None, only
         usecols=[0, 1, 2, 3, 4, 5],
         names=["gene", "chr", "strand", "exon", "start", "end"],
         converters={"chr": lambda_chr_converter},
-        skiprows=1,
-        sep="\t",
+        dtype = {
+            "gene": "string",
+            "strand": "category",
+            "exon": "category",
+            "start": "uint32",
+            "end": "uint32"
+        },
+        sep="\t"
     )
     logging.debug(f"""Loaded {len(references_df.index)} lines""")
 

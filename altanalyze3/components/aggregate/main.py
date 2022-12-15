@@ -194,8 +194,15 @@ def load_counts_data(query_locations, query_aliases, selected_chr, tmp_location,
             query_location,
             usecols = [0, 1, 2, 3, 4, 5],
             names = ["chr", "start", "end", "name", query_alias, "strand"],
-            converters={"chr": lambda_chr_converter},
-            sep="\t",
+            converters = {"chr": lambda_chr_converter},
+            dtype = {
+                "start": "uint32",
+                "end": "uint32",
+                "name": "string",
+                query_alias: "uint32",
+                "strand": "category"
+            },
+            sep="\t"
         )
         current_df.set_index(["chr", "start", "end", "name", "strand"], inplace=True)
         current_df = current_df[current_df.index.get_level_values("chr").isin(selected_chr)]                         # subset only to those chromosomes that are provided in --chr
