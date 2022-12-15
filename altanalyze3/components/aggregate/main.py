@@ -19,7 +19,7 @@ from altanalyze3.utilities.io import (
     get_all_ref_chr,
     get_correct_contig,
     get_indexed_bed,
-    export_counts_df_to_csr_anndata
+    export_counts_to_anndata
 )
 
 
@@ -192,12 +192,12 @@ def load_counts_data(query_locations, query_aliases, selected_chr, tmp_location,
         logging.info(f"""Loading counts from {query_location} as {query_alias}""")
         current_df = pandas.read_csv(
             query_location,
-            usecols = [0, 1, 2, 3, 4],
-            names = ["chr", "start", "end", "name", query_alias],
+            usecols = [0, 1, 2, 3, 4, 5],
+            names = ["chr", "start", "end", "name", query_alias, "strand"],
             converters={"chr": lambda_chr_converter},
             sep="\t",
         )
-        current_df.set_index(["chr", "start", "end", "name"], inplace=True)
+        current_df.set_index(["chr", "start", "end", "name", "strand"], inplace=True)
         current_df = current_df[current_df.index.get_level_values("chr").isin(selected_chr)]                         # subset only to those chromosomes that are provided in --chr
         counts_df = current_df if counts_df is None else counts_df.join(current_df, how="outer").fillna(0)
         counts_df = counts_df.astype(pandas.SparseDtype("uint32", 0))                                                # saves memory and is required before exporting to h5ad
@@ -219,35 +219,38 @@ def load_counts_data(query_locations, query_aliases, selected_chr, tmp_location,
             coords_location,
             sep="\t",
             header=False,
-            index=False
+            index=False,
+            columns=["chr", "start", "end", "name", "score", "strand"]
         )
-        coords_location = get_indexed_bed(coords_location)
+        coords_location = get_indexed_bed(coords_location, keep_original=False, force=True)
 
         start_coords_df = coords_df.copy()
         start_coords_df["end"] = start_coords_df["start"]
-        start_coords_df.sort_values(by=["chr", "start", "end", "name"], ascending=True, inplace=True)
+        start_coords_df.sort_values(by=["chr", "start", "end", "name", "strand"], ascending=True, inplace=True)
         starts_location = tmp_location.joinpath(get_tmp_suffix()).with_suffix(".bed")
         logging.info(f"""Saving only start coordinates as a temporary BED file to {starts_location}""")
         start_coords_df.to_csv(
             starts_location,
             sep="\t",
             header=False,
-            index=False
+            index=False,
+            columns=["chr", "start", "end", "name", "score", "strand"]
         )
-        starts_location = get_indexed_bed(starts_location)
+        starts_location = get_indexed_bed(starts_location, keep_original=False, force=True)
 
         end_coords_df = coords_df.copy()
         end_coords_df["start"] = end_coords_df["end"]
-        end_coords_df.sort_values(by=["chr", "start", "end", "name"], ascending=True, inplace=True)
+        end_coords_df.sort_values(by=["chr", "start", "end", "name", "strand"], ascending=True, inplace=True)
         ends_location = tmp_location.joinpath(get_tmp_suffix()).with_suffix(".bed")
         logging.info(f"""Saving only end coordinates as a temporary BED file to {ends_location}""")
         end_coords_df.to_csv(
             ends_location,
             sep="\t",
             header=False,
-            index=False
+            index=False,
+            columns=["chr", "start", "end", "name", "score", "strand"]
         )
-        ends_location = get_indexed_bed(ends_location)
+        ends_location = get_indexed_bed(ends_location, keep_original=False, force=True)
 
     return (counts_location, coords_location, starts_location, ends_location)
 
@@ -277,13 +280,11 @@ def export_to_anndata(args, jobs, location):
     logging.info(f"""Loading pickled introns counts from {args.int_counts_location}""")
     int_counts_df = pandas.read_pickle(args.int_counts_location)
     int_counts_df["annotation"] = int_counts_df.index.to_frame(index=False).name.values
-    if "strand" not in int_counts_df.columns:
-        int_counts_df["strand"] = "."                                                           # need to update intcount to save strand information
     logging.info("Concatenating annotated junctions and introns counts from")
     counts_df = pandas.concat([counts_df, int_counts_df])
     counts_df.sort_index(ascending=True, inplace=True)
 
-    export_counts_df_to_csr_anndata(
+    export_counts_to_anndata(
         counts_df=counts_df,
         location=location,
         counts_columns=counts_columns,

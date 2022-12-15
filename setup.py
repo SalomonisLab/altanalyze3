@@ -26,7 +26,7 @@ setup(
     ),
     install_requires=[
         "pysam",
-        "bioframe"
+        "anndata"
     ],
     zip_safe=False,
     scripts=["altanalyze3/bin/altanalyze3"],

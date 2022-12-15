@@ -27,7 +27,8 @@ MAIN_CRH = [
     "chr22",
     "chrX",
     "chrY",
-    "chrM"
+    "chrM",
+    "chrMT"    # somehow in the gene model file the chromosome is named MT
 ]
 
 

@@ -5,7 +5,6 @@ workflow IntCountWorkflow {
         File alignment_file
         File alignment_file_index
         File reference_file
-        File reference_file_index
         Int? overlap_bp
         String? strandness
         Int? threads
@@ -17,7 +16,6 @@ workflow IntCountWorkflow {
         alignment_file = alignment_file,
         alignment_file_index = alignment_file_index,
         reference_file = reference_file,
-        reference_file_index = reference_file_index,
         overlap_bp = overlap_bp,
         strandness = strandness,
         threads = threads,
@@ -36,7 +34,6 @@ task IntCountTask {
         File alignment_file
         File alignment_file_index
         File reference_file
-        File reference_file_index
         Int? overlap_bp
         String? strandness
         Int? threads

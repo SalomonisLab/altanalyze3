@@ -1,4 +1,5 @@
 import pysam
+import shutil
 import logging
 import multiprocessing
 from functools import partial
@@ -344,3 +345,6 @@ def count_introns(args):
     with multiprocessing.Pool(args.cpus) as pool:
         pool.map(partial(process_contig, args), jobs)
     collect_results(args, jobs)
+
+    logging.debug("Removing temporary directory")
+    shutil.rmtree(args.tmp)

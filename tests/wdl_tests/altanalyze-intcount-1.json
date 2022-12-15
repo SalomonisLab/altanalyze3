@@ -1,6 +1,5 @@
 {
-    "IntCountWorkflow.alignment_file": "../data/hg19_pe.bam",
-    "IntCountWorkflow.alignment_file_index": "../data/hg19_pe.bam.bai",
-    "IntCountWorkflow.reference_file": "../data/hg19_ref_introns.bed.gz",
-    "IntCountWorkflow.reference_file_index": "../data/hg19_ref_introns.bed.gz.tbi"
+    "IntCountWorkflow.alignment_file": "../data/Cal27P5-1.bam",
+    "IntCountWorkflow.alignment_file_index": "../data/Cal27P5-1.bam.bai",
+    "IntCountWorkflow.reference_file": "../data/gene_model_all.tsv"
 }

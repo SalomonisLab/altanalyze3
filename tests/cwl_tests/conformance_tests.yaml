@@ -7,39 +7,39 @@
   output:
     junction_bed_file:
       class: File
-      location: hg19_pe_jun.bed
+      location: Cal27P5-1_jun.bed
     stdout_log:
       class: File
-      location: hg19_pe_jun_stdout.log
+      location: Cal27P5-1_jun_stdout.log
     stderr_log:
       class: File
-      location: hg19_pe_jun_stderr.log
+      location: Cal27P5-1_jun_stderr.log
 
 - job: ./altanalyze-juncount-2.yaml
   tool: ../../cwls/tools/altanalyze-juncount.cwl
   output:
     junction_bed_file:
       class: File
-      location: hg19_pe_jun.bed
+      location: Cal27P5-1_jun.bed
     stdout_log:
       class: File
-      location: hg19_pe_jun_stdout.log
+      location: Cal27P5-1_jun_stdout.log
     stderr_log:
       class: File
-      location: hg19_pe_jun_stderr.log
+      location: Cal27P5-1_jun_stderr.log
 
 - job: ./altanalyze-juncount-3.yaml
   tool: ../../cwls/tools/altanalyze-juncount.cwl
   output:
     junction_bed_file:
       class: File
-      location: hg19_pe_jun.bed
+      location: Cal27P5-1_jun.bed
     stdout_log:
       class: File
-      location: hg19_pe_jun_stdout.log
+      location: Cal27P5-1_jun_stdout.log
     stderr_log:
       class: File
-      location: hg19_pe_jun_stderr.log
+      location: Cal27P5-1_jun_stderr.log
 
 - job: ./altanalyze-juncount-4.yaml
   tool: ../../cwls/tools/altanalyze-juncount.cwl
@@ -63,39 +63,39 @@
   output:
     intron_bed_file:
       class: File
-      location: hg19_pe_int.bed
+      location: Cal27P5-1_int.bed
     stdout_log:
       class: File
-      location: hg19_pe_int_stdout.log
+      location: Cal27P5-1_int_stdout.log
     stderr_log:
       class: File
-      location: hg19_pe_int_stderr.log
+      location: Cal27P5-1_int_stderr.log
 
 - job: ./altanalyze-intcount-2.yaml
   tool: ../../cwls/tools/altanalyze-intcount.cwl
   output:
     intron_bed_file:
       class: File
-      location: hg19_pe_int.bed
+      location: Cal27P5-1_int.bed
     stdout_log:
       class: File
-      location: hg19_pe_int_stdout.log
+      location: Cal27P5-1_int_stdout.log
     stderr_log:
       class: File
-      location: hg19_pe_int_stderr.log
+      location: Cal27P5-1_int_stderr.log
 
 - job: ./altanalyze-intcount-3.yaml
   tool: ../../cwls/tools/altanalyze-intcount.cwl
   output:
     intron_bed_file:
       class: File
-      location: hg19_pe_int.bed
+      location: Cal27P5-1_int.bed
     stdout_log:
       class: File
-      location: hg19_pe_int_stdout.log
+      location: Cal27P5-1_int_stdout.log
     stderr_log:
       class: File
-      location: hg19_pe_int_stderr.log
+      location: Cal27P5-1_int_stderr.log
 
 - job: ./altanalyze-intcount-4.yaml
   tool: ../../cwls/tools/altanalyze-intcount.cwl
@@ -119,53 +119,53 @@
   output:
     intron_bed_file:
     - class: File
-      location: hg19_pe_int.bed
+      location: Cal27P5-1_int.bed
     intcount_stdout_log:
     - class: File
-      location: hg19_pe_int_stdout.log
+      location: Cal27P5-1_int_stdout.log
     intcount_stderr_log:
     - class: File
-      location: hg19_pe_int_stderr.log
+      location: Cal27P5-1_int_stderr.log
     junction_bed_file:
     - class: File
-      location: hg19_pe_jun.bed
+      location: Cal27P5-1_jun.bed
     juncount_stdout_log:
     - class: File
-      location: hg19_pe_jun_stdout.log
+      location: Cal27P5-1_jun_stdout.log
     juncount_stderr_log:
     - class: File
-      location: hg19_pe_jun_stderr.log
+      location: Cal27P5-1_jun_stderr.log
 
 - job: ./altanalyze-count-2.yaml
   tool: ../../cwls/workflows/altanalyze-count.cwl
   output:
     intron_bed_file:
     - class: File
-      location: hg19_pe_int.bed
+      location: Cal27P5-1_int.bed
     - class: File
-      location: hg19_pe_copy_int.bed
+      location: Cal27P5-2_int.bed
     intcount_stdout_log:
     - class: File
-      location: hg19_pe_int_stdout.log
+      location: Cal27P5-1_int_stdout.log
     - class: File
-      location: hg19_pe_copy_int_stdout.log
+      location: Cal27P5-2_int_stdout.log
     intcount_stderr_log:
     - class: File
-      location: hg19_pe_int_stderr.log
+      location: Cal27P5-1_int_stderr.log
     - class: File
-      location: hg19_pe_copy_int_stderr.log
+      location: Cal27P5-2_int_stderr.log
     junction_bed_file:
     - class: File
-      location: hg19_pe_jun.bed
+      location: Cal27P5-1_jun.bed
     - class: File
-      location: hg19_pe_copy_jun.bed
+      location: Cal27P5-2_jun.bed
     juncount_stdout_log:
     - class: File
-      location: hg19_pe_jun_stdout.log
+      location: Cal27P5-1_jun_stdout.log
     - class: File
-      location: hg19_pe_copy_jun_stdout.log
+      location: Cal27P5-2_jun_stdout.log
     juncount_stderr_log:
     - class: File
-      location: hg19_pe_jun_stderr.log
+      location: Cal27P5-1_jun_stderr.log
     - class: File
-      location: hg19_pe_copy_jun_stderr.log
+      location: Cal27P5-2_jun_stderr.log

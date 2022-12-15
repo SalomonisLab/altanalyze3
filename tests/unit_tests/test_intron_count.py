@@ -14,8 +14,8 @@ DATA_FOLDER = pathlib.Path(__file__).resolve().parents[1].joinpath("data")
         (
             [
                 "intcount",
-                "--bam", "hg19_pe.bam",
-                "--ref", "hg19_ref_introns.bed.gz",
+                "--bam", "Cal27P5-1.bam",
+                "--ref", "gene_model_all.tsv",
                 "--chr", "chr1", "chr2", "chr3"
             ],
             [
@@ -25,8 +25,8 @@ DATA_FOLDER = pathlib.Path(__file__).resolve().parents[1].joinpath("data")
         (
             [
                 "intcount",
-                "--bam", "hg19_pe.bam",
-                "--ref", "hg19_ref_introns.bed.gz",
+                "--bam", "Cal27P5-1.bam",
+                "--ref", "gene_model_all.tsv",
                 "--chr", "1", "2", "3"
             ],
             [
@@ -36,8 +36,8 @@ DATA_FOLDER = pathlib.Path(__file__).resolve().parents[1].joinpath("data")
         (
             [
                 "intcount",
-                "--bam", "hg19_pe.bam",
-                "--ref", "hg19_ref_introns.bed.gz",
+                "--bam", "Cal27P5-1.bam",
+                "--ref", "gene_model_all.tsv",
                 "--chr", "chr1", "chr2", "chr3", "chr99"
             ],
             [
@@ -47,8 +47,8 @@ DATA_FOLDER = pathlib.Path(__file__).resolve().parents[1].joinpath("data")
         (
             [
                 "intcount",
-                "--bam", "hg19_pe.bam",
-                "--ref", "hg19_ref_introns.bed.gz",
+                "--bam", "Cal27P5-1.bam",
+                "--ref", "gene_model_all.tsv",
                 "--chr", "chr99"
             ],
             []
@@ -56,8 +56,8 @@ DATA_FOLDER = pathlib.Path(__file__).resolve().parents[1].joinpath("data")
         (
             [
                 "intcount",
-                "--bam", "hg19_pe.bam",
-                "--ref", "hg19_ref_introns.bed.gz"
+                "--bam", "Cal27P5-1.bam",
+                "--ref", "gene_model_all.tsv"
             ],
             [
                 "chr1", "chr10", "chr11", "chr12", "chr13", "chr14", "chr15",
@@ -81,54 +81,54 @@ def test_get_jobs(monkeypatch, args, control_chr):
         (
             [
                 "intcount",
-                "--bam", "hg19_pe.bam",
-                "--ref", "hg19_ref_introns.bed.gz",
+                "--bam", "Cal27P5-1.bam",
+                "--ref", "gene_model_all.tsv",
                 "--chr", "chr1", "chr2", "chr3"
             ],
-            "d41d8cd98f00b204e9800998ecf8427e"
+            "d314bd03369ef7a019b15b28f695343e"
         ),
         (
             [
                 "intcount",
-                "--bam", "hg19_pe.bam",
-                "--ref", "hg19_ref_introns.bed.gz",
+                "--bam", "Cal27P5-1.bam",
+                "--ref", "gene_model_all.tsv",
                 "--chr", "1", "2", "3"
             ],
-            "d41d8cd98f00b204e9800998ecf8427e"
+            "d314bd03369ef7a019b15b28f695343e"
         ),
         (
             [
                 "intcount",
-                "--bam", "hg19_pe.bam",
-                "--ref", "hg19_ref_introns.bed.gz",
+                "--bam", "Cal27P5-1.bam",
+                "--ref", "gene_model_all.tsv",
                 "--chr", "chr1", "chr2", "chr3", "chr99"
             ],
-            "d41d8cd98f00b204e9800998ecf8427e"
+            "d314bd03369ef7a019b15b28f695343e"
         ),
         (
             [
                 "intcount",
-                "--bam", "hg19_pe.bam",
-                "--ref", "hg19_ref_introns.bed.gz",
-                "--chr", "chr99"
+                "--bam", "Cal27P5-1.bam",
+                "--ref", "gene_model_all.tsv",
+                "--chr", "chr99"                   # this should result in an empty file as we forced to use non-existing chromosome
             ],
             "d41d8cd98f00b204e9800998ecf8427e"
         ),
         (
             [
                 "intcount",
-                "--bam", "hg19_pe.bam",
-                "--ref", "hg19_ref_introns.bed.gz"
+                "--bam", "Cal27P5-1.bam",
+                "--ref", "gene_model_all.tsv"
             ],
-            "7d8c35eb9ce89bcfe0a487b00ef490c5"
+            "6f5250f1a841438fadcbe1419966f133"
         ),
         (
             [
                 "intcount",
-                "--bam", "hg19_pe_not_indexed.bam",
-                "--ref", "hg19_ref_introns.bed.gz"
+                "--bam", "Cal27P5-1-copy.bam",
+                "--ref", "gene_model_all.tsv"
             ],
-            "7d8c35eb9ce89bcfe0a487b00ef490c5"
+            "6f5250f1a841438fadcbe1419966f133"
         )
     ]
 )

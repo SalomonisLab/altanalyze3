@@ -14,21 +14,21 @@ DATA_FOLDER = pathlib.Path(__file__).resolve().parents[1].joinpath("data")
         (
             [
                 "juncount",
-                "--bam", "hg19_pe.bam",
-                "--ref", "hg19_ref_introns.bed.gz"
+                "--bam", "Cal27P5-1.bam",
+                "--ref", "gene_model_all.tsv"
             ],
             [
                 "chr1", "chr10", "chr11", "chr12", "chr13", "chr14", "chr15",
                 "chr16", "chr17", "chr18", "chr19", "chr2", "chr20", "chr21",
                 "chr22", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8", "chr9",
-                "chrM", "chrX", "chrY"
+                "chrM", "chrMT", "chrX", "chrY"                                   # this will still include chrM and chrMT, because we use MAIN_CRH as default
             ]
         ),
         (
             [
                 "juncount",
-                "--bam", "hg19_pe.bam",
-                "--ref", "hg19_ref_introns.bed.gz",
+                "--bam", "Cal27P5-1.bam",
+                "--ref", "gene_model_all.tsv",
                 "--chr", "chr1"
             ],
             [
@@ -38,8 +38,8 @@ DATA_FOLDER = pathlib.Path(__file__).resolve().parents[1].joinpath("data")
         (
             [
                 "juncount",
-                "--bam", "hg19_pe.bam",
-                "--ref", "hg19_ref_introns.bed.gz",
+                "--bam", "Cal27P5-1.bam",
+                "--ref", "gene_model_all.tsv",
                 "--chr", "chr1", "chr2", "chr3"
             ],
             [
@@ -49,8 +49,8 @@ DATA_FOLDER = pathlib.Path(__file__).resolve().parents[1].joinpath("data")
         (
             [
                 "juncount",
-                "--bam", "hg19_pe.bam",
-                "--ref", "hg19_ref_introns.bed.gz",
+                "--bam", "Cal27P5-1.bam",
+                "--ref", "gene_model_all.tsv",
                 "--chr", "1", "2", "3"
             ],
             [

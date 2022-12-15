@@ -2,21 +2,16 @@ import pysam
 import pandas
 import anndata
 import logging
-from altanalyze3.utilities.helpers import (
-    lambda_chr_converter,
-    get_tmp_suffix
-)
+from altanalyze3.utilities.helpers import lambda_chr_converter
 
 
 def guard_chr(function):
-    def prefix(c):
-        return c if c.startswith("chr") else f"chr{c}"
     def wrapper(location, threads):
         raw_res = function(location, threads)
         if isinstance(raw_res, list):
-            return [prefix(c) for c in raw_res]
+            return list(map(lambda_chr_converter, raw_res))
         else:
-            return prefix(raw_res)
+            return lambda_chr_converter(raw_res)
     return wrapper
 
 
@@ -32,12 +27,15 @@ def get_all_ref_chr(location, threads):
         return ref_handler.contigs
 
 
-def get_indexed_bed(location):
-    compressed_location = location.with_suffix(".bed.gz")
-    pysam.tabix_compress(location, compressed_location)
-    location.unlink()                                            # removing not compressed BED file
-    pysam.tabix_index(str(compressed_location), preset="bed")    # index file will be saved alongside the compressed_location
-    return compressed_location
+def get_indexed_bed(location, keep_original=None, force=None):
+    keep_original = True if keep_original is None else keep_original
+    force = False if force is None else force
+    return pysam.tabix_index(
+        str(location),
+        preset="bed",
+        keep_original=keep_original,
+        force=force
+    )
 
 
 def get_correct_contig(contig, handler):   # Attempting to fetch both types of choromosome names
@@ -60,10 +58,11 @@ def skip_bam_read(read):
            (read.is_paired and not read.is_proper_pair)
 
 
-def is_bam_paired(location, threads):
+def is_bam_paired(location, threads=None):
     """
-    Returns true of alignments in the BAM file are paired-end
+    Returns true if alignments in the BAM file are paired-end
     """
+    threads = 1 if threads is None else threads
     with pysam.AlignmentFile(location, mode="rb", threads=threads) as bam_handler:
         for read in bam_handler.fetch():                                                 # this fetches only mapped reads
             if skip_bam_read(read):
@@ -71,11 +70,20 @@ def is_bam_paired(location, threads):
             return read.is_paired
 
 
-def get_reference_as_bed(args, shift_start_by=None, only_introns=None):
+def is_bam_indexed(location, threads=None):
+    """
+    Returns true if BAM file is indexed
+    """
+    threads = 1 if threads is None else threads
+    with pysam.AlignmentFile(location, mode="rb", threads=threads) as bam_handler:
+        return bam_handler.has_index()
+
+
+def get_indexed_reference(location, selected_chr=None, shift_start_by=None, only_introns=None):
     only_introns = False if only_introns is None else only_introns
-    logging.info(f"""Loading references from {args.ref}""")
+    logging.info(f"""Loading references from {location}""")
     references_df = pandas.read_csv(
-        args.ref,
+        location,
         usecols=[0, 1, 2, 3, 4, 5],
         names=["gene", "chr", "strand", "exon", "start", "end"],
         converters={"chr": lambda_chr_converter},
@@ -83,6 +91,15 @@ def get_reference_as_bed(args, shift_start_by=None, only_introns=None):
         sep="\t",
     )
     logging.debug(f"""Loaded {len(references_df.index)} lines""")
+
+    selected_chr = references_df.chr.unique().tolist()
+
+    if selected_chr is not None:
+        if isinstance(selected_chr, list):
+            selected_chr = list(map(lambda_chr_converter, selected_chr))
+        else:
+            selected_chr = lambda_chr_converter(selected_chr)
+
     if only_introns:
         logging.info("Filtering references to include only introns")
         references_df = references_df[references_df["exon"].str.contains("^I")]
@@ -90,32 +107,31 @@ def get_reference_as_bed(args, shift_start_by=None, only_introns=None):
 
     if shift_start_by is not None:
         logging.debug(f"""Shifting start coordinates by {shift_start_by}""")
-        references_df["start"] = references_df["start"] + shift_start_by                         # to correct 1-based coordinates
+        references_df["start"] = references_df["start"] + shift_start_by                                  # to correct 1-based coordinates
 
     references_df.set_index(["chr", "start", "end"], inplace=True)
-    references_df = references_df[references_df.index.get_level_values("chr").isin(args.chr)]    # subset only to those chromosomes that are provided in --chr
+    references_df = references_df[references_df.index.get_level_values("chr").isin(selected_chr)]    # subset to the selected chromosomes
 
     logging.info("Sorting references by coordinates in ascending order")
-    references_df.sort_index(ascending=True, inplace=True)                                       # this may potentially mix overlapping genes from different strands
+    references_df.sort_index(ascending=True, inplace=True)                                                # this may potentially mix overlapping genes from different strands
     references_df["name"] = references_df["gene"] + ":" + references_df["exon"]
-    references_df["score"] = 0                                                                   # dummy column to correspond to BED format
-    references_df.drop(["gene", "exon"], axis=1, inplace=True)                                   # droping unused columns
+    references_df["score"] = 0                                                                            # dummy column to correspond to BED format
+    references_df.drop(["gene", "exon"], axis=1, inplace=True)                                            # droping unused columns
 
-    references_location = args.tmp.joinpath(get_tmp_suffix()).with_suffix(".bed")
-    logging.info(f"""Saving references as a temporary BED file to {references_location}""")
+    target_location = location.with_suffix(".bed")
+    logging.info(f"""Saving references as a BED file to {target_location}""")
     references_df.to_csv(
-        references_location,
+        target_location,
         sep="\t",
-        columns=["name", "score", "strand"],                                                     # we have "chr", "start", "end" in the index
+        columns=["name", "score", "strand"],                                                              # we have "chr", "start", "end" in the index
         header=False,
         index=True
     )
-    references_location = get_indexed_bed(references_location)
 
-    return references_location
+    return get_indexed_bed(target_location, keep_original=False, force=True)
 
 
-def export_counts_df_to_csr_anndata(counts_df, location, counts_columns=None, metadata_columns=None, sparse_dtype=None, fill_value=None):
+def export_counts_to_anndata(counts_df, location, counts_columns=None, metadata_columns=None, sparse_dtype=None, fill_value=None):
     counts_columns = counts_df.columns.values if counts_columns is None else counts_columns
     sparse_dtype = "uint32" if sparse_dtype is None else sparse_dtype
     fill_value = 0 if fill_value is None else fill_value
@@ -123,7 +139,7 @@ def export_counts_df_to_csr_anndata(counts_df, location, counts_columns=None, me
     csr_matrix = counts_df.loc[:, counts_columns].astype(pandas.SparseDtype(sparse_dtype, fill_value)).T.sparse.to_coo().tocsr()
     adata = anndata.AnnData(csr_matrix, dtype=sparse_dtype)
     adata.obs_names = counts_columns
-    adata.var_names = counts_df.index.to_frame(index=False).astype(str)[counts_df.index.names].agg("-".join, axis=1)
+    adata.var_names = counts_df.index.to_frame(index=False).astype(str)[["chr", "start", "end"]].agg("-".join, axis=1)
     if metadata_columns is not None:
         adata_var = counts_df.copy().loc[:, metadata_columns]
         adata_var.index = adata.var.index.copy()
