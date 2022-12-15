@@ -262,7 +262,7 @@ def load_counts_data(query_locations, query_aliases, selected_chr, tmp_location,
     return (counts_location, coords_location, starts_location, ends_location)
 
 
-def export_to_anndata(args, jobs, location):
+def collect_results(args, jobs, location):
     collected_annotations_df = None
     for job in jobs:
         logging.info(f"""Loading annotated junctions coordinates from {job.location}""")
@@ -324,7 +324,7 @@ def aggregate(args):
 
     adata_location = args.output.with_suffix(".h5ad")
     logging.info(f"""Exporting aggregated counts to {adata_location}""")
-    export_to_anndata(args, jun_annotation_jobs, adata_location)
+    collect_results(args, jun_annotation_jobs, adata_location)
 
     logging.debug("Removing temporary directory")
     shutil.rmtree(args.tmp)
