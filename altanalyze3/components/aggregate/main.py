@@ -7,13 +7,14 @@ import logging
 import multiprocessing
 from functools import partial
 from altanalyze3.utilities.logger import setup_logger
-from altanalyze3.utilities.helpers import (
-    lambda_chr_converter,
-    get_tmp_suffix
-)
+from altanalyze3.utilities.helpers import get_tmp_suffix
 from altanalyze3.utilities.constants import (
     Job,
-    Annotation
+    Annotation,
+    ChrConverter,
+    JunctionsParams,
+    IntronsParams,
+    AnnotationsParams
 )
 from altanalyze3.utilities.io import (
     get_all_ref_chr,
@@ -185,26 +186,18 @@ def process_jun_annotation(args, job):
                 )
 
 
-def load_counts_data(query_locations, query_aliases, selected_chr, tmp_location, save_bed=None):
+def load_counts_data(query_locations, query_aliases, selected_chr, tmp_location, as_junctions=None, save_bed=None):
     save_bed = False if save_bed is None else save_bed
+    loading_params = JunctionsParams if as_junctions is not None and as_junctions else IntronsParams
+
     counts_df = None
     for query_location, query_alias in zip(query_locations, query_aliases):
         logging.info(f"""Loading counts from {query_location} as {query_alias}""")
-        current_df = pandas.read_csv(
-            query_location,
-            usecols = [0, 1, 2, 3, 4, 5],
-            names = ["chr", "start", "end", "name", query_alias, "strand"],
-            converters = {"chr": lambda_chr_converter},
-            dtype = {
-                "start": "uint32",
-                "end": "uint32",
-                "name": "string",
-                query_alias: "uint32",
-                "strand": "category"
-            },
-            sep="\t"
+        current_df = pandas.read_csv(query_location, **loading_params)
+        current_df.rename(
+            columns = {"score": query_alias},
+            inplace = True
         )
-        current_df.set_index(["chr", "start", "end", "name", "strand"], inplace=True)
         current_df = current_df[current_df.index.get_level_values("chr").isin(selected_chr)]                         # subset only to those chromosomes that are provided in --chr
         counts_df = current_df if counts_df is None else counts_df.join(current_df, how="outer").fillna(0)
         counts_df = counts_df.astype(pandas.SparseDtype("uint32", 0))                                                # saves memory and is required before exporting to h5ad
@@ -227,13 +220,17 @@ def load_counts_data(query_locations, query_aliases, selected_chr, tmp_location,
             sep="\t",
             header=False,
             index=False,
-            columns=["chr", "start", "end", "name", "score", "strand"]
+            columns=loading_params["names"]
         )
         coords_location = get_indexed_bed(coords_location, keep_original=False, force=True)
 
         start_coords_df = coords_df.copy()
         start_coords_df["end"] = start_coords_df["start"]
-        start_coords_df.sort_values(by=["chr", "start", "end", "name", "strand"], ascending=True, inplace=True)
+        start_coords_df.sort_values(
+            by=loading_params["index_col"],
+            ascending=True,
+            inplace=True
+        )
         starts_location = tmp_location.joinpath(get_tmp_suffix()).with_suffix(".bed")
         logging.info(f"""Saving only start coordinates as a temporary BED file to {starts_location}""")
         start_coords_df.to_csv(
@@ -241,13 +238,17 @@ def load_counts_data(query_locations, query_aliases, selected_chr, tmp_location,
             sep="\t",
             header=False,
             index=False,
-            columns=["chr", "start", "end", "name", "score", "strand"]
+            columns=loading_params["names"]
         )
         starts_location = get_indexed_bed(starts_location, keep_original=False, force=True)
 
         end_coords_df = coords_df.copy()
         end_coords_df["start"] = end_coords_df["end"]
-        end_coords_df.sort_values(by=["chr", "start", "end", "name", "strand"], ascending=True, inplace=True)
+        end_coords_df.sort_values(
+            by=loading_params["index_col"],
+            ascending=True,
+            inplace=True
+        )
         ends_location = tmp_location.joinpath(get_tmp_suffix()).with_suffix(".bed")
         logging.info(f"""Saving only end coordinates as a temporary BED file to {ends_location}""")
         end_coords_df.to_csv(
@@ -255,25 +256,18 @@ def load_counts_data(query_locations, query_aliases, selected_chr, tmp_location,
             sep="\t",
             header=False,
             index=False,
-            columns=["chr", "start", "end", "name", "score", "strand"]
+            columns=loading_params["names"]
         )
         ends_location = get_indexed_bed(ends_location, keep_original=False, force=True)
 
     return (counts_location, coords_location, starts_location, ends_location)
 
 
-def collect_results(args, jobs, location):
+def collect_results(args, jobs):
     collected_annotations_df = None
     for job in jobs:
         logging.info(f"""Loading annotated junctions coordinates from {job.location}""")
-        annotations_df = pandas.read_csv(
-            job.location,
-            usecols=[0, 1, 2, 3, 4, 5],
-            names=["chr", "start", "end", "name", "annotation", "strand"],
-            converters={"chr": lambda_chr_converter},
-            sep="\t",
-        )
-        annotations_df.set_index(["chr", "start", "end", "name"], inplace=True)
+        annotations_df = pandas.read_csv(job.location, **AnnotationsParams)
         collected_annotations_df = annotations_df if collected_annotations_df is None else pandas.concat([collected_annotations_df, annotations_df])
         logging.debug(f"""Removing {job.location}""")
         job.location.unlink()
@@ -281,22 +275,37 @@ def collect_results(args, jobs, location):
     logging.info(f"""Loading pickled junctions counts from {args.jun_counts_location}""")
     counts_df = pandas.read_pickle(args.jun_counts_location)
     counts_columns = counts_df.columns.values                                                   # before we added a name column
+
     logging.info("Joining pickled junctions counts with annotations")
     counts_df = counts_df.join(collected_annotations_df, how="left")
 
     logging.info(f"""Loading pickled introns counts from {args.int_counts_location}""")
     int_counts_df = pandas.read_pickle(args.int_counts_location)
     int_counts_df["annotation"] = int_counts_df.index.to_frame(index=False).name.values
+    int_counts_df.reset_index(level="strand", inplace=True)   # need to move "strand" from the index to a column
+
     logging.info("Concatenating annotated junctions and introns counts from")
     counts_df = pandas.concat([counts_df, int_counts_df])
     counts_df.sort_index(ascending=True, inplace=True)
 
+    adata_location = args.output.with_suffix(".h5ad")
+    logging.info(f"""Exporting aggregated counts to {adata_location}""")
     export_counts_to_anndata(
         counts_df=counts_df,
-        location=location,
+        location=adata_location,
         counts_columns=counts_columns,
         metadata_columns=["annotation", "strand"]
     )
+
+    if args.tsv:
+        tsv_location = args.output.with_suffix(".tsv")
+        logging.info(f"""Exporting aggregated counts to {tsv_location}""")
+        counts_df.to_csv(
+            tsv_location,
+            sep="\t",
+            header=True,
+            index=True
+        )
 
 
 def aggregate(args):
@@ -306,6 +315,7 @@ def aggregate(args):
         query_aliases=args.aliases,
         selected_chr=args.chr,
         tmp_location=args.tmp,
+        as_junctions=True,                                                       # "strand" column will be ignored
         save_bed=True
     )
     jun_annotation_jobs = get_jun_annotation_jobs(args)
@@ -322,9 +332,8 @@ def aggregate(args):
         save_bed=False
     )
 
-    adata_location = args.output.with_suffix(".h5ad")
-    logging.info(f"""Exporting aggregated counts to {adata_location}""")
-    collect_results(args, jun_annotation_jobs, adata_location)
+    logging.debug("Collecting results")
+    collect_results(args, jun_annotation_jobs)
 
     logging.debug("Removing temporary directory")
     shutil.rmtree(args.tmp)

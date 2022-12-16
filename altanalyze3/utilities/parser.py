@@ -4,20 +4,18 @@ import logging
 import pathlib
 import argparse
 from altanalyze3.utilities.logger import setup_logger
-from altanalyze3.utilities.helpers import (
-    get_version,
-    lambda_chr_converter
-)
+from altanalyze3.utilities.helpers import get_version
 from altanalyze3.components.intron_count.main import count_introns
 from altanalyze3.components.junction_count.main import count_junctions
 from altanalyze3.components.aggregate.main import aggregate
 from altanalyze3.utilities.io import (
-    get_indexed_reference,
+    get_indexed_references,
     is_bam_indexed
 )
 from altanalyze3.utilities.constants import (
     IntRetCat,
-    MAIN_CRH
+    MAIN_CRH,
+    ChrConverter
 )
 
 
@@ -208,6 +206,11 @@ class ArgsParser():
             nargs="*",
             default=MAIN_CRH
         )
+        aggregate_parser.add_argument(
+            "--tsv",
+            help="Export results as TSV file. Default: False",                                    # mostly for debug purposes
+            action="store_true"
+        )
         self.add_common_arguments(aggregate_parser)
 
         return general_parser
@@ -251,19 +254,17 @@ class ArgsParser():
         pass
 
     def assert_args_for_count_introns(self):
-        self.args.ref = get_indexed_reference(
+        self.args.ref = get_indexed_references(
             location=self.args.ref,
             selected_chr=self.args.chr,
-            shift_start_by=-1,
             only_introns=True
         )
         self.args.strandness = IntRetCat[self.args.strandness.upper()]
 
     def assert_args_for_aggregate(self):
-        self.args.ref = get_indexed_reference(
+        self.args.ref = get_indexed_references(
             location=self.args.ref,
             selected_chr=self.args.chr,
-            shift_start_by=-1,
             only_introns=False
         )
         if len(self.args.juncounts) != len(self.args.intcounts):
@@ -280,7 +281,7 @@ class ArgsParser():
         setup_logger(logging.root, self.args.loglevel)
         self.args.tmp.mkdir(parents=True, exist_ok=True)                          # safety measure, shouldn't fail
         self.args.output.parent.mkdir(parents=True, exist_ok=True)                # safety measure, shouldn't fail
-        self.args.chr = list(map(lambda_chr_converter, self.args.chr))
+        self.args.chr = list(map(ChrConverter, self.args.chr))
         if hasattr(self.args, "bam"):
             if not is_bam_indexed(self.args.bam):
                 try:

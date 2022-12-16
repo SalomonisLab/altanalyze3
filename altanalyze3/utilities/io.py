@@ -2,16 +2,19 @@ import pysam
 import pandas
 import anndata
 import logging
-from altanalyze3.utilities.helpers import lambda_chr_converter
+from altanalyze3.utilities.constants import (
+    ChrConverter,
+    ReferencesParams
+)
 
 
 def guard_chr(function):
     def wrapper(location, threads):
         raw_res = function(location, threads)
         if isinstance(raw_res, list):
-            return list(map(lambda_chr_converter, raw_res))
+            return list(map(ChrConverter, raw_res))
         else:
-            return lambda_chr_converter(raw_res)
+            return ChrConverter(raw_res)
     return wrapper
 
 
@@ -79,44 +82,26 @@ def is_bam_indexed(location, threads=None):
         return bam_handler.has_index()
 
 
-def get_indexed_reference(location, selected_chr=None, shift_start_by=None, only_introns=None):
+def get_indexed_references(location, selected_chr=None, only_introns=None):
     only_introns = False if only_introns is None else only_introns
+
     logging.info(f"""Loading references from {location}""")
-    references_df = pandas.read_csv(
-        location,
-        usecols=[0, 1, 2, 3, 4, 5],
-        names=["gene", "chr", "strand", "exon", "start", "end"],
-        converters={"chr": lambda_chr_converter},
-        dtype = {
-            "gene": "string",
-            "strand": "category",
-            "exon": "category",
-            "start": "uint32",
-            "end": "uint32"
-        },
-        sep="\t"
-    )
+    references_df = pandas.read_csv(location, **ReferencesParams)
     logging.debug(f"""Loaded {len(references_df.index)} lines""")
 
-    selected_chr = references_df.chr.unique().tolist()
-
+    selected_chr = references_df.index.get_level_values("chr").unique().tolist()
     if selected_chr is not None:
         if isinstance(selected_chr, list):
-            selected_chr = list(map(lambda_chr_converter, selected_chr))
+            selected_chr = list(map(ChrConverter, selected_chr))
         else:
-            selected_chr = lambda_chr_converter(selected_chr)
+            selected_chr = ChrConverter(selected_chr)
+
+    references_df = references_df[references_df.index.get_level_values("chr").isin(selected_chr)]         # subset to the selected chromosomes
 
     if only_introns:
         logging.info("Filtering references to include only introns")
         references_df = references_df[references_df["exon"].str.contains("^I")]
         logging.debug(f"""After filtering {len(references_df.index)} lines remained""")
-
-    if shift_start_by is not None:
-        logging.debug(f"""Shifting start coordinates by {shift_start_by}""")
-        references_df["start"] = references_df["start"] + shift_start_by                                  # to correct 1-based coordinates
-
-    references_df.set_index(["chr", "start", "end"], inplace=True)
-    references_df = references_df[references_df.index.get_level_values("chr").isin(selected_chr)]    # subset to the selected chromosomes
 
     logging.info("Sorting references by coordinates in ascending order")
     references_df.sort_index(ascending=True, inplace=True)                                                # this may potentially mix overlapping genes from different strands

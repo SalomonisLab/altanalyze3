@@ -2,6 +2,9 @@ import enum
 from collections import namedtuple
 
 
+ChrConverter = lambda c: c if c.startswith("chr") else f"chr{c}"
+
+
 MAIN_CRH = [
     "chr1",
     "chr2",
@@ -68,3 +71,67 @@ Annotation = namedtuple(
     "Annotation",
     "gene exon strand position order"
 )
+
+
+IntronsParams = {
+    "usecols": [0, 1, 2, 3, 4, 5],
+    "names": ["chr", "start", "end", "name", "score", "strand"],
+    "index_col": ["chr", "start", "end", "name", "strand"],
+    "converters": {"chr": ChrConverter},
+    "dtype": {
+        "start": "uint32",
+        "end": "uint32",
+        "name": "string",
+        "score": "uint32",
+        "strand": "category"
+    },
+    "sep": "\t"
+}
+
+
+JunctionsParams = {
+    "usecols": [0, 1, 2, 3, 4],
+    "names": ["chr", "start", "end", "name", "score"],
+    "index_col": ["chr", "start", "end", "name"],
+    "converters": {"chr": ChrConverter},
+    "dtype": {
+        "start": "uint32",
+        "end": "uint32",
+        "name": "string",
+        "score": "uint32"
+    },
+    "sep": "\t"
+}
+
+
+ReferencesParams = {
+    "usecols": [0, 1, 2, 3, 4, 5],
+    "names": ["gene", "chr", "strand", "exon", "start", "end"],
+    "index_col": ["chr", "start", "end"],
+    "converters": {
+        "chr": ChrConverter,
+        "start": lambda c: int(c)-1                      # need to make [start, end) intervals
+    },
+    "dtype": {
+        "gene": "string",
+        "strand": "category",
+        "exon": "category",
+        "end": "uint32"
+    },
+    "sep": "\t"
+}
+
+AnnotationsParams = {
+    "usecols": [0, 1, 2, 3, 4, 5],
+    "names": ["chr", "start", "end", "name", "annotation", "strand"],
+    "index_col": ["chr", "start", "end", "name"],
+    "converters": {"chr": ChrConverter},
+    "dtype": {
+        "start": "uint32",
+        "end": "uint32",
+        "name": "string",
+        "annotation": "string",
+        "strand": "category"
+    },
+    "sep": "\t"
+}

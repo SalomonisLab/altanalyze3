@@ -5,7 +5,7 @@ from altanalyze3.utilities.io import (
     get_all_ref_chr,
     is_bam_paired,
     is_bam_indexed,
-    get_indexed_reference
+    get_indexed_references
 )
 
 
@@ -34,7 +34,7 @@ DATA_FOLDER = pathlib.Path(__file__).resolve().parents[1].joinpath("data")
     ]
 )
 def test_get_all_ref_chr(location, control_ref_chr):                           # this will also check guard_chr function
-    calculated_ref_chr = get_all_ref_chr(get_indexed_reference(DATA_FOLDER.joinpath(location)), 1)
+    calculated_ref_chr = get_all_ref_chr(get_indexed_references(DATA_FOLDER.joinpath(location)), 1)
     assert sorted(calculated_ref_chr) == sorted(control_ref_chr)
 
 
