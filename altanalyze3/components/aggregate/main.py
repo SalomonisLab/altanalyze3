@@ -297,15 +297,21 @@ def collect_results(args, jobs):
         metadata_columns=["annotation", "strand"]
     )
 
-    if args.tsv:
-        tsv_location = args.output.with_suffix(".tsv")
-        logging.info(f"""Exporting aggregated counts to {tsv_location}""")
+    if args.bed:
+        bed_location = args.output.with_suffix(".bed")
+        logging.info(f"""Exporting annotated coordinates to {bed_location}""")
+        counts_df.reset_index(inplace=True)
+        counts_df.drop(columns=["name"], inplace=True)
+        counts_df.rename(columns={"annotation": "name"}, inplace=True)
+        counts_df["score"] = 0
         counts_df.to_csv(
-            tsv_location,
+            bed_location,
             sep="\t",
-            header=True,
-            index=True
+            header=False,
+            index=False,
+            columns=["chr", "start", "end", "name", "score", "strand"]
         )
+        bed_location = get_indexed_bed(bed_location, keep_original=False, force=True)
 
 
 def aggregate(args):

@@ -207,8 +207,8 @@ class ArgsParser():
             default=MAIN_CRH
         )
         aggregate_parser.add_argument(
-            "--tsv",
-            help="Export results as TSV file. Default: False",                                    # mostly for debug purposes
+            "--bed",
+            help="Export annotated coordinates as BED file. Default: False",
             action="store_true"
         )
         self.add_common_arguments(aggregate_parser)
