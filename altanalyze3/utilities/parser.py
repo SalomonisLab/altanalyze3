@@ -1,3 +1,4 @@
+import os
 import sys
 import pysam
 import logging
@@ -168,26 +169,35 @@ class ArgsParser():
         aggregate_parser.set_defaults(func=aggregate)
         aggregate_parser.add_argument(
             "--juncounts",
-            help="Path the junction counts files. Coordinates are treated as 0-based. Number and order should correspond to --intcounts",
+            help=" ".join(
+                [
+                    "Path the junction counts files. Coordinates are treated as 0-based.",
+                    "If provided with --intcounts, the number and the order should",
+                    "correspond to --intcounts."
+                ]
+            ),
             type=str,
-            nargs="+",
-            required=True   # safety measure
+            nargs="*"
         )
         aggregate_parser.add_argument(
             "--intcounts",
-            help="Path the intron counts files. Coordinates are treated as 0-based. Number and order should correspond to --juncounts",
+            help=" ".join(
+                [
+                    "Path the intron counts files. Coordinates are treated as 0-based.",
+                    "If provided with --juncounts, the number and the order should",
+                    "correspond to --juncounts."
+                ]
+            ),
             type=str,
-            nargs="+",
-            required=True   # safety measure
+            nargs="*"
         )
         aggregate_parser.add_argument(
             "--aliases",
             help=" ".join(
                 [
-                    "Column names to be used for the loaded counts.",
-                    "The number of provided aliases should be equal to the number of",
-                    "--intcounts and --juncounts files."
-                    "Default: rootname of --intcounts files."
+                    "Column names to be used for the loaded counts. The number of provided",
+                    "aliases should be equal to the number of --intcounts and/or --juncounts",
+                    "files. Default: rootname of --intcounts and/or --intcounts files."
                 ]
             ),
             type=str,
@@ -195,9 +205,14 @@ class ArgsParser():
         )
         aggregate_parser.add_argument(
             "--ref",
-            help="Path to the gene model reference file. Coordinates are treated as 1-based.",
+            help=" ".join(
+                [
+                    "Path to the gene model reference file. Coordinates are treated as 1-based.",
+                    "Required if --juncounts parameter was provided."
+                ]
+            ),
             type=str,
-            required=True
+            required=False
         )
         aggregate_parser.add_argument(
             "--chr",
@@ -223,7 +238,7 @@ class ArgsParser():
         selected = [] if selected is None else selected
         normalized_args = {}
         for key, value in self.args.__dict__.items():
-            if key in selected:
+            if key in selected and value is not None:
                 if isinstance(value, list):
                     for v in value:
                         normalized_args.setdefault(key, []).append(
@@ -254,27 +269,40 @@ class ArgsParser():
         pass
 
     def assert_args_for_count_introns(self):
+        self.args.strandness = IntRetCat[self.args.strandness.upper()]
         self.args.ref = get_indexed_references(
             location=self.args.ref,
             selected_chr=self.args.chr,
             only_introns=True
         )
-        self.args.strandness = IntRetCat[self.args.strandness.upper()]
 
     def assert_args_for_aggregate(self):
-        self.args.ref = get_indexed_references(
-            location=self.args.ref,
-            selected_chr=self.args.chr,
-            only_introns=False
-        )
-        if len(self.args.juncounts) != len(self.args.intcounts):
+        if self.args.juncounts is None and self.args.intcounts is None:
+            logging.error("At least one of the --juncounts or --intcounts inputs should be provided")
+            sys.exit(1)
+        if self.args.juncounts is not None and self.args.intcounts is not None and len(self.args.juncounts) != len(self.args.intcounts):
             logging.error("Number of the provided files for --juncounts and --intcounts should be equal")
             sys.exit(1)
+        if self.args.aliases is not None:
+            if self.args.juncounts is not None and len(self.args.aliases) != len(self.args.juncounts):
+                logging.error("Number of the provided --aliases and --juncounts files should be equal")
+                sys.exit(1)
+            if self.args.intcounts is not None and len(self.args.aliases) != len(self.args.intcounts):
+                logging.error("Number of the provided --aliases and --intcounts files should be equal")
+                sys.exit(1)
         if self.args.aliases is None:
-            self.args.aliases = [location.stem for location in self.args.intcounts]
-        elif len(self.args.aliases) != len(self.args.intcounts):
-            logging.error("Number of the provided --aliases and --intcounts/--juncounts should be equal")
-            sys.exit(1)
+            zipped = zip(self.args.juncounts) if self.args.juncounts is not None else zip(self.args.intcounts)
+            zipped = zip(*zip(*zipped), self.args.intcounts if self.args.intcounts is not None else self.args.juncounts)
+            self.args.aliases = [os.path.commonprefix([a.stem, b.stem]) for a, b in zipped]
+        if self.args.juncounts is not None:
+            if self.args.ref is None:
+                logging.error("--ref parameter is required when using with --intcounts")
+                sys.exit(1)
+            self.args.ref = get_indexed_references(
+                location=self.args.ref,
+                selected_chr=self.args.chr,
+                only_introns=False
+            )
 
     def assert_common_args(self):
         self.args.loglevel = getattr(logging, self.args.loglevel.upper())

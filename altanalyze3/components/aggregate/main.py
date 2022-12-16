@@ -11,7 +11,6 @@ from altanalyze3.utilities.helpers import get_tmp_suffix
 from altanalyze3.utilities.constants import (
     Job,
     Annotation,
-    ChrConverter,
     JunctionsParams,
     IntronsParams,
     AnnotationsParams
@@ -263,38 +262,45 @@ def load_counts_data(query_locations, query_aliases, selected_chr, tmp_location,
     return (counts_location, coords_location, starts_location, ends_location)
 
 
-def collect_results(args, jobs):
-    collected_annotations_df = None
-    for job in jobs:
-        logging.info(f"""Loading annotated junctions coordinates from {job.location}""")
-        annotations_df = pandas.read_csv(job.location, **AnnotationsParams)
-        collected_annotations_df = annotations_df if collected_annotations_df is None else pandas.concat([collected_annotations_df, annotations_df])
-        logging.debug(f"""Removing {job.location}""")
-        job.location.unlink()
+def collect_results(args):
 
-    logging.info(f"""Loading pickled junctions counts from {args.jun_counts_location}""")
-    counts_df = pandas.read_pickle(args.jun_counts_location)
-    counts_columns = counts_df.columns.values                                                   # before we added a name column
+    counts_df = None
+    if args.juncounts is not None:
+        collected_annotations_df = None
+        for job in args.jun_annotation_jobs:
+            logging.info(f"""Loading annotated junctions coordinates from {job.location}""")
+            annotations_df = pandas.read_csv(job.location, **AnnotationsParams)
+            collected_annotations_df = annotations_df if collected_annotations_df is None else pandas.concat([collected_annotations_df, annotations_df])
+            logging.debug(f"""Removing {job.location}""")
+            job.location.unlink()
+        logging.info(f"""Loading pickled junctions counts from {args.jun_counts_location}""")
+        counts_df = pandas.read_pickle(args.jun_counts_location)
+        logging.info("Joining pickled junctions counts with annotations")
+        counts_df = counts_df.join(collected_annotations_df, how="left")
 
-    logging.info("Joining pickled junctions counts with annotations")
-    counts_df = counts_df.join(collected_annotations_df, how="left")
+    int_counts_df = None
+    if args.intcounts is not None:
+        logging.info(f"""Loading pickled introns counts from {args.int_counts_location}""")
+        int_counts_df = pandas.read_pickle(args.int_counts_location)
+        int_counts_df["annotation"] = int_counts_df.index.to_frame(index=False).name.values
+        int_counts_df.reset_index(level="strand", inplace=True)                                     # need to move "strand" from the index to a column
 
-    logging.info(f"""Loading pickled introns counts from {args.int_counts_location}""")
-    int_counts_df = pandas.read_pickle(args.int_counts_location)
-    int_counts_df["annotation"] = int_counts_df.index.to_frame(index=False).name.values
-    int_counts_df.reset_index(level="strand", inplace=True)   # need to move "strand" from the index to a column
+    if counts_df is None:
+        counts_df = int_counts_df
+    elif int_counts_df is not None:
+        logging.info("Concatenating annotated junctions and introns counts from")
+        counts_df = pandas.concat([counts_df, int_counts_df])
 
-    logging.info("Concatenating annotated junctions and introns counts from")
-    counts_df = pandas.concat([counts_df, int_counts_df])
     counts_df.sort_index(ascending=True, inplace=True)
 
     adata_location = args.output.with_suffix(".h5ad")
     logging.info(f"""Exporting aggregated counts to {adata_location}""")
+    metadata_columns = ["annotation", "strand"]
     export_counts_to_anndata(
         counts_df=counts_df,
         location=adata_location,
-        counts_columns=counts_columns,
-        metadata_columns=["annotation", "strand"]
+        counts_columns=[c for c in counts_df.columns.values if c not in metadata_columns],
+        metadata_columns=metadata_columns
     )
 
     if args.bed:
@@ -315,31 +321,34 @@ def collect_results(args, jobs):
 
 
 def aggregate(args):
-    logging.info("Processing junctions counts")
-    args.jun_counts_location, args.jun_coords_location, args.jun_starts_location, args.jun_ends_location = load_counts_data(
-        query_locations=args.juncounts,
-        query_aliases=args.aliases,
-        selected_chr=args.chr,
-        tmp_location=args.tmp,
-        as_junctions=True,                                                       # "strand" column will be ignored
-        save_bed=True
-    )
-    jun_annotation_jobs = get_jun_annotation_jobs(args)
-    logging.info(f"""Span {len(jun_annotation_jobs)} junctions annotation job(s) between {args.cpus} CPU(s)""")
-    with multiprocessing.Pool(args.cpus) as pool:
-        pool.map(partial(process_jun_annotation, args), jun_annotation_jobs)
 
-    logging.info("Processing introns counts")
-    args.int_counts_location, _, _, _ = load_counts_data(
-        query_locations=args.intcounts,
-        query_aliases=args.aliases,
-        selected_chr=args.chr,
-        tmp_location=args.tmp,
-        save_bed=False
-    )
+    if args.juncounts is not None:
+        logging.info("Processing junctions counts")
+        args.jun_counts_location, args.jun_coords_location, args.jun_starts_location, args.jun_ends_location = load_counts_data(
+            query_locations=args.juncounts,
+            query_aliases=args.aliases,
+            selected_chr=args.chr,
+            tmp_location=args.tmp,
+            as_junctions=True,                                                       # "strand" column will be ignored
+            save_bed=True
+        )
+        args.jun_annotation_jobs = get_jun_annotation_jobs(args)
+        logging.info(f"""Span {len(args.jun_annotation_jobs)} junctions annotation job(s) between {args.cpus} CPU(s)""")
+        with multiprocessing.Pool(args.cpus) as pool:
+            pool.map(partial(process_jun_annotation, args), args.jun_annotation_jobs)
+
+    if args.intcounts is not None:
+        logging.info("Processing introns counts")
+        args.int_counts_location, _, _, _ = load_counts_data(
+            query_locations=args.intcounts,
+            query_aliases=args.aliases,
+            selected_chr=args.chr,
+            tmp_location=args.tmp,
+            save_bed=False
+        )
 
     logging.debug("Collecting results")
-    collect_results(args, jun_annotation_jobs)
+    collect_results(args)
 
     logging.debug("Removing temporary directory")
     shutil.rmtree(args.tmp)
