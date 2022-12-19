@@ -132,7 +132,7 @@ def export_counts_to_anndata(counts_df, location, counts_columns=None, metadata_
     adata.obs_names = counts_columns
     adata.var_names = counts_df.index.to_frame(index=False).astype(str)[["chr", "start", "end"]].agg("-".join, axis=1)
     if metadata_columns is not None:
-        adata_var = counts_df.copy().loc[:, metadata_columns]
+        adata_var = counts_df.copy().loc[:, metadata_columns].astype(str)
         adata_var.index = adata.var.index.copy()
         adata.var = adata_var
     adata.write(location)
