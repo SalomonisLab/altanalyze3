@@ -1,4 +1,5 @@
 import pysam
+import numpy
 import pandas
 import anndata
 import logging
@@ -107,6 +108,13 @@ def get_indexed_references(location, selected_chr=None, only_introns=None):
     references_df.sort_index(ascending=True, inplace=True)                                                # this may potentially mix overlapping genes from different strands
     references_df["name"] = references_df["gene"] + ":" + references_df["exon"]
     references_df["score"] = 0                                                                            # dummy column to correspond to BED format
+    coords_df = references_df.index.to_frame(index=False)                                                 # we need it only for thickStart and thickEnd
+    references_df["thickStart"] = coords_df.start.values
+    references_df["thickEnd"] = numpy.where(
+        references_df["exon"].str.upper().str.startswith("E"),
+        coords_df["end"],
+        coords_df["start"]
+    )
     references_df.drop(["gene", "exon"], axis=1, inplace=True)                                            # droping unused columns
 
     target_location = location.with_suffix(".bed")
@@ -114,7 +122,7 @@ def get_indexed_references(location, selected_chr=None, only_introns=None):
     references_df.to_csv(
         target_location,
         sep="\t",
-        columns=["name", "score", "strand"],                                                              # we have "chr", "start", "end" in the index
+        columns=["name", "score", "strand", "thickStart", "thickEnd"],                                    # we have "chr", "start", "end" in the index
         header=False,
         index=True
     )
@@ -124,7 +132,7 @@ def get_indexed_references(location, selected_chr=None, only_introns=None):
 
 def export_counts_to_anndata(counts_df, location, counts_columns=None, metadata_columns=None, sparse_dtype=None, fill_value=None):
     counts_columns = counts_df.columns.values if counts_columns is None else counts_columns
-    sparse_dtype = "uint32" if sparse_dtype is None else sparse_dtype
+    sparse_dtype = "int32" if sparse_dtype is None else sparse_dtype
     fill_value = 0 if fill_value is None else fill_value
 
     csr_matrix = counts_df.loc[:, counts_columns].astype(pandas.SparseDtype(sparse_dtype, fill_value)).T.sparse.to_coo().tocsr()

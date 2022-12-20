@@ -79,10 +79,10 @@ IntronsParams = {
     "index_col": ["chr", "start", "end", "name", "strand"],
     "converters": {"chr": ChrConverter},
     "dtype": {
-        "start": "uint32",
-        "end": "uint32",
+        "start": "int32",
+        "end": "int32",
         "name": "string",
-        "score": "uint32",
+        "score": "int32",
         "strand": "category"
     },
     "sep": "\t"
@@ -95,10 +95,10 @@ JunctionsParams = {
     "index_col": ["chr", "start", "end", "name"],
     "converters": {"chr": ChrConverter},
     "dtype": {
-        "start": "uint32",
-        "end": "uint32",
+        "start": "int32",
+        "end": "int32",
         "name": "string",
-        "score": "uint32"
+        "score": "int32"
     },
     "sep": "\t"
 }
@@ -116,7 +116,7 @@ ReferencesParams = {
         "gene": "string",
         "strand": "category",
         "exon": "category",
-        "end": "uint32"
+        "end": "int32"
     },
     "sep": "\t"
 }
@@ -127,8 +127,8 @@ AnnotationsParams = {
     "index_col": ["chr", "start", "end", "name"],
     "converters": {"chr": ChrConverter},
     "dtype": {
-        "start": "uint32",
-        "end": "uint32",
+        "start": "int32",
+        "end": "int32",
         "name": "string",
         "annotation": "string",
         "strand": "category"

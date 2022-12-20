@@ -199,7 +199,7 @@ def load_counts_data(query_locations, query_aliases, selected_chr, tmp_location,
         )
         current_df = current_df[current_df.index.get_level_values("chr").isin(selected_chr)]                         # subset only to those chromosomes that are provided in --chr
         counts_df = current_df if counts_df is None else counts_df.join(current_df, how="outer").fillna(0)
-        counts_df = counts_df.astype(pandas.SparseDtype("uint32", 0))                                                # saves memory and is required before exporting to h5ad
+        counts_df = counts_df.astype(pandas.SparseDtype("int32", 0))                                                # saves memory and is required before exporting to h5ad
 
     logging.info("Sorting counts by coordinates in ascending order")
     counts_df.sort_index(ascending=True, inplace=True)
