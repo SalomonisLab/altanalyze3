@@ -67,9 +67,19 @@ IntRetRawData = namedtuple(
 )
 
 
+class AnnMatchCat (enum.IntEnum):
+    EXON_START = enum.auto()
+    EXON_END = enum.auto()
+    EXON_MID = enum.auto()
+    INTRON_MID = enum.auto()
+    CLOSEST = enum.auto()
+    def __str__(self):
+        return self.name
+
+
 Annotation = namedtuple(
     "Annotation",
-    "gene exon strand position order"
+    "gene exon strand position match"
 )
 
 

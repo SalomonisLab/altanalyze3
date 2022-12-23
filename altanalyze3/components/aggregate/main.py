@@ -1,11 +1,11 @@
-import sys
 import pysam
-import numpy
 import pandas
 import shutil
 import logging
+import itertools
 import multiprocessing
 from functools import partial
+from collections import deque
 from altanalyze3.utilities.logger import setup_logger
 from altanalyze3.utilities.helpers import get_tmp_suffix
 from altanalyze3.utilities.constants import (
@@ -13,7 +13,8 @@ from altanalyze3.utilities.constants import (
     Annotation,
     JunctionsParams,
     IntronsParams,
-    AnnotationsParams
+    AnnotationsParams,
+    AnnMatchCat
 )
 from altanalyze3.utilities.io import (
     get_all_ref_chr,
@@ -41,107 +42,125 @@ def get_jun_annotation_jobs(args):
             if contig in get_all_ref_chr(args.ref, args.threads) and contig in args.chr
     ]
 
+class RefDeque():
+
+    def __init__(self, reference_iter):
+        self.__reference_iter = reference_iter
+        self.__exhausted = False
+        self.__deque = deque()
+        self.__buffer = []
+        self.__last_ref = None
+        self.contig = None
+        self.start = None
+        self.end = None
+        self.name = None
+        self.strand = None
+        self.gene = None
+        self.exon = None
+        self.type = None
+
+    def __set_state(self, reference, safe=None):
+        safe = False if safe is None else safe
+        self.contig = reference.contig
+        self.start = reference.start
+        self.end = reference.end
+        self.name = reference.name
+        self.strand = reference.strand
+        self.gene, self.exon = self.name.split(":")
+        self.type = self.exon[0].upper()
+        logging.debug(f"""===> {"safely " if safe else ""}get new reference {self.contig}:{self.start:,}-{self.end:,}, {self.name}, {self.strand}""")
+        if safe:
+            self.__buffer.append(reference)
+
+    def pop_left(self, safe=None):                 # if safe is True, we will be able to restore used items
+        safe = False if safe is None else safe
+        if safe:
+            if len(self.__buffer) == 0:            # this is the first time we called pop_left with safe=True
+                self.__last_ref = (
+                    self.contig,
+                    self.start,
+                    self.end,
+                    self.name,
+                    self.strand,
+                    self.gene,
+                    self.exon,
+                    self.type
+                )
+        else:                                      # we called unsafe pop_left, so keepeing buffer doesn't make sense anymore
+            self.__buffer = []
+            self.__last_ref = None
+        try:
+            self.__set_state(self.__deque.popleft(), safe)
+        except IndexError:
+            self.__deque.append(next(self.__reference_iter))
+            self.__set_state(self.__deque.popleft(), safe)
+        except StopIteration:
+            self.__exhausted = True
+
+    def restore(self):
+        if len(self.__buffer) > 0 and self.__last_ref is not None:        # restore only when we have what to restore
+            logging.debug("Restore references deque")
+            self.__buffer.reverse()
+            self.__deque.extendleft(self.__buffer)
+            self.contig, self.start, self.end, self.name, self.strand, self.gene, self.exon, self.type = self.__last_ref
+            self.__buffer = []
+            self.__last_ref = None
+
+    def is_empty(self):
+        return self.__exhausted and len(self.__deque) == 0
+
 
 def get_annotation(job, query_location, references_location, threads=None):
     threads = 1 if threads is None else threads
-    collected_annotations = []
+    all_annotations = []
     with pysam.TabixFile(str(query_location), mode="r", parser=pysam.asBed(), threads=threads) as query_handler:
         with pysam.TabixFile(str(references_location), mode="r", parser=pysam.asBed(), threads=threads) as references_handler:
-            references_iter = references_handler.fetch(get_correct_contig(job.contig, references_handler))         # to iterate within the specific chromosome
-            current_reference = next(references_iter)                                                              # get initial value from reference iterator
-            run_out_of_references = False                                                                          # to stop iteration over references when they run out
-            for current_query in query_handler.fetch(get_correct_contig(job.contig, query_handler)):               # fetches all jucntions from the specific chromosome
-                logging.debug(f"""Current query [{current_query.start:,}, {current_query.end:,})""")
 
-                while not run_out_of_references:
-                    logging.debug(f"""Current reference [{current_reference.start:,}, {current_reference.end:,}),  {current_reference.name}, {current_reference.strand}""")
-                    current_gene, current_exon = current_reference.name.split(":")
-                    current_type = current_exon[0].upper()
-                    current_position = current_query.start             # we always use start, because query_location will be either start or end sorted with identical columns
+            reference_iter = references_handler.fetch(get_correct_contig(job.contig, references_handler))
+            ref_deque = RefDeque(reference_iter)                                                            # we need it because we can't roll back pysam iterator
+            ref_deque.pop_left()                                                                            # getting a new reference from the start of the left
 
-                    if current_position < current_reference.start:
-                        logging.debug(f"""{current_position:,} is behind [{current_reference.start:,}, {current_reference.end:,})""")
-                        current_annotation = Annotation(
-                            gene=current_gene,
-                            exon=current_exon,
-                            strand=current_reference.strand,
-                            position=current_position,
-                            order=int(current_query.score)
-                        )
+            for current_query in query_handler.fetch(get_correct_contig(job.contig, query_handler)):        # fetches all jucntions from the specific chromosome
+                logging.debug(f"""---> get new region {current_query.contig}:{current_query.start:,}-{current_query.end:,}""")
+                check_position = current_query.start                                                        # we always use start
+                current_annotations = []
+
+                while not ref_deque.is_empty():
+                    if check_position < ref_deque.start:
+                        logging.debug(f"""{check_position:,} is behind {ref_deque.contig}:{ref_deque.start:,}-{ref_deque.end:,}, {ref_deque.name}, {ref_deque.strand}""")
+                        current_annotations.append(Annotation(ref_deque.gene, ref_deque.exon, ref_deque.strand, check_position, AnnMatchCat.CLOSEST))
                         break
-                    elif current_position > current_reference.end:
-                        try:
-                            logging.debug(f"{current_position:,} is after [{current_reference.start:,}, {current_reference.end:,})")
-                            logging.debug("Attempting to switch to the next reference")
-                            current_reference = next(references_iter)
-                        except StopIteration:
-                            logging.debug("Run out of references")
-                            current_annotation = Annotation(
-                                gene=numpy.nan,
-                                exon=numpy.nan,
-                                strand=numpy.nan,
-                                position=numpy.nan,
-                                order=int(current_query.score)
-                            )
-                            run_out_of_references = True
-                    elif current_type == "E":
-                        if current_position >= current_reference.start and current_position <= current_reference.end:
-                            logging.debug(f"""{current_position:,} is within or adjacent to exon [{current_reference.start:,}, {current_reference.end:,})""")
-                            if current_position == current_reference.start or current_position == current_reference.end:
-                                logging.debug("Exact match")
-                                current_annotation = Annotation(
-                                    gene=current_gene,
-                                    exon=current_exon,
-                                    strand=current_reference.strand,
-                                    position=0,
-                                    order=int(current_query.score)
-                                )
-                            else:
-                                logging.debug("Not exact match")
-                                current_annotation = Annotation(
-                                    gene=current_gene,
-                                    exon=current_exon,
-                                    strand=current_reference.strand,
-                                    position=current_position,
-                                    order=int(current_query.score)
-                                )
-                            break
-                    elif current_type == "I":
-                        if current_position > current_reference.start and current_position < current_reference.end:
-                            logging.debug(f"""{current_position:,} is within intron [{current_reference.start:,}, {current_reference.end:,})""")
-                            current_annotation = Annotation(
-                                gene=current_gene,
-                                exon=current_exon,
-                                strand=current_reference.strand,
-                                position=current_position,
-                                order=int(current_query.score)
-                            )
-                            break
-                        elif current_position == current_reference.start or current_position == current_reference.end:
-                            try:
-                                logging.debug(f"{current_position:,} is outside of intron [{current_reference.start:,}, {current_reference.end:,})")
-                                logging.debug("Attempting to switch to the next reference")
-                                current_reference = next(references_iter)
-                            except StopIteration:
-                                logging.debug("Run out of references")
-                                current_annotation = Annotation(
-                                    gene=numpy.nan,
-                                    exon=numpy.nan,
-                                    strand=numpy.nan,
-                                    position=numpy.nan,
-                                    order=int(current_query.score)
-                                )
-                                run_out_of_references = True
-                        else:
-                            sys.exit(-1)  # exit, not correct logic
+                    elif check_position > ref_deque.end:
+                        logging.debug(f"{check_position:,} is after {ref_deque.contig}:{ref_deque.start:,}-{ref_deque.end:,}, {ref_deque.name}, {ref_deque.strand}")
+                        ref_deque.pop_left()
                     else:
-                        sys.exit(-1)      # exit, not correct logic
+                        while not ref_deque.is_empty() and check_position >= ref_deque.start:
+                            if ref_deque.type == "E" and check_position == ref_deque.start:
+                                logging.debug("Exact match - exon start")
+                                current_annotations.append(Annotation(ref_deque.gene, ref_deque.exon, ref_deque.strand, 0, AnnMatchCat.EXON_START))
+                            elif ref_deque.type == "E" and check_position == ref_deque.end:
+                                logging.debug("Exact match - exon end")
+                                current_annotations.append(Annotation(ref_deque.gene, ref_deque.exon, ref_deque.strand, 0, AnnMatchCat.EXON_END))
+                            elif check_position > ref_deque.start and check_position < ref_deque.end:
+                                if ref_deque.type == "E":
+                                    logging.debug("Not exact exon match")
+                                    current_annotations.append(Annotation(ref_deque.gene, ref_deque.exon, ref_deque.strand, check_position, AnnMatchCat.EXON_MID))
+                                elif ref_deque.type == "I":
+                                    logging.debug("Not exact intron match")
+                                    current_annotations.append(Annotation(ref_deque.gene, ref_deque.exon, ref_deque.strand, check_position, AnnMatchCat.INTRON_MID))
+                                else:
+                                    assert(False), "Not implemented logic"
+                            ref_deque.pop_left(safe=True)
+                        ref_deque.restore()
+                        break
 
-                logging.debug(f"""Assigning {current_annotation}""")
-                collected_annotations.append(current_annotation)
+                if len(current_annotations) == 0:                                            # in case we failed to annotate junction
+                    current_annotations.append(None)
+                
+                all_annotations.append((current_annotations, int(current_query.score)))      # score keeps the original rows order
 
-    collected_annotations.sort(key = lambda i:i.order)    # need to sort the results so the order corresponds to the jun_coords_location
-    return collected_annotations
+    all_annotations.sort(key = lambda i:i[1])    # need to sort the results so the order corresponds to the jun_coords_location
+    return all_annotations
 
 
 def process_jun_annotation(args, job):
@@ -155,7 +174,7 @@ def process_jun_annotation(args, job):
     logging.info(f"""Temporary results will be saved to {job.location}""")
 
     logging.debug("Annotating junctions start coordinates")
-    start_annotations = get_annotation(
+    sorted_start_annotations = get_annotation(
         job=job,
         query_location=args.jun_starts_location,
         references_location=args.ref,
@@ -163,7 +182,7 @@ def process_jun_annotation(args, job):
     )
 
     logging.debug("Annotating junctions end coordinates")
-    end_annotations = get_annotation(
+    sorted_end_annotations = get_annotation(
         job=job,
         query_location=args.jun_ends_location,
         references_location=args.ref,
@@ -172,14 +191,63 @@ def process_jun_annotation(args, job):
 
     with job.location.open("wt") as output_stream:
         with pysam.TabixFile(str(args.jun_coords_location), mode="r", parser=pysam.asBed(), threads=args.threads) as jun_coords_handler:
-            for (current_coords, start_annotation, end_annotation) in zip(
-                jun_coords_handler.fetch(get_correct_contig(job.contig, jun_coords_handler)), start_annotations, end_annotations
+            for (current_coords, (start_annotations, _), (end_annotations, _)) in zip(
+                jun_coords_handler.fetch(get_correct_contig(job.contig, jun_coords_handler)), sorted_start_annotations, sorted_end_annotations
             ):
-                start_shift = "" if start_annotation.position == 0 else f"""_{start_annotation.position}"""
-                end_shift = "" if end_annotation.position == 0 else f"""_{end_annotation.position}"""
-                gene = (f"""{start_annotation.gene}:""", "") if start_annotation.gene == end_annotation.gene else (f"""{start_annotation.gene}:""", f"""{end_annotation.gene}:""")
-                annotation = f"""{gene[0]}{start_annotation.exon}{start_shift}-{gene[1]}{end_annotation.exon}{end_shift}"""
-                strand = start_annotation.strand if start_annotation.strand == start_annotation.strand else "."
+                logging.info(f"""Assigning annotation for {job.contig}:{current_coords.start:,}-{current_coords.end:,}, {current_coords.name}""")
+                start_annotations = [_ for _ in start_annotations if _ is not None]
+                end_annotations = [_ for _ in end_annotations if _ is not None]
+
+                choices = [
+                    [],                        # exact match
+                    [],                        # same gene
+                    [],                        # different genes
+                    [("undefined", ".")]       # default
+                ]
+
+                for annotations_pair in list(itertools.product(start_annotations, end_annotations)):   # if any of annotations is [], returns []
+                    if annotations_pair[0].gene == annotations_pair[1].gene and \
+                        annotations_pair[0].strand == annotations_pair[1].strand and \
+                        annotations_pair[0].match == AnnMatchCat.EXON_END and \
+                        annotations_pair[1].match == AnnMatchCat.EXON_START:
+
+                        choices[0].append(
+                            (
+                                f"""{annotations_pair[0].gene}:{annotations_pair[0].exon}-{annotations_pair[1].exon}""",
+                                annotations_pair[0].strand
+                            )
+                        )
+
+                    elif annotations_pair[0].gene == annotations_pair[1].gene and \
+                        annotations_pair[0].strand == annotations_pair[1].strand:
+                        start_shift = "" if annotations_pair[0].position == 0 else f"""_{annotations_pair[0].position}"""
+                        end_shift = "" if annotations_pair[1].position == 0 else f"""_{annotations_pair[1].position}"""
+
+                        choices[1].append(
+                            (
+                                f"""{annotations_pair[0].gene}:{annotations_pair[0].exon}{start_shift}-{annotations_pair[1].exon}{end_shift}""",
+                                annotations_pair[0].strand
+                            )
+                        )
+
+                    else:
+                        start_shift = "" if annotations_pair[0].position == 0 else f"""_{annotations_pair[0].position}"""
+                        end_shift = "" if annotations_pair[1].position == 0 else f"""_{annotations_pair[1].position}"""
+
+                        choices[2].append(
+                            (
+                                f"""{annotations_pair[0].gene}:{annotations_pair[0].exon}{start_shift}-{annotations_pair[1].gene}:{annotations_pair[1].exon}{end_shift}""",
+                                "."
+                            )
+                        )
+
+                logging.info(choices)
+                for choice in choices:
+                    if len(choice) != 0:
+                        annotation, strand = choice[0][0], choice[0][1]
+                        logging.info(f"""Best choice found - {annotation},{strand}""")
+                        break
+
                 output_stream.write(
                     f"""{job.contig}\t{current_coords.start}\t{current_coords.end}\t{current_coords.name}\t{annotation}\t{strand}\n"""   # no reason to keep it BED-formatted
                 )
