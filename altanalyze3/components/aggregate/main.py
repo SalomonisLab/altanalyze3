@@ -42,6 +42,33 @@ def get_jun_annotation_jobs(args):
             if contig in get_all_ref_chr(args.ref, args.threads) and contig in args.chr
     ]
 
+
+class GroupedAnnotations():
+
+    def __init__(self):
+        self.__exact_match = []
+        self.__same_gene = []
+        self.__different_genes = []
+
+    def add(self, sa, ea):          # sa - start annotation, ea - end annotation
+        if sa.gene == ea.gene and sa.strand == ea.strand and sa.match == AnnMatchCat.EXON_END and ea.match == AnnMatchCat.EXON_START:
+            self.__exact_match.append((f"""{sa.gene}:{sa.exon}-{ea.exon}""", sa.strand))
+        else:
+            sa_shift = "" if sa.position == 0 else f"""_{sa.position}"""
+            ea_shift = "" if ea.position == 0 else f"""_{ea.position}"""
+            if sa.gene == ea.gene and sa.strand == ea.strand:
+                self.__same_gene.append((f"""{sa.gene}:{sa.exon}{sa_shift}-{ea.exon}{ea_shift}""", sa.strand))
+            else:
+                self.__different_genes.append((f"""{sa.gene}:{sa.exon}{sa_shift}-{ea.gene}:{ea.exon}{ea_shift}""", "."))     # we don't know strand for this case
+
+    def best(self):
+        all_annotations = self.__exact_match + self.__same_gene + self.__different_genes
+        if len(all_annotations) > 0:
+            return all_annotations[0]
+        else:
+            return ("undefined", ".")
+
+
 class RefDeque():
 
     def __init__(self, reference_iter):
@@ -197,57 +224,10 @@ def process_jun_annotation(args, job):
                 logging.info(f"""Assigning annotation for {job.contig}:{current_coords.start:,}-{current_coords.end:,}, {current_coords.name}""")
                 start_annotations = [_ for _ in start_annotations if _ is not None]
                 end_annotations = [_ for _ in end_annotations if _ is not None]
-
-                choices = [
-                    [],                        # exact match
-                    [],                        # same gene
-                    [],                        # different genes
-                    [("undefined", ".")]       # default
-                ]
-
-                for annotations_pair in list(itertools.product(start_annotations, end_annotations)):   # if any of annotations is [], returns []
-                    if annotations_pair[0].gene == annotations_pair[1].gene and \
-                        annotations_pair[0].strand == annotations_pair[1].strand and \
-                        annotations_pair[0].match == AnnMatchCat.EXON_END and \
-                        annotations_pair[1].match == AnnMatchCat.EXON_START:
-
-                        choices[0].append(
-                            (
-                                f"""{annotations_pair[0].gene}:{annotations_pair[0].exon}-{annotations_pair[1].exon}""",
-                                annotations_pair[0].strand
-                            )
-                        )
-
-                    elif annotations_pair[0].gene == annotations_pair[1].gene and \
-                        annotations_pair[0].strand == annotations_pair[1].strand:
-                        start_shift = "" if annotations_pair[0].position == 0 else f"""_{annotations_pair[0].position}"""
-                        end_shift = "" if annotations_pair[1].position == 0 else f"""_{annotations_pair[1].position}"""
-
-                        choices[1].append(
-                            (
-                                f"""{annotations_pair[0].gene}:{annotations_pair[0].exon}{start_shift}-{annotations_pair[1].exon}{end_shift}""",
-                                annotations_pair[0].strand
-                            )
-                        )
-
-                    else:
-                        start_shift = "" if annotations_pair[0].position == 0 else f"""_{annotations_pair[0].position}"""
-                        end_shift = "" if annotations_pair[1].position == 0 else f"""_{annotations_pair[1].position}"""
-
-                        choices[2].append(
-                            (
-                                f"""{annotations_pair[0].gene}:{annotations_pair[0].exon}{start_shift}-{annotations_pair[1].gene}:{annotations_pair[1].exon}{end_shift}""",
-                                "."
-                            )
-                        )
-
-                logging.info(choices)
-                for choice in choices:
-                    if len(choice) != 0:
-                        annotation, strand = choice[0][0], choice[0][1]
-                        logging.info(f"""Best choice found - {annotation},{strand}""")
-                        break
-
+                grouped_annotation = GroupedAnnotations()
+                for annotations_pair in list(itertools.product(start_annotations, end_annotations)):   # if any of [start_]/[end_]annotations is [], returns []
+                    grouped_annotation.add(annotations_pair[0], annotations_pair[1])
+                annotation, strand = grouped_annotation.best()
                 output_stream.write(
                     f"""{job.contig}\t{current_coords.start}\t{current_coords.end}\t{current_coords.name}\t{annotation}\t{strand}\n"""   # no reason to keep it BED-formatted
                 )
