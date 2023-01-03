@@ -49,14 +49,19 @@ class GroupedAnnotations():
         self.__exact_match = []
         self.__partial_match = []
 
-    def add(self, sa, ea):          # sa - start annotation, ea - end annotation
-        if sa.gene == ea.gene and sa.strand == ea.strand:
-            if sa.match == AnnMatchCat.EXON_END and ea.match == AnnMatchCat.EXON_START:
-                self.__exact_match.append((f"""{sa.gene}:{sa.exon}-{ea.exon}""", sa.strand))
-            else:
-                sa_shift = "" if sa.position == 0 else f"""_{sa.position}"""
-                ea_shift = "" if ea.position == 0 else f"""_{ea.position}"""
-                self.__partial_match.append((f"""{sa.gene}:{sa.exon}{sa_shift}-{ea.exon}{ea_shift}""", sa.strand))
+    def add(self, sa, ea):                                                                 # sa - start annotation, ea - end annotation
+        if sa.match == AnnMatchCat.CLOSEST or ea.match == AnnMatchCat.CLOSEST:             # not enough data to make a conclusion
+            pass
+        elif sa.gene != ea.gene or sa.strand != ea.strand:                                 # different gene or strand
+            pass
+        elif sa.match == AnnMatchCat.INTRON_MID and ea.match == AnnMatchCat.INTRON_MID:    # the same gene and strand but both start/end are within intron
+            pass
+        elif sa.match == AnnMatchCat.EXON_END and ea.match == AnnMatchCat.EXON_START:      # exact match
+            self.__exact_match.append((f"""{sa.gene}:{sa.exon}-{ea.exon}""", sa.strand))
+        else:                                                                              # partial match
+            sa_shift = "" if sa.position == 0 else f"""_{sa.position}"""
+            ea_shift = "" if ea.position == 0 else f"""_{ea.position}"""
+            self.__partial_match.append((f"""{sa.gene}:{sa.exon}{sa_shift}-{ea.exon}{ea_shift}""", sa.strand))
 
     def best(self):
         all_annotations = self.__exact_match + self.__partial_match
@@ -152,6 +157,7 @@ def get_annotation(job, query_location, references_location, threads=None):
                 while not ref_deque.is_empty():
                     if check_position < ref_deque.start:
                         logging.debug(f"""{check_position:,} is behind {ref_deque.contig}:{ref_deque.start:,}-{ref_deque.end:,}, {ref_deque.name}, {ref_deque.strand}""")
+                        logging.debug("Closest match")
                         current_annotations.append(Annotation(ref_deque.gene, ref_deque.exon, ref_deque.strand, check_position, AnnMatchCat.CLOSEST))
                         break
                     elif check_position > ref_deque.end:
@@ -179,8 +185,9 @@ def get_annotation(job, query_location, references_location, threads=None):
                         break
 
                 if len(current_annotations) == 0:                                            # in case we failed to annotate junction
+                    logging.debug(f"""Failed to annotate {check_position:,}""")
                     current_annotations.append(None)
-                
+
                 all_annotations.append((current_annotations, int(current_query.score)))      # score keeps the original rows order
 
     all_annotations.sort(key = lambda i:i[1])    # need to sort the results so the order corresponds to the jun_coords_location
