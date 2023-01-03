@@ -20,3 +20,7 @@ wget -q --show-progress https://github.com/michael-kotliar/altanalyze3_data/raw/
 wget -q --show-progress https://github.com/michael-kotliar/altanalyze3_data/raw/main/data/Cal27P5-3.bam.bai -O Cal27P5-3.bam.bai
 
 cp Cal27P5-1.bam Cal27P5-1-copy.bam
+
+mkdir -p controls && cd controls
+wget -q --show-progress https://github.com/michael-kotliar/altanalyze3_data/raw/main/data/controls/Cal27P5_1_aggregated_counts.bed.gz -O Cal27P5_1_aggregated_counts.bed.gz
+cd ..

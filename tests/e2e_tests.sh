@@ -24,3 +24,17 @@ altanalyze3 aggregate --juncounts ./Cal27P5_1_juncounts.bed \
                       --bed \
                       --loglevel info \
                       --output Cal27P5_1_aggregated_counts
+
+diff Cal27P5_1_aggregated_counts.bed.gz ../controls/Cal27P5_1_aggregated_counts.bed.gz
+DIFF_ERROR=$?
+if [ $DIFF_ERROR -eq 2 ]
+then
+   echo "something wrong with the diff command"
+   exit 1
+elif [ $DIFF_ERROR -eq 1 ]
+then
+   echo "files are different"
+   exit 1
+else
+   echo "success"
+fi
