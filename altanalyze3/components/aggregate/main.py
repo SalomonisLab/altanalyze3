@@ -47,22 +47,19 @@ class GroupedAnnotations():
 
     def __init__(self):
         self.__exact_match = []
-        self.__same_gene = []
-        self.__different_genes = []
+        self.__partial_match = []
 
     def add(self, sa, ea):          # sa - start annotation, ea - end annotation
-        if sa.gene == ea.gene and sa.strand == ea.strand and sa.match == AnnMatchCat.EXON_END and ea.match == AnnMatchCat.EXON_START:
-            self.__exact_match.append((f"""{sa.gene}:{sa.exon}-{ea.exon}""", sa.strand))
-        else:
-            sa_shift = "" if sa.position == 0 else f"""_{sa.position}"""
-            ea_shift = "" if ea.position == 0 else f"""_{ea.position}"""
-            if sa.gene == ea.gene and sa.strand == ea.strand:
-                self.__same_gene.append((f"""{sa.gene}:{sa.exon}{sa_shift}-{ea.exon}{ea_shift}""", sa.strand))
+        if sa.gene == ea.gene and sa.strand == ea.strand:
+            if sa.match == AnnMatchCat.EXON_END and ea.match == AnnMatchCat.EXON_START:
+                self.__exact_match.append((f"""{sa.gene}:{sa.exon}-{ea.exon}""", sa.strand))
             else:
-                self.__different_genes.append((f"""{sa.gene}:{sa.exon}{sa_shift}-{ea.gene}:{ea.exon}{ea_shift}""", "."))     # we don't know strand for this case
+                sa_shift = "" if sa.position == 0 else f"""_{sa.position}"""
+                ea_shift = "" if ea.position == 0 else f"""_{ea.position}"""
+                self.__partial_match.append((f"""{sa.gene}:{sa.exon}{sa_shift}-{ea.exon}{ea_shift}""", sa.strand))
 
     def best(self):
-        all_annotations = self.__exact_match + self.__same_gene + self.__different_genes
+        all_annotations = self.__exact_match + self.__partial_match
         if len(all_annotations) > 0:
             return all_annotations[0]
         else:
@@ -221,7 +218,7 @@ def process_jun_annotation(args, job):
             for (current_coords, (start_annotations, _), (end_annotations, _)) in zip(
                 jun_coords_handler.fetch(get_correct_contig(job.contig, jun_coords_handler)), sorted_start_annotations, sorted_end_annotations
             ):
-                logging.info(f"""Assigning annotation for {job.contig}:{current_coords.start:,}-{current_coords.end:,}, {current_coords.name}""")
+                logging.debug(f"""Assigning annotation for {job.contig}:{current_coords.start:,}-{current_coords.end:,}, {current_coords.name}""")
                 start_annotations = [_ for _ in start_annotations if _ is not None]
                 end_annotations = [_ for _ in end_annotations if _ is not None]
                 grouped_annotation = GroupedAnnotations()
@@ -319,7 +316,7 @@ def collect_results(args):
             logging.info(f"""Loading annotated junctions coordinates from {job.location}""")
             annotations_df = pandas.read_csv(job.location, **AnnotationsParams)
             collected_annotations_df = annotations_df if collected_annotations_df is None else pandas.concat([collected_annotations_df, annotations_df])
-            logging.debug(f"""Removing {job.location}""")
+            logging.info(f"""Removing {job.location}""")
             job.location.unlink()
         logging.info(f"""Loading pickled junctions counts from {args.jun_counts_location}""")
         counts_df = pandas.read_pickle(args.jun_counts_location)
@@ -395,8 +392,8 @@ def aggregate(args):
             save_bed=False
         )
 
-    logging.debug("Collecting results")
+    logging.info("Collecting results")
     collect_results(args)
 
-    logging.debug("Removing temporary directory")
+    logging.info("Removing temporary directory")
     shutil.rmtree(args.tmp)

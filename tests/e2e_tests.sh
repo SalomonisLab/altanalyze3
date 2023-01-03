@@ -33,8 +33,26 @@ then
    exit 1
 elif [ $DIFF_ERROR -eq 1 ]
 then
-   echo "files are different"
+   echo "Cal27P5_1_aggregated_counts.bed.gz file is not equal to the control one"
    exit 1
 else
    echo "success"
 fi
+
+
+echo "Count junctions reads from Cal27P5-1.bam, Cal27P5-2.bam, and Cal27P5-3.bam"
+altanalyze3 juncount --bam ../Cal27P5-1.bam ../Cal27P5-2.bam ../Cal27P5-3.bam \
+                     --output Cal27P5_1_2_3_juncounts
+
+echo "Count introns reads from Cal27P5-1.bam, Cal27P5-2.bam, and Cal27P5-3.bam"
+altanalyze3 intcount --bam ../Cal27P5-1.bam ../Cal27P5-2.bam ../Cal27P5-3.bam \
+                     --ref ../gene_model_all.tsv \
+                     --output Cal27P5_1_2_3_intcounts \
+
+echo "Aggregating counts from Cal27P5_1_2_3_juncounts.bed and Cal27P5_1_2_3_intcounts.bed"
+altanalyze3 aggregate --juncounts ./Cal27P5_1_2_3_juncounts.bed \
+                      --intcounts ./Cal27P5_1_2_3_intcounts.bed \
+                      --ref ../gene_model_all.tsv \
+                      --bed \
+                      --loglevel info \
+                      --output Cal27P5_1_2_3_aggregated_counts
