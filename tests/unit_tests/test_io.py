@@ -33,8 +33,14 @@ DATA_FOLDER = pathlib.Path(__file__).resolve().parents[1].joinpath("data")
         )
     ]
 )
-def test_get_all_ref_chr(location, control_ref_chr):                           # this will also check guard_chr function
-    calculated_ref_chr = get_all_ref_chr(get_indexed_references(DATA_FOLDER.joinpath(location)), 1)
+def test_get_all_ref_chr(tmp_path, location, control_ref_chr):                           # this will also check guard_chr function
+    calculated_ref_chr = get_all_ref_chr(
+        get_indexed_references(
+            DATA_FOLDER.joinpath(location),
+            tmp_path
+        ),
+        1
+    )
     assert sorted(calculated_ref_chr) == sorted(control_ref_chr)
 
 

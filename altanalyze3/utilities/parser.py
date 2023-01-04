@@ -272,6 +272,7 @@ class ArgsParser():
         self.args.strandness = IntRetCat[self.args.strandness.upper()]
         self.args.ref = get_indexed_references(
             location=self.args.ref,
+            tmp_location=self.args.tmp,
             selected_chr=self.args.chr,
             only_introns=True
         )
@@ -300,6 +301,7 @@ class ArgsParser():
                 sys.exit(1)
             self.args.ref = get_indexed_references(
                 location=self.args.ref,
+                tmp_location=self.args.tmp,
                 selected_chr=self.args.chr,
                 only_introns=False
             )

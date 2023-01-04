@@ -7,6 +7,7 @@ from altanalyze3.utilities.constants import (
     ChrConverter,
     ReferencesParams
 )
+from altanalyze3.utilities.helpers import get_tmp_suffix
 
 
 def guard_chr(function):
@@ -83,7 +84,7 @@ def is_bam_indexed(location, threads=None):
         return bam_handler.has_index()
 
 
-def get_indexed_references(location, selected_chr=None, only_introns=None):
+def get_indexed_references(location, tmp_location, selected_chr=None, only_introns=None):
     only_introns = False if only_introns is None else only_introns
 
     logging.info(f"""Loading references from {location}""")
@@ -117,7 +118,7 @@ def get_indexed_references(location, selected_chr=None, only_introns=None):
     )
     references_df.drop(["gene", "exon"], axis=1, inplace=True)                                            # droping unused columns
 
-    target_location = location.with_suffix(".bed")
+    target_location = tmp_location.joinpath(get_tmp_suffix()).with_suffix(".bed")
     logging.info(f"""Saving references as a BED file to {target_location}""")
     references_df.to_csv(
         target_location,
