@@ -23,4 +23,10 @@ cp Cal27P5-1.bam Cal27P5-1-copy.bam
 
 mkdir -p controls && cd controls
 wget -q --show-progress https://github.com/michael-kotliar/altanalyze3_data/raw/main/data/controls/Cal27P5_1_aggregated_counts.bed.gz -O Cal27P5_1_aggregated_counts.bed.gz
+wget -q --show-progress https://github.com/michael-kotliar/altanalyze3_data/raw/main/data/controls/Cal27P5_1_intcounts.bed -O Cal27P5_1_intcounts.bed
+wget -q --show-progress https://github.com/michael-kotliar/altanalyze3_data/raw/main/data/controls/Cal27P5_1_juncounts.bed -O Cal27P5_1_juncounts.bed
+wget -q --show-progress https://github.com/michael-kotliar/altanalyze3_data/raw/main/data/controls/Cal27P5_2_intcounts.bed -O Cal27P5_2_intcounts.bed
+wget -q --show-progress https://github.com/michael-kotliar/altanalyze3_data/raw/main/data/controls/Cal27P5_2_juncounts.bed -O Cal27P5_2_juncounts.bed
+wget -q --show-progress https://github.com/michael-kotliar/altanalyze3_data/raw/main/data/controls/Cal27P5_3_intcounts.bed -O Cal27P5_3_intcounts.bed
+wget -q --show-progress https://github.com/michael-kotliar/altanalyze3_data/raw/main/data/controls/Cal27P5_3_juncounts.bed -O Cal27P5_3_juncounts.bed
 cd ..

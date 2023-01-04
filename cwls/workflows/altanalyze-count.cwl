@@ -105,6 +105,16 @@ outputs:
     outputSource: juncount/junction_bed_file
     doc: "Junction counts BED file"
 
+  aggregated_bed_file:
+    type: File
+    outputSource: aggregate/aggregated_bed_file
+    doc: "Aggergated counts BED file"
+
+  aggregated_h5ad_file:
+    type: File
+    outputSource: aggregate/aggregated_h5ad_file
+    doc: "Aggergated counts H5AD file"
+
   intcount_stdout_log:
     type: File[]
     outputSource: intcount/stdout_log
@@ -124,6 +134,16 @@ outputs:
     type: File[]
     outputSource: juncount/stderr_log
     doc: "Stderr log from juncount step"
+
+  aggregate_stdout_log:
+    type: File
+    outputSource: aggregate/stdout_log
+    doc: "Stdout log from aggregate step"
+
+  aggregate_stderr_log:
+    type: File
+    outputSource: aggregate/stderr_log
+    doc: "Stderr log from aggregate step"
 
 
 steps:
@@ -158,6 +178,24 @@ steps:
     - alignment_file
     out:
     - junction_bed_file
+    - stdout_log
+    - stderr_log
+
+  aggregate:
+    run: ../tools/altanalyze-aggregate.cwl
+    in:
+      junction_bed_file: juncount/junction_bed_file
+      intron_bed_file: intcount/intron_bed_file
+      reference_file: reference_file
+      chrom_list: chrom_list
+      export_to_bed:
+        default: true
+      log_level: log_level
+      threads: threads
+      processes: processes
+    out:
+    - aggregated_bed_file
+    - aggregated_h5ad_file
     - stdout_log
     - stderr_log
 
