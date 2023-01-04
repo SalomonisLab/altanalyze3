@@ -121,10 +121,11 @@ class RefDeque():
         try:
             self.__set_state(self.__deque.popleft(), safe)
         except IndexError:
-            self.__deque.append(next(self.__reference_iter))
-            self.__set_state(self.__deque.popleft(), safe)
-        except StopIteration:
-            self.__exhausted = True
+            try:
+                self.__deque.append(next(self.__reference_iter))
+                self.__set_state(self.__deque.popleft(), safe)
+            except StopIteration:
+                self.__exhausted = True
 
     def restore(self):
         if len(self.__buffer) > 0 and self.__last_ref is not None:        # restore only when we have what to restore
