@@ -13,21 +13,6 @@ requirements:
         }
         return "results"+ext;
     };
-- class: InitialWorkDirRequirement
-  listing: |
-    ${
-      if (inputs.reference_file != null) {
-        return [
-          {
-            "entry": inputs.reference_file,
-            "entryname": inputs.reference_file.basename,
-            "writable": true
-          }
-        ]
-      } else {
-        return []
-      }
-    }
 
 
 inputs:
