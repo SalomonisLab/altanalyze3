@@ -48,23 +48,25 @@ class GroupedAnnotations():
     def __init__(self):
         self.__exact_match = []
         self.__partial_match = []
+        self.__distant_match = []
 
-    def add(self, sa, ea):                                                                 # sa - start annotation, ea - end annotation
-        if sa.match == AnnMatchCat.CLOSEST or ea.match == AnnMatchCat.CLOSEST:             # not enough data to make a conclusion
+    def add(self, sa, ea):                                                                                           # sa - start annotation, ea - end annotation
+
+        sa_shift = "" if sa.position == 0 else f"""_{sa.position}"""                                                 # junction start coord if not exact exon match
+        ea_shift = "" if ea.position == 0 else f"""_{ea.position}"""                                                 # junction end coorf if not exact exon match
+
+        if sa.match == AnnMatchCat.CLOSEST or ea.match == AnnMatchCat.CLOSEST:                                       # not enough data to make a conclusion
             pass
-        elif sa.gene != ea.gene or sa.strand != ea.strand:                                 # different gene or strand
-            pass
-        elif sa.match == AnnMatchCat.INTRON_MID and ea.match == AnnMatchCat.INTRON_MID:    # the same gene and strand but both start/end are within intron
-            pass
-        elif sa.match == AnnMatchCat.EXON_END and ea.match == AnnMatchCat.EXON_START:      # exact match
-            self.__exact_match.append((f"""{sa.gene}:{sa.exon}-{ea.exon}""", sa.strand))
-        else:                                                                              # partial match
-            sa_shift = "" if sa.position == 0 else f"""_{sa.position}"""
-            ea_shift = "" if ea.position == 0 else f"""_{ea.position}"""
-            self.__partial_match.append((f"""{sa.gene}:{sa.exon}{sa_shift}-{ea.exon}{ea_shift}""", sa.strand))
+        elif sa.gene == ea.gene and sa.strand == ea.strand:                                                          # the same gene and strand
+            if sa.match == AnnMatchCat.EXON_END and ea.match == AnnMatchCat.EXON_START:                              #    exact match
+                self.__exact_match.append((f"""{sa.gene}:{sa.exon}-{ea.exon}""", sa.strand))
+            else:                                                                                                    #    partial match
+                self.__partial_match.append((f"""{sa.gene}:{sa.exon}{sa_shift}-{ea.exon}{ea_shift}""", sa.strand))
+        else:                                                                                                        # different gene and/or strand
+            self.__distant_match.append((f"""{sa.gene}:{sa.exon}{sa_shift}-{ea.gene}:{ea.exon}{ea_shift}""", "."))   #    distant match
 
     def best(self):
-        all_annotations = self.__exact_match + self.__partial_match
+        all_annotations = self.__exact_match + self.__partial_match + self.__distant_match
         if len(all_annotations) > 0:
             return all_annotations[0]
         else:
