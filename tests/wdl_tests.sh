@@ -13,5 +13,6 @@ cd $DIR/wdl_tests
 java -jar /usr/local/bin/cromwell.jar run $DIR/../wdls/altanalyze-intcount.wdl --inputs altanalyze-intcount-1.json --options $TMP_DIR/options.json
 java -jar /usr/local/bin/cromwell.jar run $DIR/../wdls/altanalyze-juncount.wdl --inputs altanalyze-juncount-1.json --options $TMP_DIR/options.json
 java -jar /usr/local/bin/cromwell.jar run $DIR/../wdls/altanalyze-juncount.wdl --inputs altanalyze-juncount-2.json --options $TMP_DIR/options.json
+java -jar /usr/local/bin/cromwell.jar run $DIR/../wdls/altanalyze-aggregate.wdl --inputs altanalyze-aggregate-1.json --options $TMP_DIR/options.json
 rm -rf cromwell-executions cromwell-workflow-logs
 

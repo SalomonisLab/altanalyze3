@@ -1,0 +1,13 @@
+{
+    "AggregateWorkflow.junction_bed_file": [
+        "../data/controls/Cal27P5_1_juncounts.bed",
+        "../data/controls/Cal27P5_2_juncounts.bed",
+        "../data/controls/Cal27P5_3_juncounts.bed"
+    ],
+    "AggregateWorkflow.intron_bed_file": [
+        "../data/controls/Cal27P5_1_intcounts.bed",
+        "../data/controls/Cal27P5_2_intcounts.bed",
+        "../data/controls/Cal27P5_3_intcounts.bed"
+    ],
+    "AggregateWorkflow.reference_file": "../data/gene_model_all.tsv"
+}
