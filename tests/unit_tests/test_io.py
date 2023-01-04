@@ -37,7 +37,7 @@ def test_get_all_ref_chr(tmp_path, location, control_ref_chr):                  
     calculated_ref_chr = get_all_ref_chr(
         get_indexed_references(
             DATA_FOLDER.joinpath(location),
-            tmp_path
+            tmp_path                                                                     # https://docs.pytest.org/en/7.1.x/how-to/tmp_path.html#tmp-path
         ),
         1
     )
