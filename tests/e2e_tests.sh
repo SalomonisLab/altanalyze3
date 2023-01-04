@@ -40,18 +40,27 @@ else
 fi
 
 
-echo "Count junctions reads from Cal27P5-1.bam, Cal27P5-2.bam, and Cal27P5-3.bam"
-altanalyze3 juncount --bam ../Cal27P5-1.bam ../Cal27P5-2.bam ../Cal27P5-3.bam \
-                     --output Cal27P5_1_2_3_juncounts
+echo "Count junctions reads from Cal27P5-2.bam"
+altanalyze3 juncount --bam ../Cal27P5-2.bam \
+                     --output Cal27P5_2_juncounts
 
-echo "Count introns reads from Cal27P5-1.bam, Cal27P5-2.bam, and Cal27P5-3.bam"
-altanalyze3 intcount --bam ../Cal27P5-1.bam ../Cal27P5-2.bam ../Cal27P5-3.bam \
+echo "Count introns reads from Cal27P5-2.bam"
+altanalyze3 intcount --bam ../Cal27P5-2.bam \
                      --ref ../gene_model_all.tsv \
-                     --output Cal27P5_1_2_3_intcounts \
+                     --output Cal27P5_2_intcounts \
 
-echo "Aggregating counts from Cal27P5_1_2_3_juncounts.bed and Cal27P5_1_2_3_intcounts.bed"
-altanalyze3 aggregate --juncounts ./Cal27P5_1_2_3_juncounts.bed \
-                      --intcounts ./Cal27P5_1_2_3_intcounts.bed \
+echo "Count junctions reads from Cal27P5-3.bam"
+altanalyze3 juncount --bam ../Cal27P5-3.bam \
+                     --output Cal27P5_3_juncounts
+
+echo "Count introns reads from Cal27P5-3.bam"
+altanalyze3 intcount --bam ../Cal27P5-3.bam \
+                     --ref ../gene_model_all.tsv \
+                     --output Cal27P5_3_intcounts \
+
+echo "Aggregating counts from Cal27P5_[1/2/3]_juncounts.bed and Cal27P5_[1/2/3]_intcounts.bed"
+altanalyze3 aggregate --juncounts ./Cal27P5_1_juncounts.bed ./Cal27P5_2_juncounts.bed ./Cal27P5_3_juncounts.bed \
+                      --intcounts ./Cal27P5_1_intcounts.bed ./Cal27P5_2_intcounts.bed ./Cal27P5_3_intcounts.bed \
                       --ref ../gene_model_all.tsv \
                       --bed \
                       --loglevel info \
