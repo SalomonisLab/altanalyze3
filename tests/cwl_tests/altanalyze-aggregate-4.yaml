@@ -1,0 +1,13 @@
+junction_bed_file:
+- class: File
+  location: "../data/controls/Cal27P5_1_juncounts.bed"
+- class: File
+  location: "../data/controls/Cal27P5_2_juncounts.bed"
+- class: File
+  location: "../data/controls/Cal27P5_3_juncounts.bed"
+chrom_list: "chr1"
+reference_file:
+  class: File
+  location: "../data/gene_model_all.tsv"
+export_to_bed: true
+output_prefix: "custom"

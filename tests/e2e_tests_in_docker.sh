@@ -6,7 +6,7 @@ ALTANALYZE_URL=${4:-`git config --get remote.origin.url`}
 
 WORKING_DIR=$( cd ../"$( dirname "${BASH_SOURCE[0]}" )" && pwd )
 
-echo "Running unit tests with Python ${PYTHON_VERSION} in dockerized Ubuntu $UBUNTU_VERSION"
+echo "Running e2e tests in dockerized Ubuntu $UBUNTU_VERSION with Python ${PYTHON_VERSION}"
 echo "Using AltAnalyze downloaded from ${ALTANALYZE_URL}, version ${ALTANALYZE_VERSION}"
 echo "Working directory $WORKING_DIR"
 
@@ -20,4 +20,4 @@ docker build --no-cache --build-arg UBUNTU_VERSION=$UBUNTU_VERSION \
 docker run --rm -it -v ${WORKING_DIR}:${WORKING_DIR} \
                     --workdir ${WORKING_DIR}/tests \
                     altanalyze:latest \
-                    ${WORKING_DIR}/tests/unit_tests.sh
+                    ${WORKING_DIR}/tests/e2e_tests.sh

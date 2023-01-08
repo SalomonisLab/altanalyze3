@@ -111,6 +111,100 @@
       location: int_int_stderr.log
 
 # ========================================================
+# altanalyze-aggregate.cwl
+# ========================================================
+
+- job: ./altanalyze-aggregate-1.yaml
+  tool: ../../cwls/tools/altanalyze-aggregate.cwl
+  output:
+    aggregated_bed_file: null
+    aggregated_h5ad_file:
+      class: File
+      location: results_agg.h5ad
+    stdout_log:
+      class: File
+      location: results_agg_stdout.log
+    stderr_log:
+      class: File
+      location: results_agg_stderr.log
+
+- job: ./altanalyze-aggregate-2.yaml
+  tool: ../../cwls/tools/altanalyze-aggregate.cwl
+  output:
+    aggregated_bed_file:
+      class: File
+      location: custom_agg.bed.gz
+      secondaryFiles:
+      - class: File
+        location: custom_agg.bed.gz.tbi
+    aggregated_h5ad_file:
+      class: File
+      location: custom_agg.h5ad
+    stdout_log:
+      class: File
+      location: custom_agg_stdout.log
+    stderr_log:
+      class: File
+      location: custom_agg_stderr.log
+
+- job: ./altanalyze-aggregate-3.yaml
+  tool: ../../cwls/tools/altanalyze-aggregate.cwl
+  output:
+    aggregated_bed_file:
+      class: File
+      location: custom_agg.bed.gz
+      secondaryFiles:
+      - class: File
+        location: custom_agg.bed.gz.tbi
+    aggregated_h5ad_file:
+      class: File
+      location: custom_agg.h5ad
+    stdout_log:
+      class: File
+      location: custom_agg_stdout.log
+    stderr_log:
+      class: File
+      location: custom_agg_stderr.log
+
+- job: ./altanalyze-aggregate-4.yaml
+  tool: ../../cwls/tools/altanalyze-aggregate.cwl
+  output:
+    aggregated_bed_file:
+      class: File
+      location: custom_agg.bed.gz
+      secondaryFiles:
+      - class: File
+        location: custom_agg.bed.gz.tbi
+    aggregated_h5ad_file:
+      class: File
+      location: custom_agg.h5ad
+    stdout_log:
+      class: File
+      location: custom_agg_stdout.log
+    stderr_log:
+      class: File
+      location: custom_agg_stderr.log
+
+- job: ./altanalyze-aggregate-5.yaml
+  tool: ../../cwls/tools/altanalyze-aggregate.cwl
+  output:
+    aggregated_bed_file:
+      class: File
+      location: custom_agg.bed.gz
+      secondaryFiles:
+      - class: File
+        location: custom_agg.bed.gz.tbi
+    aggregated_h5ad_file:
+      class: File
+      location: custom_agg.h5ad
+    stdout_log:
+      class: File
+      location: custom_agg_stdout.log
+    stderr_log:
+      class: File
+      location: custom_agg_stderr.log
+
+# ========================================================
 # altanalyze-count.cwl
 # ========================================================
 
@@ -135,6 +229,21 @@
     juncount_stderr_log:
     - class: File
       location: Cal27P5-1_jun_stderr.log
+    aggregated_bed_file:
+      class: File
+      location: results_agg.bed.gz
+      secondaryFiles:
+      - class: File
+        location: results_agg.bed.gz.tbi
+    aggregated_h5ad_file:
+      class: File
+      location: results_agg.h5ad
+    aggregate_stdout_log:
+      class: File
+      location: results_agg_stdout.log
+    aggregate_stderr_log:
+      class: File
+      location: results_agg_stderr.log
 
 - job: ./altanalyze-count-2.yaml
   tool: ../../cwls/workflows/altanalyze-count.cwl
@@ -169,3 +278,18 @@
       location: Cal27P5-1_jun_stderr.log
     - class: File
       location: Cal27P5-2_jun_stderr.log
+    aggregated_bed_file:
+      class: File
+      location: results_agg.bed.gz
+      secondaryFiles:
+      - class: File
+        location: results_agg.bed.gz.tbi
+    aggregated_h5ad_file:
+      class: File
+      location: results_agg.h5ad
+    aggregate_stdout_log:
+      class: File
+      location: results_agg_stdout.log
+    aggregate_stderr_log:
+      class: File
+      location: results_agg_stderr.log

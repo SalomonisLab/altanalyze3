@@ -22,11 +22,6 @@ requirements:
           "entry": inputs.alignment_file,
           "entryname": inputs.alignment_file.basename,
           "writable": true
-        },
-        {
-          "entry": inputs.reference_file,
-          "entryname": inputs.reference_file.basename,
-          "writable": true
         }
       ]
     }
