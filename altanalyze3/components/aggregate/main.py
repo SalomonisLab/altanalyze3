@@ -355,6 +355,7 @@ def collect_results(args):
         counts_df=counts_df,
         location=adata_location,
         counts_columns=[c for c in counts_df.columns.values if c not in metadata_columns],
+        strand_coords=True,
         metadata_columns=metadata_columns
     )
 

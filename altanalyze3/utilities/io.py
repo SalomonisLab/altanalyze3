@@ -131,17 +131,23 @@ def get_indexed_references(location, tmp_location, selected_chr=None, only_intro
     return get_indexed_bed(target_location, keep_original=False, force=True)
 
 
-def export_counts_to_anndata(counts_df, location, counts_columns=None, metadata_columns=None, sparse_dtype=None, fill_value=None):
+def export_counts_to_anndata(counts_df, location, counts_columns=None, metadata_columns=None, sparse_dtype=None, fill_value=None, strand_coords=None):
     counts_columns = counts_df.columns.values if counts_columns is None else counts_columns
+    metadata_columns = [] if metadata_columns is None else metadata_columns
     sparse_dtype = "int32" if sparse_dtype is None else sparse_dtype
     fill_value = 0 if fill_value is None else fill_value
+    strand_coords = False if strand_coords is None else strand_coords
+
+    def __get_name(series, strand_coords):
+        if strand_coords and "strand" in series and series.at["strand"] == "-":
+            return f"""{series.at["chr"]}:{series.at["end"]}-{series.at["start"]}"""
+        else:
+            return f"""{series.at["chr"]}:{series.at["start"]}-{series.at["end"]}"""
 
     csr_matrix = counts_df.loc[:, counts_columns].astype(pandas.SparseDtype(sparse_dtype, fill_value)).T.sparse.to_coo().tocsr()
     adata = anndata.AnnData(csr_matrix, dtype=sparse_dtype)
     adata.obs_names = counts_columns
-    adata.var_names = counts_df.index.to_frame(index=False).astype(str)[["chr", "start", "end"]].agg("-".join, axis=1)
-    if metadata_columns is not None:
-        adata_var = counts_df.copy().loc[:, metadata_columns].astype(str)
-        adata_var.index = adata.var.index.copy()
-        adata.var = adata_var
+    adata_var = counts_df.copy().loc[:, metadata_columns].astype(str)    # can be empty df if metadata_columns is []
+    adata_var.index = adata_var.reset_index().agg(__get_name, axis="columns", strand_coords=strand_coords)
+    adata.var = adata_var
     adata.write(location)
