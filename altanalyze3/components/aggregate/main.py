@@ -53,15 +53,25 @@ class GroupedAnnotations():
     def add(self, sa, ea):                                                                                           # sa - start annotation, ea - end annotation
 
         sa_shift = "" if sa.position == 0 else f"""_{sa.position}"""                                                 # junction start coord if not exact exon match
-        ea_shift = "" if ea.position == 0 else f"""_{ea.position}"""                                                 # junction end coorf if not exact exon match
+        ea_shift = "" if ea.position == 0 else f"""_{ea.position + 1}"""                                             # junction end coorf if not exact exon match
 
         if sa.match == AnnMatchCat.CLOSEST or ea.match == AnnMatchCat.CLOSEST:                                       # not enough data to make a conclusion
             pass
         elif sa.gene == ea.gene and sa.strand == ea.strand:                                                          # the same gene and strand
             if sa.match == AnnMatchCat.EXON_END and ea.match == AnnMatchCat.EXON_START:                              #    exact match
-                self.__exact_match.append((f"""{sa.gene}:{sa.exon}-{ea.exon}""", sa.strand))
+                if sa.strand == "+":
+                    self.__exact_match.append((f"""{sa.gene}:{sa.exon}-{ea.exon}""", sa.strand))                     #        start - end exons order
+                elif sa.strand == "-":
+                    self.__exact_match.append((f"""{sa.gene}:{ea.exon}-{sa.exon}""", sa.strand))                     #        end - start exons order
+                else:
+                    assert(False), "Not implemented logic"
             else:                                                                                                    #    partial match
-                self.__partial_match.append((f"""{sa.gene}:{sa.exon}{sa_shift}-{ea.exon}{ea_shift}""", sa.strand))
+                if sa.strand == "+":
+                    self.__partial_match.append((f"""{sa.gene}:{sa.exon}{sa_shift}-{ea.exon}{ea_shift}""", sa.strand))  #     start - end exons order
+                elif sa.strand == "-":
+                    self.__partial_match.append((f"""{sa.gene}:{ea.exon}{ea_shift}-{sa.exon}{sa_shift}""", sa.strand))  #     end - start exons order
+                else:
+                    assert(False), "Not implemented logic"
         else:                                                                                                        # different gene and/or strand
             self.__distant_match.append((f"""{sa.gene}:{sa.exon}{sa_shift}-{ea.gene}:{ea.exon}{ea_shift}""", "."))   #    distant match
 

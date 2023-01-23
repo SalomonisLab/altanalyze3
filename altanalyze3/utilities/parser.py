@@ -223,7 +223,7 @@ class ArgsParser():
         )
         aggregate_parser.add_argument(
             "--bed",
-            help="Export annotated coordinates as BED file. Default: False",
+            help="Export annotated 0-based coordinates as BED file. Default: False",
             action="store_true"
         )
         self.add_common_arguments(aggregate_parser)
