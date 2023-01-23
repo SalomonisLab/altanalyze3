@@ -13,7 +13,7 @@ CONTROL_MD5_SUMS = {
     "Cal27P5-3.bam": "3d6fdef5e90c16deed6c36b418c597c4",
     "Cal27P5-3.bam.bai": "c92fbf32ffcf874979c41051f0d2e16c",
     "Cal27P5-1-copy.bam": "6e418cb604ea82c90d4b3e832afb4997",
-    "Cal27P5_1_aggregated_counts.bed.gz": "26251bd42bac659434799040c8b0caf8",
+    "Cal27P5_1_aggregated_counts.bed.gz": "faee5946f7d18064773fc67e01e4ce5b",
     "Cal27P5_1_intcounts.bed": "6f5250f1a841438fadcbe1419966f133",
     "Cal27P5_1_juncounts.bed": "24f6a6ac5f831c7709102c235db03ec5",
     "Cal27P5_2_intcounts.bed": "2d9889a6520f96012ba7d4be5cdcfea3",
