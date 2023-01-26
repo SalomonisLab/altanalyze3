@@ -140,9 +140,9 @@ def export_counts_to_anndata(counts_df, location, counts_columns=None, metadata_
 
     def __get_name(series, strand_coords):
         if strand_coords and "strand" in series and series.at["strand"] == "-":
-            return f"""{series.at["chr"]}:{series.at["end"]}-{series.at["start"]}"""
+            return f"""{series.at["chr"]}:{series.at["end"] + 1}-{series.at["start"]}"""
         else:
-            return f"""{series.at["chr"]}:{series.at["start"]}-{series.at["end"]}"""
+            return f"""{series.at["chr"]}:{series.at["start"]}-{series.at["end"] + 1}"""
 
     csr_matrix = counts_df.loc[:, counts_columns].astype(pandas.SparseDtype(sparse_dtype, fill_value)).T.sparse.to_coo().tocsr()
     adata = anndata.AnnData(csr_matrix, dtype=sparse_dtype)
