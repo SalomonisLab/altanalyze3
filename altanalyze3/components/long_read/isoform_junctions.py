@@ -57,7 +57,7 @@ def exportJunctionMatrix(matrix_dir, ensembl_exon_dir, gff_source, barcode_clust
     isoform_names = adata.var.index.tolist()
     print('isoform features |',isoform_names[:5])
 
-    def parse_isoform_mapping(isoform_mapping_file, gff_source=gff_source):
+    def parse_isoform_mapping(isoform_mapping_file):
         """ Parse the isoform mapping file and return dictionaries of isoform-to-junctions and isoform-to-genes """
         isoform_to_junctions = collections.OrderedDict()
         isoform_to_gene = {}
@@ -81,7 +81,7 @@ def exportJunctionMatrix(matrix_dir, ensembl_exon_dir, gff_source, barcode_clust
                         else:
                             try: chr, start, stop = exon_dict[geneID,exon]
                             except:
-                                print ('ERROR!!!',gene,geneID,exon,isoform)
+                                print ('GFF Annotation Construction ERROR!!!',gene,geneID,exon,isoform)
                                 print (exon_structure, exons);sys.exit() 
                         junctions.append((exon,(start, stop),geneID))
 
@@ -175,7 +175,6 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     barcode_clusters = pd.read_csv(args.barcode_cluster, sep='\t', index_col=0)
-    print(barcode_clusters);sys.exit()
     exportJunctionMatrix(args.matrix_path, args.ensembl_exon_dir, args.gff_source, barcode_clusters=barcode_clusters, rev=args.reverse_complement)
 
     """

@@ -4,6 +4,9 @@ import csv
 import anndata as ad
 import pandas as pd
 import numpy as np
+import warnings
+from Bio import BiopythonWarning
+warnings.simplefilter('ignore', BiopythonWarning)
 from scipy.sparse import csr_matrix
 from scipy.io import mmread
 from scipy.sparse import lil_matrix
@@ -72,7 +75,7 @@ def calculate_barcode_match_percentage(adata, barcode_clusters):
     adata.obs = adata.obs.join(barcode_clusters, how='inner')
     return adata
 
-def pseudo_cluster_counts(combined_adata,cell_threshold=5,count_threshold=5):
+def pseudo_cluster_counts(combined_adata, cell_threshold=5, count_threshold=5, compute_tpm=False, tpm_threshold=1):
     # Convert sparse matrix to dense DataFrame for easier manipulation
     junction_counts_df = pd.DataFrame(combined_adata.X.toarray(), index=combined_adata.obs_names, columns=combined_adata.var_names)
     # Group by cluster
@@ -85,10 +88,20 @@ def pseudo_cluster_counts(combined_adata,cell_threshold=5,count_threshold=5):
     summed_groups = filtered_summed_groups.groupby(combined_adata.obs['cluster'], observed=True).sum()
     # Filter out junctions with fewer than 5 reads
     summed_groups = summed_groups.loc[:, summed_groups.sum(axis=0) >= count_threshold]
-    # Transpose
     filtered_summed_groups_transposed = summed_groups.transpose()
-    print('Pseudobulk cluster junction counts exported')
-    return filtered_summed_groups_transposed
 
-
- 
+    if compute_tpm:
+        tpm_values = summed_groups.div(summed_groups.sum(axis=1), axis=0) * 1e6
+        # Compute gene sums only once
+        gene_sums = summed_groups.T.groupby(lambda x: x.split(":")[0]).transform('sum').T
+        # Prepare isoform ratios efficiently
+        isoform_ratios = summed_groups.div(gene_sums)
+        # Filter isoform ratios where gene TPM < 1
+        gene_tpms = tpm_values.T.groupby(lambda x: x.split(":")[0]).sum().T
+        mask = gene_tpms >= tpm_threshold
+        mask = mask.reindex(columns=tpm_values.columns, method='ffill')
+        isoform_ratios = isoform_ratios.where(mask).transpose()
+        print('Pseudobulk cluster junction counts exported')
+        return filtered_summed_groups_transposed, tpm_values, isoform_ratios
+    else:
+        return filtered_summed_groups_transposed

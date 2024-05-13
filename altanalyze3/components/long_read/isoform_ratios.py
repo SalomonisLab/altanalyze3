@@ -4,7 +4,6 @@ import csv
 import anndata as ad
 import pandas as pd
 import numpy as np
-from scipy.sparse import csr_matrix
 from scipy.io import mmread
 from scipy.sparse import lil_matrix
 import collections
@@ -12,15 +11,108 @@ import argparse
 from tqdm import tqdm # progress bar
 
 sys.path.insert(1, os.path.join(sys.path[0], '..'))
+import long_read.isoform_matrix as iso
 import long_read.gff_process as gff_process
-
-def collapse_isoforms(gff_source,ensembl_exon_dir):
-    """ 
-    Derive common isoform IDs across study samples for downstream comparison
-    """
     
-    gff_output_dir = gff_process.consolidateLongReadGFFs(gff_source, ensembl_exon_dir)
+def exportConsensusIsoformMatrix(matrix_dir, isoform_association_path, gff_source=None, barcode_clusters=None, rev=False):
+    """ 
+    Decompose isoforms into exon-exon and exon-junctions counts at the single-cell and pseudobulk level
+    """
 
+    # Load the 10x matrix keyed by isoforms in the first column and cell barcode cluster annotations
+    adata = iso.mtx_to_adata(int_folder=matrix_dir, gene_is_index=True, feature='genes.tsv', feature_col=0, barcode='barcodes.tsv', barcode_col=0, matrix='matrix.mtx', rev=rev)
+    
+    # If existing cell clusters are provided already (e.g., supervised classification from gene-level analyses)
+    if barcode_clusters is not None and not barcode_clusters.empty:
+        adata = iso.calculate_barcode_match_percentage(adata, barcode_clusters)
+
+    # Need to filter cell barcodes to those with a sufficient number of expressed genes
+    adata.obs['total_counts'] = np.sum(adata.X, axis=1)
+    adata = adata[adata.obs['total_counts'] >= 100, :]
+    remaining_cells = adata.n_obs
+    print(f"Number of remaining cells with >=100 reads: {remaining_cells}")
+
+    isoform_names = adata.var.index.tolist()
+    print('isoform features |',isoform_names[:5])
+
+    def parse_isoform_mapping(isoform_association_path, gff_source = None):
+        """ Parse the isoform mapping file and return dictionaries of isoform-to-collapsed-isoforms """
+        isoform_to_meta_isoform = collections.OrderedDict()
+
+        print ('Mapping isoforms to meta-isoforms...',)
+        unique_isoforms={}
+        unique_ref_isoforms={}
+        isoform_to_gene = {}
+        with open(isoform_association_path, 'r') as file:
+            reader = csv.reader(file, delimiter='\t')
+            for row in reader:
+                #ENSG00000241860	PB.10.25	ND167_MPP_3k	ENST00000655252.1	gencode.v45.annotation
+                gene, ref_isoform, ref_gff, source_isoform, source_gff = row
+                if source_gff == gff_source:
+                    isoform_to_meta_isoform[source_isoform] = gene+':'+ref_isoform
+                    unique_isoforms[source_isoform,source_gff]=[]
+                    unique_ref_isoforms[ref_isoform,ref_gff]=[]
+                if ref_gff == gff_source:
+                    isoform_to_meta_isoform[ref_isoform] = gene+':'+ref_isoform
+                    unique_isoforms[ref_isoform,ref_gff]=[]
+                    unique_ref_isoforms[ref_isoform,ref_gff]=[]
+                isoform_to_gene[ref_isoform] = gene
+
+        print('unique isoforms |',len(unique_ref_isoforms),'out of',len(unique_isoforms))
+        return isoform_to_meta_isoform, isoform_to_gene
+
+    # Load isoform mapping information
+    isoform_to_meta_isoform, isoform_to_gene = parse_isoform_mapping(isoform_association_path, gff_source=gff_source)
+
+    isoform_counts = {}
+    # Iterate through each cell barcode and isoform
+    print ('Computing junctions counts for cells')
+    cell_data = adata.X.toarray()
+    isoform_ids = adata.var_names
+
+    for isoform_idx, isoform in tqdm(enumerate(isoform_ids), total=len(isoform_ids), desc="Processing isoforms"):
+        counts = cell_data[:, isoform_idx]
+        if np.any(counts > 0):
+            if isoform in isoform_to_meta_isoform: # Exclude isoforms without gene annotations
+                ref_isoform = isoform_to_meta_isoform[isoform]
+                for cell_index, count in zip(np.where(counts > 0)[0], counts[counts > 0]):
+                    if ref_isoform not in isoform_counts:
+                        isoform_counts[ref_isoform] = np.zeros(len(adata.obs_names), dtype=int)
+                    isoform_counts[ref_isoform][cell_index] += count
+
+    # Convert the counts to a sparse matrix (and report progress)
+    isoform_counts_df = pd.DataFrame({k: pd.Series(v, index=adata.obs_names) for k, v in tqdm(isoform_counts.items(), desc="Creating DataFrame")})
+    sparse_junction_matrix = lil_matrix(isoform_counts_df.shape)
+    for i, (index, row) in enumerate(tqdm(isoform_counts_df.iterrows(), total=isoform_counts_df.shape[0], desc="Converting to sparse matrix")):
+        sparse_junction_matrix[i, :] = row.values
+    sparse_junction_matrix = sparse_junction_matrix.tocsr()
+
+    # Create a new AnnData object for the junction counts
+    isoform_adata = ad.AnnData(X=sparse_junction_matrix, obs=adata.obs, var=pd.DataFrame(index=isoform_counts.keys()))
+
+    # Add gene annotations
+    isoform_adata.var['gene'] = [isoform_to_gene.get(isoform, '') for isoform in isoform_adata.var_names]
+
+    # Write the junction counts to an h5ad file
+    h5ad_dir = os.path.basename(gff_source)
+    #isoform_adata.write_h5ad("filtered_junction.h5ad")
+    isoform_adata.write_h5ad(f"{h5ad_dir.split('.g')[0]}-isoform.h5ad")
+    print ('h5ad exported')
+
+    if barcode_clusters is not None and not barcode_clusters.empty:
+        # Compute pseudo-cluster counts and write them to a file
+        grouped = isoform_counts_df.groupby(adata.obs['cluster'])
+        
+        # Remove clusters with less than 10 cells
+        filtered_summed_groups = grouped.filter(lambda x: len(x) >= 10).groupby(adata.obs['cluster']).sum()
+        
+        # Remove junctions with less than 10 reads total
+        filtered_summed_groups = filtered_summed_groups.loc[:, filtered_summed_groups.sum(axis=0) >= 10]
+        filtered_summed_groups_transposed = filtered_summed_groups.transpose()
+        filtered_summed_groups_transposed.to_csv('pseudo_cluster_isocounts.txt', sep='\t')
+        print ('pseudobulk cluster junction counts exported')
+
+    return isoform_adata
 
 if __name__ == '__main__':
     # python iso_matrix_to_junctions.py /path/to/matrix /path/to/ensembl_exon /path/to/gff --barcode_cluster /path/to/barcode_cluster
@@ -34,14 +126,5 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     barcode_clusters = pd.read_csv(args.barcode_cluster, sep='\t', index_col=0)
-    print(barcode_clusters);sys.exit()
-    exportJunctionMatrix(args.matrix_path, args.ensembl_exon_dir, args.gff_source, barcode_clusters=barcode_clusters, rev=args.reverse_complement)
+    exportConsensusIsoformMatrix(args.matrix_path,isoform_association_path,gff_source=args.gff_source,barcode_clusters=barcode_clusters,rev=args.reverse_complement)
 
-    """
-    gff = '/Users/saljh8/Dropbox/Revio/Apharesis-Sequel2/ND167_Iso-Seq/PacBio/HSC_3k/ND167_HSC-3k.gtf'
-    matrix_path = '/Users/saljh8/Dropbox/Revio/Apharesis-Sequel2/ND167_Iso-Seq/PacBio/HSC_3k/filtered_matrices'
-    barcode_cluster = 'HSC.txt'
-    ensembl_exon_dir = '/Users/saljh8/Documents/GitHub/altanalyze/AltDatabase/EnsMart100/ensembl/Hs/Hs_Ensembl_exon.txt'
-    exportJunctionMatrix(matrix_path, ensembl_exon_dir, gff, barcode_cluster=barcode_cluster)
-    """
- 
