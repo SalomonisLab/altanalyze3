@@ -357,10 +357,12 @@ def exonAnnotate(chr, exons, strand, transcript_id):
 def uniqueList(ls):
     return [seen.add(x) or x for seen in (set(),) for x in ls if x not in seen]
 
-def collapseIsoforms(gene_db,junction_db):
-    num_isoforms=0
+def collapseIsoforms(gene_db, junction_db):
+    num_isoforms = 0
     collaped_db = defaultdict(lambda: defaultdict(list))
-    for gene, isoforms in gene_db.items():
+    
+    # Adding a progress bar for the outer loop iterating over genes
+    for gene, isoforms in tqdm(gene_db.items(), desc="Collapsing Isoforms"):
         sorted_isoforms = sorted(isoforms, key=len, reverse=True)
         # Initially set every isoform as a key with an empty list
         for isoform in sorted_isoforms:
@@ -368,7 +370,7 @@ def collapseIsoforms(gene_db,junction_db):
         # Populate the list with sub-isoforms
         for i, isoform in enumerate(sorted_isoforms):
             for shorter_isoform in sorted_isoforms[i+1:]:
-                #if set(shorter_isoform).issubset(set(isoform)):
+                # Check if one isoform is a subset of another
                 if shorter_isoform in isoform:
                     if isoform != shorter_isoform:
                         collaped_db[gene][isoform].append(shorter_isoform)
@@ -378,15 +380,12 @@ def collapseIsoforms(gene_db,junction_db):
                 if super_isoform in sub_isoforms:
                     del collaped_db[gene][super_isoform]
                     break
-        """
-        if num_isoforms==17:
-            print (collaped_db[gene])
-            print (len(collaped_db[gene]),len(gene_db[gene]),num_isoforms)"""
-        num_isoforms+= len(collaped_db[gene])
-    
-    #print (collaped_db['ENSG00000070081']);sys.exit()
-    print (num_isoforms,'collapsed unique isoforms')
+
+        num_isoforms += len(collaped_db[gene])
+
+    print(num_isoforms, 'collapsed unique isoforms')
     return collaped_db
+
 
 def consolidateLongReadGFFs(directory, exon_reference_dir):
     """Only return isoforms with unique splice-site combinations"""
@@ -564,7 +563,7 @@ def consolidateLongReadGFFs(directory, exon_reference_dir):
                 if 'UNK' not in gene:
                     (file,info) = junction_db[gene,isoform][0] # First example of that isoform
                     ref_super_transcript_id = info.split(';')[gff_organization[file][0]].split(gff_organization[file][1])[1]
-                    isoforms_to_retain[(file,info)] = [] 
+                    isoforms_to_retain[(file,ref_super_transcript_id)] = [] 
                     eo.write('\t'.join([gene, ref_super_transcript_id,file,'','']) + '\n')
                     a+=1
                     # Get the isoform annotations for the super-isoform
@@ -623,8 +622,13 @@ def consolidateLongReadGFFs(directory, exon_reference_dir):
                     if line[0] =='#':
                         continue
                     chr, a, type, pos1, pos2, b, strand, c, info = t
-
-                    if (file, info) in isoforms_to_retain:
+                    ti = next((i for i, x in enumerate(info.split(';')) if 'transcript_id' in x), -1)
+                    if '=' in info:
+                        td = '='
+                    else:
+                        td = '"'
+                    transcript_id = info.split(';')[ti].split(td)[1]
+                    if (file, transcript_id) in isoforms_to_retain:
                         if 'CDS' != type and 'gene' != type:
                             line = line.replace("PB.", file + '_PB.')
                             eo.write(line)

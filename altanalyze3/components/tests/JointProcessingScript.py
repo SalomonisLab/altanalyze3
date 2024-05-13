@@ -16,6 +16,7 @@ import long_read.gff_process as gff_process
 from Bio import SeqIO
 
 ensembl_exon_dir ='/Users/saljh8/Documents/GitHub/altanalyze/AltDatabase/EnsMart91/ensembl/Hs/Hs_Ensembl_exon.txt'
+
 """
 ################################### JUNCTION LEVEL ANALYSIS ###################################
 ######## Process data from sample ND167 ########

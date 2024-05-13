@@ -66,7 +66,6 @@ def extract_cds_and_protein(transcripts, genome_fasta, ref_last_exons=None, quer
     cds_records = []
     protein_records = []
     for transcript_id, data in tqdm(transcripts.items(), desc="Processing Transcripts"):
-        #if transcript_id == 'ENST00000491706.5':
         exons = data["exons"]
         gene_id = data["gene_id"]
         if transcript_id in query_transcript_to_gene:
@@ -140,6 +139,7 @@ def get_reference_last_exons(ref_gff_file):
 
 def gff_translate(query_gff_file, genome_fasta, ref_gff_file=None, transcript_associations_file=None):
     query_transcripts = parse_gff(query_gff_file)
+    
     query_transcript_to_gene, intron_retention_dict = parse_transcript_associations(transcript_associations_file) if os.path.exists(transcript_associations_file) else {}
     #ref_last_exons = get_reference_last_exons(ref_gff_file) if os.path.exists(ref_gff_file) else {}
     #query_transcript_to_gene = None
