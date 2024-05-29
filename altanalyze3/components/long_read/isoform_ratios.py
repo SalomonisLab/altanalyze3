@@ -14,14 +14,18 @@ sys.path.insert(1, os.path.join(sys.path[0], '..'))
 import long_read.isoform_matrix as iso
 import long_read.gff_process as gff_process
     
-def exportConsensusIsoformMatrix(matrix_dir, isoform_association_path, gff_source=None, barcode_clusters=None, rev=False):
+def exportConsensusIsoformMatrix(matrix_dir, isoform_association_path, gff_source=None, barcode_clusters=None, rev=False, mtx=True):
     """ 
     Decompose isoforms into exon-exon and exon-junctions counts at the single-cell and pseudobulk level
     """
 
     # Load the 10x matrix keyed by isoforms in the first column and cell barcode cluster annotations
-    adata = iso.mtx_to_adata(int_folder=matrix_dir, gene_is_index=True, feature='genes.tsv', feature_col=0, barcode='barcodes.tsv', barcode_col=0, matrix='matrix.mtx', rev=rev)
-    
+
+    if mtx:
+        adata = iso.mtx_to_adata(int_folder=matrix_dir, gene_is_index=True, feature='genes.tsv', feature_col=0, barcode='barcodes.tsv', barcode_col=0, matrix='matrix.mtx', rev=rev)
+    else:
+        adata = iso.tsv_to_adata(matrix_dir)    
+
     # If existing cell clusters are provided already (e.g., supervised classification from gene-level analyses)
     if barcode_clusters is not None and not barcode_clusters.empty:
         adata = iso.calculate_barcode_match_percentage(adata, barcode_clusters)

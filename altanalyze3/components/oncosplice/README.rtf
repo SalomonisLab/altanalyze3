@@ -1,0 +1,84 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2580
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica-Bold;\f1\fswiss\fcharset0 Helvetica-BoldOblique;\f2\fswiss\fcharset0 Helvetica;
+}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\qc\partightenfactor0
+
+\f0\b\fs24 \cf0 Description of the Oncosplice components\
+\
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f1\i \cf0 Main.py:
+\f0\i0  
+\f2\b0 the script to call for running the complete oncosplice pipeline and defines the input arguments for the oncosplice pipeline
+\f0\b \
+\
+
+\f1\i RoundWrapper.py: 
+\f2\i0\b0 contains wrapper function for one complete iteration of clustering. Oncosplice, by default, performs 3 such iterations. 
+\f0\b \
+\
+
+\f1\i preprocess.py:
+\f0\i0  
+\f2\b0 variance based and intercorrelation based feature selection of the splicing events prior to clustering algorithm \
+
+\f0\b \
+
+\f1\i removeRedundantSplicingEvents.py:
+\f0\i0  
+\f2\b0 removes redundant splicing events based on correlation of splicing events within a gene \
+
+\f0\b \
+
+\f1\i PCAbasedFeatureSelection.py: 
+\f2\i0\b0 equivalent to the splice-ICGS component in the original Oncosplice pipeline, this script contains PCA-based feature selection approach \'97 these are the final highly variable splicing events that are utilized for clustering. \
+\
+
+\f1\i\b medianImpute.py: 
+\f2\i0\b0 imputes the missing values with median value of the the splicing event
+\f0\b \
+\
+
+\f1\i visualizations.py: 
+\f2\i0\b0 script for creating bar graphs for the types of annotations of splicing events and heat map visualization of the clusters.  
+\f0\b \
+\
+
+\f1\i determineNMFRank.py:
+\f0\i0  
+\f2\b0 if rank is not set to 30, oncosplice calculates the appropriate rank value using the function in this script
+\f0\b \
+\
+
+\f1\i runNMF.py:
+\f0\i0  
+\f2\b0 runs NMF clustering and assigns multi-label clusters to each sample
+\f0\b \
+\
+
+\f1\i metadataAnalysis.py:
+\f0\i0  
+\f2\b0 differential splicing event analysis and annotates the events and their directions (exclusion, inclusion)
+\f0\b \
+\
+
+\f1\i linearSVM.py:
+\f0\i0  
+\f2\b0 performs linear SVM analysis to finalize cluster assignment for each sample\
+
+\f0\b \
+
+\f1\i correlationDepletion.py:
+\f0\i0  
+\f2\b0 depletes the events associated with the round so that the remaining events in the matrix can be used as a guide for the next iteration of clustering. 
+\f0\b \
+\
+
+\f1\i correlationDepletion_vectorized.py:
+\f0\i0  
+\f2\b0 faster version of the correlationDepletion.py script, but uses imputed values for correlation analysis (unlike the slower, original code). 
+\f0\b \
+}

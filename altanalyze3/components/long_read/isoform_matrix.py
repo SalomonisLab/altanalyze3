@@ -75,6 +75,32 @@ def calculate_barcode_match_percentage(adata, barcode_clusters):
     adata.obs = adata.obs.join(barcode_clusters, how='inner')
     return adata
 
+import pandas as pd
+import anndata as ad
+
+def tsv_to_adata(file_path: str):
+    """Convert a TSV file with either (1) annot_transcript_id and counts or (2) isoform IDs and sample-level counts to an AnnData object."""
+    df = pd.read_csv(file_path, sep='\t')
+    
+    if df.shape[1] < 2:
+        raise ValueError("The TSV file must contain at least two columns.")
+
+    if 'annot_transcript_id' in df.columns:
+        # Handle the original format with 'annot_transcript_id' column
+        transcript_ids = df['annot_transcript_id']
+        counts = df.iloc[:, -1].values  # Assuming counts are in the last column
+        count_df = pd.DataFrame(counts, index=transcript_ids, columns=['counts'])
+        count_df = count_df.transpose()
+    else:
+        # Handle the standard count matrix format
+        isoform_ids = df.iloc[:, 0]  # First column for isoform IDs
+        counts = df.iloc[:, 1:].values  # All other columns for counts
+        count_df = pd.DataFrame(counts, index=isoform_ids, columns=df.columns[1:])
+        count_df = count_df.transpose()
+
+    adata = ad.AnnData(X=count_df)
+    return adata
+
 def pseudo_cluster_counts(combined_adata, cell_threshold=5, count_threshold=5, compute_tpm=False, tpm_threshold=1):
     # Convert sparse matrix to dense DataFrame for easier manipulation
     junction_counts_df = pd.DataFrame(combined_adata.X.toarray(), index=combined_adata.obs_names, columns=combined_adata.var_names)
@@ -105,3 +131,35 @@ def pseudo_cluster_counts(combined_adata, cell_threshold=5, count_threshold=5, c
         return filtered_summed_groups_transposed, tpm_values, isoform_ratios
     else:
         return filtered_summed_groups_transposed
+
+def pseudo_counts_no_cluster(combined_adata, count_threshold=5, compute_tpm=False, tpm_threshold=1):
+    # Convert sparse matrix to dense DataFrame for easier manipulation
+    junction_counts_df = pd.DataFrame(combined_adata.X.toarray(), index=combined_adata.obs_names, columns=combined_adata.var_names)
+    
+    # Filter out junctions with fewer than the specified count threshold in any sample
+    filtered_counts = junction_counts_df.loc[:, (junction_counts_df >= count_threshold).any(axis=0)]
+    
+    if compute_tpm:
+        # Compute TPM values for each sample
+        total_counts = filtered_counts.sum(axis=1)
+        tpm_values = (filtered_counts.T / total_counts).T * 1e6
+        
+        # Ensure the columns are correctly formatted as strings for grouping
+        def extract_gene_id(x):
+            return x.split(":")[0] if isinstance(x, str) else x
+        
+        # Calculate gene sums using transposed DataFrame
+        gene_sums = filtered_counts.T.groupby(extract_gene_id).transform('sum').T
+        isoform_ratios = filtered_counts / gene_sums
+        
+        # Filter isoform ratios where gene TPM < 1 for each sample using transposed DataFrame
+        gene_tpms = tpm_values.T.groupby(extract_gene_id).transform('sum').T
+        mask = gene_tpms >= tpm_threshold
+        isoform_ratios = isoform_ratios.where(mask, np.nan)
+        
+        print('Junction counts and TPM values exported')
+        return filtered_counts.T, tpm_values.T, isoform_ratios.T
+    else:
+        return filtered_counts.T
+
+

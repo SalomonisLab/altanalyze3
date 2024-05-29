@@ -4,6 +4,8 @@ this script is biased against isoforms that are bleeding and internal hybrid."""
 
 import os,sys
 from collections import defaultdict
+from tqdm import tqdm
+import pandas as pd
 
 novelGene = 0
 novelGeneLoci = [1,1]
@@ -128,12 +130,14 @@ def exonAnnotate(chr, exons, strand, transcript_id):
     if len(genes) == 0:
         output_list = [f"{start}-{end}" for start, end in exons]
         associations_updated = output_list  # Novel genes don't require exon annotations (likely update - currently position tuple)
+        associations_simple = output_list
     else:
         """
         if 'PB.2986.5' == transcript_id:
             print(exons,associations);sys.exit()
         """
         associations_updated = []
+        associations_simple = []
         for ind, association in enumerate(associations):
             exonType = association[0]
 
@@ -143,6 +147,7 @@ def exonAnnotate(chr, exons, strand, transcript_id):
                 if gene1 != gene or current_gene != gene:
                     exonAnnotation = gene1 + ':' + exonAnnotation
                 associations_updated.append(exonAnnotation) # denotes a splice site or end
+                associations_simple.append(exonAnnotation)
             elif exonType == 'mixed':
                 exonAnnotation1 = association[1][1]
                 exonAnnotation2 = association[1][2]
@@ -154,6 +159,8 @@ def exonAnnotate(chr, exons, strand, transcript_id):
                     exonAnnotation1 = gene1 + ':' + exonAnnotation1
                     current_gene = gene1
                 associations_updated.append(exonAnnotation1)
+                if ind != 0: # don't add the begining of the exon
+                    associations_simple.append(exonAnnotation1)
                 prior_splice_acceptor = None
                 ref_exons = geneData[current_gene]
                 # Add exon and intron regions in the middle of a broader exon
@@ -173,6 +180,8 @@ def exonAnnotate(chr, exons, strand, transcript_id):
                     exonAnnotation2 = gene1 + ':' + exonAnnotation2
                     current_gene = gene1
                 associations_updated.append(exonAnnotation2) # denotes a splice site or end
+                if ind != (len(associations)-1): # Don't add the last splice site
+                    associations_simple.append(exonAnnotation2)
                 """
                 if len(ref_exons[start_index:end_index])>1 and 'I2.1' in associations_updated and strand == '-':
                     print(exons)
@@ -186,10 +195,14 @@ def exonAnnotate(chr, exons, strand, transcript_id):
                 exonAnnotation2 = association[1][3]
                 if gene == gene1:
                     associations_updated.append(exonAnnotation1)
+                    associations_simple.append(exonAnnotation1)
                     associations_updated.append(gene2 + ':' + exonAnnotation2)
+                    associations_simple.append(gene2 + ':' + exonAnnotation2)
                 elif gene == gene2:
                     associations_updated.append(gene1 + ':' + exonAnnotation1)
+                    associations_simple.append(gene1 + ':' + exonAnnotation1)
                     associations_updated.append(exonAnnotation2) # denotes a splice site or end
+                    associations_simple.append(exonAnnotation2)
                     current_gene = gene2
 
             elif exonType == 'novel1':
@@ -213,6 +226,7 @@ def exonAnnotate(chr, exons, strand, transcript_id):
                     exonAnnotation1 = gene2+':'+exonAnnotation1
                     current_gene = gene2
                 associations_updated.append(exonAnnotation1)
+                associations_simple.append(exonAnnotation1)
                 # If exons and/or introns span from the begining of a novel exon to a known end, include all regions in between (e.g., U1.1_29934 to E3.1)
                 # start_index will not exist in the database (novel end)
                 start,stop = exons[ind]
@@ -254,7 +268,7 @@ def exonAnnotate(chr, exons, strand, transcript_id):
                     exonAnnotation2 = gene2+':'+exonAnnotation2
                     current_gene = gene2
                 associations_updated.append(exonAnnotation2) # denotes a splice site or end
-
+                associations_simple.append(exonAnnotation2)
             elif exonType == 'novel2':
                 novel_position = association[1][2]
                 exonAnnotation1 = association[1][1]
@@ -274,7 +288,7 @@ def exonAnnotate(chr, exons, strand, transcript_id):
                     exonAnnotation1 = gene1+':'+exonAnnotation1
                     current_gene = gene1
                 associations_updated.append(exonAnnotation1)
-
+                associations_simple.append(exonAnnotation1)
                 # If exons and/or introns span from the begining of a known exon to the novel end, include all regions in between (e.g., E10.1 to U15.1_1234)
                 # end_index will not exist in the database (novel end)
                 start,stop = exons[ind]
@@ -316,6 +330,7 @@ def exonAnnotate(chr, exons, strand, transcript_id):
                     exonAnnotation2 = geneID+':'+exonAnnotation2
                     current_gene = geneID
                 associations_updated.append(exonAnnotation2) # denotes a splice site or end
+                associations_simple.append(exonAnnotation2)
 
             elif exonType == 'novel':
                 novel_position1 = association[1][0]
@@ -345,18 +360,29 @@ def exonAnnotate(chr, exons, strand, transcript_id):
                 ### Need to fill in-between exons
                 associations_updated.append(exonAnnotation1)
                 associations_updated.append(exonAnnotation2) # denotes a splice site or end
+                associations_simple.append(exonAnnotation1)
+                associations_simple.append(exonAnnotation2)
     """
     if 'PB.2986.5' == transcript_id:
         print('***',associations)
         print(associations_updated);sys.exit()
     """
     associations_updated = uniqueList(associations_updated)
+    associations_simple = uniqueList(associations_simple)
 
-    return gene,associations_updated,genes
+    return gene,associations_updated,associations_simple,genes
 
 def uniqueList(ls):
     return [seen.add(x) or x for seen in (set(),) for x in ls if x not in seen]
 
+def knownIsoform(transcripts):
+    search_strings = ["ENST", "NM_", "XM_", "XR_"]
+    found = any(any(s in transcript for s in search_strings) for transcript in transcripts)
+    if found:
+        return 'known'
+    else:
+        return 'novel'
+    
 def collapseIsoforms(gene_db, junction_db):
     num_isoforms = 0
     collaped_db = defaultdict(lambda: defaultdict(list))
@@ -449,39 +475,45 @@ def consolidateLongReadGFFs(directory, exon_reference_dir):
             else:
                 unique_junction_db[uid] = [file]
 
-    def process_isoform(chr, strand, info, exons, file):
-        transcript_id = info.split(';')[ti].split(td)[1]
-        gene, exonIDs, genes = exonAnnotate(chr, exons, strand, transcript_id)
-
+    def exon_str(exonIDs):
         separator = '|'
         exonIDs_str = separator.join(exonIDs)
-        
-        # Restrict the exon string to high confidence exon boundaries
         filtered_exonIDs = exonIDs
         if '_' in filtered_exonIDs[0]:
             del filtered_exonIDs[0]
         if '_' in filtered_exonIDs[-1]:
             del filtered_exonIDs[-1]
         filtered_exonIDs_str = separator.join(filtered_exonIDs) + '|'
+        return filtered_exonIDs_str,exonIDs_str
+
+    def process_isoform(chr, strand, info, exons, file):
+        transcript_id = info.split(';')[ti].split(td)[1]
+        gene, exonIDs, exonIDs_simple, genes = exonAnnotate(chr, exons, strand, transcript_id)
+        # Restrict the exon string to high confidence exon boundaries
+        filtered_exonIDs_str,exonIDs_str = exon_str(exonIDs)
+        try:
+            filtered_exonIDs_str,exonIDs_simple_str = exon_str(exonIDs_simple)
+        except:
+            pass
+        """
+        if transcript_id == 'PB.130001.30' or transcript_id == 'ENST00000536435.7':
+            print (filtered_exonIDs_str,transcript_id)
+        """
         if len(genes)>2:
             trans_spliced_isoforms[exonIDs_str] = []
         eo.write('\t'.join([gene, strand, exonIDs_str, transcript_id, file]) + '\n')
-        splice_junctions = getJunctions(exons)
+        #splice_junctions = getJunctions(exons)
         if 'UNK' not in gene:
-            junction_str_db[gene,filtered_exonIDs_str] = tuple(splice_junctions)
+            #junction_str_db[gene,filtered_exonIDs_str] = tuple(splice_junctions)
             try: 
-                #junction_db[(gene, tuple(splice_junctions))].append((file, info))
                 junction_db[(gene, filtered_exonIDs_str)].append((file, info))
             except:
-                #junction_db[(gene, tuple(splice_junctions))] = [(file, info)]
                 junction_db[(gene, filtered_exonIDs_str)] = [(file, info)]
             try:
-                if splice_junctions not in gene_db[gene]:
-                    #gene_db[gene].append(tuple(splice_junctions))
+                if filtered_exonIDs_str not in gene_db[gene]:
                     gene_db[gene].append(filtered_exonIDs_str)
             except:
-                #gene_db[gene] = [tuple(splice_junctions)]
-                gene_db[gene] = [filtered_exonIDs_str]
+                    gene_db[gene] = [filtered_exonIDs_str]
             strand_db[gene] = strand
 
     gff_organization={}
@@ -501,7 +533,10 @@ def consolidateLongReadGFFs(directory, exon_reference_dir):
                     continue
                 data = line.strip()
                 t = data.split('\t')
-                chr, null, type, pos1, pos2, null, strand, null, info = t
+                try: chr, null, type, pos1, pos2, null, strand, null, info = t
+                except: 
+                    print (info)
+                    continue
                 pos1 = int(pos1)
                 pos2 = int(pos2)
                 if 'chr' not in chr:
@@ -552,53 +587,62 @@ def consolidateLongReadGFFs(directory, exon_reference_dir):
         
         # Export super- to sub-isoform associations:
         eo = open(os.path.join(combined_dir, 'isoform_links.txt'), 'w')
-        jo = open(os.path.join(combined_dir, 'isoform_junctions.txt'), 'w')
+        #jo = open(os.path.join(combined_dir, 'isoform_junctions.txt'), 'w')
+        ao = open(os.path.join(combined_dir, 'isoform_annotations.txt'), 'w')
         isoforms_to_retain = {}
         a=0
-        for gene in super_isoform_db:
-            added=[]
+        total_genes = len(super_isoform_db)
+        # Use tqdm to create a progress bar
+        for gene in tqdm(super_isoform_db, total=total_genes, desc="Processing genes"):
+            added = []
             for isoform in super_isoform_db[gene]: 
                 # isoform is a tuple of junction coordinates tuples
                 strand = strand_db[gene]
+                related_transcripts = []
                 if 'UNK' not in gene:
-                    (file,info) = junction_db[gene,isoform][0] # First example of that isoform
+                    (file, info) = junction_db[gene, isoform][0]  # First example of that isoform
                     ref_super_transcript_id = info.split(';')[gff_organization[file][0]].split(gff_organization[file][1])[1]
-                    isoforms_to_retain[(file,ref_super_transcript_id)] = [] 
-                    eo.write('\t'.join([gene, ref_super_transcript_id,file,'','']) + '\n')
-                    a+=1
+                    related_transcripts.append(ref_super_transcript_id)
+                    isoforms_to_retain[(file, ref_super_transcript_id)] = [] 
+                    eo.write('\t'.join([gene, ref_super_transcript_id, file, '', '']) + '\n')
+                    a += 1
                     # Get the isoform annotations for the super-isoform
-                    for (f2,info) in junction_db[gene,isoform][1:]:
+                    for (f2, info) in junction_db[gene, isoform][1:]:
                         super_transcript_id = info.split(';')[gff_organization[f2][0]].split(gff_organization[f2][1])[1]
-                        if (super_transcript_id,f2) not in added:
-                            eo.write('\t'.join([gene, ref_super_transcript_id,file,super_transcript_id,f2]) + '\n')
-                            added.append((super_transcript_id,f2))
-                            a+=1
+                        related_transcripts.append(super_transcript_id)
+                        if (super_transcript_id, f2) not in added:
+                            eo.write('\t'.join([gene, ref_super_transcript_id, file, super_transcript_id, f2]) + '\n')
+                            added.append((super_transcript_id, f2))
+                            a += 1
                     for sub_isoform in super_isoform_db[gene][isoform]:
-                        for (f3,info) in junction_db[gene,sub_isoform]:
+                        for (f3, info) in junction_db[gene, sub_isoform]:
                             sub_transcript_id = info.split(';')[gff_organization[f3][0]].split(gff_organization[f3][1])[1]
-                            if (sub_transcript_id,f3) not in added:
-                                eo.write('\t'.join([gene, ref_super_transcript_id,file,sub_transcript_id,f3]) + '\n')
-                                added.append((sub_transcript_id,f3))
-                                a+=1
-
+                            if (sub_transcript_id, f3) not in added:
+                                eo.write('\t'.join([gene, ref_super_transcript_id, file, sub_transcript_id, f3]) + '\n')
+                                added.append((sub_transcript_id, f3))
+                                related_transcripts.append(sub_transcript_id)
+                                a += 1
+                    known_isoform = knownIsoform(related_transcripts)
+                    ao.write('\t'.join([gene, ref_super_transcript_id, file, known_isoform]) + '\n')
                     # Create an inclusive exon-exon and exon-intron junction object - incorporate in-between-exons/introns
-                    # isoform_modified = list(isoform)
-                    isoform_modified = list(junction_str_db[gene,isoform])
+                    """
+                    isoform_modified = list(junction_str_db[gene, isoform])
                     if strand == '-':
                         isoform_modified = [(b, a) for a, b in isoform_modified]
                         if ref_super_transcript_id in additional_junctions:
-                            isoform_modified+=list(additional_junctions[ref_super_transcript_id])
+                            isoform_modified += list(additional_junctions[ref_super_transcript_id])
                         isoform_modified.sort()
                         isoform_modified.reverse()
                     else:
                         if ref_super_transcript_id in additional_junctions:
-                            isoform_modified+=list(additional_junctions[ref_super_transcript_id])
+                            isoform_modified += list(additional_junctions[ref_super_transcript_id])
                         isoform_modified.sort()
                     isoform_string = '|'.join([f"{start}-{end}" for start, end in isoform_modified])
                     jo.write('\t'.join([gene, ref_super_transcript_id, file, isoform_string]) + '\n')
-
+                    """
         eo.close()
-        jo.close()
+        ao.close()
+        #jo.close()
         print(a, 'isoform pairs')
         print(len(trans_spliced_isoforms), '>2 trans-spliced isoforms')
 
@@ -622,14 +666,14 @@ def consolidateLongReadGFFs(directory, exon_reference_dir):
                     if line[0] =='#':
                         continue
                     chr, a, type, pos1, pos2, b, strand, c, info = t
-                    ti = next((i for i, x in enumerate(info.split(';')) if 'transcript_id' in x), -1)
-                    if '=' in info:
-                        td = '='
-                    else:
-                        td = '"'
-                    transcript_id = info.split(';')[ti].split(td)[1]
-                    if (file, transcript_id) in isoforms_to_retain:
-                        if 'CDS' != type and 'gene' != type:
+                    if 'CDS' != type and 'gene' != type:
+                        ti = next((i for i, x in enumerate(info.split(';')) if 'transcript_id' in x), -1)
+                        if '=' in info:
+                            td = '='
+                        else:
+                            td = '"'
+                        transcript_id = info.split(';')[ti].split(td)[1]
+                        if (file, transcript_id) in isoforms_to_retain:
                             line = line.replace("PB.", file + '_PB.')
                             eo.write(line)
         eo.close()
@@ -725,6 +769,85 @@ def sort_gff(concatenated_gff_file, sorted_gff_file):
         for _, _, line in features:
             sorted_gff.write(line)
 
+def convert_alt_chromosome_ids():
+    # Load the mapping file from UCSC Genome Browser
+    mapping_url = "https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.ncbiRefSeq.gtf.gz"
+    mapping_df = pd.read_csv(mapping_url, sep='\t', header=None, comment='#')
+
+    # Extract RefSeq ID to chromosome mapping
+    mapping = dict(zip(mapping_df[1], mapping_df[0]))
+
+    def convert_gff(input_gff, output_gff):
+        with open(input_gff, 'r') as infile, open(output_gff, 'w') as outfile:
+            for line in infile:
+                if line.startswith('#'):
+                    outfile.write(line)
+                    continue
+                parts = line.split('\t')
+                if parts[0] in mapping:
+                    parts[0] = mapping[parts[0]]
+                outfile.write('\t'.join(parts))
+
+def reformat_uncoventional_gtf(gtf_file_path,output_file_path):
+
+    # Read the GTF file into a pandas DataFrame
+    gtf_df = pd.read_csv(gtf_file_path, sep='\t', header=None, comment='#',
+                        names=['seqname', 'source', 'feature', 'start', 'end', 'score', 'strand', 'frame', 'attribute'])
+
+    # Replace 'CDS' with 'exon' in the 'feature' column
+    gtf_df['feature'] = gtf_df['feature'].replace('CDS', 'exon')
+
+    # Extract transcript IDs
+    gtf_df['transcript_id'] = gtf_df['attribute'].str.extract('transcript_id "([^"]+)"')
+
+    # Identify unique transcripts and their first and last exon positions
+    transcript_info = gtf_df.groupby('transcript_id').agg({
+        'seqname': 'first',
+        'source': 'first',
+        'strand': 'first',
+        'start': 'min',
+        'end': 'max',
+        'attribute': 'first'
+    }).reset_index()
+
+    # Create transcript entries
+    transcript_entries = pd.DataFrame({
+        'seqname': transcript_info['seqname'],
+        'source': transcript_info['source'],
+        'feature': 'transcript',
+        'start': transcript_info['start'],
+        'end': transcript_info['end'],
+        'score': '.',
+        'strand': transcript_info['strand'],
+        'frame': '.',
+        'attribute': transcript_info['attribute'].str.replace(r'(\|[^"]+)', '', regex=True)
+    })
+
+    # Add transcript_id to transcript_entries to merge with exons
+    transcript_entries['transcript_id'] = transcript_info['transcript_id']
+
+    # Initialize a list to hold final entries
+    final_entries = []
+
+    # Iterate over each unique transcript ID to gather transcript and exon entries
+    for transcript_id in transcript_info['transcript_id']:
+        transcript_entry = transcript_entries[transcript_entries['transcript_id'] == transcript_id]
+        exon_entries = gtf_df[gtf_df['transcript_id'] == transcript_id]
+        final_entries.append(transcript_entry)
+        final_entries.append(exon_entries)
+
+    # Combine all entries into a single DataFrame
+    final_df = pd.concat(final_entries).reset_index(drop=True)
+
+    # Drop the temporary 'transcript_id' column
+    final_df = final_df.drop(columns=['transcript_id'])
+
+    # Save the reformatted DataFrame to a new GTF file
+    final_df.to_csv(output_file_path, sep='\t', header=False, index=False, quoting=3)  # quoting=3 is for quote None
+
+    print(f"Reformatted GTF file with transcript entries saved to {output_file_path}")
+
+
 if __name__ == '__main__':
     #concatenated = '/Volumes/salomonis2/LabFiles/Frank-Li/neoantigen/revision/blood/Leucegene_AML/MDS-isoforms/head/combined-GFF-alt/combined.gff'
     #sorted_gff = '/Volumes/salomonis2/LabFiles/Frank-Li/neoantigen/revision/blood/Leucegene_AML/MDS-isoforms/head/combined-GFF-alt/sorted_gff_file.gff'
@@ -732,10 +855,11 @@ if __name__ == '__main__':
 
     exon_reference_dir = '/Users/saljh8/Documents/GitHub/altanalyze/AltDatabase/EnsMart91/ensembl/Hs/Hs_Ensembl_exon.txt'
     #exon_reference_dir = '/Volumes/salomonis2/software/AltAnalyze-91/AltAnalyze/AltDatabase/EnsMart91/ensembl/Hs/Hs_Ensembl_exon.txt'
-    exon_reference_dir = '/Users/saljh8/Desktop/Code/AltAnalyze/AltDatabase/EnsMart100/ensembl/Mm/Mm_Ensembl_exon.txt'
+    #exon_reference_dir = '/Users/saljh8/Desktop/Code/AltAnalyze/AltDatabase/EnsMart100/ensembl/Mm/Mm_Ensembl_exon.txt'
     
     gff_input_dir = '/Volumes/salomonis2/LabFiles/Frank-Li/neoantigen/revision/blood/Leucegene_AML/MDS-isoforms/head/'
     gff_input_dir = '/Users/saljh8/Dropbox/Revio/Apharesis-Sequel2/ND167_Iso-Seq/PacBio/Accessory'
     gff_input_dir = '/Users/saljh8/Dropbox/Nanopore/Mouse'
+    gff_input_dir = '/Users/saljh8/Downloads/RefSeq'
     #gff_input_dir = '/Volumes/salomonis2/LabFiles/Frank-Li/neoantigen/revision/blood/Leucegene_AML/MDS-isoforms/'
     consolidateLongReadGFFs(gff_input_dir,exon_reference_dir)
