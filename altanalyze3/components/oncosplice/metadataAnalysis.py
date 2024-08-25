@@ -210,8 +210,6 @@ def find_top_differential_events(exp_file, groups_file, min_group_size, metadata
         results_c0.columns = results_cols
         results_c0 = calculate_coordinate_lengths(results_c0)
         results_c0 = determine_event_direction(results_c0)
-        file_path = os.path.join(output_loc, 'c_' + groups_file_cols[cluster] + "_vs_others_splicing_events.txt")
-        results_c0.to_csv(file_path, sep="\t")
         # filter based on deg requirements
         results_c0 = results_c0[results_c0['mwuAdjPval'] < dPSI_p_val]
         results_c0 = results_c0[results_c0["Abs_Mean_Diff"] > dPSI]
@@ -222,6 +220,8 @@ def find_top_differential_events(exp_file, groups_file, min_group_size, metadata
             # results_c0 = results_c0.sort_values(by=['Abs_Mean_Diff'], ascending=False)  # for using top n events sorted by fold change instead of p val
             results_c0 = results_c0.sort_values(by=['mwuAdjPval'])  # does not matter much whether you sort by raw or adjusted p value here -- results will be identical most likely
             results_all = pd.concat([results_all, results_c0], axis=0)  # equivalent to rbind
+            file_path = os.path.join(output_loc, 'c_' + groups_file_cols[cluster] + "_vs_others_splicing_events.txt")
+            results_c0.to_csv(file_path, sep="\t")
             results_c0 = results_c0.iloc[:top_n, :]
             all_reg_events = all_reg_events + results_c0.index.to_list()
             # top150_reg_events_file = "/Users/tha8tf/Documents/testsOncosplice/differential_events_per_cluster/all_reg_events_force_broad_nmf_cluster_adjp_0.05_" + cluster + ".txt"

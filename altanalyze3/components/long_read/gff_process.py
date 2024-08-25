@@ -6,6 +6,7 @@ import os,sys
 from collections import defaultdict
 from tqdm import tqdm
 import pandas as pd
+import collections
 
 novelGene = 0
 novelGeneLoci = [1,1]
@@ -413,9 +414,8 @@ def collapseIsoforms(gene_db, junction_db):
     return collaped_db
 
 
-def consolidateLongReadGFFs(directory, exon_reference_dir):
+def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
     """Only return isoforms with unique splice-site combinations"""
-    import collections
     junction_db = collections.OrderedDict()
     junction_str_db = collections.OrderedDict()
     gene_db = collections.OrderedDict()
@@ -490,14 +490,15 @@ def consolidateLongReadGFFs(directory, exon_reference_dir):
         transcript_id = info.split(';')[ti].split(td)[1]
         gene, exonIDs, exonIDs_simple, genes = exonAnnotate(chr, exons, strand, transcript_id)
         # Restrict the exon string to high confidence exon boundaries
-        filtered_exonIDs_str,exonIDs_str = exon_str(exonIDs)
+        filtered_exonIDs_str,exonIDs_str = exon_str(list(exonIDs))
         try:
-            filtered_exonIDs_str,exonIDs_simple_str = exon_str(exonIDs_simple)
+            if mode == 'collapse':
+                filtered_exonIDs_str,exonIDs_simple_str = exon_str(list(exonIDs_simple))
         except:
             pass
         """
-        if transcript_id == 'PB.130001.30' or transcript_id == 'ENST00000536435.7':
-            print (filtered_exonIDs_str,transcript_id)
+        if transcript_id == 'ENST00000525626.6' or transcript_id == 'ENST00000682936.1':
+            print (filtered_exonIDs_str,transcript_id,mode) 
         """
         if len(genes)>2:
             trans_spliced_isoforms[exonIDs_str] = []
@@ -573,6 +574,15 @@ def consolidateLongReadGFFs(directory, exon_reference_dir):
     eo.close()
     print(len(junction_db), 'unique isoforms')
 
+    def sort_isoforms_with_ENST_first(junction_db):
+        sorted_junction_db = defaultdict(list)
+        for key, value in junction_db.items():
+            sorted_value = sorted(value, key=lambda x: 'ENST' not in x[1])
+            sorted_junction_db[key] = sorted_value
+        return sorted_junction_db
+
+    junction_db = sort_isoforms_with_ENST_first(junction_db)
+
     if collapse_isoforms == False:
         return transcript_associations
     else:
@@ -583,7 +593,12 @@ def consolidateLongReadGFFs(directory, exon_reference_dir):
         # {((1, 2), (3, 4), (5, 6), (7, 8)): [((1, 2), (3, 4), (5, 6))], ((1, 2), (3, 4), (7, 8)): [((1, 2), (3, 4), (7, 8)), ((3, 4), (7, 8))]}
         #a = {'gene1':[((1,2),(3,4),(5,6)),((1,2),(3,4),(5,6),(7,8)),((1,2),(3,4),(7,8)),((3,4),(7,8)),((1,2),(3,4),(7,8))]}
         
-        super_isoform_db = collapseIsoforms(gene_db,junction_db)
+        if mode == 'collapse':
+            super_isoform_db = collapseIsoforms(gene_db,junction_db)
+        else:
+            super_isoform_db = defaultdict(lambda: defaultdict(list))
+            for (gene, isoform) in junction_db: 
+                super_isoform_db[gene][isoform] = []
         
         # Export super- to sub-isoform associations:
         eo = open(os.path.join(combined_dir, 'isoform_links.txt'), 'w')

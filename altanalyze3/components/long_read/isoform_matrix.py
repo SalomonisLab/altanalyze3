@@ -118,6 +118,7 @@ def pseudo_cluster_counts(combined_adata, cell_threshold=5, count_threshold=5, c
 
     if compute_tpm:
         tpm_values = summed_groups.div(summed_groups.sum(axis=1), axis=0) * 1e6
+        tpm_values_transposed = tpm_values.transpose()
         # Compute gene sums only once
         gene_sums = summed_groups.T.groupby(lambda x: x.split(":")[0]).transform('sum').T
         # Prepare isoform ratios efficiently
@@ -128,7 +129,7 @@ def pseudo_cluster_counts(combined_adata, cell_threshold=5, count_threshold=5, c
         mask = mask.reindex(columns=tpm_values.columns, method='ffill')
         isoform_ratios = isoform_ratios.where(mask).transpose()
         print('Pseudobulk cluster junction counts exported')
-        return filtered_summed_groups_transposed, tpm_values, isoform_ratios
+        return filtered_summed_groups_transposed, tpm_values_transposed, isoform_ratios
     else:
         return filtered_summed_groups_transposed
 
@@ -163,3 +164,121 @@ def pseudo_counts_no_cluster(combined_adata, count_threshold=5, compute_tpm=Fals
         return filtered_counts.T
 
 
+    def export_and_filter_pseudobulks(input_file, output_file, groups_file, cell_type_order_file=None):
+        #Function to reduce a combined TPM, ratio or splicing matrix (with or without null values) to rows in which clusters have multiple samples with signal (>2). Assumes null = 0.
+
+        # Step 1: Read in the optional cell type order file if provided
+        if cell_type_order_file:
+            with open(cell_type_order_file, 'r') as f:
+                cell_type_order = f.read().splitlines()
+        else:
+            cell_type_order = None
+
+        with open(input_file, 'r') as infile:
+            header = infile.readline().strip().split('\t')
+            samples = header[1:]  # Skip the first column (feature names)
+            
+            # Determine cell types from sample names
+            cell_types = [sample.split('.')[0] for sample in samples]
+            
+            # If cell_type_order is provided, re-arrange columns
+            if cell_type_order:
+                reordered_columns = []
+                reordered_cell_types = []
+                for cell_type in cell_type_order:
+                    cols = [sample for sample in samples if sample.startswith(cell_type+'.')]
+                    reordered_columns.extend(cols)
+                    reordered_cell_types.extend([cell_type] * len(cols))
+            else:
+                reordered_columns = samples
+                reordered_cell_types = cell_types
+            
+            with open(output_file, 'w') as outfile:
+                outfile.write('\t'.join(['Feature'] + reordered_columns) + '\n')
+
+                valid_rows = []  # To collect all valid rows for later processing
+                for line in infile:
+                    fields = line.strip().split('\t')
+                    feature = fields[0]
+                    try:
+                        values = list(map(float, fields[1:]))
+                    except:
+                        # for ratios
+                        values = [float(value) if value != '' else 0 for value in fields[1:]]
+
+                    # Step 3: Group values by cell type and check non-zero counts
+                    cell_type_counts = {cell_type: 0 for cell_type in set(cell_types)}
+                    
+                    for value, cell_type in zip(values, cell_types):
+                        if value > 0.1:
+                            cell_type_counts[cell_type] += 1
+                    
+                    # If any cell type has at least 3 non-zero samples, keep the row
+                    if any(count >= 3 for count in cell_type_counts.values()):
+                        if cell_type_order:
+                            reordered_values = [fields[samples.index(col) + 1] for col in reordered_columns]
+                        else:
+                            reordered_values = fields[1:]
+                        valid_rows.append((feature, reordered_values))
+                        outfile.write(f"{feature}\t" + "\t".join(map(str, reordered_values)) + "\n")
+            
+            # Step 6: Write the groups file
+            with open(groups_file, 'w') as f:
+                f.write('Original Column ID\tCell Type\n')
+                for col, cell_type in zip(reordered_columns, reordered_cell_types):
+                    f.write(f'{col}\t{cell_type}\n')
+
+    def concatenate_h5ad_and_compute_pseudobulks(sample_files,collection_name = ''):
+
+        # Initialize empty DataFrames to store results
+        combined_pseudo_pdf = None
+        combined_tpm = None
+        combined_isoform_to_gene_ratio = None
+
+        if collection_name!='':
+            collection_name = '_'+collection_name
+
+        # Loop through each sample file
+        for sample_file in sample_files:
+            sample_name = sample_file.split('.')[0]  # Extract the sample name from the file name
+            print(f'Processing {sample_file}')
+            
+            # Load the data
+            adata = ad.read_h5ad(sample_file)
+            
+            # Ensure indices are strings and observation names are unique
+            adata.obs.index = adata.obs.index.astype(str)
+            adata.obs_names_make_unique()
+
+            # Generate pseudobulks for the current sample
+            pseudo_pdf, tpm, isoform_to_gene_ratio = pseudo_cluster_counts(adata, cell_threshold=5, count_threshold=0, compute_tpm=True)
+            
+            # Rename the columns to include the sample name
+            pseudo_pdf.columns = [f'{col}.{sample_name}' for col in pseudo_pdf.columns]
+            tpm.columns = [f'{col}.{sample_name}' for col in tpm.columns]
+            isoform_to_gene_ratio.columns = [f'{col}.{sample_name}' for col in isoform_to_gene_ratio.columns]
+            
+            # Ensure the original order of clusters is preserved
+            if combined_pseudo_pdf is None:
+                combined_pseudo_pdf = pseudo_pdf
+                combined_tpm = tpm
+                combined_isoform_to_gene_ratio = isoform_to_gene_ratio
+            else:
+                # Reindex the dataframes to match the combined dataframe's index (cluster names) and fill missing values with 0
+                pseudo_pdf = pseudo_pdf.reindex(index=combined_pseudo_pdf.index, columns=pseudo_pdf.columns).fillna(0)
+                tpm = tpm.reindex(index=combined_tpm.index, columns=tpm.columns).fillna(0)
+                isoform_to_gene_ratio = isoform_to_gene_ratio.reindex(index=combined_isoform_to_gene_ratio.index, columns=isoform_to_gene_ratio.columns).fillna(0)
+                
+                # Concatenate the dataframes along columns
+                combined_pseudo_pdf = pd.concat([combined_pseudo_pdf, pseudo_pdf], axis=1)
+                combined_tpm = pd.concat([combined_tpm, tpm], axis=1)
+                combined_isoform_to_gene_ratio = pd.concat([combined_isoform_to_gene_ratio, isoform_to_gene_ratio], axis=1)
+
+        # Export to text file
+        pseudo_counts = collection_name+'combined_pseudo_cluster_counts.txt'
+        pseudo_tpm = collection_name+'combined_tpm.txt'
+        pseudo_ratios = collection_name+'combined_isoform_to_gene_ratio.txt'
+        combined_pseudo_pdf.to_csv(pseudo_counts, sep='\t')
+        combined_tpm.to_csv(pseudo_tpm, sep='\t')
+        combined_isoform_to_gene_ratio.to_csv(pseudo_ratios, sep='\t')
+    return pseudo_counts,pseudo_tpm,pseudo_ratios

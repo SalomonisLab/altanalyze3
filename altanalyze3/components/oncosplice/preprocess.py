@@ -36,3 +36,60 @@ def intercorrelation_based_feature_selection(df, corr_threshold=0.5, corr_n_even
     filtered_df = filtered_df.transpose()
 
     return filtered_df
+
+
+def fast_intercorrelation_based_feature_selection(df, corr_threshold=0.5, corr_n_events=10):
+    # Calculate correlation matrix
+    df = df.transpose()
+
+    corr_matrix = fast_corr_matrix(data_matrix=df.to_numpy())
+
+    corr_matrix = pd.DataFrame(corr_matrix, index=df.columns, columns=df.columns)
+
+    # Get columns with correlation > 0.4
+    correlated_features = (corr_matrix > corr_threshold).sum() > corr_n_events
+
+    # Filter dataframe based on correlated features
+    filtered_df = df[correlated_features.index[correlated_features]]
+
+    filtered_df = filtered_df.transpose()
+
+    return filtered_df
+
+
+def test_func(df1, df2):
+    norm1 = df1 - df1.mean(axis=0)
+    norm2 = df2 - df2.mean(axis=0)
+    sqsum1 = (norm1**2).sum(axis=0)
+    sqsum2 = (norm2**2).sum(axis=0)
+    return((norm1.T @ norm2) / np.sqrt(sqsum1.apply(lambda x: x*sqsum2)))
+
+
+import numpy as np
+
+
+def fast_corr_matrix(data_matrix):
+
+    # Mask out NaNs by replacing them with the column mean, if necessary
+    valid_data = np.nan_to_num(data_matrix, nan=np.nanmean(data_matrix, axis=0))
+
+    # Subtract the mean from each column (centering the data)
+    centered_data = valid_data - np.nanmean(data_matrix, axis=0)
+
+    # Calculate the dot product of the centered data matrix with itself
+    dot_product = np.dot(centered_data.T, centered_data)
+
+    # Calculate the sum of squared deviations (like variance)
+    sum_squared = np.sqrt(np.sum(centered_data ** 2, axis=0))
+
+    # Outer product of sum_squared to get all combinations of feature variances
+    denom = np.outer(sum_squared, sum_squared)
+
+    # Calculate the correlation matrix
+    corr_matrix = dot_product / denom
+
+    # Set the diagonal to 1 (perfect correlation with self)
+    np.fill_diagonal(corr_matrix, 1)
+
+    return corr_matrix
+

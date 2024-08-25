@@ -64,11 +64,16 @@ def oncosplice(args):
     metadata = variance_based_feature_selection(formatted_psi_file, metadata, fold_threshold=fold_threshold, samples_differing=samples_differing)
     et = time.time()
     el_t = (et-st) / 60
+    print(f"Time taken for variance based feature selection: {el_t} minutes")
     metadata = metadata.loc[metadata['high_variance'] == True, :]
     formatted_psi_file = formatted_psi_file.loc[metadata.index, :]
 
     # inter-feature correlation module
+    st = time.time()
     formatted_psi_file = intercorrelation_based_feature_selection(formatted_psi_file, corr_threshold=corr_threshold_intercorr, corr_n_events=corr_n_events)
+    et = time.time()
+    el_t = (et - st) / 60
+    print(f"Time taken for intercorrelated based feature selection: {el_t} minutes")
     metadata = metadata.loc[formatted_psi_file.index, :]
 
     # impute the psi matrix for certain downstream steps
@@ -77,7 +82,11 @@ def oncosplice(args):
     formatted_psi_file_imp.index = formatted_psi_file.index
 
     # Find the non-redundant splicing events
+    st = time.time()
     list_of_events = remove_redundant_splicing_events(formatted_psi_file, corr_threshold, metadata)
+    et = time.time()
+    el_t = (et - st) / 60
+    print(f"Time taken for redundant splicing event removal: {el_t} minutes")
     list_of_events = list(set(list_of_events))
 
 
@@ -106,18 +115,30 @@ def oncosplice(args):
     print(npcs)
 
     # feature selection prior to Round 1
+    st = time.time()
     pca_events_round = get_events_from_pca(formatted_psi_file_imp, formatted_psi_file, list_of_events, corr_threshold=pca_corr_threshold, n_components=npcs)
+    et = time.time()
+    el_t = (et - st) / 60
+    print(f"Time taken for PCA based feature selection round 1: {el_t} minutes")
+
+    pca_events_round_df = pd.DataFrame(pca_events_round)
+    pca_events_round_df.to_csv("pca_events_round_1.txt", sep="\t")
 
     print("STARING ROUND 1...")
     print("Number of events prior to entering ROUND 1: ")
     print(len(formatted_psi_file_0.index))
 
     # Round 1 OncoSplice
+    st = time.time()
     final_clusters_i, depleted_psi_file_after_round_imp_i, depleted_psi_file_after_round_i, deg_results_all_i = round_wrapper(
         filename="Round1", full_psi_file=formatted_psi_file_0, full_imputed_psi_file=formatted_psi_file_imp_0, metadata=metadata,
         highly_variable_events=pca_events_round, rank=rank1, min_group_size=min_group_size, dPSI=dPSI, dPSI_p_val=dPSI_p_val,
         min_differential_events=min_differential_events, top_n_differential_events=top_n_differential_events, conservation=conservation, strictness="tough",
         depletion_corr_threshold=depletion_corr_threshold, write_files=True, speed_corr=speed)
+
+    et = time.time()
+    el_t = (et - st) / 60
+    print(f"Time taken for round 1 clustering: {el_t} minutes")
 
     # Round i OncoSplice (tough)
     depleted_events_round_i = depleted_psi_file_after_round_i.index.to_list()
@@ -140,14 +161,23 @@ def oncosplice(args):
     for round_j in range(2, n_rounds+1):
 
         # feature selection prior to Round J
+        st = time.time()
         pca_events_round_j = get_events_from_pca(formatted_psi_file_imp, formatted_psi_file, depleted_events_round_i,
                                                  corr_threshold=pca_corr_threshold, n_components=npcs)
+
+        et = time.time()
+        el_t = (et - st) / 60
+        print(f"Time taken for PCA based feature selection round {round_j}: {el_t} minutes")
+
+        pca_events_round_df_j = pd.DataFrame(pca_events_round_j)
+        pca_events_round_df_j.to_csv(f"pca_events_round_{round_j}.txt", sep="\t")
 
         print(f"STARING ROUND {round_j}...")
         print(f"Number of events prior to entering ROUND {round_j}: ")
         print(len(depleted_psi_file_after_round_i.index))
 
-        # Round 2 Oncosplice
+        # Round j Oncosplice
+        st = time.time()
         final_clusters_j, depleted_psi_file_after_round_imp_j, depleted_psi_file_after_round_j, deg_results_all_j = round_wrapper(
             filename=f"Round{round_j}", full_psi_file=depleted_psi_file_after_round_i,
             full_imputed_psi_file=depleted_psi_file_after_round_imp_i, highly_variable_events=pca_events_round_j, metadata=metadata, rank=rank,
@@ -155,7 +185,10 @@ def oncosplice(args):
             top_n_differential_events=top_n_differential_events, conservation=conservation, strictness="tough",
             depletion_corr_threshold=depletion_corr_threshold, write_files=True, speed_corr=speed)
 
-        # Round 3 OncoSplice
+        et = time.time()
+        el_t = (et - st) / 60
+        print(f"Time taken for round {round_j}: {el_t} minutes")
+
         depleted_events_round_j = depleted_psi_file_after_round_j.index.to_list()
         print(f"Number of events removed after ROUND {round_j}: ")
         print(len(depleted_psi_file_after_round_i.index) - len(depleted_psi_file_after_round_j.index))

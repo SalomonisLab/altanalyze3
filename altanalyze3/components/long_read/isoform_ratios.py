@@ -14,7 +14,7 @@ sys.path.insert(1, os.path.join(sys.path[0], '..'))
 import long_read.isoform_matrix as iso
 import long_read.gff_process as gff_process
     
-def exportConsensusIsoformMatrix(matrix_dir, isoform_association_path, gff_source=None, barcode_clusters=None, rev=False, mtx=True):
+def exportConsensusIsoformMatrix(matrix_dir, isoform_association_path, gff_source=None, barcode_clusters=None, rev=False, mtx=True, sample_id=None):
     """ 
     Decompose isoforms into exon-exon and exon-junctions counts at the single-cell and pseudobulk level
     """
@@ -26,10 +26,20 @@ def exportConsensusIsoformMatrix(matrix_dir, isoform_association_path, gff_sourc
     else:
         adata = iso.tsv_to_adata(matrix_dir)    
 
+    # Ensure obs index and column names are string type
+    adata.obs.index = adata.obs.index.astype(str)
+    adata.obs.columns = adata.obs.columns.astype(str)
+
     # If existing cell clusters are provided already (e.g., supervised classification from gene-level analyses)
     if barcode_clusters is not None and not barcode_clusters.empty:
         adata = iso.calculate_barcode_match_percentage(adata, barcode_clusters)
+    else:
+        if sample_id is not None:
+            adata.obs['cluster'] = sample_id
+        else:
+            adata.obs['cluster'] = gff_source
 
+    
     # Need to filter cell barcodes to those with a sufficient number of expressed genes
     adata.obs['total_counts'] = np.sum(adata.X, axis=1)
     adata = adata[adata.obs['total_counts'] >= 100, :]
@@ -96,25 +106,29 @@ def exportConsensusIsoformMatrix(matrix_dir, isoform_association_path, gff_sourc
 
     # Add gene annotations
     isoform_adata.var['gene'] = [isoform_to_gene.get(isoform, '') for isoform in isoform_adata.var_names]
+    
+    # Some weird key's get added when excluding barcode to cluster associations
+    isoform_adata.obs = isoform_adata.obs.dropna().reset_index(drop=True)
+
 
     # Write the junction counts to an h5ad file
     h5ad_dir = os.path.basename(gff_source)
+    
     #isoform_adata.write_h5ad("filtered_junction.h5ad")
     isoform_adata.write_h5ad(f"{h5ad_dir.split('.g')[0]}-isoform.h5ad")
     print ('h5ad exported')
 
-    if barcode_clusters is not None and not barcode_clusters.empty:
-        # Compute pseudo-cluster counts and write them to a file
-        grouped = isoform_counts_df.groupby(adata.obs['cluster'])
-        
-        # Remove clusters with less than 10 cells
-        filtered_summed_groups = grouped.filter(lambda x: len(x) >= 10).groupby(adata.obs['cluster']).sum()
-        
-        # Remove junctions with less than 10 reads total
-        filtered_summed_groups = filtered_summed_groups.loc[:, filtered_summed_groups.sum(axis=0) >= 10]
-        filtered_summed_groups_transposed = filtered_summed_groups.transpose()
-        filtered_summed_groups_transposed.to_csv('pseudo_cluster_isocounts.txt', sep='\t')
-        print ('pseudobulk cluster junction counts exported')
+    # Compute pseudo-cluster counts and write them to a file
+    grouped = isoform_counts_df.groupby(adata.obs['cluster'])
+    
+    # Remove clusters with less than 10 cells
+    filtered_summed_groups = grouped.filter(lambda x: len(x) >= 10).groupby(adata.obs['cluster']).sum()
+    
+    # Remove junctions with less than 10 reads total
+    filtered_summed_groups = filtered_summed_groups.loc[:, filtered_summed_groups.sum(axis=0) >= 10]
+    filtered_summed_groups_transposed = filtered_summed_groups.transpose()
+    filtered_summed_groups_transposed.to_csv('pseudo_cluster_isocounts.txt', sep='\t')
+    print ('pseudobulk cluster junction counts exported')
 
     return isoform_adata
 

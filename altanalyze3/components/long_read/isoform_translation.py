@@ -65,6 +65,7 @@ def is_nmd(transcript_seq, stop_codon_pos, last_exon_start):
 def extract_cds_and_protein(transcripts, genome_fasta, ref_first_exons=None, query_transcript_to_gene={}):
     genome_seq = SeqIO.to_dict(SeqIO.parse(genome_fasta, "fasta"))
     cds_records = []
+    transcript_records = []
     protein_records = []
     for transcript_id, data in tqdm(transcripts.items(), desc="Processing Transcripts"):
         #if transcript_id=='ENST00000356073.8':
@@ -115,6 +116,8 @@ def extract_cds_and_protein(transcripts, genome_fasta, ref_first_exons=None, que
                 cds_seq = transcript_seq[orf_start:orf_start + len(orf_seq) * 3]
                 description = f";CDS;gene_id:{gene_id}" if gene_id else "CDS"
                 cds_records.append(SeqRecord(Seq(cds_seq), id=transcript_id, description=description))
+                description = f";transcript;gene_id:{gene_id}" if gene_id else "CDS"
+                transcript_records.append(SeqRecord(Seq(transcript_seq), id=transcript_id, description=description))
                 stop_codon_pos = orf_start + len(orf_seq) * 3
                 nmd_annotation = ""
                 if exons[0][3] == '-':
@@ -128,7 +131,7 @@ def extract_cds_and_protein(transcripts, genome_fasta, ref_first_exons=None, que
                 #print (orf_start,(len(orf_seq) * 3),last_exon_length,last_exon_start_relative,stop_codon_pos,transcript_seq,[nmd_annotation])
         except KeyError as e:
             print(f"Error: {e}. Check if chromosome identifiers match between GFF and genome FASTA.")
-    return cds_records, protein_records
+    return cds_records, transcript_records, protein_records
 
 def parse_transcript_associations(file_path):
     df = pd.read_csv(file_path, sep='\t', header=None)
@@ -181,12 +184,12 @@ def gff_translate(query_gff_file, genome_fasta, ref_gff_file=None, transcript_as
     
     query_transcript_to_gene, intron_retention_dict = parse_transcript_associations(transcript_associations_file) if os.path.exists(transcript_associations_file) else {}
     ref_first_exons = get_reference_first_exons(ref_gff_file) if os.path.exists(ref_gff_file) else {}
-    cds_records, protein_records = extract_cds_and_protein(query_transcripts, genome_fasta, query_transcript_to_gene=query_transcript_to_gene, ref_first_exons=ref_first_exons)
+    cds_records, transcript_records, protein_records = extract_cds_and_protein(query_transcripts, genome_fasta, query_transcript_to_gene=query_transcript_to_gene, ref_first_exons=ref_first_exons)
     
     # Output protein information to CSV
     export_protein_summary(protein_records, intron_retention_dict, "protein_summary.txt")
 
-    return cds_records, protein_records
+    return cds_records, transcript_records, protein_records
 
 def export_protein_summary(protein_records, intron_retention_dict, output_csv_file):
     summary_data = []
@@ -232,7 +235,7 @@ def export_protein_summary(protein_records, intron_retention_dict, output_csv_fi
        "Gene ID",  "Transcript ID", "Protein Length", "NMD Status", "Intron Retention", "Longest Isoform Length"])
     summary_df.to_csv(output_csv_file, index=False, sep='\t')
 
-def find_redundant_proteins(fasta_file, output_file):
+def find_redundant_proteins(fasta_file, output_file, restrict=None):
     # Dictionary to hold sequences as keys and list of corresponding protein IDs as values
     sequence_dict = defaultdict(list)
     
@@ -240,7 +243,11 @@ def find_redundant_proteins(fasta_file, output_file):
     for record in SeqIO.parse(fasta_file, "fasta"):
         sequence = str(record.seq)
         protein_id = record.id
-        sequence_dict[sequence].append(protein_id)
+        if restrict is not None:
+            if restrict in protein_id:
+                sequence_dict[sequence].append(protein_id)
+        else:
+            sequence_dict[sequence].append(protein_id)
     
     # Write the output to a two-column text file
     with open(output_file, 'w') as out_f:
@@ -261,10 +268,13 @@ def find_redundant_proteins(fasta_file, output_file):
 if __name__ == '__main__':
 
     fasta_file = "protein_sequences.fasta"
-    fasta_file = 'cds_sequences.fasta'
+    #fasta_file = 'cds_sequences.fasta'
+    #fasta_file = 'transcript_sequences.fasta'
     output_file = "redundant_proteins.txt"
-    output_file = "redundant_cDNA.txt"
-    find_redundant_proteins(fasta_file, output_file);sys.exit()
+    #output_file = "redundant_cDNA.txt"
+    #output_file = "redundant_transcripts.txt"
+    restrict = 'ENSG00000109689'
+    find_redundant_proteins(fasta_file, output_file, restrict=restrict);sys.exit()
 
     # Example usage
     ref_gff_file = "/Users/saljh8/Dropbox/Revio/Apharesis-Sequel2/ND167_Iso-Seq/PacBio/Accessory/AltAnalyze3/MANE.GRCh38.v0.5.select_ensembl_genomic.gff"

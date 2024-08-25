@@ -48,7 +48,8 @@ def round_wrapper(filename, full_psi_file, full_imputed_psi_file, highly_variabl
     print(("Running NMF analysis with rank set to " + str(rank) + "..."))
     basis_matrix, binarized_output_test, refined_binarized_output = run_nmf(imputed_psi_file=formatted_psi_file_imp_hve,
                                                                             rank=rank)
-    print("--- %s seconds ---" % (time.time() - start_time))
+    elapsed_time = (time.time() - start_time) / 60  # Convert seconds to minutes
+    print("--- %.3f minutes ---" % elapsed_time)
 
     # for metadata analysis, which determines the differential splicing events, format the binary groups file (an output from NMF analysis) to match the expectations of the mwuCompute function
     groups_file = pd.DataFrame(
@@ -87,13 +88,15 @@ def round_wrapper(filename, full_psi_file, full_imputed_psi_file, highly_variabl
                                                                              dPSI_p_val=dPSI_p_val,
                                                                              min_differential_events=min_differential_events,
                                                                              top_n=top_n_differential_events)
-    print("--- %s seconds ---" % (time.time() - start_time))
+    elapsed_time = (time.time() - start_time) / 60  # Convert seconds to minutes
+    print("--- %.3f minutes ---" % elapsed_time)
 
     start_time = time.time()
     print(("Determined " + str(len(diff_events)) + " unique differential events across all clusters"))
     psi_file_with_diff_events = full_psi_file.loc[diff_events,]
     psi_file_with_diff_events_imp = full_imputed_psi_file.loc[diff_events,]
-    print("--- %s seconds ---" % (time.time() - start_time))
+    elapsed_time = (time.time() - start_time) / 60  # Convert seconds to minutes
+    print("--- %.3f minutes ---" % elapsed_time)
 
     refined_binarized_output_f = np.delete(refined_binarized_output, remove_clusters,
                                            axis=0)  # remove clusters (rows) with number of differential splicing events less than threshold (100)
@@ -110,19 +113,22 @@ def round_wrapper(filename, full_psi_file, full_imputed_psi_file, highly_variabl
     final_clusters = classify(train=centroids, imputed_psi_file_with_diff_events=psi_file_with_diff_events_imp,
                               groups=np.arange(np.shape(refined_binarized_output_f)[0]),
                               conservation=conservation)  # need to figure out a way to give more meaningful cluster name instead of an integer after this step (such as C1, etc etc).
-    print("--- %s seconds ---" % (time.time() - start_time))
+    elapsed_time = (time.time() - start_time) / 60  # Convert seconds to minutes
+    print("--- %.3f minutes ---" % elapsed_time)
 
     print(("Depleting events using a correlation threshold of " + str(depletion_corr_threshold) + "..."))
     if speed_corr == "og":
         start_time = time.time()
         depleted_psi_file_after_round = deplete_events(nmf_basis_matrix=basis_matrix, full_psi_file=full_psi_file,
                                                        full_imputed_psi_file=full_imputed_psi_file, corr_threshold=depletion_corr_threshold, strictness=strictness, speed="og")
-        print("--- %s seconds ---" % (time.time() - start_time))
+        elapsed_time = (time.time() - start_time) / 60  # Convert seconds to minutes
+        print("--- %.3f minutes ---" % elapsed_time)
     elif speed_corr == "efficient":
         start_time = time.time()
         depleted_psi_file_after_round = deplete_events(nmf_basis_matrix=basis_matrix, full_psi_file=full_psi_file,
                                                        full_imputed_psi_file=full_imputed_psi_file, corr_threshold=depletion_corr_threshold, strictness=strictness, speed="vectorized")
-        print("--- %s seconds ---" % (time.time() - start_time))
+        elapsed_time = (time.time() - start_time) / 60  # Convert seconds to minutes
+        print("--- %.3f minutes ---" % elapsed_time)
 
     depleted_psi_file_after_round_imp = full_imputed_psi_file.filter(depleted_psi_file_after_round.index, axis="rows")
     depleted_psi_file_after_round = full_psi_file.filter(depleted_psi_file_after_round.index, axis="rows")
