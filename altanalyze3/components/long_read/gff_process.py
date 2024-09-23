@@ -383,8 +383,21 @@ def knownIsoform(transcripts):
         return 'known'
     else:
         return 'novel'
+
+def selectKnownIsoform(transcripts):
+    search_strings = ["ENST", "NM_", "XM_", "XR_"]
+    found=[]
+    for transcript in transcripts:
+        for s in search_strings:
+            if transcript.startswith(s):
+                found.append(transcript)
+    found.sort()
+    for transcript in transcripts:
+        if transcript not in found:
+            found.append(transcript)
+    return found
     
-def collapseIsoforms(gene_db, junction_db):
+def collapseIsoforms(gene_db, junction_db,gff_organization, mode):
     num_isoforms = 0
     collaped_db = defaultdict(lambda: defaultdict(list))
     
@@ -409,8 +422,67 @@ def collapseIsoforms(gene_db, junction_db):
                     break
 
         num_isoforms += len(collaped_db[gene])
-
     print(num_isoforms, 'collapsed unique isoforms')
+
+    if mode == 'Ensembl':
+        def get_transcript_ids(gene,isoforms):
+            transcript_ids=defaultdict(lambda: defaultdict(list))
+            for iso in isoforms:
+                for (file, info) in junction_db[gene, iso]:
+                    transcript_id = info.split(';')[gff_organization[file][0]].split(gff_organization[file][1])[1]
+                    transcript_ids[transcript_id]=iso
+            return transcript_ids
+
+        num_isoforms=0
+
+        # Prioritizes partial matching Ensembl transcripts - augmented "simple" mode. This is less conservative than 
+        #"collapse" and is combined with "simple" peripheral splice site filtering
+        #a=0; b=0; c=0; d=0; e=0; f=0; g=0; h=0
+        super_isoform_collapsed_db = collaped_db
+        collaped_db = defaultdict(lambda: defaultdict(list))
+        keys_added={}
+        for (gene, isoform) in junction_db:
+            super_isoforms = super_isoform_collapsed_db[gene]
+            if isoform in super_isoforms: # Hence, super_isoform - keep
+                sub_isoforms = super_isoform_collapsed_db[gene][isoform]
+                combined_iso = [isoform]+sub_isoforms
+                transcript_ids = get_transcript_ids(gene,combined_iso)
+                transcript_list = list(transcript_ids.keys())
+                #if 'PB.98490.113' in transcript_list: print ('key',isoform,transcript_list)
+                found = next((x for x in transcript_list if x.startswith('ENST')), False)
+                if found == False:
+                    pass
+                else:
+                    ens_iso = transcript_ids[found]
+                    if ens_iso == isoform:
+                        collaped_db[gene][ens_iso]=[]
+                    else:  
+                        collaped_db[gene][ens_iso].append(isoform)
+                    keys_added[gene,isoform]=[]
+                    keys_added[gene,ens_iso]=[]
+            else:
+                for iso in super_isoforms:
+                    if isoform in super_isoforms[iso]:
+                        combined_iso = [iso]+super_isoforms[iso]
+                        transcript_ids = get_transcript_ids(gene,combined_iso)
+                        transcript_list = list(transcript_ids.keys())
+                        found = next((x for x in transcript_list if x.startswith('ENST')), False)
+                        if found==False:
+                            pass
+                        else:
+                            ens_iso = transcript_ids[found]
+                            if ens_iso == iso: 
+                                collaped_db[gene][ens_iso]=[]
+                            else:
+                                collaped_db[gene][ens_iso].append(isoform)
+                            keys_added[gene,isoform]=[]
+                            keys_added[gene,ens_iso]=[]
+        for (gene, isoform) in junction_db:
+            if (gene, isoform) not in keys_added:
+                collaped_db[gene][isoform]=[]
+        for gene in collaped_db:
+            num_isoforms += len(collaped_db[gene])
+        print(num_isoforms, 'collapsed Ensembl prioritized unique isoforms')
     return collaped_db
 
 
@@ -593,13 +665,21 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
         # {((1, 2), (3, 4), (5, 6), (7, 8)): [((1, 2), (3, 4), (5, 6))], ((1, 2), (3, 4), (7, 8)): [((1, 2), (3, 4), (7, 8)), ((3, 4), (7, 8))]}
         #a = {'gene1':[((1,2),(3,4),(5,6)),((1,2),(3,4),(5,6),(7,8)),((1,2),(3,4),(7,8)),((3,4),(7,8)),((1,2),(3,4),(7,8))]}
         
-        if mode == 'collapse':
-            super_isoform_db = collapseIsoforms(gene_db,junction_db)
+        if mode == 'collapse' or mode == 'Ensembl':
+            super_isoform_db = collapseIsoforms(gene_db,junction_db,gff_organization,mode)
         else:
             super_isoform_db = defaultdict(lambda: defaultdict(list))
             for (gene, isoform) in junction_db: 
                 super_isoform_db[gene][isoform] = []
         
+        def get_transcript_ids(gene,isoforms):
+            transcript_ids=defaultdict(lambda: defaultdict(list))
+            for iso in isoforms:
+                for (file, info) in junction_db[gene, iso]:
+                    transcript_id = info.split(';')[gff_organization[file][0]].split(gff_organization[file][1])[1]
+                    transcript_ids[transcript_id]=file
+            return transcript_ids
+
         # Export super- to sub-isoform associations:
         eo = open(os.path.join(combined_dir, 'isoform_links.txt'), 'w')
         #jo = open(os.path.join(combined_dir, 'isoform_junctions.txt'), 'w')
@@ -615,46 +695,34 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
                 strand = strand_db[gene]
                 related_transcripts = []
                 if 'UNK' not in gene:
-                    (file, info) = junction_db[gene, isoform][0]  # First example of that isoform
-                    ref_super_transcript_id = info.split(';')[gff_organization[file][0]].split(gff_organization[file][1])[1]
+                    transcript_ids = get_transcript_ids(gene,[isoform])
+                    transcript_list = list(transcript_ids.keys())
+                    ordered_transcripts = selectKnownIsoform(transcript_list)
+                    ref_super_transcript_id = ordered_transcripts[0]
+                    ref_super_file = transcript_ids[ref_super_transcript_id]
+                    isoforms_to_retain[(ref_super_file, ref_super_transcript_id)] = [] 
                     related_transcripts.append(ref_super_transcript_id)
-                    isoforms_to_retain[(file, ref_super_transcript_id)] = [] 
-                    eo.write('\t'.join([gene, ref_super_transcript_id, file, '', '']) + '\n')
-                    a += 1
-                    # Get the isoform annotations for the super-isoform
-                    for (f2, info) in junction_db[gene, isoform][1:]:
-                        super_transcript_id = info.split(';')[gff_organization[f2][0]].split(gff_organization[f2][1])[1]
-                        related_transcripts.append(super_transcript_id)
-                        if (super_transcript_id, f2) not in added:
-                            eo.write('\t'.join([gene, ref_super_transcript_id, file, super_transcript_id, f2]) + '\n')
-                            added.append((super_transcript_id, f2))
-                            a += 1
+                    if len(ordered_transcripts)==1:
+                        eo.write('\t'.join([gene, ref_super_transcript_id, ref_super_file, '', '']) + '\n')
+                        a += 1
+                    else: 
+                        for t in transcript_list:
+                            if t!=ref_super_transcript_id:
+                                t_file =  transcript_ids[t]
+                                eo.write('\t'.join([gene, ref_super_transcript_id, ref_super_file, t, t_file]) + '\n')
+                                related_transcripts.append(ref_super_file)
                     for sub_isoform in super_isoform_db[gene][isoform]:
                         for (f3, info) in junction_db[gene, sub_isoform]:
                             sub_transcript_id = info.split(';')[gff_organization[f3][0]].split(gff_organization[f3][1])[1]
                             if (sub_transcript_id, f3) not in added:
-                                eo.write('\t'.join([gene, ref_super_transcript_id, file, sub_transcript_id, f3]) + '\n')
-                                added.append((sub_transcript_id, f3))
-                                related_transcripts.append(sub_transcript_id)
-                                a += 1
+                                if ref_super_transcript_id !=sub_transcript_id:
+                                    eo.write('\t'.join([gene, ref_super_transcript_id, file, sub_transcript_id, f3]) + '\n')
+                                    added.append((sub_transcript_id, f3))
+                                    related_transcripts.append(sub_transcript_id)
+                                    a += 1
                     known_isoform = knownIsoform(related_transcripts)
                     ao.write('\t'.join([gene, ref_super_transcript_id, file, known_isoform]) + '\n')
-                    # Create an inclusive exon-exon and exon-intron junction object - incorporate in-between-exons/introns
-                    """
-                    isoform_modified = list(junction_str_db[gene, isoform])
-                    if strand == '-':
-                        isoform_modified = [(b, a) for a, b in isoform_modified]
-                        if ref_super_transcript_id in additional_junctions:
-                            isoform_modified += list(additional_junctions[ref_super_transcript_id])
-                        isoform_modified.sort()
-                        isoform_modified.reverse()
-                    else:
-                        if ref_super_transcript_id in additional_junctions:
-                            isoform_modified += list(additional_junctions[ref_super_transcript_id])
-                        isoform_modified.sort()
-                    isoform_string = '|'.join([f"{start}-{end}" for start, end in isoform_modified])
-                    jo.write('\t'.join([gene, ref_super_transcript_id, file, isoform_string]) + '\n')
-                    """
+
         eo.close()
         ao.close()
         #jo.close()

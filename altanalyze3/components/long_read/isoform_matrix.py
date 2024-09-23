@@ -10,7 +10,7 @@ warnings.simplefilter('ignore', BiopythonWarning)
 from scipy.sparse import csr_matrix
 from scipy.io import mmread
 from scipy.sparse import lil_matrix
-import collections
+from collections import defaultdict
 import argparse
 from tqdm import tqdm # progress bar
 sys.path.insert(1, os.path.join(sys.path[0], '..'))
@@ -44,13 +44,17 @@ def append_sample_name(adata, sample_name):
     return adata
 
 def import_barcode_clusters(barcode_cluster_dir):
-    """ Import cell barcode to cluster associations and extract/key by sample name """
-    barcode_sample_dict = {}
-    df = pd.read_csv(barcode_cluster_dir, sep='\t', header=None, names=['barcode_cluster', 'cluster'])
-    df[['barcode', 'sample_name']] = df['barcode_cluster'].str.split('.', expand=True)
-    df['barcode'] = df['barcode'].apply(lambda x: x.split('.')[0])
-    barcode_sample_dict = {sample: group.set_index('barcode')[['cluster']] for sample, group in df.groupby('sample_name')}
-    return barcode_sample_dict
+    """Import cell barcode to cluster associations and extract/key by sample name."""
+    if not isinstance(barcode_cluster_dir, list):
+        barcode_cluster_dir = [barcode_cluster_dir]
+    barcode_sample_dict_final = defaultdict(list)
+    
+    for dir in barcode_cluster_dir:
+        df = pd.read_csv(dir, sep='\t', header=None, names=['barcode_cluster', 'cluster'])
+        df[['barcode', 'sample_name']] = df['barcode_cluster'].str.split('.', expand=True)
+        for sample, group in df.groupby('sample_name'):
+            barcode_sample_dict_final[sample] = group.set_index('barcode')['cluster']
+    return barcode_sample_dict_final
 
 def reverse_complement_seq(seq):
     complement = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G', 'N': 'N'}
