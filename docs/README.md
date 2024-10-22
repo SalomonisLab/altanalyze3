@@ -1,4 +1,4 @@
-# Explanation for how the old Python2 code base work
+# Python3 reimplementation of AltAnalyze2 BAM file junction/exon quantification
 
 ## Input
 
