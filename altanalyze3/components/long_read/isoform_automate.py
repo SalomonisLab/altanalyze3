@@ -8,13 +8,15 @@ from scipy.sparse import csr_matrix
 from scipy.io import mmread
 import collections
 sys.path.insert(1, os.path.join(sys.path[0], '..'))
-import long_read.isoform_junctions_chunk as junc
-import long_read.isoform_matrix as iso
-import long_read.isoform_ratios as isor
-import long_read.isoform_automate as isoa
-import long_read.isoform_translation as isot
-import long_read.gff_process as gff_process
+from . import isoform_junctions_chunk as junc
+from . import isoform_matrix as iso
+from . import isoform_ratios as isor
+from . import isoform_automate as isoa
+from . import isoform_translation as isot
+from . import gff_process as gff_process
+from ..psi import psi_single as psi
 from Bio import SeqIO
+import asyncio
 
 def exportRatios(ob,out):
     pseudo_pdf, tpm, isoform_to_gene_ratio = iso.pseudo_cluster_counts(ob,cell_threshold=5,count_threshold=0,compute_tpm=True)
@@ -58,7 +60,7 @@ def export_junction_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict):
         adata_list = [export_junction_matrix(s['matrix'], s['gff'], s['library'], s['reverse'], ensembl_exon_dir, barcode_sample_dict) for s in samples]
         if num_samples>1:
             combined_adata = ad.concat(adata_list, axis=0, join='outer') if len(adata_list) > 1 else adata_list[0]
-            combined_adata.write_h5ad(f'{uid}.h5ad')
+            combined_adata.write_h5ad(f'{uid}.h5ad', compression='gzip')
 
 def export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, reference_gff, genome_fasta):
     """Processes samples, concatenates if necessary, and writes h5ad files."""
@@ -179,3 +181,28 @@ def export_pseudo_counts(metadata_file,barcode_cluster_dirs,dataType='junction',
         iso.export_and_filter_pseudobulks(pseudo_ratios, pseudo_ratios[:-4]+'-filtered.txt', cluster_order)
         iso.export_and_filter_pseudobulks(pseudo_tpm, pseudo_tpm[:-4]+'-filtered.txt', cluster_order)
 
+def pre_process_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_dir):
+    # Perform junction quantification across samples
+    sample_dict = import_metadata(metadata_file)
+    barcode_sample_dict = iso.import_barcode_clusters(barcode_cluster_dirs)
+    export_junction_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict)
+    export_pseudo_counts(metadata_file,barcode_cluster_dirs,'junction')
+
+def combine_processed_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_dir, gencode_gff, genome_fasta):
+    sample_dict = import_metadata(metadata_file)
+    barcode_sample_dict = iso.import_barcode_clusters(barcode_cluster_dirs)
+
+    # Perform isoform quantification across samples
+    export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, gencode_gff, genome_fasta)
+    export_pseudo_counts(metadata_file,barcode_cluster_dirs,'isoform',compute_tpm=True)
+    
+    junction_coords_file = 'junction_combined_pseudo_cluster_counts-filtered.txt'
+    outdir = 'psi_combined_pseudo_cluster_counts.txt'
+    junction_coords_file = export_sorted(junction_coords_file, 0) ### Sort the expression file
+    #psi.main(junction_path=junction_coords_file, query_gene=None, outdir=outdir, use_multiprocessing=False, mp_context=mp_context, num_cores=num_cores)
+    run_psi_analysis(junction_coords_file, outdir)
+
+# Wrap in a function to avoid event loop conflicts
+def run_psi_analysis(junction_path, outdir):
+    # Use asyncio.run to ensure event loop is properly created
+    asyncio.run(psi.main(junction_path=junction_path, query_gene=None, outdir=outdir))

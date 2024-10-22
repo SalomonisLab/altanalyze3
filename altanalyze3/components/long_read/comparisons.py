@@ -1,9 +1,9 @@
 import os, sys, csv, copy
 import pandas as pd
 sys.path.insert(1, os.path.join(sys.path[0], '..'))
-import long_read.isoform_automate as isoa
-import annotation.junction_isoform as ji
-import oncosplice.metadataAnalysis as ma
+from . import isoform_automate as isoa
+from ..annotation import junction_isoform as ji
+from ..oncosplice import metadataAnalysis as ma
 import numpy as np
 
 def compare_one_cluster_to_many(condition,cluster_order,groups_file,psi_matrix,junction_coords_file,gene_symbol_file,dataType='junction'):

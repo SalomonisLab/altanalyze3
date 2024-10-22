@@ -12,8 +12,8 @@ from tqdm import tqdm # progress bar
 import time
 
 sys.path.insert(1, os.path.join(sys.path[0], '..'))
-import long_read.isoform_matrix as iso
-import long_read.gff_process as gff_process
+from . import isoform_matrix as iso
+from . import gff_process as gff_process
     
 def parse_exon_file(ensembl_exon_dir):
     """ Import Ensembl exon genomic information """
@@ -172,7 +172,7 @@ def exportJunctionMatrix(matrix_dir, ensembl_exon_dir, gff_source, barcode_clust
     # Write the junction counts to an h5ad file
     h5ad_dir = os.path.basename(gff_source)
     #junction_adata.write_h5ad("filtered_junction.h5ad")
-    junction_adata.write_h5ad(f"{h5ad_dir.split('.g')[0]}.h5ad")
+    junction_adata.write_h5ad(f"{h5ad_dir.split('.g')[0]}.h5ad", compression='gzip')
     print ('h5ad exported')
 
     if barcode_clusters is not None and len(barcode_clusters) > 0:

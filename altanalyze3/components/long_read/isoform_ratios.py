@@ -11,8 +11,8 @@ import argparse
 from tqdm import tqdm # progress bar
 
 sys.path.insert(1, os.path.join(sys.path[0], '..'))
-import long_read.isoform_matrix as iso
-import long_read.gff_process as gff_process
+from . import isoform_matrix as iso
+from . import gff_process as gff_process
     
 def exportConsensusIsoformMatrix(matrix_dir, isoform_association_path, gff_source=None, barcode_clusters=None, rev=False, mtx=True, sample_id=None):
     """ 
@@ -115,7 +115,7 @@ def exportConsensusIsoformMatrix(matrix_dir, isoform_association_path, gff_sourc
     h5ad_dir = os.path.basename(gff_source)
     
     #isoform_adata.write_h5ad("filtered_junction.h5ad")
-    isoform_adata.write_h5ad(f"{h5ad_dir.split('.g')[0]}-isoform.h5ad")
+    isoform_adata.write_h5ad(f"{h5ad_dir.split('.g')[0]}-isoform.h5ad", compression='gzip')
     print ('h5ad exported')
 
     export_pseudobulk = False

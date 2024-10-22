@@ -8,40 +8,11 @@ sys.path.insert(1, os.path.join(sys.path[0], '..'))
 import long_read.isoform_matrix as iso
 import long_read.isoform_automate as isoa
 import long_read.comparisons as comp
-import psi.basic as psi
-import multiprocessing
-import asyncio
 
-
+#import multiprocessing
 # Create multiprocessing context using 'spawn'
-mp_context = multiprocessing.get_context('spawn')
-num_cores = mp_context.cpu_count()
-
-# Wrap in a function to avoid event loop conflicts
-def run_psi_analysis(junction_path, outdir):
-    # Use asyncio.run to ensure event loop is properly created
-    asyncio.run(psi.main(junction_path=junction_path, query_gene=None, outdir=outdir))
-
-def pre_process_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_dir):
-    # Perform junction quantification across samples
-    sample_dict = isoa.import_metadata(metadata_file)
-    barcode_sample_dict = iso.import_barcode_clusters(barcode_cluster_dirs)
-    isoa.export_junction_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict)
-    isoa.export_pseudo_counts(metadata_file,barcode_cluster_dirs,'junction')
-
-def combine_processed_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_dir, gencode_gff, genome_fasta):
-    sample_dict = isoa.import_metadata(metadata_file)
-    barcode_sample_dict = iso.import_barcode_clusters(barcode_cluster_dirs)
-
-    # Perform isoform quantification across samples
-    isoa.export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, gencode_gff, genome_fasta)
-    isoa.export_pseudo_counts(metadata_file,barcode_cluster_dirs,'isoform',compute_tpm=True)
-    
-    junction_coords_file = 'junction_combined_pseudo_cluster_counts-filtered.txt'
-    outdir = 'psi_combined_pseudo_cluster_counts.txt'
-    junction_coords_file = isoa.export_sorted(junction_coords_file, 0) ### Sort the expression file
-    #psi.main(junction_path=junction_coords_file, query_gene=None, outdir=outdir, use_multiprocessing=False, mp_context=mp_context, num_cores=num_cores)
-    run_psi_analysis(junction_coords_file, outdir)
+#mp_context = multiprocessing.get_context('spawn')
+#num_cores = mp_context.cpu_count()
 
 if __name__ == '__main__':
     # Load local database files
@@ -65,10 +36,10 @@ if __name__ == '__main__':
     sample_dict = isoa.import_metadata(metadata_file)
 
     # Pre-process all samples in the metadata file
-    pre_process_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_dir)
+    isoa.pre_process_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_dir)
 
     # Integrate all sample processed results into combined junction/splicing, isoform, and isoform ratio files
-    combine_processed_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_dir, gencode_gff, genome_fasta)
+    isoa.combine_processed_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_dir, gencode_gff, genome_fasta)
 
     # Perform pairwise comparisons between groups and cell-types
     condition1 = 'young'
