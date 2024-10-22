@@ -1,0 +1,12 @@
+uid	gff	matrix	library	reverse	groups
+5801M_pre	/Users/saljh8/Dropbox/Revio/MDS-Revio/5801-MDS/MDS-pre/5801-pre.gff	/Users/saljh8/Dropbox/Revio/MDS-Revio/5801-MDS/MDS-pre/isoforms_seurat	WM71-0121-5801_CD34	TRUE	MDS-pre
+5801M_post	/Users/saljh8/Dropbox/Revio/MDS-Revio/5801-MDS/MDS-post/5801-post.gff	/Users/saljh8/Dropbox/Revio/MDS-Revio/5801-MDS/MDS-post/isoforms_seurat	MDS5801-postHMA_CD34	TRUE	MDS-post
+5801A_pre	/Users/saljh8/Dropbox/Revio/MDS-Revio/5801-MDS/AML/run1/5801-AML-1.gff	/Users/saljh8/Dropbox/Revio/MDS-Revio/5801-MDS/AML/run1/isoforms_seurat	MDS5801-preVEN_342	TRUE	AML
+5801A_pre	/Users/saljh8/Dropbox/Revio/MDS-Revio/5801-MDS/AML/run2/5801-AML-2.gff	/Users/saljh8/Dropbox/Revio/MDS-Revio/5801-MDS/AML/run2/isoforms_seurat	MDS5801-preVEN_342	TRUE	AML
+5801A_therapy	/Users/saljh8/Dropbox/Revio/MDS-Revio/5801-MDS/AML-therapy/5801IR.gff	/Users/saljh8/Dropbox/Revio/MDS-Revio/5801-MDS/AML-therapy/isoforms_seurat	MDS5801-1229IR_CD34	TRUE	AML
+5801A_post	/Users/saljh8/Dropbox/Revio/MDS-Revio/5801-MDS/AML-post/5801-9_341.gff	/Users/saljh8/Dropbox/Revio/MDS-Revio/5801-MDS/AML-post/isoforms_seurat	MDS5801R-341	TRUE	AML
+AM75M_pre	/Users/saljh8/Dropbox/Revio/MDS-Revio/AM75-MDS/pre/Y1258.gff	/Users/saljh8/Dropbox/Revio/MDS-Revio/AM75-MDS/pre/isoforms_seurat	Y1258	TRUE	MDS-pre
+AM75M_therapy	/Users/saljh8/Dropbox/Revio/MDS-Revio/AM75-MDS/on/Y1607.gff	/Users/saljh8/Dropbox/Revio/MDS-Revio/AM75-MDS/on/isoforms_seurat	Y1607	TRUE	MDS-on
+AM75M_post	/Users/saljh8/Dropbox/Revio/MDS-Revio/AM75-MDS/post/Y5116.gff	/Users/saljh8/Dropbox/Revio/MDS-Revio/AM75-MDS/post/isoforms_seurat	Y5116	TRUE	MDS-post
+WF78M_pre	/Users/saljh8/Dropbox/Revio/MDS-Revio/WF78-MDS/pre/Y1493.gff	/Users/saljh8/Dropbox/Revio/MDS-Revio/WF78-MDS/pre/isoforms_seurat	Y1493	TRUE	MDS-pre
+WF78M_post	/Users/saljh8/Dropbox/Revio/MDS-Revio/WF78-MDS/post/Y1737.gff	/Users/saljh8/Dropbox/Revio/MDS-Revio/WF78-MDS/post/isoforms_seurat	Y1737	TRUE	MDS-post

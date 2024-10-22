@@ -59,8 +59,18 @@ def get_longest_orf(seq):
             aa_start = aa_end + 1
     return max_orf, max_orf_start
 
-def is_nmd(transcript_seq, stop_codon_pos, last_exon_start):
-    return stop_codon_pos < last_exon_start - 50
+def is_nmd(transcript_seq, stop_codon_pos, last_exon_start, start_codon_pos, penultimate_exon_start):
+    if stop_codon_pos < last_exon_start - 50:
+        #"start codon condition", decreased accuracy when tested
+        """if stop_codon_pos < start_codon_pos + 100:
+           #return False
+        else:
+        """
+        return True
+    #predicts NMD when PTC is more than 2 exons away from end of transcript
+    elif stop_codon_pos < penultimate_exon_start:
+        return True
+    return False
 
 def extract_cds_and_protein(transcripts, genome_fasta, ref_first_exons=None, query_transcript_to_gene={}):
     genome_seq = SeqIO.to_dict(SeqIO.parse(genome_fasta, "fasta"))
@@ -122,10 +132,15 @@ def extract_cds_and_protein(transcripts, genome_fasta, ref_first_exons=None, que
                 nmd_annotation = ""
                 if exons[0][3] == '-':
                     last_exon_length = exons[0][2] - exons[0][1] + 1
+                    try: penultimate_exon_length = exons[1][2] - exons[1][1] + 11
+                    except: penultimate_exon_legth = 0
                 else:
                     last_exon_length = exons[-1][2] - exons[-1][1] + 1
+                    try: penultimate_exon_length = exons[-2][2] - exons[-2][1] + 1
+                    except: penultimate_exon_length = 0
                 last_exon_start_relative = len(transcript_seq) - last_exon_length
-                nmd_annotation = ";(NMD)" if is_nmd(transcript_seq, stop_codon_pos, last_exon_start_relative) else ""
+                penultimate_exon_start_relative = last_exon_start_relative - penultimate_exon_length #check if last intron length needs to be included?
+                nmd_annotation = ";(NMD)" if is_nmd(transcript_seq, stop_codon_pos, last_exon_start_relative, orf_start, penultimate_exon_start_relative) else ""
                 protein_description = f";Protein';'gene_id:{gene_id}{nmd_annotation}" if gene_id else f"Protein{nmd_annotation}"
                 protein_records.append(SeqRecord(Seq(orf_seq), id=transcript_id, description=protein_description))
                 #print (orf_start,(len(orf_seq) * 3),last_exon_length,last_exon_start_relative,stop_codon_pos,transcript_seq,[nmd_annotation])
@@ -216,7 +231,7 @@ def export_protein_summary(protein_records, intron_retention_dict, output_csv_fi
         seq_len = len(prot_seq[aa_start:])
         gene_id_match = re.search(r'gene_id:([^ ]+)', description)
         gene_id = gene_id_match.group(1) if gene_id_match else ""
-        nmd_status = "Potential NMD" if "Potential NMD" in description else "Not NMD"
+        nmd_status = "Potential-NMD" if "NMD" in description else "Not-NMD"
         if seq_len<10:
             nmd_status = "NMD"
         intron_retention = intron_retention_dict.get(transcript_id, False)

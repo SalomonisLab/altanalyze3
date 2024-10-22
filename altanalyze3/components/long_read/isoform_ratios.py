@@ -118,17 +118,19 @@ def exportConsensusIsoformMatrix(matrix_dir, isoform_association_path, gff_sourc
     isoform_adata.write_h5ad(f"{h5ad_dir.split('.g')[0]}-isoform.h5ad")
     print ('h5ad exported')
 
-    # Compute pseudo-cluster counts and write them to a file
-    grouped = isoform_counts_df.groupby(adata.obs['cluster'])
-    
-    # Remove clusters with less than 10 cells
-    filtered_summed_groups = grouped.filter(lambda x: len(x) >= 10).groupby(adata.obs['cluster']).sum()
-    
-    # Remove junctions with less than 10 reads total
-    filtered_summed_groups = filtered_summed_groups.loc[:, filtered_summed_groups.sum(axis=0) >= 10]
-    filtered_summed_groups_transposed = filtered_summed_groups.transpose()
-    filtered_summed_groups_transposed.to_csv('pseudo_cluster_isocounts.txt', sep='\t')
-    print ('pseudobulk cluster junction counts exported')
+    export_pseudobulk = False
+    if export_pseudobulk:
+        # Compute pseudo-cluster counts and write them to a file
+        grouped = isoform_counts_df.groupby(adata.obs['cluster'])
+        
+        # Remove clusters with less than 10 cells
+        filtered_summed_groups = grouped.filter(lambda x: len(x) >= 10).groupby(adata.obs['cluster']).sum()
+        
+        # Remove junctions with less than 10 reads total
+        filtered_summed_groups = filtered_summed_groups.loc[:, filtered_summed_groups.sum(axis=0) >= 10]
+        filtered_summed_groups_transposed = filtered_summed_groups.transpose()
+        filtered_summed_groups_transposed.to_csv(f"{h5ad_dir.split('.g')[0]}_isocounts.txt", sep='\t')
+        print ('pseudobulk cluster junction counts exported')
 
     return isoform_adata
 

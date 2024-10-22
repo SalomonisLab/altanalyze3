@@ -397,7 +397,7 @@ def selectKnownIsoform(transcripts):
             found.append(transcript)
     return found
     
-def collapseIsoforms(gene_db, junction_db,gff_organization, mode):
+def collapseIsoforms(gene_db, junction_db, gff_organization, mode):
     num_isoforms = 0
     collaped_db = defaultdict(lambda: defaultdict(list))
     
@@ -425,65 +425,66 @@ def collapseIsoforms(gene_db, junction_db,gff_organization, mode):
     print(num_isoforms, 'collapsed unique isoforms')
 
     if mode == 'Ensembl':
-        def get_transcript_ids(gene,isoforms):
-            transcript_ids=defaultdict(lambda: defaultdict(list))
+        def get_transcript_ids(gene, isoforms):
+            transcript_ids = defaultdict(lambda: defaultdict(list))
             for iso in isoforms:
                 for (file, info) in junction_db[gene, iso]:
                     transcript_id = info.split(';')[gff_organization[file][0]].split(gff_organization[file][1])[1]
-                    transcript_ids[transcript_id]=iso
+                    transcript_ids[transcript_id] = iso
             return transcript_ids
 
-        num_isoforms=0
+        num_isoforms = 0
 
-        # Prioritizes partial matching Ensembl transcripts - augmented "simple" mode. This is less conservative than 
-        #"collapse" and is combined with "simple" peripheral splice site filtering
-        #a=0; b=0; c=0; d=0; e=0; f=0; g=0; h=0
         super_isoform_collapsed_db = collaped_db
         collaped_db = defaultdict(lambda: defaultdict(list))
-        keys_added={}
-        for (gene, isoform) in junction_db:
+        keys_added = {}
+
+        # Adding progress bar for Ensembl processing
+        for (gene, isoform) in tqdm(junction_db, desc="Processing Ensembl Isoforms"):
             super_isoforms = super_isoform_collapsed_db[gene]
-            if isoform in super_isoforms: # Hence, super_isoform - keep
+            if isoform in super_isoforms:  # Hence, super_isoform - keep
                 sub_isoforms = super_isoform_collapsed_db[gene][isoform]
-                combined_iso = [isoform]+sub_isoforms
-                transcript_ids = get_transcript_ids(gene,combined_iso)
+                combined_iso = [isoform] + sub_isoforms
+                transcript_ids = get_transcript_ids(gene, combined_iso)
                 transcript_list = list(transcript_ids.keys())
-                #if 'PB.98490.113' in transcript_list: print ('key',isoform,transcript_list)
                 found = next((x for x in transcript_list if x.startswith('ENST')), False)
-                if found == False:
-                    pass
-                else:
+                if found:
                     ens_iso = transcript_ids[found]
                     if ens_iso == isoform:
-                        collaped_db[gene][ens_iso]=[]
-                    else:  
+                        collaped_db[gene][ens_iso] = []
+                    else:
                         collaped_db[gene][ens_iso].append(isoform)
-                    keys_added[gene,isoform]=[]
-                    keys_added[gene,ens_iso]=[]
+                    keys_added[gene, isoform] = []
+                    keys_added[gene, ens_iso] = []
             else:
                 for iso in super_isoforms:
                     if isoform in super_isoforms[iso]:
-                        combined_iso = [iso]+super_isoforms[iso]
-                        transcript_ids = get_transcript_ids(gene,combined_iso)
+                        combined_iso = [iso] + super_isoforms[iso]
+                        transcript_ids = get_transcript_ids(gene, combined_iso)
                         transcript_list = list(transcript_ids.keys())
                         found = next((x for x in transcript_list if x.startswith('ENST')), False)
-                        if found==False:
-                            pass
-                        else:
+                        if found:
                             ens_iso = transcript_ids[found]
-                            if ens_iso == iso: 
-                                collaped_db[gene][ens_iso]=[]
+                            if ens_iso == iso:
+                                collaped_db[gene][ens_iso] = []
                             else:
                                 collaped_db[gene][ens_iso].append(isoform)
-                            keys_added[gene,isoform]=[]
-                            keys_added[gene,ens_iso]=[]
+                            keys_added[gene, isoform] = []
+                            keys_added[gene, ens_iso] = []
+
+        # Add isoforms that were not processed earlier
         for (gene, isoform) in junction_db:
             if (gene, isoform) not in keys_added:
-                collaped_db[gene][isoform]=[]
+                collaped_db[gene][isoform] = []
+
+        # Count the total number of collapsed isoforms
         for gene in collaped_db:
             num_isoforms += len(collaped_db[gene])
+        
         print(num_isoforms, 'collapsed Ensembl prioritized unique isoforms')
+
     return collaped_db
+
 
 
 def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):

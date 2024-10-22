@@ -118,18 +118,30 @@ def exportJunctionMatrix(matrix_dir, ensembl_exon_dir, gff_source, barcode_clust
     junction_counts = {}
     # Iterate through each cell barcode and isoform
     print ('Computing junctions counts for cells')
-    cell_data = adata.X.toarray()
-    isoform_ids = adata.var_names
 
-    for isoform_idx, isoform in tqdm(enumerate(isoform_ids), total=len(isoform_ids), desc="Processing isoforms"):
-        counts = cell_data[:, isoform_idx]
-        if np.any(counts > 0):
-            junctions = isoform_to_junctions.get(isoform, [])
-            for cell_index, count in zip(np.where(counts > 0)[0], counts[counts > 0]):
-                for junction in junctions:
-                    if junction not in junction_counts:
-                        junction_counts[junction] = np.zeros(len(adata.obs_names), dtype=int)
-                    junction_counts[junction][cell_index] += count
+    isoform_ids = adata.var_names
+    # Define the chunk size
+    chunk_size = 2000  # Adjust this number based on memory usage and processing speed
+
+    # Iterate over the isoforms in chunks
+    for start in tqdm(range(0, len(isoform_ids), chunk_size), desc="Processing isoforms in chunks"):
+        end = min(start + chunk_size, len(isoform_ids))
+        chunk_isoform_ids = isoform_ids[start:end]
+        
+        # Convert the current chunk of isoforms to dense format
+        chunk_data = adata.X[:, start:end].toarray()  # Only this chunk of isoforms is converted to dense
+        
+        # Process isoforms in this chunk
+        for local_idx, isoform in enumerate(chunk_isoform_ids):
+            counts = chunk_data[:, local_idx]
+            if np.any(counts > 0):
+                junctions = isoform_to_junctions.get(isoform, [])
+                for cell_index, count in zip(np.where(counts > 0)[0], counts[counts > 0]):
+                    for junction in junctions:
+                        if junction not in junction_counts:
+                            junction_counts[junction] = np.zeros(len(adata.obs_names), dtype=int)
+                        junction_counts[junction][cell_index] += count
+
 
     # Convert the counts to a dense DataFrame and then to a sparse matrix
     junction_counts_df = pd.DataFrame({k: pd.Series(v, index=adata.obs_names) for k, v in tqdm(junction_counts.items(), desc="Creating DataFrame")})
@@ -174,19 +186,21 @@ def exportJunctionMatrix(matrix_dir, ensembl_exon_dir, gff_source, barcode_clust
     #junction_adata.write_h5ad("filtered_junction.h5ad")
     junction_adata.write_h5ad(f"{h5ad_dir.split('.g')[0]}.h5ad")
     print ('h5ad exported')
-
-    if barcode_clusters is not None and len(barcode_clusters) > 0:
-        # Compute pseudo-cluster counts and write them to a file
-        grouped = junction_counts_df.groupby(adata.obs['cluster'])
-        
-        # Remove clusters with less than 10 cells
-        filtered_summed_groups = grouped.filter(lambda x: len(x) >= 10).groupby(adata.obs['cluster']).sum()
-        
-        # Remove junctions with less than 10 reads total
-        filtered_summed_groups = filtered_summed_groups.loc[:, filtered_summed_groups.sum(axis=0) >= 10]
-        filtered_summed_groups_transposed = filtered_summed_groups.transpose()
-        filtered_summed_groups_transposed.to_csv(f"{h5ad_dir.split('.g')[0]}_counts.txt", sep='\t')
-        print ('pseudobulk cluster junction counts exported')
+    
+    export_pseudobulk = False
+    if export_pseudobulk:
+        if barcode_clusters is not None and not barcode_clusters.empty:
+            # Compute pseudo-cluster counts and write them to a file
+            grouped = junction_counts_df.groupby(adata.obs['cluster'])
+            
+            # Remove clusters with less than 10 cells
+            filtered_summed_groups = grouped.filter(lambda x: len(x) >= 10).groupby(adata.obs['cluster']).sum()
+            
+            # Remove junctions with less than 10 reads total
+            filtered_summed_groups = filtered_summed_groups.loc[:, filtered_summed_groups.sum(axis=0) >= 10]
+            filtered_summed_groups_transposed = filtered_summed_groups.transpose()
+            filtered_summed_groups_transposed.to_csv(f"{h5ad_dir.split('.g')[0]}_counts.txt", sep='\t')
+            print ('pseudobulk cluster junction counts exported')
 
     return junction_adata
 
