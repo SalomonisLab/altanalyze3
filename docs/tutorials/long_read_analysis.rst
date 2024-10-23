@@ -29,7 +29,7 @@ Ensure that your samples are properly annotated in a metadata file. A sample met
 **Install Dependencies**:
 Use the following command to install dependencies:
 
-.. code-block:: python
+.. code-block:: bash
 
    pip install altanalyze3
 
@@ -43,7 +43,8 @@ Step-by-Step Preprocessing
 **Prepare Metadata and Cluster Files**:
 You need metadata and barcode-cluster files for cluster-guided analyses. Extract database files from the Hs.zip file. Example:
 
-.. code-block:: python
+.. code-block:: text
+
    /path/to/metadata.txt
    /path/to/barcode_to_clusters.txt
 
@@ -52,11 +53,11 @@ You need metadata and barcode-cluster files for cluster-guided analyses. Extract
    /path/to/Hs_Ensembl_exon.txt
    /path/to/genome.fa
 
-
 **Run Preprocessing Script**:
 In your Python environment or script, run:
    
 .. code-block:: python
+
    import altanalyze3.components.long_read.isoform_matrix as iso
    import altanalyze3.components.long_read.isoform_automate as isoa
 
@@ -72,6 +73,7 @@ In your Python environment or script, run:
 Once preprocessed, combine them using:
 
 .. code-block:: python
+
    import altanalyze3.components.long_read.comparisons as comp
    gencode_gff = "/path/to/gencode.annotation.gff3"
    genome_fasta = "/path/to/genome.fa"
@@ -81,14 +83,14 @@ Once preprocessed, combine them using:
       barcode_cluster_dirs,
       ensembl_exon_dir,
       gencode_gff,
-      genome_fasta"
+      genome_fasta
    )
-
 
 **Compute and Annotate Differential Splicing Events and Isoforms**:
 Once preprocessed, combine them using:
 
 .. code-block:: python
+
    gene_symbol_file = "/path/to/Hs_Ensembl-annotations.txt"
    genome_fasta = "/path/to/genome.fa"
 
@@ -96,18 +98,18 @@ Once preprocessed, combine them using:
    cluster_order = iso.return_cluster_order(barcode_cluster_dirs)
 
    # Differential analyses to perform
-   analyses = ['junction','isoform','isoform-ratio']
+   analyses = ['junction', 'isoform', 'isoform-ratio']
 
    condition1 = 'Diagnosis'
    condition2 = 'Relapse'
-   conditions = [(condition1,condition2)]
+   conditions = [(condition1, condition2)]
 
    comp.compute_differentials(
       sample_dict,
       conditions,
       cluster_order,
       gene_symbol_file,
-      analyses=analyses"
+      analyses=analyses
    )
 
 **Verify Output**:
