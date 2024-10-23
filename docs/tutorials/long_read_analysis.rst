@@ -92,7 +92,6 @@ Once preprocessed, combine them using:
 .. code-block:: python
 
    gene_symbol_file = "/path/to/Hs_Ensembl-annotations.txt"
-   genome_fasta = "/path/to/genome.fa"
 
    # Import all cell clusters in order or replace with a list of select cluster(s)
    cluster_order = iso.return_cluster_order(barcode_cluster_dirs)
