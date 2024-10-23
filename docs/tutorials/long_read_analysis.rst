@@ -26,6 +26,7 @@ Ensure that your samples are properly annotated in a metadata file. A sample met
    D005    /Relapse2/D005.gff    /Relapse2/sciso     D005-HSPC     TRUE       Relapse
    D006    /Relapse3/D006.gff    /Relapse3/sciso     D006-HSPC     FALSE      Relapse
 
+Note: Multiple sequencing runs or libraries will be combined with the same uid. If the cell barcodes are reverse complemented from the barcode-to-cluster relationships (two column file), enter reverse as True.
 
 **Install Dependencies**:
 Use the following command to install dependencies:
@@ -69,6 +70,7 @@ In your Python environment or script, run:
    sample_dict = isoa.import_metadata(metadata_file)
    isoa.pre_process_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_dir)
 
+Note: ensembl_exon_dir, gene_symbol_file, genome_fasta and gencode_gff must pre-downloaded from the Hs.zip above.
 
 **Combining Processed Samples**:
 Once preprocessed, combine them using:
@@ -112,12 +114,28 @@ Once preprocessed, combine them using:
       analyses=analyses
    )
 
+**Expected Outputs**:
+
+- *gff_output* - Directory of isoform exon structure and isoform mappings
+- *sample.h5ad* - Anndata for each sample with consensus isoform or junctions IDs
+- *protein_sequences.fasta*  - protein sequence for consensus isoforms
+- *protein_summary.txt*  - isoform NMD prediction
+- *isoform_combined_pseudo_cluster_tpm.txt* - Cluster-level pseudobulks TPMs
+- *junction_combined_pseudo_cluster_counts.txt* - Junction, intron & 3' end counts
+- *protein_summary.txt*  - isoform NMD prediction
+- *psi_combined_pseudo_cluster_counts.txt* - PSI for junctions in >2 cluster pseudobulks
+- *junction_combined_pseudo_cluster_counts.txt* - Junction, intron & 3' end counts
+- *dPSI-events.txt* - Pairwise group Mann-Whitney U differential PSI events
+- *dPSI-cluster/covariate* - Pairwise group Mann-Whitney U differential PSI events
+- *diff-cluster/covariate-isoform* - Pairwise group Mann-Whitney U differential isoform log2 TPM
+- *diff-cluster/covariate-ratio* - Pairwise group Mann-Whitney U differential isoform/gene ratios
+
 **Verify Output**:
 Ensure that the processed outputs include files with differential splicing, isoform, and ratio data in the current working directory.
 
 Next Steps
 ----------
-After preprocessing, you are ready to inspect your results in a spreadsheet editor, **Perform Secondary Analyses** or perform **Visualize Results**. See the relevant tutorials for these steps.
+After preprocessing, you are ready to inspect your results in a spreadsheet editor, **Perform Secondary Analyses** or **Visualize Results**. See the relevant tutorials for these steps.
 
 Support
 -------
