@@ -7,6 +7,7 @@ This tutorial will guide you through the automated combined analysis of multiple
 Prerequisites
 -------------
 **Requirements**:
+
 - Python 3.11 or higher
 - AltAnalyze3 installed via pip (`pip install altanalyze3`)
 - 10x Genomics long read matrices (.mtx) and associated GFF files
