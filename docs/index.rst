@@ -3,7 +3,7 @@ AltAnalyze3 Documentation
 
 Welcome to the AltAnalyze3 documentation!
 
-AltAnalyze3 is an advanced RNA-Seq analysis tool tailored for long-read sequencing, integrating single-cell data, and supporting complex workflows such as isoform detection and splicing analysis. This platform is optimized for 10x Genomics datasets and provides step-by-step or automated pipelines for various types of analyses.
+AltAnalyze3 is an advanced Python3 workflow for long-read (LR) and short read splicing analysis. The software can integrate results across single-cell and bulk technological platforms, aligning to a common gene model for splice junction- (MultiPath-PSI) and isoform-based analyses (TPM or ratio). Both supervised and unsupervised (splice-ICGS) analyses are supported. Workflows can be run in a fully automated manner with or step-by-step with extensive customization. See tutorials for examples.
 
 .. toctree::
    :maxdepth: 2
@@ -12,9 +12,9 @@ AltAnalyze3 is an advanced RNA-Seq analysis tool tailored for long-read sequenci
    installation
    quickstart
    api_reference
-   tutorials/preprocessing
-   tutorials/differential
-   tutorials/splicing_icgs
+   tutorials/long_read_analysis
+   tutorials/differentials
+   tutorials/splice_icgs
 
 Getting Started
 ---------------
@@ -24,10 +24,11 @@ To begin using AltAnalyze3, follow the steps in the :doc:`installation` section.
 Key Features
 ------------
 
-- Long-read RNA-Seq support with isoform detection.
-- Automated processing and detailed differential analysis.
-- Integration with bulk and single-cell RNA-Seq data.
-- Powerful splicing and alternative polyadenylation tools.
+- Integrated long-read isoform analysis.
+- Protein-level impacts of splicing and isoforms.
+- Automated single-cell and differential analyses.
+- Integration of bulk and single-cell data.
+- Alternative promoter, retained intron and alternative polyadenylation regulation.
 
 API Documentation
 -----------------
@@ -39,9 +40,10 @@ Tutorials
 
 Our tutorials cover essential workflows, including:
 
-- **Preprocessing Data**: :doc:`tutorials/preprocessing`
-- **Differential Analysis**: :doc:`tutorials/differential`
-- **Splicing-ICGS Analysis**: :doc:`tutorials/splicing_icgs`
+- **Long Read Analysis**: :doc:`tutorials/long_read_analysis`
+- **Short Read Analysis**: :doc:`tutorials/short_read_analysis`
+- **Differential Analysis**: :doc:`tutorials/differentials`
+- **Splice-ICGS Analysis**: :doc:`tutorials/splice_icgs`
 
 Support
 -------
