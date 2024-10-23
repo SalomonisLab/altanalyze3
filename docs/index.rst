@@ -16,6 +16,12 @@ AltAnalyze3 is an advanced Python3 workflow for long-read (LR) and short read an
    tutorials/differentials
    tutorials/splice_icgs
 
+.. image:: ./images/AltAnalyze3.png
+   :height: 500px
+   :width: 737px
+   :align: center
+   :target: target
+   
 Getting Started
 ---------------
 
