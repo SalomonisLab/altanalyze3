@@ -1,4 +1,4 @@
-[![Documentation Status](https://readthedocs.org/projects/altanalyze3/badge/?version=latest)](https://altanalyze3.readthedocs.io/en/latest/?badge=latest)  [![Pypi](https://img.shields.io/altanalyze3/v/snaf?logo=PyPI)](https://pypi.org/project/altanalyze3/)  [![Downloads](https://pepy.tech/badge/altanalyze3)](https://pypi.org/project/altanalyze3/)  [![Stars](https://img.shields.io/github/stars/SalomonisLab/altanalyze3)](https://github.com/SalomonisLab/altanalyze3/stargazers)
+[![Documentation Status](https://readthedocs.org/projects/altanalyze3/badge/?version=latest)](https://altanalyze3.readthedocs.io/en/latest/?badge=latest)  [![Pypi](https://img.shields.io/pypi/v/altanalyze3?logo=PyPI)](https://pypi.org/project/altanalyze3/)  [![Downloads](https://pepy.tech/badge/altanalyze3)](https://pypi.org/project/altanalyze3/)  [![Stars](https://img.shields.io/github/stars/SalomonisLab/altanalyze3)](https://github.com/SalomonisLab/altanalyze3/stargazers)
 
 
 # altanalyze3
