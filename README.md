@@ -1,7 +1,16 @@
+[![Documentation Status](https://readthedocs.org/projects/altanalyze3/badge/?version=latest)](https://altanalyze3.readthedocs.io/en/latest/?badge=latest)  [![Pypi](https://img.shields.io/altanalyze3/v/snaf?logo=PyPI)](https://pypi.org/project/altanalyze3/)  [![Downloads](https://pepy.tech/badge/altanalyze3)](https://pypi.org/project/altanalyze3/)  [![Stars](https://img.shields.io/github/stars/SalomonisLab/altanalyze3)](https://github.com/SalomonisLab/altanalyze3/stargazers)
+
+
 # altanalyze3
 AltAnalyze3 is an advanced Python3 workflow for long-read (LR) and short read splicing analysis. The software can integrate results across single-cell and bulk technological platforms, aligning to a common gene model for splice junction- (MultiPath-PSI) and isoform-based analyses (TPM or ratio). Both supervised and unsupervised (splice-ICGS) analyses are supported. Workflows can be run in a fully automated manner with or step-by-step with extensive customization. See tutorials for examples.
 
-[Read the full documentation](https://altanalyze3.readthedocs.io/en/latest/)
+## Tutorials and Installation
+
+[Read the full documentation](https://altanalyze3.readthedocs.io/en/latest/). AltAnalyze 3 has been tested in python>=3.11 on MacOS and Linux. To install:
+
+```bash
+pip install AltAnalyze3
+```
 
 The source code is in [src folder](./src)
 
