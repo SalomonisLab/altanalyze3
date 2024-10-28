@@ -96,6 +96,11 @@ def export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, refe
         adata_list = [export_isoform_matrix(s['matrix'], s['gff_name'], s['library'], isoform_associations_path, s['reverse'], barcode_sample_dict) for s in samples]
         if num_samples>1:
             combined_adata = ad.concat(adata_list, axis=0, join='outer') if len(adata_list) > 1 else adata_list[0]
+            # Current code creates redundant cells for technical replicates - the below would sum counts across replicates per cell and feature
+            #summed_counts = combined_adata.to_df().groupby(combined_adata.obs.index).sum()
+            #combined_adata = ad.AnnData(X=summed_counts)
+
+
             combined_adata.write_h5ad(f'{uid}_isoform.h5ad')
 
 def get_valid_h5ad(sample_dict,dataType):
