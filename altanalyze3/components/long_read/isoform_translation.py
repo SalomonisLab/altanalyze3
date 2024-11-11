@@ -141,8 +141,8 @@ def extract_cds_and_protein(transcripts, genome_fasta, ref_first_exons=None, que
                 last_exon_start_relative = len(transcript_seq) - last_exon_length
                 penultimate_exon_start_relative = last_exon_start_relative - penultimate_exon_length #check if last intron length needs to be included?
                 nmd_annotation = ";(NMD)" if is_nmd(transcript_seq, stop_codon_pos, last_exon_start_relative, orf_start, penultimate_exon_start_relative) else ""
-                protein_description = f";Protein';'gene_id:{gene_id}{nmd_annotation}" if gene_id else f"Protein{nmd_annotation}"
-                protein_records.append(SeqRecord(Seq(orf_seq), id=transcript_id, description=protein_description))
+                protein_description = f";Protein;gene_id:{gene_id}{nmd_annotation}" if gene_id else f"Protein{nmd_annotation}"
+            protein_records.append(SeqRecord(Seq(orf_seq), id=transcript_id, description=protein_description.replace(" ", "")))
                 #print (orf_start,(len(orf_seq) * 3),last_exon_length,last_exon_start_relative,stop_codon_pos,transcript_seq,[nmd_annotation])
         except KeyError as e:
             print(f"Error: {e}. Check if chromosome identifiers match between GFF and genome FASTA.")
@@ -279,6 +279,66 @@ def find_redundant_proteins(fasta_file, output_file, restrict=None):
             out_f.write(f"{gene_id}\t{redundant_ids}\t{sequence}\n")
 
     print(f"Output written to {output_file}")
+
+from Bio import SeqIO
+from Bio.Seq import Seq
+import re
+
+def extract_splice_sequences(input_file, genome_fasta, output_file="splice_sequences.txt"):
+    """
+    Reads junction coordinates from an input file, extracts 20nt sequences
+    adjacent to the 5' and 3' splice sites, and writes the results to an output file.
+
+    Parameters:
+    input_file (str): Path to the file with junction coordinates.
+    genome_fasta (str): Path to the genome FASTA file.
+    output_file (str): Path to the output file.
+    """
+    # Load genome sequences
+    # Load genome sequences and normalize chromosome names by removing 'chr' prefix if present
+    genome_seq = SeqIO.to_dict(SeqIO.parse(genome_fasta, "fasta"))
+    genome_seq = {f"chr{k.lstrip('chr')}": v for k, v in genome_seq.items()}
+    results = []
+
+    # Function to parse each line and return chromosome, start, end, and strand
+    def parse_junction(line):
+        match = re.match(r"(chr[0-9XY]+):(\d+)-(\d+)\(([-+])\)", line.strip())
+        if match:
+            chrom = match.group(1)
+            start = int(match.group(2))
+            end = int(match.group(3))
+            strand = match.group(4)
+            return chrom, start, end, strand
+        else:
+            raise ValueError(f"Line format is incorrect: {line}")
+
+    # Open and process the input file
+    with open(input_file, "r") as file:
+        for line in file:
+            chrom, start, end, strand = parse_junction(line)
+            if chrom not in genome_seq:
+                raise ValueError(f"Chromosome {chrom} not found in genome sequence")
+
+            # Extract adjacent sequences based on strand
+            if strand == "+":
+                # 20 bases before the start position and 20 bases after the end position
+                splice_5_prime = genome_seq[chrom].seq[start - 21:start+1]
+                splice_3_prime = genome_seq[chrom].seq[end:end + 21]
+            elif strand == "-":
+                # Reverse complement of 20 bases after the end and 20 bases before the start
+                splice_5_prime = genome_seq[chrom].seq[end-1:end + 21].reverse_complement()
+                splice_3_prime = genome_seq[chrom].seq[start - 21:start].reverse_complement()
+            else:
+                raise ValueError("Strand must be '+' or '-'")
+
+            # Format as "<5'_sequence>|<3'_sequence>"
+            splice_sequence = f"{splice_5_prime}|{splice_3_prime}"
+            results.append(f"{chrom}:{start}-{end}({strand})\t{splice_sequence}")
+
+    # Write results to the output file
+    with open(output_file, "w") as output:
+        output.write("\n".join(results))
+    print(f"Splice sequences have been written to '{output_file}'")
 
 if __name__ == '__main__':
 

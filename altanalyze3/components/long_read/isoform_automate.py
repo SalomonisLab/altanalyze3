@@ -70,6 +70,7 @@ def export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, refe
     query_gff_file = current_dir+gff_output+"combined.gff"
     transcript_associations_path = current_dir+gff_output+"transcript_associations.txt"
     isoform_associations_path = current_dir+gff_output+"isoform_links.txt"
+
     if os.path.exists(current_dir+gff_output):
         pass
     else:
@@ -86,7 +87,7 @@ def export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, refe
             SeqIO.write(protein_records, protein_file, "fasta")
         with open("transcript_sequences.fasta", "w") as cds_file:
             SeqIO.write(transcript_records, cds_file, "fasta")
-        with open("cds_sequences.fasta", "w") as cds_file:
+        with open("orf_sequences.fasta", "w") as cds_file:
             SeqIO.write(cds_records, cds_file, "fasta")
 
     # Export individual library/sample isoform h5ad

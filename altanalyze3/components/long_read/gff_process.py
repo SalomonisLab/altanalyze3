@@ -7,6 +7,7 @@ from collections import defaultdict
 from tqdm import tqdm
 import pandas as pd
 import collections
+import gzip
 
 novelGene = 0
 novelGeneLoci = [1,1]
@@ -400,7 +401,15 @@ def selectKnownIsoform(transcripts):
 def collapseIsoforms(gene_db, junction_db, gff_organization, mode):
     num_isoforms = 0
     collaped_db = defaultdict(lambda: defaultdict(list))
-    
+
+    def get_transcript_ids(gene, isoforms):
+        transcript_ids = defaultdict(lambda: defaultdict(list))
+        for iso in isoforms:
+            for (file, info) in junction_db[gene, iso]:
+                transcript_id = info.split(';')[gff_organization[file][0]].split(gff_organization[file][1])[1]
+                transcript_ids[transcript_id] = iso
+        return transcript_ids
+            
     # Adding a progress bar for the outer loop iterating over genes
     for gene, isoforms in tqdm(gene_db.items(), desc="Collapsing Isoforms"):
         sorted_isoforms = sorted(isoforms, key=len, reverse=True)
@@ -425,14 +434,6 @@ def collapseIsoforms(gene_db, junction_db, gff_organization, mode):
     print(num_isoforms, 'collapsed unique isoforms')
 
     if mode == 'Ensembl':
-        def get_transcript_ids(gene, isoforms):
-            transcript_ids = defaultdict(lambda: defaultdict(list))
-            for iso in isoforms:
-                for (file, info) in junction_db[gene, iso]:
-                    transcript_id = info.split(';')[gff_organization[file][0]].split(gff_organization[file][1])[1]
-                    transcript_ids[transcript_id] = iso
-            return transcript_ids
-
         num_isoforms = 0
 
         super_isoform_collapsed_db = collaped_db
@@ -451,7 +452,10 @@ def collapseIsoforms(gene_db, junction_db, gff_organization, mode):
                 if found:
                     ens_iso = transcript_ids[found]
                     if ens_iso == isoform:
-                        collaped_db[gene][ens_iso] = []
+                        try: 
+                            if isoform not in collaped_db[gene][ens_iso]:
+                                collaped_db[gene][ens_iso].append(isoform)
+                        except: collaped_db[gene][ens_iso] = [isoform]
                     else:
                         collaped_db[gene][ens_iso].append(isoform)
                     keys_added[gene, isoform] = []
@@ -466,12 +470,24 @@ def collapseIsoforms(gene_db, junction_db, gff_organization, mode):
                         if found:
                             ens_iso = transcript_ids[found]
                             if ens_iso == iso:
-                                collaped_db[gene][ens_iso] = []
+                                try:
+                                    if isoform not in collaped_db[gene][ens_iso]:
+                                        collaped_db[gene][ens_iso].append(isoform) 
+                                except:
+                                    collaped_db[gene][ens_iso] = [isoform]
+                                if isoform == 'E1.4|E3.3|E3.4|' and gene == 'ENSG00000183072':
+                                    transcript_ids1 = get_transcript_ids(gene, [isoform])
+                                    transcript_list1 = list(transcript_ids1.keys())
+                                    print ('g',ens_iso,isoform)
+                                    #print ('c',gene,transcript_list1,transcript_list)
+                                    print ('k',gene, [ens_iso],collaped_db[gene][ens_iso])
+                                    print ('i',collaped_db['ENSG00000183072']['E1.1|E1.2|E1.3|E1.4|E3.3|E3.4|E3.5|'])
+                                    
                             else:
                                 collaped_db[gene][ens_iso].append(isoform)
                             keys_added[gene, isoform] = []
                             keys_added[gene, ens_iso] = []
-
+        #print ('dd',collaped_db['ENSG00000183072']['E1.1|E1.2|E1.3|E1.4|E3.3|E3.4|E3.5|'])
         # Add isoforms that were not processed earlier
         for (gene, isoform) in junction_db:
             if (gene, isoform) not in keys_added:
@@ -482,9 +498,8 @@ def collapseIsoforms(gene_db, junction_db, gff_organization, mode):
             num_isoforms += len(collaped_db[gene])
         
         print(num_isoforms, 'collapsed Ensembl prioritized unique isoforms')
-
+    #print (collaped_db['ENSG00000183072']['E1.1|E1.2|E1.3|E1.4|E3.3|E3.4|E3.5|'])#;sys.exit()
     return collaped_db
-
 
 
 def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
@@ -561,6 +576,7 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
 
     def process_isoform(chr, strand, info, exons, file):
         transcript_id = info.split(';')[ti].split(td)[1]
+
         gene, exonIDs, exonIDs_simple, genes = exonAnnotate(chr, exons, strand, transcript_id)
         # Restrict the exon string to high confidence exon boundaries
         filtered_exonIDs_str,exonIDs_str = exon_str(list(exonIDs))
@@ -570,8 +586,8 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
         except:
             pass
         """
-        if transcript_id == 'ENST00000525626.6' or transcript_id == 'ENST00000682936.1':
-            print (filtered_exonIDs_str,transcript_id,mode) 
+        if transcript_id == 'NKX2-5|1/3|01H01':
+            print (filtered_exonIDs_str,transcript_id,mode);sys.exit()
         """
         if len(genes)>2:
             trans_spliced_isoforms[exonIDs_str] = []
@@ -601,7 +617,8 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
         firstRow = True
         exons = []
         isoforms = 2
-        with open(fn, 'r') as filepath:
+        open_func = gzip.open if fn.endswith('.gz') else open
+        with open_func(fn, 'rt') as filepath:
             for line in filepath:
                 if line[0] == '#':
                     continue
@@ -609,7 +626,7 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
                 t = data.split('\t')
                 try: chr, null, type, pos1, pos2, null, strand, null, info = t
                 except: 
-                    print (info)
+                    #print (info)
                     continue
                 pos1 = int(pos1)
                 pos2 = int(pos2)
@@ -681,6 +698,8 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
                     transcript_ids[transcript_id]=file
             return transcript_ids
 
+        #print (super_isoform_db['ENSG00000183072']['E1.1|E1.2|E1.3|E1.4|E3.3|E3.4|E3.5|'])
+
         # Export super- to sub-isoform associations:
         eo = open(os.path.join(combined_dir, 'isoform_links.txt'), 'w')
         #jo = open(os.path.join(combined_dir, 'isoform_junctions.txt'), 'w')
@@ -699,7 +718,12 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
                     transcript_ids = get_transcript_ids(gene,[isoform])
                     transcript_list = list(transcript_ids.keys())
                     ordered_transcripts = selectKnownIsoform(transcript_list)
-                    ref_super_transcript_id = ordered_transcripts[0]
+                    try:
+                        ref_super_transcript_id = ordered_transcripts[0]
+                    except:
+                        print (transcript_ids)
+                        print (gene,[isoform])
+                        print ('error...');sys.exit()
                     ref_super_file = transcript_ids[ref_super_transcript_id]
                     isoforms_to_retain[(ref_super_file, ref_super_transcript_id)] = [] 
                     related_transcripts.append(ref_super_transcript_id)
@@ -711,18 +735,17 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
                             if t!=ref_super_transcript_id:
                                 t_file =  transcript_ids[t]
                                 eo.write('\t'.join([gene, ref_super_transcript_id, ref_super_file, t, t_file]) + '\n')
-                                related_transcripts.append(ref_super_file)
                     for sub_isoform in super_isoform_db[gene][isoform]:
                         for (f3, info) in junction_db[gene, sub_isoform]:
                             sub_transcript_id = info.split(';')[gff_organization[f3][0]].split(gff_organization[f3][1])[1]
                             if (sub_transcript_id, f3) not in added:
                                 if ref_super_transcript_id !=sub_transcript_id:
-                                    eo.write('\t'.join([gene, ref_super_transcript_id, file, sub_transcript_id, f3]) + '\n')
+                                    eo.write('\t'.join([gene, ref_super_transcript_id, ref_super_file, sub_transcript_id, f3]) + '\n')
                                     added.append((sub_transcript_id, f3))
                                     related_transcripts.append(sub_transcript_id)
                                     a += 1
                     known_isoform = knownIsoform(related_transcripts)
-                    ao.write('\t'.join([gene, ref_super_transcript_id, file, known_isoform]) + '\n')
+                    ao.write('\t'.join([gene, ref_super_transcript_id, ref_super_file, ','.join(related_transcripts), known_isoform]) + '\n')
 
         eo.close()
         ao.close()
@@ -743,7 +766,8 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
             firstRow = True
             exons = []
             isoforms = 2
-            with open(fn, 'r') as filepath:
+            open_func = gzip.open if fn.endswith('.gz') else open
+            with open_func(fn, 'rt') as filepath:
                 for line in filepath:
                     data = line.strip()
                     t = data.split('\t')

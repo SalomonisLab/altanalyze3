@@ -65,6 +65,8 @@ def load_protein_summary(file_path):
             gene_id, isoform, length, nmd_status, _, longest_length = line.strip().split('\t')
             if '_' in isoform:
                 isoform = isoform.split('_')[1]  # Remove dataset prefix
+            if ';' in gene_id:
+                gene_id = gene_id.split(';')[0]
             try: length = int(length)
             except:
                 continue

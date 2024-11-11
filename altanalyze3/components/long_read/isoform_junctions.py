@@ -70,7 +70,7 @@ def exportJunctionMatrix(matrix_dir, ensembl_exon_dir, gff_source, barcode_clust
                 gene, strand, exon_structure, isoform, gff_name = row
                 # If multiple gff files used - restrict to isoforms to the appropriate gff
                 if 'UNK' not in gene: # (gff_source==gff_name or gff_source==None) and
-                    exons = exon_structure.split('|')[1:] #[1:-1] - consider APA
+                    exons = exon_structure.split('|') #[1:-1] - consider APA
                     junctions = []
                     for exon in exons:
                         geneID = gene
