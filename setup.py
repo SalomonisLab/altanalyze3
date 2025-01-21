@@ -7,7 +7,7 @@ def parse_requirements():
 
 setup(
     name="altanalyze3",
-    version="0.1.2",
+    version="0.1.3",
     description="AltAnalyze3",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",

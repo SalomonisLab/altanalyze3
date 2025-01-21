@@ -20,7 +20,6 @@ def exportConsensusIsoformMatrix(matrix_dir, isoform_association_path, gff_sourc
     """
 
     # Load the 10x matrix keyed by isoforms in the first column and cell barcode cluster annotations
-
     if mtx:
         adata = iso.mtx_to_adata(int_folder=matrix_dir, gene_is_index=True, feature='genes.tsv', feature_col=0, barcode='barcodes.tsv', barcode_col=0, matrix='matrix.mtx', rev=rev)
     else:
@@ -39,7 +38,6 @@ def exportConsensusIsoformMatrix(matrix_dir, isoform_association_path, gff_sourc
         else:
             adata.obs['cluster'] = gff_source
 
-    
     # Need to filter cell barcodes to those with a sufficient number of expressed genes
     adata.obs['total_counts'] = np.sum(adata.X, axis=1)
     adata = adata[adata.obs['total_counts'] >= 100, :]
@@ -108,14 +106,21 @@ def exportConsensusIsoformMatrix(matrix_dir, isoform_association_path, gff_sourc
     isoform_adata.var['gene'] = [isoform_to_gene.get(isoform, '') for isoform in isoform_adata.var_names]
     
     # Some weird key's get added when excluding barcode to cluster associations
-    isoform_adata.obs = isoform_adata.obs.dropna().reset_index(drop=True)
+    #isoform_adata.obs = isoform_adata.obs.dropna().reset_index(drop=True)
+    print("Before resetting index:", isoform_adata.obs_names[:5].tolist())
+    isoform_adata.obs = isoform_adata.obs.dropna().reset_index(drop=False)
+    isoform_adata.obs_names = isoform_adata.obs['index'].astype(str)  # Use correct column name
+    print("After resetting index:", isoform_adata.obs_names[:5].tolist())
 
 
     # Write the junction counts to an h5ad file
     h5ad_dir = os.path.basename(gff_source)
     
     #isoform_adata.write_h5ad("filtered_junction.h5ad")
-    isoform_adata.write_h5ad(f"{h5ad_dir.split('.g')[0]}-isoform.h5ad", compression='gzip')
+    export_h5ad = f"{h5ad_dir.split('.g')[0]}-isoform.h5ad"
+    isoform_adata.write_h5ad(export_h5ad, compression='gzip')
+    loaded_adata = ad.read_h5ad(export_h5ad)
+    print("Loaded barcodes after saving:", loaded_adata.obs_names[:5].tolist())
     print ('h5ad exported')
 
     export_pseudobulk = False

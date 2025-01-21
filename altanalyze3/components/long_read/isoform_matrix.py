@@ -111,7 +111,9 @@ def calculate_barcode_match_percentage(adata, barcode_clusters):
     print(f'Barcode mapping percentage: {percentage:.2f}%')
 
     adata = adata[sorted(matching_barcodes), :]
+    adata.obs.index.name = None
     adata.obs = adata.obs.join(barcode_clusters, how='inner')
+
     return adata
 
 import pandas as pd
@@ -141,7 +143,7 @@ def tsv_to_adata(file_path: str):
     return adata
 
 
-def pseudo_cluster_counts(sample, combined_adata, cell_threshold=5, count_threshold=5, compute_tpm=False, tpm_threshold=1, status=True):
+def pseudo_cluster_counts(sample, combined_adata, cell_threshold=0, count_threshold=0, compute_tpm=False, tpm_threshold=1, status=True):
     if compute_tpm:
         dataType = 'isoform'
     else:
@@ -225,9 +227,9 @@ def pseudo_counts_no_cluster(combined_adata, count_threshold=5, compute_tpm=Fals
 
 from tqdm import tqdm
 
-def export_and_filter_pseudobulks(input_file, output_file, cell_type_order=None):
+def export_and_filter_pseudobulks(input_file, output_file, cell_type_order=None, min_group_size = 3):
     # Function to reduce a combined TPM, ratio, or splicing matrix (with or without null values) to rows in which clusters have multiple samples with signal (>2). Assumes null = 0.
-
+    
     # Step 1: Read in the optional cell type order file if provided
     if cell_type_order is None:
         cell_type_order = None
@@ -272,7 +274,7 @@ def export_and_filter_pseudobulks(input_file, output_file, cell_type_order=None)
                             cell_type_counts[cell_type] += 1
 
                     # If any cell type has at least 3 non-zero samples, keep the row
-                    if any(count >= 3 for count in cell_type_counts.values()):
+                    if any(count >= min_group_size for count in cell_type_counts.values()):
                         if cell_type_order:
                             reordered_values = [fields[samples.index(col) + 1] for col in reordered_columns]
                         else:
@@ -302,7 +304,7 @@ def concatenate_h5ad_and_compute_pseudobulks(sample_files,collection_name = ''):
 
         # Generate pseudobulks for the current sample
         if collection_name == 'isoform':
-            pseudo_pdf, tpm, isoform_to_gene_ratio = pseudo_cluster_counts(sample_name, adata, cell_threshold=5, count_threshold=0, compute_tpm=True, status=False)
+            pseudo_pdf, tpm, isoform_to_gene_ratio = pseudo_cluster_counts(sample_name, adata, cell_threshold=0, count_threshold=0, compute_tpm=True, status=False)
         
             # Rename the columns to include the sample name
             pseudo_pdf.columns = [f'{col}.{sample_name}' for col in pseudo_pdf.columns]
@@ -329,7 +331,7 @@ def concatenate_h5ad_and_compute_pseudobulks(sample_files,collection_name = ''):
             combined_tpm.to_csv(pseudo_tpm, sep='\t')
             combined_isoform_to_gene_ratio.to_csv(pseudo_ratios, sep='\t')
         else:
-            pseudo_pdf = pseudo_cluster_counts(sample_name, adata, cell_threshold=5, count_threshold=0, compute_tpm=False, status=False)
+            pseudo_pdf = pseudo_cluster_counts(sample_name, adata, cell_threshold=0, count_threshold=0, compute_tpm=False, status=False)
             pseudo_pdf.columns = [f'{col}.{sample_name}' for col in pseudo_pdf.columns]
             if combined_pseudo_pdf is None:
                 combined_pseudo_pdf = pseudo_pdf
@@ -343,9 +345,9 @@ def concatenate_h5ad_and_compute_pseudobulks(sample_files,collection_name = ''):
     combined_pseudo_pdf.to_csv(pseudo_counts, sep='\t')
 
 
-def pseudo_cluster_counts_optimized(sample, combined_adata, cell_threshold=5, count_threshold=5, compute_tpm=False, tpm_threshold=1, status=True):
+def pseudo_cluster_counts_optimized(sample, combined_adata, cell_threshold=0, count_threshold=0, compute_tpm=False, tpm_threshold=1, status=True):
     dataType = 'isoform' if compute_tpm else 'junction'
-    
+
     # Prepare the output file path
     if dataType == 'isoform':
         output_file = f"{sample}.txt"
@@ -435,11 +437,11 @@ def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_
         # Generate pseudobulks for the current sample
         if compute_tpm:
             pseudo_pdf_file, tpm_file, isoform_ratio_file = pseudo_cluster_counts_optimized(
-                sample_name, adata, cell_threshold=5, count_threshold=0, compute_tpm=compute_tpm, tpm_threshold=tpm_threshold, status=False
+                sample_name, adata, cell_threshold=0, count_threshold=0, compute_tpm=compute_tpm, tpm_threshold=tpm_threshold, status=False
             )
         else:
             pseudo_pdf_file = pseudo_cluster_counts_optimized(
-                sample_name, adata, cell_threshold=5, count_threshold=0, compute_tpm=compute_tpm, tpm_threshold=tpm_threshold, status=False
+                sample_name, adata, cell_threshold=0, count_threshold=0, compute_tpm=compute_tpm, tpm_threshold=tpm_threshold, status=False
             )
 
         # Load the pseudobulk file

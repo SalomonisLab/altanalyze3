@@ -176,7 +176,11 @@ def exportJunctionMatrix(matrix_dir, ensembl_exon_dir, gff_source, barcode_clust
     sparse_junction_matrix = coo_matrix_method()
     
     # Create a new AnnData object for the junction counts
+    #print("Original adata.obs_names:", adata.obs_names[:5].tolist())
     junction_adata = ad.AnnData(X=sparse_junction_matrix, obs=adata.obs, var=pd.DataFrame(index=junction_counts.keys()))
+    #junction_adata = ad.AnnData(X=sparse_junction_matrix, obs=adata.obs.copy(), var=pd.DataFrame(index=junction_counts.keys()))
+    junction_adata.obs_names = adata.obs_names
+    #print("Final junction_adata.obs_names:", junction_adata.obs_names[:5].tolist())
 
     # Add gene annotations
     junction_adata.var['gene'] = [isoform_to_gene.get(isoform, '') for isoform in junction_adata.var_names]
@@ -185,6 +189,9 @@ def exportJunctionMatrix(matrix_dir, ensembl_exon_dir, gff_source, barcode_clust
     h5ad_dir = os.path.basename(gff_source)
     #junction_adata.write_h5ad("filtered_junction.h5ad")
     junction_adata.write_h5ad(f"{h5ad_dir.split('.g')[0]}.h5ad", compression='gzip')
+    #loaded_adata = ad.read_h5ad(f"{h5ad_dir.split('.g')[0]}.h5ad")
+    #print("Loaded barcodes after saving:", loaded_adata.obs_names[:5].tolist())
+
     print ('h5ad exported')
     
     export_pseudobulk = False

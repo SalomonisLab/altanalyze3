@@ -98,7 +98,8 @@ def compute_differentials(sample_dict,conditions,cluster_order,gene_symbol_file,
 
             # Extract 'groups' for each UID from the sample_dict
             uid_to_group = isoa.get_sample_to_group(sample_dict,'junction')
-
+            print ('Samples to consider for comparison:',uid_to_group)
+            
             # Create a DataFrame for the group mapping using the PSI matrix columns
             groups_file = pd.DataFrame({
                 'grp': [uid_to_group.get(col.split('.')[1], 'unknown') for col in psi_matrix.columns],  # Extract UID and map to group

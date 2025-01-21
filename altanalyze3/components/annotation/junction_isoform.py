@@ -180,7 +180,7 @@ def annotate_all_stats_files(stats_folder, transcript_dict, gene_symbol_dict, co
                 annotate_junction_stats_file(stats_file, transcript_dict, gene_symbol_dict, coord_dict, protein_dict, output_folder)
             else:
                 annotate_iso_stats_file(stats_file, transcript_dict, gene_symbol_dict, protein_dict, output_folder)
-        except ZeroDivisionError as e:
+        except Exception as e:
             print(f"Error processing {stats_file}: {e}")
             continue
 

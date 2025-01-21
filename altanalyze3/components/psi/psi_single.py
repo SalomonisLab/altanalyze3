@@ -80,6 +80,7 @@ def calculate_psi_per_gene(count, outdir, write_header=True, result_batch=None):
     count = count.set_index('uid')
     uid2coords = count.apply(lambda x: [x['start'], x['end']], axis=1, result_type='reduce').to_dict()
 
+    warnings.filterwarnings("ignore", category=RuntimeWarning, message="All-NaN slice encountered")
     for row in count.iterrows():
         uid = row[0]
         region = uid2coords[uid]
