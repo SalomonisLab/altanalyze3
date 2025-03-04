@@ -147,7 +147,8 @@ def export_counts_to_anndata(counts_df, location, counts_columns=None, metadata_
     csr_matrix = counts_df.loc[:, counts_columns].astype(pandas.SparseDtype(sparse_dtype, fill_value)).T.sparse.to_coo().tocsr()
     adata = anndata.AnnData(csr_matrix, dtype=sparse_dtype)
     adata.obs_names = counts_columns
-    adata_var = counts_df.copy().loc[:, metadata_columns].astype(str)    # can be empty df if metadata_columns is []
-    adata_var.index = adata_var.reset_index().agg(__get_name, axis="columns", strand_coords=strand_coords)
+    counts_df_no_index = counts_df.copy().reset_index()                    # index is moved to columns
+    adata_var = counts_df_no_index.loc[:, metadata_columns]                # can be empty df if metadata_columns is []
+    adata_var.index = counts_df_no_index.agg(__get_name, axis="columns", strand_coords=strand_coords)
     adata.var = adata_var
     adata.write(location)
