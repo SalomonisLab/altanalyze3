@@ -30,6 +30,7 @@ def import_metadata(metadata_file, return_size = False, include_hashed_samples =
     gff_name_tracker = {}
     hashed_path = None
     gff_names = []
+    comparison_groups = {}
 
     for _, row in metadata.iterrows():
         uid = row['uid']
@@ -37,7 +38,9 @@ def import_metadata(metadata_file, return_size = False, include_hashed_samples =
         gff_path = row['gff']
         if 'hashed_barcodes' in row:
             hashed_path = row['hashed_barcodes']
-            if '.' not in hashed_path:
+            if isinstance(hashed_path, str) and '.' in hashed_path:
+                pass
+            else:
                 hashed_path = None
         gff_name = os.path.basename(gff_path)  # Full GFF filename
         gff_basename = gff_name[:-4]  # Name without extension
@@ -76,11 +79,21 @@ def import_metadata(metadata_file, return_size = False, include_hashed_samples =
             'groups': row['groups'],
             'hashed': hashed_path
         })
+        if row['groups'] in comparison_groups:
+            if uid not in comparison_groups[row['groups']]:
+                comparison_groups[row['groups']].append(uid)
+        else:
+            comparison_groups[row['groups']]=[uid]
+        
         gff_names.append(gff_basename)
 
-    group_sizes = [len(sample['groups'].split(',')) for samples in sample_dict.values() for sample in samples]
-    min_group_size = min(group_sizes) if group_sizes else 0
-    
+    group_sizes = list(set(len(v) for v in comparison_groups.values()))
+    two_groups_with_min_3 = sum(x > 2 for x in group_sizes) >= 2
+    if two_groups_with_min_3:
+        min_group_size = 3
+    else:
+        min_group_size = min(group_sizes) if group_sizes else 0
+
     if return_size:
         print(f"Minimum group size: {min_group_size}")
         return sample_dict, min_group_size
@@ -158,8 +171,14 @@ def get_valid_h5ad(sample_dict,dataType):
         if not os.path.exists(f'{current_dir}/{h5ad}'):
             for s in samples:
                 h5ad = s['gff_name'] + ('.h5ad' if dataType == 'junction' else '-isoform.h5ad')
-        sample_files.append(h5ad)
-        sample_index[s['gff_name']] = h5ad
+                if h5ad not in sample_files:
+                    sample_files.append(h5ad)
+                sample_index[s['gff_name']] = h5ad
+        else:
+            for s in samples:
+                sample_index[s['gff_name']] = h5ad
+                if h5ad not in sample_files:
+                    sample_files.append(h5ad)
         uids.append(uid)
 
     return sample_files,sample_index,uids
@@ -176,8 +195,6 @@ def get_sample_to_group(sample_dict,dataType):
                 sample = s['gff_name'] + ('' if dataType == 'junction' else '-isoform')
                 sample_group[sample]=group
     return sample_group
-
-import os
 
 def export_sorted(filename, sort_col, exclude_header=True):
     """
@@ -227,7 +244,9 @@ def deconvolute_libraries_by_hashed_index(sample_dict,sample_h5ads,dataType):
                 if s['gff_name'] not in added_samples:
                     added_samples.append(s['gff_name'])
             else:
-                update_sample_files.append(sample_h5ads[s['gff_name']])
+                name = sample_h5ads[s['gff_name']]
+                if name not in update_sample_files:
+                    update_sample_files.append(name)
 
     for info, samples in sample_metadata.items():
         hashed_path, gff_name = info
@@ -260,7 +279,8 @@ def deconvolute_libraries_by_hashed_index(sample_dict,sample_h5ads,dataType):
                 # Save subset h5ad file
                 sample_adata.write(output_path,compression='gzip')
                 print(f"Saved {output_filename}")
-                update_sample_files.append(output_filename)
+                if output_filename not in update_sample_files:
+                    update_sample_files.append(output_filename)
 
     """
     for file in update_sample_files:
@@ -273,7 +293,6 @@ def deconvolute_libraries_by_hashed_index(sample_dict,sample_h5ads,dataType):
 def export_pseudo_counts(metadata_file,barcode_cluster_dirs,dataType='junction',compute_tpm=False):
     sample_dict, min_group_size = import_metadata(metadata_file, return_size = True, include_hashed_samples = True)
     cluster_order = iso.return_cluster_order(barcode_cluster_dirs)
-
     # Memory efficient combine and pseudobulk of many h5ad files
     pseudo_counts = dataType+'_combined_pseudo_cluster_counts.txt'
     pseudo_tpm = dataType+'_combined_pseudo_cluster_tpm.txt'
@@ -284,13 +303,14 @@ def export_pseudo_counts(metadata_file,barcode_cluster_dirs,dataType='junction',
     print (sample_files)
     sample_files = deconvolute_libraries_by_hashed_index(sample_dict,sample_h5ads,dataType)
     print (sample_files)
+
     iso.concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files,collection_name=dataType,compute_tpm=compute_tpm)
 
     # Organize and filter
-    iso.export_and_filter_pseudobulks(pseudo_counts, pseudo_counts[:-4]+'-filtered.txt', cluster_order, min_group_size=min_group_size)
+    iso.export_and_filter_pseudobulk_chunks(pseudo_counts, pseudo_counts[:-4]+'-filtered.txt', cluster_order, min_group_size=min_group_size)
     if dataType == 'isoform':
-        iso.export_and_filter_pseudobulks(pseudo_ratios, pseudo_ratios[:-4]+'-filtered.txt', cluster_order, min_group_size=min_group_size)
-        iso.export_and_filter_pseudobulks(pseudo_tpm, pseudo_tpm[:-4]+'-filtered.txt', cluster_order, min_group_size=min_group_size)
+        iso.export_and_filter_pseudobulk_chunks(pseudo_ratios, pseudo_ratios[:-4]+'-filtered.txt', cluster_order, min_group_size=min_group_size)
+        iso.export_and_filter_pseudobulk_chunks(pseudo_tpm, pseudo_tpm[:-4]+'-filtered.txt', cluster_order, min_group_size=min_group_size)
 
 def pre_process_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_dir):
     # Perform junction quantification across samples

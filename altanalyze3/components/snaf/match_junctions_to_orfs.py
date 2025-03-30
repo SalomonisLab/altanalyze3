@@ -6,11 +6,13 @@ from Bio.Seq import Seq
 # File paths - replace with a main function call to pass these variables when connected with upstream functions
 junctions_file = "/Users/saljh8/Dropbox/Manuscripts/InProgress/SNAF/STM-revision/AML/neojunction_SNAF-B_AML-MDS-additional.txt"
 junctions_file = "/Users/saljh8/Dropbox/Revio/BoneMarrow/SNAF-B_MDS-AML-neojunctions.txt"
-junctions_file = "/Users/saljh8/Dropbox/Revio/BoneMarrow/dPSI-cluster-events/merged-HSC-1-Others-HSC-1_stats-annotated-filtered-filtered1.txt"
+#junctions_file = "/Users/saljh8/Dropbox/Revio/BoneMarrow/dPSI-cluster-events/merged-HSC-1-Others-HSC-1_stats-annotated-filtered-filtered1.txt"
+#junctions_file = "/Users/saljh8/Dropbox/Revio/BoneMarrow/top-pattern-specific-splice-events-counts.txt"
 genome_fasta = "/Users/saljh8/Dropbox/Revio/Other/Variants/SNV/genome.fa"
 transcript_associations_file = "/Users/saljh8/Dropbox/Revio/BoneMarrow/gff-output/transcript_associations.txt"
 protein_summary_file = "/Users/saljh8/Dropbox/Revio/BoneMarrow/protein_summary.txt"
 orf_sequences_file = "/Users/saljh8/Dropbox/Revio/BoneMarrow/orf_sequences.fasta"
+orf_sequences_file = "/Users/saljh8/Dropbox/Revio/BoneMarrow/transcript_sequences.fasta"
 output_file = "/Users/saljh8/Dropbox/Revio/BoneMarrow/SNAF-B_functional_annotations-broad.txt"
 uniprot_coordinates = '/Users/saljh8/Desktop/Code/AltAnalyze/AltDatabase/EnsMart100/uniprot/Hs/Hs_FeatureCoordinate.txt'
 protein_translation_dir = '/Users/saljh8/Desktop/Code/AltAnalyze/AltDatabase/EnsMart100/ensembl/Hs/Hs_Ensembl_Protein__100_38.tab'
@@ -217,7 +219,10 @@ with open(junctions_file, "r") as f:
         line = line.strip()
         values = line.split("\t")
         if line:
-            gene, junction_name, chrom, start, end = parse_junction(values[0])
+            try: 
+                gene, junction_name, chrom, start, end = parse_junction(values[0])
+            except:
+                continue
             source = junction_name
             if has_chr_prefix:
                 pass
@@ -327,7 +332,7 @@ with open(orf_sequences_file, "r") as orf_handle, open(output_file, "w") as out_
              pass
 
     # Write results to output file
-    out_handle.write(f"symbol\tgene\tjunction_name\ttranscript_id\tPeptide in ORF\tprotein_info\tNovel-isoform-sequence\tjunc-seq\tjunction-peptide\tEM_domain_presence\tTM_overlap\tunique_peptide_seq\tref_isoform_seq\tprotein_length)\tref_length\ttm_count\tref_tm_count\ORF\n")
+    out_handle.write(f"symbol\tgene\tjunction_name\ttranscript_id\tPeptide in ORF\tprotein_info\tNovel-isoform-sequence\tjunc-seq\tjunction-peptide\tEM_domain_presence\tTM_overlap\tunique_peptide_seq\tref_isoform_seq\tprotein_length)\tref_length\ttm_count\tref_tm_count\tcDNA\n")
 
     for gene,junction_name, transcript_id, status, protein_info, protein_sequence, junc_seq, peptide, EM_domain_presence, TM_overlap, ref_isoform_seq, unique_peptide_seq, ref_length, tm_count, tm_ref_count, orf in results:
         if gene in gene_symbol_dict:

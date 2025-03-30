@@ -39,6 +39,23 @@ def mtx_to_adata(int_folder, gene_is_index, feature, feature_col, barcode, barco
     adata = ad.AnnData(X=mat.T, obs=pd.DataFrame(index=barcodes.index), var=pd.DataFrame(index=features.index))
     return adata
 
+def bulk_counts_to_adata(file_path: str):
+    """Convert a text file with either (1) pbid and counts to an AnnData object."""
+    df = pd.read_csv(file_path, sep='\t', comment='#')
+    
+    if df.shape[1] < 2:
+        raise ValueError("The TSV file must contain at least two columns.")
+
+    if 'pbid' in df.columns:
+        # Handle the original format with 'annot_transcript_id' column
+        transcript_ids = df['pbid']
+        counts = df.iloc[:, -2].values  # Assuming counts are in the second to last column
+        count_df = pd.DataFrame(counts, index=transcript_ids, columns=['counts'])
+        count_df = count_df.transpose()
+
+    adata = ad.AnnData(X=count_df)
+    return adata
+
 def append_sample_name(adata, sample_name):
     adata.obs_names = adata.obs_names.astype(str) + "_" + sample_name
     return adata
@@ -115,9 +132,6 @@ def calculate_barcode_match_percentage(adata, barcode_clusters):
     adata.obs = adata.obs.join(barcode_clusters, how='inner')
 
     return adata
-
-import pandas as pd
-import anndata as ad
 
 def tsv_to_adata(file_path: str):
     """Convert a TSV file with either (1) annot_transcript_id and counts or (2) isoform IDs and sample-level counts to an AnnData object."""
@@ -223,8 +237,6 @@ def pseudo_counts_no_cluster(combined_adata, count_threshold=5, compute_tpm=Fals
         return filtered_counts.T, tpm_values.T, isoform_ratios.T
     else:
         return filtered_counts.T
-
-
 from tqdm import tqdm
 
 def export_and_filter_pseudobulks(input_file, output_file, cell_type_order=None, min_group_size = 3):
@@ -282,6 +294,53 @@ def export_and_filter_pseudobulks(input_file, output_file, cell_type_order=None,
                         outfile.write(f"{feature}\t" + "\t".join(map(str, reordered_values)) + "\n")
 
                     pbar.update(1)
+
+def export_and_filter_pseudobulk_chunks(input_file, output_file, cell_type_order=None, min_group_size=3, chunk_size=500000):
+    # Read header and determine sample names
+    with open(input_file, 'r') as infile:
+        header = infile.readline().strip().split('\t')
+        samples = header[1:]  # Skip the first column (feature names)
+
+    # Precompute cell type mappings
+    cell_types = np.array([sample.split('.')[0] for sample in samples])
+    unique_cell_types = np.unique(cell_types)
+
+    # If reordering is needed, create index mapping
+    if cell_type_order:
+        reordered_indices = [i for cell_type in cell_type_order for i, sample in enumerate(samples) if sample.startswith(cell_type + '.')]
+    else:
+        reordered_indices = np.arange(len(samples))  # No reordering needed
+
+    # Open output file and write header
+    with open(output_file, 'w') as outfile:
+        outfile.write('\t'.join(['Feature'] + [samples[i] for i in reordered_indices]) + '\n')
+
+        # Read in chunks instead of line-by-line processing
+        chunk_iter = pd.read_csv(input_file, sep='\t', skiprows=1, header=None, names=['Feature'] + samples, chunksize=chunk_size)
+
+        for chunk in tqdm(chunk_iter, desc="Processing Chunks"):
+            # Convert values to NumPy array for speed
+            values = chunk.iloc[:, 1:].values.astype(float)  # Convert data to float fast
+
+            # Compute nonzero counts per cell type using NumPy fast operations
+            cell_type_counts = {ct: np.sum(values[:, cell_types == ct] > 0.1, axis=1) for ct in unique_cell_types}
+
+            # Identify rows meeting the min_group_size threshold
+            mask = np.zeros(values.shape[0], dtype=bool)
+            for ct in unique_cell_types:
+                mask |= (cell_type_counts[ct] >= min_group_size)
+
+            # Filter rows
+            filtered_chunk = chunk[mask]
+
+            # Reorder columns if needed
+            if cell_type_order:
+                filtered_chunk = filtered_chunk[['Feature'] + [samples[i] for i in reordered_indices]]
+
+            # Write filtered data in one batch
+            filtered_chunk.to_csv(outfile, sep='\t', index=False, header=False, mode='a')
+
+
 
 def concatenate_h5ad_and_compute_pseudobulks(sample_files,collection_name = ''):
 

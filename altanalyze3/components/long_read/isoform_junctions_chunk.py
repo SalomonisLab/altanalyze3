@@ -51,7 +51,13 @@ def exportJunctionMatrix(matrix_dir, ensembl_exon_dir, gff_source, barcode_clust
 
     # Need to filter cell barcodes to those with a sufficient number of expressed genes
     adata.obs['total_counts'] = np.sum(adata.X, axis=1)
-    adata = adata[adata.obs['total_counts'] >= 100, :]
+    try:
+        adata = adata[adata.obs['total_counts'] >= 100, :]
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        print(f"AnnData: {anndata.__version__}")
+        print ("WARNING -- SOFTWARE EXIT - likely outdated version of anndata (recommend version 0.10.9).");sys.exit()
+
     remaining_cells = adata.n_obs
     print(f"Number of remaining cells with >=100 reads: {remaining_cells}")
 

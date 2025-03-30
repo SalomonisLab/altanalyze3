@@ -23,7 +23,11 @@ def exportConsensusIsoformMatrix(matrix_dir, isoform_association_path, gff_sourc
     if mtx:
         adata = iso.mtx_to_adata(int_folder=matrix_dir, gene_is_index=True, feature='genes.tsv', feature_col=0, barcode='barcodes.tsv', barcode_col=0, matrix='matrix.mtx', rev=rev)
     else:
-        adata = iso.tsv_to_adata(matrix_dir)    
+        try: 
+            # ENCODE format bulk TSV
+            adata = iso.tsv_to_adata(matrix_dir)  
+        except:
+            adata = iso.bulk_counts_to_adata(matrix_dir)  
 
     # Ensure obs index and column names are string type
     adata.obs.index = adata.obs.index.astype(str)
