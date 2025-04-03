@@ -403,105 +403,143 @@ def concatenate_h5ad_and_compute_pseudobulks(sample_files,collection_name = ''):
     pseudo_counts = collection_name+'_combined_pseudo_cluster_counts.txt'
     combined_pseudo_pdf.to_csv(pseudo_counts, sep='\t')
 
-
 def pseudo_cluster_counts_optimized(sample, combined_adata, cell_threshold=0, count_threshold=0, compute_tpm=False, tpm_threshold=1, status=True):
-    dataType = 'isoform' if compute_tpm else 'junction'
+    output_file = f"{sample}.txt"
+    cluster_labels = combined_adata.obs['cluster'].astype(str)
+    cluster_order = sorted(cluster_labels.unique().tolist())
 
-    # Prepare the output file path
-    if dataType == 'isoform':
-        output_file = f"{sample}.txt"
-    else:
-        output_file = f"{sample}.txt"
-    # Write the header first
     with open(output_file, 'w') as f_out:
-        f_out.write('Feature\t' + '\t'.join(combined_adata.obs['cluster'].unique()) + '\n')
-    
-    chunk_size = 1000  # Number of rows to process per chunk
-    num_chunks = int(np.ceil(combined_adata.shape[1] / chunk_size))
-    
-    # Prepare TPM and isoform ratio file paths if necessary
+        f_out.write('Feature\t' + '\t'.join(cluster_order) + '\n')
+
     if compute_tpm:
         tpm_output_file = f"{sample}_tpm.txt"
         isoform_ratio_file = f"{sample}_ratio.txt"
         with open(tpm_output_file, 'w') as tpm_out, open(isoform_ratio_file, 'w') as isoform_out:
-            tpm_out.write('Feature\t' + '\t'.join(combined_adata.obs['cluster'].unique()) + '\n')
-            isoform_out.write('Feature\t' + '\t'.join(combined_adata.obs['cluster'].unique()) + '\n')
+            header = 'Feature\t' + '\t'.join(cluster_order) + '\n'
+            tpm_out.write(header)
+            isoform_out.write(header)
+
+    chunk_size = 1000
+    num_chunks = int(np.ceil(combined_adata.shape[1] / chunk_size))
 
     for chunk_idx in tqdm(range(num_chunks), desc="Processing chunks of data"):
         start = chunk_idx * chunk_size
         end = min((chunk_idx + 1) * chunk_size, combined_adata.shape[1])
-        
-        # Extract the chunk of data
         chunk_data = combined_adata[:, start:end].X.toarray()
         chunk_var_names = combined_adata.var_names[start:end]
 
-        # Convert the chunk to a DataFrame for processing
         chunk_df = pd.DataFrame(chunk_data, index=combined_adata.obs_names, columns=chunk_var_names)
-        
-        # Group by clusters
-        grouped = chunk_df.groupby(combined_adata.obs['cluster'], observed=True)
-        
-        # Filter clusters and sum values
-        filtered_summed_groups = grouped.filter(lambda x: len(x) >= cell_threshold)
-        summed_groups = filtered_summed_groups.groupby(combined_adata.obs['cluster'], observed=True).sum()
+        chunk_df = chunk_df.join(cluster_labels.rename("cluster"))
 
-        # Filter out low counts
-        filtered_summed_groups_transposed = summed_groups.loc[:, summed_groups.sum(axis=0) >= count_threshold].transpose()
-        
-        # Append the chunk results to the output file
-        filtered_summed_groups_transposed.to_csv(output_file, sep='\t', mode='a', header=False)
+        grouped = chunk_df.groupby("cluster", observed=True)
+        valid_groups = grouped.filter(lambda x: len(x) >= cell_threshold)
+        summed_groups = valid_groups.groupby("cluster", observed=True).sum()
+
+        result = summed_groups.T.reindex(columns=cluster_order).fillna(0)
+        result = result.loc[result.sum(axis=1) >= count_threshold]
+        result.insert(0, "Feature", result.index)
+        result.to_csv(output_file, sep="\t", index=False, mode="a", header=False)
 
         if compute_tpm:
-            # Calculate TPM values
-            tpm_values = summed_groups.div(summed_groups.sum(axis=1), axis=0) * 1e6
-            tpm_values_transposed = tpm_values.transpose()
-            tpm_values_transposed.to_csv(tpm_output_file, sep='\t', mode='a', header=False)
+            tpm = summed_groups.div(summed_groups.sum(axis=1), axis=0) * 1e6
+            tpm_values = tpm.T.reindex(columns=cluster_order).fillna(0)
+            tpm_values.insert(0, "Feature", tpm_values.index)
+            tpm_values.to_csv(tpm_output_file, sep="\t", index=False, mode="a", header=False)
 
-            # Compute gene sums and isoform ratios
-            gene_sums = summed_groups.T.groupby(lambda x: x.split(":")[0]).transform('sum').T
-            isoform_ratios = summed_groups.div(gene_sums)
+            isoform_cols = summed_groups.columns
+            gene_ids = [col.split(":")[0] for col in isoform_cols]
 
-            # Filter isoform ratios where gene TPM < 1
-            gene_tpms = tpm_values.T.groupby(lambda x: x.split(":")[0]).sum().T
-            mask = gene_tpms >= tpm_threshold
-            mask = mask.reindex(columns=tpm_values.columns, method='ffill')
-            isoform_ratios = isoform_ratios.where(mask).transpose()
+            # TPM threshold mask (isoform level)
+            mask = tpm >= tpm_threshold
+
+            # Gene-level raw counts
+            gene_counts = summed_groups.T.groupby(lambda x: x.split(":")[0]).sum().T
+
             
-            isoform_ratios.to_csv(isoform_ratio_file, sep='\t', mode='a', header=False)
+            gene_counts_broadcasted = pd.DataFrame(
+                [[gene_counts.loc[idx, gid] if gid in gene_counts.columns else np.nan for gid in gene_ids] for idx in summed_groups.index],
+                index=summed_groups.index,
+                columns=isoform_cols
+            )
+
+            # Replace 0 with np.nan in denominator
+            safe_denominator = gene_counts_broadcasted.replace(0, np.nan)
+
+            # Calculate isoform-to-gene ratio
+            ratios = summed_groups / safe_denominator
+            ratios = ratios.where(mask)
+
+            # Optional diagnostics
+            if status:
+                for gid in set(gene_ids):
+                    if gene_ids.count(gid) > 1 and gid in gene_counts.columns:
+                        isoform_subset = [col for col in isoform_cols if col.startswith(gid + ":")]
+                        print(f"\n🔎 QC for gene: {gid}")
+                        print("\nRaw counts:\n", summed_groups[isoform_subset])
+                        print("\nTPM values:\n", tpm[isoform_subset])
+                        print("\nTPM threshold mask:\n", mask[isoform_subset])
+                        print("\nGene counts:\n", gene_counts[gid])
+                        print("\nBroadcasted gene counts:\n", gene_counts_broadcasted[isoform_subset])
+                        print("\nCalculated ratios:\n", ratios[isoform_subset])
+                        break
+
+            ratios = ratios.T.reindex(columns=cluster_order)
+            ratios.insert(0, "Feature", ratios.index)
+            ratios.to_csv(isoform_ratio_file, sep="\t", index=False, mode="a", header=False)
+
+            #print(f"Final isoform_ratios non-zero entries: {(ratios.iloc[:, 1:] > 0).sum().sum()}")
+
+    print(f"Done writing {output_file}" + (f", {tpm_output_file}, {isoform_ratio_file}" if compute_tpm else ''))
 
     if compute_tpm:
-        print(f'Finished processing and writing {output_file}, {tpm_output_file}, and {isoform_ratio_file}')
         return output_file, tpm_output_file, isoform_ratio_file
     else:
-        print(f'Finished processing and writing {output_file}')
+        return output_file
+
+def just_return_dense_count_files(sample, compute_tpm=False):
+    # Bypass the above function to regenerate the counts and TPM files
+
+    output_file = f"{sample}.txt"
+    if compute_tpm:
+        tpm_output_file = f"{sample}_tpm.txt"
+        isoform_ratio_file = f"{sample}_ratio.txt"
+        return output_file, tpm_output_file, isoform_ratio_file
+    else:
         return output_file
 
 def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_name='junction', compute_tpm=False, tpm_threshold=1):
+    
     combined_pseudo_pdf = None
     combined_tpm = None
     combined_isoform_to_gene_ratio = None
-    
+    only_import_existing = False
+
     # Process each sample file
     for sample_file in sample_files:
         sample_name = sample_file.split('.')[0]  # Extract sample name
         print(f'Processing {sample_file}')
 
-        # Load the data
-        adata = ad.read_h5ad(sample_file)
-
-        # Ensure indices are strings and observation names are unique
-        adata.obs.index = adata.obs.index.astype(str)
-        adata.obs_names_make_unique()
-
-        # Generate pseudobulks for the current sample
-        if compute_tpm:
-            pseudo_pdf_file, tpm_file, isoform_ratio_file = pseudo_cluster_counts_optimized(
-                sample_name, adata, cell_threshold=0, count_threshold=0, compute_tpm=compute_tpm, tpm_threshold=tpm_threshold, status=False
-            )
+        if only_import_existing:
+            pseudo_pdf_file = just_return_dense_count_files(sample_name, compute_tpm=False)
+            if compute_tpm:
+                pseudo_pdf_file, tpm_file, isoform_ratio_file = pseudo_pdf_file
         else:
-            pseudo_pdf_file = pseudo_cluster_counts_optimized(
-                sample_name, adata, cell_threshold=0, count_threshold=0, compute_tpm=compute_tpm, tpm_threshold=tpm_threshold, status=False
-            )
+            # Load the data
+            adata = ad.read_h5ad(sample_file)
+
+            # Ensure indices are strings and observation names are unique
+            adata.obs.index = adata.obs.index.astype(str)
+            adata.obs_names_make_unique()
+
+            # Generate pseudobulks for the current sample
+            if compute_tpm:
+                pseudo_pdf_file, tpm_file, isoform_ratio_file = pseudo_cluster_counts_optimized(
+                    sample_name, adata, cell_threshold=0, count_threshold=0, compute_tpm=compute_tpm, tpm_threshold=tpm_threshold, status=False
+                )
+            else:
+                pseudo_pdf_file = pseudo_cluster_counts_optimized(
+                    sample_name, adata, cell_threshold=0, count_threshold=0, compute_tpm=compute_tpm, tpm_threshold=tpm_threshold, status=False
+                )
 
         # Load the pseudobulk file
         pseudo_pdf = pd.read_csv(pseudo_pdf_file, sep='\t', index_col=0)
@@ -547,3 +585,25 @@ def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_
 
     return combined_pseudo_file
 
+if __name__ == '__main__':
+    sample_name = 'test'
+    compute_tpm = True
+    tpm_threshold = 1
+
+    isoform_input = "WM34-isoform.h5ad"
+
+    adata = ad.read_h5ad(isoform_input)
+
+    # Ensure indices are strings and observation names are unique
+    adata.obs.index = adata.obs.index.astype(str)
+    adata.obs_names_make_unique()
+
+    target_gene_id = "ENSG00000177674"
+    isoform_vars = [v for v in adata.var_names if v.startswith(target_gene_id)]
+
+    # ----- Extract counts matrix for selected isoforms -----
+    X = adata[:, isoform_vars].copy()
+
+    pseudo_pdf_file = pseudo_cluster_counts_optimized(
+        sample_name, X, cell_threshold=0, count_threshold=0, compute_tpm=compute_tpm, 
+        tpm_threshold=tpm_threshold, status=True)

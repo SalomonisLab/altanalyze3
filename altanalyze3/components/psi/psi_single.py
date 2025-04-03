@@ -36,7 +36,7 @@ def find_uid_in_clique(the_uid, region, strand, uid2coords):
 
 # Early exit conditional checking to optimize
 def is_valid(mat, uid):
-    min_reads = 5
+    min_reads = 10
     num_incl_events = np.count_nonzero(mat[0, :] >= min_reads)
     if num_incl_events <= 1:
         return False  # Early exit if inclusion events are too low
@@ -57,7 +57,7 @@ def calculate_psi_core(clique, uid, count, sample_columns):
     mat = sub_count.values
     with np.errstate(divide='ignore', invalid='ignore'):
         psi = mat[0, :] / mat.sum(axis=0)
-
+        psi[mat.sum(axis=0) < 5] = np.nan # Sets PSI to null where less than 5 reads
     if sub_count.shape[0] > 1:
         bg_uid = sub_count.index.tolist()[np.argmax(mat[1:, :].sum(axis=1)) + 1]
         cond = is_valid(mat, uid)

@@ -148,18 +148,60 @@ def export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, refe
             SeqIO.write(transcript_records, cds_file, "fasta")
         with open("orf_sequences.fasta", "w") as cds_file:
             SeqIO.write(cds_records, cds_file, "fasta")
-
+            
     # Export individual library/sample isoform h5ad
     for uid, samples in sample_dict.items():
         num_samples = len(samples)
-        print(f'Processing {num_samples} library for sample: {uid}')
-        adata_list = [export_isoform_matrix(s['matrix'], s['gff_name'], s['library'], isoform_associations_path, s['reverse'], barcode_sample_dict) for s in samples]
-        if num_samples>1:
-            combined_adata = ad.concat(adata_list, axis=0, join='outer') if len(adata_list) > 1 else adata_list[0]
-            # Current code creates redundant cells for technical replicates - the below would sum counts across replicates per cell and feature
-            #summed_counts = combined_adata.to_df().groupby(combined_adata.obs.index).sum()
-            #combined_adata = ad.AnnData(X=summed_counts)
-            combined_adata.write_h5ad(f'{uid}_isoform.h5ad')
+        print(f'Processing {num_samples} libraries for sample: {uid}')
+        
+        adata_list = []
+        for s in samples:
+            adata = export_isoform_matrix(
+                s['matrix'], s['gff_name'], s['library'],
+                isoform_associations_path, s['reverse'], barcode_sample_dict)
+            # Resolve the index conflict issue:
+            if adata.obs.index.name in adata.obs.columns:
+                print(f"Conflict found in {s['library']}: index name '{adata.obs.index.name}' is also a column.")
+                adata.obs.rename_axis('barcode', inplace=True)  # Rename index to 'barcode' to avoid conflict
+            adata.obs_names_make_unique()
+            adata_list.append(adata)
+            
+            # Check the overlaping labels
+            from collections import Counter
+            labels = [s['library'] for s in samples]
+            label_counts = Counter(labels)
+            duplicates = {label: count for label, count in label_counts.items() if count > 1}
+            if duplicates:
+                print("Duplicated labels found:")
+                for label, count in duplicates.items():
+                    print(f"{label}: {count} occurrences")
+            else:
+                #print("No duplicated labels found.")
+                pass
+
+        """The below code combines h5ads. Instead of combining counts (see alternative code below)
+        the same cell barcode is referenced twice with a sample-level suffix for the barcode ID. 
+        Combined reads are the union not intersection."""
+        sum_reads_per_cell = False
+
+        if num_samples > 1:
+            if sum_reads_per_cell:
+                # Combine without changing cell names
+                combined = ad.concat(adata_list, axis=0, join='outer', index_unique=None)
+                # Group by cell barcode and sum counts
+                print("Summing counts across identical barcodes...")
+                counts_df = combined.to_df()
+                summed_counts = counts_df.groupby(combined.obs_names).sum()
+                # Create new AnnData with summed counts
+                new_obs = combined.obs.groupby(combined.obs_names).first()
+                new_adata = ad.AnnData(X=csr_matrix(summed_counts.values), obs=new_obs, var=combined.var.loc[summed_counts.columns])
+                print(f"Saving merged and summed AnnData for {uid}")
+                new_adata.write_h5ad(f'{uid}_isoform.h5ad')
+            else:
+                # Combine without the 'keys' parameter to avoid duplicate label issues
+                combined_adata = ad.concat(adata_list, axis=0, join='outer', label="sample")
+                combined_adata.obs_names_make_unique()
+                combined_adata.write_h5ad(f'{uid}_isoform.h5ad')
 
 def get_valid_h5ad(sample_dict,dataType):
     sample_index={}

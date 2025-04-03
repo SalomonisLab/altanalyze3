@@ -65,7 +65,7 @@ def compare_two_groups_per_cluster(condition1,condition2,cluster_order,groups_fi
         ]
         try: run_metadataAnalysis(cluster,psi_matrix,condition1,condition2,filtered_groups_file,stats_folder)
         except:
-            print (f'Failed for {condition1} vs. {condition2} for {cluster}')
+            print (f'Statistical analysis failed for {condition1} vs. {condition2} for {cluster}')
     print ('Annotating the test results by gene, isoform and protein...')
     ji.annotate(gene_symbol_file,transcript_assoc_file,junction_coords_file,protein_summary_file,stats_folder,dataType=dataType)
 
