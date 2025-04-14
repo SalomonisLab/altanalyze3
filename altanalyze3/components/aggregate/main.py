@@ -66,14 +66,20 @@ class GroupedAnnotations():
                 else:
                     assert(False), "Not implemented logic"
             else:                                                                                                    #    partial match
-                if sa.strand == "+":
-                    self.__partial_match.append((f"""{sa.gene}:{sa.exon}{sa_shift}-{ea.exon}{ea_shift}""", sa.strand))  #     start - end exons order
-                elif sa.strand == "-":
-                    self.__partial_match.append((f"""{sa.gene}:{ea.exon}{ea_shift}-{sa.exon}{sa_shift}""", sa.strand))  #     end - start exons order
+                if sa.strand == "+":                                                                                 #        start - end exons order
+                    self.__partial_match.append(
+                        (f"""{sa.gene}:{sa.exon}{sa_shift}-{ea.exon}{ea_shift}""", sa.strand)
+                    )
+                elif sa.strand == "-":                                                                               #        end - start exons order
+                    self.__partial_match.append(
+                        (f"""{sa.gene}:{ea.exon}{ea_shift}-{sa.exon}{sa_shift}""", sa.strand)
+                    )
                 else:
                     assert(False), "Not implemented logic"
         else:                                                                                                        # different gene and/or strand
-            self.__distant_match.append((f"""{sa.gene}:{sa.exon}{sa_shift}-{ea.gene}:{ea.exon}{ea_shift}""", "."))   #    distant match
+            self.__distant_match.append(                                                                             #    distant match
+                (f"""{sa.gene}:{sa.exon}{sa_shift}-{ea.gene}:{ea.exon}{ea_shift}""", ".")
+            )
 
     def best(self):
         all_annotations = self.__exact_match + self.__partial_match + self.__distant_match
@@ -348,7 +354,7 @@ def collect_results(args):
         logging.info(f"""Loading pickled introns counts from {args.int_counts_location}""")
         int_counts_df = pandas.read_pickle(args.int_counts_location)
         int_counts_df["annotation"] = int_counts_df.index.to_frame(index=False).name.values
-        int_counts_df.reset_index(level="strand", inplace=True)                                     # need to move "strand" from the index to a column
+        int_counts_df.reset_index(level="strand", inplace=True)                                # need to move "strand" from the index to a column
 
     if counts_df is None:
         counts_df = int_counts_df
@@ -358,9 +364,12 @@ def collect_results(args):
 
     counts_df.sort_index(ascending=True, inplace=True)
 
+    logging.debug("Adding column with gene name")
+    counts_df["gene"] = counts_df["annotation"].str.split(":", expand=True).loc[:, 0]          # in case of a distant match when we have two genes, we take the first one
+
     adata_location = args.output.with_suffix(".h5ad")
     logging.info(f"""Exporting aggregated counts to {adata_location}""")
-    metadata_columns = ["annotation", "strand"]
+    metadata_columns = ["chr", "start", "end", "gene", "strand", "annotation"]                 # may include columns names from the index
     export_counts_to_anndata(
         counts_df=counts_df,
         location=adata_location,
