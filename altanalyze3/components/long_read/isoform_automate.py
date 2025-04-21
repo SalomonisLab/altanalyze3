@@ -378,3 +378,69 @@ def combine_processed_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_
 def run_psi_analysis(junction_path, outdir):
     # Use asyncio.run to ensure event loop is properly created
     asyncio.run(psi.main(junction_path=junction_path, query_gene=None, outdir=outdir))
+
+def combine_h5ad_files(sample_h5ads, output_file='combined.h5ad'):
+    """
+    Combine multiple h5ad files into a single file with a union of features.
+    
+    Parameters:
+    -----------
+    sample_h5ads : list
+        List of paths to h5ad files to combine
+    output_file : str
+        Name of the output combined h5ad file
+        
+    Returns:
+    --------
+    anndata.AnnData
+        Combined AnnData object with union of features
+    """
+    import anndata as ad
+    import pandas as pd
+    from scipy.sparse import vstack
+    
+    print(f"Combining {len(sample_h5ads)} h5ad files...")
+    
+    # Initialize lists to store data
+    adatas = []
+    all_features = set()
+    
+    # First pass: read all files and collect unique features
+    for h5ad_file in sample_h5ads:
+        print(f"Reading {h5ad_file}")
+        adata = ad.read_h5ad(h5ad_file)
+        adatas.append(adata)
+        all_features.update(adata.var_names)
+    
+    # Convert to sorted list for consistent ordering
+    all_features = sorted(list(all_features))
+    print(f"Total unique features: {len(all_features)}")
+    
+    # Second pass: align features and combine
+    aligned_adatas = []
+    for adata in adatas:
+        # Create new var DataFrame with all features
+        new_var = pd.DataFrame(index=all_features)
+        # Copy over any existing var annotations
+        for col in adata.var.columns:
+            new_var[col] = pd.Series(index=all_features)
+            new_var.loc[adata.var.index, col] = adata.var[col]
+        
+        # Create new AnnData with aligned features
+        new_adata = ad.AnnData(
+            X=adata.X,
+            obs=adata.obs,
+            var=new_var,
+            uns=adata.uns
+        )
+        aligned_adatas.append(new_adata)
+    
+    # Combine all aligned AnnData objects
+    print("Combining aligned AnnData objects...")
+    combined_adata = ad.concat(aligned_adatas, axis=0, join='outer')
+    
+    # Write combined file
+    print(f"Writing combined file to {output_file}")
+    combined_adata.write_h5ad(output_file, compression='gzip')
+    
+    return combined_adata

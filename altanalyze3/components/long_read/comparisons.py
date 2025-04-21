@@ -21,13 +21,13 @@ def compare_one_cluster_to_many(condition,cluster_order,groups_file,psi_matrix,j
     for cluster in cluster_order:
         # Filter samples for the current cluster
         current_cluster_samples = groups_file[
-            (groups_file.index.str.startswith(cluster)) &  # Match the specific cluster
+            (groups_file.index.str.startswith(cluster+'.')) &  # Match the specific cluster
             (groups_file['grp'].str.endswith(condition))  # Ensure it belongs to the queried condition
         ]
 
         # Filter other samples within the same condition but in different clusters
         other_samples = groups_file[
-            (~groups_file.index.str.startswith(cluster)) &  # Exclude the current cluster
+            (~groups_file.index.str.startswith(cluster+'.')) &  # Exclude the current cluster
             (groups_file['grp'].str.endswith(condition))  # Ensure it belongs to the queried condition
         ]
 
@@ -60,7 +60,7 @@ def compare_two_groups_per_cluster(condition1,condition2,cluster_order,groups_fi
         
     for cluster in cluster_order:
         filtered_groups_file = groups_file[
-            (groups_file.index.str.startswith(cluster)) &  # Filter by cell type prefix
+            (groups_file.index.str.startswith(cluster+'.')) &  # Filter by cell type prefix
             (groups_file['grp'].str.endswith((condition1, condition2)))  # Keep only 'aged' and 'young' groups
         ]
         try: run_metadataAnalysis(cluster,psi_matrix,condition1,condition2,filtered_groups_file,stats_folder)

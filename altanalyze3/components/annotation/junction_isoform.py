@@ -247,7 +247,7 @@ def annotate_all_stats_files(stats_folder, transcript_dict, gene_symbol_dict, co
     output_folder = stats_folder
 
     # Get a list of all .txt files excluding '-annotated.txt' files
-    stats_files = [f for f in glob.glob(f"{stats_folder}/*.txt") if '-annotated' not in f]
+    stats_files = [f for f in glob.glob(f"{stats_folder}/*.txt") if f.endswith("stats.txt")]
 
     # Use tqdm to show progress over the stats files
     for stats_file in tqdm(stats_files, desc="Annotating Stats Files"):
