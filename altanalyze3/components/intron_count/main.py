@@ -286,7 +286,7 @@ def get_jobs(args):
     return [
         Job(
             contig=contig,                                                            # contig is always prepended with 'chr'
-            location=args.tmp.joinpath(get_tmp_suffix())
+            location=args.tmp.joinpath(args.bam.stem, get_tmp_suffix())
         )
         for contig in get_all_bam_chr(args.bam, args.threads)
             if contig in get_all_ref_chr(args.ref, args.threads) and contig in args.chr                 # safety measure to include only chromosomes present in BAM, BED, and --chr
@@ -317,37 +317,52 @@ def process_contig(args, job):
 def collect_results(args, jobs):
     with args.output.with_suffix(".bed").open("w") as output_stream:
         for job in jobs:
-            logging.info(f"""Collect counts from {job.location}""")
+            logging.info(f"Collect counts from {job.location}")
             with job.location.open("r") as input_stream:
                 output_stream.write(input_stream.read())
-                logging.debug(f"""Remove {job.location}""")
+            # Only delete now if NOT saving reads
+            if not args.savereads:
+                logging.debug(f"Remove {job.location}")
                 job.location.unlink()
+
     if args.savereads:
         tmp_bam = args.output.with_suffix(get_tmp_suffix() + ".bam")
         with pysam.AlignmentFile(args.bam, mode="rb", threads=args.threads) as template_handler:
             with pysam.AlignmentFile(tmp_bam, "wb", threads=args.threads, template=template_handler) as out_bam_handler:
                 for job in jobs:
                     bam_location = job.location.with_suffix(".bam")
-                    logging.info(f"""Collect reads from {bam_location}""")
+                    logging.info(f"Collect reads from {bam_location}")
                     with pysam.AlignmentFile(bam_location, mode="rb", threads=args.threads) as in_bam_handler:
-                        for read in in_bam_handler.fetch(until_eof=True):                                         # we don't need index because of until_eof
+                        for read in in_bam_handler.fetch(until_eof=True):
                             out_bam_handler.write(read)
-                        logging.debug(f"""Remove {bam_location}""")
-                        bam_location.unlink()
+                        logging.debug(f"Remove {bam_location}")
+                        bam_location.unlink()  # delete bam parts here
         pysam.sort("-o", str(args.output.with_suffix(".bam")), str(tmp_bam))
         pysam.index(str(args.output.with_suffix(".bam")))
         tmp_bam.unlink()
 
 
 def count_introns(args):
+    sample_path = args.tmp.joinpath(args.bam.stem)
+    sample_path.mkdir(parents=True, exist_ok=True)
     jobs = get_jobs(args)
     logging.info(f"""Span {len(jobs)} job(s) between {args.cpus} CPU(s)""")
     with multiprocessing.Pool(args.cpus) as pool:
         pool.map(partial(process_contig, args), jobs)
     collect_results(args, jobs)
 
-    logging.debug("Removing temporary directory")
-    shutil.rmtree(args.tmp)
+    import pathlib
+    # Ensure you are getting the .bed.gz file path (this is args.ref after indexing)
+    ref_gz = pathlib.Path(args.ref)
+    # Delete .bed.gz (if you want) and .bed.gz.tbi
+    files_to_delete = [ref_gz, ref_gz.with_name(ref_gz.name + ".tbi")]
+    for f in files_to_delete:
+        if f.exists():
+            logging.info(f"Removing temporary file: {f}")
+            f.unlink()
+
+    logging.debug(f"Removing temporary directory and all contents for sample {args.bam.stem} at {sample_path}")
+    shutil.rmtree(sample_path)
 
 if __name__ == "__main__":
     import argparse

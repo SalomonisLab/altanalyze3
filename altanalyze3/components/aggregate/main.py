@@ -31,16 +31,15 @@ from altanalyze3.utilities.io import (
 
 
 def get_jun_annotation_jobs(args):
-    # we include only chromosomes present both in jun_coords_location and references,
-    # and user provided list. Contig is always prepended with 'chr'
     return [
         Job(
             contig=contig,
-            location=args.tmp.joinpath(get_tmp_suffix())
+            location=args.sample_tmp.joinpath(get_tmp_suffix())
         )
         for contig in get_all_ref_chr(args.jun_coords_location, args.threads)
             if contig in get_all_ref_chr(args.ref, args.threads) and contig in args.chr
     ]
+
 
 
 class GroupedAnnotations():
@@ -359,7 +358,9 @@ def collect_results(args):
     counts_df.sort_index(ascending=True, inplace=True)
 
     adata_location = args.output.with_suffix(".h5ad")
+
     logging.info(f"""Exporting aggregated counts to {adata_location}""")
+
     metadata_columns = ["annotation", "strand"]
     export_counts_to_anndata(
         counts_df=counts_df,
@@ -370,7 +371,7 @@ def collect_results(args):
     )
 
     if args.bed:
-        bed_location = args.output.with_suffix(".bed")
+        bed_location = args.sample_tmp.joinpath(get_tmp_suffix()).with_suffix(".bed")
         logging.info(f"""Exporting annotated coordinates to {bed_location}""")
         counts_df.reset_index(inplace=True)
         counts_df.drop(columns=["name"], inplace=True)
@@ -387,6 +388,10 @@ def collect_results(args):
 
 
 def aggregate(args):
+    from altanalyze3.utilities.helpers import get_tmp_suffix
+    sample_path = args.tmp.joinpath(get_tmp_suffix())
+    sample_path.mkdir(parents=True, exist_ok=True)
+    args.sample_tmp = sample_path
 
     if args.juncounts is not None:
         logging.info("Processing junctions counts")
@@ -394,12 +399,12 @@ def aggregate(args):
             query_locations=args.juncounts,
             query_aliases=args.aliases,
             selected_chr=args.chr,
-            tmp_location=args.tmp,
-            as_junctions=True,                                                       # "strand" column will be ignored
+            tmp_location=args.sample_tmp,
+            as_junctions=True,
             save_bed=True
         )
         args.jun_annotation_jobs = get_jun_annotation_jobs(args)
-        logging.info(f"""Span {len(args.jun_annotation_jobs)} junctions annotation job(s) between {args.cpus} CPU(s)""")
+        logging.info(f"Span {len(args.jun_annotation_jobs)} junctions annotation job(s) between {args.cpus} CPU(s)")
         with multiprocessing.Pool(args.cpus) as pool:
             pool.map(partial(process_jun_annotation, args), args.jun_annotation_jobs)
 
@@ -409,12 +414,22 @@ def aggregate(args):
             query_locations=args.intcounts,
             query_aliases=args.aliases,
             selected_chr=args.chr,
-            tmp_location=args.tmp,
+            tmp_location=args.sample_tmp,
             save_bed=False
         )
 
     logging.info("Collecting results")
     collect_results(args)
 
-    logging.info("Removing temporary directory")
-    shutil.rmtree(args.tmp)
+    import pathlib
+    # Ensure you are getting the .bed.gz file path (this is args.ref after indexing)
+    ref_gz = pathlib.Path(args.ref)
+
+    # Delete .bed.gz (if you want) and .bed.gz.tbi
+    files_to_delete = [ref_gz, ref_gz.with_name(ref_gz.name + ".tbi")]
+    for f in files_to_delete:
+        if f.exists():
+            logging.info(f"Removing temporary file: {f}")
+            f.unlink()
+    logging.debug(f"Removing temporary directory and all contents at {args.sample_tmp}")
+    shutil.rmtree(args.sample_tmp)
