@@ -348,3 +348,36 @@ def count_introns(args):
 
     logging.debug("Removing temporary directory")
     shutil.rmtree(args.tmp)
+
+if __name__ == "__main__":
+    import argparse
+    from pathlib import Path
+
+    parser = argparse.ArgumentParser(description="Count intron overlaps from BAM using GFF/GTF annotation.")
+
+    parser.add_argument("--bam", type=Path, required=False, default=Path("/path/to/input.bam"), help="Input BAM file")
+    parser.add_argument("--ref", type=Path, required=False, default=Path("/path/to/annotation.bed.gz"), help="Input intron BED file (.gz)")
+    parser.add_argument("--output", type=Path, required=False, default=Path("/path/to/output_prefix"), help="Prefix path for output files (no extension)")
+    parser.add_argument("--tmp", type=Path, required=False, default=Path("/tmp/altanalyze_tmp"), help="Temporary directory for intermediate files")
+    parser.add_argument("--span", type=int, default=10, help="Span threshold for 5'/3' prime assignment")
+    parser.add_argument("--strandness", type=int, default=0, help="0: Auto, 1: Unstranded, 2: Forward, 3: Reverse")
+    parser.add_argument("--cpus", type=int, default=4, help="Number of CPU processes to use")
+    parser.add_argument("--threads", type=int, default=2, help="Number of BAM/Tabix threads per process")
+    parser.add_argument("--savereads", action="store_true", help="Save classified reads in output BAM")
+    parser.add_argument("--chr", nargs='+', default=[], help="Specific chromosomes to process (e.g., --chr chr1 chr2 chrX)")
+    parser.add_argument("--loglevel", type=str, default="INFO", help="Logging level: DEBUG, INFO, WARNING, ERROR")
+
+    args = parser.parse_args()
+    """
+    # --- DIRECT OVERRIDE: you want the script runnable without needing manual input ---
+    args.bam = Path("/Users/your_username/path_to_input.bam")
+    args.ref = Path("/Users/your_username/path_to_introns.bed.gz")
+    args.output = Path("/Users/your_username/path_to_output_prefix")
+    args.tmp = Path("/Users/your_username/tmp_folder")
+    args.chr = ["chr1", "chr2", "chrX"]  # Example: change to [] if you want all chromosomes
+    args.savereads = True  # Set to False if you don't want output BAM
+    """
+    # Ensure tmp directory exists
+    args.tmp.mkdir(parents=True, exist_ok=True)
+    print (args)
+    count_introns(args)

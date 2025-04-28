@@ -13,9 +13,10 @@ def build_gene_model(df):
     position_footprint = {}
     position_ense = {}
     gene_start, gene_end, strand, ensg, chromsome = None,None,None,None,None
-    pat = re.compile(r'exon_id "(ENSE\d+)"')
+    pat = re.compile(r'exon_id=(ENSE\d+\.\d+)')
     # phase1: build footprint
     for row in df.itertuples(index=False):
+       
         if row.type == 'gene':
             gene_start, gene_end, strand, ensg, chromosome = row.start, row.end, row.strand, row.gene, row.chr
         elif row.type == 'transcript':
@@ -23,12 +24,13 @@ def build_gene_model(df):
             continue
         elif row.type == 'exon':
             attrs = row.attrs
-            ense = re.search(pat,attrs).group(1)
-            for p in range(row.start,row.end+1,1):
-                # put into position_footprint
-                position_footprint.setdefault(p,[]).append(transcript_id)
-                # put into position_ense
-                position_ense.setdefault(p,[]).append(ense)
+            ense_match = re.search(pat, attrs)
+            if ense_match:
+                ense = ense_match.group(1)
+                for p in range(row.start, row.end + 1):
+                    position_footprint.setdefault(p, []).append(transcript_id)
+                    position_ense.setdefault(p, []).append(ense)
+
     # phase2: moving along the footprint
     if strand == '+':
         string_stream = ''
@@ -45,7 +47,7 @@ def build_gene_model(df):
                 # write
                 subexon_identifier = 'E'+str(block_index)+'.'+str(segment_index)
                 associated_ense = '|'.join(position_ense[p-1])
-                string_stream += '{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(ensg,chromosome,strand,subexon_identifier,anchor_position,p-1,associated_ense)  # because current p is the first base in intron, shouldn't be included in previous exon
+                string_stream += '{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(ensg,subexon_identifier,chromosome,strand,anchor_position,p-1,'',associated_ense)  # because current p is the first base in intron, shouldn't be included in previous exon
                 # enumerate the whole intron region
                 pi = p
                 while True:
@@ -57,7 +59,7 @@ def build_gene_model(df):
                         # write the intron
                         intron_block_index += 1
                         subexon_identifier = 'I'+str(intron_block_index)+'.'+str(1)
-                        string_stream += '{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(ensg,chromosome,strand,subexon_identifier,p,pi-1,'')  # because the current pi is the first base in next exon, shouldn't be included in the intron
+                        string_stream += '{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(ensg,subexon_identifier,chromosome,strand,p,pi-1,'','')  # because the current pi is the first base in next exon, shouldn't be included in the intron
                         # update
                         p = pi
                         running_profile = position_footprint[p]
@@ -70,7 +72,7 @@ def build_gene_model(df):
                     # write          
                     subexon_identifier = 'E'+str(block_index)+'.'+str(segment_index)
                     associated_ense = '|'.join(position_ense[p-1])  # because the current p is the first base in next segment, we are writing the previous segment and its associated ense
-                    string_stream += '{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(ensg,chromosome,strand,subexon_identifier,anchor_position,p-1,associated_ense)
+                    string_stream += '{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(ensg,subexon_identifier,chromosome,strand,anchor_position,p-1,'',associated_ense)
                     # update
                     running_profile = position_footprint[p]
                     segment_index += 1
@@ -81,7 +83,7 @@ def build_gene_model(df):
         # write the last exon segment
         subexon_identifier = 'E'+str(block_index)+'.'+str(segment_index)
         associated_ense = '|'.join(position_ense[p-1])
-        string_stream += '{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(ensg,chromosome,strand,subexon_identifier,anchor_position,p-1,associated_ense)
+        string_stream += '{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(ensg,subexon_identifier,chromosome,strand,anchor_position,p-1,'',associated_ense)
 
     else:   # negative string, so backtrack
         string_stream = ''
@@ -98,7 +100,7 @@ def build_gene_model(df):
                 # write
                 subexon_identifier = 'E'+str(block_index)+'.'+str(segment_index)
                 associated_ense = '|'.join(position_ense[p+1])
-                string_stream += '{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(ensg,chromosome,strand,subexon_identifier,p+1,anchor_position,associated_ense)  
+                string_stream += '{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(ensg,subexon_identifier,chromosome,strand,p+1,anchor_position,'',associated_ense)  
                 # enumerate the whole intron region
                 pi = p
                 while True:
@@ -110,7 +112,7 @@ def build_gene_model(df):
                         # write the intron
                         intron_block_index += 1
                         subexon_identifier = 'I'+str(intron_block_index)+'.'+str(1)
-                        string_stream += '{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(ensg,chromosome,strand,subexon_identifier,pi+1,p,'')  
+                        string_stream += '{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(ensg,subexon_identifier,chromosome,strand,pi+1,p,'','')  
                         # update
                         p = pi
                         running_profile = position_footprint[p]
@@ -123,7 +125,7 @@ def build_gene_model(df):
                     # write          
                     subexon_identifier = 'E'+str(block_index)+'.'+str(segment_index)
                     associated_ense = '|'.join(position_ense[p+1])  
-                    string_stream += '{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(ensg,chromosome,strand,subexon_identifier,p+1,anchor_position,associated_ense)
+                    string_stream += '{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(ensg,subexon_identifier,chromosome,strand,p+1,anchor_position,'',associated_ense)
                     # update
                     running_profile = position_footprint[p]
                     segment_index += 1
@@ -134,7 +136,7 @@ def build_gene_model(df):
         # write the last exon segment
         subexon_identifier = 'E'+str(block_index)+'.'+str(segment_index)
         associated_ense = '|'.join(position_ense[p+1])
-        string_stream += '{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(ensg,chromosome,strand,subexon_identifier,p+1,anchor_position,associated_ense)        
+        string_stream += '{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(ensg,subexon_identifier,chromosome,strand,p+1,anchor_position,'',associated_ense)        
     return string_stream
 
 def split_array_to_chunks(array,cores=None):
@@ -164,11 +166,30 @@ def main(args):
     gtf = args.gtf
     gene = args.gene
     outdir = args.outdir
-    df = pd.read_csv(gtf,sep='\t',header=None,skiprows=[0,1,2,3,4])
+
+    df = pd.read_csv(gtf, sep='\t', comment='#', header=None)
+    # Flexible parsing
+    if gtf.endswith('.gff3') or gtf.endswith('.gff'):
+        pat = re.compile(r'gene_id=(ENSG\d+)(?:\.\d+)?')
+    else:
+        pat = re.compile(r'gene_id "(ENSG\d+)"')
+
+    if gtf.endswith('.gff3') or gtf.endswith('.gff'):
+        pat = re.compile(r'gene_id=(ENSG\d+)(?:\.\d+)?')
+    else:
+        pat = re.compile(r'gene_id "(ENSG\d+)"')
+
+
     df.columns = ['chr','source','type','start','end','score','strand','phase','attrs']
     df = df.loc[df['type'].isin(['gene','transcript','exon']),:]
-    pat = re.compile(r'gene_id "(ENSG\d+)"')
-    df['gene'] = [re.search(pat,item).group(1) for item in df['attrs']]
+
+    # Correct regex based on file type
+    if gtf.endswith('.gff3') or gtf.endswith('.gff'):
+        pat = re.compile(r'gene_id=(ENSG\d+)(?:\.\d+)?')
+    else:
+        pat = re.compile(r'gene_id "(ENSG\d+)"')
+    df['gene'] = [re.search(pat, item).group(1) if re.search(pat, item) else None for item in df['attrs']]
+
     if gene != 'all':
         df = df.loc[df['gene']==gene,:]
         string_stream = build_gene_model(df)
@@ -186,7 +207,7 @@ def main(args):
             sub_string_stream = collect.get()
             string_stream += sub_string_stream
 
-    with open(os.path.join(outdir,'gene_model_{}.txt'.format(gene)),'w') as f:
+    with open(os.path.join(outdir,'gene_model_{}.tsv'.format(gene)),'w') as f:
         f.write(string_stream)
         
 if __name__ == '__main__':
@@ -196,25 +217,4 @@ if __name__ == '__main__':
     parser.add_argument('--outdir',type=str,default=None,help='output dir for the gene model txt file')
     args = parser.parse_args()
     main(args)
-
-
-   
-
-            
-
-
-
-
-
-
-
-
-            
-        
-
-
-
-
-
-
 

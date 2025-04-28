@@ -113,14 +113,13 @@ JunctionsParams = {
     "sep": "\t"
 }
 
-
 ReferencesParams = {
     "usecols": [0, 1, 2, 3, 4, 5],
-    "names": ["gene", "chr", "strand", "exon", "start", "end"],
+    "names": ["chr", "start", "end", "exon", "gene", "strand"],
     "index_col": ["chr", "start", "end"],
     "converters": {
         "chr": ChrConverter,
-        "start": lambda c: int(c)-1                      # need to make [start, end) intervals
+        "start": lambda c: int(c)-1
     },
     "dtype": {
         "gene": "string",

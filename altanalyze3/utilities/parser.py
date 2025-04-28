@@ -9,6 +9,7 @@ from altanalyze3.utilities.helpers import get_version
 from altanalyze3.components.intron_count.main import count_introns
 from altanalyze3.components.junction_count.main import count_junctions
 from altanalyze3.components.aggregate.main import aggregate
+from altanalyze3.components.gene_model.gene_model_index import build_index
 from altanalyze3.utilities.io import (
     get_indexed_references,
     is_bam_indexed
@@ -25,7 +26,7 @@ class ArgsParser():
     def __init__(self, args):
         args = args + [""] if len(args) == 0 else args
         self.args, _ = self.get_parser().parse_known_args(args)
-        self.resolve_path(["bam", "ref", "tmp", "output", "juncounts", "intcounts"])
+        self.resolve_path(["bam", "ref", "tmp", "output", "juncounts", "intcounts", "index"])
         self.assert_args()
         self.set_args_as_attributes()
 
@@ -33,7 +34,14 @@ class ArgsParser():
         for arg, value in vars(self.args).items():
             setattr(self, arg, value)
 
-    def add_common_arguments(self, parser):
+    def add_common_arguments(self, parser, exclude=None):
+        """
+        Add common arguments to the parser.
+        Args:
+            parser: The parser to add arguments to
+            exclude: List of argument names to exclude
+        """
+        exclude = exclude or []
         self.common_arguments = [
             ("--loglevel", "Logging level. Default: info", str, "info", ["fatal", "error", "warning", "info", "debug"]),
             ("--threads", "Number of threads to run in parallel where applicable. Default: 1", int, 1, None),
@@ -42,13 +50,14 @@ class ArgsParser():
             ("--output", "Output prefix. Default: results", str, "results", None)
         ]
         for param in self.common_arguments:
-            parser.add_argument(
-                param[0],
-                help=param[1],
-                type=param[2],
-                default=param[3],
-                choices=param[4]
-            )
+            if param[0].lstrip('--') not in exclude:
+                parser.add_argument(
+                    param[0],
+                    help=param[1],
+                    type=param[2],
+                    default=param[3],
+                    choices=param[4]
+                )
 
     def get_parser(self):
         """
@@ -66,6 +75,28 @@ class ArgsParser():
             version=get_version(),
             help="Print current version and exit"
         )
+
+        # Index parameters
+        index_parser = subparsers.add_parser(
+            "index",
+            parents=[parent_parser],
+            help="Create an index from a GTF/GFF file"
+        )
+        index_parser.set_defaults(func=build_index)
+        index_parser.add_argument(
+            "--gtf",
+            help="Path to the GTF/GFF file to index",
+            type=str,
+            required=True
+        )
+        index_parser.add_argument(
+            "--output",
+            help="Output directory for the index files",
+            type=str,
+            required=True
+        )
+        # Add common arguments except output
+        self.add_common_arguments(index_parser, exclude=['output'])
 
         # Intron count parameters
         intron_parser = subparsers.add_parser(
@@ -264,6 +295,8 @@ class ArgsParser():
             self.assert_args_for_count_introns()
         elif self.args.func == aggregate:
             self.assert_args_for_aggregate()
+        elif self.args.func == build_index:
+            self.assert_args_for_index()
 
     def assert_args_for_count_junctions(self):
         pass
@@ -306,12 +339,27 @@ class ArgsParser():
                 only_introns=False
             )
 
+    def assert_args_for_index(self):
+        """
+        Assert arguments for the index command
+        """
+        if not os.path.exists(self.args.gtf):
+            logging.error(f"GTF/GFF file not found: {self.args.gtf}")
+            sys.exit(1)
+        
+        # Create output directory if it doesn't exist
+        os.makedirs(self.args.output, exist_ok=True)
+
     def assert_common_args(self):
         self.args.loglevel = getattr(logging, self.args.loglevel.upper())
         setup_logger(logging.root, self.args.loglevel)
         self.args.tmp.mkdir(parents=True, exist_ok=True)                          # safety measure, shouldn't fail
         self.args.output.parent.mkdir(parents=True, exist_ok=True)                # safety measure, shouldn't fail
-        self.args.chr = list(map(ChrConverter, self.args.chr))
+        
+        # Only process chr attribute if it exists
+        if hasattr(self.args, 'chr'):
+            self.args.chr = list(map(ChrConverter, self.args.chr))
+            
         if hasattr(self.args, "bam"):
             if not is_bam_indexed(self.args.bam):
                 try:
