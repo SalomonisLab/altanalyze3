@@ -72,7 +72,7 @@ def build_gene_model(df):
                     # write          
                     subexon_identifier = 'E'+str(block_index)+'.'+str(segment_index)
                     associated_ense = '|'.join(position_ense[p-1])  # because the current p is the first base in next segment, we are writing the previous segment and its associated ense
-                    string_stream += '{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(ensg,subexon_identifier,chromosome,strand,anchor_position,p-1,'',associated_ense)
+                    string_stream += '{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(ensg,subexon_identifier,chromosome,strand,anchor_position,p,'',associated_ense)
                     # update
                     running_profile = position_footprint[p]
                     segment_index += 1
@@ -125,7 +125,7 @@ def build_gene_model(df):
                     # write          
                     subexon_identifier = 'E'+str(block_index)+'.'+str(segment_index)
                     associated_ense = '|'.join(position_ense[p+1])  
-                    string_stream += '{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(ensg,subexon_identifier,chromosome,strand,p+1,anchor_position,'',associated_ense)
+                    string_stream += '{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(ensg,subexon_identifier,chromosome,strand,p,anchor_position,'',associated_ense)
                     # update
                     running_profile = position_footprint[p]
                     segment_index += 1

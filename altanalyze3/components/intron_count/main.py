@@ -254,7 +254,7 @@ class Counter:
         logging.info(f"""Save counts to {self.location}""")
         with self.location.open("w") as out_handler:
             for contig, start, end, name, strand, p5, p3 in self.overlaps:
-                out_handler.write(f"{contig}\t{start-self.span-1}\t{start+self.span-1}\t{name}_{start}\t{p5}\t{strand}\n")
+                out_handler.write(f"{contig}\t{start-self.span+1}\t{start+self.span+1}\t{name}_{start+1}\t{p5}\t{strand}\n")
                 out_handler.write(f"{contig}\t{end-self.span}\t{end+self.span}\t{name}_{end}\t{p3}\t{strand}\n")
 
     def export_reads(self):
