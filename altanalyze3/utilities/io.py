@@ -84,7 +84,7 @@ def is_bam_indexed(location, threads=None):
         return bam_handler.has_index()
 
 
-def get_indexed_references(location, tmp_location, selected_chr=None, only_introns=None):
+def get_indexed_references(location, tmp_location, selected_chr=None, only_introns=None, return_temp_bed=False):
     only_introns = False if only_introns is None else only_introns
 
     logging.info(f"""Loading references from {location}""")
@@ -128,7 +128,10 @@ def get_indexed_references(location, tmp_location, selected_chr=None, only_intro
         index=True
     )
 
-    return get_indexed_bed(target_location, keep_original=False, force=True)
+    if return_temp_bed:
+        return get_indexed_bed(target_location, keep_original=False, force=True), target_location
+    else:
+        return get_indexed_bed(target_location, keep_original=False, force=True)
 
 
 def export_counts_to_anndata(counts_df, location, counts_columns=None, metadata_columns=None, sparse_dtype=None, fill_value=None, strand_coords=None):

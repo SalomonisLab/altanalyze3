@@ -68,6 +68,41 @@ def process_contig(args, job):
                 f"{job.contig}\t{start}\t{end}\tJUNC:{job.contig}-{start}-{end}\t{count}\t{strand}\n"
             )
 
+def process_contig(args, job):
+    from collections import defaultdict
+    setup_logger(multiprocessing.get_logger(), args.loglevel)
+    multiprocessing.current_process().name = job.contig
+    logging.info(f"Process chromosome {job.contig} to {job.location}")
+    junctions = defaultdict(int)
+    with job.location.open("wt") as output_stream:
+        with pysam.AlignmentFile(args.bam, mode="rb", threads=args.threads) as bam:
+            contig = get_correct_contig(job.contig, bam)
+            for read in bam.fetch(contig):
+                if read.is_unmapped or read.is_secondary or read.is_supplementary:
+                    continue
+                if read.cigartuples is None:
+                    continue
+                if not any(op == 3 for op, _ in read.cigartuples):
+                    continue
+                try:
+                    strand = read.get_tag("XS")
+                except KeyError:
+                    continue  # no strand tag, skip this read
+                ref_pos = read.reference_start
+                for op, length in read.cigartuples:
+                    if op == 3:  # N = splice junction
+                        start = ref_pos
+                        end = ref_pos + length
+                        junctions[(start, end, strand)] += 1
+                    if op in {0, 2, 3, 7, 8}:  # advance reference
+                        ref_pos += length
+        for (start, end, strand), count in junctions.items():
+            if strand == '-':
+                start, end = end, start  # reverse the coordinates
+            output_stream.write(
+                f"{job.contig}\t{start}\t{end}\tJUNC:{job.contig}-{start}-{end}\t{count}\t{strand}\n"
+            )
+
 def collect_results(args, jobs):
     output_file = args.output.with_suffix(".bed")
     with output_file.open("w") as output_stream:
