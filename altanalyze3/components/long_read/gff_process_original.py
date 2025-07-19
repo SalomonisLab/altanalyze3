@@ -792,7 +792,7 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
             print ('sort error')
         return combined_dir
 
-def importEnsemblGenes(exon_file,include_introns=False):
+def importEnsemblGenes(exon_file):
     global exonCoordinates
     global geneData
     global exonData
@@ -834,12 +834,8 @@ def importEnsemblGenes(exon_file,include_introns=False):
             if 'E' in exon:
                 exonCoordinates[(chr, start, strandData[gene], 1)] = (gene, exon, index)
                 exonCoordinates[(chr, stop, strandData[gene], 2)] = (gene, exon, index)
-            elif include_introns:
-                exonCoordinates[(chr, start, strandData[gene], 1)] = (gene, exon, index)
-                exonCoordinates[(chr, stop, strandData[gene], 2)] = (gene, exon, index)
             index+=1
-    return exonCoordinates, geneData, strandData
-    
+
 def sort_gff(concatenated_gff_file, sorted_gff_file):
     def chromosome_sort_key(chromosome):
         chromosome = chromosome.replace('chr', '').replace('Chr', '')

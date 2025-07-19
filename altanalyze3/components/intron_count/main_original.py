@@ -254,16 +254,8 @@ class Counter:
         logging.info(f"""Save counts to {self.location}""")
         with self.location.open("w") as out_handler:
             for contig, start, end, name, strand, p5, p3 in self.overlaps:
-                #out_handler.write(f"{contig}\t{start-self.span+1}\t{start+self.span+1}\t{name}_{start+1}\t{p5}\t{strand}\n")
-                #out_handler.write(f"{contig}\t{end-self.span}\t{end+self.span}\t{name}_{end}\t{p3}\t{strand}\n")
-
-                if strand == "+":
-                    out_handler.write(f"{contig}\t{start-1}\t{start}\t{name}_{start}\t{p5}\t{strand}\n")
-                    out_handler.write(f"{contig}\t{end}\t{end+1}\t{name}_{end}\t{p3}\t{strand}\n")
-                elif strand == "-":
-                    out_handler.write(f"{contig}\t{end-1}\t{end}\t{name}_{end}\t{p5}\t{strand}\n")
-                    out_handler.write(f"{contig}\t{start}\t{start+1}\t{name}_{start}\t{p3}\t{strand}\n")
-
+                out_handler.write(f"{contig}\t{start-self.span+1}\t{start+self.span+1}\t{name}_{start+1}\t{p5}\t{strand}\n")
+                out_handler.write(f"{contig}\t{end-self.span}\t{end+self.span}\t{name}_{end}\t{p3}\t{strand}\n")
 
     def export_reads(self):
         bam_location = self.location.with_suffix(".bam")
@@ -359,7 +351,6 @@ def count_introns(args):
         pool.map(partial(process_contig, args), jobs)
     collect_results(args, jobs)
 
-    """
     import pathlib
     # Ensure you are getting the .bed.gz file path (this is args.ref after indexing)
     ref_gz = pathlib.Path(args.ref)
@@ -369,7 +360,7 @@ def count_introns(args):
         if f.exists():
             logging.info(f"Removing temporary file: {f}")
             f.unlink()
-    """
+
     logging.debug(f"Removing temporary directory and all contents for sample {args.bam.stem} at {sample_path}")
     shutil.rmtree(sample_path)
 
@@ -383,7 +374,7 @@ if __name__ == "__main__":
     parser.add_argument("--ref", type=Path, required=False, default=Path("/path/to/annotation.bed.gz"), help="Input intron BED file (.gz)")
     parser.add_argument("--output", type=Path, required=False, default=Path("/path/to/output_prefix"), help="Prefix path for output files (no extension)")
     parser.add_argument("--tmp", type=Path, required=False, default=Path("/tmp/altanalyze_tmp"), help="Temporary directory for intermediate files")
-    parser.add_argument("--span", type=int, default=10, help="Span threshold for 5'/3' prime assignment")
+    parser.add_argument("--span", type=int, default=0, help="Span threshold for 5'/3' prime assignment")
     parser.add_argument("--strandness", type=int, default=0, help="0: Auto, 1: Unstranded, 2: Forward, 3: Reverse")
     parser.add_argument("--cpus", type=int, default=4, help="Number of CPU processes to use")
     parser.add_argument("--threads", type=int, default=2, help="Number of BAM/Tabix threads per process")
@@ -401,7 +392,6 @@ if __name__ == "__main__":
     args.chr = ["chr1", "chr2", "chrX"]  # Example: change to [] if you want all chromosomes
     args.savereads = True  # Set to False if you don't want output BAM
     """
-    args.chr =["chr1", "chr2", "chr6"] 
     # Ensure tmp directory exists
     args.tmp.mkdir(parents=True, exist_ok=True)
     print (args)

@@ -4,27 +4,17 @@ from Bio import SeqIO
 from Bio.Seq import Seq
 
 # File paths - replace with a main function call to pass these variables when connected with upstream functions
-junctions_file = "/Users/saljh8/Dropbox/Manuscripts/InProgress/SNAF/STM-revision/AML/neojunction_SNAF-B_AML-MDS-additional.txt"
-junctions_file = "/Users/saljh8/Dropbox/Revio/BoneMarrow/SNAF-B_MDS-AML-neojunctions.txt"
-#junctions_file = "/Users/saljh8/Dropbox/Revio/BoneMarrow/dPSI-cluster-events/merged-HSC-1-Others-HSC-1_stats-annotated-filtered-filtered1.txt"
-#junctions_file = "/Users/saljh8/Dropbox/Revio/BoneMarrow/top-pattern-specific-splice-events-counts.txt"
-genome_fasta = "/Users/saljh8/Dropbox/Revio/Other/Variants/SNV/genome.fa"
-transcript_associations_file = "/Users/saljh8/Dropbox/Revio/BoneMarrow/gff-output/transcript_associations.txt"
-protein_summary_file = "/Users/saljh8/Dropbox/Revio/BoneMarrow/protein_summary.txt"
-orf_sequences_file = "/Users/saljh8/Dropbox/Revio/BoneMarrow/orf_sequences.fasta"
-orf_sequences_file = "/Users/saljh8/Dropbox/Revio/BoneMarrow/transcript_sequences.fasta"
-output_file = "/Users/saljh8/Dropbox/Revio/BoneMarrow/SNAF-B_functional_annotations-broad.txt"
-uniprot_coordinates = '/Users/saljh8/Desktop/Code/AltAnalyze/AltDatabase/EnsMart100/uniprot/Hs/Hs_FeatureCoordinate.txt'
-protein_translation_dir = '/Users/saljh8/Desktop/Code/AltAnalyze/AltDatabase/EnsMart100/ensembl/Hs/Hs_Ensembl_Protein__100_38.tab'
-gene_symbol_file = '/Users/saljh8/Documents/GitHub/altanalyze/AltDatabase/EnsMart91/ensembl/Hs/Hs_Ensembl-annotations.txt'
-uniprot_seq_file = '/Users/saljh8/Desktop/Code/AltAnalyze/AltDatabase/EnsMart112/uniprot/Hs/uniprot_sequence.txt'
+junctions_file = "/data/salomonis-archive/LabFiles/Nathan/Revio/BoneMarrow/SNAF-B_MDS-AML-neojunctions.txt"
+genome_fasta = "/data/salomonis-archive/LabFiles/Nathan/Revio/Hs/genome.fa"
+transcript_associations_file = "/data/salomonis-archive/LabFiles/Nathan/Revio/Pancancer1/gff-output/transcript_associations.txt"
+protein_summary_file = "/data/salomonis-archive/LabFiles/Nathan/Revio/Pancancer1/gff-output/protein_summary.txt"
+orf_sequences_file = "/data/salomonis-archive/LabFiles/Nathan/Revio/Pancancer1/gff-output/orf_sequences.fasta"
+output_file = "/data/salomonis-archive/LabFiles/Nathan/Revio/Pancancer1/gff-output/SNAF-B_functional_annotations-broad.txt"
+uniprot_coordinates = '/data/salomonis2/software/AltAnalyze-100/AltDatabase/EnsMart100/uniprot/Hs/Hs_FeatureCoordinate.txt'
+protein_translation_dir = '/data/salomonis2/software/AltAnalyze-100/AltDatabase/EnsMart100/ensembl/Hs/Hs_Ensembl_Protein__100_38.tab'
+gene_symbol_file = '/data/salomonis2/software/AltAnalyze-100/AltDatabase/EnsMart100/ensembl/Hs/Hs_Ensembl-annotations.txt'
+uniprot_seq_file = '/data/salomonis2/software/AltAnalyze-100/AltDatabase/EnsMart100/uniprot/Hs/uniprot_sequence.txt'
 
-"""
-transcript_associations_file = "/Users/saljh8/Dropbox/Revio/AML/gff-output/transcript_associations.txt"
-protein_summary_file = "/Users/saljh8/Dropbox/Revio/AML/protein_summary.txt"
-orf_sequences_file = "/Users/saljh8/Dropbox/Revio/AML/orf_sequences.fasta"
-output_file = "/Users/saljh8/Dropbox/Revio/AML/SNAF-B_functional_annotations.txt"
-"""
 # Helper functions
 def load_gene_symbols(file_path):
     gene_symbol_dict = {}
@@ -332,7 +322,7 @@ with open(orf_sequences_file, "r") as orf_handle, open(output_file, "w") as out_
              pass
 
     # Write results to output file
-    out_handle.write(f"symbol\tgene\tjunction_name\ttranscript_id\tPeptide in ORF\tprotein_info\tNovel-isoform-sequence\tjunc-seq\tjunction-peptide\tEM_domain_presence\tTM_overlap\tunique_peptide_seq\tref_isoform_seq\tprotein_length)\tref_length\ttm_count\tref_tm_count\tcDNA\n")
+    out_handle.write(f"symbol\tgene\tjunction_name\ttranscript_id\tPeptide in ORF\tprotein_info\tNovel-isoform-sequence\tjunc-seq\tjunction-peptide\tEM_domain_presence\tTM_overlap\tunique_peptide_seq\tref_isoform_seq\tprotein_length)\tref_length\ttm_count\tref_tm_count\ORF\n")
 
     for gene,junction_name, transcript_id, status, protein_info, protein_sequence, junc_seq, peptide, EM_domain_presence, TM_overlap, ref_isoform_seq, unique_peptide_seq, ref_length, tm_count, tm_ref_count, orf in results:
         if gene in gene_symbol_dict:

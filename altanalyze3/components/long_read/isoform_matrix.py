@@ -1,5 +1,4 @@
-import os
-import sys
+import os, sys, time
 import csv
 import anndata as ad
 import pandas as pd
@@ -14,6 +13,8 @@ import argparse
 from tqdm import tqdm # progress bar
 sys.path.insert(1, os.path.join(sys.path[0], '..'))
 from joblib import Parallel, delayed
+from anndata import AnnData, concat, read_h5ad
+
 
 """
 Module for long-read sparse matrix single-cell processing.
@@ -584,6 +585,82 @@ def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_
         return combined_pseudo_file, combined_tpm_file, combined_isoform_ratio_file
 
     return combined_pseudo_file
+
+
+def extract_all_features_above_threshold(h5ad_files, min_reads):
+    feature_sums = {}  # {feature: total_count_across_files}
+
+    for file in h5ad_files:
+        adata = read_h5ad(file)
+        X = adata.X
+        var_names = adata.var_names
+
+        # Sum reads for this file
+        counts = np.asarray(X.sum(axis=0)).ravel()
+        for feat, count in zip(var_names, counts):
+            if feat in feature_sums:
+                feature_sums[feat] += count
+            else:
+                feature_sums[feat] = count
+
+    # Keep only features with total reads above threshold
+    retained_features = [feat for feat, total in feature_sums.items() if total >= min_reads]
+    print(f"Retained {len(retained_features)} features with ≥{min_reads} total reads")
+
+    return sorted(retained_features)
+
+def align_adata_to_union(h5ad_file, all_features, feature_to_idx):
+    adata = read_h5ad(h5ad_file)
+    sample_id = os.path.basename(h5ad_file).replace('.h5ad', '')
+    # Ensure unique obs_names across all files
+    adata.obs_names = [f"{sample_id}.{name}" for name in adata.obs_names]
+
+    old_features = adata.var_names
+
+    old_to_new_idx = {i: feature_to_idx[feat] for i, feat in enumerate(old_features) if feat in feature_to_idx}
+
+    X = adata.X.tocoo()
+    rows, cols, data = [], [], []
+    for i, j, v in zip(X.row, X.col, X.data):
+        if j in old_to_new_idx:
+            rows.append(i)
+            cols.append(old_to_new_idx[j])
+            data.append(v)
+    new_X = csr_matrix((data, (rows, cols)), shape=(adata.n_obs, len(all_features)))
+
+    new_var = pd.DataFrame(index=all_features)
+    for col in adata.var.columns:
+        dtype = float if pd.api.types.is_numeric_dtype(adata.var[col]) else object
+        new_var[col] = pd.Series(index=all_features, dtype=dtype)
+        shared_features = adata.var.index.intersection(new_var.index)
+        new_var.loc[shared_features, col] = adata.var.loc[shared_features, col]
+
+    adata.obs = adata.obs.copy()
+    adata.obs['sample'] = os.path.basename(h5ad_file).replace('.h5ad', '')
+    return AnnData(X=new_X, obs=adata.obs, var=new_var, uns=adata.uns.copy())
+
+def combine_h5ad_files_parallel(sample_h5ads_dict, output_file='combined.h5ad', n_jobs=4, min_total_reads=200):
+    start_time = time.time()
+    h5ad_files = sorted(set(sample_h5ads_dict.values()))
+    print(f"Identifying union of features across {len(h5ad_files)} files...")
+    #all_features = extract_all_features(h5ad_files)
+    all_features = extract_all_features_above_threshold(h5ad_files, min_total_reads)
+
+    feature_to_idx = {feat: idx for idx, feat in enumerate(all_features)}
+
+    print("Aligning features in parallel...")
+    aligned_adatas = Parallel(n_jobs=n_jobs)(
+        delayed(align_adata_to_union)(file, all_features, feature_to_idx)
+        for file in h5ad_files
+    )
+
+    print("Concatenating aligned AnnData objects...")
+    combined_adata = concat(aligned_adatas, axis=0, join='outer')
+    print(f"Writing combined file to: {output_file}")
+    combined_adata.write_h5ad(output_file, compression='gzip')
+    end_time = time.time()  # End the timer
+    print(f"Execution time: {end_time - start_time:.2f} seconds")
+    return combined_adata
 
 if __name__ == '__main__':
     sample_name = 'test'

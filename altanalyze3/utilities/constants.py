@@ -98,29 +98,28 @@ IntronsParams = {
     "sep": "\t"
 }
 
-
 JunctionsParams = {
-    "usecols": [0, 1, 2, 3, 4],
-    "names": ["chr", "start", "end", "name", "score"],
-    "index_col": ["chr", "start", "end", "name"],
+    "usecols": [0, 1, 2, 3, 4, 5],  # <- previously ended at column 4
+    "names": ["chr", "start", "end", "name", "score", "strand"],
+    "index_col": ["chr", "start", "end", "name", "strand"],
     "converters": {"chr": ChrConverter},
     "dtype": {
         "start": "int32",
         "end": "int32",
         "name": "string",
-        "score": "int32"
+        "score": "int32",
+        "strand": "category"
     },
     "sep": "\t"
 }
 
-
 ReferencesParams = {
     "usecols": [0, 1, 2, 3, 4, 5],
-    "names": ["gene", "chr", "strand", "exon", "start", "end"],
+    "names": ["chr", "start", "end", "exon", "gene", "strand"],
     "index_col": ["chr", "start", "end"],
     "converters": {
         "chr": ChrConverter,
-        "start": lambda c: int(c)-1                      # need to make [start, end) intervals
+        "start": lambda c: int(c)-1
     },
     "dtype": {
         "gene": "string",
