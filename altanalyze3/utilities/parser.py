@@ -3,6 +3,7 @@ import sys
 import pysam
 import logging
 import pathlib
+from pathlib import Path
 import argparse
 from altanalyze3.utilities.logger import setup_logger
 from altanalyze3.utilities.helpers import get_version
@@ -194,71 +195,42 @@ class ArgsParser():
         # Aggregate parameters
         aggregate_parser = subparsers.add_parser(
             "aggregate",
-            parents=[parent_parser],
-            help="Aggregate read counts produced by intcount and juncount"
+            help="Aggregate junction and intron BED files into a single .h5ad matrix"
         )
-        aggregate_parser.set_defaults(func=aggregate)
-        aggregate_parser.add_argument(
-            "--juncounts",
-            help=" ".join(
-                [
-                    "Path the junction counts files. Coordinates are treated as 0-based.",
-                    "If provided with --intcounts, the number and the order should",
-                    "correspond to --intcounts."
-                ]
-            ),
-            type=str,
-            nargs="*"
-        )
-        aggregate_parser.add_argument(
-            "--intcounts",
-            help=" ".join(
-                [
-                    "Path the intron counts files. Coordinates are treated as 0-based.",
-                    "If provided with --juncounts, the number and the order should",
-                    "correspond to --juncounts."
-                ]
-            ),
-            type=str,
-            nargs="*"
-        )
-        aggregate_parser.add_argument(
-            "--aliases",
-            help=" ".join(
-                [
-                    "Column names to be used for the loaded counts. The number of provided",
-                    "aliases should be equal to the number of --intcounts and/or --juncounts",
-                    "files. Default: rootname of --intcounts and/or --intcounts files."
-                ]
-            ),
-            type=str,
-            nargs="*"
-        )
-        aggregate_parser.add_argument(
-            "--ref",
-            help=" ".join(
-                [
-                    "Path to the gene model reference file. Coordinates are treated as 1-based.",
-                    "Required if --juncounts parameter was provided."
-                ]
-            ),
-            type=str,
-            required=False
-        )
-        aggregate_parser.add_argument(
-            "--chr",
-            help="Select chromosomes to process. Default: only main chromosomes",
-            type=str,
-            nargs="*",
-            default=MAIN_CRH
-        )
-        aggregate_parser.add_argument(
-            "--bed",
-            help="Export annotated 0-based coordinates as BED file. Default: False",
-            action="store_true"
-        )
-        self.add_common_arguments(aggregate_parser)
 
+        aggregate_parser.add_argument(
+            "--juncounts", type=str, required=False,
+            help="Junction count BED file or directory containing BED files"
+        )
+        aggregate_parser.add_argument(
+            "--intcounts", type=str, required=False,
+            help="Intron count BED file or directory containing BED files"
+        )
+        aggregate_parser.add_argument(
+            "--output", type=str, required=True,
+            help="Path prefix for output h5ad file (suffix .h5ad will be added)"
+        )
+        aggregate_parser.add_argument(
+            "--chr", nargs="+", default=[],
+            help="Optional list of chromosomes to retain (e.g. chr1 chr2 chrX)"
+        )
+
+        aggregate_parser.add_argument(
+            "--ref", type=str, required=True,
+            help="Reference exon BED file used for annotation"
+        )
+
+        aggregate_parser.set_defaults(func=aggregate)
+
+        aggregate_parser.add_argument(
+            "--loglevel", type=str, default="INFO",
+            help="Logging level: DEBUG, INFO, WARNING, ERROR"
+        )
+
+        aggregate_parser.add_argument(
+            "--tmp", type=Path, default=Path("/tmp/altanalyze_tmp"),
+            help="Temporary directory for intermediate files"
+        )
         return general_parser
 
     def resolve_path(self, selected=None):
@@ -295,6 +267,21 @@ class ArgsParser():
             self.assert_args_for_count_introns()
         elif self.args.func == aggregate:
             self.assert_args_for_aggregate()
+
+            from altanalyze3.components.aggregate import annotate  # assumes annotate.py is in that directory
+            import anndata
+
+            aggregated_path = Path(self.args.output).with_suffix(".h5ad")
+            adata = anndata.read_h5ad(aggregated_path)
+            # Use the full exon_file not the compressed bed version
+            exon_file = self.args.ref.with_name(self.args.ref.name.replace(".bed.gz", "_all.tsv"))
+            annotate.annotate_junctions(adata, exon_file)
+            annotated_path = aggregated_path.with_name(aggregated_path.stem + "_annotated.h5ad")
+            adata.write(annotated_path)
+
+            # Export dense TSV
+            annotate.export_dense_matrix(adata, annotated_path.with_suffix(".tsv"))
+
         elif self.args.func == build_index:
             self.assert_args_for_index()
 
@@ -314,30 +301,20 @@ class ArgsParser():
         if self.args.juncounts is None and self.args.intcounts is None:
             logging.error("At least one of the --juncounts or --intcounts inputs should be provided")
             sys.exit(1)
-        if self.args.juncounts is not None and self.args.intcounts is not None and len(self.args.juncounts) != len(self.args.intcounts):
-            logging.error("Number of the provided files for --juncounts and --intcounts should be equal")
-            sys.exit(1)
-        if self.args.aliases is not None:
-            if self.args.juncounts is not None and len(self.args.aliases) != len(self.args.juncounts):
-                logging.error("Number of the provided --aliases and --juncounts files should be equal")
-                sys.exit(1)
-            if self.args.intcounts is not None and len(self.args.aliases) != len(self.args.intcounts):
-                logging.error("Number of the provided --aliases and --intcounts files should be equal")
-                sys.exit(1)
-        if self.args.aliases is None:
-            zipped = zip(self.args.juncounts) if self.args.juncounts is not None else zip(self.args.intcounts)
-            zipped = zip(*zip(*zipped), self.args.intcounts if self.args.intcounts is not None else self.args.juncounts)
-            self.args.aliases = [os.path.commonprefix([a.stem, b.stem]) for a, b in zipped]
+        # Skip length check if input is Path (new usage: file or dir)
+        if isinstance(self.args.juncounts, list) and isinstance(self.args.intcounts, list):
+            if len(self.args.juncounts) != len(self.args.intcounts):
+                raise ValueError("The number of junction and intron count files must match.")
+        def assert_args_for_aggregate(self):
+            # Only check list-lengths if both are lists (for backward compatibility)
+            if isinstance(self.args.juncounts, list) and isinstance(self.args.intcounts, list):
+                if len(self.args.juncounts) != len(self.args.intcounts):
+                    raise ValueError("The number of junction and intron count files must match.")
+
         if self.args.juncounts is not None:
             if self.args.ref is None:
                 logging.error("--ref parameter is required when using with --intcounts")
                 sys.exit(1)
-            self.args.ref = get_indexed_references(
-                location=self.args.ref,
-                tmp_location=self.args.tmp,
-                selected_chr=self.args.chr,
-                only_introns=False
-            )
 
     def assert_args_for_index(self):
         """

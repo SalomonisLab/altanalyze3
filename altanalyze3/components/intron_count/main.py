@@ -359,7 +359,7 @@ def count_introns(args):
         pool.map(partial(process_contig, args), jobs)
     collect_results(args, jobs)
 
-    """
+    #"""
     import pathlib
     # Ensure you are getting the .bed.gz file path (this is args.ref after indexing)
     ref_gz = pathlib.Path(args.ref)
@@ -369,7 +369,7 @@ def count_introns(args):
         if f.exists():
             logging.info(f"Removing temporary file: {f}")
             f.unlink()
-    """
+    #"""
     logging.debug(f"Removing temporary directory and all contents for sample {args.bam.stem} at {sample_path}")
     shutil.rmtree(sample_path)
 

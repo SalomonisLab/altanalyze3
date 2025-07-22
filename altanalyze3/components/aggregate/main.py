@@ -56,6 +56,7 @@ def write_h5ad_compressed(adata: anndata.AnnData, out_path: Path):
 
 
 def aggregate(args):
+
     def resolve_files(path_str):
         p = Path(path_str)
         return sorted(p.glob("*.bed")) if p.is_dir() else [p]
