@@ -99,6 +99,7 @@ def process_contig(args, job):
         for (start, end, strand), count in junctions.items():
             if strand == '-':
                 start, end = end, start  # reverse the coordinates
+                start += 1 # to be compliant with the exon annotations
             output_stream.write(
                 f"{job.contig}\t{start}\t{end}\tJUNC:{job.contig}-{start}-{end}\t{count}\t{strand}\n"
             )

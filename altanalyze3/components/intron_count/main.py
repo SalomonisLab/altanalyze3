@@ -261,8 +261,8 @@ class Counter:
                     out_handler.write(f"{contig}\t{start-1}\t{start}\t{name}_{start}\t{p5}\t{strand}\n")
                     out_handler.write(f"{contig}\t{end}\t{end+1}\t{name}_{end}\t{p3}\t{strand}\n")
                 elif strand == "-":
-                    out_handler.write(f"{contig}\t{end-1}\t{end}\t{name}_{end}\t{p5}\t{strand}\n")
-                    out_handler.write(f"{contig}\t{start}\t{start+1}\t{name}_{start}\t{p3}\t{strand}\n")
+                    out_handler.write(f"{contig}\t{end+1}\t{end}\t{name}_{end}\t{p5}\t{strand}\n")
+                    out_handler.write(f"{contig}\t{start}\t{start+1}\t{name}_{start+1}\t{p3}\t{strand}\n")
 
 
     def export_reads(self):

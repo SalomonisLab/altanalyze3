@@ -16,7 +16,9 @@ def annotate_junctions(adata, exon_file):
         start = row["start"]
         end = row["end"]
         strand = row["strand"]
-
+        if strand == '-':
+            start,end = end,start
+        """
         # Assign donor and acceptor based on strand
         if strand == "+":
             uid1 = (chr, start, strand, 2)  # Donor
@@ -26,19 +28,31 @@ def annotate_junctions(adata, exon_file):
             uid1 = (chr, end, strand, 2)    # Donor on negative strand
             uid2 = (chr, start, strand, 1)  # Acceptor on negative strand
             pos1, pos2 = end, start
+        """
 
-        def get_annot(uid, pos):
+        def get_annot(chr,pos,strand,site):
+            uid = (chr,pos,strand,site)
             if uid in exonCoordinates:
                 gene, exon, _ = exonCoordinates[uid]
                 return f"{gene}:{exon}"
             else:
-                for gene in geneData:
-                    if geneData[gene][0][0] <= pos <= geneData[gene][-1][1] and strandData[gene] == strand:
-                        return f"{gene}:{gff_process.findNovelSpliceSite(gene, pos, strand)}"
-                return f"NA:{pos}"
+                if site == 1: 
+                    site = 2 # splice donor
+                else: 
+                    site = 1 # splice acceptor
+                uid = (chr,pos,strand, site)
+                if uid in exonCoordinates:
+                    gene, exon, _ = exonCoordinates[uid]
+                    return f"{gene}:{exon}"
+                else:
+                    # Check for novel splice site
+                    for gene in geneData:
+                        if geneData[gene][0][0] <= pos <= geneData[gene][-1][1] and strandData[gene] == strand:
+                            return f"{gene}:{gff_process.findNovelSpliceSite(gene, pos, strand)}"
+                    return f"NA:{pos}"
 
-        annot1 = get_annot(uid1, pos1)
-        annot2 = get_annot(uid2, pos2)
+        annot1 = get_annot(chr, start, strand, 2)
+        annot2 = get_annot(chr, end, strand, 1)
 
         # Always report both gene:exon components
         annotations.append(f"{annot1}-{annot2}")

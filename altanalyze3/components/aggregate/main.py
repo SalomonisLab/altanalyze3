@@ -50,7 +50,6 @@ def sort_adata_by_genomic_position(adata: anndata.AnnData) -> anndata.AnnData:
     return adata[:, sorter].copy()  # Force copy to avoid ImplicitModificationWarning
 
 
-
 def write_h5ad_compressed(adata: anndata.AnnData, out_path: Path):
     adata.write(out_path, compression="gzip")
 
