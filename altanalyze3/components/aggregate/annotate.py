@@ -18,23 +18,12 @@ def annotate_junctions(adata, exon_file):
         strand = row["strand"]
         if strand == '-':
             start,end = end,start
-        """
-        # Assign donor and acceptor based on strand
-        if strand == "+":
-            uid1 = (chr, start, strand, 2)  # Donor
-            uid2 = (chr, end, strand, 1)    # Acceptor
-            pos1, pos2 = start, end
-        else:
-            uid1 = (chr, end, strand, 2)    # Donor on negative strand
-            uid2 = (chr, start, strand, 1)  # Acceptor on negative strand
-            pos1, pos2 = end, start
-        """
 
         def get_annot(chr,pos,strand,site):
             uid = (chr,pos,strand,site)
             if uid in exonCoordinates:
                 gene, exon, _ = exonCoordinates[uid]
-                return f"{gene}:{exon}"
+                return gene, exon #f"{gene}:{exon}"
             else:
                 if site == 1: 
                     site = 2 # splice donor
@@ -43,19 +32,42 @@ def annotate_junctions(adata, exon_file):
                 uid = (chr,pos,strand, site)
                 if uid in exonCoordinates:
                     gene, exon, _ = exonCoordinates[uid]
-                    return f"{gene}:{exon}"
+                    return gene, exon
                 else:
-                    # Check for novel splice site
-                    for gene in geneData:
-                        if geneData[gene][0][0] <= pos <= geneData[gene][-1][1] and strandData[gene] == strand:
-                            return f"{gene}:{gff_process.findNovelSpliceSite(gene, pos, strand)}"
-                    return f"NA:{pos}"
+                    return None, None
 
-        annot1 = get_annot(chr, start, strand, 2)
-        annot2 = get_annot(chr, end, strand, 1)
+        def find_completely_novel_annot(chr,pos,strand):
+            for gene in geneData:
+                if geneData[gene][0][0] <= pos <= geneData[gene][-1][1] and strandData[gene] == strand:
+                    return gene, gff_process.findNovelSpliceSite(gene, pos, strand)
+            return None, None #f"NA:{pos}"
 
-        # Always report both gene:exon components
-        annotations.append(f"{annot1}-{annot2}")
+        gene1,exon1 = get_annot(chr, start, strand, 2)
+        gene2,exon2 = get_annot(chr, end, strand, 1)
+
+        if strand == '-' and (end>start):
+            # Correct naming and order 
+            gene1,exon1,gene2,exon2 = gene2,exon2,gene1,exon1
+            start,end = end,start
+        if gene1 != gene2: # novel splice site or gene
+            if gene1 == None:
+                exon1 = gff_process.findNovelSpliceSite(gene2, start, strand)
+                annotations.append(f"{gene2}:{exon1}-{exon2}={chr}:{start}-{end}")
+            elif gene2 == None:
+                exon2 = gff_process.findNovelSpliceSite(gene1, end, strand)
+                annotations.append(f"{gene1}:{exon1}-{exon2}={chr}:{start}-{end}")
+            else:
+                # trans-splicing
+                annotations.append(f"{gene1}:{exon1}-{gene2}:{exon2}={chr}:{start}-{end}")
+        elif gene1 == None: #both == None
+            gene1, exon1 = find_completely_novel_annot(chr,start,strand)
+            gene2, exon2 = find_completely_novel_annot(chr,start,strand)
+            if gene1 == gene2:
+                annotations.append(f"{gene1}:{exon1}-{exon2}={chr}:{start}-{end}")
+            else:
+                annotations.append(f"{gene1}:{exon1}-{gene2}:{exon2}={chr}:{start}-{end}")
+        else:
+            annotations.append(f"{gene1}:{exon1}-{exon2}={chr}:{start}-{end}")
 
     adata.var["annotation"] = annotations
 
