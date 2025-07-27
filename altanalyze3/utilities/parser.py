@@ -268,20 +268,6 @@ class ArgsParser():
         elif self.args.func == aggregate:
             self.assert_args_for_aggregate()
 
-            from altanalyze3.components.aggregate import annotate  # assumes annotate.py is in that directory
-            import anndata
-
-            aggregated_path = Path(self.args.output).with_suffix(".h5ad")
-            adata = anndata.read_h5ad(aggregated_path)
-            # Use the full exon_file not the compressed bed version
-            exon_file = self.args.ref.with_name(self.args.ref.name.replace(".bed.gz", "_all.tsv"))
-            annotate.annotate_junctions(adata, exon_file)
-            annotated_path = aggregated_path.with_name(aggregated_path.stem + "_annotated.h5ad")
-            adata.write(annotated_path)
-
-            # Export dense TSV
-            annotate.export_dense_matrix(adata, annotated_path.with_suffix(".tsv"))
-
         elif self.args.func == build_index:
             self.assert_args_for_index()
 

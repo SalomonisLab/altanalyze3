@@ -254,15 +254,13 @@ class Counter:
         logging.info(f"""Save counts to {self.location}""")
         with self.location.open("w") as out_handler:
             for contig, start, end, name, strand, p5, p3 in self.overlaps:
-                #out_handler.write(f"{contig}\t{start-self.span+1}\t{start+self.span+1}\t{name}_{start+1}\t{p5}\t{strand}\n")
-                #out_handler.write(f"{contig}\t{end-self.span}\t{end+self.span}\t{name}_{end}\t{p3}\t{strand}\n")
-
-                if strand == "+":
-                    out_handler.write(f"{contig}\t{start-1}\t{start}\t{name}_{start}\t{p5}\t{strand}\n")
-                    out_handler.write(f"{contig}\t{end}\t{end+1}\t{name}_{end}\t{p3}\t{strand}\n")
-                elif strand == "-":
-                    out_handler.write(f"{contig}\t{end+1}\t{end}\t{name}_{end}\t{p5}\t{strand}\n")
-                    out_handler.write(f"{contig}\t{start}\t{start+1}\t{name}_{start+1}\t{p3}\t{strand}\n")
+                if p5>0 and p3>0: # PE reads exist at the 5' and 3' end of the intron
+                    if strand == "+":
+                        out_handler.write(f"{contig}\t{start-1}\t{start}\t{name}_{start}\t{p5}\t{strand}\n")
+                        out_handler.write(f"{contig}\t{end}\t{end+1}\t{name}_{end}\t{p3}\t{strand}\n")
+                    elif strand == "-":
+                        out_handler.write(f"{contig}\t{end+1}\t{end}\t{name}_{end}\t{p5}\t{strand}\n")
+                        out_handler.write(f"{contig}\t{start}\t{start+1}\t{name}_{start+1}\t{p3}\t{strand}\n")
 
 
     def export_reads(self):

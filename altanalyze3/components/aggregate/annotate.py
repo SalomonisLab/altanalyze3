@@ -71,8 +71,16 @@ def annotate_junctions(adata, exon_file):
 
     adata.var["annotation"] = annotations
 
-
 def export_dense_matrix(adata, out_path):
+    df = pd.DataFrame(
+        adata.X.toarray().T,
+        columns=adata.obs_names
+    )
+
+    df.insert(0, "UID", adata.var["annotation"].values)
+    df.to_csv(out_path, sep="\t", index=False)
+
+def export_dense_matrix1(adata, out_path):
     uids = (
         adata.var["chr"].astype(str) + ":"
         + adata.var["start"].astype(str) + "-"
@@ -90,7 +98,8 @@ def export_dense_matrix(adata, out_path):
     df.insert(0, "annotation", adata.var["annotation"].values)
     df.index.name = "uid"
     df.to_csv(out_path, sep="\t")
-
+    import altanalyze3.components.long_read.isoform_automate as isoa
+    junction_coords_file = isoa.export_sorted(str(out_path), 0)
 
 if __name__ == "__main__":
     import argparse
@@ -110,3 +119,4 @@ if __name__ == "__main__":
         export_path = annotated_path.with_suffix(".tsv")
         export_dense_matrix(adata, export_path)
         print(f"Dense matrix exported to: {export_path}")
+
