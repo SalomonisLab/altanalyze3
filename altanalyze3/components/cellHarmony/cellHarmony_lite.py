@@ -40,7 +40,8 @@ def combine_and_align_h5(
     save_adata=False,
     unsupervised_cluster=False,
     append_obs_field=None,
-    alignment_mode="classic"
+    alignment_mode="classic",
+    min_alignment_score=None
 ):
     start_time = time.time()
     os.makedirs(output_dir, exist_ok=True)
@@ -108,7 +109,14 @@ def combine_and_align_h5(
                 shutil.copy(barcodes, os.path.join(tmp_path, os.path.basename(barcodes)))
                 shutil.copy(features, os.path.join(tmp_path, "features.tsv.gz" if features.endswith(".gz") else "features.tsv"))
 
-                sample_name = os.path.basename(prefix)
+                # Determine sample name correctly
+                if os.path.basename(path) in ("matrix.mtx", "matrix.mtx.gz"):
+                    # If the file is literally matrix.mtx, use its parent folder name (e.g. "Chow-Flu-5")
+                    base_dir = os.path.dirname(path)
+                    sample_name = os.path.basename(os.path.normpath(base_dir))
+                else:
+                    # Otherwise use the prefix logic (for *_matrix.mtx.gz style files)
+                    sample_name = os.path.basename(prefix)
 
                 try:
                     adata = sc.read_10x_mtx(tmp_path, var_names='gene_symbols')
@@ -182,6 +190,9 @@ def combine_and_align_h5(
 
         adata_combined = adata_combined[adata_combined.obs["pct_counts_mt"] < mit_percent].copy()
         print(f"Cells remaining after mito-percent filtering: {adata_combined.n_obs}")
+
+    # retain the original counts in the h5ad in the new counts slot
+    adata_combined.layers["counts"] = adata_combined.X.copy()
 
     with tqdm(total=3, desc="Normalization steps") as pbar:
         sc.pp.normalize_total(adata_combined, target_sum=1e4); pbar.update(1)
@@ -272,6 +283,13 @@ def combine_and_align_h5(
         "AlignmentScore": alignment_scores
     })
 
+    if min_alignment_score is not None:
+        before = match_df.shape[0]
+        match_df = match_df[match_df["AlignmentScore"] >= min_alignment_score].copy()
+        after = match_df.shape[0]
+        print(f"[INFO] Applied min_alignment_score={min_alignment_score}. "
+            f"Excluded {before - after} cells, kept {after}.")
+
     if alignment_mode == "community":
         ordered_match_df = match_df.sort_values(ref_name, ascending=False)
     else:
@@ -304,12 +322,14 @@ def combine_and_align_h5(
             adata_filtered = adata_combined[adata_combined.obs[ref_name].isin(
                 adata_combined.obs[ref_name].value_counts()[lambda x: x >= 10].index
             )].copy()
+
             adata_filtered = downsample_cells_per_group(adata_filtered, ref_name, max_cells=150)
 
             sc.tl.rank_genes_groups(adata_filtered, groupby=ref_name, method='wilcoxon', use_raw=False)
             save_marker_genes(adata_filtered, ref_name, os.path.join(output_dir, 'supervised_markers.txt'))
 
             deg_results = pd.DataFrame(adata_filtered.uns['rank_genes_groups']['names'])
+
             markers = list(set([gene for col in deg_results.columns for gene in deg_results[col][:10]]))
             excluded_prefixes = ('mt-', 'rp', 'xist')
             markers = [gene for gene in markers if not gene.lower().startswith(excluded_prefixes) and gene in adata_filtered.var_names]
@@ -317,10 +337,12 @@ def combine_and_align_h5(
             adata_markers = adata_filtered[:, markers].copy()
             sc.pp.pca(adata_markers, n_comps=50)
             sc.pp.neighbors(adata_markers)
-            sc.tl.umap(adata_markers)
 
+            sc.tl.umap(adata_markers)
             adata_all_cells = adata_combined[:, markers].copy()
-            sc.pp.pca(adata_all_cells, n_comps=50)
+
+            sc.pp.pca(adata_all_cells, n_comps=50) ### Segmentation fault: 11 - leaked semaphore - if library mismatch
+
             sc.pp.neighbors(adata_all_cells)
             sc.tl.umap(adata_all_cells)
 
@@ -379,68 +401,75 @@ def combine_and_align_h5(
         # If unsupervised clustering was run, merge leiden clusters into adata_combined before saving
         if unsupervised_cluster and 'leiden' in adata_unsup.obs.columns:
             adata_combined.obs['scanpy-leiden'] = adata_unsup.obs['leiden']
+            coords_unsup = adata_unsup.obsm['X_umap']
+            adata_combined.obsm['X_umap_leiden'] = coords_unsup
+            adata_combined.obs['UMAP_leiden_X'] = coords_unsup[:, 0]
+            adata_combined.obs['UMAP_leiden_Y'] = coords_unsup[:, 1]
+
+            # Export leiden results to a tsv
+            leiden_export = pd.DataFrame({
+                "CellBarcode": adata_unsup.obs_names,
+                "Leiden": adata_unsup.obs['leiden'].values,
+                "UMAP_X": coords_unsup[:, 0],
+                "UMAP_Y": coords_unsup[:, 1]
+            })
+            leiden_export.to_csv(
+                os.path.join(output_dir, "unsupervised_leiden_clusters.tsv"),
+                sep="\t", index=False
+            )
+
         adata_combined.write(os.path.join(output_dir, "combined_with_umap_and_markers.h5ad"), compression="gzip")
 
 
     print(f"Analysis completed in {time.time() - start_time:.2f} seconds.")
     return ordered_match_df
 
+
 def get_h5_and_mtx_files(folder_path):
     """
-    Scans a directory for:
-    - .h5 files
-    - triplet-formatted 10x files using *_filtered_matrix.mtx.gz, *_counts.mtx.gz, or *_matrix.mtx.gz
-    - Accepts either *_features.tsv.gz or *_genes.tsv.gz
-    - .tar.gz or .tgz archives with filtered_feature_bc_matrix/
-
-    Returns a list of .h5 files and representative paths to mtx inputs.
+    Recursively scans a directory for:
+      - .h5 files
+      - .h5ad files
+      - 10x-style triplets: matrix.mtx (+ barcodes.tsv + genes.tsv/features.tsv)
+      - .tar.gz/.tgz archives containing 10x-formatted content
+    Returns a list of file paths (h5, h5ad, or matrix.mtx).
     """
-
-    if '.' in folder_path[-5:]:
-        return [folder_path]
 
     import tarfile
     import tempfile
 
-    h5_files = sorted(glob(os.path.join(folder_path, "*.h5")))
- 
-    h5ad_files = sorted(glob(os.path.join(folder_path, "*.h5ad")))
+    results = []
 
-    mtx_paths = []
+    # Direct case: if folder_path is itself a file
+    if os.path.isfile(folder_path):
+        if folder_path.endswith((".h5", ".h5ad", ".mtx", ".mtx.gz")):
+            return [folder_path]
 
-    # Define suffix patterns to match
-    suffixes = [
-        "_filtered_matrix.mtx.gz", "_counts.mtx.gz", "_matrix.mtx.gz",
-        "filtered_matrix.mtx.gz", "matrix.mtx.gz", "matrix.mtx"
-    ]
+    # Walk all subdirectories
+    for root, dirs, files in os.walk(folder_path):
+        # h5 / h5ad
+        for f in files:
+            if f.endswith(".h5") or f.endswith(".h5ad"):
+                results.append(os.path.join(root, f))
 
-    # Scan for all matching matrix files
-    for suffix in suffixes:
-        matrix_files = sorted(glob(os.path.join(folder_path, f"*{suffix}")))
-        for matrix_path in matrix_files:
-            prefix = matrix_path[:-len(suffix)]
-            
-            # Determine corresponding barcodes and features files
-            if matrix_path.endswith(".gz"):
-                barcode_file = prefix + "barcodes.tsv.gz"
-                feature_options = [prefix + "features.tsv.gz", prefix + "genes.tsv.gz"]
-            else:
-                barcode_file = prefix + "barcodes.tsv"
-                feature_options = [prefix + "features.tsv", prefix + "genes.tsv"]
-
-            # Find existing feature file
+        # Check for matrix triplet
+        if "matrix.mtx" in files or "matrix.mtx.gz" in files:
+            # determine filenames in this folder
+            gz = "matrix.mtx.gz" in files
+            barcode_file = os.path.join(root, "barcodes.tsv.gz" if gz else "barcodes.tsv")
+            feature_options = [
+                os.path.join(root, "features.tsv.gz" if gz else "features.tsv"),
+                os.path.join(root, "genes.tsv.gz" if gz else "genes.tsv"),
+            ]
             features = next((f for f in feature_options if os.path.exists(f)), None)
-
-            # Check for barcode and feature file existence
             if os.path.exists(barcode_file) and features:
-                mtx_paths.append(matrix_path)
+                mtx_name = "matrix.mtx.gz" if gz else "matrix.mtx"
+                results.append(os.path.join(root, mtx_name))
 
-    # Extract tar.gz/tgz archives with 10x-formatted content
-    tarballs = sorted(glob(os.path.join(folder_path, "*.tar.gz")) + glob(os.path.join(folder_path, "*.tgz")))
-    for archive in tarballs:
-        with tarfile.open(archive, "r:gz") as tar:
-            members = tar.getnames()
-            for archive in tarballs:
+        # Check for tarballs
+        for f in files:
+            if f.endswith((".tar.gz", ".tgz")):
+                archive = os.path.join(root, f)
                 with tarfile.open(archive, "r:gz") as tar:
                     members = tar.getnames()
                     extract_dirs = set(os.path.dirname(m) for m in members if m.endswith((".mtx.gz", ".tsv.gz")))
@@ -448,15 +477,17 @@ def get_h5_and_mtx_files(folder_path):
                         if (
                             any(m.endswith(f"{subdir}/matrix.mtx.gz") for m in members) and
                             any(m.endswith(f"{subdir}/barcodes.tsv.gz") for m in members) and
-                            any(m.endswith(f"{subdir}/features.tsv.gz") for m in members) or
-                            any(m.endswith(f"{subdir}/genes.tsv.gz") for m in members)
+                            (any(m.endswith(f"{subdir}/features.tsv.gz") for m in members) or
+                             any(m.endswith(f"{subdir}/genes.tsv.gz") for m in members))
                         ):
                             tmpdir = tempfile.mkdtemp(prefix="mtx_")
                             tar.extractall(path=tmpdir)
-                            extracted_path = os.path.join(tmpdir, subdir)
-                            mtx_paths.append(extracted_path)
-                            break  # assume only one valid subdir per archive
-    return h5_files + mtx_paths + h5ad_files
+                            extracted_path = os.path.join(tmpdir, subdir, "matrix.mtx.gz")
+                            results.append(extracted_path)
+                            break
+
+    return sorted(results)
+
 
 ########## Dedicated Functions for cellHarony-community re-implementation
 
@@ -580,15 +611,17 @@ if __name__ == '__main__':
     parser.add_argument('--h5ad', type=str, default=None, help='existing h5ad')
     parser.add_argument('--cptt', action='store_true', help='export a dense tsv for ref gene normalized exp')
     parser.add_argument('--export_h5ad', action='store_true', help='export an h5ad with all counts and normalized exp')
-    parser.add_argument('--min_genes', type=int, default=500, help='min_genes for scanpy QC')
+    parser.add_argument('--min_genes', type=int, default=200, help='min_genes for scanpy QC')
     parser.add_argument('--min_cells', type=int, default=3, help='min_cells for scanpy QC')
-    parser.add_argument('--min_counts', type=int, default=1000, help='min_counts for scanpy QC')
+    parser.add_argument('--min_counts', type=int, default=500, help='min_counts for scanpy QC')
     parser.add_argument('--mit_percent', type=int, default=10, help='mit_percent for scanpy QC')
     parser.add_argument('--generate_umap', action='store_true', help='generate UMAP and marker analysis')
     parser.add_argument('--save_adata', action='store_true', help='save updated AnnData object')
     parser.add_argument('--unsupervised_cluster', action='store_true', help='perform unsupervised clustering analysis')
     parser.add_argument('--append_obs', type=str, default=None, help='Field in .obs to append to the cell barcode (e.g., donor_id)')
     parser.add_argument('--alignment_mode', type=str, default="cosine", help='Alignment mode: "cosine" or "classic"')
+    parser.add_argument('--align_cutoff', type=float, default=None, help='Exclude cells with AlignmentScore below this threshold (default: include all)')
+
     args = parser.parse_args()
 
     h5_directory = args.h5dir
@@ -606,6 +639,7 @@ if __name__ == '__main__':
     alignment_mode = args.alignment_mode
     unsupervised_cluster = args.unsupervised_cluster
     append_obs_field = args.append_obs
+    align_cutoff = args.align_cutoff
 
     #h5_files = glob(os.path.join(h5_directory, "*.h5")) if '.h5' not in h5_directory else [h5_directory]
     h5_files = get_h5_and_mtx_files(h5_directory)
@@ -613,6 +647,7 @@ if __name__ == '__main__':
     if len(h5_files)==0:
         print ("No compatible h5, h5ad or .mtx files identified")
         sys.exit()
+        
     combine_and_align_h5(
         h5_files=h5_files,
         h5ad_file=h5ad_file,
@@ -628,5 +663,6 @@ if __name__ == '__main__':
         save_adata=save_adata,
         unsupervised_cluster=unsupervised_cluster,
         append_obs_field=append_obs_field,
-        alignment_mode=alignment_mode
+        alignment_mode=alignment_mode,
+        min_alignment_score=align_cutoff
     )
