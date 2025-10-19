@@ -19,3 +19,4 @@ scipy==1.14.1
 setuptools==68.2.2
 statsmodels==0.14.0
 tqdm==4.62.3
+

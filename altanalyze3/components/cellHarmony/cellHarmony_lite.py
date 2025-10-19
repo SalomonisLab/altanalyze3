@@ -41,7 +41,8 @@ def combine_and_align_h5(
     unsupervised_cluster=False,
     append_obs_field=None,
     alignment_mode="classic",
-    min_alignment_score=None
+    min_alignment_score=None,
+    gene_translation_file=None
 ):
     start_time = time.time()
     os.makedirs(output_dir, exist_ok=True)
@@ -49,6 +50,12 @@ def combine_and_align_h5(
     reference_df = pd.read_csv(cellharmony_ref, sep='\t', index_col=0)
     cell_populations = reference_df.columns.tolist()
     ref_name = os.path.basename(cellharmony_ref)[:-4]
+
+    # Optional gene translation table (e.g., Ensembl → Symbol)
+    translation_map = None
+    if gene_translation_file is not None and os.path.exists(gene_translation_file):
+        translation_map = load_gene_translation(gene_translation_file)
+
 
     if h5ad_file is not None:
         adata_combined = sc.read_h5ad(h5ad_file)
@@ -72,12 +79,12 @@ def combine_and_align_h5(
 
             elif path.endswith((
                 "_filtered_matrix.mtx.gz", "_counts.mtx.gz", "_matrix.mtx.gz",
-                "filtered_matrix.mtx.gz", "matrix.mtx.gz", "matrix.mtx"
+                "filtered_matrix.mtx.gz", "matrix.mtx.gz", "matrix.mtx", "quants_mat.mtx"
             )):
                 # Determine suffix and prefix
                 suffixes = [
                     "_filtered_matrix.mtx.gz", "_counts.mtx.gz", "_matrix.mtx.gz",
-                    "filtered_matrix.mtx.gz", "matrix.mtx.gz", "matrix.mtx"
+                    "filtered_matrix.mtx.gz", "matrix.mtx.gz", "matrix.mtx", "quants_mat.mtx"
                 ]
                 suffix = next(s for s in suffixes if path.endswith(s))
                 prefix = path[:-len(suffix)]
@@ -88,10 +95,21 @@ def combine_and_align_h5(
                     feature_options = [prefix + "_features.tsv.gz", prefix + "_genes.tsv.gz",
                                     prefix + "features.tsv.gz", prefix + "genes.tsv.gz"]
                 else:
-                    barcodes = prefix + ("_barcodes.tsv" if any(path.endswith(f"_{s}") for s in ["matrix.mtx"]) else "barcodes.tsv")
-                    feature_options = [prefix + "_features.tsv", prefix + "_genes.tsv",
-                                    prefix + "features.tsv", prefix + "genes.tsv"]
-
+                    barcodes = prefix + (
+                        "_barcodes.tsv"
+                        if any(path.endswith(f"_{s}") for s in ["matrix.mtx"])
+                        else (
+                            "quants_mat_rows.txt"
+                            if path.endswith("quants_mat.mtx") 
+                            else "barcodes.tsv"
+                        ) #avelin-fry
+                    )
+                    feature_options = [
+                        prefix + "_features.tsv", prefix + "_genes.tsv",
+                        prefix + "features.tsv", prefix + "genes.tsv",
+                        prefix + "quants_mat_cols.txt" 
+                    ] #avelin-fry
+                    
                 # Select existing feature file
                 features = next((f for f in feature_options if os.path.exists(f)), None)
                 if not features:
@@ -125,7 +143,13 @@ def combine_and_align_h5(
                     from anndata import AnnData 
 
                     matrix_file = "matrix.mtx.gz" if path.endswith(".gz") else "matrix.mtx"
-                    matrix = mmread(os.path.join(tmp_path, matrix_file)).tocsr().T
+                    matrix = mmread(os.path.join(tmp_path, matrix_file)).tocsr()
+                    #print(f"\n[DEBUG] Loaded matrix from {os.path.basename(path)}: {matrix.shape} (raw)")
+
+                    #For Alevin-Fry, do NOT transpose
+                    if "quants_mat" not in os.path.basename(path):
+                        # 10x-style: features (rows) × barcodes (cols)
+                        matrix = matrix.T
 
                     barcodes_df = pd.read_csv(
                         os.path.join(tmp_path, os.path.basename(barcodes)), header=None
@@ -138,10 +162,12 @@ def combine_and_align_h5(
                     )
 
                     if genes_df.shape[1] != 2:
-                        raise ValueError(f"Expected 2 columns in features.tsv for {sample_name}, got: {genes_df.shape[1]}")
-
-                    gene_ids = genes_df[0].astype(str).tolist()
-                    gene_symbols = genes_df[1].astype(str).tolist()
+                        #raise ValueError(f"Expected 2 columns in features.tsv for {sample_name}, got: {genes_df.shape[1]}")
+                        gene_ids = genes_df[0].astype(str).tolist()
+                        gene_symbols = genes_df[0].astype(str).tolist()
+                    else:
+                        gene_ids = genes_df[0].astype(str).tolist()
+                        gene_symbols = genes_df[1].astype(str).tolist()
 
                     if matrix.shape[0] != len(barcodes_list):
                         raise ValueError(f"Mismatch between number of cells ({matrix.shape[0]}) and barcodes ({len(barcodes_list)})")
@@ -153,6 +179,15 @@ def combine_and_align_h5(
                     adata.var_names = gene_symbols
                     adata.var["gene_ids"] = gene_ids
 
+                    # Apply gene translation if provided
+                    if translation_map is not None:
+                        original_names = adata.var_names.tolist()
+                        translated = [translation_map.get(g, g) for g in original_names]
+                        adata.var["translated_name"] = translated
+                        adata.var_names = pd.Index(translated)
+                        adata.var_names_make_unique()
+                        print(f"[INFO] Applied gene translation for {sample_name}: "
+                            f"{sum(g != t for g, t in zip(original_names, translated))} IDs updated")
 
             elif os.path.isdir(path):
                 adata = sc.read_10x_mtx(path, var_names='gene_symbols')
@@ -418,12 +453,20 @@ def combine_and_align_h5(
                 sep="\t", index=False
             )
 
+        adata_combined.uns["lineage_order"] = reference_df.columns.tolist()
         adata_combined.write(os.path.join(output_dir, "combined_with_umap_and_markers.h5ad"), compression="gzip")
 
 
     print(f"Analysis completed in {time.time() - start_time:.2f} seconds.")
     return ordered_match_df
 
+def load_gene_translation(translation_path):
+    """Load a two-column gene translation file (e.g., Ensembl → Symbol)."""
+    df = pd.read_csv(translation_path, sep='\t', header=None, names=["source", "target"])
+    df = df.dropna().drop_duplicates()
+    translation_map = dict(zip(df["source"].astype(str), df["target"].astype(str)))
+    print(f"[INFO] Loaded gene translation table: {len(translation_map)} mappings")
+    return translation_map
 
 def get_h5_and_mtx_files(folder_path):
     """
@@ -439,7 +482,7 @@ def get_h5_and_mtx_files(folder_path):
     import tempfile
 
     results = []
-
+    
     # Direct case: if folder_path is itself a file
     if os.path.isfile(folder_path):
         if folder_path.endswith((".h5", ".h5ad", ".mtx", ".mtx.gz")):
@@ -465,6 +508,13 @@ def get_h5_and_mtx_files(folder_path):
             if os.path.exists(barcode_file) and features:
                 mtx_name = "matrix.mtx.gz" if gz else "matrix.mtx"
                 results.append(os.path.join(root, mtx_name))
+
+        # Detect Alevin-Fry output folders
+        if "quants_mat.mtx" in files:
+            if all(os.path.exists(os.path.join(root, f)) for f in [
+                "quants_mat.mtx", "quants_mat_cols.txt", "quants_mat_rows.txt"
+            ]):
+                results.append(root+"quants_mat.mtx")
 
         # Check for tarballs
         for f in files:
@@ -621,6 +671,7 @@ if __name__ == '__main__':
     parser.add_argument('--append_obs', type=str, default=None, help='Field in .obs to append to the cell barcode (e.g., donor_id)')
     parser.add_argument('--alignment_mode', type=str, default="cosine", help='Alignment mode: "cosine" or "classic"')
     parser.add_argument('--align_cutoff', type=float, default=None, help='Exclude cells with AlignmentScore below this threshold (default: include all)')
+    parser.add_argument("--gene_translation",type=str, default=None, help='Optional two-column TSV mapping file (e.g. Ensembl→Symbol) for gene ID translation')
 
     args = parser.parse_args()
 
@@ -640,6 +691,7 @@ if __name__ == '__main__':
     unsupervised_cluster = args.unsupervised_cluster
     append_obs_field = args.append_obs
     align_cutoff = args.align_cutoff
+    gene_translation = args.gene_translation
 
     #h5_files = glob(os.path.join(h5_directory, "*.h5")) if '.h5' not in h5_directory else [h5_directory]
     h5_files = get_h5_and_mtx_files(h5_directory)
@@ -664,5 +716,6 @@ if __name__ == '__main__':
         unsupervised_cluster=unsupervised_cluster,
         append_obs_field=append_obs_field,
         alignment_mode=alignment_mode,
-        min_alignment_score=align_cutoff
+        min_alignment_score=align_cutoff,
+        gene_translation_file=gene_translation
     )
