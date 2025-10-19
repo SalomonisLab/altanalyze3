@@ -1,0 +1,1 @@
+"""Metacell component package."""

@@ -135,7 +135,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--n-pcs", type=int, default=50, help="Number of principal components.")
     parser.add_argument("--pca-svd-solver", choices=["arpack", "randomized"], default="randomized")
     parser.add_argument("--n-neighbors", type=int, default=30, help="Number of neighbors for the KNN graph.")
-    parser.add_argument("--neighbor-method", choices=["pynndescent", "sklearn"], default="pynndescent")
+    parser.add_argument("--neighbor-method", choices=["auto", "umap", "gauss"], default="auto")
     parser.add_argument("--neighbor-metric", default="euclidean", help="Metric for neighbor search.")
 
     # Expression data handling
@@ -148,15 +148,15 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--aggregation",
-        choices=["sum", "mean"],
+        choices=["sum"],
         default="sum",
-        help="Aggregation function for metacell expression profiles.",
+        help="Aggregation function for metacell expression profiles (sums only).",
     )
 
     parser.add_argument(
         "--random-metacell-count",
         type=int,
-        default=None,
+        default=50,
         help="Number of random metacells to generate per group (used when --graph-algorithm random).",
     )
     parser.add_argument(
@@ -264,22 +264,6 @@ def group_iterable(
         yield key_tuple, subgroup
 
 
-def summarize_categorical(
-    obs: pd.DataFrame,
-    labels: np.ndarray,
-    column: str,
-) -> pd.Series:
-    """Summarize categorical data by returning the dominant value per label."""
-    # Build DataFrame with labels to group efficiently.
-    temp = pd.DataFrame({"label": labels, "value": obs[column].values}, index=obs.index)
-    mode_series = (
-        temp.groupby("label", observed=True)["value"]
-        .agg(lambda x: x.value_counts(dropna=False).idxmax())
-        .rename(column)
-    )
-    return mode_series
-
-
 ###############################################################################
 # Graph construction and clustering
 ###############################################################################
@@ -313,14 +297,15 @@ def prepare_graph_data(
         params.neighbor_method,
         params.neighbor_metric,
     )
-    sc.pp.neighbors(
-        adata,
+    neighbor_kwargs = dict(
         n_pcs=params.n_pcs,
         n_neighbors=params.n_neighbors,
-        method=params.neighbor_method,
         metric=params.neighbor_metric,
         random_state=params.random_state,
     )
+    if params.neighbor_method != "auto":
+        neighbor_kwargs["method"] = params.neighbor_method
+    sc.pp.neighbors(adata, **neighbor_kwargs)
     return adata
 
 
@@ -516,6 +501,44 @@ def enforce_size_bounds(
     return final_groups
 
 
+def generate_random_groups(
+    n_cells: int,
+    count: int,
+    cells_per_group: int,
+    with_replacement: bool,
+    rng: np.random.Generator,
+) -> List[np.ndarray]:
+    """Generate random cell index groups for metacell aggregation."""
+    if count <= 0 or cells_per_group <= 0 or n_cells == 0:
+        return []
+
+    indices = np.arange(n_cells, dtype=int)
+    groups: List[np.ndarray] = []
+
+    # If sampling with replacement or requesting more cells than available,
+    # draw with replacement for each group.
+    if with_replacement or cells_per_group > n_cells:
+        for _ in range(count):
+            chosen = rng.choice(indices, size=cells_per_group, replace=True)
+            groups.append(chosen)
+        return groups
+
+    # Otherwise cycle through permutations without replacement per group.
+    needed = count * cells_per_group
+    pooled = rng.permutation(indices)
+    while pooled.size < needed:
+        pooled = np.concatenate([pooled, rng.permutation(indices)])
+
+    for start in range(0, count * cells_per_group, cells_per_group):
+        segment = pooled[start : start + cells_per_group]
+        if segment.size < cells_per_group:
+            supplement = rng.choice(indices, size=cells_per_group - segment.size, replace=False)
+            segment = np.concatenate([segment, supplement])
+        groups.append(segment.astype(int))
+
+    return groups
+
+
 ###############################################################################
 # Metacell aggregation
 ###############################################################################
@@ -527,40 +550,42 @@ def aggregate_expression(
     aggregation: str,
 ) -> sp.spmatrix | np.ndarray:
     """Aggregate expression matrix based on the provided cell index groups."""
-    n_cells = matrix.shape[0]
+    if aggregation != "sum":
+        raise ValueError("Only sum aggregation is supported for metacell construction.")
+
     n_groups = len(groups)
     if n_groups == 0:
         raise ValueError("No metacell groups generated.")
 
-    group_ids = np.empty(n_cells, dtype=np.int32)
-    for idx, cells in enumerate(groups):
-        group_ids[cells] = idx
+    if sp.issparse(matrix):
+        aggregated_rows = []
+        for cells in groups:
+            cells = np.asarray(cells, dtype=int)
+            if cells.size == 0:
+                aggregated_rows.append(sp.csr_matrix((1, matrix.shape[1]), dtype=matrix.dtype))
+                continue
+            subset = matrix[cells]
+            agg_row = subset.sum(axis=0)
+            aggregated_rows.append(sp.csr_matrix(agg_row))
+        aggregated = sp.vstack(aggregated_rows, format="csr")
+    else:
+        aggregated_rows = []
+        for cells in groups:
+            cells = np.asarray(cells, dtype=int)
+            if cells.size == 0:
+                aggregated_rows.append(np.zeros((1, matrix.shape[1]), dtype=matrix.dtype))
+                continue
+            subset = matrix[cells]
+            agg_row = np.sum(subset, axis=0, keepdims=True)
+            aggregated_rows.append(agg_row)
+        aggregated = np.vstack(aggregated_rows)
 
-    indicator = sp.csr_matrix(
-        (np.ones(n_cells, dtype=np.float32), (group_ids, np.arange(n_cells))),
-        shape=(n_groups, n_cells),
-    )
-
-    aggregated = indicator @ matrix
-
-    if aggregation == "mean":
-        counts = indicator.sum(axis=1)
-        counts = np.asarray(counts).reshape(-1, 1)
-        counts[counts == 0] = 1.0
-        if sp.issparse(aggregated):
-            aggregated = aggregated.multiply(1.0 / counts)
-        else:
-            aggregated = aggregated / counts
-
-    if sp.issparse(aggregated):
-        aggregated = aggregated.tocsr()
     return aggregated
 
 
 def build_metacell_obs(
     groups: List[np.ndarray],
     metacell_ids: List[str],
-    labels_per_cell: np.ndarray,
     cell_obs: pd.DataFrame,
     sample_column: Optional[str],
     cell_type_column: Optional[str],
@@ -573,13 +598,27 @@ def build_metacell_obs(
     for column, value in boundary_info.items():
         obs[column] = value
 
+    def _mode(values: pd.Series) -> Optional[str]:
+        if values.empty:
+            return None
+        counts = values.value_counts(dropna=False)
+        if counts.empty:
+            return None
+        return counts.idxmax()
+
     if sample_column and sample_column in cell_obs.columns:
-        dominant_sample = summarize_categorical(cell_obs, labels_per_cell, sample_column)
-        obs[f"dominant_{sample_column}"] = obs.index.map(dominant_sample)
+        dominant_samples = []
+        for indices in groups:
+            values = cell_obs.iloc[np.asarray(indices, dtype=int)][sample_column]
+            dominant_samples.append(_mode(values))
+        obs[f"dominant_{sample_column}"] = dominant_samples
 
     if cell_type_column and cell_type_column in cell_obs.columns:
-        dominant_cell_type = summarize_categorical(cell_obs, labels_per_cell, cell_type_column)
-        obs[f"dominant_{cell_type_column}"] = obs.index.map(dominant_cell_type)
+        dominant_cell_types = []
+        for indices in groups:
+            values = cell_obs.iloc[np.asarray(indices, dtype=int)][cell_type_column]
+            dominant_cell_types.append(_mode(values))
+        obs[f"dominant_{cell_type_column}"] = dominant_cell_types
 
     return obs
 
@@ -596,14 +635,15 @@ def build_membership_df(
     records: List[Dict[str, str]] = []
     for metacell_id, indices in zip(metacell_ids, groups):
         for idx in indices:
+            idx_int = int(idx)
             entry = {
                 "metacell_id": metacell_id,
-                "cell_barcode": str(cell_names[idx]),
+                "cell_barcode": str(cell_names[idx_int]),
             }
             if sample_column and sample_column in cell_obs.columns:
-                entry[sample_column] = cell_obs.iloc[idx][sample_column]
+                entry[sample_column] = cell_obs.iloc[idx_int][sample_column]
             if cell_type_column and cell_type_column in cell_obs.columns:
-                entry[cell_type_column] = cell_obs.iloc[idx][cell_type_column]
+                entry[cell_type_column] = cell_obs.iloc[idx_int][cell_type_column]
             records.append(entry)
     return pd.DataFrame.from_records(records)
 
@@ -623,14 +663,29 @@ def process_group(
     cell_type_column: Optional[str],
 ) -> Tuple[ad.AnnData, pd.DataFrame, int]:
     """Compute metacells for a single group and return the aggregated AnnData."""
-    if group.n_obs < max(params.min_size, 2):
+    rng = np.random.default_rng(params.random_state + metacell_start_idx)
+
+    if params.graph_algorithm == "random" and params.random_metacell_count:
+        groups = generate_random_groups(
+            n_cells=group.n_obs,
+            count=params.random_metacell_count,
+            cells_per_group=params.random_cells_per_metacell,
+            with_replacement=params.random_sampling_with_replacement,
+            rng=rng,
+        )
+        if not groups:
+            logging.warning(
+                "Group %s has no cells; skipping metacell generation.",
+                boundary_key,
+            )
+            groups = []
+    elif group.n_obs < max(params.min_size, 2):
         logging.warning(
             "Group %s has only %d cells; returning single metacell covering all cells.",
             boundary_key,
             group.n_obs,
         )
-        groups = [np.arange(group.n_obs)]
-        embeddings = np.zeros((group.n_obs, 2))
+        groups = [np.arange(group.n_obs, dtype=int)]
     else:
         # Prepare analysis data for clustering
         analysis_matrix, analysis_var = get_obs_matrix(group, layer=params.hvg_layer, use_raw=params.use_raw)
@@ -641,6 +696,9 @@ def process_group(
         embeddings = analysis.obsm["X_pca"]
         groups = enforce_size_bounds(labels, embeddings, params)
 
+    if not groups:
+        raise ValueError(f"No metacell groups produced for boundary {boundary_key}.")
+
     # Aggregate expression using the requested matrix
     expr_matrix, expr_var = get_obs_matrix(group, layer=params.expression_layer, use_raw=params.use_raw)
     aggregated_matrix = aggregate_expression(expr_matrix, groups, params.aggregation)
@@ -650,14 +708,9 @@ def process_group(
 
     boundary_info = dict(zip(boundary_columns, boundary_key)) if boundary_columns else {}
 
-    labels_per_cell = np.empty(group.n_obs, dtype=object)
-    for metacell_id, indices in zip(metacell_ids, groups):
-        labels_per_cell[indices] = metacell_id
-
     metacell_obs = build_metacell_obs(
         groups,
         metacell_ids,
-        labels_per_cell,
         group.obs,
         sample_column=sample_column,
         cell_type_column=cell_type_column,
@@ -768,6 +821,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     boundary_columns = resolve_boundary_columns(args)
 
+    if args.random_cells_per_metacell <= 0:
+        raise ValueError("--random-cells-per-metacell must be a positive integer.")
+
+    if args.graph_algorithm == "random":
+        if args.random_metacell_count is None or args.random_metacell_count <= 0:
+            raise ValueError("--random-metacell-count must be positive when using the random algorithm.")
+        random_metacell_count = args.random_metacell_count
+    else:
+        random_metacell_count = None
+
     params = MetacellParams(
         target_size=max(1, args.target_metacell_size),
         min_size=max(1, args.min_metacell_size),
@@ -788,6 +851,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         expression_layer=args.expression_layer,
         use_raw=args.use_raw,
         random_state=args.random_state,
+        random_metacell_count=random_metacell_count,
+        random_cells_per_metacell=args.random_cells_per_metacell,
+        random_sampling_with_replacement=args.random_sampling_with_replacement,
     )
 
     logging.info("Generating metacells (mode=%s, boundaries=%s).", args.mode, boundary_columns or "none")
