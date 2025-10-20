@@ -11,6 +11,8 @@ AltAnalyze3 is an advanced Python3 workflow for long-read (LR) and short read an
 
    installation
    quickstart
+   cellHarmony
+   cellHarmony_differential
    api_reference
    tutorials/long_read_analysis
    tutorials/differentials
@@ -56,4 +58,3 @@ Support
 
 If you encounter issues or need assistance, please visit our GitHub repository:  
 https://github.com/SalomonisLab/altanalyze3
-
