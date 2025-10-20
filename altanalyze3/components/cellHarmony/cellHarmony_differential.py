@@ -29,6 +29,7 @@ import anndata as ad
 import scanpy as sc
 import scipy.sparse as sps
 from tqdm import tqdm
+from altanalyze3.components.visualization import NetPerspective
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -959,7 +960,8 @@ def run_de_for_comparisons(adata,
         "method": str(method),
         "alpha": float(alpha),
         "fc_thresh": float(fc_thresh),
-        "min_cells_per_group": int(min_cells)
+        "min_cells_per_group": int(min_cells),
+        "per_population_deg": {k: v.copy() for k, v in per_pop_de.items()},
     }
 
     # --- NEW: build a complete fold-change matrix from per-population stored vectors ---
@@ -1302,6 +1304,7 @@ def main():
     ap.add_argument("--pseudobulk_min_cells", type=int, default=10, help="Minimum cells per pseudobulk group (default: 10)")
     ap.add_argument("--use_rawp", action="store_true", help="Use raw p-values instead of FDR for significance filtering")
     ap.add_argument("--outdir", default="cellHarmony_DE_out", help="Output directory (default: cellHarmony_DE_out)")
+    ap.add_argument("--skip_grn", action="store_true", help="Skip interaction network (GRN) generation")
     args = ap.parse_args()
 
     comps = parse_comparisons_arg(args.comparisons)
@@ -1311,6 +1314,17 @@ def main():
 
     if not os.path.isdir(args.outdir):
         os.makedirs(args.outdir)
+
+    interactions_df = None
+    interaction_root = os.path.join(args.outdir, "interaction-plots")
+    if not args.skip_grn:
+        try:
+            interactions_df = NetPerspective.load_interaction_data()
+        except Exception as ex:
+            print(f"[WARN] Unable to load interaction data for GRN export: {ex}")
+            args.skip_grn = True
+        else:
+            os.makedirs(interaction_root, exist_ok=True)
 
     # Step 1: load + merge covariates
     print("[INFO] Loading h5ad and merging covariates...")
@@ -1427,6 +1441,85 @@ def main():
         if cr is not None and not cr.empty:
             cr.to_csv(cr_path, sep="\t", index=False)
             print("[INFO] Wrote {}".format(cr_path))
+
+        if not args.skip_grn and interactions_df is not None:
+            per_pop_results = de_store.get("per_population_deg", {})
+            if not per_pop_results:
+                if diagnostic_report:
+                    print("[DEBUG] No per-population DE results supplied for GRN export.")
+            else:
+                comparison_dir = os.path.join(interaction_root, NetPerspective.safe_component(tag))
+                os.makedirs(comparison_dir, exist_ok=True)
+                fc_threshold = max(0.0, float(np.log2(float(args.fc)))) if float(args.fc) > 0 else 0.0
+                use_rawp = bool(de_store.get("use_rawp", False))
+
+                for pop_name, pop_df in per_pop_results.items():
+                    if pop_df is None or pop_df.empty:
+                        continue
+
+                    stats_df = pop_df.copy()
+                    stats_df = stats_df.reset_index().rename(columns={stats_df.index.name or "index": "gene"})
+                    stats_df["gene"] = stats_df["gene"].astype(str)
+                    stats_df["log2fc"] = pd.to_numeric(stats_df.get("log2fc"), errors="coerce")
+
+                    significance_column = None
+                    if use_rawp and "pval" in stats_df.columns and stats_df["pval"].notna().any():
+                        significance_column = "pval"
+                    elif "fdr" in stats_df.columns:
+                        significance_column = "fdr"
+
+                    if significance_column is None:
+                        if diagnostic_report:
+                            print(f"[DEBUG] Skipping {pop_name}: missing significance column for GRN export.")
+                        continue
+
+                    stats_df[significance_column] = pd.to_numeric(
+                        stats_df[significance_column], errors="coerce"
+                    )
+
+                    significance_mask = stats_df[significance_column] < float(args.alpha)
+                    if fc_threshold > 0:
+                        significance_mask &= stats_df["log2fc"].abs() >= fc_threshold
+
+                    if not significance_mask.any():
+                        continue
+
+                    keep_columns = {"gene", "log2fc", "fdr", "pval", significance_column}
+                    keep_columns = [col for col in keep_columns if col in stats_df.columns]
+                    selected = (
+                        stats_df.loc[significance_mask, keep_columns]
+                        .dropna(subset=["gene"])
+                        .drop_duplicates(subset=["gene"])
+                    )
+
+                    if selected.empty or selected["gene"].nunique() < 2:
+                        continue
+
+                    pop_component = NetPerspective.safe_component(pop_name)
+                    output_prefix = os.path.join(comparison_dir, pop_component)
+
+                    try:
+                        outputs = NetPerspective.generate_network_for_genes(
+                            selected,
+                            interactions_df,
+                            output_prefix,
+                            gene_column="gene",
+                            fold_change_column="log2fc",
+                            pval_column=significance_column if significance_column in selected.columns else None,
+                            max_genes=75,
+                        )
+                        print(
+                            f"[INFO] Wrote interaction network for {pop_name} ({case_label} vs {control_label}): {outputs[0]}"
+                        )
+                    except NetPerspective.NetworkGenerationError as ex:
+                        if diagnostic_report:
+                            print(f"[DEBUG] Interaction network skipped for {pop_name}: {ex}")
+                        else:
+                            print(f"[WARN] No interaction edges found for {pop_name}; skipping network plot.")
+                    except ImportError as ex:
+                        print(f"[WARN] Interaction plots disabled (missing dependency): {ex}")
+                        args.skip_grn = True
+                        break
 
     print("[INFO] Completed.")
 

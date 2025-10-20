@@ -14,12 +14,25 @@ import warnings
 warnings.filterwarnings("ignore", message="Variable names are not unique. To make them unique, call `.var_names_make_unique`.")
 warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
 warnings.filterwarnings("ignore", category=RuntimeWarning, message=".*invalid value encountered in log2.*")
+warnings.filterwarnings("ignore", category=FutureWarning, message=".*default backend for leiden will be igraph.*")
+warnings.filterwarnings("ignore", category=UserWarning, message="Received a view of an AnnData. Making a copy.")
 
 plt.rcParams['axes.linewidth'] = 0.5
 plt.rcParams['pdf.fonttype'] = 42
 plt.rcParams['font.family'] = 'sans-serif'
 plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
 plt.rcParams['figure.facecolor'] = 'white'
+
+
+def normalize_adata(adata, show_progress=False):
+    """Log-normalize the AnnData object in-place."""
+    if show_progress:
+        with tqdm(total=2, desc="Normalization steps") as pbar:
+            sc.pp.normalize_total(adata, target_sum=1e4); pbar.update(1)
+            sc.pp.log1p(adata); pbar.update(1)
+    else:
+        sc.pp.normalize_total(adata, target_sum=1e4)
+        sc.pp.log1p(adata)
 
 def save_marker_genes(adata, groupby, output_file):
     deg = pd.DataFrame(adata.uns['rank_genes_groups']['names'])
@@ -42,7 +55,19 @@ def combine_and_align_h5(
     append_obs_field=None,
     alignment_mode="classic",
     min_alignment_score=None,
-    gene_translation_file=None
+    gene_translation_file=None,
+    metacell_align=False,
+    metacell_target_size=50,
+    metacell_min_size=25,
+    metacell_max_size=100,
+    metacell_algorithm="kmeans",
+    metacell_neighbors=30,
+    metacell_hvg=3000,
+    metacell_pcs=50,
+    metacell_random_count=50,
+    metacell_random_cells=5,
+    metacell_random_replacement=False,
+    metacell_random_state=0
 ):
     start_time = time.time()
     os.makedirs(output_dir, exist_ok=True)
@@ -59,6 +84,8 @@ def combine_and_align_h5(
 
     if h5ad_file is not None:
         adata_combined = sc.read_h5ad(h5ad_file)
+        apply_gene_translation(adata_combined, translation_map, os.path.basename(h5ad_file))
+        adata_combined.var_names_make_unique()
         print(f"reimported adata shape: {adata_combined.shape} (cells x genes)")
     else:
         adata_list = []
@@ -179,16 +206,6 @@ def combine_and_align_h5(
                     adata.var_names = gene_symbols
                     adata.var["gene_ids"] = gene_ids
 
-                    # Apply gene translation if provided
-                    if translation_map is not None:
-                        original_names = adata.var_names.tolist()
-                        translated = [translation_map.get(g, g) for g in original_names]
-                        adata.var["translated_name"] = translated
-                        adata.var_names = pd.Index(translated)
-                        adata.var_names_make_unique()
-                        print(f"[INFO] Applied gene translation for {sample_name}: "
-                            f"{sum(g != t for g, t in zip(original_names, translated))} IDs updated")
-
             elif os.path.isdir(path):
                 adata = sc.read_10x_mtx(path, var_names='gene_symbols')
                 sample_name = os.path.basename(os.path.normpath(path))
@@ -196,8 +213,10 @@ def combine_and_align_h5(
             else:
                 raise ValueError(f"Unsupported input: {path}")
 
-            group_name = sample_name.split('__')[0] if '__' in sample_name else '_'.join(sample_name.split('_')[:-1])
+            apply_gene_translation(adata, translation_map, sample_name)
             adata.var_names_make_unique()
+
+            group_name = sample_name.split('__')[0] if '__' in sample_name else '_'.join(sample_name.split('_')[:-1])
             if sample_name and len(sample_name) > 0:
                 adata.obs_names = [f"{bc}.{sample_name}" for bc in adata.obs_names]
             else:
@@ -226,28 +245,104 @@ def combine_and_align_h5(
         adata_combined = adata_combined[adata_combined.obs["pct_counts_mt"] < mit_percent].copy()
         print(f"Cells remaining after mito-percent filtering: {adata_combined.n_obs}")
 
+    original_cell_adata = None
+    metacell_membership = None
+    metacell_aligned_adata = None
+    cell_to_metacell_map = None
+    cell_metacell_lookup = None
+
+    if metacell_align:
+        from altanalyze3.components.metacells.main import MetacellParams, assemble_metacells
+
+        original_cell_adata = adata_combined.copy()
+
+        metacell_params = MetacellParams(
+            target_size=metacell_target_size,
+            min_size=metacell_min_size,
+            max_size=metacell_max_size,
+            preserve_small=False,
+            aggregation="sum",
+            graph_algorithm=metacell_algorithm,
+            resolution=None,
+            resolution_steps=5,
+            resolution_tolerance=0.15,
+            n_neighbors=max(5, metacell_neighbors),
+            neighbor_method="auto",
+            neighbor_metric="euclidean",
+            n_top_genes=max(200, metacell_hvg),
+            n_pcs=max(10, metacell_pcs),
+            pca_svd_solver="randomized",
+            hvg_layer=None,
+            expression_layer=None,
+            use_raw=False,
+            random_state=metacell_random_state,
+            random_metacell_count=metacell_random_count if metacell_algorithm == "random" else None,
+            random_cells_per_metacell=metacell_random_cells,
+            random_sampling_with_replacement=metacell_random_replacement,
+        )
+
+        mc_start = time.time()
+
+
+        metacell_adata, membership_df = assemble_metacells(
+            adata_combined,
+            params=metacell_params,
+            boundary_columns=[],
+            sample_column=None,
+            cell_type_column=None,
+        )
+
+
+        mc_end = time.time()
+
+
+        mc_duration = mc_end - mc_start
+
+
+        n_cells = original_cell_adata.n_obs
+
+
+        n_metacells = metacell_adata.n_obs
+
+
+        size_stats = metacell_adata.obs['metacell_size']
+
+
+        print(f"[metacell] generated {n_metacells} metacells from {n_cells} cells in {mc_duration:.1f}s")
+
+
+        print(f"[metacell] size median={size_stats.median():.1f} range=({int(size_stats.min())}, {int(size_stats.max())})")
+
+        if "gene_symbols" not in metacell_adata.var.columns:
+            metacell_adata.var["gene_symbols"] = metacell_adata.var_names.astype(str)
+
+
+        print(f"[metacell] algorithm={metacell_algorithm} target={metacell_target_size} min={metacell_min_size} max={metacell_max_size} neighbors={metacell_neighbors} hvg={metacell_hvg} pcs={metacell_pcs}")
+        metacell_adata.uns["metacell_membership"] = membership_df
+        metacell_path = os.path.join(output_dir, "metacells.h5ad")
+        metacell_adata.write(metacell_path, compression="gzip")
+
+        adata_combined = metacell_adata.copy()
+        metacell_membership = membership_df.copy()
+        cell_to_metacell_map = membership_df[['cell_barcode', 'metacell_id']].set_index('cell_barcode')['metacell_id']
+
     # retain the original counts in the h5ad in the new counts slot
     adata_combined.layers["counts"] = adata_combined.X.copy()
 
-    with tqdm(total=3, desc="Normalization steps") as pbar:
-        sc.pp.normalize_total(adata_combined, target_sum=1e4); pbar.update(1)
-        sc.pp.log1p(adata_combined); pbar.update(1)
-        #adata_combined.X = adata_combined.X / np.log(2)
-        pbar.update(1)
+    normalize_adata(adata_combined, show_progress=True)
+    metacell_aligned_adata = adata_combined.copy() if metacell_align else None
 
     if export_h5ad:
         adata_combined.write(output_dir+"/combined_qc_normalized.h5ad", compression="gzip")
 
     marker_genes = reference_df.index
-    genes_present = reference_df.index.intersection(adata_combined.var_names)
-    adata_filtered = adata_combined[:, genes_present].copy()
+    adata_filtered, genes_present, missing_genes = subset_to_reference_genes(adata_combined, marker_genes)
 
-    missing_genes = set(reference_df.index) - set(genes_present)
     if missing_genes:
         print(f"Warning: {len(missing_genes)} marker genes not found in dataset and will be excluded out of {len(marker_genes)}.")
-        print(f"(First 10) Missing genes: {sorted(list(missing_genes))[:10]}")
+        print(f"(First 10) Missing genes: {sorted(missing_genes)[:10]}")
 
-    if export_cptt:
+    if export_cptt and not metacell_align:
         cptt_df = pd.DataFrame(
             adata_filtered.X,
             index=adata_filtered.obs_names,
@@ -325,6 +420,40 @@ def combine_and_align_h5(
         print(f"[INFO] Applied min_alignment_score={min_alignment_score}. "
             f"Excluded {before - after} cells, kept {after}.")
 
+    if metacell_align:
+        if metacell_membership is None or original_cell_adata is None:
+            raise RuntimeError("Metacell membership data not available for propagation.")
+
+        metacell_assignments = match_df.set_index("CellBarcode")[ref_name]
+        metacell_scores = match_df.set_index("CellBarcode")["AlignmentScore"]
+
+        membership_df = metacell_membership.copy()
+        membership_df = membership_df.rename(columns={"cell_barcode": "CellBarcode"})
+        membership_df[ref_name] = membership_df["metacell_id"].map(metacell_assignments)
+        membership_df["AlignmentScore"] = membership_df["metacell_id"].map(metacell_scores)
+        membership_df = membership_df.dropna(subset=[ref_name])
+
+        available_cells = original_cell_adata.obs_names.intersection(membership_df["CellBarcode"])
+        membership_df = membership_df[membership_df["CellBarcode"].isin(available_cells)]
+
+        match_df = membership_df[["CellBarcode", ref_name, "AlignmentScore"]].copy()
+        match_df = match_df.drop_duplicates(subset="CellBarcode")
+
+        cell_metacell_lookup = membership_df.set_index("CellBarcode")["metacell_id"]
+        cell_to_metacell_map = cell_metacell_lookup
+
+        adata_combined = original_cell_adata[match_df["CellBarcode"]].copy()
+        adata_combined.layers["counts"] = adata_combined.X.copy()
+        normalize_adata(adata_combined, show_progress=False)
+
+        marker_genes = reference_df.index
+        adata_filtered, genes_present, _ = subset_to_reference_genes(adata_combined, marker_genes)
+        query_matrix = pd.DataFrame(
+            adata_filtered.X.toarray() if sp.issparse(adata_filtered.X) else adata_filtered.X,
+            index=adata_filtered.obs_names,
+            columns=adata_filtered.var_names
+        )
+
     if alignment_mode == "community":
         ordered_match_df = match_df.sort_values(ref_name, ascending=False)
     else:
@@ -333,9 +462,17 @@ def combine_and_align_h5(
             for pop in reference_df.columns if pop in match_df[ref_name].values
         ], ignore_index=True)
 
-
     adata_combined = adata_combined[match_df.CellBarcode].copy()
     adata_combined.obs[ref_name] = match_df.set_index('CellBarcode').loc[adata_combined.obs_names][ref_name]
+
+    if export_cptt and metacell_align:
+        cptt_df = pd.DataFrame(
+            adata_filtered.X,
+            index=adata_filtered.obs_names,
+            columns=adata_filtered.var_names
+        ).T
+        cptt_df.insert(0, "UID", cptt_df.index)
+        cptt_df.to_csv(output_dir+"/CPTT_matrix.txt", sep="\t", index=False)
 
     ordered_match_df.to_csv(output_dir + "/cellHarmony_lite_assignments.txt", sep="\t", index=False)
     print(f"Cosine similarity computation completed in {time.time() - align_start_time:.2f} seconds.")
@@ -405,32 +542,103 @@ def combine_and_align_h5(
 
     if unsupervised_cluster:
         os.chdir(output_dir)
-        adata_unsup = adata_combined.copy()
-        sc.pp.highly_variable_genes(adata_unsup, min_mean=0.0125, max_mean=3, min_disp=0.5)
-        adata_unsup = adata_unsup[:, adata_unsup.var.highly_variable]
-        sc.pp.scale(adata_unsup, max_value=10)
-        sc.pp.pca(adata_unsup, n_comps=50)
-        sc.pp.neighbors(adata_unsup)
-        sc.tl.umap(adata_unsup)
-        sc.tl.leiden(adata_unsup)
+        if metacell_align:
+            adata_unsup_metacell = metacell_aligned_adata.copy()
+            sc.pp.highly_variable_genes(adata_unsup_metacell, min_mean=0.0125, max_mean=3, min_disp=0.5)
+            adata_unsup_metacell = adata_unsup_metacell[:, adata_unsup_metacell.var.highly_variable].copy()
+            sc.pp.scale(adata_unsup_metacell, max_value=10)
+            sc.pp.pca(adata_unsup_metacell, n_comps=50)
+            sc.pp.neighbors(adata_unsup_metacell)
+            sc.tl.umap(adata_unsup_metacell)
+            sc.tl.leiden(adata_unsup_metacell, flavor="leidenalg")
+            print('[metacell] unsupervised clustering performed on metacells')
 
-        sc.tl.rank_genes_groups(adata_unsup, groupby='leiden', method='wilcoxon', use_raw=False)
-        save_marker_genes(adata_unsup, 'leiden', os.path.join(output_dir, 'unsupervised_markers.txt'))
+            metacell_cluster_map = adata_unsup_metacell.obs['leiden'].astype(str).to_dict()
+            pd.DataFrame({
+                "metacell_id": adata_unsup_metacell.obs_names,
+                "leiden": adata_unsup_metacell.obs['leiden'].astype(str).values
+            }).to_csv(os.path.join(output_dir, "metacell_leiden_clusters.tsv"), sep="\t", index=False)
 
-        sc.pl.umap(adata_unsup, color='leiden', save="_unsupervised_umap.pdf", 
-            show=False, legend_loc='on data', legend_fontsize=5,legend_fontweight='normal')
+            if cell_to_metacell_map is not None:
+                cell_clusters = [
+                    metacell_cluster_map.get(cell_to_metacell_map.get(bc), "NA")
+                    for bc in adata_combined.obs_names
+                ]
+            else:
+                cell_clusters = ["NA"] * adata_combined.n_obs
+            adata_combined.obs['scanpy-leiden'] = pd.Series(cell_clusters, index=adata_combined.obs_names).astype(str)
 
-        sc.pl.rank_genes_groups_heatmap(
-            adata_unsup,
-            groupby='leiden',
-            n_genes=5,
-            show=False,
-            save="_unsupervised_heatmap.pdf",
-            standard_scale='var',
-            dendrogram=False,
-            swap_axes=True,
-            var_group_rotation=0,
-        )
+            adata_unsup_cells = adata_combined.copy()
+            sc.pp.highly_variable_genes(adata_unsup_cells, min_mean=0.0125, max_mean=3, min_disp=0.5)
+            adata_unsup_cells = adata_unsup_cells[:, adata_unsup_cells.var.highly_variable].copy()
+            sc.pp.scale(adata_unsup_cells, max_value=10)
+            sc.pp.pca(adata_unsup_cells, n_comps=50)
+            sc.pp.neighbors(adata_unsup_cells)
+            sc.tl.umap(adata_unsup_cells)
+            adata_unsup_cells.obs['leiden'] = adata_combined.obs['scanpy-leiden'].reindex(adata_unsup_cells.obs_names).astype(str)
+
+            adata_combined.obsm['X_umap_leiden'] = adata_unsup_cells.obsm['X_umap']
+            adata_combined.obs['UMAP_leiden_X'] = adata_unsup_cells.obsm['X_umap'][:, 0]
+            adata_combined.obs['UMAP_leiden_Y'] = adata_unsup_cells.obsm['X_umap'][:, 1]
+
+            unique_clusters = adata_unsup_cells.obs['leiden'].dropna().unique()
+            if len(unique_clusters) > 1:
+                sc.tl.rank_genes_groups(adata_unsup_cells, groupby='leiden', method='wilcoxon', use_raw=False)
+                save_marker_genes(adata_unsup_cells, 'leiden', os.path.join(output_dir, 'unsupervised_markers.txt'))
+
+                sc.pl.umap(
+                    adata_unsup_cells,
+                    color='leiden',
+                    save="_unsupervised_umap.pdf",
+                    show=False,
+                    legend_loc='on data',
+                    legend_fontsize=5,
+                    legend_fontweight='normal',
+                )
+
+                sc.pl.rank_genes_groups_heatmap(
+                    adata_unsup_cells,
+                    groupby='leiden',
+                    n_genes=5,
+                    show=False,
+                    save="_unsupervised_heatmap.pdf",
+                    standard_scale='var',
+                    dendrogram=False,
+                    swap_axes=True,
+                    var_group_rotation=0,
+                )
+            else:
+                print("[INFO] Skipping unsupervised marker discovery (insufficient metacell clusters).")
+            adata_unsup = adata_unsup_cells
+        else:
+            adata_unsup = adata_combined.copy()
+            sc.pp.highly_variable_genes(adata_unsup, min_mean=0.0125, max_mean=3, min_disp=0.5)
+            adata_unsup = adata_unsup[:, adata_unsup.var.highly_variable].copy()
+            sc.pp.scale(adata_unsup, max_value=10)
+            sc.pp.pca(adata_unsup, n_comps=50)
+            sc.pp.neighbors(adata_unsup)
+            sc.tl.umap(adata_unsup)
+            sc.tl.leiden(adata_unsup, flavor="leidenalg")
+            print('[cell] unsupervised clustering performed on individual cells')
+
+            sc.tl.rank_genes_groups(adata_unsup, groupby='leiden', method='wilcoxon', use_raw=False)
+            save_marker_genes(adata_unsup, 'leiden', os.path.join(output_dir, 'unsupervised_markers.txt'))
+
+            sc.pl.umap(adata_unsup, color='leiden', save="_unsupervised_umap.pdf",
+                show=False, legend_loc='on data', legend_fontsize=5,legend_fontweight='normal')
+
+            sc.pl.rank_genes_groups_heatmap(
+                adata_unsup,
+                groupby='leiden',
+                n_genes=5,
+                show=False,
+                save="_unsupervised_heatmap.pdf",
+                standard_scale='var',
+                dendrogram=False,
+                swap_axes=True,
+                var_group_rotation=0,
+            )
+            adata_combined.obs['scanpy-leiden'] = adata_unsup.obs['leiden']
 
     if save_adata:
         # If unsupervised clustering was run, merge leiden clusters into adata_combined before saving
@@ -467,6 +675,72 @@ def load_gene_translation(translation_path):
     translation_map = dict(zip(df["source"].astype(str), df["target"].astype(str)))
     print(f"[INFO] Loaded gene translation table: {len(translation_map)} mappings")
     return translation_map
+
+
+def apply_gene_translation(adata, translation_map, sample_label=None):
+    """Apply a gene translation map to an AnnData object."""
+    sample_label = sample_label or "dataset"
+
+    if "gene_symbols" not in adata.var.columns:
+        adata.var["gene_symbols"] = adata.var_names.astype(str)
+
+    if translation_map is None:
+        return 0
+
+    original_names = adata.var_names.astype(str)
+    translated_names = []
+    updated_count = 0
+
+    for name in original_names:
+        translated = translation_map.get(name, name)
+        if translated != name:
+            updated_count += 1
+        translated_names.append(str(translated))
+
+    adata.var["source_gene_id"] = original_names
+    adata.var["gene_symbols"] = translated_names
+    adata.var_names = pd.Index(translated_names)
+
+    if updated_count:
+        print(f"[INFO] Applied gene translation for {sample_label}: {updated_count} IDs updated")
+    else:
+        print(f"[INFO] Gene translation file provided but no IDs matched for {sample_label}")
+
+    return updated_count
+
+
+def subset_to_reference_genes(adata, reference_genes):
+    """Subset AnnData to genes present in the reference, using gene symbols when available."""
+    if isinstance(reference_genes, pd.Index):
+        reference_genes = reference_genes.tolist()
+
+    if "gene_symbols" in adata.var.columns:
+        symbol_values = adata.var["gene_symbols"].astype(str).tolist()
+    else:
+        symbol_values = adata.var_names.astype(str).tolist()
+
+    symbol_to_var = {}
+    for var_name, symbol in zip(adata.var_names.tolist(), symbol_values):
+        if symbol is None:
+            continue
+        symbol_str = str(symbol)
+        if not symbol_str or symbol_str.lower() == "nan":
+            continue
+        if symbol_str not in symbol_to_var:
+            symbol_to_var[symbol_str] = var_name
+
+    matched_symbols = [gene for gene in reference_genes if gene in symbol_to_var]
+    missing_symbols = [gene for gene in reference_genes if gene not in symbol_to_var]
+
+    if not matched_symbols:
+        raise ValueError("No overlapping genes between the dataset and the reference after translation.")
+
+    selected_var_names = [symbol_to_var[gene] for gene in matched_symbols]
+    filtered = adata[:, selected_var_names].copy()
+    filtered.var_names = pd.Index(matched_symbols)
+    filtered.var["gene_symbols"] = matched_symbols
+
+    return filtered, matched_symbols, missing_symbols
 
 def get_h5_and_mtx_files(folder_path):
     """
@@ -672,6 +946,18 @@ if __name__ == '__main__':
     parser.add_argument('--alignment_mode', type=str, default="cosine", help='Alignment mode: "cosine" or "classic"')
     parser.add_argument('--align_cutoff', type=float, default=None, help='Exclude cells with AlignmentScore below this threshold (default: include all)')
     parser.add_argument("--gene_translation",type=str, default=None, help='Optional two-column TSV mapping file (e.g. Ensembl→Symbol) for gene ID translation')
+    parser.add_argument('--metacell-align', action='store_true', help='Aggregate cells into metacells prior to alignment')
+    parser.add_argument('--metacell-target-size', type=int, default=50, help='Target number of cells per metacell')
+    parser.add_argument('--metacell-min-size', type=int, default=25, help='Minimum cells per metacell')
+    parser.add_argument('--metacell-max-size', type=int, default=100, help='Maximum cells per metacell')
+    parser.add_argument('--metacell-algorithm', type=str, default='kmeans', choices=['kmeans', 'leiden', 'louvain', 'random'], help='Clustering algorithm for metacell construction')
+    parser.add_argument('--metacell-neighbors', type=int, default=30, help='Number of neighbors for metacell graph construction')
+    parser.add_argument('--metacell-hvg', type=int, default=3000, help='Number of highly variable genes for metacell clustering')
+    parser.add_argument('--metacell-pcs', type=int, default=50, help='Number of PCs for metacell clustering')
+    parser.add_argument('--metacell-random-count', type=int, default=50, help='Metacells per group when using random aggregation')
+    parser.add_argument('--metacell-random-cells', type=int, default=5, help='Cells per metacell for random aggregation')
+    parser.add_argument('--metacell-random-replacement', action='store_true', help='Sample cells with replacement for random metacells')
+    parser.add_argument('--metacell-random-state', type=int, default=0, help='Random state for metacell construction')
 
     args = parser.parse_args()
 
@@ -692,6 +978,18 @@ if __name__ == '__main__':
     append_obs_field = args.append_obs
     align_cutoff = args.align_cutoff
     gene_translation = args.gene_translation
+    metacell_align = args.metacell_align
+    metacell_target = args.metacell_target_size
+    metacell_min = args.metacell_min_size
+    metacell_max = args.metacell_max_size
+    metacell_algorithm = args.metacell_algorithm
+    metacell_neighbors = args.metacell_neighbors
+    metacell_hvg = args.metacell_hvg
+    metacell_pcs = args.metacell_pcs
+    metacell_random_count = args.metacell_random_count
+    metacell_random_cells = args.metacell_random_cells
+    metacell_random_replacement = args.metacell_random_replacement
+    metacell_random_state = args.metacell_random_state
 
     #h5_files = glob(os.path.join(h5_directory, "*.h5")) if '.h5' not in h5_directory else [h5_directory]
     h5_files = get_h5_and_mtx_files(h5_directory)
@@ -717,5 +1015,17 @@ if __name__ == '__main__':
         append_obs_field=append_obs_field,
         alignment_mode=alignment_mode,
         min_alignment_score=align_cutoff,
-        gene_translation_file=gene_translation
+        gene_translation_file=gene_translation,
+        metacell_align=metacell_align,
+        metacell_target_size=metacell_target,
+        metacell_min_size=metacell_min,
+        metacell_max_size=metacell_max,
+        metacell_algorithm=metacell_algorithm,
+        metacell_neighbors=metacell_neighbors,
+        metacell_hvg=metacell_hvg,
+        metacell_pcs=metacell_pcs,
+        metacell_random_count=metacell_random_count,
+        metacell_random_cells=metacell_random_cells,
+        metacell_random_replacement=metacell_random_replacement,
+        metacell_random_state=metacell_random_state
     )

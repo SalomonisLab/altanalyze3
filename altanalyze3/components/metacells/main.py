@@ -27,6 +27,7 @@ import pandas as pd
 import scanpy as sc
 import scipy.sparse as sp
 from sklearn.cluster import MiniBatchKMeans
+from tqdm.auto import tqdm
 
 
 ###############################################################################
@@ -133,7 +134,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--n-top-genes", type=int, default=3000, help="Number of HVGs to use for graph construction.")
     parser.add_argument("--n-pcs", type=int, default=50, help="Number of principal components.")
-    parser.add_argument("--pca-svd-solver", choices=["arpack", "randomized"], default="randomized")
+    parser.add_argument("--pca-svd-solver", choices=["auto", "arpack", "randomized"], default="auto")
     parser.add_argument("--n-neighbors", type=int, default=30, help="Number of neighbors for the KNN graph.")
     parser.add_argument("--neighbor-method", choices=["auto", "umap", "gauss"], default="auto")
     parser.add_argument("--neighbor-metric", default="euclidean", help="Metric for neighbor search.")
@@ -247,6 +248,7 @@ def subset_adata(
 def group_iterable(
     adata: ad.AnnData,
     boundary_columns: Sequence[str],
+    grouped: Optional[pd.core.groupby.generic.DataFrameGroupBy] = None,
 ) -> Iterable[Tuple[Tuple[str, ...], ad.AnnData]]:
     """Yield (group_key, group_adata) pairs for the requested boundary columns."""
     if not boundary_columns:
@@ -257,7 +259,8 @@ def group_iterable(
     if missing:
         raise KeyError(f"Boundary columns missing from obs: {', '.join(missing)}")
 
-    grouped = adata.obs.groupby(list(boundary_columns), observed=True, dropna=False)
+    if grouped is None:
+        grouped = adata.obs.groupby(list(boundary_columns), observed=True, dropna=False)
     for key, group_df in grouped:
         key_tuple = key if isinstance(key, tuple) else (key,)
         subgroup = adata[group_df.index].copy()
@@ -283,11 +286,22 @@ def prepare_graph_data(
         layer=params.hvg_layer,
     )
 
+    if sp.issparse(adata.X):
+        adata.X = adata.X.astype(np.float32)
+    else:
+        adata.X = np.asarray(adata.X, dtype=np.float32)
+
     logging.debug("Running PCA (n_pcs=%d).", params.n_pcs)
+    solver = params.pca_svd_solver
+    if solver == "auto":
+        solver = "arpack" if sp.issparse(adata.X) else "randomized"
+    elif sp.issparse(adata.X) and solver == "randomized":
+        logging.debug("Switching PCA solver to 'arpack' for sparse input to avoid densification.")
+        solver = "arpack"
     sc.tl.pca(
         adata,
         n_comps=params.n_pcs,
-        svd_solver=params.pca_svd_solver,
+        svd_solver=solver,
         random_state=params.random_state,
     )
 
@@ -664,71 +678,96 @@ def process_group(
 ) -> Tuple[ad.AnnData, pd.DataFrame, int]:
     """Compute metacells for a single group and return the aggregated AnnData."""
     rng = np.random.default_rng(params.random_state + metacell_start_idx)
+    label_parts = [str(part) for part in boundary_key] if boundary_key else ["all"]
+    label = " | ".join(label_parts)
+    if len(label) > 48:
+        label = label[:45] + "..."
 
-    if params.graph_algorithm == "random" and params.random_metacell_count:
-        groups = generate_random_groups(
-            n_cells=group.n_obs,
-            count=params.random_metacell_count,
-            cells_per_group=params.random_cells_per_metacell,
-            with_replacement=params.random_sampling_with_replacement,
-            rng=rng,
-        )
-        if not groups:
-            logging.warning(
-                "Group %s has no cells; skipping metacell generation.",
-                boundary_key,
+    progress_disable = group.n_obs == 0
+    with tqdm(
+        total=4,
+        desc=f"Group {label}",
+        unit="step",
+        leave=False,
+        disable=progress_disable,
+    ) as step_bar:
+        if params.graph_algorithm == "random" and params.random_metacell_count:
+            groups = generate_random_groups(
+                n_cells=group.n_obs,
+                count=params.random_metacell_count,
+                cells_per_group=params.random_cells_per_metacell,
+                with_replacement=params.random_sampling_with_replacement,
+                rng=rng,
             )
-            groups = []
-    elif group.n_obs < max(params.min_size, 2):
-        logging.warning(
-            "Group %s has only %d cells; returning single metacell covering all cells.",
-            boundary_key,
-            group.n_obs,
+            if not groups:
+                logging.warning(
+                    "Group %s has no cells; skipping metacell generation.",
+                    boundary_key,
+                )
+                groups = []
+        elif group.n_obs < max(params.min_size, 2):
+            logging.warning(
+                "Group %s has only %d cells; returning single metacell covering all cells.",
+                boundary_key,
+                group.n_obs,
+            )
+            groups = [np.arange(group.n_obs, dtype=int)]
+        else:
+            # Prepare analysis data for clustering
+            analysis_matrix, analysis_var = get_obs_matrix(group, layer=params.hvg_layer, use_raw=params.use_raw)
+            analysis = ad.AnnData(X=analysis_matrix, obs=group.obs.copy(), var=analysis_var)
+            prepare_graph_data(analysis, params)
+
+            labels = initial_labels(analysis, params)
+            embeddings = analysis.obsm["X_pca"]
+            groups = enforce_size_bounds(labels, embeddings, params)
+
+        if not groups:
+            raise ValueError(f"No metacell groups produced for boundary {boundary_key}.")
+
+        step_bar.update(1)
+        if not progress_disable:
+            step_bar.set_postfix_str(f"groups={len(groups)}")
+
+        # Aggregate expression using the requested matrix
+        expr_matrix, expr_var = get_obs_matrix(group, layer=params.expression_layer, use_raw=params.use_raw)
+        aggregated_matrix = aggregate_expression(expr_matrix, groups, params.aggregation)
+        step_bar.update(1)
+        if not progress_disable:
+            step_bar.set_postfix_str(f"metacells={len(groups)}")
+
+        # Assign metacell IDs
+        metacell_ids = [f"MC_{idx:06d}" for idx in range(metacell_start_idx, metacell_start_idx + len(groups))]
+
+        boundary_info = dict(zip(boundary_columns, boundary_key)) if boundary_columns else {}
+
+        metacell_obs = build_metacell_obs(
+            groups,
+            metacell_ids,
+            group.obs,
+            sample_column=sample_column,
+            cell_type_column=cell_type_column,
+            boundary_info=boundary_info,
         )
-        groups = [np.arange(group.n_obs, dtype=int)]
-    else:
-        # Prepare analysis data for clustering
-        analysis_matrix, analysis_var = get_obs_matrix(group, layer=params.hvg_layer, use_raw=params.use_raw)
-        analysis = ad.AnnData(X=analysis_matrix, obs=group.obs.copy(), var=analysis_var)
-        prepare_graph_data(analysis, params)
+        step_bar.update(1)
+        if not progress_disable:
+            step_bar.set_postfix_str("obs")
 
-        labels = initial_labels(analysis, params)
-        embeddings = analysis.obsm["X_pca"]
-        groups = enforce_size_bounds(labels, embeddings, params)
+        metacell_var = expr_var.copy()
+        metacell_adata = ad.AnnData(X=aggregated_matrix, obs=metacell_obs, var=metacell_var)
+        metacell_adata.obs_names = metacell_ids
 
-    if not groups:
-        raise ValueError(f"No metacell groups produced for boundary {boundary_key}.")
-
-    # Aggregate expression using the requested matrix
-    expr_matrix, expr_var = get_obs_matrix(group, layer=params.expression_layer, use_raw=params.use_raw)
-    aggregated_matrix = aggregate_expression(expr_matrix, groups, params.aggregation)
-
-    # Assign metacell IDs
-    metacell_ids = [f"MC_{idx:06d}" for idx in range(metacell_start_idx, metacell_start_idx + len(groups))]
-
-    boundary_info = dict(zip(boundary_columns, boundary_key)) if boundary_columns else {}
-
-    metacell_obs = build_metacell_obs(
-        groups,
-        metacell_ids,
-        group.obs,
-        sample_column=sample_column,
-        cell_type_column=cell_type_column,
-        boundary_info=boundary_info,
-    )
-
-    metacell_var = expr_var.copy()
-    metacell_adata = ad.AnnData(X=aggregated_matrix, obs=metacell_obs, var=metacell_var)
-    metacell_adata.obs_names = metacell_ids
-
-    membership_df = build_membership_df(
-        groups,
-        metacell_ids,
-        group.obs_names.to_numpy(),
-        group.obs,
-        sample_column=sample_column,
-        cell_type_column=cell_type_column,
-    )
+        membership_df = build_membership_df(
+            groups,
+            metacell_ids,
+            group.obs_names.to_numpy(),
+            group.obs,
+            sample_column=sample_column,
+            cell_type_column=cell_type_column,
+        )
+        step_bar.update(1)
+        if not progress_disable:
+            step_bar.set_postfix_str("membership")
 
     next_index = metacell_start_idx + len(groups)
     return metacell_adata, membership_df, next_index
@@ -746,10 +785,29 @@ def assemble_metacells(
     membership_tables: List[pd.DataFrame] = []
 
     next_metacell_id = 0
-    total_groups = 0
+    if not boundary_columns:
+        total_groups = 1
+        grouped = None
+    else:
+        missing = [col for col in boundary_columns if col not in adata.obs.columns]
+        if missing:
+            raise KeyError(f"Boundary columns missing from obs: {', '.join(missing)}")
+        grouped = adata.obs.groupby(list(boundary_columns), observed=True, dropna=False)
+        total_groups = grouped.ngroups
 
-    for boundary_key, group in group_iterable(adata, boundary_columns):
-        total_groups += 1
+    group_iter = group_iterable(adata, boundary_columns, grouped=grouped)
+    group_pbar = tqdm(
+        group_iter,
+        total=total_groups,
+        desc="Metacell groups",
+        unit="group",
+        disable=total_groups <= 1,
+        leave=False,
+    )
+
+    for boundary_key, group in group_pbar:
+        if hasattr(group_pbar, "set_postfix_str"):
+            group_pbar.set_postfix_str(f"cells={group.n_obs}")
         logging.info(
             "Processing group %s with %d cells.",
             boundary_key,
@@ -766,6 +824,9 @@ def assemble_metacells(
         )
         metacell_tables.append(metacell_table)
         membership_tables.append(membership_df)
+
+    if hasattr(group_pbar, "close"):
+        group_pbar.close()
 
     if not metacell_tables:
         raise RuntimeError("No metacells generated. Check filters and boundaries.")
