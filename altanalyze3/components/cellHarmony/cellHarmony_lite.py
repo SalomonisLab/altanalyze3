@@ -283,7 +283,6 @@ def combine_and_align_h5(
 
         mc_start = time.time()
 
-
         metacell_adata, membership_df = assemble_metacells(
             adata_combined,
             params=metacell_params,
@@ -292,30 +291,17 @@ def combine_and_align_h5(
             cell_type_column=None,
         )
 
-
         mc_end = time.time()
-
-
         mc_duration = mc_end - mc_start
-
-
         n_cells = original_cell_adata.n_obs
-
-
         n_metacells = metacell_adata.n_obs
-
-
         size_stats = metacell_adata.obs['metacell_size']
 
-
         print(f"[metacell] generated {n_metacells} metacells from {n_cells} cells in {mc_duration:.1f}s")
-
-
         print(f"[metacell] size median={size_stats.median():.1f} range=({int(size_stats.min())}, {int(size_stats.max())})")
 
         if "gene_symbols" not in metacell_adata.var.columns:
             metacell_adata.var["gene_symbols"] = metacell_adata.var_names.astype(str)
-
 
         print(f"[metacell] algorithm={metacell_algorithm} target={metacell_target_size} min={metacell_min_size} max={metacell_max_size} neighbors={metacell_neighbors} hvg={metacell_hvg} pcs={metacell_pcs}")
         metacell_adata.uns["metacell_membership"] = membership_df

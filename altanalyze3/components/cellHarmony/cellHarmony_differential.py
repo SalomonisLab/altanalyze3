@@ -1443,83 +1443,91 @@ def main():
             print("[INFO] Wrote {}".format(cr_path))
 
         if not args.skip_grn and interactions_df is not None:
-            per_pop_results = de_store.get("per_population_deg", {})
-            if not per_pop_results:
+            detailed = de_store.get("detailed_deg")
+            if detailed is None or detailed.empty:
                 if diagnostic_report:
-                    print("[DEBUG] No per-population DE results supplied for GRN export.")
+                    print("[DEBUG] No detailed DEG table available for GRN export.")
             else:
-                comparison_dir = os.path.join(interaction_root, NetPerspective.safe_component(tag))
-                os.makedirs(comparison_dir, exist_ok=True)
-                fc_threshold = max(0.0, float(np.log2(float(args.fc)))) if float(args.fc) > 0 else 0.0
-                use_rawp = bool(de_store.get("use_rawp", False))
+                per_pop_results = {
+                    str(pop): grp.copy()
+                    for pop, grp in detailed.groupby("population")
+                }
 
-                for pop_name, pop_df in per_pop_results.items():
-                    if pop_df is None or pop_df.empty:
-                        continue
+                if not per_pop_results:
+                    if diagnostic_report:
+                        print("[DEBUG] No per-population DEG entries found for GRN export.")
+                else:
+                    comparison_dir = os.path.join(interaction_root, NetPerspective.safe_component(tag))
+                    os.makedirs(comparison_dir, exist_ok=True)
+                    use_rawp = bool(de_store.get("use_rawp", False))
 
-                    stats_df = pop_df.copy()
-                    stats_df = stats_df.reset_index().rename(columns={stats_df.index.name or "index": "gene"})
-                    stats_df["gene"] = stats_df["gene"].astype(str)
-                    stats_df["log2fc"] = pd.to_numeric(stats_df.get("log2fc"), errors="coerce")
+                    for pop_name, pop_df in per_pop_results.items():
+                        if pop_df is None or pop_df.empty:
+                            if diagnostic_report:
+                                print(f"[DEBUG] GRN skip {pop_name}: empty per-pop DEG table.")
+                            continue
 
-                    significance_column = None
-                    if use_rawp and "pval" in stats_df.columns and stats_df["pval"].notna().any():
-                        significance_column = "pval"
-                    elif "fdr" in stats_df.columns:
-                        significance_column = "fdr"
+                        stats_df = pop_df.copy()
+                        stats_df = stats_df.reset_index(drop=True)
+                        stats_df["gene"] = stats_df["gene"].astype(str)
+                        stats_df["log2fc"] = pd.to_numeric(stats_df.get("log2fc"), errors="coerce")
 
-                    if significance_column is None:
-                        if diagnostic_report:
-                            print(f"[DEBUG] Skipping {pop_name}: missing significance column for GRN export.")
-                        continue
+                        significance_column = None
+                        if use_rawp and "pval" in stats_df.columns and stats_df["pval"].notna().any():
+                            significance_column = "pval"
+                        elif "fdr" in stats_df.columns:
+                            significance_column = "fdr"
 
-                    stats_df[significance_column] = pd.to_numeric(
-                        stats_df[significance_column], errors="coerce"
-                    )
+                        keep_columns = {"gene", "log2fc", "fdr", "pval"}
+                        if significance_column:
+                            keep_columns.add(significance_column)
+                        keep_columns = [col for col in keep_columns if col in stats_df.columns]
 
-                    significance_mask = stats_df[significance_column] < float(args.alpha)
-                    if fc_threshold > 0:
-                        significance_mask &= stats_df["log2fc"].abs() >= fc_threshold
-
-                    if not significance_mask.any():
-                        continue
-
-                    keep_columns = {"gene", "log2fc", "fdr", "pval", significance_column}
-                    keep_columns = [col for col in keep_columns if col in stats_df.columns]
-                    selected = (
-                        stats_df.loc[significance_mask, keep_columns]
-                        .dropna(subset=["gene"])
-                        .drop_duplicates(subset=["gene"])
-                    )
-
-                    if selected.empty or selected["gene"].nunique() < 2:
-                        continue
-
-                    pop_component = NetPerspective.safe_component(pop_name)
-                    output_prefix = os.path.join(comparison_dir, pop_component)
-
-                    try:
-                        outputs = NetPerspective.generate_network_for_genes(
-                            selected,
-                            interactions_df,
-                            output_prefix,
-                            gene_column="gene",
-                            fold_change_column="log2fc",
-                            pval_column=significance_column if significance_column in selected.columns else None,
-                            max_genes=75,
+                        selected = (
+                            stats_df.loc[:, keep_columns]
+                            .dropna(subset=["gene", "log2fc"])
+                            .drop_duplicates(subset=["gene"])
                         )
-                        print(
-                            f"[INFO] Wrote interaction network for {pop_name} ({case_label} vs {control_label}): {outputs[0]}"
-                        )
-                    except NetPerspective.NetworkGenerationError as ex:
+
                         if diagnostic_report:
-                            print(f"[DEBUG] Interaction network skipped for {pop_name}: {ex}")
-                        else:
-                            print(f"[WARN] No interaction edges found for {pop_name}; skipping network plot.")
-                    except ImportError as ex:
-                        print(f"[WARN] Interaction plots disabled (missing dependency): {ex}")
-                        args.skip_grn = True
-                        break
+                            print(
+                                f"[DEBUG] GRN candidate genes for {pop_name}: total={len(stats_df)}, "
+                                f"after_cleanup={selected['gene'].nunique()}"
+                            )
+
+                        if selected.empty or selected["gene"].nunique() < 2:
+                            if diagnostic_report:
+                                print(
+                                    f"[DEBUG] GRN skip {pop_name}: insufficient unique genes (n={selected['gene'].nunique()})."
+                                )
+                            continue
+
+                        pop_component = NetPerspective.safe_component(pop_name)
+                        output_prefix = os.path.join(comparison_dir, pop_component)
+                        try:
+                            outputs = NetPerspective.generate_network_for_genes(
+                                selected,
+                                interactions_df,
+                                output_prefix,
+                                gene_column="gene",
+                                fold_change_column="log2fc",
+                                pval_column=significance_column if significance_column in selected.columns else None,
+                                max_genes=None,
+                            )
+                            print(
+                                f"[INFO] Wrote interaction network for {pop_name} ({case_label} vs {control_label}): {outputs[0]}"
+                            )
+                        except NetPerspective.NetworkGenerationError as ex:
+                            if diagnostic_report:
+                                print(f"[DEBUG] Interaction network skipped for {pop_name}: {ex}")
+                            else:
+                                print(f"[WARN] No interaction edges found for {pop_name}; skipping network plot.")
+                        except ImportError as ex:
+                            print(f"[WARN] Interaction plots disabled (missing dependency): {ex}")
+                        except Exception as ex:
+                            print(f"[WARN] Interaction network failed for {pop_name}: {ex}")
+                    args.skip_grn = True
+                    break
 
     print("[INFO] Completed.")
 

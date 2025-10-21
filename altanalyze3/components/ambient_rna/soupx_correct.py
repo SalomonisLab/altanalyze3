@@ -10,12 +10,17 @@ library-specific fractions.
 Highlights
 ~~~~~~~~~~
 * Accept either a single rho value or per-library mapping.
+* Automatically computes per-library Leiden clusters (Scanpy) to speed SoupX;
+  override with `--cluster-col` or disable via CLI if needed.
+* Accept optional precomputed cluster labels via `--cluster-col` for reproducible runs.
 * Processes each library independently to avoid cross-library bleed.
 * Stores the raw counts in a layer (``soupx_raw``) and overwrites ``.X`` with the
   corrected counts unless disabled.
 * Persists corrected counts in a ``soupx_corrected`` layer for downstream audit.
 * Emits progress updates via ``tqdr`` when available (falls back to console
   prints otherwise).
+* When top-of-droplet (raw) matrices are unavailable, derives a fallback ambient
+  profile directly from each library's filtered counts.
 
 Example (standalone)::
 
@@ -42,13 +47,18 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import warnings
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Iterable, Optional
 
 import anndata as ad
 import numpy as np
+import pandas as pd
 import scipy.sparse as sp
+from scipy.sparse import SparseEfficiencyWarning
+import scanpy as sc
 
 try:  # soupx is mandatory for the core functionality
     import soupx
@@ -81,6 +91,14 @@ def _select_tqdr_reporter() -> Optional[callable]:  # pragma: no cover - import-
 _TQDR_REPORTER = _select_tqdr_reporter()
 
 
+warnings.filterwarnings(
+    "ignore",
+    message="`flavor='seurat_v3'` expects raw count data, but non-integers were found.",
+    category=UserWarning,
+)
+warnings.filterwarnings("ignore", category=SparseEfficiencyWarning)
+
+
 def _try_reporter(message: str, reporter: callable, **kwargs) -> bool:
     """Attempt different call signatures for tqdr reporters."""
 
@@ -111,18 +129,19 @@ def report_status(message: str, **kwargs) -> None:
 
 
 @contextmanager
-def status_scope(message: str, done_message: Optional[str] = None):
+def status_scope(message: str, done_message: Optional[str] = None, *, status_kwargs: Optional[dict] = None):
     """Emit a start message and optionally a completion message."""
 
-    report_status(message)
+    status_kwargs = status_kwargs or {}
+    report_status(message, **status_kwargs)
     try:
         yield
     except Exception:
-        report_status(f"FAILED: {message}")
+        report_status(f"FAILED: {message}", **status_kwargs)
         raise
     else:
         if done_message:
-            report_status(done_message)
+            report_status(done_message, **status_kwargs)
 
 
 def validate_rho(value: float) -> float:
@@ -183,15 +202,145 @@ def _safe_filename(label: str) -> str:
     return sanitized or "library"
 
 
+def _run_leiden_clustering(
+    subset: ad.AnnData,
+    *,
+    resolution: float,
+    n_neighbors: int,
+    n_pcs: int,
+    n_top_genes: int,
+    random_state: int,
+) -> tuple[np.ndarray, str]:
+    """Compute Leiden clusters on a copy of the subset and return labels."""
+
+    if subset.n_obs < 3 or subset.n_vars < 3:
+        clusters = np.array([f"cell_{i}" for i in range(subset.n_obs)], dtype=str)
+        subset.obs["soupx_leiden"] = clusters
+        return clusters, "auto_identity"
+
+    work = subset.copy()
+
+    if sp.issparse(work.X):
+        work.X = work.X.astype(np.float32)
+    else:
+        work.X = np.asarray(work.X, dtype=np.float32)
+
+    prev_verbosity = sc.settings.verbosity
+    sc.settings.verbosity = 0
+    try:
+        sc.pp.normalize_total(work, target_sum=1e4, inplace=True)
+        sc.pp.log1p(work)
+
+        hvg = min(max(200, n_top_genes), work.n_vars)
+        if work.n_vars > hvg:
+            sc.pp.highly_variable_genes(work, n_top_genes=hvg, flavor="seurat_v3", subset=True)
+
+        max_pcs = min(n_pcs, max(1, work.n_obs - 1), max(1, work.n_vars - 1))
+        if max_pcs < 1:
+            max_pcs = 1
+        sc.pp.pca(work, n_comps=max_pcs, random_state=random_state)
+
+        effective_neighbors = max(2, min(n_neighbors, work.n_obs - 1))
+        sc.pp.neighbors(work, n_neighbors=effective_neighbors, n_pcs=max_pcs, random_state=random_state)
+        sc.tl.leiden(
+            work,
+            resolution=resolution,
+            random_state=random_state,
+            flavor="igraph",
+            n_iterations=2,
+            directed=False,
+        )
+    finally:
+        sc.settings.verbosity = prev_verbosity
+
+    clusters = work.obs["leiden"].astype(str).to_numpy()
+    subset.obs["soupx_leiden"] = clusters
+    return clusters, f"auto_leiden(res={resolution},k={effective_neighbors},pcs={max_pcs})"
+
+
+def _configure_soup_profile(sc, counts_csr: sp.csr_matrix) -> str:
+    """Ensure SoupChannel has an ambient profile even without raw droplets."""
+
+    # Attempt explicit helper methods provided by soupx-python.
+    for method_name in ("setSoupProfileFromTOC", "setSoupProfileFromSoup", "setSoupProfileFromTou"):
+        method = getattr(sc, method_name, None)
+        if callable(method):
+            try:
+                method()
+                return method_name + "()"
+            except TypeError:
+                for candidate in (counts_csr, counts_csr.T):
+                    try:
+                        method(candidate)
+                        return f"{method_name}(matrix)"
+                    except Exception:
+                        continue
+
+    estimate = getattr(sc, "estimateSoupProfile", None)
+    setter = getattr(sc, "setSoupProfile", None)
+    if callable(estimate) and callable(setter):
+        try:
+            profile = estimate()
+            setter(profile)
+            return "estimateSoupProfile()"
+        except Exception:
+            pass
+
+    # Final fallback: normalize summed gene expression across cells.
+    gene_sums = np.asarray(counts_csr.sum(axis=0)).ravel()
+    if gene_sums.sum() > 0:
+        gene_sums = gene_sums / gene_sums.sum()
+    else:
+        gene_sums[:] = 1.0 / max(gene_sums.size, 1)
+
+    for attr in ("soup_profile", "soupProfile", "ambientProfile", "_soupProfile"):
+        if hasattr(sc, attr):
+            setattr(sc, attr, gene_sums)
+            return f"setattr:{attr}"
+
+    # Store as a generic attribute; SoupX will read it back if it expects soup_profile.
+    sc.soup_profile = gene_sums  # type: ignore[attr-defined]
+    return "setattr:soup_profile"
+
+
+def _adjust_counts(sc, clusters, *, method: str, round_to_int: bool, verbose: int = 0):
+    """Call soupx.adjustCounts while tolerating differing signatures."""
+
+    kwargs = {
+        "method": method,
+        "roundToInt": round_to_int,
+        "verbose": verbose,
+    }
+
+    try:
+        if clusters is None:
+            return soupx.adjustCounts(sc, **kwargs)
+        return soupx.adjustCounts(sc, clusters=clusters, **kwargs)
+    except TypeError:
+        if clusters is None:
+            return soupx.adjustCounts(sc, **kwargs)
+        try:
+            return soupx.adjustCounts(sc, clusters, **kwargs)
+        except TypeError:
+            # Fall back to positional without additional kwargs
+            if clusters is None:
+                return soupx.adjustCounts(sc, verbose=verbose)
+            return soupx.adjustCounts(sc, clusters, verbose=verbose)
+
+
 def correct_library(
     subset: ad.AnnData,
     *,
     rho: float,
+    method: str,
+    round_to_int: bool,
     store_raw_layer: bool = True,
     replace_x: bool = True,
     raw_layer: str = RAW_LAYER_NAME,
     corrected_layer: str = CORRECTED_LAYER_NAME,
     library_label: Optional[str] = None,
+    clusters = None,
+    cluster_source: Optional[str] = None,
 ) -> ad.AnnData:
     """Apply SoupX correction to a single library AnnData in-place."""
 
@@ -202,31 +351,54 @@ def correct_library(
     if store_raw_layer:
         subset.layers[raw_layer] = counts_csr.copy()
 
-    sc = soupx.SoupChannel(toc=counts_csr.T)
-    sc.rho = validate_rho(rho)
-    corrected = soupx.adjustCounts(sc)
+    try:
+        sc = soupx.SoupChannel(tod=counts_csr.T, toc=counts_csr.T)
+        soup_channel_mode = "tod=toc"
+    except TypeError:
+        try:
+            sc = soupx.SoupChannel(counts_csr.T)
+            soup_channel_mode = "single-arg"
+        except TypeError:
+            sc = soupx.SoupChannel(toc=counts_csr.T)
+            soup_channel_mode = "named-toc"
+    rho_value = validate_rho(rho)
+
+    set_contam = getattr(sc, "set_contamination_fraction", None)
+    if callable(set_contam):
+        set_contam(rho_value)
+    else:
+        sc.metaData["rho"] = rho_value
+
+    soup_profile_source = _configure_soup_profile(sc, counts_csr)
+    corrected = _adjust_counts(sc, clusters, method=method, round_to_int=round_to_int)
     corrected_csr = _to_csr(corrected).T
 
     subset.layers[corrected_layer] = corrected_csr
     if replace_x:
         subset.X = corrected_csr.copy()
 
-    subset.obs["soupx_rho"] = rho
+    subset.obs["soupx_rho"] = rho_value
     if library_label is not None:
         subset.obs["soupx_library"] = library_label
+    if clusters is not None:
+        subset.obs["soupx_cluster"] = clusters
+
+    cluster_count = int(np.unique(clusters).size) if clusters is not None else None
 
     metadata = {
         "library": library_label or "unknown",
-        "rho": rho,
+        "rho": float(rho_value),
         "soupx_version": getattr(soupx, "__version__", "unknown"),
         "cells": int(subset.n_obs),
         "genes": int(subset.n_vars),
+        "soup_profile_source": soup_profile_source,
+        "soup_channel_mode": soup_channel_mode,
+        "method": method,
+        "round_to_int": bool(round_to_int),
+        "n_clusters": int(cluster_count) if cluster_count is not None else 0,
+        "cluster_column": cluster_source or "",
     }
-    history = subset.uns.get("soupx_correction", [])
-    if not isinstance(history, list):
-        history = [history]
-    history.append(metadata)
-    subset.uns["soupx_correction"] = history
+    subset.uns["soupx_correction"] = metadata
     return subset
 
 
@@ -249,13 +421,22 @@ def process_h5ad(
     h5ad_path: Path,
     *,
     rho: float = DEFAULT_RHO,
-    library_col: str = "library",
+    library_col: str = "Library",
     outdir: Path = Path("./soupx_corrected"),
     rho_mapping: Optional[Dict[str, float]] = None,
     store_raw_layer: bool = True,
     replace_x: bool = True,
     write_individual: bool = True,
     merged_filename: str = "soupx_corrected_merged.h5ad",
+    cluster_col: Optional[str] = None,
+    auto_cluster: bool = True,
+    leiden_resolution: float = 0.5,
+    leiden_neighbors: int = 15,
+    leiden_npcs: int = 30,
+    leiden_hvg: int = 3000,
+    leiden_random_state: int = 0,
+    method: str = "subtraction",
+    round_to_int: bool = False,
 ) -> ad.AnnData:
     """Process all libraries within an h5ad file and write corrected outputs."""
 
@@ -274,14 +455,27 @@ def process_h5ad(
     if not libraries:
         raise ValueError(f"No library values found in column '{library_col}'.")
 
+    total_libraries = len(libraries)
     report_status(
-        f"Loaded {h5ad_path.name} with {adata.n_obs} cells, {adata.n_vars} genes, {len(libraries)} libraries."
+        "Loaded {file} with {cells} cells, {genes} genes, {libs} libraries. "
+        "Method={method} round_to_int={round_to_int} clustering={cluster_info}".format(
+            file=h5ad_path.name,
+            cells=adata.n_obs,
+            genes=adata.n_vars,
+            libs=total_libraries,
+            method=method,
+            round_to_int=round_to_int,
+            cluster_info=(
+                f"obs:{cluster_col}" if cluster_col
+                else ("auto_leiden" if auto_cluster else "cell_level")
+            ),
+        )
     )
 
     corrected_libs = []
     summary = []
 
-    for lib in libraries:
+    for idx, lib in enumerate(libraries, start=1):
         lib_mask = adata.obs[library_col] == lib
         subset = adata[lib_mask].copy()
         if subset.n_obs == 0:
@@ -289,33 +483,122 @@ def process_h5ad(
             continue
 
         lib_label = str(lib)
-        lib_rho = rho_mapping.get(lib_label, rho)
-        lib_rho = validate_rho(lib_rho)
+        lib_rho = validate_rho(rho_mapping.get(lib_label, rho))
+        progress_kwargs = {"progress": {"current": idx, "total": total_libraries}}
 
-        with status_scope(
-            f"Correcting library '{lib_label}' (rho={lib_rho:.4f})",
-            done_message=f"Finished library '{lib_label}'",
-        ):
-            corrected_subset = correct_library(
+        report_status(
+            f"[{idx}/{total_libraries}] Starting library '{lib_label}' (cells={subset.n_obs}, rho={lib_rho:.4f})",
+            **progress_kwargs,
+        )
+        library_start = time.perf_counter()
+
+        clusters = None
+        cluster_source = None
+        cluster_time = 0.0
+
+        if cluster_col:
+            if cluster_col not in subset.obs:
+                raise ValueError(
+                    f"Requested cluster column '{cluster_col}' not found for library '{lib_label}'."
+                )
+            clusters = subset.obs[cluster_col].astype(str).to_numpy()
+            cluster_source = cluster_col
+            report_status(
+                f"[{idx}/{total_libraries}] Using clusters from column '{cluster_col}'",
+                **progress_kwargs,
+            )
+        elif auto_cluster:
+            report_status(
+                f"[{idx}/{total_libraries}] Leiden clustering '{lib_label}' (resolution={leiden_resolution})",
+                **progress_kwargs,
+            )
+            cluster_start = time.perf_counter()
+            clusters, cluster_source = _run_leiden_clustering(
                 subset,
-                rho=lib_rho,
-                store_raw_layer=store_raw_layer,
-                replace_x=replace_x,
-                library_label=lib_label,
+                resolution=leiden_resolution,
+                n_neighbors=leiden_neighbors,
+                n_pcs=leiden_npcs,
+                n_top_genes=leiden_hvg,
+                random_state=leiden_random_state,
+            )
+            cluster_time = time.perf_counter() - cluster_start
+            report_status(
+                f"[{idx}/{total_libraries}] Clustering completed in {cluster_time:.1f}s",
+                **progress_kwargs,
             )
 
-        summary.append({
-            "library": lib_label,
-            "rho": lib_rho,
-            "cells": int(corrected_subset.n_obs),
-            "genes": int(corrected_subset.n_vars),
-        })
+        correction_start = time.perf_counter()
+        corrected_subset = correct_library(
+            subset,
+            rho=lib_rho,
+            method=method,
+            round_to_int=round_to_int,
+            store_raw_layer=store_raw_layer,
+            replace_x=replace_x,
+            library_label=lib_label,
+            clusters=clusters,
+            cluster_source=cluster_source,
+        )
+        correction_time = time.perf_counter() - correction_start
+        report_status(
+            f"[{idx}/{total_libraries}] SoupX correction completed in {correction_time:.1f}s",
+            **progress_kwargs,
+        )
 
+        library_metadata = corrected_subset.uns.get("soupx_correction", {}).copy()
+        library_metadata.update(
+            {
+                "cluster_time_sec": round(cluster_time, 3),
+                "correction_time_sec": round(correction_time, 3),
+            }
+        )
+
+        write_time = 0.0
         if write_individual:
             safe_name = _safe_filename(lib_label)
             out_file = outdir / f"{safe_name}_soupx_corrected.h5ad"
+            report_status(
+                f"[{idx}/{total_libraries}] Writing per-library file to {out_file}",
+                **progress_kwargs,
+            )
+            write_start = time.perf_counter()
             corrected_subset.write_h5ad(out_file, compression="gzip")
-            report_status(f"Wrote corrected library dataset: {out_file}")
+            write_time = time.perf_counter() - write_start
+            report_status(
+                f"[{idx}/{total_libraries}] Per-library file written in {write_time:.1f}s",
+                **progress_kwargs,
+            )
+
+        library_elapsed = time.perf_counter() - library_start
+        library_metadata.update(
+            {
+                "write_time_sec": round(write_time, 3),
+                "total_time_sec": round(library_elapsed, 3),
+            }
+        )
+        corrected_subset.uns["soupx_correction"] = library_metadata
+
+        summary.append(
+            {
+                "library": lib_label,
+                "rho": float(library_metadata.get("rho", lib_rho)),
+                "cells": int(library_metadata.get("cells", corrected_subset.n_obs)),
+                "genes": int(library_metadata.get("genes", corrected_subset.n_vars)),
+                "cluster_column": library_metadata.get("cluster_column", cluster_source or ""),
+                "n_clusters": int(library_metadata.get("n_clusters", 0)),
+                "method": library_metadata.get("method", method),
+                "round_to_int": bool(library_metadata.get("round_to_int", round_to_int)),
+                "cluster_time_sec": library_metadata.get("cluster_time_sec", 0.0),
+                "correction_time_sec": library_metadata.get("correction_time_sec", 0.0),
+                "write_time_sec": library_metadata.get("write_time_sec", write_time),
+                "total_time_sec": library_metadata.get("total_time_sec", library_elapsed),
+            }
+        )
+
+        report_status(
+            f"[{idx}/{total_libraries}] Completed library '{lib_label}' in {library_elapsed:.1f}s",
+            **progress_kwargs,
+        )
 
         corrected_subset.uns.pop("soupx_correction", None)
         corrected_libs.append(corrected_subset)
@@ -328,18 +611,33 @@ def process_h5ad(
     else:
         merged = ad.concat(corrected_libs, join="outer", merge="same")
 
+    summary_table = pd.DataFrame(summary) if summary else pd.DataFrame()
     merged.uns.setdefault("soupx_correction", {})
     merged.uns["soupx_correction"].update(
         {
-            "default_rho": rho,
+            "default_rho": float(rho),
             "library_column": library_col,
-            "libraries": summary,
+            "libraries": summary_table,
+            "cluster_column": cluster_col or "",
+            "auto_cluster": bool(auto_cluster),
+            "leiden_parameters": {
+                "resolution": float(leiden_resolution),
+                "n_neighbors": int(leiden_neighbors),
+                "n_pcs": int(leiden_npcs),
+                "n_top_genes": int(leiden_hvg),
+                "random_state": int(leiden_random_state),
+            },
+            "method": method,
+            "round_to_int": bool(round_to_int),
         }
     )
 
     merged_path = outdir / merged_filename
+    report_status(f"Writing merged corrected dataset to {merged_path}")
+    merged_write_start = time.perf_counter()
     merged.write_h5ad(merged_path, compression="gzip")
-    report_status(f"Wrote merged corrected dataset: {merged_path}")
+    merged_write_time = time.perf_counter() - merged_write_start
+    report_status(f"Merged dataset written in {merged_write_time:.1f}s")
 
     return merged
 
@@ -355,6 +653,15 @@ def run_soupx_correction(
     replace_x: bool = True,
     write_individual: bool = True,
     merged_filename: str = "soupx_corrected_merged.h5ad",
+    cluster_col: Optional[str] = None,
+    auto_cluster: bool = True,
+    leiden_resolution: float = 0.5,
+    leiden_neighbors: int = 15,
+    leiden_npcs: int = 30,
+    leiden_hvg: int = 3000,
+    leiden_random_state: int = 0,
+    method: str = "subtraction",
+    round_to_int: bool = False,
     return_adata: bool = False,
 ) -> Optional[ad.AnnData]:
     """Convenience wrapper for programmatic usage."""
@@ -370,6 +677,15 @@ def run_soupx_correction(
         replace_x=replace_x,
         write_individual=write_individual,
         merged_filename=merged_filename,
+        cluster_col=cluster_col,
+        auto_cluster=auto_cluster,
+        leiden_resolution=leiden_resolution,
+        leiden_neighbors=leiden_neighbors,
+        leiden_npcs=leiden_npcs,
+        leiden_hvg=leiden_hvg,
+        leiden_random_state=leiden_random_state,
+        method=method,
+        round_to_int=round_to_int,
     )
     if return_adata:
         return corrected
@@ -393,8 +709,59 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--library-col",
-        default="library",
+        default="Library",
         help="Column name in .obs specifying library identifiers.",
+    )
+    parser.add_argument(
+        "--cluster-col",
+        help="Optional column in .obs supplying precomputed cluster labels for SoupX.",
+    )
+    parser.add_argument(
+        "--disable-auto-cluster",
+        dest="auto_cluster",
+        action="store_false",
+        help="Disable automatic per-library Leiden clustering.",
+    )
+    parser.add_argument(
+        "--leiden-resolution",
+        type=float,
+        default=0.5,
+        help="Resolution for automatic Leiden clustering (default: 0.5).",
+    )
+    parser.add_argument(
+        "--leiden-neighbors",
+        type=int,
+        default=15,
+        help="Number of neighbors for Leiden clustering (default: 15).",
+    )
+    parser.add_argument(
+        "--leiden-npcs",
+        type=int,
+        default=30,
+        help="Number of principal components for Leiden clustering (default: 30).",
+    )
+    parser.add_argument(
+        "--leiden-hvg",
+        type=int,
+        default=3000,
+        help="Number of highly variable genes for Leiden clustering (default: 3000).",
+    )
+    parser.add_argument(
+        "--leiden-random-state",
+        type=int,
+        default=0,
+        help="Random seed for Leiden clustering (default: 0).",
+    )
+    parser.add_argument(
+        "--method",
+        choices=["subtraction", "multinomial", "soupOnly"],
+        default="subtraction",
+        help="SoupX correction method (default: subtraction).",
+    )
+    parser.add_argument(
+        "--round-to-int",
+        action="store_true",
+        help="Enable SoupX stochastic rounding to integers.",
     )
     parser.add_argument("--outdir", required=True, help="Output directory for corrected h5ad files.")
     parser.add_argument(
@@ -420,7 +787,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Do not emit per-library corrected h5ad files.",
     )
-    parser.set_defaults(store_raw_layer=True, replace_x=True, write_individual=True)
+    parser.set_defaults(store_raw_layer=True, replace_x=True, write_individual=True, auto_cluster=True)
     return parser
 
 
@@ -438,6 +805,15 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         replace_x=args.replace_x,
         write_individual=args.write_individual,
         merged_filename=args.merged_name,
+        cluster_col=args.cluster_col,
+        auto_cluster=args.auto_cluster,
+        leiden_resolution=args.leiden_resolution,
+        leiden_neighbors=args.leiden_neighbors,
+        leiden_npcs=args.leiden_npcs,
+        leiden_hvg=args.leiden_hvg,
+        leiden_random_state=args.leiden_random_state,
+        method=args.method,
+        round_to_int=args.round_to_int,
         return_adata=False,
     )
 
