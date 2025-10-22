@@ -46,3 +46,7 @@ If you are not a member of development team, to contribute, please follow the st
 2. make the changes in your forked repository
 3. create a pull request
 4. the managers will review your codes and decide how to merge into the main branch (At each standing meeting)
+
+## To cite AltAnalyze3 please refer to the following publication
+
+- [Splicing regulatory dynamics for precision analysis and treatment of heterogeneous leukemias.](https://pubmed.ncbi.nlm.nih.gov/40333990/) Venkatasubramanian M, Schwartz L, Ramachandra N, Bennett J, Subramanian KR, Chen X, Gordon-Mitchell S, Fromowitz A, Pradhan K, Shechter D, Sahu S, Heiser D, Scherle P, Chetal K, Kulkarni A, Lee D, Zhou J, Myers KC, Tseng E, Weirauch MT, Grimes HL, Starczynowski DT, Verma A, Salomonis N. *Sci Transl Med.* 2025 May 7;17(797):eadr1471. doi: 10.1126/scitranslmed.adr1471. PMID: 40333990.
