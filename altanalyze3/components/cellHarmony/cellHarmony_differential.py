@@ -23,6 +23,7 @@ Notes:
 import os
 import sys
 import argparse
+import datetime
 import numpy as np
 import pandas as pd
 import anndata as ad
@@ -47,6 +48,26 @@ plt.rcParams['figure.facecolor'] = 'white'
 
 diagnostic_report = False
 # ------------------------------- Utilities -------------------------------- #
+
+class Tee:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for stream in self.streams:
+            stream.write(data)
+        return len(data)
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
+
+    @property
+    def encoding(self):
+        for stream in self.streams:
+            if hasattr(stream, "encoding"):
+                return stream.encoding
+        return "utf-8"
 
 def _assert_no_multiindex(df, name):
     if isinstance(df.index, pd.MultiIndex):
@@ -1030,12 +1051,16 @@ def build_fixed_order_heatmap(de_store, outdir, population_col, fc_thresh, heatm
     # ------------------------- 1. Identify local-significant genes ------------------------- #
     local_genes = set(assigned.loc[assigned["group"] == "local", "gene"])
     if len(local_genes) == 0:
-        print("[WARN] No locally significant genes; skipping heatmap.")
-        return None, None
+        print("[WARN] No locally significant genes; falling back to all assigned genes for heatmap.")
+        include_genes = set(assigned["gene"])
+    else:
+        # Include only local genes and any global/coreg genes that overlap with local
+        include_genes = set(assigned.loc[assigned["gene"].isin(local_genes), "gene"])
+        assigned = assigned[assigned["gene"].isin(include_genes)].copy()
 
-    # Include only local genes and any global/coreg genes that overlap with local
-    include_genes = set(assigned.loc[assigned["gene"].isin(local_genes), "gene"])
-    assigned = assigned[assigned["gene"].isin(include_genes)].copy()
+    if len(include_genes) == 0:
+        print("[WARN] No genes available after fallback; skipping heatmap.")
+        return None, None
 
     # ------------------------- 2. Build log2FC matrix using full fold_matrix ------------------------- #
     if "fold_matrix" not in de_store:
@@ -1312,224 +1337,240 @@ def main():
         print("[ERROR] No valid comparisons parsed from --comparisons.", file=sys.stderr)
         sys.exit(1)
 
-    if not os.path.isdir(args.outdir):
-        os.makedirs(args.outdir)
+    base_outdir = args.outdir
+    os.makedirs(base_outdir, exist_ok=True)
+    heatmap_dir = os.path.join(base_outdir, "heatmaps")
+    deg_dir = os.path.join(base_outdir, "DEGs")
+    pseudobulk_dir = os.path.join(base_outdir, "pseudobulk")
+    log_dir = os.path.join(base_outdir, "logs")
 
-    interactions_df = None
-    interaction_root = os.path.join(args.outdir, "interaction-plots")
-    if not args.skip_grn:
-        try:
-            interactions_df = NetPerspective.load_interaction_data()
-        except Exception as ex:
-            print(f"[WARN] Unable to load interaction data for GRN export: {ex}")
-            args.skip_grn = True
-        else:
-            os.makedirs(interaction_root, exist_ok=True)
-
-    # Step 1: load + merge covariates
-    print("[INFO] Loading h5ad and merging covariates...")
-    adata = load_and_merge_covariates(args.h5ad, args.covariates, args.library_col, args.sample_col, args.covariate_col)
-
-    # Optional Step 3: pseudobulk
+    for path in (heatmap_dir, deg_dir, log_dir):
+        os.makedirs(path, exist_ok=True)
     if args.make_pseudobulk:
-        print("[INFO] Computing pseudobulks per ({} × {}).".format(args.population_col, args.sample_col))
-        _, pb_h5ad = compute_pseudobulk_per_population(
-            adata,
-            population_col=args.population_col,
-            sample_col=args.sample_col,
-            covariate_col=args.covariate_col,   # <-- add this new argument
-            min_cells=int(args.pseudobulk_min_cells),
-            outdir=args.outdir
-        )
-        # Replace the working dataset with pseudobulk for all downstream DE
-        adata = ad.read_h5ad(pb_h5ad)
+        os.makedirs(pseudobulk_dir, exist_ok=True)
 
+    timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_path = os.path.join(log_dir, f"cellHarmony-differential_{timestamp}.log")
+    log_file = open(log_path, "w")
+    stdout_orig, stderr_orig = sys.stdout, sys.stderr
+    sys.stdout = Tee(stdout_orig, log_file)
+    sys.stderr = Tee(stderr_orig, log_file)
 
-    # Step 4–6 per comparison
-    for case_label, control_label in comps:
-        tag = "{}_vs_{}".format(str(case_label), str(control_label)).replace(" ", "_")
-        print("[INFO] Differential analysis: {} vs {}.".format(case_label, control_label))
+    try:
+        log_file.write("# cellHarmony differential run parameters\n")
+        log_file.write(f"command = {' '.join(sys.argv)}\n")
+        for key, value in sorted(vars(args).items()):
+            log_file.write(f"{key} = {value}\n")
+        log_file.write("\n")
+        log_file.flush()
 
-        # Identify total populations to process for progress tracking
-        all_pops = sorted(adata.obs[args.population_col].unique())
-
-        print(f"[INFO] Running differential expression across {len(all_pops)} populations...")
-
-        # Initialize a persistent, dynamically updating progress bar
-        pbar = tqdm(
-            total=len(all_pops),
-            desc="Running DE per population",
-            ncols=100,
-            dynamic_ncols=True,
-            position=0,
-            leave=True
-        )
-
-        def progress_callback():
-            """Increment progress bar with live refresh."""
-            pbar.update(1)
-            pbar.refresh()
-
-
-        # Pass the full callback to the DE function
-        de_store = run_de_for_comparisons(
-            adata=adata,
-            population_col=args.population_col,
-            covariate_col=args.covariate_col,
-            case_label=case_label,
-            control_label=control_label,
-            method=args.method,
-            alpha=float(args.alpha),
-            fc_thresh=float(args.fc),
-            min_cells_per_group=int(args.min_cells_per_group),
-            use_rawp=args.use_rawp,
-            progress_callback=progress_callback
-        )
-
-        # Close the progress bar after completion
-        pbar.close()
-        sys.stdout.flush()
-
-        # Determine population order for heatmap using lineage hierarchy if available
-        if "lineage_order" in adata.uns:
-            pop_order = [str(x) for x in list(adata.uns["lineage_order"])]
-            print(f"[INFO] Using lineage order from h5ad (n={len(pop_order)} populations).")
-        else:
-            # Fallback to alphabetical order if not found
-            detailed = de_store.get("detailed_deg")
-            if detailed is not None and "population_or_pattern" in detailed.columns:
-                pop_order = sorted(detailed["population_or_pattern"].astype(str).unique().tolist())
+        interactions_df = None
+        interaction_root = os.path.join(base_outdir, "interaction-plots")
+        if not args.skip_grn:
+            try:
+                interactions_df = NetPerspective.load_interaction_data()
+            except Exception as ex:
+                print(f"[WARN] Unable to load interaction data for GRN export: {ex}")
+                args.skip_grn = True
             else:
-                pop_order = []
-            print("[WARN] 'lineage_order' not found in h5ad; using alphabetical order.")
+                os.makedirs(interaction_root, exist_ok=True)
 
-        # Step 5: heatmap (fixed order) and TSV
-        heat_png = "heatmap_{}_by_{}.pdf".format(tag, args.population_col)
-        heat_tsv = "heatmap_{}_by_{}.tsv".format(tag, args.population_col)
-        build_fixed_order_heatmap(de_store, args.outdir, args.population_col, float(args.fc),
-                                  heatmap_png=heat_png, heatmap_tsv=heat_tsv)
+        # Step 1: load + merge covariates
+        print("[INFO] Loading h5ad and merging covariates...")
+        adata = load_and_merge_covariates(args.h5ad, args.covariates, args.library_col, args.sample_col, args.covariate_col)
 
-        # Step 6: differentials-only h5ad
-        out_h5ad = os.path.join(args.outdir, "differentials_only_{}.h5ad".format(tag))
-        write_differentials_only_h5ad(adata, de_store, out_h5ad)
+        # Optional Step 3: pseudobulk
+        if args.make_pseudobulk:
+            print("[INFO] Computing pseudobulks per ({} × {}).".format(args.population_col, args.sample_col))
+            _, pb_h5ad = compute_pseudobulk_per_population(
+                adata,
+                population_col=args.population_col,
+                sample_col=args.sample_col,
+                covariate_col=args.covariate_col,
+                min_cells=int(args.pseudobulk_min_cells),
+                outdir=pseudobulk_dir
+            )
+            adata = ad.read_h5ad(pb_h5ad)
 
-        # Also export summary/detailed as TSV
-        det = de_store["detailed_deg"]
-        summ = de_store["summary_per_population"]
-        assign = de_store["assigned_groups"]
-        po = de_store["pooled_overall"]
-        cr = de_store["coreg_pooled"]
+        # Step 4–6 per comparison
+        for case_label, control_label in comps:
+            tag = "{}_vs_{}".format(str(case_label), str(control_label)).replace(" ", "_")
+            print("[INFO] Differential analysis: {} vs {}.".format(case_label, control_label))
 
-        det_path = os.path.join(args.outdir, "DEG_detailed_{}.tsv".format(tag))
-        summ_path = os.path.join(args.outdir, "DEG_summary_{}.tsv".format(tag))
-        assign_path = os.path.join(args.outdir, "DEG_assigned_groups_{}.tsv".format(tag))
-        po_path = os.path.join(args.outdir, "DEG_pooled_overall_{}.tsv".format(tag))
-        cr_path = os.path.join(args.outdir, "DEG_coreg_pooled_{}.tsv".format(tag))
+            all_pops = sorted(adata.obs[args.population_col].unique())
+            print(f"[INFO] Running differential expression across {len(all_pops)} populations...")
 
-        if not det.empty:
-            det.to_csv(det_path, sep="\t", index=False)
-            print("[INFO] Wrote {}".format(det_path))
-        if not summ.empty:
-            summ.to_csv(summ_path, sep="\t", index=False)
-            print("[INFO] Wrote {}".format(summ_path))
-        if not assign.empty:
-            assign.to_csv(assign_path, sep="\t", index=False)
-            print("[INFO] Wrote {}".format(assign_path))
-        if po is not None and not po.empty:
-            po.to_csv(po_path, sep="\t")
-            print("[INFO] Wrote {}".format(po_path))
-        if cr is not None and not cr.empty:
-            cr.to_csv(cr_path, sep="\t", index=False)
-            print("[INFO] Wrote {}".format(cr_path))
+            pbar = tqdm(
+                total=len(all_pops),
+                desc="Running DE per population",
+                ncols=100,
+                dynamic_ncols=True,
+                position=0,
+                leave=True
+            )
 
-        if not args.skip_grn and interactions_df is not None:
-            detailed = de_store.get("detailed_deg")
-            if detailed is None or detailed.empty:
-                if diagnostic_report:
-                    print("[DEBUG] No detailed DEG table available for GRN export.")
+            def progress_callback():
+                pbar.update(1)
+                pbar.refresh()
+
+            de_store = run_de_for_comparisons(
+                adata=adata,
+                population_col=args.population_col,
+                covariate_col=args.covariate_col,
+                case_label=case_label,
+                control_label=control_label,
+                method=args.method,
+                alpha=float(args.alpha),
+                fc_thresh=float(args.fc),
+                min_cells_per_group=int(args.min_cells_per_group),
+                use_rawp=args.use_rawp,
+                progress_callback=progress_callback
+            )
+
+            pbar.close()
+            sys.stdout.flush()
+
+            if "lineage_order" in adata.uns:
+                pop_order = [str(x) for x in list(adata.uns["lineage_order"])]
+                print(f"[INFO] Using lineage order from h5ad (n={len(pop_order)} populations).")
             else:
-                per_pop_results = {
-                    str(pop): grp.copy()
-                    for pop, grp in detailed.groupby("population")
-                }
-
-                if not per_pop_results:
-                    if diagnostic_report:
-                        print("[DEBUG] No per-population DEG entries found for GRN export.")
+                detailed = de_store.get("detailed_deg")
+                if detailed is not None and "population_or_pattern" in detailed.columns:
+                    pop_order = sorted(detailed["population_or_pattern"].astype(str).unique().tolist())
                 else:
-                    comparison_dir = os.path.join(interaction_root, NetPerspective.safe_component(tag))
-                    os.makedirs(comparison_dir, exist_ok=True)
-                    use_rawp = bool(de_store.get("use_rawp", False))
+                    pop_order = []
+                print("[WARN] 'lineage_order' not found in h5ad; using alphabetical order.")
 
-                    for pop_name, pop_df in per_pop_results.items():
-                        if pop_df is None or pop_df.empty:
-                            if diagnostic_report:
-                                print(f"[DEBUG] GRN skip {pop_name}: empty per-pop DEG table.")
-                            continue
+            heat_png = "heatmap_{}_by_{}.pdf".format(tag, args.population_col)
+            heat_tsv = "heatmap_{}_by_{}.tsv".format(tag, args.population_col)
+            build_fixed_order_heatmap(de_store, heatmap_dir, args.population_col, float(args.fc),
+                                      heatmap_png=heat_png, heatmap_tsv=heat_tsv)
 
-                        stats_df = pop_df.copy()
-                        stats_df = stats_df.reset_index(drop=True)
-                        stats_df["gene"] = stats_df["gene"].astype(str)
-                        stats_df["log2fc"] = pd.to_numeric(stats_df.get("log2fc"), errors="coerce")
+            out_h5ad = os.path.join(deg_dir, "differentials_only_{}.h5ad".format(tag))
+            write_differentials_only_h5ad(adata, de_store, out_h5ad)
 
-                        significance_column = None
-                        if use_rawp and "pval" in stats_df.columns and stats_df["pval"].notna().any():
-                            significance_column = "pval"
-                        elif "fdr" in stats_df.columns:
-                            significance_column = "fdr"
+            det = de_store["detailed_deg"]
+            summ = de_store["summary_per_population"]
+            assign = de_store["assigned_groups"]
+            po = de_store["pooled_overall"]
+            cr = de_store["coreg_pooled"]
 
-                        keep_columns = {"gene", "log2fc", "fdr", "pval"}
-                        if significance_column:
-                            keep_columns.add(significance_column)
-                        keep_columns = [col for col in keep_columns if col in stats_df.columns]
+            det_path = os.path.join(deg_dir, "DEG_detailed_{}.tsv".format(tag))
+            summ_path = os.path.join(deg_dir, "DEG_summary_{}.tsv".format(tag))
+            assign_path = os.path.join(deg_dir, "DEG_assigned_groups_{}.tsv".format(tag))
+            po_path = os.path.join(deg_dir, "DEG_pooled_overall_{}.tsv".format(tag))
+            cr_path = os.path.join(deg_dir, "DEG_coreg_pooled_{}.tsv".format(tag))
 
-                        selected = (
-                            stats_df.loc[:, keep_columns]
-                            .dropna(subset=["gene", "log2fc"])
-                            .drop_duplicates(subset=["gene"])
-                        )
+            if not det.empty:
+                det.to_csv(det_path, sep="\t", index=False)
+                print("[INFO] Wrote {}".format(det_path))
+            if not summ.empty:
+                summ.to_csv(summ_path, sep="\t", index=False)
+                print("[INFO] Wrote {}".format(summ_path))
+            if not assign.empty:
+                assign.to_csv(assign_path, sep="\t", index=False)
+                print("[INFO] Wrote {}".format(assign_path))
+            if po is not None and not po.empty:
+                po.to_csv(po_path, sep="\t")
+                print("[INFO] Wrote {}".format(po_path))
+            if cr is not None and not cr.empty:
+                cr.to_csv(cr_path, sep="\t", index=False)
+                print("[INFO] Wrote {}".format(cr_path))
 
+            if not args.skip_grn and interactions_df is not None:
+                detailed = de_store.get("detailed_deg")
+                if detailed is None or detailed.empty:
+                    if diagnostic_report:
+                        print("[DEBUG] No detailed DEG table available for GRN export.")
+                else:
+                    per_pop_results = {
+                        str(pop): grp.copy()
+                        for pop, grp in detailed.groupby("population")
+                    }
+
+                    if not per_pop_results:
                         if diagnostic_report:
-                            print(
-                                f"[DEBUG] GRN candidate genes for {pop_name}: total={len(stats_df)}, "
-                                f"after_cleanup={selected['gene'].nunique()}"
+                            print("[DEBUG] No per-population DEG entries found for GRN export.")
+                    else:
+                        comparison_dir = os.path.join(interaction_root, NetPerspective.safe_component(tag))
+                        os.makedirs(comparison_dir, exist_ok=True)
+                        use_rawp = bool(de_store.get("use_rawp", False))
+
+                        for pop_name, pop_df in per_pop_results.items():
+                            if pop_df is None or pop_df.empty:
+                                if diagnostic_report:
+                                    print(f"[DEBUG] GRN skip {pop_name}: empty per-pop DEG table.")
+                                continue
+
+                            stats_df = pop_df.copy()
+                            stats_df = stats_df.reset_index(drop=True)
+                            stats_df["gene"] = stats_df["gene"].astype(str)
+                            stats_df["log2fc"] = pd.to_numeric(stats_df.get("log2fc"), errors="coerce")
+
+                            significance_column = None
+                            if use_rawp and "pval" in stats_df.columns and stats_df["pval"].notna().any():
+                                significance_column = "pval"
+                            elif "fdr" in stats_df.columns:
+                                significance_column = "fdr"
+
+                            keep_columns = {"gene", "log2fc", "fdr", "pval"}
+                            if significance_column:
+                                keep_columns.add(significance_column)
+                            keep_columns = [col for col in keep_columns if col in stats_df.columns]
+
+                            selected = (
+                                stats_df.loc[:, keep_columns]
+                                .dropna(subset=["gene", "log2fc"])
+                                .drop_duplicates(subset=["gene"])
                             )
 
-                        if selected.empty or selected["gene"].nunique() < 2:
                             if diagnostic_report:
                                 print(
-                                    f"[DEBUG] GRN skip {pop_name}: insufficient unique genes (n={selected['gene'].nunique()})."
+                                    f"[DEBUG] GRN candidate genes for {pop_name}: total={len(stats_df)}, "
+                                    f"after_cleanup={selected['gene'].nunique()}"
                                 )
-                            continue
 
-                        pop_component = NetPerspective.safe_component(pop_name)
-                        output_prefix = os.path.join(comparison_dir, pop_component)
-                        try:
-                            outputs = NetPerspective.generate_network_for_genes(
-                                selected,
-                                interactions_df,
-                                output_prefix,
-                                gene_column="gene",
-                                fold_change_column="log2fc",
-                                pval_column=significance_column if significance_column in selected.columns else None,
-                                max_genes=None,
-                            )
-                            print(
-                                f"[INFO] Wrote interaction network for {pop_name} ({case_label} vs {control_label}): {outputs[0]}"
-                            )
-                        except NetPerspective.NetworkGenerationError as ex:
-                            if diagnostic_report:
-                                print(f"[DEBUG] Interaction network skipped for {pop_name}: {ex}")
-                            else:
-                                print(f"[WARN] No interaction edges found for {pop_name}; skipping network plot.")
-                        except ImportError as ex:
-                            print(f"[WARN] Interaction plots disabled (missing dependency): {ex}")
-                        except Exception as ex:
-                            print(f"[WARN] Interaction network failed for {pop_name}: {ex}")
+                            if selected.empty or selected["gene"].nunique() < 2:
+                                if diagnostic_report:
+                                    print(
+                                        f"[DEBUG] GRN skip {pop_name}: insufficient unique genes (n={selected['gene'].nunique()})."
+                                    )
+                                continue
+
+                            pop_component = NetPerspective.safe_component(pop_name)
+                            output_prefix = os.path.join(comparison_dir, pop_component)
+                            try:
+                                outputs = NetPerspective.generate_network_for_genes(
+                                    selected,
+                                    interactions_df,
+                                    output_prefix,
+                                    gene_column="gene",
+                                    fold_change_column="log2fc",
+                                    pval_column=significance_column if significance_column in selected.columns else None,
+                                    max_genes=None,
+                                )
+                                print(
+                                    f"[INFO] Wrote interaction network for {pop_name} ({case_label} vs {control_label}): {outputs[0]}"
+                                )
+                            except NetPerspective.NetworkGenerationError as ex:
+                                if diagnostic_report:
+                                    print(f"[DEBUG] Interaction network skipped for {pop_name}: {ex}")
+                                else:
+                                    print(f"[WARN] No interaction edges found for {pop_name}; skipping network plot.")
+                            except ImportError as ex:
+                                print(f"[WARN] Interaction plots disabled (missing dependency): {ex}")
+                            except Exception as ex:
+                                print(f"[WARN] Interaction network failed for {pop_name}: {ex}")
                     args.skip_grn = True
                     break
 
-    print("[INFO] Completed.")
+        print("[INFO] Completed.")
+    finally:
+        sys.stdout = stdout_orig
+        sys.stderr = stderr_orig
+        log_file.close()
+        stdout_orig.write(f"[INFO] cellHarmony differential log written to {log_path}\n")
+        stdout_orig.flush()
 
 
 if __name__ == "__main__":
