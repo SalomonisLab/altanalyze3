@@ -604,7 +604,10 @@ def combine_and_align_h5(
             sc.pp.pca(adata_unsup, n_comps=50)
             sc.pp.neighbors(adata_unsup)
             sc.tl.umap(adata_unsup)
-            sc.tl.leiden(adata_unsup, flavor="leidenalg")
+            sc.tl.leiden(adata_unsup, flavor="leidenalg", resolution=0.5)
+            n_clusters = adata_unsup.obs['leiden'].nunique()
+            n_cells = adata_unsup.n_obs
+            print(f"[cell] Unsupervised clustering completed: {n_clusters} clusters from {n_cells} cells (resolution=0.5)")
             print('[cell] unsupervised clustering performed on individual cells')
 
             sc.tl.rank_genes_groups(adata_unsup, groupby='leiden', method='wilcoxon', use_raw=False)

@@ -44,6 +44,16 @@ INTERACTION_TABLE = os.path.join(
     "Hs_Ensembl-TF-BioGRID-Pathway.txt",
 )
 
+# Allow default loading of both human and mouse interaction resources when available.
+INTERACTION_TABLES = [
+    INTERACTION_TABLE,
+    os.path.join(
+        os.path.dirname(__file__),
+        "interactions",
+        "Mm_Ensembl-TF-BioGRID-Pathway.txt",
+    ),
+]
+
 
 class NetworkGenerationError(RuntimeError):
     """Raised when a network cannot be generated for the provided genes."""
@@ -74,29 +84,54 @@ def safe_component(value: str, fallback: str = "value") -> str:
     return cleaned or fallback
 
 
-def load_interaction_data(interaction_path: Optional[str] = None) -> pd.DataFrame:
-    """Load the curated interaction table used for GRN visualisations."""
-
-    path = interaction_path or INTERACTION_TABLE
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            f"Interaction file not found: {path}. "
-            "Please ensure the curated interaction resource is available."
-        )
+def _load_single_interaction_table(path: str) -> pd.DataFrame:
+    """Load a single interaction table from ``path`` with validation."""
 
     df = pd.read_csv(path, sep="\t")
     required = {"Symbol1", "InteractionType", "Symbol2"}
     missing = required - set(df.columns)
     if missing:
-        raise ValueError(f"Interaction file is missing required columns: {sorted(missing)}")
+        raise ValueError(f"Interaction file '{path}' is missing required columns: {sorted(missing)}")
 
-    # Normalise key columns up-front so downstream lookups are reliable.
     df["Symbol1"] = df["Symbol1"].astype(str)
     df["Symbol2"] = df["Symbol2"].astype(str)
     df["InteractionType"] = df["InteractionType"].astype(str)
     if "Source" not in df.columns:
         df["Source"] = ""
 
+    return df
+
+
+def load_interaction_data(interaction_path: Optional[str] = None) -> pd.DataFrame:
+    """
+    Load curated interaction tables used for GRN visualisations.
+
+    When ``interaction_path`` is ``None`` the loader looks for both human (Hs_)
+    and mouse (Mm_) resources in the ``interactions`` directory and concatenates
+    any that are present.  Callers may pass either a single file path or an
+    iterable of paths to override this behaviour explicitly.
+    """
+
+    if interaction_path is None:
+        paths = INTERACTION_TABLES
+    elif isinstance(interaction_path, (list, tuple, set)):
+        paths = list(interaction_path)
+    else:
+        paths = [interaction_path]
+
+    loaded_tables = []
+    for path in paths:
+        if not os.path.exists(path):
+            continue
+        loaded_tables.append(_load_single_interaction_table(path))
+
+    if not loaded_tables:
+        raise FileNotFoundError(
+            "No interaction tables were found. Checked paths: "
+            + ", ".join(paths)
+        )
+
+    df = pd.concat(loaded_tables, axis=0, ignore_index=True)
     return df
 
 

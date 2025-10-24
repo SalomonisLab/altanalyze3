@@ -24,6 +24,7 @@ import os
 import sys
 import argparse
 import datetime
+from collections import Counter
 import numpy as np
 import pandas as pd
 import anndata as ad
@@ -101,6 +102,69 @@ def _ordered_categories_from_obs(obs, col):
         if v not in seen:
             seen.append(v)
     return seen
+
+def _validate_lineage_order_candidates(candidate_order, population_labels, population_col):
+    """
+    Ensure lineage_order pulled from adata.uns matches the population labels used for DE.
+    Returns the sanitized candidate_order list if valid, otherwise raises ValueError.
+    """
+    candidate_list = [str(x) for x in list(candidate_order)]
+    expected = [str(x) for x in population_labels]
+
+    duplicates = [name for name, count in Counter(candidate_list).items() if count > 1]
+    missing = [name for name in expected if name not in candidate_list]
+    unexpected = [name for name in candidate_list if name not in expected]
+
+    if duplicates:
+        raise ValueError(f"duplicate entries detected ({duplicates[:5]})")
+    messages = []
+    if missing:
+        preview = ", ".join(missing[:5])
+        messages.append(f"missing {len(missing)} populations (e.g. {preview})")
+    if unexpected:
+        preview = ", ".join(unexpected[:5])
+        messages.append(f"unexpected {len(unexpected)} names (e.g. {preview})")
+
+    if messages:
+        raise ValueError("; ".join(messages))
+
+    return candidate_list
+
+def _extract_lineage_order(adata, population_col):
+    """
+    Attempt to extract and validate lineage_order from adata.uns against population_col.
+    Returns a list if validation succeeds, otherwise None (with warning already printed).
+    """
+    if not hasattr(adata, "uns") or "lineage_order" not in adata.uns:
+        return None
+
+    try:
+        populations = _ordered_categories_from_obs(adata.obs, population_col)
+    except KeyError:
+        print(f"[WARN] Cannot validate lineage_order: obs missing '{population_col}'.")
+        return None
+
+    try:
+        return _validate_lineage_order_candidates(adata.uns["lineage_order"], populations, population_col)
+    except ValueError as exc:
+        print(f"[WARN] Ignoring lineage_order for '{population_col}': {exc}")
+        return None
+    except Exception as exc:
+        print(f"[WARN] Failed to parse lineage_order for '{population_col}': {exc}")
+        return None
+
+def _pattern_to_label(pattern, populations):
+    """
+    Convert a list of -1/0/1 values to a descriptive string, e.g.:
+    [0, -1, 1] -> 'Pop2__down--Pop3__up'
+    """
+    labels = []
+    for val, pop_name in zip(pattern, populations):
+        if val == 1:
+            labels.append(f"{pop_name}__up")
+        elif val == -1:
+            labels.append(f"{pop_name}__down")
+    return "--".join(labels) if labels else "none"
 
 def _ln_to_log2(v):
     # Scanpy logfoldchanges are in natural log when applicable; convert to log2 safely.
@@ -272,10 +336,11 @@ def compute_pseudobulk_per_population(adata, population_col, sample_col, covaria
     pb_adata.obs["Population"] = populations
     pb_adata.uns["pseudobulk_method"] = "pseudobulk"
     # Preserve lineage hierarchy if present in input AnnData
-    if "lineage_order" in adata.uns:
-        pb_adata.uns["lineage_order"] = adata.uns["lineage_order"]
-        print(f"[INFO] Preserved lineage_order from input (n={len(adata.uns['lineage_order'])}).")
-    else:
+    lineage_order = _extract_lineage_order(adata, population_col)
+    if lineage_order is not None:
+        pb_adata.uns["lineage_order"] = lineage_order
+        print(f"[INFO] Preserved lineage_order from input (n={len(lineage_order)}).")
+    elif "lineage_order" not in getattr(adata, "uns", {}):
         print("[WARN] lineage_order not found in input AnnData; skipping preservation.")
 
 
@@ -358,7 +423,7 @@ def compute_pseudobulk_per_population(adata, population_col, sample_col, covaria
 # --------- Step 4: per-population DE and pooled/global/co-reg logic -------- #
 
 def _rank_genes_scanpy(two_group_adata, groupby, case_label, control_label, method):
-    # Run Scanpy DE and return names, pvals_adj, log2fc as Series for the case vs control
+    # Run Scanpy DE and return names, pvals_adj, log2fc, raw pvals as Series for the case vs control
     sc.tl.rank_genes_groups(two_group_adata,
                             groupby=groupby,
                             groups=[case_label],
@@ -367,9 +432,10 @@ def _rank_genes_scanpy(two_group_adata, groupby, case_label, control_label, meth
     rg = two_group_adata.uns["rank_genes_groups"]
     names = pd.Index(rg["names"][case_label]).astype(str)
     pvals_adj = pd.Series(rg["pvals_adj"][case_label], index=names, name="fdr").astype(float)
+    pvals_raw = pd.Series(rg["pvals"][case_label], index=names, name="pval").astype(float)
     logfc_ln = pd.Series(rg["logfoldchanges"][case_label], index=names, name="logfc_ln").astype(float)
     logfc = pd.Series(_ln_to_log2(logfc_ln.values), index=names, name="log2fc")
-    return names, pvals_adj, logfc
+    return names, pvals_adj, logfc, pvals_raw
 
 
 def _moderated_t_test(adata, covariate_col, case_label, control_label, pop):
@@ -531,10 +597,11 @@ def run_de_for_comparisons(adata,
         if "pseudobulk" in adata.uns.get("pseudobulk_method", ""):
             # Use limma-like moderated t-test for pseudobulk
             df, tested_genes = _moderated_t_test(two, covariate_col, case_label, control_label, pop)
-            names  = df["gene"]
-            fdr    = df["fdr"]
-            log2fc = df["log2fc"]
-            pvals  = df["pval"] if "pval" in df.columns else pd.Series(np.nan, index=names)
+            df["gene"] = df["gene"].astype(str)
+            names = df["gene"].astype(str)
+            fdr = df["fdr"].astype(float)
+            log2fc = df["log2fc"].astype(float)
+            pvals_series = df["pval"].astype(float)
 
             # --- capture full log2FC vector for this population ---
             if "full_log2fc" in two.uns and str(pop) in two.uns["full_log2fc"]:
@@ -544,7 +611,8 @@ def run_de_for_comparisons(adata,
         else:
             # Default Scanpy DE method
             try:
-                names, fdr, log2fc = _rank_genes_scanpy(two, covariate_col, case_label, control_label, method)
+                names, fdr, log2fc, pvals_series = _rank_genes_scanpy(two, covariate_col, case_label, control_label, method)
+                tested_genes = len(names)
             except ValueError as e:
                 err = str(e)
                 if (
@@ -561,33 +629,39 @@ def run_de_for_comparisons(adata,
                 else:
                     raise
 
-        # --- Harmonize identifiers between DE results and pseudobulk matrix ---
-        if corrected_fc is not None:
-            df_names = pd.Index(names).astype(str).str.upper().str.replace(r'\.\d+$', '', regex=True)
-            cf_names = pd.Index(corrected_fc.index).astype(str).str.upper().str.replace(r'\.\d+$', '', regex=True)
-            overlap = len(set(df_names) & set(cf_names))
+        names_idx = pd.Index(names).astype(str)
+        fdr_series = pd.Series(np.asarray(fdr, dtype=float), index=names_idx)
+        log2fc_series = pd.Series(np.asarray(log2fc, dtype=float), index=names_idx)
+        pvals_series = pd.Series(np.asarray(pvals_series, dtype=float), index=names_idx)
 
+        df = pd.DataFrame(
+            {
+                "gene": names_idx,
+                "log2fc": log2fc_series.values,
+                "fdr": fdr_series.values,
+                "pval": pvals_series.values,
+            }
+        )
+
+        if "gene_symbols" in pop_data.var.columns:
+            id_map = pop_data.var["gene_symbols"].astype(str).to_dict()
+            df["gene"] = df["gene"].map(lambda g: id_map.get(g, g))
+            df["gene"] = df["gene"].astype(str)
+
+        if corrected_fc is not None:
+            df_names_upper = pd.Index(df["gene"]).astype(str).str.upper().str.replace(r"\.\d+$", "", regex=True)
+            cf_names = pd.Index(corrected_fc.index).astype(str).str.upper().str.replace(r"\.\d+$", "", regex=True)
+            overlap = len(set(df_names_upper) & set(cf_names))
             if diagnostic_report:
-                print(f"[DEBUG] Harmonized ID overlap: {overlap} / {len(df_names)} genes shared with corrected_fc index")
-                unmatched = list(set(df_names) - set(cf_names))
+                print(f"[DEBUG] Harmonized ID overlap: {overlap} / {len(df_names_upper)} genes shared with corrected_fc index")
+                unmatched = list(set(df_names_upper) - set(cf_names))
                 print(f"[DEBUG] Example unmatched DE identifiers (first 10): {unmatched[:10]}")
-                matched = list(set(df_names) & set(cf_names))
+                matched = list(set(df_names_upper) & set(cf_names))
                 print(f"[DEBUG] Example matched identifiers (first 10): {matched[:10]}")
                 print(f"[DEBUG] corrected_fc index example (first 10): {list(corrected_fc.index[:10])}")
         else:
             if diagnostic_report:
                 print("[WARN] corrected_fc not yet defined during harmonization.")
-
-        df = pd.DataFrame({
-            "gene": names.values,
-            "log2fc": log2fc.values,
-            "fdr": fdr.values
-        })
-
-        # Harmonize gene identifiers if var includes gene symbols
-        if "gene_symbols" in pop_data.var.columns:
-            id_map = pop_data.var["gene_symbols"].to_dict()
-            df["gene"] = df["gene"].map(lambda g: id_map.get(g, g))
 
         df["population"] = pop
         df["case_label"] = case_label
@@ -595,32 +669,20 @@ def run_de_for_comparisons(adata,
         df["n_case"] = n_case
         df["n_control"] = n_ctrl
 
-        # thresholding
+        log2fc_values = df["log2fc"].to_numpy(dtype=float)
+        fdr_values = df["fdr"].to_numpy(dtype=float)
+        pvals_values = df["pval"].to_numpy(dtype=float)
+
         if use_rawp:
-            # use raw p-values from the DE frame; ensure alignment to 'names'
-            p_base = pvals.values
-            sig = (np.abs(log2fc.values) > np.log2(float(fc_thresh))) & (p_base < float(alpha))
             if diagnostic_report:
                 print(f"[INFO] Using raw p-values for significance (alpha={alpha})")
+            p_base = pvals_values
         else:
-            p_base = fdr.values
-            sig = (np.abs(log2fc.values) > np.log2(float(fc_thresh))) & (p_base < float(alpha))
+            p_base = fdr_values
 
-        deg_names = names[sig]
+        sig = (np.abs(log2fc_values) > np.log2(float(fc_thresh))) & (p_base < float(alpha))
+        deg_names = pd.Index(df["gene"])[sig]
         n_deg = int(sig.sum())
-
-        # collect full stats table for this population
-        df = pd.DataFrame({
-            "gene": names.values,
-            "log2fc": log2fc.values,
-            "fdr": fdr.values,
-            "pval": pvals if "pvals" in locals() else np.full_like(fdr.values, np.nan),
-            "population": pop,
-            "case_label": case_label,
-            "control_label": control_label,
-            "n_case": n_case,
-            "n_control": n_ctrl,
-        })
 
 
         # --- Correct fold computation: true mean-based log2 fold (per gene across cells) ---
@@ -632,7 +694,13 @@ def run_de_for_comparisons(adata,
         mean_case = np.log2(np.mean(2 ** expr[cond == case_label], axis=0) + 1e-9)
         mean_ctrl = np.log2(np.mean(2 ** expr[cond == control_label], axis=0) + 1e-9)
         corrected_fc = mean_case - mean_ctrl
+        corrected_fc.index = corrected_fc.index.astype(str)
+        if "gene_symbols" in pop_data.var.columns:
+            symbol_map = pop_data.var["gene_symbols"].astype(str).to_dict()
+            corrected_fc = corrected_fc.rename(index=symbol_map)
+            corrected_fc = corrected_fc.groupby(level=0).mean()
         corrected_fc.index.name = "gene"
+        all_fold_values[str(pop)] = corrected_fc
 
         # overwrite Scanpy’s log2fc column with corrected values
         df["log2fc"] = df["gene"].map(corrected_fc)
@@ -795,41 +863,31 @@ def run_de_for_comparisons(adata,
         if int(mask_case.sum()) < min_cells or int(mask_ctrl.sum()) < min_cells:
             continue
         pooled_pat = sub[mask_case | mask_ctrl].copy()
+        coreg_name = _pattern_to_label(pat, pop_order)
         try:
-            names_c, fdr_c, log2fc_c = _rank_genes_scanpy(pooled_pat, covariate_col, case_label, control_label, method)
-            dfc = pd.DataFrame({"gene": names_c.values, "log2fc": log2fc_c.values, "fdr": fdr_c.values})
-
-            # ----- Construct human-readable pattern label -----
-            def _pattern_to_label(pattern, populations):
-                """
-                Convert a list of -1/0/1 values to a descriptive string, e.g.:
-                [0, -1, 1] -> 'Pop2__down--Pop3__up'
-                """
-                labels = []
-                for val, pop_name in zip(pattern, populations):
-                    if val == 1:
-                        labels.append(f"{pop_name}__up")
-                    elif val == -1:
-                        labels.append(f"{pop_name}__down")
-                return "--".join(labels) if labels else "none"
-
-            coreg_name = _pattern_to_label(pat, pop_order)
-
-            # ----- Perform pooled DE for this co-regulation pattern -----
             if method == "scanpy":
-                names_c, fdr_c, log2fc_c = _rank_genes_scanpy(pooled_pat, covariate_col, case_label, control_label, method)
-                dfc = pd.DataFrame({"gene": names_c.values, "log2fc": log2fc_c.values, "fdr": fdr_c.values})
+                names_c, fdr_c, log2fc_c, pvals_c = _rank_genes_scanpy(
+                    pooled_pat, covariate_col, case_label, control_label, method
+                )
+                dfc = pd.DataFrame({
+                    "gene": names_c.values,
+                    "log2fc": log2fc_c.values,
+                    "fdr": fdr_c.values,
+                    "pval": pvals_c.values,
+                })
             else:
                 dfc, _ = _moderated_t_test(pooled_pat, covariate_col, case_label, control_label, coreg_name)
-
+                keep_cols = [c for c in ["gene", "log2fc", "fdr", "pval"] if c in dfc.columns]
+                dfc = dfc.loc[:, keep_cols]
+            if diagnostic_report:
+                print(f"[DEBUG] Co-reg pattern '{coreg_name}' using pops {pops_sel} "
+                      f"(n_case={int(mask_case.sum())}, n_ctrl={int(mask_ctrl.sum())})")
             dfc["pattern"] = coreg_name
             coreg_tables.append(dfc)
-
-
-
-            coreg_tables.append(dfc)
         except Exception as e:
-            print("[WARN] Co-reg pooled DE failed for pattern {}: {}".format(pat, e))
+            print(f"[WARN] Co-reg pooled DE failed for pattern {pat} ({coreg_name}): {e}")
+            if diagnostic_report:
+                print(f"[DEBUG] Failed co-reg pops: {pops_sel}")
 
 
     coreg_df = pd.concat(coreg_tables, axis=0) if len(coreg_tables) > 0 else pd.DataFrame(
@@ -1001,9 +1059,10 @@ def run_de_for_comparisons(adata,
         print(f"[WARN] fold_matrix assembly failed: {e}")
 
     # Preserve lineage order from input AnnData so downstream heatmap can access it
-    if "lineage_order" in adata.uns:
-        de_store["lineage_order"] = list(adata.uns["lineage_order"])
-        #print(f"[INFO] Preserved lineage_order in de_store (n={len(de_store['lineage_order'])}).")
+    lineage_order = _extract_lineage_order(adata, population_col)
+    if lineage_order is not None:
+        de_store["lineage_order"] = lineage_order
+        # print(f"[INFO] Preserved lineage_order in de_store (n={len(lineage_order)}).")
 
     de_store["use_rawp"] = bool(use_rawp)
 
@@ -1044,23 +1103,41 @@ def build_fixed_order_heatmap(de_store, outdir, population_col, fc_thresh, heatm
     pooled_overall = de_store.get("pooled_overall", pd.DataFrame())
     coreg_df = de_store.get("coreg_pooled", pd.DataFrame())
 
+    lineage_order = None
+    lineage_source = None
+    if "lineage_order" in de_store:
+        try:
+            lineage_order = _validate_lineage_order_candidates(de_store["lineage_order"], pop_order, population_col)
+            lineage_source = "de_store"
+        except ValueError as exc:
+            print(f"[WARN] Stored lineage_order mismatch for '{population_col}': {exc}")
+    elif "adata" in de_store and hasattr(de_store["adata"], "uns") and "lineage_order" in de_store["adata"].uns:
+        try:
+            lineage_order = _validate_lineage_order_candidates(
+                de_store["adata"].uns["lineage_order"], pop_order, population_col
+            )
+            lineage_source = "adata.uns"
+        except ValueError as exc:
+            print(f"[WARN] lineage_order from embedded adata mismatched for '{population_col}': {exc}")
+
     if assigned.empty or detailed.empty:
         print("[WARN] No DEGs to plot heatmap.")
         return None, None
 
     # ------------------------- 1. Identify local-significant genes ------------------------- #
     local_genes = set(assigned.loc[assigned["group"] == "local", "gene"])
-    if len(local_genes) == 0:
-        print("[WARN] No locally significant genes; falling back to all assigned genes for heatmap.")
-        include_genes = set(assigned["gene"])
-    else:
-        # Include only local genes and any global/coreg genes that overlap with local
-        include_genes = set(assigned.loc[assigned["gene"].isin(local_genes), "gene"])
-        assigned = assigned[assigned["gene"].isin(include_genes)].copy()
+    global_genes = set(assigned.loc[assigned["group"] == "global", "gene"])
+    coreg_genes = set(assigned.loc[assigned["group"] == "co-regulated", "gene"])
+    print(f"[DEBUG] Heatmap gene group counts -> local: {len(local_genes)}, global: {len(global_genes)}, co-reg: {len(coreg_genes)}")
 
+    include_genes = set(assigned["gene"])
     if len(include_genes) == 0:
-        print("[WARN] No genes available after fallback; skipping heatmap.")
-        return None, None
+        print("[WARN] Assigned groups empty; falling back to detailed DEG table.")
+        include_genes = set(detailed["gene"])
+        if len(include_genes) == 0:
+            print("[ERROR] Detailed DEG table empty; skipping heatmap.")
+            return None, None
+    print(f"[DEBUG] Heatmap include_genes count: {len(include_genes)}")
 
     # ------------------------- 2. Build log2FC matrix using full fold_matrix ------------------------- #
     if "fold_matrix" not in de_store:
@@ -1074,6 +1151,15 @@ def build_fixed_order_heatmap(de_store, outdir, population_col, fc_thresh, heatm
         fold_df = full_fold.loc[full_fold.index.intersection(sorted(include_genes))]
 
     fold_df = fold_df.astype(float)
+    print(f"[DEBUG] fold_df shape after filtering: {fold_df.shape[0]} genes × {fold_df.shape[1]} populations")
+    extra_genes = [g for g in detailed["gene"].astype(str).unique() if g not in fold_df.index]
+    if extra_genes:
+        print(f"[DEBUG] Adding {len(extra_genes)} genes absent from fold_df via detailed DEG table.")
+        pivot_col = "population" if "population" in detailed.columns else "population_or_pattern"
+        extra_matrix = detailed[detailed["gene"].isin(extra_genes)].pivot_table(
+            index="gene", columns=pivot_col, values="log2fc", fill_value=0.0
+        )
+        fold_df = pd.concat([fold_df, extra_matrix], axis=0)
 
     # ------------------------- 3. Ranking logic ------------------------- #
     global_hits = assigned.loc[assigned["group"] == "global"].copy()
@@ -1108,10 +1194,10 @@ def build_fixed_order_heatmap(de_store, outdir, population_col, fc_thresh, heatm
     local_block_sizes = []
 
     # Use lineage-based order for populations if available
-    lineage_order = de_store.get("lineage_order", pop_order)
-    lineage_order = [p for p in lineage_order if p in pop_order]
+    lineage_for_local = lineage_order if lineage_order is not None else pop_order
+    lineage_for_local = [p for p in lineage_for_local if p in pop_order]
 
-    for pop in lineage_order:
+    for pop in lineage_for_local:
         sub = local_hits[local_hits["population_or_pattern"] == str(pop)]
         u, d = split_up_down(sub)
         u_list = [g for g in u["gene"].tolist() if g in fold_df.index]
@@ -1123,9 +1209,32 @@ def build_fixed_order_heatmap(de_store, outdir, population_col, fc_thresh, heatm
     # Combine master order: global → coreg → local
     ordered_genes = g_up_list + g_down_list + c_up_list + c_down_list + ordered_local_genes
 
+    print(f"[DEBUG] Heatmap ordered gene block sizes -> global_up:{len(g_up_list)}, global_down:{len(g_down_list)}, "
+          f"coreg_up:{len(c_up_list)}, coreg_down:{len(c_down_list)}, local_total:{len(ordered_local_genes)}")
+
+    extra_genes = [g for g in fold_df.index if g not in ordered_genes]
+    if extra_genes:
+        print(f"[DEBUG] Appending {len(extra_genes)} unassigned genes to heatmap order.")
+        ordered_genes.extend(extra_genes)
+
     if len(ordered_genes) == 0:
-        print("[WARN] No ordered genes found; skipping heatmap.")
-        return None, None
+        print("[WARN] No ordered genes found after block assembly; falling back to top genes by significance.")
+        fallback = (
+            detailed.sort_values("sig_metric", ascending=True)
+            .drop_duplicates(subset=["gene"])
+            .head(min(200, len(detailed)))
+        )
+        ordered_genes = fallback["gene"].tolist()
+        pivot_col = "population" if "population" in detailed.columns else "population_or_pattern"
+        fold_df = detailed.pivot_table(index="gene", columns=pivot_col, values="log2fc", fill_value=0.0)
+        fold_df = fold_df.loc[ordered_genes]
+        fold_df = fold_df.reindex(columns=[col for col in pop_order if col in fold_df.columns])
+        g_up_list, g_down_list, c_up_list, c_down_list = [], [], [], []
+        ordered_local_genes = ordered_genes
+        block_breaks = []
+        local_block_sizes = [len(ordered_genes)]
+        extra_genes = []
+        print(f"[INFO] Heatmap fallback selected {len(ordered_genes)} genes.")
 
     # Compute horizontal block boundaries (end indices of each block)
     block_breaks = []
@@ -1146,23 +1255,22 @@ def build_fixed_order_heatmap(de_store, outdir, population_col, fc_thresh, heatm
             cursor += sz
             block_breaks.append(cursor)
 
+    if extra_genes:
+        cursor += len(extra_genes)
+        block_breaks.append(cursor)
+
     # Reorder the matrix rows by the final order
     fold_df = fold_df.loc[ordered_genes]
 
     # ------------------------- 4. Apply lineage order if available ------------------------- #
-    lineage_order = None
-    # Prefer de_store (populated during DE run) over undefined adata
-    if "lineage_order" in de_store:
-        lineage_order = list(de_store["lineage_order"])
-        print(f"[INFO] Using lineage order from de_store (n={len(lineage_order)}).")
-    elif "adata" in de_store and hasattr(de_store["adata"], "uns") and "lineage_order" in de_store["adata"].uns:
-        lineage_order = list(de_store["adata"].uns["lineage_order"])
-        print(f"[INFO] Using lineage order from adata.uns (n={len(lineage_order)}).")
-
     if lineage_order is not None:
         # --- Reorder strictly by lineage_order but keep only populations with DE results ---
         existing_pops = [p for p in lineage_order if p in fold_df.columns]
         missing_pops = [p for p in lineage_order if p not in fold_df.columns]
+        if lineage_source:
+            print(f"[INFO] Using lineage order from {lineage_source} (n={len(lineage_order)}).")
+        else:
+            print(f"[INFO] Using lineage order (n={len(lineage_order)}).")
         if missing_pops:
             print(f"[WARN] {len(missing_pops)} lineage populations missing from DE results: {missing_pops}")
         if existing_pops:
@@ -1430,8 +1538,8 @@ def main():
             pbar.close()
             sys.stdout.flush()
 
-            if "lineage_order" in adata.uns:
-                pop_order = [str(x) for x in list(adata.uns["lineage_order"])]
+            pop_order = _extract_lineage_order(adata, args.population_col)
+            if pop_order:
                 print(f"[INFO] Using lineage order from h5ad (n={len(pop_order)} populations).")
             else:
                 detailed = de_store.get("detailed_deg")
@@ -1439,7 +1547,10 @@ def main():
                     pop_order = sorted(detailed["population_or_pattern"].astype(str).unique().tolist())
                 else:
                     pop_order = []
-                print("[WARN] 'lineage_order' not found in h5ad; using alphabetical order.")
+                if hasattr(adata, "uns") and "lineage_order" in adata.uns:
+                    print(f"[WARN] lineage_order present but mismatched with '{args.population_col}'; using alphabetical order.")
+                else:
+                    print("[WARN] 'lineage_order' not found in h5ad; using alphabetical order.")
 
             heat_png = "heatmap_{}_by_{}.pdf".format(tag, args.population_col)
             heat_tsv = "heatmap_{}_by_{}.tsv".format(tag, args.population_col)
