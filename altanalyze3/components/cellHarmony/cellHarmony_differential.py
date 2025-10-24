@@ -1450,9 +1450,10 @@ def main():
     heatmap_dir = os.path.join(base_outdir, "heatmaps")
     deg_dir = os.path.join(base_outdir, "DEGs")
     pseudobulk_dir = os.path.join(base_outdir, "pseudobulk")
+    cellfreq_dir = os.path.join(base_outdir, "cell-frequency")
     log_dir = os.path.join(base_outdir, "logs")
 
-    for path in (heatmap_dir, deg_dir, log_dir):
+    for path in (heatmap_dir, deg_dir, log_dir, cellfreq_dir):
         os.makedirs(path, exist_ok=True)
     if args.make_pseudobulk:
         os.makedirs(pseudobulk_dir, exist_ok=True)
@@ -1551,6 +1552,124 @@ def main():
                     print(f"[WARN] lineage_order present but mismatched with '{args.population_col}'; using alphabetical order.")
                 else:
                     print("[WARN] 'lineage_order' not found in h5ad; using alphabetical order.")
+
+            # ----------------------------- Cell frequency plots ----------------------------- #
+            freq_subdir = os.path.join(cellfreq_dir, NetPerspective.safe_component(tag))
+            os.makedirs(freq_subdir, exist_ok=True)
+
+            freq_obs = adata.obs.loc[
+                adata.obs[args.covariate_col].isin([case_label, control_label]),
+                [args.population_col, args.covariate_col]
+            ].dropna()
+
+            if freq_obs.empty:
+                print("[WARN] Skipping cell frequency plots: no cells found for comparison subset.")
+            else:
+                freq_obs[args.population_col] = freq_obs[args.population_col].astype(str)
+                freq_obs[args.covariate_col] = freq_obs[args.covariate_col].astype(str)
+
+                unique_pops = list(freq_obs[args.population_col].unique())
+                if pop_order:
+                    freq_order = [p for p in pop_order if p in unique_pops]
+                    freq_order.extend([p for p in unique_pops if p not in freq_order])
+                else:
+                    freq_order = sorted(unique_pops)
+
+                counts = (
+                    freq_obs.groupby([args.population_col, args.covariate_col])
+                    .size()
+                    .unstack(fill_value=0)
+                )
+
+                case_name = str(case_label)
+                control_name = str(control_label)
+                for col in (control_name, case_name):
+                    if col not in counts.columns:
+                        counts[col] = 0
+
+                counts = counts.reindex(freq_order).fillna(0)
+                counts = counts.loc[counts.sum(axis=1) > 0]
+
+                if counts.empty:
+                    print("[WARN] Skipping cell frequency plots: all populations have zero cells for comparison.")
+                else:
+                    column_order = [control_name, case_name]
+                    counts = counts.loc[:, [c for c in column_order if c in counts.columns]]
+
+                    cluster_totals = counts.sum(axis=1).replace(0, np.nan)
+                    percent_by_cluster = counts.div(cluster_totals, axis=0).fillna(0) * 100.0
+
+                    group_totals = counts.sum(axis=0).replace(0, np.nan)
+                    percent_by_group = counts.div(group_totals, axis=1).fillna(0) * 100.0
+
+                    comp_component = NetPerspective.safe_component(tag)
+                    pop_component = NetPerspective.safe_component(args.population_col)
+                    stacked_path = os.path.join(freq_subdir, f"{comp_component}_stacked_{pop_component}.pdf")
+                    grouped_path = os.path.join(freq_subdir, f"{comp_component}_by_condition_{pop_component}.pdf")
+
+                    control_color = "skyblue"
+                    case_color = "lightcoral"
+
+                    fig1, ax1 = plt.subplots(figsize=(8, max(2.0, 0.4 * len(percent_by_cluster) + 2)))
+                    percent_by_cluster.plot(
+                        kind="barh",
+                        stacked=True,
+                        ax=ax1,
+                        color=[control_color, case_color],
+                        width=0.8,
+                        edgecolor="black",
+                        linewidth=0.2,
+                    )
+                    ax1.set_xlabel("Percent of cells per population")
+                    ax1.set_ylabel(args.population_col)
+                    ax1.set_title(f"Cell composition by {args.population_col}: {case_name} vs {control_name}", fontsize=12)
+                    ax1.legend(
+                        title="Condition",
+                        bbox_to_anchor=(1.05, 1),
+                        loc="upper left",
+                        borderaxespad=0.0,
+                        frameon=False,
+                        fontsize=8,
+                        title_fontsize=9,
+                    )
+                    plt.tight_layout(rect=[0, 0, 0.85, 1])
+                    fig1.savefig(stacked_path, bbox_inches="tight")
+                    plt.close(fig1)
+                    print(f"[INFO] Wrote cell frequency stacked bar chart: {stacked_path}")
+
+                    fig2, ax2 = plt.subplots(figsize=(8, max(2.0, 0.4 * len(percent_by_group) + 2)))
+                    y_positions = np.arange(len(percent_by_group.index))
+                    bar_height = 0.35
+
+                    ax2.barh(
+                        y_positions - bar_height / 2,
+                        percent_by_group[control_name],
+                        height=bar_height,
+                        color=control_color,
+                        edgecolor="black",
+                        linewidth=0.2,
+                        label=control_name,
+                    )
+                    ax2.barh(
+                        y_positions + bar_height / 2,
+                        percent_by_group[case_name],
+                        height=bar_height,
+                        color=case_color,
+                        edgecolor="black",
+                        linewidth=0.2,
+                        label=case_name,
+                    )
+                    ax2.set_yticks(y_positions)
+                    ax2.set_yticklabels(percent_by_group.index)
+                    ax2.invert_yaxis()
+                    ax2.set_xlabel("Percent of condition cells")
+                    ax2.set_ylabel(args.population_col)
+                    ax2.set_title(f"Cell frequency by condition: {case_name} vs {control_name}", fontsize=12)
+                    ax2.legend(loc="best", frameon=False)
+                    plt.tight_layout()
+                    fig2.savefig(grouped_path, bbox_inches="tight")
+                    plt.close(fig2)
+                    print(f"[INFO] Wrote cell frequency comparison chart: {grouped_path}")
 
             heat_png = "heatmap_{}_by_{}.pdf".format(tag, args.population_col)
             heat_tsv = "heatmap_{}_by_{}.tsv".format(tag, args.population_col)
