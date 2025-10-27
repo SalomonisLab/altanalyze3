@@ -424,18 +424,126 @@ def compute_pseudobulk_per_population(adata, population_col, sample_col, covaria
 
 def _rank_genes_scanpy(two_group_adata, groupby, case_label, control_label, method):
     # Run Scanpy DE and return names, pvals_adj, log2fc, raw pvals as Series for the case vs control
-    sc.tl.rank_genes_groups(two_group_adata,
+    two_for_rank = _prepare_scanpy_rank_input(two_group_adata)
+
+    sc.tl.rank_genes_groups(two_for_rank,
                             groupby=groupby,
                             groups=[case_label],
                             reference=control_label,
-                            method=method)
-    rg = two_group_adata.uns["rank_genes_groups"]
+                            method=method,
+                            use_raw=False)
+    rg = two_for_rank.uns["rank_genes_groups"]
+    two_group_adata.uns["rank_genes_groups"] = rg
     names = pd.Index(rg["names"][case_label]).astype(str)
     pvals_adj = pd.Series(rg["pvals_adj"][case_label], index=names, name="fdr").astype(float)
     pvals_raw = pd.Series(rg["pvals"][case_label], index=names, name="pval").astype(float)
     logfc_ln = pd.Series(rg["logfoldchanges"][case_label], index=names, name="logfc_ln").astype(float)
     logfc = pd.Series(_ln_to_log2(logfc_ln.values), index=names, name="log2fc")
     return names, pvals_adj, logfc, pvals_raw
+
+
+def _prepare_scanpy_rank_input(two_group_adata):
+    """Ensure matrix is log-transformed before calling Scanpy rank_genes_groups."""
+    if "log1p" in two_group_adata.uns:
+        return two_group_adata
+
+    X = two_group_adata.X
+    max_val = None
+    if sps.issparse(X):
+        try:
+            max_val = X.max()
+            if hasattr(max_val, "A"):
+                max_val = max_val.A.max()
+            else:
+                max_val = float(max_val)
+        except Exception:
+            max_val = None
+    else:
+        try:
+            max_val = float(np.max(X))
+        except Exception:
+            max_val = None
+
+    # Heuristic: raw counts typically exceed 20, whereas log-normalised values are ~<15
+    if max_val is not None and max_val > 20:
+        ad = two_group_adata.copy()
+        ad.raw = None
+        if not sps.issparse(ad.X):
+            ad.X = np.asarray(ad.X, dtype=float)
+        sc.pp.normalize_total(ad, target_sum=1e4, inplace=True)
+        sc.pp.log1p(ad)
+        return ad
+    return two_group_adata
+
+
+def _extract_expression_matrix(pop_data):
+    """Return matrix, gene names, and logging metadata for fold-change computation."""
+    if getattr(pop_data, "raw", None) is not None:
+        matrix = pop_data.raw.X
+        genes = np.asarray(pop_data.raw.var_names.astype(str))
+        return matrix, genes, False, None
+
+    if "counts" in getattr(pop_data, "layers", {}):
+        matrix = pop_data.layers["counts"]
+        genes = np.asarray(pop_data.var_names.astype(str))
+        return matrix, genes, False, None
+
+    matrix = pop_data.X
+    genes = np.asarray(pop_data.var_names.astype(str))
+
+    log1p_info = pop_data.uns.get("log1p", {})
+    logged = bool(log1p_info)
+    log_base = log1p_info.get("base", None)
+
+    if not logged:
+        max_val = None
+        if sps.issparse(matrix):
+            if matrix.nnz > 0:
+                max_val = float(matrix.max())
+        else:
+            if matrix.size > 0:
+                max_val = float(np.nanmax(matrix))
+        if max_val is not None and max_val <= 20:
+            logged = True
+
+    return matrix, genes, logged, log_base
+
+
+def _matrix_to_numpy(matrix):
+    if sps.issparse(matrix):
+        return matrix.toarray()
+    return np.asarray(matrix, dtype=float)
+
+
+def _compute_pseudobulk_log2fc(pop_data, covariate_col, case_label, control_label):
+    cond = pop_data.obs[covariate_col].astype(str).values
+    case_mask = cond == str(case_label)
+    ctrl_mask = cond == str(control_label)
+    if case_mask.sum() == 0 or ctrl_mask.sum() == 0:
+        return pd.Series(dtype=float)
+
+    matrix, genes, logged, log_base = _extract_expression_matrix(pop_data)
+    matrix = _matrix_to_numpy(matrix)
+
+    if logged:
+        if log_base is None or np.isclose(log_base, np.e):
+            linear = np.expm1(matrix)
+        else:
+            linear = np.power(log_base, matrix) - 1.0
+    else:
+        linear = matrix
+
+    eps = 1e-9
+    mean_case = linear[case_mask].mean(axis=0)
+    mean_ctrl = linear[ctrl_mask].mean(axis=0)
+    log2fc = np.log2((mean_case + eps) / (mean_ctrl + eps))
+
+    series = pd.Series(log2fc, index=genes.astype(str))
+    if "gene_symbols" in pop_data.var.columns:
+        symbol_map = pop_data.var["gene_symbols"].astype(str).to_dict()
+        series = series.rename(index=symbol_map).groupby(level=0).mean()
+    series.index.name = "gene"
+    return series
 
 
 def _moderated_t_test(adata, covariate_col, case_label, control_label, pop):
@@ -648,21 +756,6 @@ def run_de_for_comparisons(adata,
             df["gene"] = df["gene"].map(lambda g: id_map.get(g, g))
             df["gene"] = df["gene"].astype(str)
 
-        if corrected_fc is not None:
-            df_names_upper = pd.Index(df["gene"]).astype(str).str.upper().str.replace(r"\.\d+$", "", regex=True)
-            cf_names = pd.Index(corrected_fc.index).astype(str).str.upper().str.replace(r"\.\d+$", "", regex=True)
-            overlap = len(set(df_names_upper) & set(cf_names))
-            if diagnostic_report:
-                print(f"[DEBUG] Harmonized ID overlap: {overlap} / {len(df_names_upper)} genes shared with corrected_fc index")
-                unmatched = list(set(df_names_upper) - set(cf_names))
-                print(f"[DEBUG] Example unmatched DE identifiers (first 10): {unmatched[:10]}")
-                matched = list(set(df_names_upper) & set(cf_names))
-                print(f"[DEBUG] Example matched identifiers (first 10): {matched[:10]}")
-                print(f"[DEBUG] corrected_fc index example (first 10): {list(corrected_fc.index[:10])}")
-        else:
-            if diagnostic_report:
-                print("[WARN] corrected_fc not yet defined during harmonization.")
-
         df["population"] = pop
         df["case_label"] = case_label
         df["control_label"] = control_label
@@ -686,24 +779,14 @@ def run_de_for_comparisons(adata,
 
 
         # --- Correct fold computation: true mean-based log2 fold (per gene across cells) ---
-        expr = pop_data.to_df()  # rows = cells, columns = genes
-        cond = pop_data.obs[covariate_col].astype(str)
-        cond = cond.reindex(expr.index)
-
-        # compute mean expression per condition
-        mean_case = np.log2(np.mean(2 ** expr[cond == case_label], axis=0) + 1e-9)
-        mean_ctrl = np.log2(np.mean(2 ** expr[cond == control_label], axis=0) + 1e-9)
-        corrected_fc = mean_case - mean_ctrl
-        corrected_fc.index = corrected_fc.index.astype(str)
-        if "gene_symbols" in pop_data.var.columns:
-            symbol_map = pop_data.var["gene_symbols"].astype(str).to_dict()
-            corrected_fc = corrected_fc.rename(index=symbol_map)
-            corrected_fc = corrected_fc.groupby(level=0).mean()
-        corrected_fc.index.name = "gene"
-        all_fold_values[str(pop)] = corrected_fc
-
-        # overwrite Scanpy’s log2fc column with corrected values
-        df["log2fc"] = df["gene"].map(corrected_fc)
+        corrected_fc = _compute_pseudobulk_log2fc(pop_data, covariate_col, case_label, control_label)
+        if not corrected_fc.empty:
+            all_fold_values[str(pop)] = corrected_fc
+            updated_fc = df["gene"].map(corrected_fc)
+            df.loc[updated_fc.notna(), "log2fc"] = updated_fc[updated_fc.notna()]
+        else:
+            if diagnostic_report:
+                print(f"[WARN] No corrected fold-change computed for population {pop} (insufficient data).")
 
         if diagnostic_report:
             # --- DEBUGGING: PROSER2 in AT1 ---
@@ -714,7 +797,6 @@ def run_de_for_comparisons(adata,
                 print(f"  FDR: {row['fdr']:.3e}")
                 print(f"  case/control: {row['case']} vs {row['control']}")
                 print(f"  n_case={row['n_case']}, n_control={row['n_control']}")
-                print(f"  mean_case={mean_case.get('PROSER2', np.nan):.3f}, mean_ctrl={mean_ctrl.get('PROSER2', np.nan):.3f}")
 
         # --- Optional debugging ---
         fold_value_check = False
@@ -1370,9 +1452,14 @@ def write_differentials_only_h5ad(adata, de_store, out_path):
     if detailed.empty:
         print("[WARN] No DEGs; writing a copy of input with DE container only.")
         adx = adata.copy()
+        _sanitize_de_store(de_store)
         if "cellHarmony_DE" in adx.uns:
             del adx.uns["cellHarmony_DE"]
         adx.uns["cellHarmony_DE"] = de_store
+        if hasattr(adx, "var") and "_index" in adx.var.columns:
+            adx.var = adx.var.drop(columns=["_index"])
+        if adx.raw is not None and "_index" in adx.raw.var.columns:
+            adx.raw.var = adx.raw.var.drop(columns=["_index"])
         adx.write(out_path)
         print("[INFO] Wrote differentials h5ad: {}".format(out_path))
         return
@@ -1385,19 +1472,48 @@ def write_differentials_only_h5ad(adata, de_store, out_path):
     if keep_mask.sum() == 0:
         print("[WARN] None of the DEG genes match var_names; writing input with DE container only.")
         adx = adata.copy()
+        _sanitize_de_store(de_store)
         if "cellHarmony_DE" in adx.uns:
             del adx.uns["cellHarmony_DE"]
         adx.uns["cellHarmony_DE"] = de_store
+        if hasattr(adx, "var") and "_index" in adx.var.columns:
+            adx.var = adx.var.drop(columns=["_index"])
+        if adx.raw is not None and "_index" in adx.raw.var.columns:
+            adx.raw.var = adx.raw.var.drop(columns=["_index"])
         adx.write(out_path)
         print("[INFO] Wrote differentials h5ad: {}".format(out_path))
         return
 
     adx = adata[:, keep_mask].copy()
+    _sanitize_de_store(de_store)
+    if adx.raw is not None:
+        adx.raw = adx.raw[:, keep_mask]
     if "cellHarmony_DE" in adx.uns:
         del adx.uns["cellHarmony_DE"]
     adx.uns["cellHarmony_DE"] = de_store
+
+    # Drop reserved column names before writing
+    if hasattr(adx, "var") and "_index" in adx.var.columns:
+        adx.var = adx.var.drop(columns=["_index"])
+    if adx.raw is not None and "_index" in adx.raw.var.columns:
+        adx.raw.var = adx.raw.var.drop(columns=["_index"])
+
     adx.write(out_path)
     print("[INFO] Wrote differentials h5ad: {}".format(out_path))
+
+
+def _sanitize_de_store(de_store):
+    assigned = de_store.get("assigned_groups")
+    if isinstance(assigned, pd.DataFrame):
+        for col in assigned.columns:
+            assigned[col] = assigned[col].apply(lambda v: str(v) if not isinstance(v, str) else v)
+        de_store["assigned_groups"] = assigned
+
+    detailed = de_store.get("detailed_deg")
+    if isinstance(detailed, pd.DataFrame):
+        for col in detailed.columns:
+            detailed[col] = detailed[col].apply(lambda v: str(v) if not isinstance(v, str) else v)
+        de_store["detailed_deg"] = detailed
 
 # --------------------------------- CLI ------------------------------------ #
 
