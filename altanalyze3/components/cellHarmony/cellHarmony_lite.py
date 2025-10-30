@@ -1,5 +1,6 @@
 import os, time, sys, shutil, re
 import tempfile
+from pathlib import Path
 import pandas as pd
 import numpy as np
 import scipy.sparse as sp
@@ -67,7 +68,8 @@ def combine_and_align_h5(
     metacell_random_count=50,
     metacell_random_cells=5,
     metacell_random_replacement=False,
-    metacell_random_state=0
+    metacell_random_state=0,
+    ambient_correct_cutoff=None
 ):
     start_time = time.time()
     os.makedirs(output_dir, exist_ok=True)
@@ -229,6 +231,32 @@ def combine_and_align_h5(
 
         adata_combined = ad.concat(adata_list, label="sample", join="outer", fill_value=0)
         print(f"adata shape: {adata_combined.shape} (cells x genes)")
+
+        if ambient_correct_cutoff is not None:
+            soupx_dir = os.path.join(output_dir, "soupx")
+            os.makedirs(soupx_dir, exist_ok=True)
+            try:
+                from altanalyze3.components.ambient_rna import soupx_correct
+            except ImportError as exc:
+                raise RuntimeError(
+                    "SoupX ambient correction requested (--ambient_correct_cutoff) but the soupx module "
+                    "is unavailable. Install the 'soupx' package to enable this option."
+                ) from exc
+
+            print(f"[INFO] Running SoupX ambient correction (rho={ambient_correct_cutoff})...")
+            corrected = soupx_correct.process_anndata(
+                adata_combined,
+                rho=float(ambient_correct_cutoff),
+                library_col="Library",
+                outdir=Path(soupx_dir),
+                write_individual=False,
+                merged_filename="soupx_corrected_merged.h5ad",
+            )
+            if corrected is None:
+                raise RuntimeError("SoupX correction did not return a corrected AnnData object.")
+            adata_combined = corrected
+            adata_combined.var_names_make_unique()
+            print(f"[INFO] SoupX correction complete. Corrected adata shape: {adata_combined.shape} (cells x genes)")
 
         sc.pp.filter_cells(adata_combined, min_genes=min_genes)
         print(f"Cells remaining after min_genes {min_genes} filtering: {adata_combined.n_obs}")
@@ -947,6 +975,7 @@ if __name__ == '__main__':
     parser.add_argument('--metacell-random-cells', type=int, default=5, help='Cells per metacell for random aggregation')
     parser.add_argument('--metacell-random-replacement', action='store_true', help='Sample cells with replacement for random metacells')
     parser.add_argument('--metacell-random-state', type=int, default=0, help='Random state for metacell construction')
+    parser.add_argument('--ambient_correct_cutoff', type=float, default=None, help='Apply SoupX ambient RNA correction with the specified contamination fraction (rho).')
 
     args = parser.parse_args()
 
@@ -979,6 +1008,7 @@ if __name__ == '__main__':
     metacell_random_cells = args.metacell_random_cells
     metacell_random_replacement = args.metacell_random_replacement
     metacell_random_state = args.metacell_random_state
+    ambient_correct_cutoff = args.ambient_correct_cutoff
 
     #h5_files = glob(os.path.join(h5_directory, "*.h5")) if '.h5' not in h5_directory else [h5_directory]
     h5_files = get_h5_and_mtx_files(h5_directory)
@@ -1016,5 +1046,6 @@ if __name__ == '__main__':
         metacell_random_count=metacell_random_count,
         metacell_random_cells=metacell_random_cells,
         metacell_random_replacement=metacell_random_replacement,
-        metacell_random_state=metacell_random_state
+        metacell_random_state=metacell_random_state,
+        ambient_correct_cutoff=ambient_correct_cutoff
     )

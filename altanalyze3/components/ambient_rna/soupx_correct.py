@@ -417,8 +417,8 @@ def _iter_libraries(values: Iterable) -> Iterable:
     return seen
 
 
-def process_h5ad(
-    h5ad_path: Path,
+def process_anndata(
+    adata: ad.AnnData,
     *,
     rho: float = DEFAULT_RHO,
     library_col: str = "Library",
@@ -437,21 +437,20 @@ def process_h5ad(
     leiden_random_state: int = 0,
     method: str = "subtraction",
     round_to_int: bool = False,
+    input_label: str = "anndata",
 ) -> ad.AnnData:
-    """Process all libraries within an h5ad file and write corrected outputs."""
-
-    if not h5ad_path.exists():
-        raise FileNotFoundError(f"Input h5ad not found: {h5ad_path}")
+    """Process libraries within an AnnData object and write corrected outputs."""
 
     rho_mapping = rho_mapping or {}
-    adata = ad.read_h5ad(h5ad_path)
-
     if library_col not in adata.obs:
-        raise ValueError(f"obs column '{library_col}' not found in h5ad.")
+        raise ValueError(f"obs column '{library_col}' not found in AnnData.")
 
+    outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    libraries = list(_iter_libraries(adata.obs[library_col].tolist()))
+    working = adata.copy()
+
+    libraries = list(_iter_libraries(working.obs[library_col].tolist()))
     if not libraries:
         raise ValueError(f"No library values found in column '{library_col}'.")
 
@@ -459,9 +458,9 @@ def process_h5ad(
     report_status(
         "Loaded {file} with {cells} cells, {genes} genes, {libs} libraries. "
         "Method={method} round_to_int={round_to_int} clustering={cluster_info}".format(
-            file=h5ad_path.name,
-            cells=adata.n_obs,
-            genes=adata.n_vars,
+            file=input_label,
+            cells=working.n_obs,
+            genes=working.n_vars,
             libs=total_libraries,
             method=method,
             round_to_int=round_to_int,
@@ -476,8 +475,8 @@ def process_h5ad(
     summary = []
 
     for idx, lib in enumerate(libraries, start=1):
-        lib_mask = adata.obs[library_col] == lib
-        subset = adata[lib_mask].copy()
+        lib_mask = working.obs[library_col] == lib
+        subset = working[lib_mask].copy()
         if subset.n_obs == 0:
             report_status(f"Skipping empty library: {lib}")
             continue
@@ -639,7 +638,64 @@ def process_h5ad(
     merged_write_time = time.perf_counter() - merged_write_start
     report_status(f"Merged dataset written in {merged_write_time:.1f}s")
 
+    if not summary_table.empty:
+        summary_path = outdir / "soupx_summary.tsv"
+        summary_table.to_csv(summary_path, sep="\t", index=False)
+        report_status(f"Summary table written to {summary_path}")
+
     return merged
+
+
+def process_h5ad(
+    h5ad_path: Path,
+    *,
+    rho: float = DEFAULT_RHO,
+    library_col: str = "Library",
+    outdir: Path = Path("./soupx_corrected"),
+    rho_mapping: Optional[Dict[str, float]] = None,
+    store_raw_layer: bool = True,
+    replace_x: bool = True,
+    write_individual: bool = True,
+    merged_filename: str = "soupx_corrected_merged.h5ad",
+    cluster_col: Optional[str] = None,
+    auto_cluster: bool = True,
+    leiden_resolution: float = 0.5,
+    leiden_neighbors: int = 15,
+    leiden_npcs: int = 30,
+    leiden_hvg: int = 3000,
+    leiden_random_state: int = 0,
+    method: str = "subtraction",
+    round_to_int: bool = False,
+) -> ad.AnnData:
+    """Process all libraries within an h5ad file and write corrected outputs."""
+
+    if not h5ad_path.exists():
+        raise FileNotFoundError(f"Input h5ad not found: {h5ad_path}")
+
+    rho_mapping = rho_mapping or {}
+    adata = ad.read_h5ad(h5ad_path)
+
+    return process_anndata(
+        adata,
+        rho=rho,
+        library_col=library_col,
+        outdir=outdir,
+        rho_mapping=rho_mapping,
+        store_raw_layer=store_raw_layer,
+        replace_x=replace_x,
+        write_individual=write_individual,
+        merged_filename=merged_filename,
+        cluster_col=cluster_col,
+        auto_cluster=auto_cluster,
+        leiden_resolution=leiden_resolution,
+        leiden_neighbors=leiden_neighbors,
+        leiden_npcs=leiden_npcs,
+        leiden_hvg=leiden_hvg,
+        leiden_random_state=leiden_random_state,
+        method=method,
+        round_to_int=round_to_int,
+        input_label=h5ad_path.name,
+    )
 
 
 def run_soupx_correction(

@@ -108,27 +108,31 @@ def _validate_lineage_order_candidates(candidate_order, population_labels, popul
     Ensure lineage_order pulled from adata.uns matches the population labels used for DE.
     Returns the sanitized candidate_order list if valid, otherwise raises ValueError.
     """
-    candidate_list = [str(x) for x in list(candidate_order)]
+    raw_list = [str(x) for x in list(candidate_order)]
     expected = [str(x) for x in population_labels]
 
-    duplicates = [name for name, count in Counter(candidate_list).items() if count > 1]
-    missing = [name for name in expected if name not in candidate_list]
-    unexpected = [name for name in candidate_list if name not in expected]
+    print(f"[DEBUG] Validating lineage_order for '{population_col}': candidate={raw_list}")
+    print(f"[DEBUG] Expected population labels: {expected}")
 
-    if duplicates:
-        raise ValueError(f"duplicate entries detected ({duplicates[:5]})")
-    messages = []
+    filtered: List[str] = []
+    seen = set()
+    for entry in raw_list:
+        if entry in seen:
+            continue
+        seen.add(entry)
+        filtered.append(entry)
+
+    missing = [name for name in expected if name not in filtered]
+    unexpected = [name for name in filtered if name not in expected]
+
     if missing:
-        preview = ", ".join(missing[:5])
-        messages.append(f"missing {len(missing)} populations (e.g. {preview})")
+        print(f"[INFO] lineage_order missing {len(missing)} populations (e.g. {missing[:5]})")
     if unexpected:
-        preview = ", ".join(unexpected[:5])
-        messages.append(f"unexpected {len(unexpected)} names (e.g. {preview})")
+        print(f"[INFO] lineage_order contains {len(unexpected)} populations not present in DE (e.g. {unexpected[:5]}); ignoring them.")
 
-    if messages:
-        raise ValueError("; ".join(messages))
+    filtered = [name for name in filtered if name in expected]
 
-    return candidate_list
+    return filtered
 
 def _extract_lineage_order(adata, population_col):
     """
@@ -1191,9 +1195,11 @@ def build_fixed_order_heatmap(de_store, outdir, population_col, fc_thresh, heatm
         try:
             lineage_order = _validate_lineage_order_candidates(de_store["lineage_order"], pop_order, population_col)
             lineage_source = "de_store"
+            print(f"[DEBUG] de_store lineage_order present: {de_store['lineage_order']}")
         except ValueError as exc:
             print(f"[WARN] Stored lineage_order mismatch for '{population_col}': {exc}")
     elif "adata" in de_store and hasattr(de_store["adata"], "uns") and "lineage_order" in de_store["adata"].uns:
+        print(f"[DEBUG] adata.uns keys: {list(de_store['adata'].uns.keys())}")
         try:
             lineage_order = _validate_lineage_order_candidates(
                 de_store["adata"].uns["lineage_order"], pop_order, population_col
@@ -1278,6 +1284,8 @@ def build_fixed_order_heatmap(de_store, outdir, population_col, fc_thresh, heatm
     # Use lineage-based order for populations if available
     lineage_for_local = lineage_order if lineage_order is not None else pop_order
     lineage_for_local = [p for p in lineage_for_local if p in pop_order]
+    if diagnostic_report:
+        print(f"[DEBUG] lineage_for_local: {lineage_for_local}")
 
     for pop in lineage_for_local:
         sub = local_hits[local_hits["population_or_pattern"] == str(pop)]
@@ -1349,6 +1357,8 @@ def build_fixed_order_heatmap(de_store, outdir, population_col, fc_thresh, heatm
         # --- Reorder strictly by lineage_order but keep only populations with DE results ---
         existing_pops = [p for p in lineage_order if p in fold_df.columns]
         missing_pops = [p for p in lineage_order if p not in fold_df.columns]
+        print(f"[DEBUG] Existing pops for lineage order: {existing_pops}")
+        #print(f"[DEBUG] Missing pops: {missing_pops}")
         if lineage_source:
             print(f"[INFO] Using lineage order from {lineage_source} (n={len(lineage_order)}).")
         else:
@@ -1358,10 +1368,13 @@ def build_fixed_order_heatmap(de_store, outdir, population_col, fc_thresh, heatm
         if existing_pops:
             fold_df = fold_df.reindex(columns=existing_pops)
             print(f"[INFO] Reordered heatmap columns by lineage_order (n={len(existing_pops)}).")
+            #print(f"[DEBUG] fold_df columns after reorder: {list(fold_df.columns)}")
         else:
             print("[WARN] No matching lineage_order populations found in DE matrix; keeping default order.")
     else:
         print("[WARN] lineage_order not found in de_store or adata; keeping existing column order.")
+        #print(f"[DEBUG] pop_order: {pop_order}")
+        #print(f"[DEBUG] fold_df columns: {list(fold_df.columns)}")
 
     # ------------------------- 4. Export TSV ------------------------- #
     if not os.path.isdir(outdir):
@@ -1373,6 +1386,8 @@ def build_fixed_order_heatmap(de_store, outdir, population_col, fc_thresh, heatm
         fold_df = fold_df.loc[:, [p for p in pop_order if p in fold_df.columns]]
     else:
         print("[WARN] lineage_order incomplete or missing columns; using current order.")
+        print(f"[DEBUG] pop_order when writing TSV: {pop_order}")
+        print(f"[DEBUG] fold_df columns when writing TSV: {list(fold_df.columns)}")
 
     fold_df.to_csv(heatmap_path, sep="\t")
     print("[INFO] Wrote heatmap matrix TSV: {}".format(heatmap_path))

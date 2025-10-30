@@ -40,6 +40,7 @@ Additional options are grouped by theme to keep the core workflow succinct.
 | `--min_cells` | Minimum cells referencing a gene before it is retained (3). |
 | `--min_counts` | Minimum total counts per cell (500). |
 | `--mit_percent` | Upper mitochondrial percentage threshold (10). |
+| `--ambient_correct_cutoff` | If set, run SoupX ambient RNA correction with this contamination fraction (rho) **before** QC and alignment. Corrected counts and a summary TSV are written under `<outdir>/soupx/`. |
 | `--generate_umap` | Run Scanpy HVG/PCA/neighbor graph steps and store UMAP coordinates plus marker rankings. |
 | `--save_adata` | Persist the AnnData after optional UMAP/clustering (`combined_with_umap_and_markers.h5ad`). |
 | `--unsupervised_cluster` | Compute Leiden clusters prior to exporting results. |
