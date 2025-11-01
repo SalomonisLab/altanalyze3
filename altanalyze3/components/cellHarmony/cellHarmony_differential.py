@@ -524,7 +524,7 @@ def _compute_pseudobulk_log2fc(pop_data, covariate_col, case_label, control_labe
     case_mask = cond == str(case_label)
     ctrl_mask = cond == str(control_label)
     if case_mask.sum() == 0 or ctrl_mask.sum() == 0:
-        return pd.Series(dtype=float)
+        return pd.DataFrame(columns=["log2fc", "case_mean", "control_mean"])
 
     matrix, genes, logged, log_base = _extract_expression_matrix(pop_data)
     matrix = _matrix_to_numpy(matrix)
@@ -541,13 +541,20 @@ def _compute_pseudobulk_log2fc(pop_data, covariate_col, case_label, control_labe
     mean_case = linear[case_mask].mean(axis=0)
     mean_ctrl = linear[ctrl_mask].mean(axis=0)
     log2fc = np.log2((mean_case + eps) / (mean_ctrl + eps))
-
-    series = pd.Series(log2fc, index=genes.astype(str))
+    df = pd.DataFrame(
+        {
+            "log2fc": log2fc.astype(float),
+            "case_mean": mean_case.astype(float),
+            "control_mean": mean_ctrl.astype(float),
+        },
+        index=genes.astype(str),
+    )
     if "gene_symbols" in pop_data.var.columns:
         symbol_map = pop_data.var["gene_symbols"].astype(str).to_dict()
-        series = series.rename(index=symbol_map).groupby(level=0).mean()
-    series.index.name = "gene"
-    return series
+        df.index = [symbol_map.get(g, g) for g in df.index]
+        df = df.groupby(level=0).mean()
+    df.index.name = "gene"
+    return df
 
 
 def _moderated_t_test(adata, covariate_col, case_label, control_label, pop):
@@ -783,14 +790,18 @@ def run_de_for_comparisons(adata,
 
 
         # --- Correct fold computation: true mean-based log2 fold (per gene across cells) ---
-        corrected_fc = _compute_pseudobulk_log2fc(pop_data, covariate_col, case_label, control_label)
-        if not corrected_fc.empty:
-            all_fold_values[str(pop)] = corrected_fc
-            updated_fc = df["gene"].map(corrected_fc)
+        corrected_stats = _compute_pseudobulk_log2fc(pop_data, covariate_col, case_label, control_label)
+        if not corrected_stats.empty:
+            all_fold_values[str(pop)] = corrected_stats["log2fc"]
+            updated_fc = df["gene"].map(corrected_stats["log2fc"])
             df.loc[updated_fc.notna(), "log2fc"] = updated_fc[updated_fc.notna()]
+            df["case_mean_expr"] = df["gene"].map(corrected_stats["case_mean"])
+            df["control_mean_expr"] = df["gene"].map(corrected_stats["control_mean"])
         else:
             if diagnostic_report:
                 print(f"[WARN] No corrected fold-change computed for population {pop} (insufficient data).")
+            df["case_mean_expr"] = np.nan
+            df["control_mean_expr"] = np.nan
 
         if diagnostic_report:
             # --- DEBUGGING: PROSER2 in AT1 ---
@@ -852,7 +863,19 @@ def run_de_for_comparisons(adata,
     summary = pd.DataFrame(results_rows,
                            columns=["population", "n_case", "n_control", "num_DEG", "tested_genes"])
     detailed = pd.concat(long_stats, axis=0) if len(long_stats) > 0 else pd.DataFrame(
-        columns=["gene", "population", "log2fc", "fdr", "case", "control", "n_case", "n_control"]
+        columns=[
+            "gene",
+            "population",
+            "log2fc",
+            "fdr",
+            "pval",
+            "case",
+            "control",
+            "n_case",
+            "n_control",
+            "case_mean_expr",
+            "control_mean_expr",
+        ]
     )
 
     # Pooled overall test pO (all cells case vs control, regardless of population)
@@ -1801,6 +1824,38 @@ def main():
                     fig2.savefig(grouped_path, bbox_inches="tight")
                     plt.close(fig2)
                     print(f"[INFO] Wrote cell frequency comparison chart: {grouped_path}")
+
+                    freq_tsv_path = os.path.join(freq_subdir, f"{comp_component}_cell_frequencies_{pop_component}.tsv")
+                    counts_long = counts.reset_index().melt(
+                        id_vars=args.population_col,
+                        var_name="condition",
+                        value_name="cell_count",
+                    )
+                    pct_group_long = percent_by_group.reset_index().melt(
+                        id_vars=args.population_col,
+                        var_name="condition",
+                        value_name="percent_of_condition",
+                    )
+                    pct_cluster_long = percent_by_cluster.reset_index().melt(
+                        id_vars=args.population_col,
+                        var_name="condition",
+                        value_name="percent_of_population",
+                    )
+                    freq_table = counts_long.merge(
+                        pct_group_long,
+                        on=[args.population_col, "condition"],
+                        how="left",
+                    ).merge(
+                        pct_cluster_long,
+                        on=[args.population_col, "condition"],
+                        how="left",
+                    )
+                    freq_table.sort_values(
+                        by=[args.population_col, "condition"],
+                        inplace=True,
+                    )
+                    freq_table.to_csv(freq_tsv_path, sep="\t", index=False, float_format="%.4f")
+                    print(f"[INFO] Wrote cell frequency table: {freq_tsv_path}")
 
             heat_png = "heatmap_{}_by_{}.pdf".format(tag, args.population_col)
             heat_tsv = "heatmap_{}_by_{}.tsv".format(tag, args.population_col)

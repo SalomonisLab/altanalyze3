@@ -1,6 +1,7 @@
 import os, time, sys, shutil, re
 import tempfile
 from pathlib import Path
+from datetime import datetime
 import pandas as pd
 import numpy as np
 import scipy.sparse as sp
@@ -23,6 +24,27 @@ plt.rcParams['pdf.fonttype'] = 42
 plt.rcParams['font.family'] = 'sans-serif'
 plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
 plt.rcParams['figure.facecolor'] = 'white'
+
+
+class Tee:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for stream in self.streams:
+            stream.write(data)
+        return len(data)
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
+
+    @property
+    def encoding(self):
+        for stream in self.streams:
+            if hasattr(stream, "encoding"):
+                return stream.encoding
+        return "utf-8"
 
 
 def normalize_adata(adata, show_progress=False):
@@ -1010,42 +1032,65 @@ if __name__ == '__main__':
     metacell_random_state = args.metacell_random_state
     ambient_correct_cutoff = args.ambient_correct_cutoff
 
-    #h5_files = glob(os.path.join(h5_directory, "*.h5")) if '.h5' not in h5_directory else [h5_directory]
     h5_files = get_h5_and_mtx_files(h5_directory)
 
-    if len(h5_files)==0:
-        print ("No compatible h5, h5ad or .mtx files identified")
+    if len(h5_files) == 0:
+        print("No compatible h5, h5ad or .mtx files identified")
         sys.exit()
-        
-    combine_and_align_h5(
-        h5_files=h5_files,
-        h5ad_file=h5ad_file,
-        cellharmony_ref=cellharmony_ref,
-        output_dir=output_dir,
-        export_cptt=export_cptt,
-        export_h5ad=export_h5ad,
-        min_genes=min_genes,
-        min_cells=min_cells,
-        min_counts=min_counts,
-        mit_percent=mit_percent,
-        generate_umap=generate_umap,
-        save_adata=save_adata,
-        unsupervised_cluster=unsupervised_cluster,
-        append_obs_field=append_obs_field,
-        alignment_mode=alignment_mode,
-        min_alignment_score=align_cutoff,
-        gene_translation_file=gene_translation,
-        metacell_align=metacell_align,
-        metacell_target_size=metacell_target,
-        metacell_min_size=metacell_min,
-        metacell_max_size=metacell_max,
-        metacell_algorithm=metacell_algorithm,
-        metacell_neighbors=metacell_neighbors,
-        metacell_hvg=metacell_hvg,
-        metacell_pcs=metacell_pcs,
-        metacell_random_count=metacell_random_count,
-        metacell_random_cells=metacell_random_cells,
-        metacell_random_replacement=metacell_random_replacement,
-        metacell_random_state=metacell_random_state,
-        ambient_correct_cutoff=ambient_correct_cutoff
-    )
+
+    log_dir = os.path.join(output_dir, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_path = os.path.join(log_dir, f"cellHarmony-lite_{timestamp}.log")
+    log_file = open(log_path, "w")
+    log_file.write("# cellHarmony_lite run parameters\n")
+    log_file.write(f"command = {' '.join(sys.argv)}\n")
+    for key, value in sorted(vars(args).items()):
+        log_file.write(f"{key} = {value}\n")
+    log_file.write("\n")
+    log_file.flush()
+
+    stdout_orig, stderr_orig = sys.stdout, sys.stderr
+    sys.stdout = Tee(stdout_orig, log_file)
+    sys.stderr = Tee(stderr_orig, log_file)
+
+    try:
+        combine_and_align_h5(
+            h5_files=h5_files,
+            h5ad_file=h5ad_file,
+            cellharmony_ref=cellharmony_ref,
+            output_dir=output_dir,
+            export_cptt=export_cptt,
+            export_h5ad=export_h5ad,
+            min_genes=min_genes,
+            min_cells=min_cells,
+            min_counts=min_counts,
+            mit_percent=mit_percent,
+            generate_umap=generate_umap,
+            save_adata=save_adata,
+            unsupervised_cluster=unsupervised_cluster,
+            append_obs_field=append_obs_field,
+            alignment_mode=alignment_mode,
+            min_alignment_score=align_cutoff,
+            gene_translation_file=gene_translation,
+            metacell_align=metacell_align,
+            metacell_target_size=metacell_target,
+            metacell_min_size=metacell_min,
+            metacell_max_size=metacell_max,
+            metacell_algorithm=metacell_algorithm,
+            metacell_neighbors=metacell_neighbors,
+            metacell_hvg=metacell_hvg,
+            metacell_pcs=metacell_pcs,
+            metacell_random_count=metacell_random_count,
+            metacell_random_cells=metacell_random_cells,
+            metacell_random_replacement=metacell_random_replacement,
+            metacell_random_state=metacell_random_state,
+            ambient_correct_cutoff=ambient_correct_cutoff
+        )
+    finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        sys.stdout = stdout_orig
+        sys.stderr = stderr_orig
+        log_file.close()
+        print(f"[INFO] cellHarmony_lite log written to {log_path}")

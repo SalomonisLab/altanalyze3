@@ -76,6 +76,7 @@ When `--metacell-align` is active, the following knobs control metacell generati
 | `combined_qc_normalized.h5ad` | `--export_h5ad` | QC-filtered AnnData with original counts in `layers["counts"]` and normalized expression in `X`. |
 | `combined_with_umap_and_markers.h5ad` | `--save_adata` or `--generate_umap` | Annotated AnnData containing UMAP coordinates, optional Leiden labels, and marker rankings. |
 | `metacells.h5ad` | `--metacell-align` | AnnData describing generated metacells plus `uns["metacell_membership"]` for barcode → metacell mapping. |
+| `logs/cellHarmony-lite_<timestamp>.log` | Always | Execution log capturing console output and command-line parameters for reproducibility. |
 
 All outputs are written to `--outdir` (default `output/`). Console logs summarise file loading, gene translation, QC filters, alignment statistics, and optional metacell construction.
 
