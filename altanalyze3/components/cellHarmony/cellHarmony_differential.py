@@ -270,6 +270,7 @@ def compute_pseudobulk_per_population(adata, population_col, sample_col, covaria
     mat = _ensure_numeric_matrix(mat)
 
     rows = []
+    linear_rows = []
     colnames = []
 
     for gid in valid_groups:
@@ -295,14 +296,16 @@ def compute_pseudobulk_per_population(adata, population_col, sample_col, covaria
         log_cptt = np.log2(cptt + 1.0)
 
         rows.append(log_cptt)
+        linear_rows.append(cptt)
         colnames.append(gid)
 
     if len(rows) == 0:
         print("[ERROR] No pseudobulk groups passed threshold.", file=sys.stderr)
         sys.exit(1)
 
-    M = np.vstack(rows).T  # genes × groups
-    df = pd.DataFrame(M, index=adata.var_names.astype(str), columns=colnames)
+    log_matrix = np.vstack(rows).T  # genes × groups
+    lin_matrix = np.vstack(linear_rows).T
+    df = pd.DataFrame(log_matrix, index=adata.var_names.astype(str), columns=colnames)
     method = "counts_log2CP10k" if use_counts else "avgExpr_like"
 
     # --- Ensure proper gene identifiers for pseudobulk rows ---
@@ -325,6 +328,7 @@ def compute_pseudobulk_per_population(adata, population_col, sample_col, covaria
     # Interim h5ad with pseudobulk matrix
     pb_adata = ad.AnnData(X=df.values.T)  # obs = groups, var = genes
     pb_adata.var.index = df.index.astype(str)
+    pb_adata.layers["counts"] = np.asarray(lin_matrix.T, dtype=float)
 
     # --- Decompose and define metadata ---
     populations = [c.split("|", 1)[0] for c in df.columns]
@@ -339,6 +343,7 @@ def compute_pseudobulk_per_population(adata, population_col, sample_col, covaria
     pb_adata.obs["Sample"] = samples
     pb_adata.obs["Population"] = populations
     pb_adata.uns["pseudobulk_method"] = "pseudobulk"
+    pb_adata.uns["log1p"] = {"base": 2.0}
     # Preserve lineage hierarchy if present in input AnnData
     lineage_order = _extract_lineage_order(adata, population_col)
     if lineage_order is not None:
@@ -537,7 +542,7 @@ def _compute_pseudobulk_log2fc(pop_data, covariate_col, case_label, control_labe
     else:
         linear = matrix
 
-    eps = 1e-9
+    eps = 1.0
     mean_case = linear[case_mask].mean(axis=0)
     mean_ctrl = linear[ctrl_mask].mean(axis=0)
     log2fc = np.log2((mean_case + eps) / (mean_ctrl + eps))
