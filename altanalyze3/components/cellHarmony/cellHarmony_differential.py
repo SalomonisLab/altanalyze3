@@ -546,11 +546,15 @@ def _compute_pseudobulk_log2fc(pop_data, covariate_col, case_label, control_labe
     mean_case = linear[case_mask].mean(axis=0)
     mean_ctrl = linear[ctrl_mask].mean(axis=0)
     log2fc = np.log2((mean_case + eps) / (mean_ctrl + eps))
+    case_mean_log2 = np.log2(mean_case + eps)
+    control_mean_log2 = np.log2(mean_ctrl + eps)
     df = pd.DataFrame(
         {
             "log2fc": log2fc.astype(float),
-            "case_mean": mean_case.astype(float),
-            "control_mean": mean_ctrl.astype(float),
+            "case_mean_log2": case_mean_log2.astype(float),
+            "control_mean_log2": control_mean_log2.astype(float),
+            "case_mean_linear": mean_case.astype(float),
+            "control_mean_linear": mean_ctrl.astype(float),
         },
         index=genes.astype(str),
     )
@@ -800,8 +804,11 @@ def run_de_for_comparisons(adata,
             all_fold_values[str(pop)] = corrected_stats["log2fc"]
             updated_fc = df["gene"].map(corrected_stats["log2fc"])
             df.loc[updated_fc.notna(), "log2fc"] = updated_fc[updated_fc.notna()]
-            df["case_mean_expr"] = df["gene"].map(corrected_stats["case_mean"])
-            df["control_mean_expr"] = df["gene"].map(corrected_stats["control_mean"])
+
+            case_map = corrected_stats.get("case_mean_log2", corrected_stats.get("case_mean"))
+            ctrl_map = corrected_stats.get("control_mean_log2", corrected_stats.get("control_mean"))
+            df["case_mean_expr"] = df["gene"].map(case_map) if case_map is not None else np.nan
+            df["control_mean_expr"] = df["gene"].map(ctrl_map) if ctrl_map is not None else np.nan
         else:
             if diagnostic_report:
                 print(f"[WARN] No corrected fold-change computed for population {pop} (insufficient data).")
