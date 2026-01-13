@@ -12,6 +12,7 @@ from glob import glob
 from tqdm import tqdm
 from scipy.spatial.distance import cdist
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 import warnings
 warnings.filterwarnings("ignore", message="Variable names are not unique. To make them unique, call `.var_names_make_unique`.")
 warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
@@ -60,6 +61,22 @@ def normalize_adata(adata, show_progress=False):
 def save_marker_genes(adata, groupby, output_file):
     deg = pd.DataFrame(adata.uns['rank_genes_groups']['names'])
     deg.to_csv(output_file, sep='\t', index=False)
+
+
+def ensure_category_palette(adata, column):
+    if column not in adata.obs:
+        return
+    obs_col = adata.obs[column].astype(str)
+    adata.obs[column] = pd.Categorical(obs_col)
+    categories = adata.obs[column].cat.categories
+    num_cats = len(categories)
+    base_palette = list(sc.pl.palettes.default_102)
+    if num_cats <= len(base_palette):
+        palette = base_palette[:num_cats]
+    else:
+        cmap = plt.get_cmap("gist_ncar", num_cats)
+        palette = [mcolors.to_hex(cmap(i)) for i in range(num_cats)]
+    adata.uns[f"{column}_colors"] = palette
 
 def combine_and_align_h5(
     h5_files, 
@@ -559,6 +576,7 @@ def combine_and_align_h5(
             adata_combined.obs['UMAP-Y'] = coords[:, 1]
             adata_combined.obsm['X_umap'] = coords
 
+            ensure_category_palette(adata_combined, ref_name)
             sc.pl.umap(adata_combined, color=ref_name, 
                 save=f"_UMAP.pdf", show=False, legend_loc='on data',
                 legend_fontsize=3,legend_fontweight='normal')
@@ -588,6 +606,7 @@ def combine_and_align_h5(
             sc.tl.umap(adata_unsup_metacell)
             sc.tl.leiden(adata_unsup_metacell, flavor="leidenalg")
             print('[metacell] unsupervised clustering performed on metacells')
+            ensure_category_palette(adata_unsup_metacell, 'leiden')
 
             metacell_cluster_map = adata_unsup_metacell.obs['leiden'].astype(str).to_dict()
             pd.DataFrame({
@@ -621,6 +640,7 @@ def combine_and_align_h5(
             if len(unique_clusters) > 1:
                 sc.tl.rank_genes_groups(adata_unsup_cells, groupby='leiden', method='wilcoxon', use_raw=False)
                 save_marker_genes(adata_unsup_cells, 'leiden', os.path.join(output_dir, 'unsupervised_markers.txt'))
+                ensure_category_palette(adata_unsup_cells, 'leiden')
 
                 sc.pl.umap(
                     adata_unsup_cells,
@@ -663,6 +683,7 @@ def combine_and_align_h5(
             sc.tl.rank_genes_groups(adata_unsup, groupby='leiden', method='wilcoxon', use_raw=False)
             save_marker_genes(adata_unsup, 'leiden', os.path.join(output_dir, 'unsupervised_markers.txt'))
 
+            ensure_category_palette(adata_unsup, 'leiden')
             sc.pl.umap(adata_unsup, color='leiden', save="_unsupervised_umap.pdf",
                 show=False, legend_loc='on data', legend_fontsize=5,legend_fontweight='normal')
 

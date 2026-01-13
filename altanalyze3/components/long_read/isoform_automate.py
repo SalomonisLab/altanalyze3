@@ -381,3 +381,104 @@ def combine_processed_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_
 def run_psi_analysis(junction_path, outdir):
     # Use asyncio.run to ensure event loop is properly created
     asyncio.run(psi.main(junction_path=junction_path, query_gene=None, outdir=outdir))
+
+
+def combine_h5ad_files(sample_h5ads, output_file='combined.h5ad'):
+    """
+    Combine multiple h5ad files into a single file with a union of features.
+    
+    Parameters:
+    -----------
+    sample_h5ads : dictionary
+        Dictionary of samples (keys) and h5ad filenames (values)
+    output_file : str
+        Name of the output combined h5ad file
+        
+    Returns:
+    --------
+    anndata.AnnData
+        Combined AnnData object with union of features
+    """
+
+    # Get unique h5ad files
+    sample_h5ads = sorted(set(sample_h5ads.values()))
+    print(f"Combining {len(sample_h5ads)} h5ad files...")
+    
+    # Initialize lists to store data
+    adatas = []
+    all_features = set()
+    
+    # First pass: read all files and collect unique features
+    for h5ad_file in tqdm(sample_h5ads, desc="Reading files"):
+        adata = ad.read_h5ad(h5ad_file)
+        adatas.append(adata)
+        all_features.update(adata.var_names)
+    
+    # Convert to sorted list for consistent ordering
+    all_features = sorted(list(all_features))
+    print(f"Total unique features: {len(all_features)}")
+    
+    # Create a mapping of features to their indices in the combined matrix
+    feature_to_combined_idx = {feat: idx for idx, feat in enumerate(all_features)}
+    
+    # Second pass: align features and combine
+    aligned_adatas = []
+    for adata in tqdm(adatas, desc="Aligning features"):
+        # Create a mapping of current features to their indices
+        feature_to_idx = {feat: idx for idx, feat in enumerate(adata.var_names)}
+        
+        # Create a mapping from old indices to new indices
+        old_to_new_idx = {}
+        for feat, old_idx in feature_to_idx.items():
+            if feat in feature_to_combined_idx:
+                old_to_new_idx[old_idx] = feature_to_combined_idx[feat]
+        
+        # Create a new sparse matrix with all features
+        # Use a more efficient approach for large matrices
+        rows, cols, data = [], [], []
+        
+        # Get the sparse matrix in COO format for efficient iteration
+        X_coo = adata.X.tocoo()
+        
+        # Only process non-zero elements
+        for i, j, v in zip(X_coo.row, X_coo.col, X_coo.data):
+            if j in old_to_new_idx:
+                rows.append(i)
+                cols.append(old_to_new_idx[j])
+                data.append(v)
+        
+        # Create the new sparse matrix
+        new_X = csr_matrix((data, (rows, cols)), shape=(adata.n_obs, len(all_features)))
+        
+        # Create new var DataFrame with all features
+        new_var = pd.DataFrame(index=all_features)
+        
+        # Copy over any existing var annotations
+        for col in adata.var.columns:
+            # Initialize with appropriate dtype
+            if pd.api.types.is_numeric_dtype(adata.var[col]):
+                new_var[col] = pd.Series(index=all_features, dtype=float)
+            else:
+                new_var[col] = pd.Series(index=all_features, dtype='object')
+            
+            # Fill in values for existing features
+            new_var.loc[adata.var.index, col] = adata.var[col]
+        
+        # Create new AnnData with aligned features
+        new_adata = ad.AnnData(
+            X=new_X,
+            obs=adata.obs,
+            var=new_var,
+            uns=adata.uns
+        )
+        aligned_adatas.append(new_adata)
+    
+    # Combine all aligned AnnData objects
+    print("Combining aligned AnnData objects...")
+    combined_adata = ad.concat(aligned_adatas, axis=0, join='outer')
+    
+    # Write combined file
+    print(f"Writing combined file to {output_file}")
+    combined_adata.write_h5ad(output_file, compression='gzip')
+    
+    return combined_adata

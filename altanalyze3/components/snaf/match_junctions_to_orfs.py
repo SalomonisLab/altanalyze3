@@ -15,6 +15,19 @@ protein_translation_dir = '/data/salomonis2/software/AltAnalyze-100/AltDatabase/
 gene_symbol_file = '/data/salomonis2/software/AltAnalyze-100/AltDatabase/EnsMart100/ensembl/Hs/Hs_Ensembl-annotations.txt'
 uniprot_seq_file = '/data/salomonis2/software/AltAnalyze-100/AltDatabase/EnsMart100/uniprot/Hs/uniprot_sequence.txt'
 
+genome_fasta = "/Users/saljh8/Dropbox/Revio/Other/Variants/SNV/genome.fa"
+junctions_file = "/Users/saljh8/Dropbox/Revio/Lung/LUAD-events-20-GTEx-100-cancer.txt"
+junctions_file = "/Users/saljh8/Dropbox/Revio/POSEIDON/whitelist.txt"
+junctions_file = "/Users/saljh8/Dropbox/Revio/POSEIDON/oncosplice_novel.txt"
+transcript_associations_file = "/Users/saljh8/Dropbox/Revio/POSEIDON/gff-output/transcript_associations.txt"
+protein_summary_file = "/Users/saljh8/Dropbox/Revio/POSEIDON/protein_summary.txt"
+orf_sequences_file = "/Users/saljh8/Dropbox/Revio/POSEIDON/cds_sequences.fasta"
+output_file = "/Users/saljh8/Dropbox/Revio/POSEIDON/Neoantigen-isoforms-expanded-oncosplice.txt"
+uniprot_coordinates = '/Users/saljh8/Desktop/Code/AltAnalyze/AltDatabase/EnsMart100/uniprot/Hs/Hs_FeatureCoordinate.txt'
+protein_translation_dir = '/Users/saljh8/Desktop/Code/AltAnalyze/AltDatabase/EnsMart100/ensembl/Hs/Hs_Ensembl_Protein__100_38.tab'
+gene_symbol_file = '/Users/saljh8/Desktop/Code/AltAnalyze/AltDatabase/EnsMart100/ensembl/Hs/Hs_Ensembl-annotations.txt'
+uniprot_seq_file = '/Users/saljh8/Desktop/Code/AltAnalyze/AltDatabase/EnsMart100/uniprot/Hs/uniprot_sequence.txt'
+
 # Helper functions
 def load_gene_symbols(file_path):
     gene_symbol_dict = {}

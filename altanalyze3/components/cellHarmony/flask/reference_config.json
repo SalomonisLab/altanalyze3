@@ -1,0 +1,39 @@
+{
+  "species": [
+    {
+      "id": "human",
+      "label": "Human",
+      "references": [
+        {
+          "id": "hs_bm_reference",
+          "label": "Bone marrow reference (demo)",
+          "states_tsv": "/data/cellHarmony/references/human/hs_bm_reference_states.tsv",
+          "reference_clusters_tsv": "/data/cellHarmony/references/human/hs_bm_reference_clusters.tsv",
+          "reference_coords_tsv": "/data/cellHarmony/references/human/hs_bm_reference_umap.tsv",
+          "cluster_key": "Population",
+          "soupx_options": [
+            "default",
+            "immune"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "mouse",
+      "label": "Mouse",
+      "references": [
+        {
+          "id": "mm_lung_reference",
+          "label": "Mouse lung reference (demo)",
+          "states_tsv": "/data/cellHarmony/references/mouse/mm_lung_reference_states.tsv",
+          "reference_clusters_tsv": "/data/cellHarmony/references/mouse/mm_lung_reference_clusters.tsv",
+          "reference_coords_tsv": "/data/cellHarmony/references/mouse/mm_lung_reference_umap.tsv",
+          "cluster_key": "Population",
+          "soupx_options": [
+            "default"
+          ]
+        }
+      ]
+    }
+  ]
+}

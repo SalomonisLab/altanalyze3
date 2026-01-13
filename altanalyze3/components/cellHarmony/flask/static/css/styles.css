@@ -1,0 +1,24 @@
+.plot-area {
+  min-height: 360px;
+}
+
+.log-view {
+  background-color: #0f172a;
+  color: #e2e8f0;
+  height: 160px;
+  overflow-y: auto;
+  font-size: 0.8rem;
+  padding: 0.5rem;
+}
+
+.sample-row {
+  border: 1px dashed #dee2e6;
+  padding: 0.5rem;
+  margin-bottom: 0.5rem;
+  border-radius: 0.5rem;
+}
+
+.sample-row label {
+  font-size: 0.85rem;
+  font-weight: 600;
+}

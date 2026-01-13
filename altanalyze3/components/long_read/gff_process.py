@@ -3,6 +3,7 @@ annotate exons/transcripts and to nominate the longest exemplar isoforms. Note t
 this script is biased against isoforms that are bleeding and internal hybrid."""
 
 import os,sys
+import argparse
 from collections import defaultdict
 from tqdm import tqdm
 import pandas as pd
@@ -475,6 +476,7 @@ def collapseIsoforms(gene_db, junction_db, gff_organization, mode):
                                         collaped_db[gene][ens_iso].append(isoform) 
                                 except:
                                     collaped_db[gene][ens_iso] = [isoform]
+                                """
                                 if isoform == 'E1.4|E3.3|E3.4|' and gene == 'ENSG00000183072':
                                     transcript_ids1 = get_transcript_ids(gene, [isoform])
                                     transcript_list1 = list(transcript_ids1.keys())
@@ -482,7 +484,7 @@ def collapseIsoforms(gene_db, junction_db, gff_organization, mode):
                                     #print ('c',gene,transcript_list1,transcript_list)
                                     print ('k',gene, [ens_iso],collaped_db[gene][ens_iso])
                                     print ('i',collaped_db['ENSG00000183072']['E1.1|E1.2|E1.3|E1.4|E3.3|E3.4|E3.5|'])
-                                    
+                                """
                             else:
                                 collaped_db[gene][ens_iso].append(isoform)
                             keys_added[gene, isoform] = []
@@ -649,7 +651,10 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
                     if type == 'transcript':
                         isoforms += 1
                         chr, strand, info = gene_info
-                        process_isoform(chr, strand, info, exons, file)
+                        try: 
+                            process_isoform(chr, strand, info, exons, file)
+                        except:
+                            continue
                         exons = []
                     elif type != 'transcript' and type != 'exon':
                         pass
@@ -658,7 +663,10 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
                         gene_info = chr, strand, info
         # for the last isoform in the file
         chr, strand, info = gene_info
-        process_isoform(chr, strand, info, exons, file)
+        try: 
+            process_isoform(chr, strand, info, exons, file)
+        except:
+            continue
         print(file, '...', isoforms, 'isoforms')
 
     eo.close()
@@ -716,6 +724,8 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
                 related_transcripts = []
                 if 'UNK' not in gene:
                     transcript_ids = get_transcript_ids(gene,[isoform])
+                    if not transcript_ids:
+                        continue
                     transcript_list = list(transcript_ids.keys())
                     ordered_transcripts = selectKnownIsoform(transcript_list)
                     try:
@@ -773,17 +783,23 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
                     t = data.split('\t')
                     if line[0] =='#':
                         continue
-                    chr, a, type, pos1, pos2, b, strand, c, info = t
+                    try: 
+                        chr, a, type, pos1, pos2, b, strand, c, info = t
+                    except:
+                        continue
                     if 'CDS' != type and 'gene' != type:
                         ti = next((i for i, x in enumerate(info.split(';')) if 'transcript_id' in x), -1)
                         if '=' in info:
                             td = '='
                         else:
                             td = '"'
-                        transcript_id = info.split(';')[ti].split(td)[1]
-                        if (file, transcript_id) in isoforms_to_retain:
-                            line = line.replace("PB.", file + '_PB.')
-                            eo.write(line)
+                        try:
+                            transcript_id = info.split(';')[ti].split(td)[1]
+                            if (file, transcript_id) in isoforms_to_retain:
+                                line = line.replace("PB.", file + '_PB.')
+                                eo.write(line)
+                        except:
+                            pass
         eo.close()
         sorted_gff = combined_gff[:-4]+'-sorted.gff'
         try:
@@ -961,17 +977,26 @@ def reformat_uncoventional_gtf(gtf_file_path,output_file_path):
 
 
 if __name__ == '__main__':
-    #concatenated = '/Volumes/salomonis2/LabFiles/Frank-Li/neoantigen/revision/blood/Leucegene_AML/MDS-isoforms/head/combined-GFF-alt/combined.gff'
-    #sorted_gff = '/Volumes/salomonis2/LabFiles/Frank-Li/neoantigen/revision/blood/Leucegene_AML/MDS-isoforms/head/combined-GFF-alt/sorted_gff_file.gff'
-    #sort_gff(concatenated, sorted_gff);sys.exit()
+    parser = argparse.ArgumentParser(
+        description='Combine long-read GFF/GTF files and annotate isoforms.'
+    )
+    parser.add_argument(
+        '--gff-input',
+        dest='gff_input',
+        required=True,
+        help='GFF/GTF file or directory containing GFF/GTF files.'
+    )
+    parser.add_argument(
+        '--gene-model',
+        dest='gene_model',
+        required=True,
+        help='Ensembl exon reference file.'
+    )
+    parser.add_argument(
+        '--mode',
+        default='collapse',
+        help='Isoform consolidation mode (collapse, Ensembl, or any other value for raw).'
+    )
+    args = parser.parse_args()
 
-    exon_reference_dir = '/Users/saljh8/Documents/GitHub/altanalyze/AltDatabase/EnsMart91/ensembl/Hs/Hs_Ensembl_exon.txt'
-    #exon_reference_dir = '/Volumes/salomonis2/software/AltAnalyze-91/AltAnalyze/AltDatabase/EnsMart91/ensembl/Hs/Hs_Ensembl_exon.txt'
-    #exon_reference_dir = '/Users/saljh8/Desktop/Code/AltAnalyze/AltDatabase/EnsMart100/ensembl/Mm/Mm_Ensembl_exon.txt'
-    
-    gff_input_dir = '/Volumes/salomonis2/LabFiles/Frank-Li/neoantigen/revision/blood/Leucegene_AML/MDS-isoforms/head/'
-    gff_input_dir = '/Users/saljh8/Dropbox/Revio/Apharesis-Sequel2/ND167_Iso-Seq/PacBio/Accessory'
-    gff_input_dir = '/Users/saljh8/Dropbox/Nanopore/Mouse'
-    gff_input_dir = '/Users/saljh8/Downloads/RefSeq'
-    #gff_input_dir = '/Volumes/salomonis2/LabFiles/Frank-Li/neoantigen/revision/blood/Leucegene_AML/MDS-isoforms/'
-    consolidateLongReadGFFs(gff_input_dir,exon_reference_dir)
+    consolidateLongReadGFFs(args.gff_input, args.gene_model, mode=args.mode)

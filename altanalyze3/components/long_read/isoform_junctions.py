@@ -50,10 +50,11 @@ def exportJunctionMatrix(matrix_dir, ensembl_exon_dir, gff_source, barcode_clust
         adata = iso.calculate_barcode_match_percentage(adata, barcode_clusters)
 
     # Need to filter cell barcodes to those with a sufficient number of expressed genes
+    counts_threshold = 0 ### Previously set to 100 but this cuts the pseudobulk counts in half
     adata.obs['total_counts'] = np.sum(adata.X, axis=1)
-    adata = adata[adata.obs['total_counts'] >= 100, :]
+    adata = adata[adata.obs['total_counts'] >= counts_threshold, :] 
     remaining_cells = adata.n_obs
-    print(f"Number of remaining cells with >=100 reads: {remaining_cells}")
+    print(f"Number of remaining cells with >={counts_threshold} reads: {remaining_cells}")
 
     isoform_names = adata.var.index.tolist()
     print('isoform features |',isoform_names[:5])

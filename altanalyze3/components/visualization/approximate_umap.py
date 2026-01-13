@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -367,6 +368,120 @@ def _load_adata(obj: AnnDataLike) -> ad.AnnData:
     return ad.read_h5ad(str(obj))
 
 
+def _create_minimal_adata(barcodes: Sequence[str]) -> ad.AnnData:
+    if not barcodes:
+        raise ValueError("Cannot build AnnData from an empty barcode list.")
+    X = np.zeros((len(barcodes), 1), dtype=float)
+    adata = ad.AnnData(X=X)
+    adata.var_names = pd.Index(["__dummy__"])
+    adata.obs_names = pd.Index([str(bc) for bc in barcodes], name="barcode")
+    return adata
+
+
+def _detect_column(columns: List[str], candidates: Sequence[str]) -> Optional[str]:
+    lower_map = {col.lower(): col for col in columns}
+    for cand in candidates:
+        if cand.lower() in lower_map:
+            return lower_map[cand.lower()]
+    return None
+
+
+def _load_reference_from_tsv(
+    coords_path: Union[str, Path],
+    clusters_path: Union[str, Path],
+    *,
+    umap_key: str,
+    cluster_key: str,
+) -> ad.AnnData:
+    coords_df = pd.read_csv(coords_path, sep="\t")
+    cluster_df = pd.read_csv(clusters_path, sep="\t")
+    if coords_df.empty:
+        raise ValueError("Reference coordinate TSV is empty.")
+    if cluster_df.empty:
+        raise ValueError("Reference cluster TSV is empty.")
+
+    barcode_col = _detect_column(
+        coords_df.columns.tolist(),
+        ["barcode", "cellbarcode", "cell_barcode", "cell"],
+    )
+    if barcode_col is None:
+        raise ValueError("Reference coordinate TSV must contain a barcode column.")
+    umap1_col = _detect_column(coords_df.columns.tolist(), ["umap1", "umap_1", "umap0", "umap_0", "umapx"])
+    umap2_col = _detect_column(coords_df.columns.tolist(), ["umap2", "umap_2", "umapy", "umap1", "umap_1"])
+    if umap1_col is None or umap2_col is None:
+        raise ValueError(
+            "Reference coordinate TSV must contain columns for UMAP1/UMAP2 (e.g. 'UMAP1' and 'UMAP2')."
+        )
+
+    cluster_barcode_col = _detect_column(
+        cluster_df.columns.tolist(),
+        ["barcode", "cellbarcode", "cell_barcode", "cell"],
+    )
+    if cluster_barcode_col is None:
+        raise ValueError("Reference cluster TSV must contain a barcode column.")
+    cluster_label_col = cluster_key if cluster_key in cluster_df.columns else _detect_column(
+        cluster_df.columns.tolist(),
+        ["cluster", "population", "label"],
+    )
+    if cluster_label_col is None:
+        raise ValueError(
+            f"Could not locate a cluster column in {clusters_path}; "
+            "expected either the provided cluster key or a column named 'cluster'/'population'."
+        )
+
+    coords_df = coords_df.rename(
+        columns={
+            barcode_col: "barcode",
+            umap1_col: "umap_0",
+            umap2_col: "umap_1",
+        }
+    )
+    cluster_df = cluster_df.rename(
+        columns={
+            cluster_barcode_col: "barcode",
+            cluster_label_col: "cluster",
+        }
+    )
+    merged = pd.merge(coords_df, cluster_df[["barcode", "cluster"]], on="barcode", how="inner")
+    if merged.empty:
+        raise ValueError("No overlapping barcodes found between coordinate and cluster TSV files.")
+
+    adata = _create_minimal_adata(merged["barcode"].tolist())
+    adata.obs[cluster_key] = merged["cluster"].astype(str).values
+    adata.obsm[umap_key] = merged[["umap_0", "umap_1"]].to_numpy(dtype=float)
+    return adata
+
+
+def _load_query_from_tsv(
+    clusters_path: Union[str, Path],
+    *,
+    cluster_key: str,
+) -> ad.AnnData:
+    df = pd.read_csv(clusters_path, sep="\t")
+    if df.empty:
+        raise ValueError("Query cluster TSV is empty.")
+    barcode_col = _detect_column(
+        df.columns.tolist(),
+        ["barcode", "cellbarcode", "cell_barcode", "cell", "CellBarcode"],
+    )
+    if barcode_col is None:
+        raise ValueError("Query cluster TSV must contain a barcode column.")
+    cluster_col = cluster_key if cluster_key in df.columns else _detect_column(
+        df.columns.tolist(),
+        ["cluster", "population", "label", "alignedpopulation", "reference"],
+    )
+    if cluster_col is None:
+        raise ValueError(
+            f"Could not locate a cluster column in {clusters_path}; "
+            "expected either '{cluster_key}' or a column named 'cluster'/'population'."
+        )
+    df = df.rename(columns={barcode_col: "barcode", cluster_col: "cluster"})
+    df = df.dropna(subset=["barcode", "cluster"])
+    adata = _create_minimal_adata(df["barcode"].astype(str).tolist())
+    adata.obs[cluster_key] = df["cluster"].astype(str).values
+    return adata
+
+
 def _validate_inputs(
     query: ad.AnnData,
     reference: ad.AnnData,
@@ -651,8 +766,20 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Approximate UMAP coordinates for a query AnnData using a reference embedding."
     )
-    parser.add_argument("--query", required=True, help="Path to the query .h5ad file.")
-    parser.add_argument("--reference", required=True, help="Path to the reference .h5ad file.")
+    parser.add_argument("--query", help="Path to the query .h5ad file.")
+    parser.add_argument("--reference", help="Path to the reference .h5ad file.")
+    parser.add_argument(
+        "--query-clusters-tsv",
+        help="cellHarmony-lite TSV (CellBarcode + cluster column) to build the query AnnData without .h5ad input.",
+    )
+    parser.add_argument(
+        "--reference-coords-tsv",
+        help="TSV with reference barcodes and UMAP coordinates (columns: barcode, UMAP1, UMAP2).",
+    )
+    parser.add_argument(
+        "--reference-clusters-tsv",
+        help="TSV with reference barcodes and clusters (columns: barcode, cluster).",
+    )
     parser.add_argument("--query-cluster-key", required=True, help="Cluster column in query.obs.")
     parser.add_argument(
         "--reference-cluster-key",
@@ -709,10 +836,38 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parse_args(argv)
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
 
-    reference_adata = ad.read_h5ad(args.reference)
+    if not args.query and not args.query_clusters_tsv:
+        print("Error: Provide either --query (h5ad) or --query-clusters-tsv.", file=sys.stderr)
+        return 2
+    if not args.reference and not (args.reference_coords_tsv and args.reference_clusters_tsv):
+        print(
+            "Error: Provide either --reference (h5ad) or both --reference-coords-tsv and --reference-clusters-tsv.",
+            file=sys.stderr,
+        )
+        return 2
+
+    if args.reference:
+        reference_source: AnnDataLike = ad.read_h5ad(args.reference)
+    else:
+        ref_cluster_key = args.reference_cluster_key or args.query_cluster_key
+        reference_source = _load_reference_from_tsv(
+            args.reference_coords_tsv,
+            args.reference_clusters_tsv,
+            umap_key=args.umap_key,
+            cluster_key=ref_cluster_key,
+        )
+
+    if args.query:
+        query_source: AnnDataLike = args.query
+    else:
+        query_source = _load_query_from_tsv(
+            args.query_clusters_tsv,
+            cluster_key=args.query_cluster_key,
+        )
+
     result = approximate_umap(
-        query=args.query,
-        reference=reference_adata,
+        query=query_source,
+        reference=reference_source,
         query_cluster_key=args.query_cluster_key,
         reference_cluster_key=args.reference_cluster_key,
         umap_key=args.umap_key,
@@ -770,8 +925,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     result.write_text_outputs(prefix)
 
     logging.info("Writing comparison PDFs to %s (annotated) and companion without labels", output_pdf)
+    reference_for_plot = reference_source if isinstance(reference_source, ad.AnnData) else _load_adata(reference_source)
     annotated_pdf, plain_pdf = result.write_comparison_pdf(
-        reference_adata=reference_adata,
+        reference_adata=reference_for_plot,
         umap_key=args.umap_key,
         reference_cluster_key=args.reference_cluster_key or args.query_cluster_key,
         query_cluster_key=args.query_cluster_key,

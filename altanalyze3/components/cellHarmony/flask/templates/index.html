@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row g-4">
+  <div class="col-12 col-lg-4">
+    <section class="card h-100">
+      <div class="card-header">
+        <h5 class="mb-0">1. Upload &amp; Configure</h5>
+      </div>
+      <div class="card-body">
+        <form id="job-form">
+          <div class="mb-3">
+            <label class="form-label">Species</label>
+            <select class="form-select" id="species-select" required></select>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Reference</label>
+            <select class="form-select" id="reference-select" required></select>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Samples (max 7)</label>
+            <div id="sample-container"></div>
+            <button class="btn btn-sm btn-outline-secondary mt-2" type="button" id="add-sample-btn">Add sample</button>
+          </div>
+          <button class="btn btn-primary w-100" type="submit">Create job</button>
+        </form>
+        <div class="alert alert-info mt-3 d-none" id="job-created"></div>
+      </div>
+    </section>
+  </div>
+
+  <div class="col-12 col-lg-4">
+    <section class="card h-100">
+      <div class="card-header">
+        <h5 class="mb-0">2. QC &amp; Alignment</h5>
+      </div>
+      <div class="card-body">
+        <form id="qc-form">
+          <div class="mb-3">
+            <label class="form-label">Job ID</label>
+            <input class="form-control" name="job_id" id="qc-job-id" placeholder="Paste job id" required>
+          </div>
+          <div class="row g-2">
+            <div class="col">
+              <label class="form-label">min genes</label>
+              <input class="form-control" name="min_genes" value="200">
+            </div>
+            <div class="col">
+              <label class="form-label">min counts</label>
+              <input class="form-control" name="min_counts" value="500">
+            </div>
+          </div>
+          <div class="row g-2 mt-2">
+            <div class="col">
+              <label class="form-label">min cells</label>
+              <input class="form-control" name="min_cells" value="3">
+            </div>
+            <div class="col">
+              <label class="form-label">% mito</label>
+              <input class="form-control" name="mit_percent" value="15">
+            </div>
+          </div>
+          <button class="btn btn-outline-primary w-100 mt-3" type="submit">Save QC &amp; align</button>
+        </form>
+        <div class="mt-3">
+          <div class="progress">
+            <div class="progress-bar" id="job-progress" role="progressbar" style="width: 0%"></div>
+          </div>
+          <pre class="log-view mt-2" id="job-log"></pre>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="col-12 col-lg-4">
+    <section class="card h-100">
+      <div class="card-header">
+        <h5 class="mb-0">3. Results &amp; Plots</h5>
+      </div>
+      <div class="card-body">
+        <form id="results-form">
+          <div class="mb-3">
+            <label class="form-label">Job ID</label>
+            <input class="form-control" id="results-job-id" placeholder="Paste job id" required>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Gene</label>
+            <input class="form-control" id="gene-query" placeholder="e.g. MPO">
+          </div>
+          <div class="d-grid gap-2">
+            <button class="btn btn-outline-primary" type="button" id="load-umap-btn">Show UMAP</button>
+            <button class="btn btn-outline-secondary" type="button" id="load-expression-btn">Show expression</button>
+          </div>
+        </form>
+        <div class="mt-3 d-grid gap-2" id="download-links"></div>
+      </div>
+    </section>
+  </div>
+</div>
+
+<div class="row mt-4">
+  <div class="col-12 col-lg-6 mb-4">
+    <div class="card">
+      <div class="card-header">
+        <strong>Approximate UMAP</strong>
+      </div>
+      <div class="card-body">
+        <div id="umap-plot" class="plot-area"></div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-lg-6 mb-4">
+    <div class="card">
+      <div class="card-header">
+        <strong>Expression violin</strong>
+      </div>
+      <div class="card-body">
+        <div id="expression-plot" class="plot-area"></div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
