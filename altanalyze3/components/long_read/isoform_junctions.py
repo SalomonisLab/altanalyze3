@@ -43,7 +43,7 @@ def exportJunctionMatrix(matrix_dir, ensembl_exon_dir, gff_source, barcode_clust
     exon_dict, gene_dict = parse_exon_file(ensembl_exon_dir)
 
     # Load the 10x matrix keyed by isoforms in the first column and cell barcode cluster annotations
-    adata = iso.mtx_to_adata(int_folder=matrix_dir, gene_is_index=True, feature='genes.tsv', feature_col=0, barcode='barcodes.tsv', barcode_col=0, matrix='matrix.mtx', rev=rev)
+    adata = iso.matrix_dir_to_adata(int_folder=matrix_dir, gene_is_index=True, feature='genes.tsv', feature_col=0, barcode='barcodes.tsv', barcode_col=0, matrix='matrix.mtx', rev=rev)
     
     # If existing cell clusters are provided already (e.g., supervised classification from gene-level analyses)
     if barcode_clusters is not None and not barcode_clusters.empty:

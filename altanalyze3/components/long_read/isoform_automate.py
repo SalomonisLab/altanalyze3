@@ -1,6 +1,7 @@
 import os, shutil
 import sys
 import csv
+import importlib
 from tqdm import tqdm
 import anndata as ad
 import pandas as pd
@@ -15,6 +16,7 @@ from . import isoform_ratios as isor
 from . import isoform_translation as isot
 from . import gff_process as gff_process
 from ..psi import psi_single as psi
+importlib.reload(psi)
 from Bio import SeqIO
 import asyncio
 import warnings

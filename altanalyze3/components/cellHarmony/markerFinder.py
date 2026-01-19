@@ -21,7 +21,7 @@ import seaborn as sns
 from anndata import AnnData
 from matplotlib import cm
 from matplotlib.colors import ListedColormap, to_hex
-from scipy.sparse import issparse
+from scipy import sparse
 from scipy.stats import t
 
 # Default diverging colormap similar to the UDON visualizations
@@ -52,15 +52,17 @@ def _ensure_output_dir(output_dir: Optional[str]) -> Optional[str]:
     return output_dir
 
 
-def _matrix_to_dataframe(matrix, obs_names: Sequence[str], var_names: Sequence[str]) -> pd.DataFrame:
-    if issparse(matrix):
-        matrix = matrix.toarray()
-    else:
-        matrix = np.asarray(matrix)
-    return pd.DataFrame(matrix, index=obs_names, columns=var_names)
+def _coerce_sparse_matrix(matrix) -> sparse.csr_matrix:
+    if sparse.issparse(matrix):
+        return matrix.tocsr()
+    return sparse.csr_matrix(matrix)
 
 
-def _get_expression_matrix(adata: AnnData, layer: Optional[str], use_raw: bool) -> pd.DataFrame:
+def _get_expression_matrix(
+    adata: AnnData,
+    layer: Optional[str],
+    use_raw: bool,
+) -> Tuple[sparse.csr_matrix, pd.Index, pd.Index]:
     if use_raw:
         if adata.raw is None:
             raise ValueError("Requested use_raw=True, but adata.raw is not set.")
@@ -74,7 +76,7 @@ def _get_expression_matrix(adata: AnnData, layer: Optional[str], use_raw: bool) 
     else:
         matrix = adata.X
         var_names = adata.var_names
-    return _matrix_to_dataframe(matrix, obs_names=adata.obs_names, var_names=var_names)
+    return _coerce_sparse_matrix(matrix), adata.obs_names.copy(), pd.Index(var_names)
 
 
 def _get_cluster_series(adata: AnnData, cluster_key: str) -> pd.Series:
@@ -113,22 +115,71 @@ def _resolve_cluster_order(
     return sorted(unique_clusters)
 
 
-def marker_finder(input_df: pd.DataFrame, groups: Sequence[str]) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    ideal_vectors = pd.get_dummies(groups)
-    ideal_vectors.index = input_df.index.values
-    degrees_f = input_df.shape[0] - 2
-    r_df = pearson_corr_df_to_df(input_df, ideal_vectors).dropna()
-    t_df = r_df * np.sqrt(degrees_f) / np.sqrt(1 - (r_df**2))
-    p_df = t_df.map(lambda x: t.sf(abs(x), df=degrees_f) * 2)
+def _build_cluster_indicator(groups: Sequence[str]) -> Tuple[sparse.csr_matrix, pd.Index]:
+    group_series = pd.Series(groups, dtype=str)
+    categories = pd.Index(pd.unique(group_series))
+    codes = pd.Categorical(group_series, categories=categories).codes
+    valid_mask = codes >= 0
+    row_idx = np.arange(len(group_series))[valid_mask]
+    col_idx = codes[valid_mask]
+    data = np.ones(len(row_idx), dtype=float)
+    indicator = sparse.csr_matrix(
+        (data, (row_idx, col_idx)),
+        shape=(len(group_series), len(categories)),
+    )
+    return indicator, categories
+
+
+def marker_finder(
+    expression_matrix: sparse.spmatrix,
+    groups: Sequence[str],
+    gene_names: Optional[Sequence[str]] = None,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    if not sparse.issparse(expression_matrix):
+        expression_matrix = sparse.csr_matrix(expression_matrix)
+    else:
+        expression_matrix = expression_matrix.tocsr()
+
+    n_cells, n_genes = expression_matrix.shape
+    if len(groups) != n_cells:
+        raise ValueError("Group labels must match the number of rows in the expression matrix.")
+
+    indicator, cluster_names = _build_cluster_indicator(groups)
+
+    sum_x = np.asarray(expression_matrix.sum(axis=0)).ravel()
+    sum_x2 = np.asarray(expression_matrix.power(2).sum(axis=0)).ravel()
+    sum_y = np.asarray(indicator.sum(axis=0)).ravel()
+
+    sum_xy = expression_matrix.T.dot(indicator)
+    if sparse.issparse(sum_xy):
+        sum_xy = sum_xy.toarray()
+    else:
+        sum_xy = np.asarray(sum_xy)
+
+    n = float(n_cells)
+    numerator = sum_xy - np.outer(sum_x, sum_y) / n
+    ssx = sum_x2 - (sum_x**2) / n
+    ssy = sum_y - (sum_y**2) / n
+    denom = np.sqrt(np.outer(ssx, ssy))
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        r = numerator / denom
+
+    degrees_f = n_cells - 2
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t_stat = r * np.sqrt(degrees_f) / np.sqrt(1 - (r**2))
+        p = t.sf(np.abs(t_stat), df=degrees_f) * 2
+
+    if gene_names is None:
+        gene_names = pd.Index(range(n_genes)).astype(str)
+    else:
+        gene_names = pd.Index(gene_names)
+
+    r_df = pd.DataFrame(r, index=gene_names, columns=cluster_names)
+    p_df = pd.DataFrame(p, index=gene_names, columns=cluster_names)
+    r_df = r_df.dropna(axis=0, how="any")
+    p_df = p_df.loc[r_df.index, r_df.columns]
     return r_df, p_df
-
-
-def pearson_corr_df_to_df(df1: pd.DataFrame, df2: pd.DataFrame) -> pd.DataFrame:
-    norm1 = df1 - df1.mean(axis=0)
-    norm2 = df2 - df2.mean(axis=0)
-    sqsum1 = (norm1**2).sum(axis=0)
-    sqsum2 = (norm2**2).sum(axis=0)
-    return (norm1.T @ norm2) / np.sqrt(sqsum1.apply(lambda x: x * sqsum2))
 
 
 def _select_unique_markers(
@@ -189,7 +240,9 @@ def _select_unique_markers(
 
 
 def _build_heatmap_dataframe(
-    expression_df: pd.DataFrame,
+    expression_matrix: sparse.spmatrix,
+    obs_names: pd.Index,
+    var_names: pd.Index,
     markers_df: pd.DataFrame,
     clusters: pd.Series,
     cluster_order: Sequence[str],
@@ -198,25 +251,41 @@ def _build_heatmap_dataframe(
     if markers_df.empty:
         return pd.DataFrame(), pd.DataFrame()
 
-    clusters = clusters.loc[clusters.index.intersection(expression_df.index)].dropna()
+    clusters = clusters.loc[clusters.index.intersection(obs_names)].dropna()
+    if clusters.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
     cat = pd.Categorical(clusters, categories=cluster_order, ordered=True)
     ordered_clusters = pd.Series(cat, index=clusters.index).dropna().sort_values()
+    if ordered_clusters.empty:
+        return pd.DataFrame(), pd.DataFrame()
 
     markers_df = markers_df.copy()
     markers_df["cluster"] = pd.Categorical(markers_df["cluster"], categories=cluster_order, ordered=True)
     markers_df = markers_df.dropna(subset=["cluster"])
     markers_df = markers_df.sort_values(["cluster", "direction", "rank"])
-    markers_df = markers_df[markers_df["marker"].isin(expression_df.columns)]
+    markers_df = markers_df[markers_df["marker"].isin(var_names)]
     marker_list = markers_df["marker"].tolist()
     if not marker_list:
         return pd.DataFrame(), pd.DataFrame()
 
-    heatmap_df = expression_df.loc[ordered_clusters.index, marker_list].T
+    cell_indexer = obs_names.get_indexer(ordered_clusters.index)
+    if np.any(cell_indexer < 0):
+        raise ValueError("Failed to align clusters to expression matrix rows.")
+
+    gene_indexer = var_names.get_indexer(marker_list)
+    if np.any(gene_indexer < 0):
+        raise ValueError("Failed to align markers to expression matrix columns.")
+
+    submatrix = expression_matrix[cell_indexer, :][:, gene_indexer]
+    heatmap_array = submatrix.T.toarray()
+    heatmap_df = pd.DataFrame(heatmap_array, index=marker_list, columns=ordered_clusters.index)
+
     if z_score:
-        heatmap_df = heatmap_df.apply(
-            lambda row: (row - row.mean()) / (row.std(ddof=0) or 1e-9),
-            axis=1,
-        )
+        means = heatmap_df.mean(axis=1)
+        stds = heatmap_df.std(axis=1, ddof=0).replace(0, 1e-9)
+        heatmap_df = heatmap_df.sub(means, axis=0).div(stds, axis=0)
+
     ordered_markers = markers_df.reset_index(drop=True)
     ordered_markers.index = heatmap_df.index
     return heatmap_df, ordered_markers
@@ -316,15 +385,18 @@ def find_markers_from_adata(
     marker_table_filename: str = "marker_genes.tsv",
     heatmap_table_filename: str = "marker_heatmap.tsv",
 ) -> MarkerOutputs:
-    expression_df = _get_expression_matrix(adata, layer=layer, use_raw=use_raw)
+    expression_matrix, obs_names, var_names = _get_expression_matrix(adata, layer=layer, use_raw=use_raw)
     clusters = _get_cluster_series(adata, cluster_key)
-    common_cells = expression_df.index.intersection(clusters.index)
-    if common_cells.empty:
-        raise ValueError("No overlapping cells between expression matrix and cluster assignments.")
-    expression_df = expression_df.loc[common_cells]
-    clusters = clusters.loc[common_cells]
 
-    r_df, p_df = marker_finder(expression_df, clusters.tolist())
+    cell_indexer = obs_names.get_indexer(clusters.index)
+    if cell_indexer.size == 0 or np.any(cell_indexer < 0):
+        raise ValueError("No overlapping cells between expression matrix and cluster assignments.")
+
+    expression_matrix = expression_matrix[cell_indexer, :]
+    obs_names = obs_names[cell_indexer]
+    clusters = clusters.loc[obs_names]
+
+    r_df, p_df = marker_finder(expression_matrix, clusters.tolist(), gene_names=var_names)
     markers_df = _select_unique_markers(
         r_df=r_df,
         p_df=p_df,
@@ -335,7 +407,14 @@ def find_markers_from_adata(
     )
 
     resolved_order = _resolve_cluster_order(clusters, adata, lineage_order_key, cluster_order)
-    heatmap_df, ordered_markers_df = _build_heatmap_dataframe(expression_df, markers_df, clusters, resolved_order)
+    heatmap_df, ordered_markers_df = _build_heatmap_dataframe(
+        expression_matrix,
+        obs_names,
+        var_names,
+        markers_df,
+        clusters,
+        resolved_order,
+    )
 
     if write_outputs:
         if output_dir is None:

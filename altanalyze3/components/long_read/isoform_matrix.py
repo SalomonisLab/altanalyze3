@@ -40,6 +40,53 @@ def mtx_to_adata(int_folder, gene_is_index, feature, feature_col, barcode, barco
     adata = ad.AnnData(X=mat.T, obs=pd.DataFrame(index=barcodes.index), var=pd.DataFrame(index=features.index))
     return adata
 
+
+def h5ad_to_adata(h5ad_path, rev=False):
+    """Import isoform h5ad files and match mtx_to_adata conventions."""
+    adata = read_h5ad(h5ad_path)
+    def ensure_barcode_suffix(barcode):
+        return barcode if '-' in barcode else f"{barcode}-1"
+
+    def reverse_complement_barcode(barcode):
+        if '-' in barcode:
+            return reverse_complement_seq(barcode)
+        complement = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G', 'N': 'N'}
+        rev_comp = ''.join(complement.get(base, 'N') for base in reversed(barcode))
+        return f"{rev_comp}-1"
+
+    barcodes = adata.obs_names.to_series().astype(str)
+    if rev:
+        barcodes = barcodes.apply(reverse_complement_barcode)
+    else:
+        barcodes = barcodes.apply(ensure_barcode_suffix)
+    adata.obs_names = barcodes.values
+    adata.var_names = (
+        adata.var_names.to_series()
+        .astype(str)
+        .apply(lambda value: value.split(':', 1)[1] if ':' in value else value)
+        .values
+    )
+    return adata
+
+
+def matrix_dir_to_adata(int_folder, gene_is_index, feature, feature_col,
+                        barcode, barcode_col, matrix, rev=False):
+    """Dispatch to h5ad or mtx based on the matrix_dir name."""
+    path = str(int_folder)
+    lower_path = path.lower()
+    if lower_path.endswith('.h5ad') or lower_path.endswith('.h5ad.gz'):
+        return h5ad_to_adata(path, rev=rev)
+    return mtx_to_adata(
+        path,
+        gene_is_index,
+        feature,
+        feature_col,
+        barcode,
+        barcode_col,
+        matrix,
+        rev=rev
+    )
+
 def bulk_counts_to_adata(file_path: str):
     """Convert a text file with either (1) pbid and counts to an AnnData object."""
     df = pd.read_csv(file_path, sep='\t', comment='#')

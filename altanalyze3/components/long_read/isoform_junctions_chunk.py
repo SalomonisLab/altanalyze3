@@ -43,7 +43,7 @@ def exportJunctionMatrix(matrix_dir, ensembl_exon_dir, gff_source, barcode_clust
     exon_dict, gene_dict = parse_exon_file(ensembl_exon_dir)
 
     # Load the 10x matrix keyed by isoforms in the first column and cell barcode cluster annotations
-    adata = iso.mtx_to_adata(int_folder=matrix_dir, gene_is_index=True, feature='genes.tsv', feature_col=0, barcode='barcodes.tsv', barcode_col=0, matrix='matrix.mtx', rev=rev)
+    adata = iso.matrix_dir_to_adata(int_folder=matrix_dir, gene_is_index=True, feature='genes.tsv', feature_col=0, barcode='barcodes.tsv', barcode_col=0, matrix='matrix.mtx', rev=rev)
     
     # If existing cell clusters are provided already (e.g., supervised classification from gene-level analyses)
     if barcode_clusters is not None and not barcode_clusters.empty:
@@ -122,7 +122,11 @@ def exportJunctionMatrix(matrix_dir, ensembl_exon_dir, gff_source, barcode_clust
     # Load isoform mapping information
     isoform_to_junctions, isoform_to_gene = parse_isoform_mapping(transcript_associations)
 
-    junction_counts = {}
+    junction_index = {}
+    junction_list = []
+    rows = []
+    cols = []
+    data = []
     # Iterate through each cell barcode and isoform
     print ('Computing junctions counts for cells')
 
@@ -143,48 +147,31 @@ def exportJunctionMatrix(matrix_dir, ensembl_exon_dir, gff_source, barcode_clust
             counts = chunk_data[:, local_idx]
             if np.any(counts > 0):
                 junctions = isoform_to_junctions.get(isoform, [])
-                for cell_index, count in zip(np.where(counts > 0)[0], counts[counts > 0]):
+                nonzero_idx = np.where(counts > 0)[0]
+                if nonzero_idx.size == 0:
+                    continue
+                nonzero_counts = counts[nonzero_idx]
+                for cell_index, count in zip(nonzero_idx, nonzero_counts):
                     for junction in junctions:
-                        if junction not in junction_counts:
-                            junction_counts[junction] = np.zeros(len(adata.obs_names), dtype=int)
-                        junction_counts[junction][cell_index] += count
+                        col_index = junction_index.get(junction)
+                        if col_index is None:
+                            col_index = len(junction_list)
+                            junction_index[junction] = col_index
+                            junction_list.append(junction)
+                        rows.append(cell_index)
+                        cols.append(col_index)
+                        data.append(int(count))
 
-
-    # Convert the counts to a dense DataFrame and then to a sparse matrix
-    junction_counts_df = pd.DataFrame({k: pd.Series(v, index=adata.obs_names) for k, v in tqdm(junction_counts.items(), desc="Creating DataFrame")})
-    def lil_matrix_method():
-        from scipy.sparse import lil_matrix
-        junction_counts_df = pd.DataFrame({k: pd.Series(v, index=adata.obs_names) for k, v in tqdm(junction_counts.items(), desc="Creating DataFrame")})
-        sparse_junction_matrix = lil_matrix(junction_counts_df.shape)
-        for i, (index, row) in enumerate(tqdm(junction_counts_df.iterrows(), total=junction_counts_df.shape[0], desc="Converting to sparse matrix")):
-            sparse_junction_matrix[i, :] = row.values
-        return sparse_junction_matrix.tocsr()
-
-    def coo_matrix_method():
-        from scipy.sparse import coo_matrix
-        rows, cols, data = [], [], []
-        for col_index, (k, values) in enumerate(tqdm(junction_counts.items(), desc="Building sparse matrix (COO)")):
-            for row_index, count in enumerate(values):
-                if count != 0:
-                    rows.append(row_index)
-                    cols.append(col_index)
-                    data.append(count)
-        return coo_matrix((data, (rows, cols)), shape=(len(adata.obs_names), len(junction_counts))).tocsr()
-
-    def dok_matrix_method():
-        from scipy.sparse import dok_matrix
-        sparse_junction_matrix = dok_matrix((len(adata.obs_names), len(junction_counts)))
-        for col_index, (k, values) in enumerate(tqdm(junction_counts.items(), desc="Building sparse matrix (DOK)")):
-            for row_index, count in enumerate(values):
-                if count != 0:
-                    sparse_junction_matrix[row_index, col_index] = count
-        return sparse_junction_matrix.tocsr()
-
-    sparse_junction_matrix = coo_matrix_method()
+    from scipy.sparse import coo_matrix
+    sparse_junction_matrix = coo_matrix(
+        (data, (rows, cols)),
+        shape=(len(adata.obs_names), len(junction_list))
+    ).tocsr()
     
     # Create a new AnnData object for the junction counts
     #print("Original adata.obs_names:", adata.obs_names[:5].tolist())
-    junction_adata = ad.AnnData(X=sparse_junction_matrix, obs=adata.obs, var=pd.DataFrame(index=junction_counts.keys()))
+    print(f"Junctions retained for h5ad: {len(junction_list)}")
+    junction_adata = ad.AnnData(X=sparse_junction_matrix, obs=adata.obs, var=pd.DataFrame(index=junction_list))
     #junction_adata = ad.AnnData(X=sparse_junction_matrix, obs=adata.obs.copy(), var=pd.DataFrame(index=junction_counts.keys()))
     junction_adata.obs_names = adata.obs_names
     #print("Final junction_adata.obs_names:", junction_adata.obs_names[:5].tolist())
@@ -195,7 +182,9 @@ def exportJunctionMatrix(matrix_dir, ensembl_exon_dir, gff_source, barcode_clust
     # Write the junction counts to an h5ad file
     h5ad_dir = os.path.basename(gff_source)
     #junction_adata.write_h5ad("filtered_junction.h5ad")
-    junction_adata.write_h5ad(f"{h5ad_dir.split('.g')[0]}.h5ad", compression='gzip')
+    output_path = f"{h5ad_dir.split('.g')[0]}.h5ad"
+    junction_adata.write_h5ad(output_path, compression='gzip')
+    print(f"Saved junction h5ad: {output_path}")
     #loaded_adata = ad.read_h5ad(f"{h5ad_dir.split('.g')[0]}.h5ad")
     #print("Loaded barcodes after saving:", loaded_adata.obs_names[:5].tolist())
 
@@ -204,6 +193,9 @@ def exportJunctionMatrix(matrix_dir, ensembl_exon_dir, gff_source, barcode_clust
     export_pseudobulk = False
     if export_pseudobulk:
         if barcode_clusters is not None and not barcode_clusters.empty:
+            junction_counts_df = pd.DataFrame.sparse.from_spmatrix(
+                sparse_junction_matrix, index=adata.obs_names, columns=junction_list
+            )
             # Compute pseudo-cluster counts and write them to a file
             grouped = junction_counts_df.groupby(adata.obs['cluster'])
             

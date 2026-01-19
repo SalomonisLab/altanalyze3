@@ -1309,12 +1309,38 @@ def build_fixed_order_heatmap(de_store, outdir, population_col, fc_thresh, heatm
     g_down_list = [g for g in g_down["gene"].tolist() if g in fold_df.index]
 
     # (2) Co-regulated (already sorted above)
-    c_up_list   = [g for g in c_up["gene"].tolist()   if g in fold_df.index]
-    c_down_list = [g for g in c_down["gene"].tolist() if g in fold_df.index]
+    c_up_list = []
+    c_up_labels = []
+    for _, row in c_up.iterrows():
+        gene = str(row["gene"])
+        if gene not in fold_df.index:
+            continue
+        pattern = str(row.get("population_or_pattern", "")).replace(":", "_")
+        if pattern:
+            label = f"coreg_{pattern}__up"
+        else:
+            label = "coreg__up"
+        c_up_list.append(gene)
+        c_up_labels.append(label)
+
+    c_down_list = []
+    c_down_labels = []
+    for _, row in c_down.iterrows():
+        gene = str(row["gene"])
+        if gene not in fold_df.index:
+            continue
+        pattern = str(row.get("population_or_pattern", "")).replace(":", "_")
+        if pattern:
+            label = f"coreg_{pattern}__down"
+        else:
+            label = "coreg__down"
+        c_down_list.append(gene)
+        c_down_labels.append(label)
 
     # (3) Local per-pop up/down — now ordered by lineage_order if available
     ordered_local_genes = []
     local_block_sizes = []
+    local_gene_blocks = []
 
     # Use lineage-based order for populations if available
     lineage_for_local = lineage_order if lineage_order is not None else pop_order
@@ -1330,6 +1356,8 @@ def build_fixed_order_heatmap(de_store, outdir, population_col, fc_thresh, heatm
         ordered_local_genes.extend(u_list + d_list)
         local_block_sizes.append(len(u_list))  # up genes for this pop
         local_block_sizes.append(len(d_list))  # down genes for this pop
+        pop_label = str(pop).replace(":", "_")
+        local_gene_blocks.append((pop_label, u_list, d_list))
 
     # Combine master order: global → coreg → local
     ordered_genes = g_up_list + g_down_list + c_up_list + c_down_list + ordered_local_genes
@@ -1359,6 +1387,7 @@ def build_fixed_order_heatmap(de_store, outdir, population_col, fc_thresh, heatm
         block_breaks = []
         local_block_sizes = [len(ordered_genes)]
         extra_genes = []
+        local_gene_blocks = []
         print(f"[INFO] Heatmap fallback selected {len(ordered_genes)} genes.")
 
     # Compute horizontal block boundaries (end indices of each block)
@@ -1383,6 +1412,26 @@ def build_fixed_order_heatmap(de_store, outdir, population_col, fc_thresh, heatm
     if extra_genes:
         cursor += len(extra_genes)
         block_breaks.append(cursor)
+
+    # Assign row clusters to match cellHarmony differential groups/patterns
+    row_clusters = []
+    row_clusters.extend(["coreg_global__up"] * len(g_up_list))
+    row_clusters.extend(["coreg_global__down"] * len(g_down_list))
+    row_clusters.extend(c_up_labels)
+    row_clusters.extend(c_down_labels)
+    for pop, u_list, d_list in local_gene_blocks:
+        row_clusters.extend([f"{pop}__up"] * len(u_list))
+        row_clusters.extend([f"{pop}__down"] * len(d_list))
+    if extra_genes:
+        row_clusters.extend(["unassigned"] * len(extra_genes))
+    if len(row_clusters) != len(ordered_genes):
+        row_clusters = ["unassigned"] * len(ordered_genes)
+
+    # Recompute boundaries to align with row cluster labels
+    block_breaks = []
+    for idx in range(1, len(row_clusters)):
+        if row_clusters[idx] != row_clusters[idx - 1]:
+            block_breaks.append(idx)
 
     # Reorder the matrix rows by the final order
     fold_df = fold_df.loc[ordered_genes]
@@ -1424,7 +1473,10 @@ def build_fixed_order_heatmap(de_store, outdir, population_col, fc_thresh, heatm
         print(f"[DEBUG] pop_order when writing TSV: {pop_order}")
         print(f"[DEBUG] fold_df columns when writing TSV: {list(fold_df.columns)}")
 
-    fold_df.to_csv(heatmap_path, sep="\t")
+    heatmap_export = fold_df.copy()
+    heatmap_export.index = [f"{c}:{g}" for c, g in zip(row_clusters, heatmap_export.index)]
+    heatmap_export.columns = [f"{c}:{c}" for c in heatmap_export.columns]
+    heatmap_export.to_csv(heatmap_path, sep="\t")
     print("[INFO] Wrote heatmap matrix TSV: {}".format(heatmap_path))
 
 
@@ -1452,13 +1504,14 @@ def build_fixed_order_heatmap(de_store, outdir, population_col, fc_thresh, heatm
     fold_df = fold_df.replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
     from matplotlib import colors
+    from matplotlib.colors import ListedColormap
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+    from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
     # --- Create normalization with custom scaling ---
     norm = colors.Normalize(vmin=vmin, vmax=vmax)
 
-    # --- Draw heatmap with explicit normalization ---
-    im = ax.imshow(fold_df.values, aspect="auto", cmap=cmap,
-                norm=norm, interpolation="none")
+    column_clusters = list(fold_df.columns)
 
     # --- Draw the heatmap ---
     im = ax.imshow(fold_df.values, aspect="auto", cmap=cmap, norm=norm, interpolation="none")
@@ -1472,15 +1525,69 @@ def build_fixed_order_heatmap(de_store, outdir, population_col, fc_thresh, heatm
 
     ax.set_yticks([])
     ax.set_xticks(np.arange(fold_df.shape[1]))
-    ax.set_xticklabels(list(fold_df.columns), rotation=90)
+    ax.set_xticklabels(list(fold_df.columns), rotation=45, ha="left", fontsize=7)
+    ax.xaxis.tick_top()
+    ax.tick_params(axis="x", bottom=False, top=True, labelbottom=False, labeltop=True, length=0, pad=8)
     ax.set_title("cellHarmony DE log2FC ({} vs {}) by {}".format(
         de_store["case_label"], de_store["control_label"], population_col))
 
-    # --- Create smaller colorbar (1/8 height) that respects normalization ---
-    cbar = plt.colorbar(im, ax=ax, fraction=0.08, pad=0.02)
-    cbar.set_label(f"log2 fold change (yellow=up, blue=down)\nScale: {vmin:.1f} to {vmax:.1f}")
-    cbar.set_ticks([vmin, 0, vmax])
-    cbar.ax.set_yticklabels([f"{vmin:.1f}", "0", f"{vmax:.1f}"])
+    column_colors = [plt.get_cmap("tab20")(i % 20) for i in range(len(column_clusters))]
+    column_cmap = ListedColormap(column_colors)
+    column_to_id = {cluster: idx for idx, cluster in enumerate(column_clusters)}
+
+    row_cluster_order = list(dict.fromkeys(row_clusters))
+    row_colors = [plt.get_cmap("tab20b")(i % 20) for i in range(len(row_cluster_order))]
+    row_cmap = ListedColormap(row_colors)
+    row_to_id = {cluster: idx for idx, cluster in enumerate(row_cluster_order)}
+
+    divider = make_axes_locatable(ax)
+    ax_top = divider.append_axes("top", size="1.5%", pad=0.02)
+    ax_left = divider.append_axes("left", size="3%", pad=0.02)
+
+    col_ids = np.array([column_to_id[c] for c in column_clusters], dtype=int)[None, :]
+    row_ids = np.array([row_to_id.get(c, 0) for c in row_clusters], dtype=int)[:, None]
+
+    ax_top.imshow(col_ids, aspect="auto", cmap=column_cmap, interpolation="none")
+    ax_top.set_xticks([])
+    ax_top.set_yticks([])
+    ax_top.set_ylabel("")
+
+    ax_left.imshow(row_ids, aspect="auto", cmap=row_cmap, interpolation="none")
+    ax_left.set_xticks([])
+    ax_left.set_yticks([])
+    ax_left.set_xlabel("")
+
+    cax = inset_axes(
+        ax,
+        width="35%",
+        height="3%",
+        loc="lower center",
+        bbox_to_anchor=(0.0, -0.06, 1.0, 1.0),
+        bbox_transform=ax.transAxes,
+        borderpad=0,
+    )
+    cbar = plt.colorbar(im, cax=cax, orientation="horizontal")
+    cbar.ax.set_xlim(vmin, vmax)
+    cbar.set_label("log2 fold change")
+    cbar.set_ticks([])
+    cbar.ax.text(0.0, 0.5, f"{vmin:.1f}", ha="right", va="center", transform=cbar.ax.transAxes)
+    cbar.ax.text(1.0, 0.5, f"{vmax:.1f}", ha="left", va="center", transform=cbar.ax.transAxes)
+
+    first_gene_positions = {}
+    for idx, cluster in enumerate(row_clusters):
+        if cluster not in first_gene_positions:
+            first_gene_positions[cluster] = idx
+    for cluster, pos in first_gene_positions.items():
+        gene = fold_df.index[pos]
+        ax.text(
+            1.01,
+            pos,
+            gene,
+            transform=ax.get_yaxis_transform(),
+            ha="left",
+            va="center",
+            fontsize=7,
+        )
 
     pdf_path = os.path.join(outdir, heatmap_png)
 

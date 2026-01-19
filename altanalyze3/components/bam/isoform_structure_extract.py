@@ -2,8 +2,13 @@
 import argparse
 import os
 import sys
+import time
 from collections import defaultdict
+from datetime import datetime
+import multiprocessing
 from pathlib import Path
+import shutil
+import csv
 
 import anndata as ad
 import numpy as np
@@ -105,11 +110,29 @@ def has_splice(cigartuples):
 
 def extract_exons(read):
     exons = []
-    for start, end in read.get_blocks():
-        exon_start = start + 1
-        exon_end = end
-        if exon_end >= exon_start:
-            exons.append((exon_start, exon_end))
+    if not read.cigartuples:
+        return exons
+    ref_pos = read.reference_start
+    exon_start = None
+    for op, length in read.cigartuples:
+        if op in (0, 7, 8, 2):  # M/=/X/D consume reference
+            if exon_start is None:
+                exon_start = ref_pos
+            ref_pos += length
+        elif op == 3:  # N splits exons
+            if exon_start is not None:
+                exon_end = ref_pos
+                if exon_end >= exon_start + 1:
+                    exons.append((exon_start + 1, exon_end))
+                exon_start = None
+            ref_pos += length
+        else:
+            # I/S/H/P do not consume reference
+            continue
+    if exon_start is not None:
+        exon_end = ref_pos
+        if exon_end >= exon_start + 1:
+            exons.append((exon_start + 1, exon_end))
     return exons
 
 
@@ -172,11 +195,12 @@ def write_gff_isoform(handle, chrom, strand, exons, isoform_id, gene, barcode, m
     info_parts = []
     if gene:
         info_parts.append(f'gene_id "{gene}"')
-    info_parts.append(f'transcript_id "{isoform_id}"')
-    if molecule_id:
-        info_parts.append(f'molecule_id "{molecule_id}"')
-    if barcode:
-        info_parts.append(f'cell_barcode "{barcode}"')
+    transcript_id = isoform_id
+    if isoform_id and ':' in isoform_id:
+        transcript_id = isoform_id.split(':', 1)[1]
+    if transcript_id and transcript_id.startswith('molecule/'):
+        transcript_id = transcript_id.split('molecule/', 1)[1]
+    info_parts.append(f'transcript_id "{transcript_id}"')
     info = ';'.join(info_parts) + ';'
     for exon_start, exon_end in exons:
         handle.write(
@@ -264,7 +288,10 @@ def extract_isoform_structures(bam_path, exon_file, output_prefix, target_gene=N
                 stats['known_splice_reads'] += 1
 
             molecule_id = sanitize_gff_value(resolve_molecule_id(read, molecule_tag))
-            isoform_id = sanitize_gff_value(f"{gene}:{molecule_id}")
+            molecule_core = molecule_id
+            if molecule_core.startswith('molecule/'):
+                molecule_core = molecule_core.split('molecule/', 1)[1]
+            isoform_id = sanitize_gff_value(f"{gene}:{molecule_core}")
             write_gff_isoform(
                 gff_handle,
                 chrom,
@@ -305,6 +332,265 @@ def extract_isoform_structures(bam_path, exon_file, output_prefix, target_gene=N
     return gff_path, h5ad_path, stats
 
 
+def _chunk_label(chrom, strand):
+    safe_chrom = chrom.replace('/', '_')
+    if strand is None:
+        return f"{safe_chrom}_all"
+    safe_strand = 'plus' if strand == '+' else 'minus'
+    return f"{safe_chrom}_{safe_strand}"
+
+
+def _write_chunk_stats(stats, stats_path):
+    with open(stats_path, 'w') as handle:
+        for key in (
+            'total_reads',
+            'mapped_primary_reads',
+            'spliced_reads',
+            'gene_assigned_spliced_reads',
+            'barcode_reads',
+            'known_splice_reads',
+            'kept_reads',
+        ):
+            handle.write(f"{key}\t{stats.get(key, 0)}\n")
+
+
+def extract_isoform_structures_chunk(bam_path, exon_file, output_prefix, chrom, strand,
+                                     min_mapq=1, barcode_tags=None, molecule_tag='zm',
+                                     source='bam', require_known_splice=True, chunk_dir=None):
+    if barcode_tags is None:
+        barcode_tags = ['CB', 'CR', 'BC', 'BX']
+    if chunk_dir is None:
+        chunk_dir = Path(output_prefix).parent / 'chr-results'
+    chunk_dir = Path(chunk_dir)
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+    output_prefix = Path(output_prefix)
+    chunk_label = _chunk_label(chrom, strand)
+    gff_path = chunk_dir / f"{output_prefix.name}.{chunk_label}.gff"
+    counts_path = chunk_dir / f"{output_prefix.name}.{chunk_label}.counts.tsv"
+    stats_path = chunk_dir / f"{output_prefix.name}.{chunk_label}.stats.tsv"
+
+    exon_coordinates, _, _ = gff_process.importEnsemblGenes(exon_file)
+    bam = pysam.AlignmentFile(bam_path, 'rb')
+    stats = defaultdict(int)
+    counts = defaultdict(int)
+    isoform_gene = {}
+
+    with open(gff_path, 'w') as gff_handle:
+        for read in bam.fetch(chrom):
+            stats['total_reads'] += 1
+            if read.is_unmapped or read.is_secondary or read.is_supplementary:
+                continue
+            stats['mapped_primary_reads'] += 1
+            if read.mapping_quality < min_mapq:
+                continue
+            if not has_splice(read.cigartuples):
+                continue
+            stats['spliced_reads'] += 1
+            barcode = resolve_barcode(read, barcode_tags)
+            if not barcode:
+                continue
+            stats['barcode_reads'] += 1
+
+            exons = extract_exons(read)
+            if len(exons) < 2:
+                continue
+            chrom_norm = normalize_chrom(read.reference_name, exon_coordinates)
+            strand_call = get_read_strand(read)
+            if strand is not None and strand_call != strand:
+                continue
+            gene, _, _, genes = gff_process.exonAnnotate(
+                chrom_norm, list(exons), strand_call, read.query_name
+            )
+            if not genes:
+                continue
+            stats['gene_assigned_spliced_reads'] += 1
+
+            has_known = has_known_splice_site(chrom_norm, strand_call, exons, exon_coordinates)
+            if not has_known and require_known_splice:
+                continue
+            if has_known:
+                stats['known_splice_reads'] += 1
+
+            molecule_id = sanitize_gff_value(resolve_molecule_id(read, molecule_tag))
+            molecule_core = molecule_id
+            if molecule_core.startswith('molecule/'):
+                molecule_core = molecule_core.split('molecule/', 1)[1]
+            isoform_id = sanitize_gff_value(f"{gene}:{molecule_core}")
+            write_gff_isoform(
+                gff_handle,
+                chrom_norm,
+                strand_call,
+                exons,
+                isoform_id,
+                gene,
+                barcode,
+                molecule_id,
+                source,
+            )
+            counts[(barcode, isoform_id)] += 1
+            isoform_gene[isoform_id] = gene
+            stats['kept_reads'] += 1
+
+    bam.close()
+    if counts:
+        with open(counts_path, 'w', newline='') as handle:
+            writer = csv.writer(handle, delimiter='\t')
+            writer.writerow(['barcode', 'isoform_id', 'count', 'gene'])
+            for (barcode, isoform_id), count in counts.items():
+                writer.writerow([barcode, isoform_id, count, isoform_gene.get(isoform_id, '')])
+    _write_chunk_stats(stats, stats_path)
+    return str(gff_path), str(counts_path), stats
+
+
+def _combine_chunk_gffs(chunk_dir, output_prefix):
+    gff_path = Path(output_prefix).with_suffix('.gff')
+    chunk_dir = Path(chunk_dir)
+    with open(gff_path, 'w') as out_handle:
+        for chunk in sorted(chunk_dir.glob(f"{Path(output_prefix).name}.*.gff")):
+            with open(chunk, 'r') as in_handle:
+                shutil.copyfileobj(in_handle, out_handle)
+    return gff_path
+
+
+def _combine_chunk_counts(chunk_dir, output_prefix):
+    chunk_dir = Path(chunk_dir)
+    counts_files = sorted(chunk_dir.glob(f"{Path(output_prefix).name}.*.counts.tsv"))
+    rows = []
+    cols = []
+    data = []
+    barcodes = []
+    isoforms = []
+    barcode_index = {}
+    isoform_index = {}
+    isoform_gene = {}
+    for counts_path in counts_files:
+        with open(counts_path, 'r', newline='') as handle:
+            reader = csv.DictReader(handle, delimiter='\t')
+            for row in reader:
+                barcode = row.get('barcode')
+                isoform_id = row.get('isoform_id')
+                if not barcode or not isoform_id:
+                    continue
+                try:
+                    count = int(row.get('count', 1))
+                except ValueError:
+                    count = 1
+                gene = row.get('gene', '')
+                row_idx = get_index(barcode, barcode_index, barcodes)
+                col_idx = get_index(isoform_id, isoform_index, isoforms)
+                rows.append(row_idx)
+                cols.append(col_idx)
+                data.append(count)
+                if gene:
+                    isoform_gene[isoform_id] = gene
+    if not isoforms or not barcodes:
+        return None, None, {}
+    matrix = coo_matrix((data, (rows, cols)),
+                        shape=(len(barcodes), len(isoforms)),
+                        dtype=np.int32).tocsr()
+    h5ad_path = Path(output_prefix).with_suffix('.h5ad')
+    adata = ad.AnnData(
+        X=matrix,
+        obs=pd.DataFrame(index=barcodes),
+        var=pd.DataFrame(index=isoforms),
+    )
+    adata.var['gene'] = [isoform_gene.get(isoform, '') for isoform in isoforms]
+    adata.write_h5ad(h5ad_path, compression='gzip')
+    return h5ad_path, isoform_gene, {}
+
+
+def _cleanup_chunk_outputs(chunk_dir, output_prefix):
+    chunk_dir = Path(chunk_dir)
+    prefix = Path(output_prefix).name
+    patterns = [
+        f"{prefix}.*.gff",
+        f"{prefix}.*.counts.tsv",
+        f"{prefix}.*.stats.tsv",
+    ]
+    for pattern in patterns:
+        for path in chunk_dir.glob(pattern):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                continue
+
+
+def parallel_extract_isoform_structures(bam_path, exon_file, output_prefix, min_mapq=1,
+                                        barcode_tags=None, molecule_tag='zm',
+                                        source='bam', require_known_splice=True,
+                                        max_processes=None):
+    if barcode_tags is None:
+        barcode_tags = ['CB', 'CR', 'BC', 'BX']
+    bam = pysam.AlignmentFile(bam_path, 'rb')
+    chromosomes = [ref for ref in bam.references if len(ref) < 6]
+    bam.close()
+    if not chromosomes:
+        raise ValueError("No chromosomes found in BAM header.")
+
+    cpu_total = multiprocessing.cpu_count()
+    if max_processes is None:
+        max_processes = max(1, cpu_total - 1)
+    max_processes = max(1, min(max_processes, cpu_total))
+
+    output_prefix = Path(output_prefix)
+    chunk_dir = output_prefix.parent / 'chr-results'
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+    _cleanup_chunk_outputs(chunk_dir, output_prefix)
+    tasks = []
+    for chrom in chromosomes:
+        tasks.append((
+            bam_path,
+            exon_file,
+            str(output_prefix),
+            chrom,
+            None,
+            min_mapq,
+            barcode_tags,
+            molecule_tag,
+            source,
+            require_known_splice,
+            str(chunk_dir),
+        ))
+
+    stats = defaultdict(int)
+    with multiprocessing.Pool(processes=max_processes) as pool:
+        for gff_path, counts_path, chunk_stats in pool.starmap(extract_isoform_structures_chunk, tasks):
+            for key, value in chunk_stats.items():
+                stats[key] += value
+
+    gff_path = _combine_chunk_gffs(chunk_dir, output_prefix)
+    h5ad_path, _isoform_gene, _ = _combine_chunk_counts(chunk_dir, output_prefix)
+    return gff_path, h5ad_path, stats, max_processes, len(tasks)
+
+
+class _Tee:
+    def __init__(self, *streams):
+        self._streams = streams
+
+    def write(self, message):
+        for stream in self._streams:
+            stream.write(message)
+            stream.flush()
+
+    def flush(self):
+        for stream in self._streams:
+            stream.flush()
+
+
+def _init_logging(output_prefix):
+    output_prefix = Path(output_prefix).expanduser()
+    output_dir = output_prefix.parent if output_prefix.parent.as_posix() else Path('.')
+    log_dir = output_dir / 'logs'
+    log_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_name = f"{output_prefix.name}_isoform_structure_extract_{timestamp}.log"
+    log_path = log_dir / log_name
+    log_handle = open(log_path, 'w')
+    stdout_tee = _Tee(sys.stdout, log_handle)
+    stderr_tee = _Tee(sys.stderr, log_handle)
+    return log_path, log_handle, stdout_tee, stderr_tee
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Extract spliced isoform structures from a long-read single-cell BAM."
@@ -328,34 +614,69 @@ def main():
     parser.add_argument('--require-known-splice', dest='require_known_splice',
                         action=argparse.BooleanOptionalAction, default=True,
                         help='Require at least one known Ensembl splice site per read.')
+    parser.add_argument('--no-parallel', dest='no_parallel', action='store_true',
+                        help='Disable parallel chromosome/strand processing when no gene is provided.')
+    parser.add_argument('--max-processes', dest='max_processes', type=int, default=None,
+                        help='Maximum parallel workers (default: cpu_count-1).')
     args = parser.parse_args()
 
-    barcode_tags = [tag.strip() for tag in args.barcode_tags.split(',') if tag.strip()]
-    gff_path, h5ad_path, stats = extract_isoform_structures(
-        args.bam_file,
-        args.gene_model,
-        args.output_prefix,
-        target_gene=args.gene,
-        min_mapq=args.min_mapq,
-        barcode_tags=barcode_tags,
-        molecule_tag=args.molecule_tag,
-        source=args.source,
-        require_known_splice=args.require_known_splice,
-    )
+    start_time = time.time()
+    log_path, log_handle, stdout_tee, stderr_tee = _init_logging(args.output_prefix)
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    sys.stdout = stdout_tee
+    sys.stderr = stderr_tee
+    try:
+        print(f"Run started: {datetime.now().isoformat(timespec='seconds')}")
+        print("Command:", " ".join(sys.argv))
+        print(f"Log file: {log_path}")
+        barcode_tags = [tag.strip() for tag in args.barcode_tags.split(',') if tag.strip()]
+        if args.gene is None and not args.no_parallel:
+            gff_path, h5ad_path, stats, used_processes, chunk_count = parallel_extract_isoform_structures(
+                args.bam_file,
+                args.gene_model,
+                args.output_prefix,
+                min_mapq=args.min_mapq,
+                barcode_tags=barcode_tags,
+                molecule_tag=args.molecule_tag,
+                source=args.source,
+                require_known_splice=args.require_known_splice,
+                max_processes=args.max_processes,
+            )
+            print(f"Processing mode: parallel chrom (chunks={chunk_count}, workers={used_processes})")
+        else:
+            gff_path, h5ad_path, stats = extract_isoform_structures(
+                args.bam_file,
+                args.gene_model,
+                args.output_prefix,
+                target_gene=args.gene,
+                min_mapq=args.min_mapq,
+                barcode_tags=barcode_tags,
+                molecule_tag=args.molecule_tag,
+                source=args.source,
+                require_known_splice=args.require_known_splice,
+            )
+            print("Processing mode: single-process")
 
-    print(f"GFF written to: {gff_path}")
-    if h5ad_path:
-        print(f"h5ad written to: {h5ad_path}")
-    for key in (
-        'total_reads',
-        'mapped_primary_reads',
-        'spliced_reads',
-        'gene_assigned_spliced_reads',
-        'barcode_reads',
-        'known_splice_reads',
-        'kept_reads',
-    ):
-        print(f"{key}: {stats.get(key, 0)}")
+        print(f"GFF written to: {gff_path}")
+        if h5ad_path:
+            print(f"h5ad written to: {h5ad_path}")
+        for key in (
+            'total_reads',
+            'mapped_primary_reads',
+            'spliced_reads',
+            'gene_assigned_spliced_reads',
+            'barcode_reads',
+            'known_splice_reads',
+            'kept_reads',
+        ):
+            print(f"{key}: {stats.get(key, 0)}")
+        elapsed = time.time() - start_time
+        print(f"Elapsed time (s): {elapsed:.2f}")
+    finally:
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+        log_handle.close()
 
 
 if __name__ == '__main__':

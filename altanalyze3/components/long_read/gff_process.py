@@ -4,7 +4,7 @@ this script is biased against isoforms that are bleeding and internal hybrid."""
 
 import os,sys
 import argparse
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 from tqdm import tqdm
 import pandas as pd
 import collections
@@ -398,6 +398,167 @@ def selectKnownIsoform(transcripts):
         if transcript not in found:
             found.append(transcript)
     return found
+
+
+def _split_token(token, default_gene):
+    gene_id = default_gene
+    core = token
+    if ':' in token:
+        gene_id, core = token.split(':', 1)
+    coord = None
+    base = core
+    if '_' in core:
+        base, coord_str = core.rsplit('_', 1)
+        try:
+            coord = int(coord_str)
+        except ValueError:
+            base = core
+            coord = None
+    return gene_id, base, coord
+
+
+def _strip_terminal_coords(tokens, default_gene):
+    if not tokens:
+        return []
+    trimmed = list(tokens)
+    drop_indices = set()
+    for idx in (0, len(trimmed) - 1):
+        _, base, coord = _split_token(trimmed[idx], default_gene)
+        if coord is not None and base.startswith('E'):
+            drop_indices.add(idx)
+    if drop_indices:
+        return [tok for i, tok in enumerate(trimmed) if i not in drop_indices]
+    return trimmed
+
+
+def _filter_exon_intron_tokens(tokens, default_gene):
+    kept_tokens = []
+    for tok in tokens:
+        gene_id, base, _ = _split_token(tok, default_gene)
+        if base.startswith(('E', 'I')):
+            if base.startswith('E') and '_' in tok:
+                continue
+            if gene_id != default_gene and ':' not in tok:
+                tok = f"{gene_id}:{base}"
+            kept_tokens.append(tok)
+    return kept_tokens
+
+
+def _longest_common_substring_length(seq_a, seq_b):
+    if not seq_a or not seq_b:
+        return 0
+    if len(seq_a) > len(seq_b):
+        seq_a, seq_b = seq_b, seq_a
+    prev = [0] * (len(seq_a) + 1)
+    best = 0
+    for token in seq_b:
+        current = [0]
+        for idx, a_token in enumerate(seq_a, start=1):
+            if token == a_token:
+                val = prev[idx - 1] + 1
+            else:
+                val = 0
+            current.append(val)
+            if val > best:
+                best = val
+        prev = current
+    return best
+
+
+def _substring_similarity(seq_a, seq_b):
+    if not seq_a or not seq_b:
+        return 0.0
+    short = seq_a if len(seq_a) <= len(seq_b) else seq_b
+    long = seq_b if short is seq_a else seq_a
+    lcs = _longest_common_substring_length(short, long)
+    return lcs / float(len(short))
+
+
+def _cluster_by_substring(items, threshold=0.85):
+    clusters = []
+    for item in sorted(items, key=lambda x: x['weight'], reverse=True):
+        best_idx = None
+        best_score = -1.0
+        for idx, cluster in enumerate(clusters):
+            min_score = 1.0
+            for other in cluster['items']:
+                score = _substring_similarity(item['cluster_seq'], other['cluster_seq'])
+                if score < min_score:
+                    min_score = score
+                if min_score < threshold:
+                    break
+            if min_score >= threshold and min_score > best_score:
+                best_score = min_score
+                best_idx = idx
+        if best_idx is not None:
+            clusters[best_idx]['items'].append(item)
+        else:
+            clusters.append({'items': [item]})
+    return [cluster['items'] for cluster in clusters]
+
+
+def _select_cluster_label(group):
+    best_label = None
+    best_score = None
+    for structure in group:
+        for iso in structure['items']:
+            label = iso.get('isoform_id')
+            if not label:
+                continue
+            tokens = iso.get('tokens_trimmed') or iso.get('tokens') or []
+            score = (len(tokens), iso.get('count', 0), len(str(label)))
+            if best_score is None or score > best_score:
+                best_score = score
+                best_label = label
+    return best_label
+
+
+def collapseIsoformsCluster(gene_db, junction_db, gff_organization, mode):
+    num_isoforms = 0
+    collaped_db = defaultdict(lambda: defaultdict(list))
+
+    for gene, isoforms in tqdm(gene_db.items(), desc="Collapsing Isoforms (cluster)"):
+        structure_groups = OrderedDict()
+        for isoform in isoforms:
+            tokens = [t for t in isoform.split('|') if t]
+            if not tokens:
+                continue
+            support = len(junction_db.get((gene, isoform), []))
+            if support == 0:
+                support = 1
+            key = tuple(tokens)
+            tokens_trimmed = _strip_terminal_coords(tokens, gene)
+            cluster_seq = _filter_exon_intron_tokens(tokens_trimmed, gene)
+            if key not in structure_groups:
+                structure_groups[key] = {
+                    'structure_key': key,
+                    'items': [],
+                    'weight': 0,
+                    'cluster_seq': cluster_seq
+                }
+            structure_groups[key]['items'].append({
+                'isoform_id': isoform,
+                'tokens': tokens,
+                'tokens_trimmed': tokens_trimmed,
+                'count': support
+            })
+            structure_groups[key]['weight'] += support
+
+        structure_items = list(structure_groups.values())
+        grouped_structures = _cluster_by_substring(structure_items, threshold=0.85)
+        for group in grouped_structures:
+            label = _select_cluster_label(group)
+            if label is None:
+                continue
+            sub_isoforms = []
+            for structure in group:
+                for iso in structure['items']:
+                    if iso['isoform_id'] != label:
+                        sub_isoforms.append(iso['isoform_id'])
+            collaped_db[gene][label] = sub_isoforms
+        num_isoforms += len(grouped_structures)
+    print(num_isoforms, 'collapsed cluster unique isoforms')
+    return collaped_db
     
 def collapseIsoforms(gene_db, junction_db, gff_organization, mode):
     num_isoforms = 0
@@ -439,56 +600,58 @@ def collapseIsoforms(gene_db, junction_db, gff_organization, mode):
 
         super_isoform_collapsed_db = collaped_db
         collaped_db = defaultdict(lambda: defaultdict(list))
-        keys_added = {}
+        keys_added = set()
+        gene_to_isoforms = defaultdict(list)
+        for (gene, isoform) in junction_db:
+            gene_to_isoforms[gene].append(isoform)
 
         # Adding progress bar for Ensembl processing
-        for (gene, isoform) in tqdm(junction_db, desc="Processing Ensembl Isoforms"):
+        for gene, isoform_list in tqdm(gene_to_isoforms.items(), desc="Processing Ensembl Isoforms"):
             super_isoforms = super_isoform_collapsed_db[gene]
-            if isoform in super_isoforms:  # Hence, super_isoform - keep
-                sub_isoforms = super_isoform_collapsed_db[gene][isoform]
-                combined_iso = [isoform] + sub_isoforms
-                transcript_ids = get_transcript_ids(gene, combined_iso)
-                transcript_list = list(transcript_ids.keys())
-                found = next((x for x in transcript_list if x.startswith('ENST')), False)
+            if not super_isoforms:
+                continue
+
+            iso_to_transcripts = {}
+            for isoform in isoform_list:
+                transcripts = []
+                for (file, info) in junction_db[gene, isoform]:
+                    ti, td = gff_organization[file]
+                    transcript_id = info.split(';')[ti].split(td)[1]
+                    transcripts.append(transcript_id)
+                iso_to_transcripts[isoform] = transcripts
+
+            super_to_enst = {}
+            sub_to_super = {}
+            for super_iso, sub_isoforms in super_isoforms.items():
+                combined_iso = [super_iso] + sub_isoforms
+                transcript_ids = {}
+                for iso in combined_iso:
+                    for transcript_id in iso_to_transcripts.get(iso, []):
+                        transcript_ids[transcript_id] = iso
+                found = next((x for x in transcript_ids if x.startswith('ENST')), False)
                 if found:
-                    ens_iso = transcript_ids[found]
-                    if ens_iso == isoform:
-                        try: 
-                            if isoform not in collaped_db[gene][ens_iso]:
-                                collaped_db[gene][ens_iso].append(isoform)
-                        except: collaped_db[gene][ens_iso] = [isoform]
-                    else:
+                    super_to_enst[super_iso] = transcript_ids[found]
+                for sub_iso in sub_isoforms:
+                    if sub_iso not in sub_to_super:
+                        sub_to_super[sub_iso] = super_iso
+
+            for isoform in isoform_list:
+                ens_iso = None
+                if isoform in super_to_enst:
+                    ens_iso = super_to_enst[isoform]
+                else:
+                    super_iso = sub_to_super.get(isoform)
+                    if super_iso and super_iso in super_to_enst:
+                        ens_iso = super_to_enst[super_iso]
+                if not ens_iso:
+                    continue
+                if ens_iso == isoform:
+                    if isoform not in collaped_db[gene][ens_iso]:
                         collaped_db[gene][ens_iso].append(isoform)
-                    keys_added[gene, isoform] = []
-                    keys_added[gene, ens_iso] = []
-            else:
-                for iso in super_isoforms:
-                    if isoform in super_isoforms[iso]:
-                        combined_iso = [iso] + super_isoforms[iso]
-                        transcript_ids = get_transcript_ids(gene, combined_iso)
-                        transcript_list = list(transcript_ids.keys())
-                        found = next((x for x in transcript_list if x.startswith('ENST')), False)
-                        if found:
-                            ens_iso = transcript_ids[found]
-                            if ens_iso == iso:
-                                try:
-                                    if isoform not in collaped_db[gene][ens_iso]:
-                                        collaped_db[gene][ens_iso].append(isoform) 
-                                except:
-                                    collaped_db[gene][ens_iso] = [isoform]
-                                """
-                                if isoform == 'E1.4|E3.3|E3.4|' and gene == 'ENSG00000183072':
-                                    transcript_ids1 = get_transcript_ids(gene, [isoform])
-                                    transcript_list1 = list(transcript_ids1.keys())
-                                    print ('g',ens_iso,isoform)
-                                    #print ('c',gene,transcript_list1,transcript_list)
-                                    print ('k',gene, [ens_iso],collaped_db[gene][ens_iso])
-                                    print ('i',collaped_db['ENSG00000183072']['E1.1|E1.2|E1.3|E1.4|E3.3|E3.4|E3.5|'])
-                                """
-                            else:
-                                collaped_db[gene][ens_iso].append(isoform)
-                            keys_added[gene, isoform] = []
-                            keys_added[gene, ens_iso] = []
+                else:
+                    collaped_db[gene][ens_iso].append(isoform)
+                keys_added.add((gene, isoform))
+                keys_added.add((gene, ens_iso))
         #print ('dd',collaped_db['ENSG00000183072']['E1.1|E1.2|E1.3|E1.4|E3.3|E3.4|E3.5|'])
         # Add isoforms that were not processed earlier
         for (gene, isoform) in junction_db:
@@ -578,8 +741,8 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
 
     def process_isoform(chr, strand, info, exons, file):
         transcript_id = info.split(';')[ti].split(td)[1]
-
         gene, exonIDs, exonIDs_simple, genes = exonAnnotate(chr, exons, strand, transcript_id)
+
         # Restrict the exon string to high confidence exon boundaries
         filtered_exonIDs_str,exonIDs_str = exon_str(list(exonIDs))
         try:
@@ -597,15 +760,18 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
         #splice_junctions = getJunctions(exons)
         if 'UNK' not in gene:
             #junction_str_db[gene,filtered_exonIDs_str] = tuple(splice_junctions)
+            junction_key = filtered_exonIDs_str
+            if str(mode).lower().startswith('cluster'):
+                junction_key = exonIDs_str
             try: 
-                junction_db[(gene, filtered_exonIDs_str)].append((file, info))
+                junction_db[(gene, junction_key)].append((file, info))
             except:
-                junction_db[(gene, filtered_exonIDs_str)] = [(file, info)]
+                junction_db[(gene, junction_key)] = [(file, info)]
             try:
-                if filtered_exonIDs_str not in gene_db[gene]:
-                    gene_db[gene].append(filtered_exonIDs_str)
+                if junction_key not in gene_db[gene]:
+                    gene_db[gene].append(junction_key)
             except:
-                    gene_db[gene] = [filtered_exonIDs_str]
+                    gene_db[gene] = [junction_key]
             strand_db[gene] = strand
 
     gff_organization={}
@@ -691,20 +857,36 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
         # {((1, 2), (3, 4), (5, 6), (7, 8)): [((1, 2), (3, 4), (5, 6))], ((1, 2), (3, 4), (7, 8)): [((1, 2), (3, 4), (7, 8)), ((3, 4), (7, 8))]}
         #a = {'gene1':[((1,2),(3,4),(5,6)),((1,2),(3,4),(5,6),(7,8)),((1,2),(3,4),(7,8)),((3,4),(7,8)),((1,2),(3,4),(7,8))]}
         
-        if mode == 'collapse' or mode == 'Ensembl':
-            super_isoform_db = collapseIsoforms(gene_db,junction_db,gff_organization,mode)
+        if str(mode).lower().startswith('cluster'):
+            super_isoform_db = collapseIsoformsCluster(
+                gene_db,
+                junction_db,
+                gff_organization,
+                mode,
+            )
+        elif mode == 'collapse' or mode == 'Ensembl':
+            super_isoform_db = collapseIsoforms(gene_db, junction_db, gff_organization, mode)
         else:
             super_isoform_db = defaultdict(lambda: defaultdict(list))
             for (gene, isoform) in junction_db: 
                 super_isoform_db[gene][isoform] = []
         
-        def get_transcript_ids(gene,isoforms):
-            transcript_ids=defaultdict(lambda: defaultdict(list))
-            for iso in isoforms:
-                for (file, info) in junction_db[gene, iso]:
-                    transcript_id = info.split(';')[gff_organization[file][0]].split(gff_organization[file][1])[1]
-                    transcript_ids[transcript_id]=file
-            return transcript_ids
+        isoform_transcript_map = {}
+        isoform_pair_map = {}
+        for (gene, isoform), entries in junction_db.items():
+            transcript_ids = {}
+            seen_pairs = set()
+            pairs = []
+            for (file, info) in entries:
+                ti, td = gff_organization[file]
+                transcript_id = info.split(';')[ti].split(td)[1]
+                transcript_ids[transcript_id] = file
+                pair = (transcript_id, file)
+                if pair not in seen_pairs:
+                    seen_pairs.add(pair)
+                    pairs.append(pair)
+            isoform_transcript_map[(gene, isoform)] = transcript_ids
+            isoform_pair_map[(gene, isoform)] = pairs
 
         #print (super_isoform_db['ENSG00000183072']['E1.1|E1.2|E1.3|E1.4|E3.3|E3.4|E3.5|'])
 
@@ -717,19 +899,23 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
         total_genes = len(super_isoform_db)
         # Use tqdm to create a progress bar
         for gene in tqdm(super_isoform_db, total=total_genes, desc="Processing genes"):
-            added = []
+            added = set()
             for isoform in super_isoform_db[gene]: 
                 # isoform is a tuple of junction coordinates tuples
                 strand = strand_db[gene]
                 related_transcripts = []
                 if 'UNK' not in gene:
-                    transcript_ids = get_transcript_ids(gene,[isoform])
+                    transcript_ids = isoform_transcript_map.get((gene, isoform), {})
                     if not transcript_ids:
                         continue
                     transcript_list = list(transcript_ids.keys())
-                    ordered_transcripts = selectKnownIsoform(transcript_list)
                     try:
-                        ref_super_transcript_id = ordered_transcripts[0]
+                        known_candidate = None
+                        for t_id in transcript_list:
+                            if t_id.startswith(('ENST', 'NM_', 'XM_', 'XR_')):
+                                if known_candidate is None or t_id < known_candidate:
+                                    known_candidate = t_id
+                        ref_super_transcript_id = known_candidate or transcript_list[0]
                     except:
                         print (transcript_ids)
                         print (gene,[isoform])
@@ -737,7 +923,8 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
                     ref_super_file = transcript_ids[ref_super_transcript_id]
                     isoforms_to_retain[(ref_super_file, ref_super_transcript_id)] = [] 
                     related_transcripts.append(ref_super_transcript_id)
-                    if len(ordered_transcripts)==1:
+                    known_flag = ref_super_transcript_id.startswith(('ENST', 'NM_', 'XM_', 'XR_'))
+                    if len(transcript_list)==1:
                         eo.write('\t'.join([gene, ref_super_transcript_id, ref_super_file, '', '']) + '\n')
                         a += 1
                     else: 
@@ -745,16 +932,20 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
                             if t!=ref_super_transcript_id:
                                 t_file =  transcript_ids[t]
                                 eo.write('\t'.join([gene, ref_super_transcript_id, ref_super_file, t, t_file]) + '\n')
+                                if not known_flag and t.startswith(('ENST', 'NM_', 'XM_', 'XR_')):
+                                    known_flag = True
                     for sub_isoform in super_isoform_db[gene][isoform]:
-                        for (f3, info) in junction_db[gene, sub_isoform]:
-                            sub_transcript_id = info.split(';')[gff_organization[f3][0]].split(gff_organization[f3][1])[1]
-                            if (sub_transcript_id, f3) not in added:
+                        for (sub_transcript_id, f3) in isoform_pair_map.get((gene, sub_isoform), []):
+                            sub_key = (sub_transcript_id, f3)
+                            if sub_key not in added:
                                 if ref_super_transcript_id !=sub_transcript_id:
                                     eo.write('\t'.join([gene, ref_super_transcript_id, ref_super_file, sub_transcript_id, f3]) + '\n')
-                                    added.append((sub_transcript_id, f3))
+                                    added.add(sub_key)
                                     related_transcripts.append(sub_transcript_id)
                                     a += 1
-                    known_isoform = knownIsoform(related_transcripts)
+                                    if not known_flag and sub_transcript_id.startswith(('ENST', 'NM_', 'XM_', 'XR_')):
+                                        known_flag = True
+                    known_isoform = 'known' if known_flag else 'novel'
                     ao.write('\t'.join([gene, ref_super_transcript_id, ref_super_file, ','.join(related_transcripts), known_isoform]) + '\n')
 
         eo.close()
@@ -995,7 +1186,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--mode',
         default='collapse',
-        help='Isoform consolidation mode (collapse, Ensembl, or any other value for raw).'
+        help='Isoform consolidation mode (collapse, Ensembl, cluster, or any other value for raw).'
     )
     args = parser.parse_args()
 

@@ -21,7 +21,7 @@ def exportConsensusIsoformMatrix(matrix_dir, isoform_association_path, gff_sourc
 
     # Load the 10x matrix keyed by isoforms in the first column and cell barcode cluster annotations
     if mtx:
-        adata = iso.mtx_to_adata(int_folder=matrix_dir, gene_is_index=True, feature='genes.tsv', feature_col=0, barcode='barcodes.tsv', barcode_col=0, matrix='matrix.mtx', rev=rev)
+        adata = iso.matrix_dir_to_adata(int_folder=matrix_dir, gene_is_index=True, feature='genes.tsv', feature_col=0, barcode='barcodes.tsv', barcode_col=0, matrix='matrix.mtx', rev=rev)
     else:
         try: 
             # ENCODE format bulk TSV
@@ -44,9 +44,9 @@ def exportConsensusIsoformMatrix(matrix_dir, isoform_association_path, gff_sourc
 
     # Need to filter cell barcodes to those with a sufficient number of expressed genes
     adata.obs['total_counts'] = np.sum(adata.X, axis=1)
-    adata = adata[adata.obs['total_counts'] >= 100, :]
+    adata = adata[adata.obs['total_counts'] >= 0, :]
     remaining_cells = adata.n_obs
-    print(f"Number of remaining cells with >=100 reads: {remaining_cells}")
+    print(f"Number of remaining cells with >=0 reads: {remaining_cells}")
 
     isoform_names = adata.var.index.tolist()
     print('isoform features |',isoform_names[:5])
@@ -97,10 +97,23 @@ def exportConsensusIsoformMatrix(matrix_dir, isoform_association_path, gff_sourc
                     isoform_counts[ref_isoform][cell_index] += count
 
     # Convert the counts to a sparse matrix (and report progress)
-    isoform_counts_df = pd.DataFrame({k: pd.Series(v, index=adata.obs_names) for k, v in tqdm(isoform_counts.items(), desc="Creating DataFrame")})
-    sparse_junction_matrix = lil_matrix(isoform_counts_df.shape)
-    for i, (index, row) in enumerate(tqdm(isoform_counts_df.iterrows(), total=isoform_counts_df.shape[0], desc="Converting to sparse matrix")):
-        sparse_junction_matrix[i, :] = row.values
+    if isoform_counts:
+        isoform_counts_df = pd.DataFrame({
+            k: pd.Series(v, index=adata.obs_names)
+            for k, v in tqdm(isoform_counts.items(), desc="Creating DataFrame")
+        })
+    else:
+        print("Warning: no isoforms matched the isoform association mapping; exporting empty isoform matrix.")
+        isoform_counts_df = pd.DataFrame(index=adata.obs_names)
+
+    if isoform_counts_df.shape[1] == 0:
+        sparse_junction_matrix = lil_matrix((adata.n_obs, 0))
+    else:
+        sparse_junction_matrix = lil_matrix(isoform_counts_df.shape)
+        for i, (_index, row) in enumerate(tqdm(isoform_counts_df.iterrows(),
+                                              total=isoform_counts_df.shape[0],
+                                              desc="Converting to sparse matrix")):
+            sparse_junction_matrix[i, :] = row.values
     sparse_junction_matrix = sparse_junction_matrix.tocsr()
 
     # Create a new AnnData object for the junction counts
@@ -156,4 +169,3 @@ if __name__ == '__main__':
 
     barcode_clusters = pd.read_csv(args.barcode_cluster, sep='\t', index_col=0)
     exportConsensusIsoformMatrix(args.matrix_path,isoform_association_path,gff_source=args.gff_source,barcode_clusters=barcode_clusters,rev=args.reverse_complement)
-

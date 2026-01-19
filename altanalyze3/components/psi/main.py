@@ -46,7 +46,32 @@ def is_valid(mat, uid):
 # Core PSI calculation with early exit conditions
 def calculate_psi_core(clique, uid, count, sample_columns):
     sub_count = count.loc[list(clique.keys()), sample_columns]
+
+    print (uid);sys.exit()
+    # enforce specific numerator junction
+    TARGET_JUNC = "ENSG00000112062:E22.14-E26.1"
+
+    numerator_junc = sub_count.index[0]
+    if numerator_junc != TARGET_JUNC:
+        return None, None, False
+
+
     mat = sub_count.values
+
+    j = 0  # first sample
+    numerator = mat[0, j]
+    denominator = mat[:, j].sum()
+    print("PSI DEBUG (TARGET EVENT)")
+    print("  Inclusion junction:", numerator_junc)
+    print("  Exclusion junctions:", sub_count.index[1:].tolist())
+    print("  Sample:", sample_columns[j])
+    print("  Numerator reads:", numerator)
+    print("  Denominator reads:", denominator)
+    print("  Per-junction counts:")
+    for k, junc in enumerate(sub_count.index):
+        print("   ", junc, "=", mat[k, j])
+    print("-" * 40)
+
     with np.errstate(divide='ignore', invalid='ignore'):
         psi = mat[0, :] / mat.sum(axis=0)
 
@@ -150,7 +175,7 @@ def process_junctions_in_chunks(junction_path, query_gene, outdir, total_lines, 
     sample_columns = None
     lookup_table = {}  # Direct UID to UID mapping
 
-    with tqdm(total=total_lines, desc="Processing junctions") as pbar:
+    with tqdm(total=total_lines, desc="Processing junctionsX") as pbar:
         with open(junction_path, 'r') as f:
             header = next(f).strip().split('\t')
             sample_columns = header[1:]

@@ -36,7 +36,7 @@ def find_uid_in_clique(the_uid, region, strand, uid2coords):
 
 # Early exit conditional checking to optimize
 def is_valid(mat, uid):
-    min_reads = 10
+    min_reads = 20
     num_incl_events = np.count_nonzero(mat[0, :] >= min_reads)
     if num_incl_events <= 1:
         return False  # Early exit if inclusion events are too low
@@ -46,7 +46,7 @@ def is_valid(mat, uid):
         return False  # Early exit if exclusion events are too low
 
     total_number_junctions = np.count_nonzero(mat.sum(axis=0) >= min_reads)
-    if total_number_junctions <= 2:
+    if total_number_junctions < 2:
         return False  # Early exit if total junction count is too low
 
     return True
@@ -66,6 +66,55 @@ def calculate_psi_core(clique, uid, count, sample_columns):
         cond = False
 
     return psi, bg_uid, cond
+
+"""
+### For debugging
+def calculate_psi_core(clique, uid, count, sample_columns):
+
+    TARGET_JUNC = "ENSG00000112062:E22.14-E26.1"
+
+    sub_count = count.loc[list(clique.keys()), sample_columns]
+
+    # enforce target junction as numerator (never return None)
+    numerator_junc = sub_count.index[0]
+    if numerator_junc != TARGET_JUNC:
+        return np.full(len(sample_columns), np.nan), None, False
+
+    mat = sub_count.values
+
+    # ---- DEBUG: first sample only ----
+    j = 0  # first sample encountered
+
+    numerator = mat[0, j]
+    denominator = mat[:, j].sum()
+
+    print("PSI DEBUG (TARGET EVENT)")
+    print("  Event UID:", uid)
+    print("  Sample:", sample_columns[j])
+    print("  Inclusion junction:", numerator_junc)
+    print("  Exclusion junctions:", sub_count.index[1:].tolist())
+    print("  Inclusion reads (numerator):", numerator)
+    print("  Total reads (denominator):", denominator)
+    print("  Per-junction counts:")
+    for k, junc in enumerate(sub_count.index):
+        print("   ", junc, "=", mat[k, j])
+    print("-" * 60)
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        denom = mat.sum(axis=0)
+        psi = mat[0, :] / denom
+        psi[denom < 5] = np.nan  # existing rule
+
+    if sub_count.shape[0] > 1:
+        bg_uid = sub_count.index.tolist()[np.argmax(mat[1:, :].sum(axis=1)) + 1]
+        cond = is_valid(mat, uid)
+    else:
+        bg_uid = 'None'
+        cond = False
+
+    return psi, bg_uid, cond
+"""
+
 
 # Asynchronously write to file
 async def write_to_file(file_path, data, write_header):
