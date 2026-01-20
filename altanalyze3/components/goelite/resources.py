@@ -25,20 +25,29 @@ from .structures import GOTermNode, GOTree
 DEFAULT_CACHE_ENV = "ALTA_GOELITE_DATA"
 DEFAULT_CACHE_ROOT = Path.home() / ".altanalyze3" / "goelite"
 
-GO_ONTOLOGY_URL = "https://current.geneontology.org/ontology/go-basic.obo.gz"
+GO_ONTOLOGY_URL = "https://purl.obolibrary.org/obo/go/go-basic.obo"
+
+SPECIES_CACHE_ALIAS: Dict[str, str] = {
+    "human": "Hs",
+    "mouse": "Mm",
+}
 
 SPECIES_CONFIG: Dict[str, Dict[str, str]] = {
     "human": {
-        "gaf_url": "https://current.geneontology.org/annotations/goa_human.gaf.gz",
+        "gaf_url": "https://ftp.ebi.ac.uk/pub/databases/GO/goa/HUMAN/goa_human.gaf.gz",
         "gaf_filename": "goa_human.gaf.gz",
     },
     "mouse": {
-        "gaf_url": "https://current.geneontology.org/annotations/goa_mouse.gaf.gz",
+        "gaf_url": "https://ftp.ebi.ac.uk/pub/databases/GO/goa/MOUSE/goa_mouse.gaf.gz",
         "gaf_filename": "goa_mouse.gaf.gz",
     },
 }
 
 AVAILABLE_SPECIES = tuple(sorted(SPECIES_CONFIG.keys()))
+
+
+def _species_cache_name(species: str) -> str:
+    return SPECIES_CACHE_ALIAS.get(species.lower(), species.lower())
 
 
 def resolve_cache_dir(cache_dir: Optional[str] = None) -> Path:
@@ -55,6 +64,12 @@ def resolve_cache_dir(cache_dir: Optional[str] = None) -> Path:
 
     base.mkdir(parents=True, exist_ok=True)
     return base
+
+
+def resolve_species_cache_dir(species: str, cache_dir: Optional[str] = None) -> Path:
+    cache_root = resolve_cache_dir(cache_dir)
+    cache_name = _species_cache_name(species)
+    return cache_root / cache_name
 
 
 def _download(url: str, dest: Path, chunk_size: int = 1 << 18) -> None:
@@ -191,17 +206,16 @@ def prepare_species_resources(
     force: bool = False,
     acceptable_evidence: Optional[set[str]] = None,
 ) -> ParsedGO:
-    cache_root = resolve_cache_dir(cache_dir)
     species_key = species.lower()
     if not force:
         try:
-            return load_cached_resources(species_key, cache_dir=cache_root, version=version)
+            return load_cached_resources(species_key, cache_dir=cache_dir, version=version)
         except FileNotFoundError:
             pass
 
     return _build_species_resources(
         species_key,
-        cache_root=cache_root,
+        cache_root=resolve_cache_dir(cache_dir),
         user_version=version,
         obo_path=obo_path,
         gaf_path=gaf_path,
@@ -217,7 +231,11 @@ def load_cached_resources(
 ) -> ParsedGO:
     cache_root = resolve_cache_dir(cache_dir)
     species_key = species.lower()
-    species_dir = cache_root / species_key
+    species_dir = resolve_species_cache_dir(species_key, cache_dir=cache_dir)
+    if not species_dir.exists():
+        legacy_dir = cache_root / species_key
+        if legacy_dir.exists():
+            species_dir = legacy_dir
 
     if not species_dir.exists():
         raise FileNotFoundError(f"No GO-Elite cache found for species '{species_key}' at {species_dir}")
@@ -259,7 +277,7 @@ def _build_species_resources(
     if species not in SPECIES_CONFIG:
         raise ValueError(f"Unsupported species '{species}'. Available: {sorted(SPECIES_CONFIG)}")
 
-    species_dir = cache_root / species
+    species_dir = cache_root / _species_cache_name(species)
     species_dir.mkdir(parents=True, exist_ok=True)
 
     working_tag = _sanitize_version(user_version or datetime.utcnow().strftime("%Y%m%d%H%M%S"))
@@ -269,7 +287,7 @@ def _build_species_resources(
     temp_dir = working_dir / "downloads"
     temp_dir.mkdir(parents=True, exist_ok=True)
 
-    obo_target_name = Path(obo_path).name if obo_path else "go-basic.obo.gz"
+    obo_target_name = Path(obo_path).name if obo_path else Path(GO_ONTOLOGY_URL).name or "go-basic.obo"
     gaf_target_name = Path(gaf_path).name if gaf_path else SPECIES_CONFIG[species]["gaf_filename"]
 
     obo_target = temp_dir / obo_target_name

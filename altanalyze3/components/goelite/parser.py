@@ -51,6 +51,11 @@ def parse_obo(path: str) -> GOTree:
             elif line.startswith("is_a:"):
                 parent = line.split("is_a:")[1].split("!")[0].strip()
                 current.setdefault("is_a", []).append(parent)
+            elif line.startswith("relationship:"):
+                relation = line.split("relationship:")[1].strip()
+                if relation.startswith("part_of"):
+                    parent = relation.split("part_of")[1].split("!")[0].strip()
+                    current.setdefault("part_of", []).append(parent)
     if "id" in current:
         _commit_term(current, nodes, namespace_index, roots)
 
@@ -81,7 +86,7 @@ def _commit_term(
         term_id=term_id,
         name=current.get("name", [""])[0],
         namespace=current.get("namespace", ["unknown"])[0],
-        parents=tuple(current.get("is_a", [])),
+        parents=tuple(current.get("is_a", []) + current.get("part_of", [])),
     )
     nodes[term_id] = node
     namespace_index.setdefault(node.namespace, []).append(term_id)

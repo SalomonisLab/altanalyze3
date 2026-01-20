@@ -12,6 +12,7 @@ Functions:
   - run_de_for_comparisons(...)
   - summarize_global_local_coreg(...)
   - build_fixed_order_heatmap(...)
+  - run_goelite_for_clusters(...)
   - write_differentials_only_h5ad(...)
   - main() with CLI
 
@@ -1602,6 +1603,252 @@ def build_fixed_order_heatmap(de_store, outdir, population_col, fc_thresh, heatm
 
     return pdf_path, heatmap_path
 
+
+def _normalize_goelite_species(species):
+    if species is None:
+        return None
+    value = str(species).strip().lower()
+    mapping = {
+        "hs": "human",
+        "human": "human",
+        "homo_sapiens": "human",
+        "homo sapiens": "human",
+        "mm": "mouse",
+        "mouse": "mouse",
+        "mus_musculus": "mouse",
+        "mus musculus": "mouse",
+    }
+    return mapping.get(value, value)
+
+def _is_url(path):
+    try:
+        from urllib.parse import urlparse
+        return urlparse(str(path)).scheme in ("http", "https", "ftp")
+    except Exception:
+        return False
+
+def _download_goelite_resource(resource, download_dir, filename_hint=None):
+    if resource is None or not _is_url(resource):
+        return resource
+    from urllib.parse import urlparse
+    import urllib.request
+
+    parsed = urlparse(str(resource))
+    name = filename_hint or os.path.basename(parsed.path) or "goelite_resource"
+    os.makedirs(download_dir, exist_ok=True)
+    dest = os.path.join(download_dir, name)
+    if os.path.isfile(dest) and os.path.getsize(dest) > 0:
+        if str(dest).endswith(".gz"):
+            try:
+                with open(dest, "rb") as handle:
+                    magic = handle.read(2)
+                if magic != b"\x1f\x8b":
+                    print(f"[WARN] GO-Elite cached file is not gzipped: {dest}")
+                    os.remove(dest)
+                else:
+                    return dest
+            except Exception:
+                pass
+        else:
+            return dest
+
+    try:
+        if parsed.scheme in ("http", "https"):
+            request = urllib.request.Request(
+                resource,
+                headers={"User-Agent": "AltAnalyze3-GoElite/1.0"}
+            )
+            with urllib.request.urlopen(request) as resp, open(dest, "wb") as out:
+                out.write(resp.read())
+        else:
+            urllib.request.urlretrieve(resource, dest)
+    except Exception as exc:
+        print(f"[WARN] GO-Elite download failed for {resource}: {exc}")
+        return None
+    return dest
+
+def _resolve_goelite_target(resource, download_dir, filename_hint=None):
+    if resource is None:
+        return None, None
+    if _is_url(resource):
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(str(resource))
+            name = filename_hint or os.path.basename(parsed.path) or "goelite_resource"
+        except Exception:
+            name = filename_hint or "goelite_resource"
+        return os.path.join(download_dir, name), resource
+    return resource, None
+
+def _prompt_goelite_download(missing):
+    if not missing:
+        return True
+    print("[INFO] GO-Elite resources missing locally:")
+    for label, url, dest in missing:
+        print(f"  - {label}: {url} -> {dest}")
+    if not sys.stdin.isatty():
+        print("[WARN] Non-interactive session; skipping GO-Elite download.")
+        return False
+    resp = input("Download GO-Elite resources now? [y/N]: ").strip().lower()
+    return resp in ("y", "yes")
+
+def run_goelite_for_clusters(de_store,
+                             background_genes,
+                             outdir,
+                             comparison_tag,
+                             species,
+                             obo_path=None,
+                             gaf_path=None,
+                             cache_dir=None,
+                             download_dir=None,
+                             min_term_size=5,
+                             max_term_size=2000):
+    """
+    Run GO-Elite enrichment per population cluster and write a combined TSV.
+    """
+    species_key = _normalize_goelite_species(species)
+    if species_key is None:
+        print("[INFO] GO-Elite skipped: no species provided.")
+        return None
+
+    from altanalyze3.components.goelite.resources import prepare_species_resources
+    from altanalyze3.components.goelite.runner import GOEliteRunner, EnrichmentSettings
+
+    per_pop = de_store.get("per_population_deg", {})
+    if not per_pop:
+        print("[WARN] GO-Elite skipped: no per-population DEG data found.")
+        return None
+    print(f"[INFO] GO-Elite: running enrichment for {len(per_pop)} populations...")
+
+    if download_dir is None:
+        download_dir = os.path.join(outdir, "_goelite_downloads")
+    obo_path = _download_goelite_resource(obo_path, download_dir, "go-basic.obo")
+    gaf_path = _download_goelite_resource(gaf_path, download_dir, "goa.gaf.gz")
+
+    try:
+        print("[INFO] GO-Elite: preparing resources...")
+        parsed = prepare_species_resources(
+            species_key,
+            cache_dir=cache_dir,
+            obo_path=obo_path,
+            gaf_path=gaf_path,
+        )
+    except Exception as exc:
+        print(f"[WARN] GO-Elite skipped: {exc}")
+        return None
+    settings = EnrichmentSettings(min_term_size=int(min_term_size), max_term_size=int(max_term_size))
+    runner = GOEliteRunner(parsed, settings=settings)
+
+    use_rawp = bool(de_store.get("use_rawp", False))
+    alpha = float(de_store.get("alpha", 0.05))
+    fc_thresh = float(de_store.get("fc_thresh", 1.2))
+    log2_fc_thresh = np.log2(fc_thresh)
+
+    bg = [str(g) for g in pd.Index(background_genes).dropna().unique().tolist()]
+    if not bg:
+        print("[WARN] GO-Elite skipped: empty background gene list.")
+        return None
+    prepared = runner.prepare_background(bg)
+    print(f"[INFO] GO-Elite: prepared {len(prepared.term_genes)} terms for testing.")
+
+    rows = []
+    go_pops = sorted(per_pop.keys())
+    go_pbar = tqdm(
+        total=len(go_pops),
+        desc="GO-Elite per population",
+        ncols=100,
+        dynamic_ncols=True,
+        position=0,
+        leave=True,
+        file=sys.stdout,
+        disable=False,
+    )
+    for pop_name in go_pops:
+        go_pbar.set_postfix_str(str(pop_name))
+        df = per_pop[pop_name].copy()
+        if df.empty or "log2fc" not in df.columns:
+            go_pbar.update(1)
+            continue
+
+        sig_col = "pval" if use_rawp and "pval" in df.columns else "fdr"
+        df["log2fc"] = pd.to_numeric(df["log2fc"], errors="coerce")
+        df[sig_col] = pd.to_numeric(df[sig_col], errors="coerce")
+        sig = (df[sig_col] < alpha) & (np.abs(df["log2fc"]) > log2_fc_thresh)
+        genes = pd.Index(df.index.astype(str))[sig].unique().tolist()
+        if len(genes) == 0:
+            print(f"[INFO] GO-Elite: no significant genes for {pop_name}.")
+            go_pbar.update(1)
+            continue
+
+        results = runner.run_prepared(genes, prepared, apply_prioritization=True)
+        if not results:
+            print(f"[INFO] GO-Elite: no enrichment results for {pop_name}.")
+            go_pbar.update(1)
+            continue
+
+        query_map = {}
+        for gene in genes:
+            key = gene.upper()
+            if key not in query_map:
+                query_map[key] = gene
+        query_upper = set(query_map.keys())
+
+        for res in results:
+            if not res.selected:
+                continue
+            term_genes = prepared.term_genes.get(res.term_id, set())
+            overlap_upper = query_upper & term_genes
+            overlap_genes = sorted(
+                query_map[key] for key in overlap_upper if key in query_map
+            )
+            overlap_text = ",".join(overlap_genes)
+            node = runner.go_tree.get(res.term_id)
+            term_name = node.name if node else ""
+            namespace = node.namespace if node else ""
+            rows.append({
+                "population": str(pop_name),
+                "term_id": res.term_id,
+                "term_name": term_name,
+                "namespace": namespace,
+                "p_value": res.p_value,
+                "fdr": res.fdr,
+                "z_score": res.z_score,
+                "overlap": res.overlap,
+                "term_genes": res.total_genes,
+                "query_size": len(query_upper),
+                "selected": res.selected,
+                "overlap_genes": overlap_text,
+            })
+        go_pbar.update(1)
+    go_pbar.close()
+
+    if not rows:
+        print("[INFO] GO-Elite produced no results across populations.")
+        return None
+
+    os.makedirs(outdir, exist_ok=True)
+    safe_tag = NetPerspective.safe_component(comparison_tag)
+    out_path = os.path.join(outdir, f"GOElite_{safe_tag}.tsv")
+    columns = [
+        "population",
+        "term_id",
+        "term_name",
+        "namespace",
+        "p_value",
+        "fdr",
+        "z_score",
+        "overlap",
+        "term_genes",
+        "query_size",
+        "selected",
+        "overlap_genes",
+    ]
+    out_df = pd.DataFrame(rows, columns=columns)
+    out_df.sort_values(["population", "fdr", "p_value"], inplace=True)
+    out_df.to_csv(out_path, sep="\t", index=False)
+    print(f"[INFO] GO-Elite results written to: {out_path}")
+    return out_path
+
 # ------------------------- Step 6: differentials h5ad ---------------------- #
 
 def write_differentials_only_h5ad(adata, de_store, out_path):
@@ -1709,6 +1956,12 @@ def main():
     ap.add_argument("--make_pseudobulk", action="store_true", help="If set, compute pseudobulks per (population×sample)")
     ap.add_argument("--pseudobulk_min_cells", type=int, default=10, help="Minimum cells per pseudobulk group (default: 10)")
     ap.add_argument("--use_rawp", action="store_true", help="Use raw p-values instead of FDR for significance filtering")
+    ap.add_argument("--goelite_species", default=None, help="Run GO-Elite with species (e.g. human or mouse)")
+    ap.add_argument("--goelite_obo", default=None, help="GO .obo path or URL (optional)")
+    ap.add_argument("--goelite_gaf", default=None, help="GOA .gaf path or URL (optional)")
+    ap.add_argument("--goelite_cache_dir", default=None, help="Optional GO-Elite cache directory")
+    ap.add_argument("--goelite_min_term_size", type=int, default=5, help="GO-Elite minimum term size (default: 5)")
+    ap.add_argument("--goelite_max_term_size", type=int, default=2000, help="GO-Elite maximum term size (default: 2000)")
     ap.add_argument("--outdir", default="cellHarmony_DE_out", help="Output directory (default: cellHarmony_DE_out)")
     ap.add_argument("--skip_grn", action="store_true", help="Skip interaction network (GRN) generation")
     args = ap.parse_args()
@@ -1724,12 +1977,68 @@ def main():
     deg_dir = os.path.join(base_outdir, "DEGs")
     pseudobulk_dir = os.path.join(base_outdir, "pseudobulk")
     cellfreq_dir = os.path.join(base_outdir, "cell-frequency")
+    goelite_dir = os.path.join(base_outdir, "GeneSetEnrichment")
     log_dir = os.path.join(base_outdir, "logs")
 
     for path in (heatmap_dir, deg_dir, log_dir, cellfreq_dir):
         os.makedirs(path, exist_ok=True)
     if args.make_pseudobulk:
         os.makedirs(pseudobulk_dir, exist_ok=True)
+    if args.goelite_species:
+        os.makedirs(goelite_dir, exist_ok=True)
+        from altanalyze3.components.goelite.resources import resolve_species_cache_dir
+        normalized_species = _normalize_goelite_species(args.goelite_species)
+        goelite_species_dir = resolve_species_cache_dir(normalized_species, args.goelite_cache_dir)
+        goelite_download_dir = os.path.join(str(goelite_species_dir), "downloads")
+        obo_local, obo_url = _resolve_goelite_target(args.goelite_obo, goelite_download_dir, "go-basic.obo")
+        gaf_local, gaf_url = _resolve_goelite_target(args.goelite_gaf, goelite_download_dir, "goa.gaf.gz")
+        missing = []
+        if obo_url and (not os.path.isfile(obo_local) or os.path.getsize(obo_local) == 0):
+            missing.append(("obo", obo_url, obo_local))
+        if gaf_url and (not os.path.isfile(gaf_local) or os.path.getsize(gaf_local) == 0):
+            missing.append(("gaf", gaf_url, gaf_local))
+        if args.goelite_obo and not obo_url and not os.path.isfile(args.goelite_obo):
+            print(f"[WARN] GO-Elite OBO path not found: {args.goelite_obo}")
+            args.goelite_species = None
+        if args.goelite_gaf and not gaf_url and not os.path.isfile(args.goelite_gaf):
+            print(f"[WARN] GO-Elite GAF path not found: {args.goelite_gaf}")
+            args.goelite_species = None
+        if args.goelite_species and missing:
+            if _prompt_goelite_download(missing):
+                for label, url, dest in missing:
+                    _download_goelite_resource(url, goelite_download_dir, os.path.basename(dest))
+            else:
+                args.goelite_species = None
+        if args.goelite_species and not args.goelite_obo and not args.goelite_gaf:
+            species_key = _normalize_goelite_species(args.goelite_species)
+            try:
+                from altanalyze3.components.goelite.resources import load_cached_resources, SPECIES_CONFIG, GO_ONTOLOGY_URL
+                load_cached_resources(species_key, cache_dir=args.goelite_cache_dir)
+            except Exception:
+                from urllib.parse import urlparse
+                default_obo_url = GO_ONTOLOGY_URL
+                default_gaf_url = None
+                if species_key in SPECIES_CONFIG:
+                    default_gaf_url = SPECIES_CONFIG[species_key]["gaf_url"]
+                defaults = []
+                if default_obo_url:
+                    obo_name = os.path.basename(urlparse(default_obo_url).path) or "go-basic.obo"
+                    defaults.append(("obo", default_obo_url, os.path.join(goelite_download_dir, obo_name)))
+                if default_gaf_url:
+                    gaf_name = os.path.basename(urlparse(default_gaf_url).path) or "goa.gaf.gz"
+                    defaults.append(("gaf", default_gaf_url, os.path.join(goelite_download_dir, gaf_name)))
+                if defaults:
+                    if _prompt_goelite_download(defaults):
+                        for label, url, dest in defaults:
+                            downloaded = _download_goelite_resource(url, goelite_download_dir, os.path.basename(dest))
+                            if label == "obo":
+                                args.goelite_obo = downloaded
+                            elif label == "gaf":
+                                args.goelite_gaf = downloaded
+                    else:
+                        args.goelite_species = None
+        args.goelite_obo = obo_local if obo_url else args.goelite_obo
+        args.goelite_gaf = gaf_local if gaf_url else args.goelite_gaf
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     log_path = os.path.join(log_dir, f"cellHarmony-differential_{timestamp}.log")
@@ -2011,6 +2320,29 @@ def main():
             if cr is not None and not cr.empty:
                 cr.to_csv(cr_path, sep="\t", index=False)
                 print("[INFO] Wrote {}".format(cr_path))
+
+            if args.goelite_species:
+                background_genes = adata.var_names.astype(str)
+                if "gene_symbols" in adata.var.columns:
+                    background_genes = adata.var["gene_symbols"].astype(str)
+                elif "features" in adata.var.columns:
+                    background_genes = adata.var["features"].astype(str)
+
+                goelite_subdir = os.path.join(goelite_dir, NetPerspective.safe_component(tag))
+                print(f"[INFO] GO-Elite: starting for {tag} (output: {goelite_subdir})")
+                run_goelite_for_clusters(
+                    de_store=de_store,
+                    background_genes=background_genes,
+                    outdir=goelite_subdir,
+                    comparison_tag=tag,
+                    species=args.goelite_species,
+                    obo_path=args.goelite_obo,
+                    gaf_path=args.goelite_gaf,
+                    cache_dir=args.goelite_cache_dir,
+                    download_dir=goelite_download_dir,
+                    min_term_size=args.goelite_min_term_size,
+                    max_term_size=args.goelite_max_term_size,
+                )
 
             if not args.skip_grn and interactions_df is not None:
                 detailed = de_store.get("detailed_deg")

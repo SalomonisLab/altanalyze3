@@ -145,7 +145,7 @@ class EnrichmentResult:
     blocked_by: Optional[str] = None
 
     def significance_tuple(self) -> Tuple[float, float]:
-        return (-abs(self.z_score), self.p_value)
+        return (self.p_value, -abs(self.z_score))
 
 
 def compute_z_score(hit_count: int, query_total: int, term_total: int, background_total: int) -> float:

@@ -5,7 +5,7 @@ High-level orchestration for GO-Elite enrichment.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence, Set
 
 import logging
 import numpy as np
@@ -42,6 +42,14 @@ class EnrichmentSettings:
     prioritization: PrioritizationSettings = field(default_factory=PrioritizationSettings)
 
 
+@dataclass
+class PreparedBackground:
+    background: Set[str]
+    term_genes: Dict[str, Set[str]]
+    term_sizes: Dict[str, int]
+    background_size: int
+
+
 class GOEliteRunner:
     def __init__(
         self,
@@ -52,6 +60,10 @@ class GOEliteRunner:
         self.go_tree: GOTree = go_data.tree
         self.term_to_genes = go_data.term_to_genes
         self.settings = settings or EnrichmentSettings()
+        self._term_to_genes_upper = {
+            term_id: {g.upper() for g in gene_set if g}
+            for term_id, gene_set in self.term_to_genes.items()
+        }
         if logger is None:
             logging.basicConfig(level=logging.INFO)
             self.logger = logging.getLogger("go_elite")
@@ -65,25 +77,51 @@ class GOEliteRunner:
         *,
         apply_prioritization: bool = True,
     ) -> List[EnrichmentResult]:
-        query = {g.upper() for g in query_genes}
-        background = {g.upper() for g in background_genes}
+        prepared = self.prepare_background(background_genes)
+        return self.run_prepared(query_genes, prepared, apply_prioritization=apply_prioritization)
 
+    def prepare_background(self, background_genes: Iterable[str]) -> PreparedBackground:
+        background = {g.upper() for g in background_genes if g}
         if not background:
             raise ValueError("Background gene set is empty.")
 
-        q_total = len(query)
-        bg_total = len(background)
-        results: List[EnrichmentResult] = []
-
-        for term_id, gene_set in self.term_to_genes.items():
-            genes = {g.upper() for g in gene_set if g.upper() in background}
-            term_size = len(genes)
+        term_genes: Dict[str, Set[str]] = {}
+        term_sizes: Dict[str, int] = {}
+        for term_id, genes in self._term_to_genes_upper.items():
+            genes_in_bg = genes & background
+            term_size = len(genes_in_bg)
             if term_size < self.settings.min_term_size or term_size > self.settings.max_term_size:
                 continue
+            term_genes[term_id] = genes_in_bg
+            term_sizes[term_id] = term_size
+
+        return PreparedBackground(
+            background=background,
+            term_genes=term_genes,
+            term_sizes=term_sizes,
+            background_size=len(background),
+        )
+
+    def run_prepared(
+        self,
+        query_genes: Iterable[str],
+        prepared: PreparedBackground,
+        *,
+        apply_prioritization: bool = True,
+    ) -> List[EnrichmentResult]:
+        query = {g.upper() for g in query_genes if g}
+        if not query:
+            return []
+
+        q_total = len(query)
+        bg_total = prepared.background_size
+        results: List[EnrichmentResult] = []
+
+        for term_id, genes in prepared.term_genes.items():
             hits = len(query & genes)
             if hits == 0:
                 continue
-
+            term_size = prepared.term_sizes[term_id]
             z_score = compute_z_score(hits, q_total, term_size, bg_total)
             p_val = self._hypergeom_p(hits, q_total, term_size, bg_total)
             results.append(
