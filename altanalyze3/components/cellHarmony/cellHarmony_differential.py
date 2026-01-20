@@ -1221,7 +1221,7 @@ def build_fixed_order_heatmap(
     heatmap_tsv,
     goelite_payload=None,
     show_go_terms=False,
-    goelite_max_terms=5,
+    goelite_max_terms=30,
 ):
     """
     Build a fixed-order heatmap of log2 fold-changes for all populations,
@@ -1461,6 +1461,15 @@ def build_fixed_order_heatmap(
 
     # Reorder the matrix rows by the final order
     fold_df = fold_df.loc[ordered_genes]
+    if len(row_clusters) != len(fold_df):
+        if len(row_clusters) > len(fold_df):
+            row_clusters = row_clusters[: len(fold_df)]
+        else:
+            row_clusters = row_clusters + ["unassigned"] * (len(fold_df) - len(row_clusters))
+        block_breaks = []
+        for idx in range(1, len(row_clusters)):
+            if row_clusters[idx] != row_clusters[idx - 1]:
+                block_breaks.append(idx)
 
     # ------------------------- 4. Apply lineage order if available ------------------------- #
     if lineage_order is not None:
@@ -1545,8 +1554,6 @@ def build_fixed_order_heatmap(
                 name = node.name if node else ""
                 if name:
                     term_hits.append((name, res.p_value))
-                if len(term_hits) >= goelite_max_terms:
-                    break
             if term_hits:
                 go_terms_map[str(cluster)] = term_hits
 
@@ -1573,7 +1580,7 @@ def build_fixed_order_heatmap(
             1,
             3,
             width_ratios=[0.35, 0.50, 0.15],
-            wspace=0.04,
+            wspace=0.0,
             left=0.38,
             right=0.98,
             top=plot_top,
@@ -1645,7 +1652,7 @@ def build_fixed_order_heatmap(
 
     divider = make_axes_locatable(ax)
     ax_top = divider.append_axes("top", size="1.5%", pad=0.02)
-    ax_left = divider.append_axes("left", size="3%", pad=0.02)
+    ax_left = divider.append_axes("left", size="3%", pad=0.015)
 
     col_ids = np.array([column_to_id[c] for c in column_clusters], dtype=int)[None, :]
     row_ids = np.array([row_to_id.get(c, 0) for c in row_clusters], dtype=int)[:, None]
@@ -1659,6 +1666,11 @@ def build_fixed_order_heatmap(
     ax_left.set_xticks([])
     ax_left.set_yticks([])
     ax_left.set_xlabel("")
+    if ax_terms is not None and ax_labels is not None:
+        fig.canvas.draw()
+        heatmap_bbox = ax.get_position()
+        ax_terms.set_position([ax_terms.get_position().x0, heatmap_bbox.y0, ax_terms.get_position().width, heatmap_bbox.height])
+        ax_labels.set_position([ax_labels.get_position().x0, heatmap_bbox.y0, ax_labels.get_position().width, heatmap_bbox.height])
 
     if ax_terms is not None:
         ax_terms.set_xlim(0, 1)
@@ -1669,12 +1681,10 @@ def build_fixed_order_heatmap(
         ax_terms.patch.set_alpha(0.0)
 
         fig.canvas.draw()
-        axis_height_px = ax_terms.get_window_extent().height
+        axis_height_px = ax.get_window_extent().height
         axis_width_px = ax_terms.get_window_extent().width
         row_height_px = axis_height_px / max(1, len(row_clusters))
-        left_margin = 0.01
-        text_x = 0.97
-        term_right = text_x
+        text_x = 0.96
 
         def _format_pvalue(pvalue):
             try:
@@ -1685,34 +1695,33 @@ def build_fixed_order_heatmap(
                 return "p={:.1e}".format(pval)
             return "p={:.3f}".format(pval)
 
-        def _shorten_term_label(term, font_size):
-            text_area_px = axis_width_px * (term_right - left_margin)
-            avg_char_px = max(3.5, font_size * 0.6)
-            max_chars = max(12, int(text_area_px / avg_char_px))
-            return textwrap.shorten(term, width=max_chars, placeholder="...")
-
-        go_term_font_size = 6
-        text_height_px = go_term_font_size * fig.dpi / 72.0 * 1.2
+        go_term_font_size = 4
+        text_height_px = go_term_font_size * fig.dpi / 72.0 * 2.8
         min_rows_per_term = max(1, int(math.ceil(text_height_px / max(1.0, row_height_px))))
 
         for cluster, start, end in cluster_ranges:
             terms = go_terms_map.get(str(cluster), [])
             block_height = max(1, end - start)
             slot_count = max(1, int(block_height / min_rows_per_term))
-            max_terms = max(1, min(goelite_max_terms, slot_count, len(terms)))
+            max_terms = min(slot_count, len(terms))
+            if goelite_max_terms:
+                max_terms = min(max_terms, goelite_max_terms)
             terms = terms[:max_terms] if terms else []
 
             if terms:
                 term_color = row_color_map.get(str(cluster), "blue")
                 y_positions = []
+                available_rows = max(1, block_height - 1)
+                total_height = (len(terms) - 1) * min_rows_per_term if len(terms) > 1 else 0
+                top_offset = max(0.0, (available_rows - total_height) / 2.0)
+                start_y = start + 0.5 + top_offset
                 for i in range(len(terms)):
-                    y = start + 0.5 + i * min_rows_per_term
+                    y = start_y + i * min_rows_per_term
                     if y > end - 0.5:
                         break
                     y_positions.append(y)
                 for y, (term, pval) in zip(y_positions, terms):
                     term = "{} ({})".format(term, _format_pvalue(pval))
-                    term = _shorten_term_label(term, go_term_font_size)
                     ax_terms.text(
                         text_x,
                         y,
@@ -1754,28 +1763,42 @@ def build_fixed_order_heatmap(
     for idx, cluster in enumerate(row_clusters):
         if cluster not in first_gene_positions:
             first_gene_positions[cluster] = idx
+    fig.canvas.draw()
+    if ax_labels is not None:
+        label_axis = ax_labels
+    else:
+        label_axis = ax
+    axis_height_px = label_axis.get_window_extent().height
+    row_height_px = axis_height_px / max(1, len(row_clusters))
+    one_point_rows = (fig.dpi / 72.0) / max(1.0, row_height_px)
+    base_label_offset = 0.15
+    gene_label_offset = base_label_offset + one_point_rows
     for cluster, pos in first_gene_positions.items():
         gene = fold_df.index[pos]
         if ax_labels is not None:
+            label_x = 0.02
+            label_y = pos + gene_label_offset
             ax_labels.text(
-                0.0,
-                pos,
+                label_x,
+                label_y,
                 gene,
                 transform=ax_labels.get_yaxis_transform(),
                 ha="left",
                 va="center",
-                fontsize=6,
+                fontsize=5,
+                fontstyle="italic",
                 clip_on=False,
             )
         else:
             ax.text(
-                1.01,
-                pos,
+                1.03,
+                pos + gene_label_offset,
                 gene,
                 transform=ax.get_yaxis_transform(),
                 ha="left",
                 va="center",
-                fontsize=7,
+                fontsize=6,
+                fontstyle="italic",
                 clip_on=True,
             )
 
