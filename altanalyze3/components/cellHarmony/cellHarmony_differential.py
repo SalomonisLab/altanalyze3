@@ -2029,11 +2029,11 @@ def run_goelite_for_clusters(de_store,
     from altanalyze3.components.goelite.resources import prepare_species_resources
     from altanalyze3.components.goelite.runner import GOEliteRunner, EnrichmentSettings
 
-    per_pop = de_store.get("per_population_deg", {})
-    if not per_pop:
-        print("[WARN] GO-Elite skipped: no per-population DEG data found.")
+    cluster_gene_map = _build_goelite_cluster_gene_map(de_store)
+    if not cluster_gene_map:
+        print("[WARN] GO-Elite skipped: no assigned gene clusters found.")
         return None
-    print(f"[INFO] GO-Elite: running enrichment for {len(per_pop)} populations...")
+    print(f"[INFO] GO-Elite: running enrichment for {len(cluster_gene_map)} clusters...")
 
     if download_dir is None:
         download_dir = os.path.join(outdir, "_goelite_downloads")
@@ -2054,11 +2054,6 @@ def run_goelite_for_clusters(de_store,
     settings = EnrichmentSettings(min_term_size=int(min_term_size), max_term_size=int(max_term_size))
     runner = GOEliteRunner(parsed, settings=settings)
 
-    use_rawp = bool(de_store.get("use_rawp", False))
-    alpha = float(de_store.get("alpha", 0.05))
-    fc_thresh = float(de_store.get("fc_thresh", 1.2))
-    log2_fc_thresh = np.log2(fc_thresh)
-
     bg = [str(g) for g in pd.Index(background_genes).dropna().unique().tolist()]
     if not bg:
         print("[WARN] GO-Elite skipped: empty background gene list.")
@@ -2068,10 +2063,10 @@ def run_goelite_for_clusters(de_store,
     print(f"[INFO] GO-Elite: prepared {len(prepared.term_genes)} terms for testing.")
 
     rows = []
-    go_pops = sorted(per_pop.keys())
+    go_clusters = list(cluster_gene_map.keys())
     go_pbar = tqdm(
-        total=len(go_pops),
-        desc="GO-Elite per population",
+        total=len(go_clusters),
+        desc="GO-Elite per cluster",
         ncols=100,
         dynamic_ncols=True,
         position=0,
@@ -2079,26 +2074,15 @@ def run_goelite_for_clusters(de_store,
         file=sys.stdout,
         disable=False,
     )
-    for pop_name in go_pops:
-        go_pbar.set_postfix_str(str(pop_name))
-        df = per_pop[pop_name].copy()
-        if df.empty or "log2fc" not in df.columns:
-            go_pbar.update(1)
-            continue
-
-        sig_col = "pval" if use_rawp and "pval" in df.columns else "fdr"
-        df["log2fc"] = pd.to_numeric(df["log2fc"], errors="coerce")
-        df[sig_col] = pd.to_numeric(df[sig_col], errors="coerce")
-        sig = (df[sig_col] < alpha) & (np.abs(df["log2fc"]) > log2_fc_thresh)
-        genes = pd.Index(df.index.astype(str))[sig].unique().tolist()
+    for cluster_name in go_clusters:
+        go_pbar.set_postfix_str(str(cluster_name))
+        genes = cluster_gene_map.get(cluster_name, [])
         if len(genes) == 0:
-            print(f"[INFO] GO-Elite: no significant genes for {pop_name}.")
             go_pbar.update(1)
             continue
 
         results = runner.run_prepared(genes, prepared, apply_prioritization=True)
         if not results:
-            print(f"[INFO] GO-Elite: no enrichment results for {pop_name}.")
             go_pbar.update(1)
             continue
 
@@ -2122,7 +2106,7 @@ def run_goelite_for_clusters(de_store,
             term_name = node.name if node else ""
             namespace = node.namespace if node else ""
             rows.append({
-                "population": str(pop_name),
+                "population": str(cluster_name),
                 "term_id": res.term_id,
                 "term_name": term_name,
                 "namespace": namespace,
@@ -2165,6 +2149,208 @@ def run_goelite_for_clusters(de_store,
     print(f"[INFO] GO-Elite results written to: {out_path}")
     payload["results"] = out_df
     return payload
+
+def _build_goelite_cluster_gene_map(de_store):
+    assigned = de_store.get("assigned_groups")
+    if assigned is None or assigned.empty:
+        return {}
+
+    gene_map = collections.OrderedDict()
+    for _, row in assigned.iterrows():
+        gene = str(row.get("gene", ""))
+        if not gene:
+            continue
+        group = str(row.get("group", "")).strip().lower()
+        pop = str(row.get("population_or_pattern", ""))
+        try:
+            key_fc = float(row.get("key_log2fc", np.nan))
+        except Exception:
+            key_fc = np.nan
+        if not np.isfinite(key_fc):
+            continue
+
+        if group == "global":
+            label = "coreg_global__up" if key_fc > 0 else "coreg_global__down"
+        elif group == "co-regulated":
+            pattern = pop.replace(":", "_")
+            if pattern:
+                label = f"coreg_{pattern}__up" if key_fc > 0 else f"coreg_{pattern}__down"
+            else:
+                label = "coreg__up" if key_fc > 0 else "coreg__down"
+        elif group == "local":
+            label = f"{pop}__up" if key_fc > 0 else f"{pop}__down"
+        else:
+            label = f"{group}__up" if key_fc > 0 else f"{group}__down"
+
+        genes = gene_map.setdefault(label, [])
+        if gene not in genes:
+            genes.append(gene)
+
+    return gene_map
+
+def run_goelite_for_clusters_directional(de_store,
+                                         background_genes,
+                                         outdir,
+                                         comparison_tag,
+                                         species,
+                                         direction,
+                                         runner=None,
+                                         prepared=None,
+                                         obo_path=None,
+                                         gaf_path=None,
+                                         cache_dir=None,
+                                         download_dir=None,
+                                         min_term_size=5,
+                                         max_term_size=2000):
+    """
+    Run GO-Elite enrichment per population cluster for up- or down-regulated genes.
+    """
+    species_key = _normalize_goelite_species(species)
+    if species_key is None:
+        print("[INFO] GO-Elite skipped: no species provided.")
+        return None
+
+    direction = str(direction).strip().lower()
+    if direction not in ("up", "down"):
+        print(f"[WARN] GO-Elite directional skipped: invalid direction '{direction}'.")
+        return None
+
+    from altanalyze3.components.goelite.resources import prepare_species_resources
+    from altanalyze3.components.goelite.runner import GOEliteRunner, EnrichmentSettings
+
+    per_pop = de_store.get("per_population_deg", {})
+    if not per_pop:
+        print("[WARN] GO-Elite skipped: no per-population DEG data found.")
+        return None
+
+    if runner is None or prepared is None:
+        if download_dir is None:
+            download_dir = os.path.join(outdir, "_goelite_downloads")
+        obo_path = _download_goelite_resource(obo_path, download_dir, "go-basic.obo")
+        gaf_path = _download_goelite_resource(gaf_path, download_dir, "goa.gaf.gz")
+
+        try:
+            print("[INFO] GO-Elite: preparing resources...")
+            parsed = prepare_species_resources(
+                species_key,
+                cache_dir=cache_dir,
+                obo_path=obo_path,
+                gaf_path=gaf_path,
+            )
+        except Exception as exc:
+            print(f"[WARN] GO-Elite skipped: {exc}")
+            return None
+        settings = EnrichmentSettings(min_term_size=int(min_term_size), max_term_size=int(max_term_size))
+        runner = GOEliteRunner(parsed, settings=settings)
+
+        bg = [str(g) for g in pd.Index(background_genes).dropna().unique().tolist()]
+        if not bg:
+            print("[WARN] GO-Elite skipped: empty background gene list.")
+            return None
+        prepared = runner.prepare_background(bg)
+
+    use_rawp = bool(de_store.get("use_rawp", False))
+    alpha = float(de_store.get("alpha", 0.05))
+    fc_thresh = float(de_store.get("fc_thresh", 1.2))
+    log2_fc_thresh = np.log2(fc_thresh)
+
+    rows = []
+    go_pops = sorted(per_pop.keys())
+    go_pbar = tqdm(
+        total=len(go_pops),
+        desc=f"GO-Elite per population ({direction})",
+        ncols=100,
+        dynamic_ncols=True,
+        position=0,
+        leave=True,
+        file=sys.stdout,
+        disable=False,
+    )
+    for pop_name in go_pops:
+        go_pbar.set_postfix_str(str(pop_name))
+        df = per_pop[pop_name].copy()
+        if df.empty or "log2fc" not in df.columns:
+            go_pbar.update(1)
+            continue
+
+        sig_col = "pval" if use_rawp and "pval" in df.columns else "fdr"
+        df["log2fc"] = pd.to_numeric(df["log2fc"], errors="coerce")
+        df[sig_col] = pd.to_numeric(df[sig_col], errors="coerce")
+        if direction == "up":
+            sig = (df[sig_col] < alpha) & (df["log2fc"] > log2_fc_thresh)
+        else:
+            sig = (df[sig_col] < alpha) & (df["log2fc"] < -log2_fc_thresh)
+        genes = pd.Index(df.index.astype(str))[sig].unique().tolist()
+        if len(genes) == 0:
+            go_pbar.update(1)
+            continue
+
+        results = runner.run_prepared(genes, prepared, apply_prioritization=True)
+        if not results:
+            go_pbar.update(1)
+            continue
+
+        query_map = {}
+        for gene in genes:
+            key = gene.upper()
+            if key not in query_map:
+                query_map[key] = gene
+        query_upper = set(query_map.keys())
+
+        for res in results:
+            if not res.selected:
+                continue
+            term_genes = prepared.term_genes.get(res.term_id, set())
+            overlap_upper = query_upper & term_genes
+            overlap_genes = sorted(
+                query_map[key] for key in overlap_upper if key in query_map
+            )
+            node = runner.go_tree.get(res.term_id)
+            term_name = node.name if node else ""
+            namespace = node.namespace if node else ""
+            rows.append({
+                "population": str(pop_name),
+                "term_id": res.term_id,
+                "term_name": term_name,
+                "namespace": namespace,
+                "p_value": res.p_value,
+                "fdr": res.fdr,
+                "z_score": res.z_score,
+                "overlap": res.overlap,
+                "term_genes": res.total_genes,
+                "query_size": len(query_upper),
+                "selected": res.selected,
+                "overlap_genes": ",".join(overlap_genes),
+            })
+        go_pbar.update(1)
+    go_pbar.close()
+
+    if not rows:
+        print(f"[INFO] GO-Elite produced no results for {direction}-regulated genes.")
+        return None
+
+    os.makedirs(outdir, exist_ok=True)
+    safe_tag = NetPerspective.safe_component(comparison_tag)
+    out_path = os.path.join(outdir, f"GOElite_{safe_tag}.tsv")
+    columns = [
+        "population",
+        "term_id",
+        "term_name",
+        "namespace",
+        "p_value",
+        "fdr",
+        "z_score",
+        "overlap",
+        "term_genes",
+        "query_size",
+        "selected",
+        "overlap_genes",
+    ]
+    out_df = pd.DataFrame(rows, columns=columns)
+    out_df.sort_values(["population", "fdr", "p_value"], inplace=True)
+    out_df.to_csv(out_path, sep="\t", index=False)
+    print(f"[INFO] GO-Elite {direction}-regulated results written to: {out_path}")
+    return out_df
 
 # ------------------------- Step 6: differentials h5ad ---------------------- #
 
@@ -2859,6 +3045,41 @@ def main():
                     min_term_size=args.goelite_min_term_size,
                     max_term_size=args.goelite_max_term_size,
                 )
+                if goelite_payload and goelite_payload.get("runner") and goelite_payload.get("prepared"):
+                    goelite_up_dir = os.path.join(goelite_dir, "up-regulated")
+                    goelite_down_dir = os.path.join(goelite_dir, "down-regulated")
+                    run_goelite_for_clusters_directional(
+                        de_store=de_store,
+                        background_genes=background_genes,
+                        outdir=goelite_up_dir,
+                        comparison_tag=f"{tag}_up",
+                        species=args.goelite_species,
+                        direction="up",
+                        runner=goelite_payload["runner"],
+                        prepared=goelite_payload["prepared"],
+                        obo_path=args.goelite_obo,
+                        gaf_path=args.goelite_gaf,
+                        cache_dir=args.goelite_cache_dir,
+                        download_dir=goelite_download_dir,
+                        min_term_size=args.goelite_min_term_size,
+                        max_term_size=args.goelite_max_term_size,
+                    )
+                    run_goelite_for_clusters_directional(
+                        de_store=de_store,
+                        background_genes=background_genes,
+                        outdir=goelite_down_dir,
+                        comparison_tag=f"{tag}_down",
+                        species=args.goelite_species,
+                        direction="down",
+                        runner=goelite_payload["runner"],
+                        prepared=goelite_payload["prepared"],
+                        obo_path=args.goelite_obo,
+                        gaf_path=args.goelite_gaf,
+                        cache_dir=args.goelite_cache_dir,
+                        download_dir=goelite_download_dir,
+                        min_term_size=args.goelite_min_term_size,
+                        max_term_size=args.goelite_max_term_size,
+                    )
 
             heat_png = "heatmap_{}_by_{}.pdf".format(tag, args.population_col)
             heat_tsv = "heatmap_{}_by_{}.tsv".format(tag, args.population_col)
