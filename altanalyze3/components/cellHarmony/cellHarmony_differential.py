@@ -1614,7 +1614,7 @@ def build_fixed_order_heatmap(
 
     # --- Add vertical and horizontal white gridlines ---
     for x in range(1, fold_df.shape[1]):
-        ax.axvline(x - 0.48, color="white", linewidth=0.37, alpha=0.9)
+        ax.axvline(x - 0.49, color="white", linewidth=0.39, alpha=0.9)
 
     for y in block_breaks:
         ax.axhline(y - 0.5, color="white", linewidth=0.35, alpha=0.9)
@@ -1699,6 +1699,7 @@ def build_fixed_order_heatmap(
         text_height_px = go_term_font_size * fig.dpi / 72.0 * 2.8
         min_rows_per_term = max(1, int(math.ceil(text_height_px / max(1.0, row_height_px))))
 
+        cluster_entries = []
         for cluster, start, end in cluster_ranges:
             terms = go_terms_map.get(str(cluster), [])
             block_height = max(1, end - start)
@@ -1707,32 +1708,70 @@ def build_fixed_order_heatmap(
             if goelite_max_terms:
                 max_terms = min(max_terms, goelite_max_terms)
             terms = terms[:max_terms] if terms else []
+            cluster_entries.append(
+                {
+                    "cluster": cluster,
+                    "start": start,
+                    "end": end,
+                    "block_height": block_height,
+                    "terms": terms,
+                    "positions": [],
+                }
+            )
 
-            if terms:
-                term_color = row_color_map.get(str(cluster), "blue")
-                y_positions = []
-                available_rows = max(1, block_height - 1)
-                total_height = (len(terms) - 1) * min_rows_per_term if len(terms) > 1 else 0
-                top_offset = max(0.0, (available_rows - total_height) / 2.0)
-                start_y = start + 0.5 + top_offset
-                for i in range(len(terms)):
-                    y = start_y + i * min_rows_per_term
-                    if y > end - 0.5:
-                        break
-                    y_positions.append(y)
-                for y, (term, pval) in zip(y_positions, terms):
-                    term = "{} ({})".format(term, _format_pvalue(pval))
-                    ax_terms.text(
-                        text_x,
-                        y,
-                        term,
-                        transform=ax_terms.get_yaxis_transform(),
-                        ha="right",
-                        va="center",
-                        fontsize=go_term_font_size,
-                        color=term_color,
-                        clip_on=False,
-                    )
+        def _compute_positions(entry):
+            terms = entry["terms"]
+            if not terms:
+                entry["positions"] = []
+                return
+            block_height = max(1, entry["end"] - entry["start"])
+            available_rows = max(1, block_height - 1)
+            total_height = (len(terms) - 1) * min_rows_per_term if len(terms) > 1 else 0
+            top_offset = max(0.0, (available_rows - total_height) / 2.0)
+            start_y = entry["start"] + 0.5 + top_offset
+            positions = []
+            for i in range(len(terms)):
+                y = start_y + i * min_rows_per_term
+                if y > entry["end"] - 0.5:
+                    break
+                positions.append(y)
+            entry["positions"] = positions
+
+        for entry in cluster_entries:
+            _compute_positions(entry)
+
+        for idx in range(1, len(cluster_entries)):
+            prev = cluster_entries[idx - 1]
+            curr = cluster_entries[idx]
+            while prev["positions"] and curr["positions"]:
+                prev_last = prev["positions"][-1]
+                curr_first = curr["positions"][0]
+                if (curr_first - prev_last) >= min_rows_per_term:
+                    break
+                if prev["block_height"] >= curr["block_height"]:
+                    prev["terms"] = prev["terms"][:-1]
+                    _compute_positions(prev)
+                else:
+                    curr["terms"] = curr["terms"][:-1]
+                    _compute_positions(curr)
+
+        for entry in cluster_entries:
+            if not entry["positions"]:
+                continue
+            term_color = row_color_map.get(str(entry["cluster"]), "blue")
+            for y, (term, pval) in zip(entry["positions"], entry["terms"]):
+                term = "{} ({})".format(term, _format_pvalue(pval))
+                ax_terms.text(
+                    text_x,
+                    y,
+                    term,
+                    transform=ax_terms.get_yaxis_transform(),
+                    ha="right",
+                    va="center",
+                    fontsize=go_term_font_size,
+                    color=term_color,
+                    clip_on=False,
+                )
 
     cax = inset_axes(
         ax,
