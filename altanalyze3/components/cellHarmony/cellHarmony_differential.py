@@ -1623,7 +1623,7 @@ def build_fixed_order_heatmap(
     ax.set_xticks(np.arange(fold_df.shape[1]))
     ax.set_xticklabels(list(fold_df.columns), rotation=45, ha="left", fontsize=5.5)
     ax.xaxis.tick_top()
-    ax.tick_params(axis="x", bottom=False, top=True, labelbottom=False, labeltop=True, length=0, pad=6)
+    ax.tick_params(axis="x", bottom=False, top=True, labelbottom=False, labeltop=True, length=0, pad=5)
     if show_go_terms:
         fig.suptitle(
             "cellHarmony DE log2FC ({} vs {}) by {}".format(
@@ -1652,7 +1652,7 @@ def build_fixed_order_heatmap(
 
     divider = make_axes_locatable(ax)
     ax_top = divider.append_axes("top", size="1.5%", pad=0.02)
-    ax_left = divider.append_axes("left", size="3%", pad=0.015)
+    ax_left = divider.append_axes("left", size="3%", pad=0.025)
 
     col_ids = np.array([column_to_id[c] for c in column_clusters], dtype=int)[None, :]
     row_ids = np.array([row_to_id.get(c, 0) for c in row_clusters], dtype=int)[:, None]
