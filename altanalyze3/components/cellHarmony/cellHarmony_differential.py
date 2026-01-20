@@ -23,8 +23,12 @@ Notes:
 
 import os
 import sys
+import textwrap
+import math
+import logging
 import argparse
 import datetime
+import collections
 from collections import Counter
 import numpy as np
 import pandas as pd
@@ -32,6 +36,9 @@ import anndata as ad
 import scanpy as sc
 import scipy.sparse as sps
 from tqdm import tqdm
+
+logging.getLogger("fontTools").setLevel(logging.WARNING)
+logging.getLogger("fontTools.subset").setLevel(logging.WARNING)
 from altanalyze3.components.visualization import NetPerspective
 import matplotlib
 matplotlib.use("Agg")
@@ -88,6 +95,14 @@ def _ensure_numeric_matrix(x):
     except Exception as e:
         raise ValueError("Failed to convert matrix to ndarray: {}".format(e))
     return arr
+
+def _suppress_fonttools_logs():
+    """Reduce noisy fontTools subset logging emitted during vector export."""
+    for name in ("fontTools", "fontTools.subset"):
+        logger = logging.getLogger(name)
+        logger.setLevel(logging.ERROR)
+        logger.propagate = False
+        logger.disabled = True
 
 def _is_categorical_series(s):
     return pd.api.types.is_categorical_dtype(s)
@@ -1197,7 +1212,17 @@ def run_de_for_comparisons(adata,
 
 # -------------------- Step 5: Heatmap (fixed order), TSV ------------------- #
 
-def build_fixed_order_heatmap(de_store, outdir, population_col, fc_thresh, heatmap_png, heatmap_tsv):
+def build_fixed_order_heatmap(
+    de_store,
+    outdir,
+    population_col,
+    fc_thresh,
+    heatmap_png,
+    heatmap_tsv,
+    goelite_payload=None,
+    show_go_terms=False,
+    goelite_max_terms=5,
+):
     """
     Build a fixed-order heatmap of log2 fold-changes for all populations,
     restricted to genes significant in any local comparison.
@@ -1482,6 +1507,49 @@ def build_fixed_order_heatmap(de_store, outdir, population_col, fc_thresh, heatm
 
 
     # ------------------------- 5. Draw heatmap ------------------------- #
+    go_terms_map = {}
+    cluster_ranges = []
+    if show_go_terms and goelite_payload and goelite_payload.get("runner") and goelite_payload.get("prepared"):
+        runner = goelite_payload["runner"]
+        prepared = goelite_payload["prepared"]
+        cluster_gene_map = collections.OrderedDict()
+        for gene, cluster in zip(ordered_genes, row_clusters):
+            cluster_gene_map.setdefault(cluster, []).append(gene)
+
+        current_cluster = None
+        start = 0
+        for idx, cluster in enumerate(row_clusters):
+            if cluster != current_cluster:
+                if current_cluster is not None:
+                    cluster_ranges.append((current_cluster, start, idx))
+                current_cluster = cluster
+                start = idx
+        if current_cluster is not None:
+            cluster_ranges.append((current_cluster, start, len(row_clusters)))
+
+        for cluster, genes in cluster_gene_map.items():
+            if str(cluster) == "unassigned":
+                continue
+            if not genes:
+                continue
+            results = runner.run_prepared(genes, prepared, apply_prioritization=True)
+            if not results:
+                continue
+            selected = [res for res in results if res.selected]
+            if not selected:
+                selected = results
+            selected.sort(key=lambda res: (res.p_value, -abs(res.z_score)))
+            term_hits = []
+            for res in selected:
+                node = runner.go_tree.get(res.term_id)
+                name = node.name if node else ""
+                if name:
+                    term_hits.append((name, res.p_value))
+                if len(term_hits) >= goelite_max_terms:
+                    break
+            if term_hits:
+                go_terms_map[str(cluster)] = term_hits
+
     def YellowBlackSky():
         cdict = {
             'red':   [(0.0, 0.0, 0.0), (0.5, 0.0, 0.1), (1.0, 1.0, 1.0)],
@@ -1494,10 +1562,30 @@ def build_fixed_order_heatmap(de_store, outdir, population_col, fc_thresh, heatm
     vmax = max(1.0, np.log2(float(fc_thresh)) * 1.5)
     vmin = -vmax
 
-    fixed_height = 7  # adjust between 6–12 depending on display
-    fig = plt.figure(figsize=(max(6.0, 0.25 * len(pop_order)), fixed_height))
-
-    ax = plt.gca()
+    fixed_height = 4.2  # shorter layout to reduce heatmap height
+    base_width = max(6.0, 0.25 * len(pop_order))
+    ax_labels = None
+    if show_go_terms:
+        fig = plt.figure(figsize=(base_width, fixed_height))
+        plot_top = 0.78
+        plot_bottom = 0.10
+        gs = fig.add_gridspec(
+            1,
+            3,
+            width_ratios=[0.35, 0.50, 0.15],
+            wspace=0.04,
+            left=0.38,
+            right=0.98,
+            top=plot_top,
+            bottom=plot_bottom,
+        )
+        ax_terms = fig.add_subplot(gs[0, 0], sharey=None)
+        ax = fig.add_subplot(gs[0, 1], sharey=ax_terms)
+        ax_labels = fig.add_subplot(gs[0, 2], sharey=ax)
+    else:
+        fig = plt.figure(figsize=(base_width, fixed_height))
+        ax = plt.gca()
+        ax_terms = None
 
     # --- FIX: remove white space caused by NaN folds in missing populations ---
     # Fill NaN with 0 (neutral fold) so heatmap renders continuously
@@ -1519,18 +1607,31 @@ def build_fixed_order_heatmap(de_store, outdir, population_col, fc_thresh, heatm
 
     # --- Add vertical and horizontal white gridlines ---
     for x in range(1, fold_df.shape[1]):
-        ax.axvline(x - 0.5, color="white", linewidth=0.2, alpha=0.9)
+        ax.axvline(x - 0.48, color="white", linewidth=0.37, alpha=0.9)
 
     for y in block_breaks:
-        ax.axhline(y - 0.5, color="white", linewidth=0.2, alpha=0.9)
+        ax.axhline(y - 0.5, color="white", linewidth=0.35, alpha=0.9)
 
     ax.set_yticks([])
     ax.set_xticks(np.arange(fold_df.shape[1]))
-    ax.set_xticklabels(list(fold_df.columns), rotation=45, ha="left", fontsize=7)
+    ax.set_xticklabels(list(fold_df.columns), rotation=45, ha="left", fontsize=5.5)
     ax.xaxis.tick_top()
-    ax.tick_params(axis="x", bottom=False, top=True, labelbottom=False, labeltop=True, length=0, pad=8)
-    ax.set_title("cellHarmony DE log2FC ({} vs {}) by {}".format(
-        de_store["case_label"], de_store["control_label"], population_col))
+    ax.tick_params(axis="x", bottom=False, top=True, labelbottom=False, labeltop=True, length=0, pad=6)
+    if show_go_terms:
+        fig.suptitle(
+            "cellHarmony DE log2FC ({} vs {}) by {}".format(
+                de_store["case_label"], de_store["control_label"], population_col
+            ),
+            x=0.5,
+            y=0.98,
+            fontsize=10,
+        )
+    else:
+        ax.set_title(
+            "cellHarmony DE log2FC ({} vs {}) by {}".format(
+                de_store["case_label"], de_store["control_label"], population_col
+            )
+        )
 
     column_colors = [plt.get_cmap("tab20")(i % 20) for i in range(len(column_clusters))]
     column_cmap = ListedColormap(column_colors)
@@ -1540,6 +1641,7 @@ def build_fixed_order_heatmap(de_store, outdir, population_col, fc_thresh, heatm
     row_colors = [plt.get_cmap("tab20b")(i % 20) for i in range(len(row_cluster_order))]
     row_cmap = ListedColormap(row_colors)
     row_to_id = {cluster: idx for idx, cluster in enumerate(row_cluster_order)}
+    row_color_map = {cluster: row_colors[row_to_id[cluster]] for cluster in row_cluster_order}
 
     divider = make_axes_locatable(ax)
     ax_top = divider.append_axes("top", size="1.5%", pad=0.02)
@@ -1558,6 +1660,71 @@ def build_fixed_order_heatmap(de_store, outdir, population_col, fc_thresh, heatm
     ax_left.set_yticks([])
     ax_left.set_xlabel("")
 
+    if ax_terms is not None:
+        ax_terms.set_xlim(0, 1)
+        ax_terms.set_ylim(ax.get_ylim())
+        ax_terms.set_xticks([])
+        ax_terms.set_yticks([])
+        ax_terms.axis("off")
+        ax_terms.patch.set_alpha(0.0)
+
+        fig.canvas.draw()
+        axis_height_px = ax_terms.get_window_extent().height
+        axis_width_px = ax_terms.get_window_extent().width
+        row_height_px = axis_height_px / max(1, len(row_clusters))
+        left_margin = 0.01
+        text_x = 0.97
+        term_right = text_x
+
+        def _format_pvalue(pvalue):
+            try:
+                pval = float(pvalue)
+            except Exception:
+                return "p=NA"
+            if pval < 1e-3:
+                return "p={:.1e}".format(pval)
+            return "p={:.3f}".format(pval)
+
+        def _shorten_term_label(term, font_size):
+            text_area_px = axis_width_px * (term_right - left_margin)
+            avg_char_px = max(3.5, font_size * 0.6)
+            max_chars = max(12, int(text_area_px / avg_char_px))
+            return textwrap.shorten(term, width=max_chars, placeholder="...")
+
+        go_term_font_size = 6
+        text_height_px = go_term_font_size * fig.dpi / 72.0 * 1.2
+        min_rows_per_term = max(1, int(math.ceil(text_height_px / max(1.0, row_height_px))))
+
+        for cluster, start, end in cluster_ranges:
+            terms = go_terms_map.get(str(cluster), [])
+            block_height = max(1, end - start)
+            slot_count = max(1, int(block_height / min_rows_per_term))
+            max_terms = max(1, min(goelite_max_terms, slot_count, len(terms)))
+            terms = terms[:max_terms] if terms else []
+
+            if terms:
+                term_color = row_color_map.get(str(cluster), "blue")
+                y_positions = []
+                for i in range(len(terms)):
+                    y = start + 0.5 + i * min_rows_per_term
+                    if y > end - 0.5:
+                        break
+                    y_positions.append(y)
+                for y, (term, pval) in zip(y_positions, terms):
+                    term = "{} ({})".format(term, _format_pvalue(pval))
+                    term = _shorten_term_label(term, go_term_font_size)
+                    ax_terms.text(
+                        text_x,
+                        y,
+                        term,
+                        transform=ax_terms.get_yaxis_transform(),
+                        ha="right",
+                        va="center",
+                        fontsize=go_term_font_size,
+                        color=term_color,
+                        clip_on=False,
+                    )
+
     cax = inset_axes(
         ax,
         width="35%",
@@ -1569,10 +1736,19 @@ def build_fixed_order_heatmap(de_store, outdir, population_col, fc_thresh, heatm
     )
     cbar = plt.colorbar(im, cax=cax, orientation="horizontal")
     cbar.ax.set_xlim(vmin, vmax)
-    cbar.set_label("log2 fold change")
+    cbar.set_label("log2 fold change", fontsize=6, labelpad=-2)
     cbar.set_ticks([])
-    cbar.ax.text(0.0, 0.5, f"{vmin:.1f}", ha="right", va="center", transform=cbar.ax.transAxes)
-    cbar.ax.text(1.0, 0.5, f"{vmax:.1f}", ha="left", va="center", transform=cbar.ax.transAxes)
+    cbar.ax.text(-0.10, 0.32, f"{vmin:.1f}", ha="right", va="center", transform=cbar.ax.transAxes, fontsize=6)
+    cbar.ax.text(1.10, 0.32, f"{vmax:.1f}", ha="left", va="center", transform=cbar.ax.transAxes, fontsize=6)
+    cbar.outline.set_linewidth(0.5)
+
+    if ax_labels is not None:
+        ax_labels.set_xlim(0, 1)
+        ax_labels.set_ylim(ax.get_ylim())
+        ax_labels.set_xticks([])
+        ax_labels.set_yticks([])
+        ax_labels.axis("off")
+        ax_labels.patch.set_alpha(0.0)
 
     first_gene_positions = {}
     for idx, cluster in enumerate(row_clusters):
@@ -1580,22 +1756,37 @@ def build_fixed_order_heatmap(de_store, outdir, population_col, fc_thresh, heatm
             first_gene_positions[cluster] = idx
     for cluster, pos in first_gene_positions.items():
         gene = fold_df.index[pos]
-        ax.text(
-            1.01,
-            pos,
-            gene,
-            transform=ax.get_yaxis_transform(),
-            ha="left",
-            va="center",
-            fontsize=7,
-        )
+        if ax_labels is not None:
+            ax_labels.text(
+                0.0,
+                pos,
+                gene,
+                transform=ax_labels.get_yaxis_transform(),
+                ha="left",
+                va="center",
+                fontsize=6,
+                clip_on=False,
+            )
+        else:
+            ax.text(
+                1.01,
+                pos,
+                gene,
+                transform=ax.get_yaxis_transform(),
+                ha="left",
+                va="center",
+                fontsize=7,
+                clip_on=True,
+            )
 
     pdf_path = os.path.join(outdir, heatmap_png)
 
     # Save high-quality raster and vector outputs
-    plt.savefig(pdf_path, dpi=600, bbox_inches="tight", pad_inches=0.02)
-    plt.savefig(pdf_path.replace(".png", ".pdf"), dpi=600, bbox_inches="tight", pad_inches=0.02, transparent=True)
-    plt.savefig(pdf_path.replace(".png", ".svg"), bbox_inches="tight", transparent=True)
+    _suppress_fonttools_logs()
+    bbox = None if show_go_terms else "tight"
+    plt.savefig(pdf_path, dpi=600, bbox_inches=bbox, pad_inches=0.02)
+    plt.savefig(pdf_path.replace(".png", ".pdf"), dpi=600, bbox_inches=bbox, pad_inches=0.02, transparent=True)
+    plt.savefig(pdf_path.replace(".png", ".svg"), bbox_inches=bbox, transparent=True)
 
     plt.close(fig)
     print(f"[INFO] Wrote heatmap images: {pdf_path}, {pdf_path.replace('.png', '.pdf')}, {pdf_path.replace('.png', '.svg')}")
@@ -1749,6 +1940,7 @@ def run_goelite_for_clusters(de_store,
         print("[WARN] GO-Elite skipped: empty background gene list.")
         return None
     prepared = runner.prepare_background(bg)
+    payload = {"runner": runner, "prepared": prepared, "results": None}
     print(f"[INFO] GO-Elite: prepared {len(prepared.term_genes)} terms for testing.")
 
     rows = []
@@ -1824,7 +2016,7 @@ def run_goelite_for_clusters(de_store,
 
     if not rows:
         print("[INFO] GO-Elite produced no results across populations.")
-        return None
+        return payload
 
     os.makedirs(outdir, exist_ok=True)
     safe_tag = NetPerspective.safe_component(comparison_tag)
@@ -1847,7 +2039,8 @@ def run_goelite_for_clusters(de_store,
     out_df.sort_values(["population", "fdr", "p_value"], inplace=True)
     out_df.to_csv(out_path, sep="\t", index=False)
     print(f"[INFO] GO-Elite results written to: {out_path}")
-    return out_path
+    payload["results"] = out_df
+    return payload
 
 # ------------------------- Step 6: differentials h5ad ---------------------- #
 
@@ -2285,10 +2478,42 @@ def main():
                     freq_table.to_csv(freq_tsv_path, sep="\t", index=False, float_format="%.4f")
                     print(f"[INFO] Wrote cell frequency table: {freq_tsv_path}")
 
+            goelite_payload = None
+            if args.goelite_species:
+                background_genes = adata.var_names.astype(str)
+                if "gene_symbols" in adata.var.columns:
+                    background_genes = adata.var["gene_symbols"].astype(str)
+                elif "features" in adata.var.columns:
+                    background_genes = adata.var["features"].astype(str)
+
+                goelite_subdir = os.path.join(goelite_dir, NetPerspective.safe_component(tag))
+                print(f"[INFO] GO-Elite: starting for {tag} (output: {goelite_subdir})")
+                goelite_payload = run_goelite_for_clusters(
+                    de_store=de_store,
+                    background_genes=background_genes,
+                    outdir=goelite_subdir,
+                    comparison_tag=tag,
+                    species=args.goelite_species,
+                    obo_path=args.goelite_obo,
+                    gaf_path=args.goelite_gaf,
+                    cache_dir=args.goelite_cache_dir,
+                    download_dir=goelite_download_dir,
+                    min_term_size=args.goelite_min_term_size,
+                    max_term_size=args.goelite_max_term_size,
+                )
+
             heat_png = "heatmap_{}_by_{}.pdf".format(tag, args.population_col)
             heat_tsv = "heatmap_{}_by_{}.tsv".format(tag, args.population_col)
-            build_fixed_order_heatmap(de_store, heatmap_dir, args.population_col, float(args.fc),
-                                      heatmap_png=heat_png, heatmap_tsv=heat_tsv)
+            build_fixed_order_heatmap(
+                de_store,
+                heatmap_dir,
+                args.population_col,
+                float(args.fc),
+                heatmap_png=heat_png,
+                heatmap_tsv=heat_tsv,
+                goelite_payload=goelite_payload,
+                show_go_terms=bool(goelite_payload),
+            )
 
             out_h5ad = os.path.join(deg_dir, "differentials_only_{}.h5ad".format(tag))
             write_differentials_only_h5ad(adata, de_store, out_h5ad)
@@ -2320,29 +2545,6 @@ def main():
             if cr is not None and not cr.empty:
                 cr.to_csv(cr_path, sep="\t", index=False)
                 print("[INFO] Wrote {}".format(cr_path))
-
-            if args.goelite_species:
-                background_genes = adata.var_names.astype(str)
-                if "gene_symbols" in adata.var.columns:
-                    background_genes = adata.var["gene_symbols"].astype(str)
-                elif "features" in adata.var.columns:
-                    background_genes = adata.var["features"].astype(str)
-
-                goelite_subdir = os.path.join(goelite_dir, NetPerspective.safe_component(tag))
-                print(f"[INFO] GO-Elite: starting for {tag} (output: {goelite_subdir})")
-                run_goelite_for_clusters(
-                    de_store=de_store,
-                    background_genes=background_genes,
-                    outdir=goelite_subdir,
-                    comparison_tag=tag,
-                    species=args.goelite_species,
-                    obo_path=args.goelite_obo,
-                    gaf_path=args.goelite_gaf,
-                    cache_dir=args.goelite_cache_dir,
-                    download_dir=goelite_download_dir,
-                    min_term_size=args.goelite_min_term_size,
-                    max_term_size=args.goelite_max_term_size,
-                )
 
             if not args.skip_grn and interactions_df is not None:
                 detailed = de_store.get("detailed_deg")
