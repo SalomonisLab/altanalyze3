@@ -51,7 +51,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning, message=".*invalid va
 
 plt.rcParams['axes.linewidth'] = 0.5
 plt.rcParams['pdf.fonttype'] = 42
-plt.rcParams['font.family'] = 'sans-serif'
+plt.rcParams['font.family'] = 'Arial'
 plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
 plt.rcParams['figure.facecolor'] = 'white'
 
@@ -1824,7 +1824,7 @@ def build_fixed_order_heatmap(
                 transform=ax_labels.get_yaxis_transform(),
                 ha="left",
                 va="center",
-                fontsize=5,
+                fontsize=4,
                 fontstyle="italic",
                 clip_on=False,
             )
