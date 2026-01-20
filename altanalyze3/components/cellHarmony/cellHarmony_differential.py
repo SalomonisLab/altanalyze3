@@ -39,6 +39,10 @@ from tqdm import tqdm
 
 logging.getLogger("fontTools").setLevel(logging.WARNING)
 logging.getLogger("fontTools.subset").setLevel(logging.WARNING)
+for _name in ("anndata", "anndata._core.anndata"):
+    _logger = logging.getLogger(_name)
+    _logger.setLevel(logging.ERROR)
+    _logger.propagate = False
 from altanalyze3.components.visualization import NetPerspective
 import matplotlib
 matplotlib.use("Agg")
@@ -1749,15 +1753,18 @@ def build_fixed_order_heatmap(
             return "p={:.3f}".format(pval)
 
         go_term_font_size = 4
-        text_height_px = go_term_font_size * fig.dpi / 72.0 * 2.8
-        min_rows_per_term = max(1, int(math.ceil(text_height_px / max(1.0, row_height_px))))
+        go_term_spacing_px = max(10.0, go_term_font_size * fig.dpi / 72.0 * 3.0)
+        # Adjust spacing based on total genes to keep cluster density comparable.
+        gene_scale = max(1.0, len(row_clusters) / 600.0)
+        min_rows_per_term = max(1.0, go_term_spacing_px / max(1.0, row_height_px))
+        min_rows_per_term *= gene_scale
 
         cluster_entries = []
         for cluster, start, end in cluster_ranges:
             terms = go_terms_map.get(str(cluster), [])
             block_height = max(1, end - start)
-            slot_count = max(1, int(block_height / min_rows_per_term))
-            max_terms = min(slot_count, len(terms))
+            slot_count = max(1, int(block_height / max(1.0, min_rows_per_term)))
+            max_terms = min(len(terms), slot_count)
             if goelite_max_terms:
                 max_terms = min(max_terms, goelite_max_terms)
             terms = terms[:max_terms] if terms else []
@@ -1778,8 +1785,10 @@ def build_fixed_order_heatmap(
                 entry["positions"] = []
                 return
             block_height = max(1, entry["end"] - entry["start"])
-            available_rows = max(1, block_height - 1)
-            total_height = (len(terms) - 1) * min_rows_per_term if len(terms) > 1 else 0
+            available_rows = max(1.0, block_height - 1)
+            total_height = (len(terms) - 1) * min_rows_per_term if len(terms) > 1 else 0.0
+            if total_height > available_rows:
+                total_height = available_rows
             top_offset = max(0.0, (available_rows - total_height) / 2.0)
             start_y = entry["start"] + 0.5 + top_offset
             positions = []
