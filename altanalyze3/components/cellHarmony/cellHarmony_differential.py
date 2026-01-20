@@ -1222,6 +1222,7 @@ def build_fixed_order_heatmap(
     goelite_payload=None,
     show_go_terms=False,
     goelite_max_terms=30,
+    goelite_pattern_path=None,
 ):
     """
     Build a fixed-order heatmap of log2 fold-changes for all populations,
@@ -1518,6 +1519,7 @@ def build_fixed_order_heatmap(
     # ------------------------- 5. Draw heatmap ------------------------- #
     go_terms_map = {}
     cluster_ranges = []
+    pattern_rows = []
     if show_go_terms and goelite_payload and goelite_payload.get("runner") and goelite_payload.get("prepared"):
         runner = goelite_payload["runner"]
         prepared = goelite_payload["prepared"]
@@ -1549,13 +1551,67 @@ def build_fixed_order_heatmap(
                 selected = results
             selected.sort(key=lambda res: (res.p_value, -abs(res.z_score)))
             term_hits = []
+            query_map = {}
+            for gene in genes:
+                key = str(gene).upper()
+                if key not in query_map:
+                    query_map[key] = gene
+            query_upper = set(query_map.keys())
             for res in selected:
                 node = runner.go_tree.get(res.term_id)
                 name = node.name if node else ""
+                namespace = node.namespace if node else ""
+                if namespace and namespace.lower() != "biological_process":
+                    continue
                 if name:
                     term_hits.append((name, res.p_value))
+                if goelite_pattern_path:
+                    term_genes = prepared.term_genes.get(res.term_id, set())
+                    overlap_upper = query_upper & term_genes
+                    overlap_genes = sorted(
+                        query_map[key] for key in overlap_upper if key in query_map
+                    )
+                    pattern_rows.append(
+                        {
+                            "cluster": str(cluster),
+                            "term_id": res.term_id,
+                            "term_name": name,
+                            "namespace": namespace,
+                            "p_value": res.p_value,
+                            "fdr": res.fdr,
+                            "z_score": res.z_score,
+                            "overlap": res.overlap,
+                            "term_genes": res.total_genes,
+                            "query_size": len(query_upper),
+                            "selected": res.selected,
+                            "overlap_genes": ",".join(overlap_genes),
+                        }
+                    )
             if term_hits:
                 go_terms_map[str(cluster)] = term_hits
+
+        if goelite_pattern_path and pattern_rows:
+            out_dir = os.path.dirname(goelite_pattern_path)
+            if out_dir:
+                os.makedirs(out_dir, exist_ok=True)
+            columns = [
+                "cluster",
+                "term_id",
+                "term_name",
+                "namespace",
+                "p_value",
+                "fdr",
+                "z_score",
+                "overlap",
+                "term_genes",
+                "query_size",
+                "selected",
+                "overlap_genes",
+            ]
+            out_df = pd.DataFrame(pattern_rows, columns=columns)
+            out_df.sort_values(["cluster", "fdr", "p_value"], inplace=True)
+            out_df.to_csv(goelite_pattern_path, sep="\t", index=False)
+            print(f"[INFO] GO-Elite pattern results written to: {goelite_pattern_path}")
 
     def YellowBlackSky():
         cdict = {
@@ -1624,21 +1680,18 @@ def build_fixed_order_heatmap(
     ax.set_xticklabels(list(fold_df.columns), rotation=45, ha="left", fontsize=5.5)
     ax.xaxis.tick_top()
     ax.tick_params(axis="x", bottom=False, top=True, labelbottom=False, labeltop=True, length=0, pad=5)
-    if show_go_terms:
-        fig.suptitle(
-            "cellHarmony DE log2FC ({} vs {}) by {}".format(
-                de_store["case_label"], de_store["control_label"], population_col
-            ),
-            x=0.5,
-            y=0.98,
-            fontsize=10,
-        )
+    comparison_label = de_store.get("comparison_label")
+    if comparison_label:
+        title_text = "cellHarmony DE log2FC ({}) by {}".format(comparison_label, population_col)
     else:
-        ax.set_title(
-            "cellHarmony DE log2FC ({} vs {}) by {}".format(
-                de_store["case_label"], de_store["control_label"], population_col
-            )
+        title_text = "cellHarmony DE log2FC ({} vs {}) by {}".format(
+            de_store["case_label"], de_store["control_label"], population_col
         )
+
+    if show_go_terms:
+        fig.suptitle(title_text, x=0.5, y=0.98, fontsize=10)
+    else:
+        ax.set_title(title_text)
 
     column_colors = [plt.get_cmap("tab20")(i % 20) for i in range(len(column_clusters))]
     column_cmap = ListedColormap(column_colors)
@@ -2174,6 +2227,363 @@ def _sanitize_de_store(de_store):
             detailed[col] = detailed[col].apply(lambda v: str(v) if not isinstance(v, str) else v)
         de_store["detailed_deg"] = detailed
 
+def _unique_preserve_order(values):
+    seen = set()
+    ordered = []
+    for val in values:
+        if val in seen:
+            continue
+        seen.add(val)
+        ordered.append(val)
+    return ordered
+
+def _write_cell_frequency_plots(
+    adata,
+    population_col,
+    covariate_col,
+    conditions,
+    outdir,
+    comparison_label,
+    comparison_prefix=None,
+    pop_order=None,
+):
+    if not conditions:
+        print("[WARN] Skipping cell frequency plots: no conditions provided.")
+        return
+
+    condition_list = [str(c) for c in conditions]
+    freq_obs = adata.obs.loc[
+        adata.obs[covariate_col].isin(condition_list),
+        [population_col, covariate_col],
+    ].dropna()
+
+    if freq_obs.empty:
+        print("[WARN] Skipping cell frequency plots: no cells found for condition subset.")
+        return
+
+    freq_obs[population_col] = freq_obs[population_col].astype(str)
+    freq_obs[covariate_col] = freq_obs[covariate_col].astype(str)
+
+    unique_pops = list(freq_obs[population_col].unique())
+    if pop_order:
+        freq_order = [p for p in pop_order if p in unique_pops]
+        freq_order.extend([p for p in unique_pops if p not in freq_order])
+    else:
+        freq_order = sorted(unique_pops)
+
+    counts = (
+        freq_obs.groupby([population_col, covariate_col])
+        .size()
+        .unstack(fill_value=0)
+    )
+
+    for cond in condition_list:
+        if cond not in counts.columns:
+            counts[cond] = 0
+
+    counts = counts.reindex(freq_order).fillna(0)
+    counts = counts.loc[counts.sum(axis=1) > 0]
+
+    if counts.empty:
+        print("[WARN] Skipping cell frequency plots: all populations have zero cells for condition subset.")
+        return
+
+    counts = counts.loc[:, [c for c in condition_list if c in counts.columns]]
+
+    cluster_totals = counts.sum(axis=1).replace(0, np.nan)
+    percent_by_cluster = counts.div(cluster_totals, axis=0).fillna(0) * 100.0
+
+    group_totals = counts.sum(axis=0).replace(0, np.nan)
+    percent_by_group = counts.div(group_totals, axis=1).fillna(0) * 100.0
+
+    os.makedirs(outdir, exist_ok=True)
+    prefix = comparison_prefix or comparison_label
+    comp_component = NetPerspective.safe_component(prefix)
+    pop_component = NetPerspective.safe_component(population_col)
+    stacked_path = os.path.join(outdir, f"{comp_component}_stacked_{pop_component}.pdf")
+    grouped_path = os.path.join(outdir, f"{comp_component}_by_condition_{pop_component}.pdf")
+
+    cmap = plt.get_cmap("tab20")
+    colors = [cmap(i % cmap.N) for i in range(len(counts.columns))]
+
+    fig1, ax1 = plt.subplots(figsize=(8, max(2.0, 0.4 * len(percent_by_cluster) + 2)))
+    percent_by_cluster.plot(
+        kind="barh",
+        stacked=True,
+        ax=ax1,
+        color=colors,
+        width=0.8,
+        edgecolor="black",
+        linewidth=0.2,
+    )
+    ax1.set_xlabel("Percent of cells per population")
+    ax1.set_ylabel(population_col)
+    ax1.set_title(f"Cell composition by {population_col}: {comparison_label}", fontsize=12)
+    ax1.legend(
+        title="Condition",
+        bbox_to_anchor=(1.05, 1),
+        loc="upper left",
+        borderaxespad=0.0,
+        frameon=False,
+        fontsize=8,
+        title_fontsize=9,
+    )
+    plt.tight_layout(rect=[0, 0, 0.85, 1])
+    fig1.savefig(stacked_path, bbox_inches="tight")
+    plt.close(fig1)
+    print(f"[INFO] Wrote cell frequency stacked bar chart: {stacked_path}")
+
+    fig2, ax2 = plt.subplots(figsize=(8, max(2.0, 0.4 * len(percent_by_group) + 2)))
+    y_positions = np.arange(len(percent_by_group.index))
+    n_cond = max(1, len(percent_by_group.columns))
+    bar_height = 0.8 / n_cond
+    offsets = (np.arange(n_cond) - (n_cond - 1) / 2.0) * bar_height
+
+    for idx, cond in enumerate(percent_by_group.columns):
+        ax2.barh(
+            y_positions + offsets[idx],
+            percent_by_group[cond],
+            height=bar_height * 0.9,
+            color=colors[idx],
+            edgecolor="black",
+            linewidth=0.2,
+            label=cond,
+        )
+
+    ax2.set_yticks(y_positions)
+    ax2.set_yticklabels(percent_by_group.index)
+    ax2.invert_yaxis()
+    ax2.set_xlabel("Percent of condition cells")
+    ax2.set_ylabel(population_col)
+    ax2.set_title(f"Cell frequency by condition: {comparison_label}", fontsize=12)
+    ax2.legend(loc="best", frameon=False)
+    plt.tight_layout()
+    fig2.savefig(grouped_path, bbox_inches="tight")
+    plt.close(fig2)
+    print(f"[INFO] Wrote cell frequency comparison chart: {grouped_path}")
+
+    freq_tsv_path = os.path.join(outdir, f"{comp_component}_cell_frequencies_{pop_component}.tsv")
+    counts_long = counts.reset_index().melt(
+        id_vars=population_col,
+        var_name="condition",
+        value_name="cell_count",
+    )
+    pct_group_long = percent_by_group.reset_index().melt(
+        id_vars=population_col,
+        var_name="condition",
+        value_name="percent_of_condition",
+    )
+    pct_cluster_long = percent_by_cluster.reset_index().melt(
+        id_vars=population_col,
+        var_name="condition",
+        value_name="percent_of_population",
+    )
+    freq_table = counts_long.merge(
+        pct_group_long,
+        on=[population_col, "condition"],
+        how="left",
+    ).merge(
+        pct_cluster_long,
+        on=[population_col, "condition"],
+        how="left",
+    )
+    freq_table.sort_values(
+        by=[population_col, "condition"],
+        inplace=True,
+    )
+    freq_table.to_csv(freq_tsv_path, sep="\t", index=False, float_format="%.4f")
+    print(f"[INFO] Wrote cell frequency table: {freq_tsv_path}")
+
+def _assign_integrated_groups(per_pop, population_order, alpha, fc_thresh, use_rawp, include_genes):
+    if not include_genes:
+        return pd.DataFrame(columns=["gene", "group", "key_p", "key_log2fc", "population_or_pattern"])
+
+    log2_fc_thresh = np.log2(fc_thresh)
+    rows = []
+
+    for gene in sorted(include_genes):
+        pattern = [0] * len(population_order)
+        sig_entries = []
+        for idx, pop_label in enumerate(population_order):
+            df = per_pop.get(pop_label)
+            if df is None or gene not in df.index:
+                continue
+            if "log2fc" not in df.columns:
+                continue
+
+            try:
+                log2fc_val = float(df.at[gene, "log2fc"])
+            except Exception:
+                continue
+
+            sig_col = "pval" if use_rawp and "pval" in df.columns else "fdr"
+            if sig_col not in df.columns:
+                continue
+            try:
+                pval_val = float(df.at[gene, sig_col])
+            except Exception:
+                continue
+
+            if not np.isfinite(pval_val) or not np.isfinite(log2fc_val):
+                continue
+
+            if pval_val < alpha and abs(log2fc_val) > log2_fc_thresh:
+                sign = 1 if log2fc_val > 0 else -1 if log2fc_val < 0 else 0
+                if sign != 0:
+                    sig_entries.append((pop_label, pval_val, log2fc_val))
+                    pattern[idx] = sign
+
+        if not sig_entries:
+            continue
+
+        key_pop, key_p, key_fc = min(sig_entries, key=lambda x: x[1])
+        if len(sig_entries) == 1:
+            rows.append([gene, "local", key_p, key_fc, key_pop])
+            continue
+
+        signs = [1 if entry[2] > 0 else -1 for entry in sig_entries]
+        all_pos = all(s > 0 for s in signs)
+        all_neg = all(s < 0 for s in signs)
+        if all_pos or all_neg:
+            rows.append([gene, "global", key_p, key_fc, "overall"])
+        else:
+            pattern_label = _pattern_to_label(pattern, population_order)
+            rows.append([gene, "co-regulated", key_p, key_fc, pattern_label])
+
+    return pd.DataFrame(rows, columns=["gene", "group", "key_p", "key_log2fc", "population_or_pattern"])
+
+def _build_multi_comparison_de_store(comp_results, population_col, alpha, fc_thresh, use_rawp, base_pop_order=None):
+    if not comp_results:
+        return None
+
+    if base_pop_order is None:
+        base_pop_order = []
+        for comp in comp_results:
+            pop_order = comp["de_store"].get("population_order", [])
+            if pop_order:
+                base_pop_order = list(pop_order)
+                break
+
+    lineage_order = None
+    for comp in comp_results:
+        store = comp["de_store"]
+        if "lineage_order" in store:
+            lineage_order = store["lineage_order"]
+            break
+
+    if lineage_order:
+        ordered = [p for p in lineage_order if p in base_pop_order]
+        ordered.extend([p for p in base_pop_order if p not in ordered])
+        base_pop_order = ordered
+
+    per_pop = {}
+    detailed_tables = []
+    summary_tables = []
+    fold_blocks = []
+
+    for comp in comp_results:
+        tag = comp["safe_tag"]
+        store = comp["de_store"]
+        per_pop_src = store.get("per_population_deg", {})
+        for pop_name, df in per_pop_src.items():
+            label = f"{pop_name}__{tag}"
+            per_pop[label] = df.copy()
+
+        det = store.get("detailed_deg")
+        if det is not None and not det.empty:
+            det2 = det.copy()
+            det2["population"] = det2["population"].astype(str) + "__" + tag
+            det2["comparison_tag"] = comp["tag"]
+            detailed_tables.append(det2)
+
+        summ = store.get("summary_per_population")
+        if summ is not None and not summ.empty:
+            summ2 = summ.copy()
+            summ2["population"] = summ2["population"].astype(str) + "__" + tag
+            summ2["comparison_tag"] = comp["tag"]
+            summary_tables.append(summ2)
+
+        fold = store.get("fold_matrix")
+        if isinstance(fold, pd.DataFrame) and not fold.empty:
+            fold2 = fold.copy()
+            fold2.columns = [f"{str(col)}__{tag}" for col in fold2.columns]
+            fold_blocks.append(fold2)
+
+    if fold_blocks:
+        fold_matrix = pd.concat(fold_blocks, axis=1, join="outer")
+    else:
+        fold_matrix = pd.DataFrame()
+
+    if fold_matrix.empty and per_pop:
+        fold_matrix = pd.DataFrame({k: v["log2fc"] for k, v in per_pop.items() if "log2fc" in v.columns})
+
+    if not fold_matrix.empty:
+        fold_matrix.index = fold_matrix.index.astype(str)
+
+    comp_tags = [comp["safe_tag"] for comp in comp_results]
+    population_order = []
+    for pop in base_pop_order:
+        for tag in comp_tags:
+            col = f"{pop}__{tag}"
+            if col in fold_matrix.columns:
+                population_order.append(col)
+    for col in fold_matrix.columns:
+        if col not in population_order:
+            population_order.append(col)
+
+    if population_order:
+        fold_matrix = fold_matrix.reindex(columns=population_order)
+
+    if detailed_tables:
+        detailed = pd.concat(detailed_tables, axis=0, ignore_index=True)
+    else:
+        detailed = pd.DataFrame(
+            columns=[
+                "gene",
+                "population",
+                "log2fc",
+                "fdr",
+                "pval",
+                "case_label",
+                "control_label",
+                "n_case",
+                "n_control",
+                "case_mean_expr",
+                "control_mean_expr",
+            ]
+        )
+
+    if summary_tables:
+        summary = pd.concat(summary_tables, axis=0, ignore_index=True)
+    else:
+        summary = pd.DataFrame(columns=["population", "n_case", "n_control", "num_DEG", "tested_genes"])
+
+    include_genes = set()
+    if not detailed.empty and "gene" in detailed.columns:
+        include_genes = set(detailed["gene"].astype(str))
+    else:
+        for df in per_pop.values():
+            include_genes.update(df.index.astype(str))
+
+    assigned = _assign_integrated_groups(per_pop, population_order, alpha, fc_thresh, use_rawp, include_genes)
+
+    de_store = {
+        "summary_per_population": summary,
+        "detailed_deg": detailed,
+        "assigned_groups": assigned,
+        "population_order": population_order,
+        "fold_matrix": fold_matrix,
+        "per_population_deg": per_pop,
+        "alpha": float(alpha),
+        "fc_thresh": float(fc_thresh),
+        "use_rawp": bool(use_rawp),
+        "case_label": "Multi-Comparison",
+        "control_label": "",
+        "comparison_label": "Multi-Comparison",
+        "lineage_order": population_order,
+    }
+    return de_store
+
 # --------------------------------- CLI ------------------------------------ #
 
 def parse_comparisons_arg(comp_str):
@@ -2228,19 +2638,14 @@ def main():
 
     base_outdir = args.outdir
     os.makedirs(base_outdir, exist_ok=True)
-    heatmap_dir = os.path.join(base_outdir, "heatmaps")
-    deg_dir = os.path.join(base_outdir, "DEGs")
     pseudobulk_dir = os.path.join(base_outdir, "pseudobulk")
-    cellfreq_dir = os.path.join(base_outdir, "cell-frequency")
-    goelite_dir = os.path.join(base_outdir, "GeneSetEnrichment")
     log_dir = os.path.join(base_outdir, "logs")
 
-    for path in (heatmap_dir, deg_dir, log_dir, cellfreq_dir):
-        os.makedirs(path, exist_ok=True)
+    os.makedirs(log_dir, exist_ok=True)
     if args.make_pseudobulk:
         os.makedirs(pseudobulk_dir, exist_ok=True)
+    goelite_download_dir = None
     if args.goelite_species:
-        os.makedirs(goelite_dir, exist_ok=True)
         from altanalyze3.components.goelite.resources import resolve_species_cache_dir
         normalized_species = _normalize_goelite_species(args.goelite_species)
         goelite_species_dir = resolve_species_cache_dir(normalized_species, args.goelite_cache_dir)
@@ -2311,15 +2716,12 @@ def main():
         log_file.flush()
 
         interactions_df = None
-        interaction_root = os.path.join(base_outdir, "interaction-plots")
         if not args.skip_grn:
             try:
                 interactions_df = NetPerspective.load_interaction_data()
             except Exception as ex:
                 print(f"[WARN] Unable to load interaction data for GRN export: {ex}")
                 args.skip_grn = True
-            else:
-                os.makedirs(interaction_root, exist_ok=True)
 
         # Step 1: load + merge covariates
         print("[INFO] Loading h5ad and merging covariates...")
@@ -2338,9 +2740,36 @@ def main():
             )
             adata = ad.read_h5ad(pb_h5ad)
 
+        base_pop_order = _extract_lineage_order(adata, args.population_col)
+        if not base_pop_order:
+            base_pop_order = _ordered_categories_from_obs(adata.obs, args.population_col)
+
+        background_genes = None
+        if args.goelite_species:
+            background_genes = adata.var_names.astype(str)
+            if "gene_symbols" in adata.var.columns:
+                background_genes = adata.var["gene_symbols"].astype(str)
+            elif "features" in adata.var.columns:
+                background_genes = adata.var["features"].astype(str)
+
+        comp_results = []
+
         # Step 4–6 per comparison
         for case_label, control_label in comps:
             tag = "{}_vs_{}".format(str(case_label), str(control_label)).replace(" ", "_")
+            safe_tag = NetPerspective.safe_component(tag)
+            comparison_root = os.path.join(base_outdir, safe_tag)
+            heatmap_dir = os.path.join(comparison_root, "heatmaps")
+            deg_dir = os.path.join(comparison_root, "DEGs")
+            cellfreq_dir = os.path.join(comparison_root, "cell-frequency")
+            goelite_dir = os.path.join(comparison_root, "GeneSetEnrichment")
+
+            os.makedirs(comparison_root, exist_ok=True)
+            for path in (heatmap_dir, deg_dir, cellfreq_dir):
+                os.makedirs(path, exist_ok=True)
+            if args.goelite_species:
+                os.makedirs(goelite_dir, exist_ok=True)
+
             print("[INFO] Differential analysis: {} vs {}.".format(case_label, control_label))
 
             all_pops = sorted(adata.obs[args.population_col].unique())
@@ -2391,164 +2820,22 @@ def main():
                     print("[WARN] 'lineage_order' not found in h5ad; using alphabetical order.")
 
             # ----------------------------- Cell frequency plots ----------------------------- #
-            freq_subdir = os.path.join(cellfreq_dir, NetPerspective.safe_component(tag))
-            os.makedirs(freq_subdir, exist_ok=True)
-
-            freq_obs = adata.obs.loc[
-                adata.obs[args.covariate_col].isin([case_label, control_label]),
-                [args.population_col, args.covariate_col]
-            ].dropna()
-
-            if freq_obs.empty:
-                print("[WARN] Skipping cell frequency plots: no cells found for comparison subset.")
-            else:
-                freq_obs[args.population_col] = freq_obs[args.population_col].astype(str)
-                freq_obs[args.covariate_col] = freq_obs[args.covariate_col].astype(str)
-
-                unique_pops = list(freq_obs[args.population_col].unique())
-                if pop_order:
-                    freq_order = [p for p in pop_order if p in unique_pops]
-                    freq_order.extend([p for p in unique_pops if p not in freq_order])
-                else:
-                    freq_order = sorted(unique_pops)
-
-                counts = (
-                    freq_obs.groupby([args.population_col, args.covariate_col])
-                    .size()
-                    .unstack(fill_value=0)
-                )
-
-                case_name = str(case_label)
-                control_name = str(control_label)
-                for col in (control_name, case_name):
-                    if col not in counts.columns:
-                        counts[col] = 0
-
-                counts = counts.reindex(freq_order).fillna(0)
-                counts = counts.loc[counts.sum(axis=1) > 0]
-
-                if counts.empty:
-                    print("[WARN] Skipping cell frequency plots: all populations have zero cells for comparison.")
-                else:
-                    column_order = [control_name, case_name]
-                    counts = counts.loc[:, [c for c in column_order if c in counts.columns]]
-
-                    cluster_totals = counts.sum(axis=1).replace(0, np.nan)
-                    percent_by_cluster = counts.div(cluster_totals, axis=0).fillna(0) * 100.0
-
-                    group_totals = counts.sum(axis=0).replace(0, np.nan)
-                    percent_by_group = counts.div(group_totals, axis=1).fillna(0) * 100.0
-
-                    comp_component = NetPerspective.safe_component(tag)
-                    pop_component = NetPerspective.safe_component(args.population_col)
-                    stacked_path = os.path.join(freq_subdir, f"{comp_component}_stacked_{pop_component}.pdf")
-                    grouped_path = os.path.join(freq_subdir, f"{comp_component}_by_condition_{pop_component}.pdf")
-
-                    control_color = "skyblue"
-                    case_color = "lightcoral"
-
-                    fig1, ax1 = plt.subplots(figsize=(8, max(2.0, 0.4 * len(percent_by_cluster) + 2)))
-                    percent_by_cluster.plot(
-                        kind="barh",
-                        stacked=True,
-                        ax=ax1,
-                        color=[control_color, case_color],
-                        width=0.8,
-                        edgecolor="black",
-                        linewidth=0.2,
-                    )
-                    ax1.set_xlabel("Percent of cells per population")
-                    ax1.set_ylabel(args.population_col)
-                    ax1.set_title(f"Cell composition by {args.population_col}: {case_name} vs {control_name}", fontsize=12)
-                    ax1.legend(
-                        title="Condition",
-                        bbox_to_anchor=(1.05, 1),
-                        loc="upper left",
-                        borderaxespad=0.0,
-                        frameon=False,
-                        fontsize=8,
-                        title_fontsize=9,
-                    )
-                    plt.tight_layout(rect=[0, 0, 0.85, 1])
-                    fig1.savefig(stacked_path, bbox_inches="tight")
-                    plt.close(fig1)
-                    print(f"[INFO] Wrote cell frequency stacked bar chart: {stacked_path}")
-
-                    fig2, ax2 = plt.subplots(figsize=(8, max(2.0, 0.4 * len(percent_by_group) + 2)))
-                    y_positions = np.arange(len(percent_by_group.index))
-                    bar_height = 0.35
-
-                    ax2.barh(
-                        y_positions - bar_height / 2,
-                        percent_by_group[control_name],
-                        height=bar_height,
-                        color=control_color,
-                        edgecolor="black",
-                        linewidth=0.2,
-                        label=control_name,
-                    )
-                    ax2.barh(
-                        y_positions + bar_height / 2,
-                        percent_by_group[case_name],
-                        height=bar_height,
-                        color=case_color,
-                        edgecolor="black",
-                        linewidth=0.2,
-                        label=case_name,
-                    )
-                    ax2.set_yticks(y_positions)
-                    ax2.set_yticklabels(percent_by_group.index)
-                    ax2.invert_yaxis()
-                    ax2.set_xlabel("Percent of condition cells")
-                    ax2.set_ylabel(args.population_col)
-                    ax2.set_title(f"Cell frequency by condition: {case_name} vs {control_name}", fontsize=12)
-                    ax2.legend(loc="best", frameon=False)
-                    plt.tight_layout()
-                    fig2.savefig(grouped_path, bbox_inches="tight")
-                    plt.close(fig2)
-                    print(f"[INFO] Wrote cell frequency comparison chart: {grouped_path}")
-
-                    freq_tsv_path = os.path.join(freq_subdir, f"{comp_component}_cell_frequencies_{pop_component}.tsv")
-                    counts_long = counts.reset_index().melt(
-                        id_vars=args.population_col,
-                        var_name="condition",
-                        value_name="cell_count",
-                    )
-                    pct_group_long = percent_by_group.reset_index().melt(
-                        id_vars=args.population_col,
-                        var_name="condition",
-                        value_name="percent_of_condition",
-                    )
-                    pct_cluster_long = percent_by_cluster.reset_index().melt(
-                        id_vars=args.population_col,
-                        var_name="condition",
-                        value_name="percent_of_population",
-                    )
-                    freq_table = counts_long.merge(
-                        pct_group_long,
-                        on=[args.population_col, "condition"],
-                        how="left",
-                    ).merge(
-                        pct_cluster_long,
-                        on=[args.population_col, "condition"],
-                        how="left",
-                    )
-                    freq_table.sort_values(
-                        by=[args.population_col, "condition"],
-                        inplace=True,
-                    )
-                    freq_table.to_csv(freq_tsv_path, sep="\t", index=False, float_format="%.4f")
-                    print(f"[INFO] Wrote cell frequency table: {freq_tsv_path}")
+            case_name = str(case_label)
+            control_name = str(control_label)
+            _write_cell_frequency_plots(
+                adata=adata,
+                population_col=args.population_col,
+                covariate_col=args.covariate_col,
+                conditions=[control_name, case_name],
+                outdir=cellfreq_dir,
+                comparison_label=f"{case_name} vs {control_name}",
+                comparison_prefix=tag,
+                pop_order=pop_order,
+            )
 
             goelite_payload = None
             if args.goelite_species:
-                background_genes = adata.var_names.astype(str)
-                if "gene_symbols" in adata.var.columns:
-                    background_genes = adata.var["gene_symbols"].astype(str)
-                elif "features" in adata.var.columns:
-                    background_genes = adata.var["features"].astype(str)
-
-                goelite_subdir = os.path.join(goelite_dir, NetPerspective.safe_component(tag))
+                goelite_subdir = goelite_dir
                 print(f"[INFO] GO-Elite: starting for {tag} (output: {goelite_subdir})")
                 goelite_payload = run_goelite_for_clusters(
                     de_store=de_store,
@@ -2608,6 +2895,7 @@ def main():
                 cr.to_csv(cr_path, sep="\t", index=False)
                 print("[INFO] Wrote {}".format(cr_path))
 
+            interaction_root = os.path.join(comparison_root, "interaction-plots")
             if not args.skip_grn and interactions_df is not None:
                 detailed = de_store.get("detailed_deg")
                 if detailed is None or detailed.empty:
@@ -2623,7 +2911,7 @@ def main():
                         if diagnostic_report:
                             print("[DEBUG] No per-population DEG entries found for GRN export.")
                     else:
-                        comparison_dir = os.path.join(interaction_root, NetPerspective.safe_component(tag))
+                        comparison_dir = interaction_root
                         os.makedirs(comparison_dir, exist_ok=True)
                         use_rawp = bool(de_store.get("use_rawp", False))
 
@@ -2692,8 +2980,107 @@ def main():
                                 print(f"[WARN] Interaction plots disabled (missing dependency): {ex}")
                             except Exception as ex:
                                 print(f"[WARN] Interaction network failed for {pop_name}: {ex}")
-                    args.skip_grn = True
-                    break
+
+            comp_results.append(
+                {
+                    "tag": tag,
+                    "safe_tag": safe_tag,
+                    "case_label": str(case_label),
+                    "control_label": str(control_label),
+                    "de_store": de_store,
+                }
+            )
+
+        if len(comp_results) > 1:
+            multi_root = os.path.join(base_outdir, "Multi-Comparison")
+            multi_heatmap_dir = os.path.join(multi_root, "heatmaps")
+            multi_deg_dir = os.path.join(multi_root, "DEGs")
+            multi_cellfreq_dir = os.path.join(multi_root, "cell-frequency")
+            multi_goelite_dir = os.path.join(multi_root, "GeneSetEnrichment")
+
+            os.makedirs(multi_root, exist_ok=True)
+            for path in (multi_heatmap_dir, multi_deg_dir, multi_cellfreq_dir):
+                os.makedirs(path, exist_ok=True)
+            if args.goelite_species:
+                os.makedirs(multi_goelite_dir, exist_ok=True)
+
+            all_conditions = []
+            for comp in comp_results:
+                all_conditions.extend([comp["control_label"], comp["case_label"]])
+            all_conditions = _unique_preserve_order(all_conditions)
+
+            _write_cell_frequency_plots(
+                adata=adata,
+                population_col=args.population_col,
+                covariate_col=args.covariate_col,
+                conditions=all_conditions,
+                outdir=multi_cellfreq_dir,
+                comparison_label="Multi-Comparison",
+                comparison_prefix="Multi-Comparison",
+                pop_order=base_pop_order,
+            )
+
+            multi_store = _build_multi_comparison_de_store(
+                comp_results=comp_results,
+                population_col=args.population_col,
+                alpha=float(args.alpha),
+                fc_thresh=float(args.fc),
+                use_rawp=args.use_rawp,
+                base_pop_order=base_pop_order,
+            )
+
+            if multi_store is not None:
+                multi_goelite_payload = None
+                goelite_pattern_path = None
+                if args.goelite_species:
+                    multi_goelite_payload = run_goelite_for_clusters(
+                        de_store=multi_store,
+                        background_genes=background_genes,
+                        outdir=multi_goelite_dir,
+                        comparison_tag="Multi-Comparison",
+                        species=args.goelite_species,
+                        obo_path=args.goelite_obo,
+                        gaf_path=args.goelite_gaf,
+                        cache_dir=args.goelite_cache_dir,
+                        download_dir=goelite_download_dir,
+                        min_term_size=args.goelite_min_term_size,
+                        max_term_size=args.goelite_max_term_size,
+                    )
+                    goelite_pattern_path = os.path.join(
+                        multi_goelite_dir, "GOElite_patterns_Multi-Comparison.tsv"
+                    )
+
+                heat_png = "heatmap_Multi-Comparison_by_{}.pdf".format(args.population_col)
+                heat_tsv = "heatmap_Multi-Comparison_by_{}.tsv".format(args.population_col)
+                build_fixed_order_heatmap(
+                    multi_store,
+                    multi_heatmap_dir,
+                    args.population_col,
+                    float(args.fc),
+                    heatmap_png=heat_png,
+                    heatmap_tsv=heat_tsv,
+                    goelite_payload=multi_goelite_payload,
+                    show_go_terms=bool(multi_goelite_payload),
+                    goelite_pattern_path=goelite_pattern_path,
+                )
+
+                multi_det = multi_store.get("detailed_deg", pd.DataFrame())
+                multi_summ = multi_store.get("summary_per_population", pd.DataFrame())
+                multi_assign = multi_store.get("assigned_groups", pd.DataFrame())
+
+                det_path = os.path.join(multi_deg_dir, "DEG_detailed_Multi-Comparison.tsv")
+                summ_path = os.path.join(multi_deg_dir, "DEG_summary_Multi-Comparison.tsv")
+                assign_path = os.path.join(multi_deg_dir, "DEG_assigned_groups_Multi-Comparison.tsv")
+
+                if not multi_det.empty:
+                    multi_det.to_csv(det_path, sep="\t", index=False)
+                    print("[INFO] Wrote {}".format(det_path))
+                if not multi_summ.empty:
+                    multi_summ.to_csv(summ_path, sep="\t", index=False)
+                    print("[INFO] Wrote {}".format(summ_path))
+                if not multi_assign.empty:
+                    multi_assign.to_csv(assign_path, sep="\t", index=False)
+                    print("[INFO] Wrote {}".format(assign_path))
 
         print("[INFO] Completed.")
     finally:
