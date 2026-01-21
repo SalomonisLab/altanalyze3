@@ -1681,7 +1681,7 @@ def build_fixed_order_heatmap(
 
     # --- Add vertical and horizontal white gridlines ---
     for x in range(1, fold_df.shape[1]):
-        ax.axvline(x - 0.48, color="white", linewidth=0.39, alpha=0.9)
+        ax.axvline(x - 0.482, color="white", linewidth=0.39, alpha=0.9)
 
     for y in block_breaks:
         ax.axhline(y - 0.5, color="white", linewidth=0.35, alpha=0.9)
