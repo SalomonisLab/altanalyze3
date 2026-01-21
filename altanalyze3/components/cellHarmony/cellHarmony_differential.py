@@ -55,6 +55,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning, message=".*invalid va
 
 plt.rcParams['axes.linewidth'] = 0.5
 plt.rcParams['pdf.fonttype'] = 42
+plt.rcParams['svg.fonttype'] = 'none'
 plt.rcParams['font.family'] = 'Arial'
 plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
 plt.rcParams['figure.facecolor'] = 'white'
@@ -1670,11 +1671,17 @@ def build_fixed_order_heatmap(
     column_clusters = list(fold_df.columns)
 
     # --- Draw the heatmap ---
-    im = ax.imshow(fold_df.values, aspect="auto", cmap=cmap, norm=norm, interpolation="none")
+    im = ax.imshow(
+        fold_df.values,
+        aspect="auto",
+        cmap=cmap,
+        norm=norm,
+        interpolation="none",
+    )
 
     # --- Add vertical and horizontal white gridlines ---
     for x in range(1, fold_df.shape[1]):
-        ax.axvline(x - 0.49, color="white", linewidth=0.39, alpha=0.9)
+        ax.axvline(x - 0.48, color="white", linewidth=0.39, alpha=0.9)
 
     for y in block_breaks:
         ax.axhline(y - 0.5, color="white", linewidth=0.35, alpha=0.9)
@@ -1904,16 +1911,19 @@ def build_fixed_order_heatmap(
             )
 
     pdf_path = os.path.join(outdir, heatmap_png)
+    base_path, ext = os.path.splitext(pdf_path)
+    if ext.lower() != ".pdf":
+        pdf_path = base_path + ".pdf"
+    svg_path = base_path + ".svg"
 
     # Save high-quality raster and vector outputs
     _suppress_fonttools_logs()
     bbox = None if show_go_terms else "tight"
-    plt.savefig(pdf_path, dpi=600, bbox_inches=bbox, pad_inches=0.02)
-    plt.savefig(pdf_path.replace(".png", ".pdf"), dpi=600, bbox_inches=bbox, pad_inches=0.02, transparent=True)
-    plt.savefig(pdf_path.replace(".png", ".svg"), bbox_inches=bbox, transparent=True)
+    plt.savefig(pdf_path, dpi=600, bbox_inches=bbox, pad_inches=0.02, transparent=False)
+    plt.savefig(svg_path, bbox_inches=bbox, transparent=False)
 
     plt.close(fig)
-    print(f"[INFO] Wrote heatmap images: {pdf_path}, {pdf_path.replace('.png', '.pdf')}, {pdf_path.replace('.png', '.svg')}")
+    print(f"[INFO] Wrote heatmap images: {pdf_path}, {svg_path}")
 
 
     return pdf_path, heatmap_path
