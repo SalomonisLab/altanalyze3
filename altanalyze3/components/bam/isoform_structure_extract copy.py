@@ -11,7 +11,6 @@ import shutil
 import csv
 import gzip
 import sqlite3
-import heapq
 
 import anndata as ad
 import numpy as np
@@ -23,47 +22,6 @@ sys.path.insert(1, os.path.join(os.path.dirname(__file__), '..'))
 from long_read import gff_process
 
 _EXON_MODEL_PATH = None
-_COUNTS_AGGREGATOR = os.environ.get('ISOFORM_COUNTS_AGG', 'sort-merge')
-_COUNTS_RUN_SIZE = int(os.environ.get('ISOFORM_COUNTS_RUN_SIZE', '200000'))
-_MP_START_METHOD = os.environ.get('ISOFORM_MP_START', 'fork')
-_MP_TASKS_PER_CHILD = int(os.environ.get('ISOFORM_MP_TASKS_PER_CHILD', '1'))
-_PYSAM_VERBOSITY = int(os.environ.get('ISOFORM_PYSAM_VERBOSITY', '0'))
-
-
-def _read_int_env(name):
-    value = os.environ.get(name)
-    if not value:
-        return None
-    try:
-        return int(value)
-    except ValueError:
-        return None
-
-
-def _resolve_max_processes(user_max):
-    cpu_total = multiprocessing.cpu_count()
-    env_candidates = (
-        _read_int_env('ISOFORM_MAX_PROCESSES'),
-        _read_int_env('LSB_DJOB_NUMPROC'),
-        _read_int_env('SLURM_CPUS_PER_TASK'),
-        _read_int_env('PBS_NP'),
-        _read_int_env('NSLOTS'),
-    )
-    env_max = next((value for value in env_candidates if value and value > 0), None)
-    if user_max is None:
-        max_processes = max(1, min(cpu_total - 1, 8))
-    else:
-        max_processes = user_max
-    if env_max is not None:
-        max_processes = min(max_processes, env_max)
-    return max(1, min(max_processes, cpu_total))
-
-
-def _set_pysam_verbosity():
-    try:
-        pysam.set_verbosity(_PYSAM_VERBOSITY)
-    except (AttributeError, TypeError, ValueError):
-        pass
 
 
 def _ensure_exon_model(exon_file):
@@ -77,106 +35,6 @@ def _ensure_exon_model(exon_file):
 
 def _init_chunk_worker(exon_file):
     _ensure_exon_model(exon_file)
-
-
-def _parse_count_row(line):
-    parts = line.rstrip('\n').split('\t')
-    if len(parts) < 2:
-        return None
-    barcode = parts[0]
-    isoform_id = parts[1]
-    gene = parts[2] if len(parts) > 2 else ''
-    return barcode, isoform_id, gene
-
-
-def _flush_sorted_run(records, run_path):
-    records.sort(key=lambda item: (item[0], item[1]))
-    with open(run_path, 'w', newline='') as handle:
-        writer = csv.writer(handle, delimiter='\t')
-        writer.writerows(records)
-
-
-def _write_sorted_runs(raw_path, runs_dir, max_records):
-    runs_dir.mkdir(parents=True, exist_ok=True)
-    runs = []
-    buffer_records = []
-    with open(raw_path, 'r') as handle:
-        for line in handle:
-            parsed = _parse_count_row(line)
-            if parsed is None:
-                continue
-            buffer_records.append(parsed)
-            if len(buffer_records) >= max_records:
-                run_path = runs_dir / f"run_{len(runs):05d}.tsv"
-                _flush_sorted_run(buffer_records, run_path)
-                runs.append(run_path)
-                buffer_records.clear()
-    if buffer_records:
-        run_path = runs_dir / f"run_{len(runs):05d}.tsv"
-        _flush_sorted_run(buffer_records, run_path)
-        runs.append(run_path)
-    return runs
-
-
-def _merge_sorted_runs(run_paths, counts_path):
-    handles = [open(path, 'r') for path in run_paths]
-    heap = []
-    for idx, handle in enumerate(handles):
-        line = handle.readline()
-        if line:
-            parsed = _parse_count_row(line)
-            if parsed is not None:
-                barcode, isoform_id, gene = parsed
-                heapq.heappush(heap, (barcode, isoform_id, gene, idx))
-    with open(counts_path, 'w', newline='') as out_handle:
-        writer = csv.writer(out_handle, delimiter='\t')
-        writer.writerow(['barcode', 'isoform_id', 'count', 'gene'])
-        current_key = None
-        current_count = 0
-        current_gene = ''
-        while heap:
-            barcode, isoform_id, gene, idx = heapq.heappop(heap)
-            key = (barcode, isoform_id)
-            if current_key is None:
-                current_key = key
-                current_count = 1
-                current_gene = gene
-            elif key == current_key:
-                current_count += 1
-                if not current_gene and gene:
-                    current_gene = gene
-            else:
-                writer.writerow([current_key[0], current_key[1], current_count, current_gene])
-                current_key = key
-                current_count = 1
-                current_gene = gene
-            line = handles[idx].readline()
-            if line:
-                parsed = _parse_count_row(line)
-                if parsed is not None:
-                    b_next, i_next, g_next = parsed
-                    heapq.heappush(heap, (b_next, i_next, g_next, idx))
-        if current_key is not None:
-            writer.writerow([current_key[0], current_key[1], current_count, current_gene])
-    for handle in handles:
-        handle.close()
-
-
-def _aggregate_counts_sort_merge(raw_path, counts_path, runs_dir, max_records):
-    run_paths = _write_sorted_runs(raw_path, runs_dir, max_records)
-    if not run_paths:
-        return False
-    _merge_sorted_runs(run_paths, counts_path)
-    for path in run_paths:
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            continue
-    try:
-        runs_dir.rmdir()
-    except OSError:
-        pass
-    return True
 
 
 def parse_gene_regions(exon_file):
@@ -378,7 +236,6 @@ def extract_isoform_structures(bam_path, exon_file, output_prefix, target_gene=N
     if barcode_tags is None:
         barcode_tags = ['CB', 'CR', 'BC', 'BX']
 
-    _set_pysam_verbosity()
     exon_coordinates, _, _ = gff_process.importEnsemblGenes(exon_file)
     gene_regions = parse_gene_regions(exon_file) if target_gene else {}
 
@@ -529,46 +386,35 @@ def extract_isoform_structures_chunk(bam_path, exon_file, output_prefix, chrom, 
     counts_path = chunk_dir / f"{output_prefix.name}.{chunk_label}.counts.tsv"
     stats_path = chunk_dir / f"{output_prefix.name}.{chunk_label}.stats.tsv"
 
-    _set_pysam_verbosity()
     exon_coordinates = _ensure_exon_model(exon_file)
     bam = pysam.AlignmentFile(bam_path, 'rb')
     stats = defaultdict(int)
-    counts_seen = 0
-    use_sqlite = _COUNTS_AGGREGATOR == 'sqlite'
-    counts_db_path = None
-    conn = None
-    insert_sql = None
+    counts_db_path = chunk_dir / f"{output_prefix.name}.{chunk_label}.counts.sqlite"
+    conn = sqlite3.connect(counts_db_path)
+    conn.execute("PRAGMA journal_mode=OFF")
+    conn.execute("PRAGMA synchronous=OFF")
+    conn.execute("PRAGMA temp_store=MEMORY")
+    conn.execute("PRAGMA locking_mode=EXCLUSIVE")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS counts ("
+        "barcode TEXT NOT NULL, "
+        "isoform_id TEXT NOT NULL, "
+        "count INTEGER NOT NULL, "
+        "gene TEXT, "
+        "PRIMARY KEY (barcode, isoform_id)"
+        ")"
+    )
+    insert_sql = (
+        "INSERT INTO counts (barcode, isoform_id, count, gene) "
+        "VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(barcode, isoform_id) DO UPDATE SET "
+        "count = count + excluded.count, "
+        "gene = COALESCE(counts.gene, excluded.gene)"
+    )
     counts_buffer = []
     buffer_limit = 10000
-    raw_counts_path = None
-    raw_handle = None
-    if use_sqlite:
-        counts_db_path = chunk_dir / f"{output_prefix.name}.{chunk_label}.counts.sqlite"
-        conn = sqlite3.connect(counts_db_path)
-        conn.execute("PRAGMA journal_mode=OFF")
-        conn.execute("PRAGMA synchronous=OFF")
-        conn.execute("PRAGMA temp_store=MEMORY")
-        conn.execute("PRAGMA locking_mode=EXCLUSIVE")
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS counts ("
-            "barcode TEXT NOT NULL, "
-            "isoform_id TEXT NOT NULL, "
-            "count INTEGER NOT NULL, "
-            "gene TEXT, "
-            "PRIMARY KEY (barcode, isoform_id)"
-            ")"
-        )
-        insert_sql = (
-            "INSERT INTO counts (barcode, isoform_id, count, gene) "
-            "VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(barcode, isoform_id) DO UPDATE SET "
-            "count = count + excluded.count, "
-            "gene = COALESCE(counts.gene, excluded.gene)"
-        )
-        conn.execute("BEGIN")
-    else:
-        raw_counts_path = chunk_dir / f"{output_prefix.name}.{chunk_label}.counts.raw.tsv"
-        raw_handle = open(raw_counts_path, 'w', newline='')
+    counts_seen = 0
+    conn.execute("BEGIN")
 
     with open(gff_path, 'w') as gff_handle:
         for read in bam.fetch(chrom):
@@ -622,51 +468,31 @@ def extract_isoform_structures_chunk(bam_path, exon_file, output_prefix, chrom, 
                 molecule_id,
                 source,
             )
-            gene_value = gene if gene else ''
-            if use_sqlite:
-                counts_buffer.append((barcode, isoform_id, 1, gene_value or None))
-                if len(counts_buffer) >= buffer_limit:
-                    conn.executemany(insert_sql, counts_buffer)
-                    counts_buffer.clear()
-            else:
-                raw_handle.write(f"{barcode}\t{isoform_id}\t{gene_value}\n")
+            gene_value = gene if gene else None
+            counts_buffer.append((barcode, isoform_id, 1, gene_value))
             counts_seen += 1
+            if len(counts_buffer) >= buffer_limit:
+                conn.executemany(insert_sql, counts_buffer)
+                counts_buffer.clear()
             stats['kept_reads'] += 1
 
     bam.close()
-    if use_sqlite:
-        if counts_buffer:
-            conn.executemany(insert_sql, counts_buffer)
-            counts_buffer.clear()
-        conn.commit()
-        if counts_seen:
-            with open(counts_path, 'w', newline='') as handle:
-                writer = csv.writer(handle, delimiter='\t')
-                writer.writerow(['barcode', 'isoform_id', 'count', 'gene'])
-                for barcode, isoform_id, count, gene in conn.execute(
-                        "SELECT barcode, isoform_id, count, gene FROM counts"):
-                    writer.writerow([barcode, isoform_id, count, gene or ''])
-        conn.close()
-        if counts_db_path is not None:
-            try:
-                counts_db_path.unlink()
-            except FileNotFoundError:
-                pass
-    else:
-        raw_handle.close()
-        if counts_seen:
-            runs_dir = chunk_dir / f"{output_prefix.name}.{chunk_label}.counts.runs"
-            _aggregate_counts_sort_merge(
-                raw_counts_path,
-                counts_path,
-                runs_dir,
-                _COUNTS_RUN_SIZE,
-            )
-        if raw_counts_path is not None:
-            try:
-                raw_counts_path.unlink()
-            except FileNotFoundError:
-                pass
+    if counts_buffer:
+        conn.executemany(insert_sql, counts_buffer)
+        counts_buffer.clear()
+    conn.commit()
+    if counts_seen:
+        with open(counts_path, 'w', newline='') as handle:
+            writer = csv.writer(handle, delimiter='\t')
+            writer.writerow(['barcode', 'isoform_id', 'count', 'gene'])
+            for barcode, isoform_id, count, gene in conn.execute(
+                    "SELECT barcode, isoform_id, count, gene FROM counts"):
+                writer.writerow([barcode, isoform_id, count, gene or ''])
+    conn.close()
+    try:
+        counts_db_path.unlink()
+    except FileNotFoundError:
+        pass
     _write_chunk_stats(stats, stats_path)
     return str(gff_path), str(counts_path), stats
 
@@ -768,7 +594,6 @@ def _cleanup_chunk_outputs(chunk_dir, output_prefix):
     patterns = [
         f"{prefix}.*.gff",
         f"{prefix}.*.counts.tsv",
-        f"{prefix}.*.counts.raw.tsv",
         f"{prefix}.*.counts.sqlite",
         f"{prefix}.*.stats.tsv",
     ]
@@ -778,9 +603,6 @@ def _cleanup_chunk_outputs(chunk_dir, output_prefix):
                 path.unlink()
             except FileNotFoundError:
                 continue
-    for path in chunk_dir.glob(f"{prefix}.*.counts.runs"):
-        if path.is_dir():
-            shutil.rmtree(path, ignore_errors=True)
 
 
 def _gzip_file(path):
@@ -798,14 +620,16 @@ def parallel_extract_isoform_structures(bam_path, exon_file, output_prefix, min_
                                         max_processes=None):
     if barcode_tags is None:
         barcode_tags = ['CB', 'CR', 'BC', 'BX']
-    _set_pysam_verbosity()
     bam = pysam.AlignmentFile(bam_path, 'rb')
     chromosomes = [ref for ref in bam.references if len(ref) < 6]
     bam.close()
     if not chromosomes:
         raise ValueError("No chromosomes found in BAM header.")
 
-    max_processes = _resolve_max_processes(max_processes)
+    cpu_total = multiprocessing.cpu_count()
+    if max_processes is None:
+        max_processes = max(1, cpu_total - 1)
+    max_processes = max(1, min(max_processes, cpu_total))
 
     output_prefix = Path(output_prefix)
     chunk_dir = output_prefix.parent / 'chr-results'
@@ -829,25 +653,13 @@ def parallel_extract_isoform_structures(bam_path, exon_file, output_prefix, min_
 
     stats = defaultdict(int)
     if max_processes > 1:
-        def _run_pool(ctx):
-            with ctx.Pool(
-                    processes=max_processes,
-                    initializer=_init_chunk_worker,
-                    initargs=(exon_file,),
-                    maxtasksperchild=_MP_TASKS_PER_CHILD or None) as pool:
-                for _gff_path, _counts_path, chunk_stats in pool.starmap(extract_isoform_structures_chunk, tasks):
-                    for key, value in chunk_stats.items():
-                        stats[key] += value
-
-        ctx = multiprocessing.get_context(_MP_START_METHOD)
-        try:
-            _run_pool(ctx)
-        except RuntimeError as exc:
-            if _MP_START_METHOD != 'fork' and 'bootstrapping phase' in str(exc):
-                ctx = multiprocessing.get_context('fork')
-                _run_pool(ctx)
-            else:
-                raise
+        with multiprocessing.Pool(
+                processes=max_processes,
+                initializer=_init_chunk_worker,
+                initargs=(exon_file,)) as pool:
+            for _gff_path, _counts_path, chunk_stats in pool.starmap(extract_isoform_structures_chunk, tasks):
+                for key, value in chunk_stats.items():
+                    stats[key] += value
     else:
         _ensure_exon_model(exon_file)
         for task in tasks:

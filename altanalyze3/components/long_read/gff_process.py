@@ -729,40 +729,38 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
                 unique_junction_db[uid] = [file]
 
     def exon_str(exonIDs):
-        separator = '|'
-        exonIDs_str = separator.join(exonIDs)
-        filtered_exonIDs = exonIDs
-        if '_' in filtered_exonIDs[0]:
-            del filtered_exonIDs[0]
-        if '_' in filtered_exonIDs[-1]:
-            del filtered_exonIDs[-1]
-        filtered_exonIDs_str = separator.join(filtered_exonIDs) + '|'
-        return filtered_exonIDs_str,exonIDs_str
+        if '_' in exonIDs[0]:
+            del exonIDs[0]
+        if '_' in exonIDs[-1]:
+            del exonIDs[-1]
+        filtered_exonIDs_str = "|".join(exonIDs)
+        return filtered_exonIDs_str,exonIDs
 
     def process_isoform(chr, strand, info, exons, file):
         transcript_id = info.split(';')[ti].split(td)[1]
-        gene, exonIDs, exonIDs_simple, genes = exonAnnotate(chr, exons, strand, transcript_id)
 
+        # exonIDs_simple requries further checking as justification for its structure is inconsistent with exonIDs
+        gene, exonIDs, exonIDs_simple, genes = exonAnnotate(chr, exons, strand, transcript_id)
         # Restrict the exon string to high confidence exon boundaries
-        filtered_exonIDs_str,exonIDs_str = exon_str(list(exonIDs))
-        try:
-            if mode == 'collapse':
-                filtered_exonIDs_str,exonIDs_simple_str = exon_str(list(exonIDs_simple))
-        except:
-            pass
+        filtered_exonIDs_str,filtered_exonIDs = exon_str(list(exonIDs))
+
         """
         if transcript_id == 'NKX2-5|1/3|01H01':
             print (filtered_exonIDs_str,transcript_id,mode);sys.exit()
         """
         if len(genes)>2:
-            trans_spliced_isoforms[exonIDs_str] = []
-        eo.write('\t'.join([gene, strand, exonIDs_str, transcript_id, file]) + '\n')
+            trans_spliced_isoforms[filtered_exonIDs_str] = []
+
+        if mode == 'collapse':
+            eo.write('\t'.join([gene, strand, filtered_exonIDs_str, transcript_id, file]) + '\n')
+        else:
+            eo.write('\t'.join([gene, strand, "|".join(exonIDs), transcript_id, file]) + '\n')
         #splice_junctions = getJunctions(exons)
         if 'UNK' not in gene:
             #junction_str_db[gene,filtered_exonIDs_str] = tuple(splice_junctions)
             junction_key = filtered_exonIDs_str
             if str(mode).lower().startswith('cluster'):
-                junction_key = exonIDs_str
+                junction_key = filtered_exonIDs_str
             try: 
                 junction_db[(gene, junction_key)].append((file, info))
             except:
@@ -817,10 +815,7 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
                     if type == 'transcript':
                         isoforms += 1
                         chr, strand, info = gene_info
-                        try: 
-                            process_isoform(chr, strand, info, exons, file)
-                        except:
-                            continue
+                        process_isoform(chr, strand, info, exons, file)
                         exons = []
                     elif type != 'transcript' and type != 'exon':
                         pass

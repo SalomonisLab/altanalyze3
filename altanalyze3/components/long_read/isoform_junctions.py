@@ -10,10 +10,39 @@ import collections
 import argparse
 from tqdm import tqdm # progress bar
 import time
+import gc
+import ctypes
 
 sys.path.insert(1, os.path.join(sys.path[0], '..'))
 from . import isoform_matrix as iso
 from . import gff_process as gff_process
+
+
+def _trim_memory():
+    gc.collect()
+    if sys.platform.startswith('linux'):
+        try:
+            libc = ctypes.CDLL("libc.so.6")
+            libc.malloc_trim(0)
+        except OSError:
+            pass
+        return
+    if sys.platform == 'darwin':
+        try:
+            libmalloc = ctypes.CDLL("libmalloc.dylib")
+            libmalloc.malloc_default_zone.restype = ctypes.c_void_p
+            zone = libmalloc.malloc_default_zone()
+            libmalloc.malloc_zone_pressure_relief.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+            libmalloc.malloc_zone_pressure_relief(zone, 0)
+        except OSError:
+            pass
+        return
+    if sys.platform.startswith('win'):
+        try:
+            process = ctypes.windll.kernel32.GetCurrentProcess()
+            ctypes.windll.psapi.EmptyWorkingSet(process)
+        except Exception:
+            pass
     
 def parse_exon_file(ensembl_exon_dir):
     """ Import Ensembl exon genomic information """
@@ -37,7 +66,7 @@ def exportJunctionMatrix(matrix_dir, ensembl_exon_dir, gff_source, barcode_clust
     """
 
     # Annotate isoforms relative to ensembl exons
-    transcript_associations = gff_process.consolidateLongReadGFFs(gff_source, ensembl_exon_dir)
+    transcript_associations = gff_process.consolidateLongReadGFFs(gff_source, ensembl_exon_dir, mode="collapse")
 
     # Load the prior computed exon annotations and coordinates for junction mapping
     exon_dict, gene_dict = parse_exon_file(ensembl_exon_dir)
@@ -131,6 +160,7 @@ def exportJunctionMatrix(matrix_dir, ensembl_exon_dir, gff_source, barcode_clust
                     if junction not in junction_counts:
                         junction_counts[junction] = np.zeros(len(adata.obs_names), dtype=int)
                     junction_counts[junction][cell_index] += count
+    del cell_data
 
     # Convert the counts to a dense DataFrame and then to a sparse matrix
     junction_counts_df = pd.DataFrame({k: pd.Series(v, index=adata.obs_names) for k, v in tqdm(junction_counts.items(), desc="Creating DataFrame")})
@@ -163,9 +193,11 @@ def exportJunctionMatrix(matrix_dir, ensembl_exon_dir, gff_source, barcode_clust
         return sparse_junction_matrix.tocsr()
 
     sparse_junction_matrix = coo_matrix_method()
-    
+    del junction_counts_df
+
     # Create a new AnnData object for the junction counts
     junction_adata = ad.AnnData(X=sparse_junction_matrix, obs=adata.obs, var=pd.DataFrame(index=junction_counts.keys()))
+    del sparse_junction_matrix
 
     # Add gene annotations
     junction_adata.var['gene'] = [isoform_to_gene.get(isoform, '') for isoform in junction_adata.var_names]
@@ -189,6 +221,12 @@ def exportJunctionMatrix(matrix_dir, ensembl_exon_dir, gff_source, barcode_clust
         filtered_summed_groups_transposed.to_csv(f"{h5ad_dir.split('.g')[0]}_counts.txt", sep='\t')
         print ('pseudobulk cluster junction counts exported')
 
+    del isoform_to_junctions
+    del isoform_to_gene
+    del exon_dict
+    del gene_dict
+    del junction_counts
+    _trim_memory()
     return junction_adata
 
 if __name__ == '__main__':

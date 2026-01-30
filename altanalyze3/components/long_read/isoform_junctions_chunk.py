@@ -36,8 +36,10 @@ def exportJunctionMatrix(matrix_dir, ensembl_exon_dir, gff_source, barcode_clust
     Decompose isoforms into exon-exon and exon-junctions counts at the single-cell and pseudobulk level
     """
 
+    print(f"Reading GFF for junction-quantification: {gff_source}")
+    
     # Annotate isoforms relative to ensembl exons
-    transcript_associations = gff_process.consolidateLongReadGFFs(gff_source, ensembl_exon_dir)
+    transcript_associations = gff_process.consolidateLongReadGFFs(gff_source, ensembl_exon_dir, mode="collapse")
 
     # Load the prior computed exon annotations and coordinates for junction mapping
     exon_dict, gene_dict = parse_exon_file(ensembl_exon_dir)
@@ -180,9 +182,9 @@ def exportJunctionMatrix(matrix_dir, ensembl_exon_dir, gff_source, barcode_clust
     junction_adata.var['gene'] = [isoform_to_gene.get(isoform, '') for isoform in junction_adata.var_names]
 
     # Write the junction counts to an h5ad file
-    h5ad_dir = os.path.basename(gff_source)
+    #h5ad_dir = os.path.basename(gff_source)
     #junction_adata.write_h5ad("filtered_junction.h5ad")
-    output_path = f"{h5ad_dir.split('.g')[0]}.h5ad"
+    output_path = f"{gff_source.split('.g')[0]}-junction.h5ad"
     junction_adata.write_h5ad(output_path, compression='gzip')
     print(f"Saved junction h5ad: {output_path}")
     #loaded_adata = ad.read_h5ad(f"{h5ad_dir.split('.g')[0]}.h5ad")

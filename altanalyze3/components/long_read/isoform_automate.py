@@ -6,9 +6,16 @@ from tqdm import tqdm
 import anndata as ad
 import pandas as pd
 import numpy as np
+import multiprocessing
+import gc
+import ctypes
+from ctypes import wintypes
+import subprocess
 from scipy.sparse import vstack, csr_matrix
 from scipy.io import mmread
 import collections
+import resource
+from pathlib import Path
 sys.path.insert(1, os.path.join(sys.path[0], '..'))
 from . import isoform_junctions_chunk as junc
 from . import isoform_matrix as iso
@@ -22,49 +29,199 @@ import asyncio
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
+def _get_linux_rss_stats():
+    try:
+        with open('/proc/self/statm', 'r') as handle:
+            parts = handle.read().split()
+        if len(parts) >= 2:
+            rss_pages = int(parts[1])
+            page_size = os.sysconf('SC_PAGE_SIZE')
+            rss_mb = (rss_pages * page_size) / (1024 * 1024)
+        else:
+            rss_mb = None
+    except (OSError, ValueError, AttributeError):
+        rss_mb = None
+    rss_max = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    rss_max_mb = rss_max / 1024
+    return rss_mb, rss_max_mb
+
+
+def _get_darwin_rss_stats():
+    rss_mb = None
+    try:
+        result = subprocess.run(
+            ['ps', '-o', 'rss=', '-p', str(os.getpid())],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.stdout:
+            rss_kb = int(result.stdout.strip().split()[0])
+            rss_mb = rss_kb / 1024
+    except (OSError, ValueError, IndexError):
+        rss_mb = None
+    rss_max = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    rss_max_mb = rss_max / (1024 * 1024)
+    return rss_mb, rss_max_mb
+
+
+def _get_windows_rss_stats():
+    class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            ('cb', wintypes.DWORD),
+            ('PageFaultCount', wintypes.DWORD),
+            ('PeakWorkingSetSize', ctypes.c_size_t),
+            ('WorkingSetSize', ctypes.c_size_t),
+            ('QuotaPeakPagedPoolUsage', ctypes.c_size_t),
+            ('QuotaPagedPoolUsage', ctypes.c_size_t),
+            ('QuotaPeakNonPagedPoolUsage', ctypes.c_size_t),
+            ('QuotaNonPagedPoolUsage', ctypes.c_size_t),
+            ('PagefileUsage', ctypes.c_size_t),
+            ('PeakPagefileUsage', ctypes.c_size_t),
+        ]
+    counters = PROCESS_MEMORY_COUNTERS()
+    counters.cb = ctypes.sizeof(counters)
+    process = ctypes.windll.kernel32.GetCurrentProcess()
+    if ctypes.windll.psapi.GetProcessMemoryInfo(process, ctypes.byref(counters), counters.cb):
+        rss_mb = counters.WorkingSetSize / (1024 * 1024)
+        rss_max_mb = counters.PeakWorkingSetSize / (1024 * 1024)
+        return rss_mb, rss_max_mb
+    return None, None
+
+
+def _get_rss_stats():
+    if sys.platform.startswith('linux'):
+        return _get_linux_rss_stats()
+    if sys.platform == 'darwin':
+        return _get_darwin_rss_stats()
+    if sys.platform.startswith('win'):
+        return _get_windows_rss_stats()
+    return None, None
+
+
+def _format_rss_status():
+    rss_mb, rss_max_mb = _get_rss_stats()
+    parts = []
+    if rss_mb is not None:
+        parts.append(f"rss_mb={rss_mb:.1f}")
+    if rss_max_mb is not None:
+        parts.append(f"rss_max_mb={rss_max_mb:.1f}")
+    if not parts:
+        parts.append("rss_mb=n/a")
+    return " ".join(parts)
+
+
+def _trim_memory():
+    gc.collect()
+    if sys.platform.startswith('linux'):
+        try:
+            libc = ctypes.CDLL("libc.so.6")
+            libc.malloc_trim(0)
+        except OSError:
+            pass
+        return
+    if sys.platform == 'darwin':
+        try:
+            libmalloc = ctypes.CDLL("libmalloc.dylib")
+            libmalloc.malloc_default_zone.restype = ctypes.c_void_p
+            zone = libmalloc.malloc_default_zone()
+            libmalloc.malloc_zone_pressure_relief.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+            libmalloc.malloc_zone_pressure_relief(zone, 0)
+        except OSError:
+            pass
+        return
+    if sys.platform.startswith('win'):
+        try:
+            process = ctypes.windll.kernel32.GetCurrentProcess()
+            ctypes.windll.psapi.EmptyWorkingSet(process)
+        except Exception:
+            pass
+
 def exportRatios(ob,out):
     pseudo_pdf, tpm, isoform_to_gene_ratio = iso.pseudo_cluster_counts(ob,cell_threshold=5,count_threshold=0,compute_tpm=True)
     pseudo_pdf.to_csv(out+'_pseudo_cluster_counts.txt', sep='\t')
     tpm.to_csv(out+'_pseudo_cluster-tpm.txt', sep='\t')
     isoform_to_gene_ratio.to_csv(out+'_pseudo_cluster-ratio.txt', sep='\t')
 
-def import_metadata(metadata_file, return_size = False, include_hashed_samples = False):
+def import_metadata(metadata_file, return_size = False, include_hashed_samples = False, extract_from_bams = False, reference_model = None):
     """Reads metadata file and groups samples by uid."""
     metadata = pd.read_csv(metadata_file, sep='\t')
     sample_dict = {}
     gff_name_tracker = {}
     hashed_path = None
+    bam_path = None
     gff_names = []
     comparison_groups = {}
 
     for _, row in metadata.iterrows():
         uid = row['uid']
         library = row['library']
-        gff_path = row['gff']
+        if 'gff' in row:
+            gff_path = row['gff']
+        if 'matrix' in row:
+            matrix_path = row['matrix']
         if 'hashed_barcodes' in row:
             hashed_path = row['hashed_barcodes']
             if isinstance(hashed_path, str) and '.' in hashed_path:
                 pass
             else:
                 hashed_path = None
+        # Extract reads and isoform structures from the BAM directly (very large h5ad and gff)
+        if 'bam' in row:
+            bam_path = row['bam']
+            bam_parent_dir = str(Path(bam_path).parent)
+            output_dir = bam_parent_dir+'/'+library
+            if extract_from_bams:
+                active_children = len(multiprocessing.active_children())
+                print(
+                    "Pre-extract status: "
+                    f"active_children={active_children} "
+                    f"{_format_rss_status()}"
+                )
+                from ..bam import isoform_structure_extract as bam_extract
+                print(f"Extracting isoform reads from bam:\n {bam_path}") 
+                gff_path, matrix_path, stats, n, o = bam_extract.parallel_extract_isoform_structures(bam_path, reference_model, output_dir, barcode_tags=['CB'])
+                del stats, n, o
+                _trim_memory()
+            else:
+                # If False, assume the BAMs have been processed already (replace gff and matrix paths from bam)
+                gff_path = output_dir + ".gff.gz"
+                matrix_path = output_dir + ".h5ad"
+
         gff_name = os.path.basename(gff_path)  # Full GFF filename
-        gff_basename = gff_name[:-4]  # Name without extension
+        gff_basename = gff_name.split(".g", 1)[0]
+        if '.gz' in gff_name:
+            gz = True
+        else:
+            gz = False
 
         # Check for duplicate GFF filenames or "." in the filename before the extension
-        if gff_name in gff_name_tracker or '.' in gff_basename:
-            new_gff_name = f"{library}.gff"
+        if (gff_name in gff_name_tracker or '.' in gff_basename):
+            if gff_name in gff_name_tracker:
+                version = gff_name_tracker[gff_name]
+                gff_name_tracker[gff_name]+=1
+                if gz:
+                    new_gff_name = f"{gff_basename}___{version}.gff.gz"
+                else:
+                    new_gff_name = f"{gff_basename}___{version}.gff"
+            else:
+                if gz:
+                    new_gff_name = f"{library}.gff.gz"
+                else:
+                    new_gff_name = f"{library}.gff"
             new_gff_path = os.path.join(os.path.dirname(gff_path), new_gff_name)
 
             # Copy the original GFF to the new path
             shutil.copy2(gff_path, new_gff_path)
-            #print(f"Incompatible gff name... copying to:\n {gff_path} to {new_gff_path}")
+            print(f"Making gff name unique... copying to:\n {gff_path} to {new_gff_path}")
 
             # Update the GFF path to point to the new file
             gff_path = new_gff_path
             gff_basename = library
 
         # Track the GFF filename (to check for duplicates -  not allowed)
-        gff_name_tracker[gff_name] = gff_path
+        if gff_name not in gff_name_tracker:
+            gff_name_tracker[gff_name] = 1
         
         if include_hashed_samples == False:
             # Only include hashed libraries as separate when exporting sample-level h5ad files
@@ -78,11 +235,12 @@ def import_metadata(metadata_file, return_size = False, include_hashed_samples =
         sample_dict[uid].append({
             'gff': gff_path, 
             'gff_name': gff_basename,
-            'matrix': row['matrix'], 
+            'matrix': matrix_path, 
             'library': library, 
             'reverse': row['reverse'],
             'groups': row['groups'],
-            'hashed': hashed_path
+            'hashed': hashed_path,
+            'bam': bam_path
         })
         if row['groups'] in comparison_groups:
             if uid not in comparison_groups[row['groups']]:
@@ -107,6 +265,9 @@ def import_metadata(metadata_file, return_size = False, include_hashed_samples =
 
 def export_junction_matrix(matrix, gff, library, reverse, ensembl_exon_dir, barcode_sample_dict):
     """Exports junction matrix for a single sample."""
+
+    print(f"Pre-extract status: {_format_rss_status()}")
+
     adata = junc.exportJunctionMatrix(matrix, ensembl_exon_dir, gff, barcode_clusters=barcode_sample_dict[library], rev=reverse)
     return iso.append_sample_name(adata, library)
 
