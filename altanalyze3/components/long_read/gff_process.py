@@ -743,6 +743,10 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
     eo = open(transcript_associations, 'w')
     _memtrace("after_open_transcript_associations")
 
+    transcript_associations_raw = os.path.join(combined_dir, 'transcript_associations_raw.txt')
+    eor = open(transcript_associations_raw, 'w')
+    _memtrace("after_open_transcript_associations")
+
     def getJunctions(exons):
         splice_junctions = []
         if len(exons) == 1:
@@ -786,10 +790,9 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
         if len(genes)>2:
             trans_spliced_isoforms[filtered_exonIDs_str] = []
 
-        if mode == 'collapse':
-            eo.write('\t'.join([gene, strand, filtered_exonIDs_str, transcript_id, file]) + '\n')
-        else:
-            eo.write('\t'.join([gene, strand, "|".join(exonIDs), transcript_id, file]) + '\n')
+        eo.write('\t'.join([gene, strand, filtered_exonIDs_str, transcript_id, file]) + '\n')
+        eor.write('\t'.join([gene, strand, "|".join(exonIDs), transcript_id, file]) + '\n')
+
         #splice_junctions = getJunctions(exons)
         if 'UNK' not in gene:
             #junction_str_db[gene,filtered_exonIDs_str] = tuple(splice_junctions)

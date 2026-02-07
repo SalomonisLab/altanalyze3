@@ -25,6 +25,26 @@ plt.rcParams['figure.facecolor'] = 'white'
 DEFAULT_COLORMAP = 'tab20'
 ISOFORM_STRUCTURE_VIEW_VERSION = "debug-20260206-a"
 _AUTO_DEBUG_PRINTED = False
+AUTO_CLUSTER_DEFAULTS = {
+    "cluster_mode": "block",
+    "cluster_features": "tokens",
+    "cluster_strategy": "subsequence",
+    "cluster_similarity_threshold": 0.85,
+    "min_split_fraction": 0.05,
+    "max_isoforms": 1500,
+    "min_count": 1,
+    "cluster_isoforms": True,
+}
+CLI_CLUSTER_DEFAULTS = {
+    "cluster_mode": "block",
+    "cluster_features": "tokens",
+    "cluster_strategy": "subsequence",
+    "cluster_similarity_threshold": 0.85,
+    "min_split_fraction": 0.05,
+    "max_isoforms": 1500,
+    "min_count": 1,
+    "cluster_isoforms": True,
+}
 
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), '..'))
 from long_read import isoform_matrix as iso
@@ -65,6 +85,52 @@ def _init_logging(output_path):
     stdout_tee = _Tee(sys.stdout, log_handle)
     stderr_tee = _Tee(sys.stderr, log_handle)
     return log_path, log_handle, stdout_tee, stderr_tee
+
+
+def _assert_default_alignment():
+    if AUTO_CLUSTER_DEFAULTS == CLI_CLUSTER_DEFAULTS:
+        return
+    keys = sorted(set(AUTO_CLUSTER_DEFAULTS) | set(CLI_CLUSTER_DEFAULTS))
+    mismatches = []
+    for key in keys:
+        auto_value = AUTO_CLUSTER_DEFAULTS.get(key)
+        cli_value = CLI_CLUSTER_DEFAULTS.get(key)
+        if auto_value != cli_value:
+            mismatches.append(f"{key} auto={auto_value} cli={cli_value}")
+    mismatch_text = "; ".join(mismatches) if mismatches else "unknown mismatch"
+    raise ValueError(f"[assert] auto vs cli defaults mismatch: {mismatch_text}")
+
+
+def _resolve_gene_output_label(gene, gene_symbol_dict):
+    if not gene_symbol_dict:
+        return gene
+    symbol = gene_symbol_dict.get(gene)
+    if not symbol:
+        return gene
+    label = str(symbol).strip()
+    if not label:
+        return gene
+    label = label.replace(os.sep, "_")
+    if os.altsep:
+        label = label.replace(os.altsep, "_")
+    return label
+
+
+def _resolve_transcript_associations_path(path):
+    if not path:
+        return path
+    if path.endswith('.db'):
+        return path
+    if os.path.isdir(path):
+        return path
+    base = os.path.basename(path)
+    if base == "transcript_associations_raw.txt":
+        return path
+    if base == "transcript_associations.txt":
+        raw_path = os.path.join(os.path.dirname(path), "transcript_associations_raw.txt")
+        if os.path.exists(raw_path):
+            return raw_path
+    return path
 
 
 def _normalize_group_value(value):
@@ -786,6 +852,7 @@ def load_transcript_associations(path, target_gene):
 
 
 def load_transcript_associations_auto(path, target_gene, index_dir=None):
+    path = _resolve_transcript_associations_path(path)
     if path and path.endswith('.db') and os.path.exists(path):
         return load_transcript_associations_from_sqlite(path, target_gene)
     if path:
@@ -897,19 +964,24 @@ def build_isoform_segments(tokens, exon_lookup, default_gene):
         if coords:
             coord_min = min(coords)
             coord_max = max(coords)
-            if idx == 0:
-                if direction == 1:
-                    start = max(start, coord_min)
-                else:
-                    end = min(end, coord_max)
-            if idx == len(grouped) - 1:
-                if direction == 1:
-                    end = min(end, coord_max)
-                else:
-                    start = max(start, coord_min)
-            if idx != 0 and idx != len(grouped) - 1 and len(coords) > 1:
+            if seg['type'] == 'I' and len(coords) > 1:
+                # Intron tokens with explicit boundaries represent a bounded segment.
                 start = max(start, coord_min)
                 end = min(end, coord_max)
+            else:
+                if idx == 0:
+                    if direction == 1:
+                        start = max(start, coord_min)
+                    else:
+                        end = min(end, coord_max)
+                if idx == len(grouped) - 1:
+                    if direction == 1:
+                        end = min(end, coord_max)
+                    else:
+                        start = max(start, coord_min)
+                if idx != 0 and idx != len(grouped) - 1 and len(coords) > 1:
+                    start = max(start, coord_min)
+                    end = min(end, coord_max)
         if end < start:
             start, end = end, start
         label = None
@@ -1244,20 +1316,54 @@ def load_isoform_counts_indexed(h5ad_path, target_gene, index_dir=None,
 
 def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, barcode_sample_dict,
                                           genes, gene_model, output_dir, index_dir=None,
-                                          cluster_mode='block', cluster_features='tokens',
-                                          cluster_strategy='substring',
-                                          cluster_similarity_threshold=0.85, min_split_fraction=0.05,
-                                          max_isoforms=200, min_count=1, intron_scale=0.2,
+                                          cluster_mode=AUTO_CLUSTER_DEFAULTS["cluster_mode"],
+                                          cluster_features=AUTO_CLUSTER_DEFAULTS["cluster_features"],
+                                          cluster_strategy=AUTO_CLUSTER_DEFAULTS["cluster_strategy"],
+                                          cluster_similarity_threshold=AUTO_CLUSTER_DEFAULTS["cluster_similarity_threshold"],
+                                          min_split_fraction=AUTO_CLUSTER_DEFAULTS["min_split_fraction"],
+                                          max_isoforms=AUTO_CLUSTER_DEFAULTS["max_isoforms"],
+                                          min_count=AUTO_CLUSTER_DEFAULTS["min_count"],
+                                          intron_scale=0.2,
                                           row_height=0.0125, row_gap=0.0, group_gap=0.1,
                                           isoform_gap=None, label_mode='first',
-                                          cluster_isoforms=True,
-                                          groupby_rev=True):
+                                          cluster_isoforms=AUTO_CLUSTER_DEFAULTS["cluster_isoforms"],
+                                          groupby_rev=True,
+                                          check_defaults=False,
+                                          gene_symbol_dict=None,
+                                          rebuild_index=False):
     start_time = time.time()
     global _AUTO_DEBUG_PRINTED
     if not _AUTO_DEBUG_PRINTED:
         print(f"[auto][debug] isoform_structure_view file: {__file__}")
         print(f"[auto][debug] isoform_structure_view version: {ISOFORM_STRUCTURE_VIEW_VERSION}")
         _AUTO_DEBUG_PRINTED = True
+    if check_defaults:
+        _assert_default_alignment()
+    if rebuild_index:
+        h5ad_paths = []
+        transcript_paths = []
+        for samples in sample_dict.values():
+            for sample in samples:
+                h5ad_path = sample.get('matrix')
+                if h5ad_path:
+                    h5ad_paths.append(h5ad_path)
+                assoc_path = sample.get('transcript_associations')
+                if not assoc_path and h5ad_path:
+                    assoc_path = os.path.join(
+                        os.path.dirname(h5ad_path),
+                        'gff-output',
+                        'transcript_associations.txt'
+                    )
+                if assoc_path and os.path.exists(assoc_path):
+                    transcript_paths.append(_resolve_transcript_associations_path(assoc_path))
+        h5ad_paths = list(dict.fromkeys(h5ad_paths))
+        transcript_paths = list(dict.fromkeys(transcript_paths))
+        print(
+            "[auto] Rebuilding indexes "
+            f"(h5ad={len(h5ad_paths)} transcript={len(transcript_paths)} "
+            f"gene_model={'set' if gene_model else 'none'})"
+        )
+        _maybe_rebuild_indexes(True, h5ad_paths, transcript_paths, gene_model)
     if isinstance(genes, str):
         genes = [genes]
     if isinstance(conditions, str):
@@ -1399,6 +1505,8 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                 )
                 if not os.path.exists(assoc_path):
                     assoc_path = None
+            if assoc_path:
+                assoc_path = _resolve_transcript_associations_path(assoc_path)
             for gene in genes:
                 gene_start = time.time()
                 structures = None
@@ -1562,36 +1670,6 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
         if not combined_records:
             print(f"[auto] No isoform counts for {gene}, skipping.")
             continue
-        condition_union_ids = set()
-        for condition in conditions:
-            counts_map = condition_counts[condition][gene]
-            if not counts_map:
-                continue
-            condition_records = [
-                {'isoform_id': iso_id, 'count': count, 'gene_id': gene}
-                for iso_id, count in counts_map.items()
-            ]
-            plotted_condition, _, _ = build_plotted_isoforms(
-                condition_records, transcript_structures, gene,
-                cluster_mode, cluster_features, min_count, max_isoforms
-            )
-            for iso in plotted_condition:
-                iso_key = iso.get('isoform_id', iso.get('resolved_id'))
-                if iso_key:
-                    condition_union_ids.add(str(iso_key))
-                resolved_id = iso.get('resolved_id')
-                if resolved_id:
-                    condition_union_ids.add(str(resolved_id))
-        if condition_union_ids:
-            print(
-                f"[auto][debug] {gene} union_isoforms_from_conditions="
-                f"{len(condition_union_ids)} max_isoforms={max_isoforms}"
-            )
-            combined_records = [
-                rec for rec in combined_records
-                if str(rec['isoform_id']) in condition_union_ids
-            ]
-
         resolved_hits = 0
         unresolved = []
         for iso_id in combined_counts.keys():
@@ -1651,17 +1729,6 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
             if structure_ids:
                 counts_keys = set(str(key) for key in counts_map.keys())
                 overlap_struct = len(counts_keys & structure_ids)
-                min_required = max(5, int(0.05 * len(structure_ids)))
-                if nonzero and overlap_struct < min_required:
-                    print(
-                        f"[auto][warn] {gene} {condition} grouped_structures overlap={overlap_struct} "
-                        f"< min_required={min_required}; rebuilding clusters for this condition."
-                    )
-                    local_grouped_structures = None
-                    local_isoform_colors = None
-            if structure_ids:
-                counts_keys = set(str(key) for key in counts_map.keys())
-                overlap_struct = len(counts_keys & structure_ids)
                 counts_only = counts_keys - structure_ids
                 struct_only = structure_ids - counts_keys
                 print(
@@ -1688,7 +1755,8 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                 {'isoform_id': iso_id, 'count': count, 'gene_id': gene}
                 for iso_id, count in counts_map.items()
             ]
-            condition_dir = output_dir / condition / gene
+            gene_label = _resolve_gene_output_label(gene, gene_symbol_dict)
+            condition_dir = output_dir / condition / gene_label
             condition_dir.mkdir(parents=True, exist_ok=True)
             out_path = condition_dir / f"{condition}__{cell_state_label}__{gene}.pdf"
             print(f"[auto] Plotting {gene} for {condition} -> {out_path}")
@@ -1976,20 +2044,29 @@ def build_plotted_isoforms(isoforms, transcript_structures, target_gene, cluster
     for iso, resolved in resolved_items:
         tokens = transcript_structures[resolved]
         tokens_trimmed = strip_terminal_coords(tokens, target_gene)
-        cluster_tokens = filter_exon_tokens(tokens_trimmed, target_gene)
-        cluster_set = set(cluster_tokens)
+        cluster_tokens_exon = filter_exon_tokens(tokens_trimmed, target_gene)
+        cluster_tokens_exon_intron = filter_exon_intron_tokens(tokens_trimmed, target_gene)
+        cluster_set = set(cluster_tokens_exon)
         tokens_norm = [normalize_token(tok, target_gene, cluster_mode) for tok in tokens]
         plotted.append({
             **iso,
             'resolved_id': resolved,
             'tokens': tokens,
             'tokens_trimmed': tokens_trimmed,
-            'cluster_tokens': cluster_tokens,
+            'cluster_tokens': cluster_tokens_exon,
+            'cluster_tokens_exon': cluster_tokens_exon,
+            'cluster_tokens_exon_intron': cluster_tokens_exon_intron,
             'cluster_set': cluster_set,
             'tokens_norm': tokens_norm,
             'feature_set': build_feature_set(tokens_trimmed, cluster_features)
         })
     return plotted, len(missing_ids), missing_ids
+
+
+def _format_token_list(tokens):
+    if not tokens:
+        return ''
+    return '|'.join(tokens)
 
 
 def build_plotted_rows(plotted, cluster_label_map=None, cluster_index_map=None):
@@ -2006,6 +2083,14 @@ def build_plotted_rows(plotted, cluster_label_map=None, cluster_index_map=None):
             'isoform_id': isoform_id,
             'resolved_id': resolved_id,
             'count': iso.get('count', 0),
+            'tokens_raw': _format_token_list(iso.get('tokens')),
+            'tokens_trimmed': _format_token_list(iso.get('tokens_trimmed')),
+            'cluster_tokens_exon': _format_token_list(
+                iso.get('cluster_tokens_exon') or iso.get('cluster_tokens')
+            ),
+            'cluster_tokens_exon_intron': _format_token_list(
+                iso.get('cluster_tokens_exon_intron')
+            ),
             'cluster_label': (cluster_label_map or {}).get(resolved_id)
                             or (cluster_label_map or {}).get(isoform_id)
         }
@@ -2726,12 +2811,37 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
             group_label_y[group_idx] = (group_min[group_idx] + group_max[group_idx]) / 2.0
     isoform_first_row = {}
     group_first_row = {}
-    exon_labels_drawn = False
     debug_transcript_set = set(debug_transcripts or [])
     debug_transcript_seen = set()
     effective_label_mode = label_mode
     if cluster_isoforms and label_mode == 'all':
         effective_label_mode = 'first'
+    # Draw exon labels once per gene using the full gene model.
+    exon_label_y = -row_height * 3.5
+    for gene, offset in gene_offsets.items():
+        gene_map = gene_maps.get(gene)
+        if not gene_map:
+            continue
+        seen_labels = set()
+        for seg in gene_map['segments']:
+            if seg.get('type') != 'E':
+                continue
+            label = normalize_token(seg.get('exon_id', ''), gene, 'block')
+            if not label or label in seen_labels:
+                continue
+            seen_labels.add(label)
+            x0 = seg['display_start'] + offset
+            x1 = seg['display_end'] + offset
+            ax.text(
+                (x0 + x1) / 2.0,
+                exon_label_y,
+                label,
+                va='bottom',
+                ha='center',
+                fontsize=5,
+                color='black',
+                zorder=3
+            )
     for row in rows:
         iso = row['isoform']
         is_first_row = row_index == 0
@@ -2817,25 +2927,6 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
                     zorder=2
                 )
             )
-        # Add exon labels only once for the first isoform row shown.
-        if is_first_row and not exon_labels_drawn:
-            label_y = y_center - row_height * 0.7
-            seen_labels = set()
-            for span in exon_spans:
-                label = span['label']
-                if label and label not in seen_labels:
-                    seen_labels.add(label)
-                    ax.text(
-                        (span['x0'] + span['x1']) / 2.0,
-                        label_y,
-                        label,
-                        va='bottom',
-                        ha='center',
-                        fontsize=5,
-                        color='black',
-                        zorder=3
-                    )
-            exon_labels_drawn = True
         if effective_label_mode != 'none':
             if effective_label_mode == 'all':
                 show_label = True
@@ -2862,15 +2953,16 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
                 else:
                     isoform_first_row[iso['resolved_id']] = False
 
+    gene_label_y = -row_height * 6.5
     for gene, offset in gene_offsets.items():
         gene_map = gene_maps.get(gene)
         if not gene_map:
             continue
         center = offset + gene_map['total_length'] / 2.0
-        ax.text(center, -row_height * 4.0, gene, ha='center', va='bottom', fontsize=9)
+        ax.text(center, gene_label_y, gene, ha='center', va='bottom', fontsize=7)
 
     # Tight vertical framing around the read stack.
-    ax.set_ylim(-row_height * 5.0, total_height)
+    ax.set_ylim(-row_height * 8.0, total_height)
     ax.set_xlim(-total_width * 0.1, total_width + total_width * 0.02)
     ax.invert_yaxis()
     ax.axis('off')
@@ -2935,25 +3027,32 @@ def main():
                         help='Reverse-complement barcodes from groupby TSV (default: True)')
     parser.add_argument('--groupby-sample', default=None,
                         help='Optional sample name suffix to match when groupby is a TSV/TXT file')
-    parser.add_argument('--max-isoforms', type=int, default=200,
+    parser.add_argument('--max-isoforms', type=int, default=CLI_CLUSTER_DEFAULTS["max_isoforms"],
                         help='Maximum isoforms to display')
-    parser.add_argument('--min-count', type=float, default=1,
+    parser.add_argument('--min-count', type=float, default=CLI_CLUSTER_DEFAULTS["min_count"],
                         help='Minimum summed count to include an isoform')
-    parser.add_argument('--cluster-mode', choices=['full', 'base', 'block'], default='block',
+    parser.add_argument('--cluster-mode', choices=['full', 'base', 'block'],
+                        default=CLI_CLUSTER_DEFAULTS["cluster_mode"],
                         help='How to group isoform structures for clustering')
-    parser.add_argument('--cluster-strategy', choices=['substring', 'subsequence', 'overlap', 'jaccard', 'feature', 'structure', 'count'], default='subsequence',
+    parser.add_argument('--cluster-strategy', choices=['substring', 'subsequence', 'overlap', 'jaccard', 'feature', 'structure', 'count'],
+                        default=CLI_CLUSTER_DEFAULTS["cluster_strategy"],
                         help='How to order isoforms (substring/jaccard similarity, feature splits, structure grouping, or count)')
     parser.add_argument('--cluster-similarity-threshold', '--cluster-overlap-threshold',
-                        dest='cluster_similarity_threshold', type=float, default=0.85,
+                        dest='cluster_similarity_threshold', type=float,
+                        default=CLI_CLUSTER_DEFAULTS["cluster_similarity_threshold"],
                         help='Minimum similarity for clustering (subsequence when --cluster-isoforms)')
-    parser.add_argument('--cluster-features', choices=['tokens', 'junctions', 'both'], default='tokens',
+    parser.add_argument('--cluster-features', choices=['tokens', 'junctions', 'both'],
+                        default=CLI_CLUSTER_DEFAULTS["cluster_features"],
                         help='Features to use for clustering')
-    parser.add_argument('--min-split-fraction', type=float, default=0.05,
+    parser.add_argument('--min-split-fraction', type=float,
+                        default=CLI_CLUSTER_DEFAULTS["min_split_fraction"],
                         help='Minimum fraction for a structural split (feature clustering)')
     parser.add_argument('--cluster-isoforms', action='store_true',
                         help='Color isoforms by cluster and label using the longest isoform in each cluster')
     parser.add_argument('--no-cluster-isoforms', action='store_false', dest='cluster_isoforms',
                         help='Disable isoform clustering and display isoforms independently')
+    parser.add_argument('--check-defaults', action='store_true',
+                        help='Assert auto and CLI default clustering settings match')
     parser.add_argument('--inspect-isoforms', nargs='*', default=None,
                         help='Isoform IDs to print structure details for')
     parser.add_argument('--intron-scale', type=float, default=0.2,
@@ -2972,13 +3071,15 @@ def main():
                         help='Transcript IDs to print segment debugging for')
     parser.add_argument('--debug-isoforms', nargs='*', default=None,
                         help='Isoform IDs to print clustering diagnostics for')
-    parser.set_defaults(cluster_isoforms=True)
+    parser.set_defaults(cluster_isoforms=CLI_CLUSTER_DEFAULTS["cluster_isoforms"])
     args = parser.parse_args()
     log_path, log_handle, stdout_tee, stderr_tee = _init_logging(args.out)
     original_stdout = sys.stdout
     original_stderr = sys.stderr
     sys.stdout = stdout_tee
     sys.stderr = stderr_tee
+    if args.check_defaults:
+        _assert_default_alignment()
     print(f"Log file: {log_path}")
     print(f"[debug] isoform_structure_view path: {__file__}")
     print("[debug] isoform_structure_view build: 20260206-mask-v2")
@@ -3030,6 +3131,9 @@ def main():
             transcript_paths = transcript_paths * len(args.h5ad)
         elif len(transcript_paths) != len(args.h5ad):
             parser.error("--transcript-associations must be one path or match --h5ad count")
+        transcript_paths = [
+            _resolve_transcript_associations_path(path) for path in transcript_paths
+        ]
         missing_transcripts = [path for path in transcript_paths if not os.path.exists(path)]
         if missing_transcripts:
             raise FileNotFoundError(
