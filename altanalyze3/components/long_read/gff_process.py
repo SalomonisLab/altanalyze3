@@ -669,6 +669,39 @@ def collapseIsoforms(gene_db, junction_db, gff_organization, mode):
 
 def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
     """Only return isoforms with unique splice-site combinations"""
+    memtrace_enabled = os.environ.get("ISOFORM_JUNC_MEMTRACE") == "1"
+    memtrace_tag = "MEMTRACE_TEMP"  # MEMTRACE_TEMP
+
+    def _memtrace(label):
+        if not memtrace_enabled:
+            return
+        try:
+            import resource
+            import subprocess
+            rss_mb = None
+            rss_max_mb = None
+            rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            if sys.platform == 'darwin':
+                rss_max_mb = rss_kb / (1024 * 1024)
+            else:
+                rss_max_mb = rss_kb / 1024
+            output = subprocess.check_output(
+                ["ps", "-o", "rss=", "-p", str(os.getpid())],
+                text=True,
+            ).strip()
+            if output:
+                rss_mb = float(output) / 1024
+            parts = []
+            if rss_mb is not None:
+                parts.append(f"rss_mb={rss_mb:.1f}")
+            if rss_max_mb is not None:
+                parts.append(f"rss_max_mb={rss_max_mb:.1f}")
+            status = " ".join(parts) if parts else "rss_mb=n/a"
+            print(f"[{memtrace_tag}] gff_process:{label} {status}")
+        except Exception:
+            pass
+
+    _memtrace("start")
     junction_db = collections.OrderedDict()
     junction_str_db = collections.OrderedDict()
     gene_db = collections.OrderedDict()
@@ -680,6 +713,7 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
 
     # Import preprocessed Ensembl exon information
     importEnsemblGenes(exon_reference_dir)
+    _memtrace("after_import_ensembl")
     
     collapse_isoforms = False
     if isinstance(directory, list):
@@ -707,6 +741,7 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
         os.makedirs(combined_dir)
     transcript_associations = os.path.join(combined_dir, 'transcript_associations.txt')
     eo = open(transcript_associations, 'w')
+    _memtrace("after_open_transcript_associations")
 
     def getJunctions(exons):
         splice_junctions = []
@@ -1041,6 +1076,36 @@ def importEnsemblGenes(exon_file,include_introns=False):
                 exonCoordinates[(chr, stop, strandData[gene], 2)] = (gene, exon, index)
             index+=1
     return exonCoordinates, geneData, strandData
+
+
+def clearEnsemblCache():
+    """CLEAR_GFF_CACHE_TEMP: reset global caches to release memory between runs."""
+    global exonCoordinates
+    global geneData
+    global exonData
+    global strandData
+    global novelGene
+    global novelGeneLoci
+    global additional_junctions
+    try:
+        exonCoordinates = {}
+    except NameError:
+        pass
+    try:
+        geneData = {}
+    except NameError:
+        pass
+    try:
+        exonData = {}
+    except NameError:
+        pass
+    try:
+        strandData = {}
+    except NameError:
+        pass
+    novelGene = 0
+    novelGeneLoci = [1, 1]
+    additional_junctions = {}
     
 def sort_gff(concatenated_gff_file, sorted_gff_file):
     def chromosome_sort_key(chromosome):

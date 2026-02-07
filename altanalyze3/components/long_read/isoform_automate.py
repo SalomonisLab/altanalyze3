@@ -145,6 +145,7 @@ def exportRatios(ob,out):
 
 def import_metadata(metadata_file, return_size = False, include_hashed_samples = False, extract_from_bams = False, reference_model = None):
     """Reads metadata file and groups samples by uid."""
+
     metadata = pd.read_csv(metadata_file, sep='\t')
     sample_dict = {}
     gff_name_tracker = {}
@@ -152,6 +153,7 @@ def import_metadata(metadata_file, return_size = False, include_hashed_samples =
     bam_path = None
     gff_names = []
     comparison_groups = {}
+    revise_gff_path = False
 
     for _, row in metadata.iterrows():
         uid = row['uid']
@@ -196,38 +198,40 @@ def import_metadata(metadata_file, return_size = False, include_hashed_samples =
             gz = False
 
         # Check for duplicate GFF filenames or "." in the filename before the extension
-        if (gff_name in gff_name_tracker or '.' in gff_basename):
-            if gff_name in gff_name_tracker:
-                version = gff_name_tracker[gff_name]
-                gff_name_tracker[gff_name]+=1
-                if gz:
-                    new_gff_name = f"{gff_basename}___{version}.gff.gz"
+        if revise_gff_path:
+            if (gff_name in gff_name_tracker or '.' in gff_basename):
+                if gff_name in gff_name_tracker:
+                    version = gff_name_tracker[gff_name]
+                    gff_name_tracker[gff_name]+=1
+                    if gz:
+                        new_gff_name = f"{gff_basename}___{version}.gff.gz"
+                    else:
+                        new_gff_name = f"{gff_basename}___{version}.gff"
                 else:
-                    new_gff_name = f"{gff_basename}___{version}.gff"
-            else:
-                if gz:
-                    new_gff_name = f"{library}.gff.gz"
-                else:
-                    new_gff_name = f"{library}.gff"
-            new_gff_path = os.path.join(os.path.dirname(gff_path), new_gff_name)
+                    if gz:
+                        new_gff_name = f"{library}.gff.gz"
+                    else:
+                        new_gff_name = f"{library}.gff"
+                new_gff_path = os.path.join(os.path.dirname(gff_path), new_gff_name)
 
-            # Copy the original GFF to the new path
-            shutil.copy2(gff_path, new_gff_path)
-            print(f"Making gff name unique... copying to:\n {gff_path} to {new_gff_path}")
+                # Copy the original GFF to the new path
+                shutil.copy2(gff_path, new_gff_path)
+                print(f"Making gff name unique... copying to:\n {gff_path} to {new_gff_path}")
 
-            # Update the GFF path to point to the new file
-            gff_path = new_gff_path
-            gff_basename = library
+                # Update the GFF path to point to the new file
+                gff_path = new_gff_path
+                gff_basename = library
 
-        # Track the GFF filename (to check for duplicates -  not allowed)
-        if gff_name not in gff_name_tracker:
-            gff_name_tracker[gff_name] = 1
-        
+            # Track the GFF filename (to check for duplicates -  not allowed)
+            if gff_name not in gff_name_tracker:
+                gff_name_tracker[gff_name] = 1
+
+        """   
         if include_hashed_samples == False:
             # Only include hashed libraries as separate when exporting sample-level h5ad files
             if gff_basename in gff_names:
                 continue
-
+        """
         # Populate the sample dictionary
         if uid not in sample_dict:
             sample_dict[uid] = []
@@ -263,12 +267,32 @@ def import_metadata(metadata_file, return_size = False, include_hashed_samples =
     else:
         return sample_dict
 
-def export_junction_matrix(matrix, gff, library, reverse, ensembl_exon_dir, barcode_sample_dict):
+def export_junction_matrix(matrix, gff, library, reverse, ensembl_exon_dir, barcode_sample_dict,
+                           return_adata=True):
     """Exports junction matrix for a single sample."""
 
     print(f"Pre-extract status: {_format_rss_status()}")
 
-    adata = junc.exportJunctionMatrix(matrix, ensembl_exon_dir, gff, barcode_clusters=barcode_sample_dict[library], rev=reverse)
+    regenerate_junction_h5ad = False
+    h5ad_output_path = Path(f"{gff.split('.g')[0]}-junction.h5ad")
+    if h5ad_output_path.exists() and regenerate_junction_h5ad == False:
+        if return_adata:
+            print(f"Junction h5ad exists, reloading: {h5ad_output_path}")
+            adata = ad.read_h5ad(h5ad_output_path)
+            return iso.append_sample_name(adata, library)
+
+    else:
+        adata = junc.exportJunctionMatrix(
+            matrix,
+            ensembl_exon_dir,
+            gff,
+            barcode_clusters=barcode_sample_dict[library],
+            rev=reverse,
+            return_adata=return_adata,
+        )
+    if not return_adata:
+        # RETURN_ADATA_TEMP
+        return None
     return iso.append_sample_name(adata, library)
 
 def export_isoform_matrix(matrix, gff, library, isoform_associations_path, reverse, barcode_sample_dict):
@@ -278,13 +302,27 @@ def export_isoform_matrix(matrix, gff, library, isoform_associations_path, rever
 
 def export_junction_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict):
     """Processes samples, concatenates if necessary, and writes h5ad files."""
+
     for uid, samples in sample_dict.items():
         num_samples = len(samples)
         print(f'Processing {num_samples} library for sample: {uid}')
-        adata_list = [export_junction_matrix(s['matrix'], s['gff'], s['library'], s['reverse'], ensembl_exon_dir, barcode_sample_dict) for s in samples]
-        if num_samples>1:
+        adata_list = [
+            export_junction_matrix(
+                s['matrix'],
+                s['gff'],
+                s['library'],
+                s['reverse'],
+                ensembl_exon_dir,
+                barcode_sample_dict,
+                return_adata=(num_samples > 1),
+            ) for s in samples
+        ]
+        if num_samples > 1:
             combined_adata = ad.concat(adata_list, axis=0, join='outer') if len(adata_list) > 1 else adata_list[0]
-            combined_adata.write_h5ad(f'{uid}.h5ad', compression='gzip')
+            combined_adata.write_h5ad(f'{uid}-junction.h5ad', compression='gzip')
+            del combined_adata
+        del adata_list
+        _trim_memory()
 
 def export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, reference_gff, genome_fasta, deleteGFF=False):
     """Processes samples, concatenates if necessary, and writes h5ad files."""
@@ -369,27 +407,41 @@ def export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, refe
                 combined_adata.obs_names_make_unique()
                 combined_adata.write_h5ad(f'{uid}_isoform.h5ad')
 
-def get_valid_h5ad(sample_dict,dataType):
-    sample_index={}
-    sample_files=[]
-    uids=[]
+def get_valid_h5ad(sample_dict, dataType):
+    sample_files = []   # list of unique h5ad paths (full paths)
+    sample_h5ads = {}   # dict: gff_name -> h5ad path (full path)
+    uids = []
+
     current_dir = os.getcwd()
+    suffix = '-junction.h5ad' if dataType == 'junction' else '-isoform.h5ad'
+
     for uid, samples in sample_dict.items():
-        h5ad = uid + ('.h5ad' if dataType == 'junction' else '-isoform.h5ad')
-        if not os.path.exists(f'{current_dir}/{h5ad}'):
+        uid_h5ad = os.path.join(current_dir, uid + suffix)
+
+        # Prefer UID-level combined file in CWD if present
+        if os.path.exists(uid_h5ad):
+            if uid_h5ad not in sample_files:
+                sample_files.append(uid_h5ad)
             for s in samples:
-                h5ad = s['gff_name'] + ('.h5ad' if dataType == 'junction' else '-isoform.h5ad')
-                if h5ad not in sample_files:
-                    sample_files.append(h5ad)
-                sample_index[s['gff_name']] = h5ad
+                sample_h5ads[s['gff_name']] = uid_h5ad
+
+        # Otherwise require per-sample file next to the GFF
         else:
             for s in samples:
-                sample_index[s['gff_name']] = h5ad
-                if h5ad not in sample_files:
-                    sample_files.append(h5ad)
+                gff_dir = os.path.dirname(s['gff'])
+                sample_h5ad = os.path.join(gff_dir, s['gff_name'] + suffix)
+
+                if not os.path.exists(sample_h5ad):
+                    raise FileNotFoundError("Missing h5ad file: " + sample_h5ad)
+
+                sample_h5ads[s['gff_name']] = sample_h5ad
+                if sample_h5ad not in sample_files:
+                    sample_files.append(sample_h5ad)
+
         uids.append(uid)
 
-    return sample_files,sample_index,uids
+    return sample_files, sample_h5ads, uids
+
 
 def get_sample_to_group(sample_dict,dataType):
     sample_group={}
@@ -440,6 +492,29 @@ def export_sorted(filename, sort_col, exclude_header=True):
     except Exception as e:
         print(f"Error replacing the original file: {e}")
         return output_file
+
+def _filter_pseudobulk_min_counts(input_file, output_file, min_read=10):
+
+    with open(input_file, 'r') as infile, open(output_file, 'w') as outfile:
+        header = infile.readline()
+        if not header:
+            return input_file
+        outfile.write(header)
+        for line in infile:
+            fields = line.rstrip('\n').split('\t')
+            if len(fields) <= 1:
+                continue
+            keep = False
+            for value in fields[1:]:
+                try:
+                    if float(value) > (min_read - 1):
+                        keep = True
+                        break
+                except ValueError:
+                    continue
+            if keep:
+                outfile.write(line)
+    return output_file
 
 def deconvolute_libraries_by_hashed_index(sample_dict,sample_h5ads,dataType):
     sample_metadata={}
@@ -527,7 +602,7 @@ def pre_process_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_dir):
     export_junction_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict)
     export_pseudo_counts(metadata_file,barcode_cluster_dirs,'junction')
 
-def combine_processed_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_dir, gencode_gff, genome_fasta):
+def combine_processed_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_dir, gencode_gff, genome_fasta, min_count_filter = True):
     sample_dict, min_group_size = import_metadata(metadata_file, return_size = True)
     barcode_sample_dict = iso.import_barcode_clusters(barcode_cluster_dirs)
 
@@ -536,6 +611,8 @@ def combine_processed_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_
     export_pseudo_counts(metadata_file,barcode_cluster_dirs,'isoform',compute_tpm=True)
     junction_coords_file = 'junction_combined_pseudo_cluster_counts-filtered.txt'
     outdir = 'psi_combined_pseudo_cluster_counts.txt'
+    if min_count_filter:
+        junction_coords_file = _filter_pseudobulk_min_counts(junction_coords_file, junction_coords_file[:-4]+'-10-counts.txt', min_read=10)  # MIN_COUNT_FILTER
     junction_coords_file = export_sorted(junction_coords_file, 0) ### Sort the expression file
     #psi.main(junction_path=junction_coords_file, query_gene=None, outdir=outdir, use_multiprocessing=False, mp_context=mp_context, num_cores=num_cores)
     run_psi_analysis(junction_coords_file, outdir)

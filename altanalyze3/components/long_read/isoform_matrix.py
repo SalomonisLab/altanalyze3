@@ -11,6 +11,11 @@ from scipy.io import mmread
 from collections import defaultdict
 import argparse
 from tqdm import tqdm # progress bar
+import gc
+import ctypes
+import subprocess
+import resource
+from ctypes import wintypes
 sys.path.insert(1, os.path.join(sys.path[0], '..'))
 from joblib import Parallel, delayed
 from anndata import AnnData, concat, read_h5ad
@@ -19,6 +24,122 @@ from anndata import AnnData, concat, read_h5ad
 """
 Module for long-read sparse matrix single-cell processing.
 """
+
+_MEMTRACE_TAG = "MEMTRACE_TEMP"  # MEMTRACE_TEMP
+_MEMTRACE_ENABLED = os.environ.get("ISOFORM_JUNC_MEMTRACE") == "1"
+
+
+def _get_linux_rss_stats():
+    rss_mb = None
+    rss_max_mb = None
+    try:
+        with open("/proc/self/statm", "r") as handle:
+            parts = handle.read().split()
+        if len(parts) >= 2:
+            rss_pages = int(parts[1])
+            rss_mb = (rss_pages * os.sysconf("SC_PAGE_SIZE")) / (1024 * 1024)
+    except Exception:
+        pass
+    try:
+        rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        rss_max_mb = rss_kb / 1024
+    except Exception:
+        pass
+    return rss_mb, rss_max_mb
+
+
+def _get_darwin_rss_stats():
+    rss_mb = None
+    rss_max_mb = None
+    try:
+        output = subprocess.check_output(
+            ["ps", "-o", "rss=", "-p", str(os.getpid())],
+            text=True,
+        ).strip()
+        if output:
+            rss_mb = float(output) / 1024
+    except Exception:
+        pass
+    try:
+        rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        rss_max_mb = rss_kb / (1024 * 1024)
+    except Exception:
+        pass
+    return rss_mb, rss_max_mb
+
+
+def _get_windows_rss_stats():
+    class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD),
+            ("PageFaultCount", wintypes.DWORD),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
+    counters = PROCESS_MEMORY_COUNTERS()
+    counters.cb = ctypes.sizeof(counters)
+    process = ctypes.windll.kernel32.GetCurrentProcess()
+    if ctypes.windll.psapi.GetProcessMemoryInfo(process, ctypes.byref(counters), counters.cb):
+        rss_mb = counters.WorkingSetSize / (1024 * 1024)
+        rss_max_mb = counters.PeakWorkingSetSize / (1024 * 1024)
+        return rss_mb, rss_max_mb
+    return None, None
+
+
+def _get_rss_stats():
+    if sys.platform.startswith("linux"):
+        return _get_linux_rss_stats()
+    if sys.platform == "darwin":
+        return _get_darwin_rss_stats()
+    if sys.platform.startswith("win"):
+        return _get_windows_rss_stats()
+    return None, None
+
+
+def _memtrace(label):
+    if not _MEMTRACE_ENABLED:
+        return
+    rss_mb, rss_max_mb = _get_rss_stats()
+    parts = []
+    if rss_mb is not None:
+        parts.append(f"rss_mb={rss_mb:.1f}")
+    if rss_max_mb is not None:
+        parts.append(f"rss_max_mb={rss_max_mb:.1f}")
+    status = " ".join(parts) if parts else "rss_mb=n/a"
+    print(f"[{_MEMTRACE_TAG}] {label} {status}")
+
+
+def _trim_memory():
+    gc.collect()
+    if sys.platform.startswith("linux"):
+        try:
+            libc = ctypes.CDLL("libc.so.6")
+            libc.malloc_trim(0)
+        except OSError:
+            pass
+        return
+    if sys.platform == "darwin":
+        try:
+            libmalloc = ctypes.CDLL("libmalloc.dylib")
+            libmalloc.malloc_default_zone.restype = ctypes.c_void_p
+            zone = libmalloc.malloc_default_zone()
+            libmalloc.malloc_zone_pressure_relief.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+            libmalloc.malloc_zone_pressure_relief(zone, 0)
+        except OSError:
+            pass
+        return
+    if sys.platform.startswith("win"):
+        try:
+            process = ctypes.windll.kernel32.GetCurrentProcess()
+            ctypes.windll.psapi.EmptyWorkingSet(process)
+        except Exception:
+            pass
 
 def mtx_to_adata(int_folder, gene_is_index, feature, feature_col, barcode, barcode_col, matrix, rev=False):
     """ Import isoform sparse matrices and key by isoform UID """
@@ -536,6 +657,24 @@ def pseudo_cluster_counts_optimized(sample, combined_adata, cell_threshold=0, co
             ratios.to_csv(isoform_ratio_file, sep="\t", index=False, mode="a", header=False)
 
             #print(f"Final isoform_ratios non-zero entries: {(ratios.iloc[:, 1:] > 0).sum().sum()}")
+            del tpm
+            del tpm_values
+            del isoform_cols
+            del gene_ids
+            del mask
+            del gene_counts
+            del gene_counts_broadcasted
+            del safe_denominator
+            del ratios
+
+        del chunk_data
+        del chunk_var_names
+        del chunk_df
+        del grouped
+        del valid_groups
+        del summed_groups
+        del result
+        _trim_memory()
 
     print(f"Done writing {output_file}" + (f", {tpm_output_file}, {isoform_ratio_file}" if compute_tpm else ''))
 
@@ -555,25 +694,115 @@ def just_return_dense_count_files(sample, compute_tpm=False):
     else:
         return output_file
 
+def _sample_stem(sample_file):
+    base = os.path.basename(sample_file)
+    if base.endswith(".h5ad.gz"):
+        return base[:-8]
+    if base.endswith(".h5ad"):
+        return base[:-5]
+    return os.path.splitext(base)[0]
+
+def _sample_prefix(sample_file):
+    return os.path.join(os.path.dirname(sample_file), _sample_stem(sample_file))
+
+def _read_pseudobulk_header(path):
+    with open(path, newline='') as handle:
+        reader = csv.reader(handle, delimiter='\t')
+        header = next(reader, None)
+    if not header or len(header) < 2:
+        raise ValueError(f"Invalid pseudobulk header in {path}")
+    return header[1:]
+
+def _collect_feature_order(paths):
+    feature_to_row = {}
+    features = []
+    for path in paths:
+        with open(path, newline='') as handle:
+            reader = csv.reader(handle, delimiter='\t')
+            _ = next(reader, None)
+            for row in reader:
+                if not row:
+                    continue
+                feat = row[0]
+                if feat not in feature_to_row:
+                    feature_to_row[feat] = len(features)
+                    features.append(feat)
+    return feature_to_row, features
+
+def _fill_memmap_from_files(file_info, feature_to_row, total_cols, path_key, dtype, memmap_path, chunk_rows=200000):
+    row_count = len(feature_to_row)
+    data_mm = np.memmap(memmap_path, dtype=dtype, mode='w+', shape=(row_count, total_cols))
+    data_mm[:] = 0
+    for info in file_info:
+        file_path = info.get(path_key)
+        if not file_path:
+            continue
+        col_offset = info["col_offset"]
+        ncols = info["ncols"]
+        reader = pd.read_csv(file_path, sep='\t', chunksize=chunk_rows)
+        for chunk in reader:
+            if chunk.empty:
+                continue
+            features = chunk.iloc[:, 0].astype(str).tolist()
+            rows = np.fromiter(
+                (feature_to_row[f] for f in features),
+                dtype=np.int64,
+                count=len(features)
+            )
+            data = chunk.iloc[:, 1:].to_numpy(dtype=dtype, copy=False)
+            data_mm[rows, col_offset:col_offset + ncols] = data
+            del data
+            del rows
+            del features
+        _trim_memory()
+    data_mm.flush()
+    return data_mm
+
+def _write_memmap_tsv(memmap_data, features, columns, output_file, row_chunk=10000):
+    with open(output_file, 'w', newline='') as handle:
+        writer = csv.writer(handle, delimiter='\t')
+        writer.writerow(["Feature"] + columns)
+        for start in range(0, len(features), row_chunk):
+            end = min(start + row_chunk, len(features))
+            data_chunk = memmap_data[start:end]
+            chunk_features = features[start:end]
+            rows = [
+                [feat] + data_chunk[idx].tolist()
+                for idx, feat in enumerate(chunk_features)
+            ]
+            writer.writerows(rows)
+
 def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_name='junction', compute_tpm=False, tpm_threshold=1):
     
-    combined_pseudo_pdf = None
-    combined_tpm = None
-    combined_isoform_to_gene_ratio = None
     only_import_existing = False
 
+    if only_import_existing:
+        for sample_file in sample_files:
+            sample_prefix = _sample_prefix(sample_file)
+            expected_path = f"{sample_prefix}.txt"
+            print (expected_path)
+            if not os.path.exists(expected_path):
+                raise FileNotFoundError(f"Missing pseudobulk file: {expected_path}")
+
     # Process each sample file
+    _memtrace("concat_start")
+    file_info = []
+    column_names = []
+    total_cols = 0
     for sample_file in sample_files:
-        sample_name = sample_file.split('.')[0]  # Extract sample name
+        sample_prefix = _sample_prefix(sample_file)
+        sample_label = os.path.basename(sample_prefix)
         print(f'Processing {sample_file}')
+        _memtrace(f"sample_start {sample_label}")
 
         if only_import_existing:
-            pseudo_pdf_file = just_return_dense_count_files(sample_name, compute_tpm=False)
+            pseudo_pdf_file = just_return_dense_count_files(sample_prefix, compute_tpm=False)
             if compute_tpm:
                 pseudo_pdf_file, tpm_file, isoform_ratio_file = pseudo_pdf_file
         else:
             # Load the data
             adata = ad.read_h5ad(sample_file)
+            _memtrace("after_read_h5ad")
 
             # Ensure indices are strings and observation names are unique
             adata.obs.index = adata.obs.index.astype(str)
@@ -582,54 +811,106 @@ def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_
             # Generate pseudobulks for the current sample
             if compute_tpm:
                 pseudo_pdf_file, tpm_file, isoform_ratio_file = pseudo_cluster_counts_optimized(
-                    sample_name, adata, cell_threshold=0, count_threshold=0, compute_tpm=compute_tpm, tpm_threshold=tpm_threshold, status=False
+                    sample_prefix, adata, cell_threshold=0, count_threshold=0, compute_tpm=compute_tpm, tpm_threshold=tpm_threshold, status=False
                 )
             else:
                 pseudo_pdf_file = pseudo_cluster_counts_optimized(
-                    sample_name, adata, cell_threshold=0, count_threshold=0, compute_tpm=compute_tpm, tpm_threshold=tpm_threshold, status=False
+                    sample_prefix, adata, cell_threshold=0, count_threshold=0, compute_tpm=compute_tpm, tpm_threshold=tpm_threshold, status=False
                 )
+            _memtrace("after_pseudobulk")
+            del adata
 
-        # Load the pseudobulk file
-        pseudo_pdf = pd.read_csv(pseudo_pdf_file, sep='\t', index_col=0)
+        header_cols = _read_pseudobulk_header(pseudo_pdf_file)
+        sample_cols = [f'{col}.{sample_label}' for col in header_cols]
+        file_info.append({
+            "sample": sample_label,
+            "pseudo_file": pseudo_pdf_file,
+            "tpm_file": tpm_file if compute_tpm else None,
+            "ratio_file": isoform_ratio_file if compute_tpm else None,
+            "col_offset": total_cols,
+            "ncols": len(sample_cols),
+        })
+        column_names.extend(sample_cols)
+        total_cols += len(sample_cols)
 
-        # Rename the columns to include the sample name
-        pseudo_pdf.columns = [f'{col}.{sample_name}' for col in pseudo_pdf.columns]
+        _trim_memory()
+        _memtrace("after_trim_sample")
 
-        # Combine the pseudobulk counts
-        if combined_pseudo_pdf is None:
-            combined_pseudo_pdf = pseudo_pdf
-        else:
-            combined_pseudo_pdf = pd.concat([combined_pseudo_pdf, pseudo_pdf], axis=1).fillna(0)
+    if not file_info:
+        raise ValueError("No pseudobulk files were generated.")
 
-        if compute_tpm:
-            # Load the TPM and isoform ratio files
-            tpm = pd.read_csv(tpm_file, sep='\t', index_col=0)
-            isoform_to_gene_ratio = pd.read_csv(isoform_ratio_file, sep='\t', index_col=0)
+    feature_to_row, features = _collect_feature_order([info["pseudo_file"] for info in file_info])
+    _memtrace("after_collect_features")
 
-            # Rename the columns to include the sample name
-            tpm.columns = [f'{col}.{sample_name}' for col in tpm.columns]
-            isoform_to_gene_ratio.columns = [f'{col}.{sample_name}' for col in isoform_to_gene_ratio.columns]
+    counts_memmap_path = f'{collection_name}_combined_pseudo_cluster_counts.memmap'
+    counts_mm = _fill_memmap_from_files(
+        file_info,
+        feature_to_row,
+        total_cols,
+        "pseudo_file",
+        np.float32,
+        counts_memmap_path,
+    )
+    _memtrace("after_fill_counts_memmap")
 
-            # Combine the TPM and isoform-to-gene ratio dataframes
-            if combined_tpm is None:
-                combined_tpm = tpm
-                combined_isoform_to_gene_ratio = isoform_to_gene_ratio
-            else:
-                combined_tpm = pd.concat([combined_tpm, tpm], axis=1).fillna(0)
-                combined_isoform_to_gene_ratio = pd.concat([combined_isoform_to_gene_ratio, isoform_to_gene_ratio], axis=1).fillna(0)
-
-    # Save the combined pseudobulk data to file
     combined_pseudo_file = f'{collection_name}_combined_pseudo_cluster_counts.txt'
-    combined_pseudo_pdf.to_csv(combined_pseudo_file, sep='\t')
+    _write_memmap_tsv(counts_mm, features, column_names, combined_pseudo_file)
+    _memtrace("after_write_combined_pseudo")
+
+    del counts_mm
+    _trim_memory()
+    try:
+        os.remove(counts_memmap_path)
+    except OSError:
+        pass
 
     if compute_tpm:
-        # Save the combined TPM and isoform ratio data to files
+        tpm_memmap_path = f'{collection_name}_combined_pseudo_cluster_tpm.memmap'
+        tpm_mm = _fill_memmap_from_files(
+            file_info,
+            feature_to_row,
+            total_cols,
+            "tpm_file",
+            np.float32,
+            tpm_memmap_path,
+        )
+        _memtrace("after_fill_tpm_memmap")
+
+        ratio_memmap_path = f'{collection_name}_combined_pseudo_cluster_ratio.memmap'
+        ratio_mm = _fill_memmap_from_files(
+            file_info,
+            feature_to_row,
+            total_cols,
+            "ratio_file",
+            np.float32,
+            ratio_memmap_path,
+        )
+        _memtrace("after_fill_ratio_memmap")
+
         combined_tpm_file = f'{collection_name}_combined_pseudo_cluster_tpm.txt'
         combined_isoform_ratio_file = f'{collection_name}_combined_pseudo_cluster_ratio.txt'
-        combined_tpm.to_csv(combined_tpm_file, sep='\t')
-        combined_isoform_to_gene_ratio.to_csv(combined_isoform_ratio_file, sep='\t')
+        _write_memmap_tsv(tpm_mm, features, column_names, combined_tpm_file)
+        _write_memmap_tsv(ratio_mm, features, column_names, combined_isoform_ratio_file)
+        _memtrace("after_write_combined_tpm")
+
+        del tpm_mm
+        del ratio_mm
+        _trim_memory()
+        for path in (tpm_memmap_path, ratio_memmap_path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+        del feature_to_row
+        del features
+        _trim_memory()
 
         return combined_pseudo_file, combined_tpm_file, combined_isoform_ratio_file
+
+    del feature_to_row
+    del features
+    _trim_memory()
 
     return combined_pseudo_file
 
@@ -649,6 +930,11 @@ def extract_all_features_above_threshold(h5ad_files, min_reads):
                 feature_sums[feat] += count
             else:
                 feature_sums[feat] = count
+        del counts
+        del var_names
+        del X
+        del adata
+        _trim_memory()
 
     # Keep only features with total reads above threshold
     retained_features = [feat for feat, total in feature_sums.items() if total >= min_reads]
@@ -674,6 +960,11 @@ def align_adata_to_union(h5ad_file, all_features, feature_to_idx):
             cols.append(old_to_new_idx[j])
             data.append(v)
     new_X = csr_matrix((data, (rows, cols)), shape=(adata.n_obs, len(all_features)))
+    del rows
+    del cols
+    del data
+    del X
+    del old_to_new_idx
 
     new_var = pd.DataFrame(index=all_features)
     for col in adata.var.columns:
@@ -682,9 +973,12 @@ def align_adata_to_union(h5ad_file, all_features, feature_to_idx):
         shared_features = adata.var.index.intersection(new_var.index)
         new_var.loc[shared_features, col] = adata.var.loc[shared_features, col]
 
-    adata.obs = adata.obs.copy()
-    adata.obs['sample'] = os.path.basename(h5ad_file).replace('.h5ad', '')
-    return AnnData(X=new_X, obs=adata.obs, var=new_var, uns=adata.uns.copy())
+    obs = adata.obs.copy()
+    obs['sample'] = os.path.basename(h5ad_file).replace('.h5ad', '')
+    uns = adata.uns.copy()
+    del adata
+    _trim_memory()
+    return AnnData(X=new_X, obs=obs, var=new_var, uns=uns)
 
 def combine_h5ad_files_parallel(sample_h5ads_dict, output_file='combined.h5ad', n_jobs=4, min_total_reads=200):
     start_time = time.time()
@@ -703,6 +997,8 @@ def combine_h5ad_files_parallel(sample_h5ads_dict, output_file='combined.h5ad', 
 
     print("Concatenating aligned AnnData objects...")
     combined_adata = concat(aligned_adatas, axis=0, join='outer')
+    del aligned_adatas
+    _trim_memory()
     print(f"Writing combined file to: {output_file}")
     combined_adata.write_h5ad(output_file, compression='gzip')
     end_time = time.time()  # End the timer

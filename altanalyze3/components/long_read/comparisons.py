@@ -6,6 +6,21 @@ from ..annotation import junction_isoform as ji
 from ..oncosplice import metadataAnalysis as ma
 import numpy as np
 
+def _resolve_uid(raw_uid, uid_to_group, data_type):
+    if raw_uid in uid_to_group:
+        return raw_uid
+    suffix = f"-{data_type}"
+    if raw_uid.endswith(suffix):
+        trimmed = raw_uid[:-len(suffix)]
+        if trimmed in uid_to_group:
+            return trimmed
+    for fallback in ("-junction", "-isoform", "-ratio"):
+        if raw_uid.endswith(fallback):
+            trimmed = raw_uid[:-len(fallback)]
+            if trimmed in uid_to_group:
+                return trimmed
+    return raw_uid
+
 def compare_one_cluster_to_many(condition,cluster_order,groups_file,psi_matrix,junction_coords_file,gene_symbol_file,dataType='junction'):
     # Restrict by a specific condition (e.g., aged, young)
     print(f'Performing differential {dataType} analysis for every cluster within a single condition...')
@@ -57,15 +72,23 @@ def compare_two_groups_per_cluster(condition1,condition2,cluster_order,groups_fi
         stats_folder = 'diff-covariate-isoform/'
     if dataType == 'isoform-ratio':
         stats_folder = 'diff-covariate-ratio/'
-        
+    
+    print ('test',stats_folder)
     for cluster in cluster_order:
         filtered_groups_file = groups_file[
             (groups_file.index.str.startswith(cluster+'.')) &  # Filter by cell type prefix
             (groups_file['grp'].str.endswith((condition1, condition2)))  # Keep only 'aged' and 'young' groups
         ]
+
+        """
+        print(f"[{cluster}] filtered_groups_file rows:", len(filtered_groups_file))
+        print(f"[{cluster}] grp counts:", filtered_groups_file["grp"].value_counts().to_dict())
+        """
+
         try: run_metadataAnalysis(cluster,psi_matrix,condition1,condition2,filtered_groups_file,stats_folder)
         except:
             print (f'Statistical analysis failed for {condition1} vs. {condition2} for {cluster}')
+            
     print ('Annotating the test results by gene, isoform and protein...')
     ji.annotate(gene_symbol_file,transcript_assoc_file,junction_coords_file,protein_summary_file,stats_folder,dataType=dataType)
 
@@ -74,6 +97,16 @@ def run_metadataAnalysis(cluster,psi_matrix,condition1,condition2,filtered_group
     # Subset the PSI matrix to only include the matching sample columns
     subset_psi_matrix = psi_matrix[matching_uids]
     print (f'Exporting {condition1} vs. {condition2} for {cluster}')
+    if filtered_groups_file.empty:
+        print(f"[WARN] Skipping {cluster}: no samples after group filter")
+        return
+    group_counts = filtered_groups_file['grp'].value_counts()
+    if len(group_counts) < 2:
+        print(f"[WARN] Skipping {cluster}: only one group present ({group_counts.to_dict()})")
+        return
+    if subset_psi_matrix.shape[1] == 0:
+        print(f"[WARN] Skipping {cluster}: no matching PSI columns")
+        return
     diff_stats = ma.mwuCompute(subset_psi_matrix, filtered_groups_file, grpvar='grp', min_group_size=2)
 
     if filter_condition == False:
@@ -102,9 +135,16 @@ def compute_differentials(sample_dict,conditions,cluster_order,gene_symbol_file,
             
             # Create a DataFrame for the group mapping using the PSI matrix columns
             groups_file = pd.DataFrame({
-                'grp': [uid_to_group.get(col.split('.')[1], 'unknown') for col in psi_matrix.columns],  # Extract UID and map to group
+                'grp': [uid_to_group.get(_resolve_uid(col.split('.', 1)[1], uid_to_group, 'junction'), 'unknown') for col in psi_matrix.columns],  # Extract UID and map to group
                 'uid': psi_matrix.columns
             }).set_index('uid')
+
+            """
+            print("PSI matrix shape:", psi_matrix.shape)
+            print("PSI matrix columns (first 5):", psi_matrix.columns[:5].tolist())
+            print("Group mapping unknown count:", sum(g == "unknown" for g in groups_file["grp"]))
+            print("Group counts:", groups_file["grp"].value_counts().to_dict())
+            """
 
             # Compute Differential Splicing between groups and cell types
             if condition1 not in analyzed_intial_conditions:
@@ -118,7 +158,7 @@ def compute_differentials(sample_dict,conditions,cluster_order,gene_symbol_file,
             log2_iso_matrix = np.log2(isoform_matrix + 1)
             uid_to_group = isoa.get_sample_to_group(sample_dict,'isoform')
             groups_file = pd.DataFrame({
-                'grp': [uid_to_group.get(col.split('.')[1], 'unknown') for col in isoform_matrix.columns],  # Extract UID and map to group
+                'grp': [uid_to_group.get(_resolve_uid(col.split('.', 1)[1], uid_to_group, 'isoform'), 'unknown') for col in isoform_matrix.columns],  # Extract UID and map to group
                 'uid': isoform_matrix.columns
             }).set_index('uid')
             if condition1 not in analyzed_intial_conditions:
@@ -130,7 +170,7 @@ def compute_differentials(sample_dict,conditions,cluster_order,gene_symbol_file,
             isoform_matrix = pd.read_csv(isoform_dir, sep='\t', index_col=0)
             uid_to_group = isoa.get_sample_to_group(sample_dict,'isoform')
             groups_file = pd.DataFrame({
-                'grp': [uid_to_group.get(col.split('.')[1], 'unknown') for col in isoform_matrix.columns],  # Extract UID and map to group
+                'grp': [uid_to_group.get(_resolve_uid(col.split('.', 1)[1], uid_to_group, 'isoform'), 'unknown') for col in isoform_matrix.columns],  # Extract UID and map to group
                 'uid': isoform_matrix.columns
             }).set_index('uid')
             if condition1 not in analyzed_intial_conditions:

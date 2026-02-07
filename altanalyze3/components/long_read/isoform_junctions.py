@@ -144,6 +144,7 @@ def exportJunctionMatrix(matrix_dir, ensembl_exon_dir, gff_source, barcode_clust
 
     # Load isoform mapping information
     isoform_to_junctions, isoform_to_gene = parse_isoform_mapping(transcript_associations)
+    del transcript_associations
 
     junction_counts = {}
     # Iterate through each cell barcode and isoform
@@ -161,6 +162,7 @@ def exportJunctionMatrix(matrix_dir, ensembl_exon_dir, gff_source, barcode_clust
                         junction_counts[junction] = np.zeros(len(adata.obs_names), dtype=int)
                     junction_counts[junction][cell_index] += count
     del cell_data
+    del isoform_to_junctions
 
     # Convert the counts to a dense DataFrame and then to a sparse matrix
     junction_counts_df = pd.DataFrame({k: pd.Series(v, index=adata.obs_names) for k, v in tqdm(junction_counts.items(), desc="Creating DataFrame")})
@@ -193,11 +195,12 @@ def exportJunctionMatrix(matrix_dir, ensembl_exon_dir, gff_source, barcode_clust
         return sparse_junction_matrix.tocsr()
 
     sparse_junction_matrix = coo_matrix_method()
-    del junction_counts_df
 
     # Create a new AnnData object for the junction counts
     junction_adata = ad.AnnData(X=sparse_junction_matrix, obs=adata.obs, var=pd.DataFrame(index=junction_counts.keys()))
     del sparse_junction_matrix
+    del junction_counts
+    del adata
 
     # Add gene annotations
     junction_adata.var['gene'] = [isoform_to_gene.get(isoform, '') for isoform in junction_adata.var_names]
@@ -210,7 +213,7 @@ def exportJunctionMatrix(matrix_dir, ensembl_exon_dir, gff_source, barcode_clust
 
     if barcode_clusters is not None and len(barcode_clusters) > 0:
         # Compute pseudo-cluster counts and write them to a file
-        grouped = junction_counts_df.groupby(adata.obs['cluster'])
+        grouped = junction_counts_df.groupby(junction_adata.obs['cluster'])
         
         # Remove clusters with less than 10 cells
         filtered_summed_groups = grouped.filter(lambda x: len(x) >= 10).groupby(adata.obs['cluster']).sum()
@@ -221,11 +224,10 @@ def exportJunctionMatrix(matrix_dir, ensembl_exon_dir, gff_source, barcode_clust
         filtered_summed_groups_transposed.to_csv(f"{h5ad_dir.split('.g')[0]}_counts.txt", sep='\t')
         print ('pseudobulk cluster junction counts exported')
 
-    del isoform_to_junctions
     del isoform_to_gene
     del exon_dict
     del gene_dict
-    del junction_counts
+    del junction_counts_df
     _trim_memory()
     return junction_adata
 
