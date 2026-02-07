@@ -22,6 +22,10 @@ plt.rcParams['font.family'] = 'sans-serif'
 plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
 plt.rcParams['figure.facecolor'] = 'white'
 
+DEFAULT_COLORMAP = 'tab20'
+ISOFORM_STRUCTURE_VIEW_VERSION = "debug-20260206-a"
+_AUTO_DEBUG_PRINTED = False
+
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), '..'))
 from long_read import isoform_matrix as iso
 
@@ -1062,12 +1066,14 @@ def _load_groupby_file(path, reverse_complement=True, sample_name=None):
     return mapping
 
 
-def _load_barcode_mask(adata, barcode_series, cell_states=None):
+def _load_barcode_mask(adata, barcode_series, cell_states=None, reverse_complement=True):
     if barcode_series is None:
         return np.ones(adata.n_obs, dtype=bool)
     if cell_states:
         barcode_series = barcode_series.loc[barcode_series.isin(cell_states)]
     barcodes = set(barcode_series.index.astype(str))
+    if reverse_complement:
+        barcodes = {_reverse_complement_barcode(value) for value in barcodes}
     obs_names = pd.Series(adata.obs_names.astype(str))
     mask = obs_names.isin(barcodes).values
     if mask.any():
@@ -1244,8 +1250,14 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                                           max_isoforms=200, min_count=1, intron_scale=0.2,
                                           row_height=0.0125, row_gap=0.0, group_gap=0.1,
                                           isoform_gap=None, label_mode='first',
-                                          cluster_isoforms=True):
+                                          cluster_isoforms=True,
+                                          groupby_rev=True):
     start_time = time.time()
+    global _AUTO_DEBUG_PRINTED
+    if not _AUTO_DEBUG_PRINTED:
+        print(f"[auto][debug] isoform_structure_view file: {__file__}")
+        print(f"[auto][debug] isoform_structure_view version: {ISOFORM_STRUCTURE_VIEW_VERSION}")
+        _AUTO_DEBUG_PRINTED = True
     if isinstance(genes, str):
         genes = [genes]
     if isinstance(conditions, str):
@@ -1274,6 +1286,7 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
 
     for uid, samples in sample_dict.items():
         for sample in samples:
+            sample_start = time.time()
             sample_conditions = [
                 condition for condition in conditions
                 if _matches_group(sample.get('groups'), condition)
@@ -1288,6 +1301,15 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
             barcode_series = None
             if barcode_sample_dict and sample_name in barcode_sample_dict:
                 barcode_series = barcode_sample_dict[sample_name]
+                total_barcodes = len(barcode_series)
+                if cell_states:
+                    cellstate_barcodes = int(barcode_series.isin(cell_states).sum())
+                else:
+                    cellstate_barcodes = total_barcodes
+                print(
+                    f"[auto][debug] {sample_name} barcodes: total={total_barcodes} "
+                    f"cell_states={cell_states or ['all']} count={cellstate_barcodes}"
+                )
             gene_to_pos, indptr, indices = _load_h5ad_gene_index(
                 h5ad_path, index_dir=index_dir
             )
@@ -1298,17 +1320,63 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                 None,
                 "cell_states",
                 cache_group_values,
-                False,
+                groupby_rev,
                 sample_name,
                 use_cache=True,
                 allow_build=False,
             )
+            if counts_cache is not None and barcode_series is not None and cell_states:
+                try:
+                    cache_max = float(np.max(counts_cache["counts"]))
+                except Exception as exc:
+                    print(
+                        f"[auto][warn] {sample_name} cache max check failed: {exc}; "
+                        "will rebuild cache."
+                    )
+                    cache_max = 0.0
+                if cache_max == 0.0:
+                    sample_vars = []
+                    for value in counts_cache["var_names"][:5]:
+                        if isinstance(value, (bytes, np.bytes_)):
+                            sample_vars.append(value.decode())
+                        else:
+                            sample_vars.append(str(value))
+                    print(
+                        f"[auto][warn] {sample_name} cache has zero counts for cell_states; "
+                        f"sample_isoforms={sample_vars}. Rebuilding cache."
+                    )
+                    counts_cache = None
             adata = None
             mask = None
             row_idx = None
             if counts_cache is None:
                 adata = ad.read_h5ad(h5ad_path, backed='r')
-                mask = _load_barcode_mask(adata, barcode_series, cell_states)
+                mask = _load_barcode_mask(adata, barcode_series, cell_states, reverse_complement=groupby_rev)
+                if mask is not None:
+                    mask_sum = int(mask.sum())
+                    print(f"[auto][debug] {sample_name} mask_sum={mask_sum} obs={len(mask)}")
+                    if mask_sum == 0:
+                        obs_sample = list(adata.obs_names.astype(str)[:5])
+                        barcode_sample = list(barcode_series.index.astype(str)[:5]) if barcode_series is not None else []
+                        norm_obs_sample = [_normalize_barcode(val) for val in obs_sample]
+                        norm_barcode_sample = [_normalize_barcode(val) for val in barcode_sample]
+                        print(
+                            f"[auto][debug] {sample_name} obs_sample={obs_sample} "
+                            f"barcode_sample={barcode_sample}"
+                        )
+                        print(
+                            f"[auto][debug] {sample_name} norm_obs_sample={norm_obs_sample} "
+                            f"norm_barcode_sample={norm_barcode_sample}"
+                        )
+                        print(
+                            f"[auto][warn] {sample_name} has zero barcodes for cell_states; "
+                            "skipping sample."
+                        )
+                        try:
+                            adata.file.close()
+                        except AttributeError:
+                            pass
+                        continue
                 if mask is not None and not mask.all():
                     row_idx = np.flatnonzero(mask)
                 counts_cache = _load_or_build_counts_cache(
@@ -1317,7 +1385,7 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                     mask,
                     "cell_states",
                     cache_group_values,
-                    False,
+                    groupby_rev,
                     sample_name,
                     use_cache=True,
                     allow_build=True,
@@ -1332,6 +1400,24 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                 if not os.path.exists(assoc_path):
                     assoc_path = None
             for gene in genes:
+                gene_start = time.time()
+                structures = None
+                if assoc_path:
+                    structures, _strand_map = load_transcript_associations_auto(
+                        assoc_path, gene, index_dir=None
+                    )
+                    if structures:
+                        transcript_union[gene].update(structures)
+                        sample_ids = list(structures.keys())[:5]
+                        print(
+                            f"[auto][debug] {sample_name} {gene} transcript_structures={len(structures)} "
+                            f"sample_ids={sample_ids}"
+                        )
+                    else:
+                        print(
+                            f"[auto][debug] {sample_name} {gene} transcript_structures=0 "
+                            f"assoc_path={assoc_path}"
+                        )
                 pos = gene_to_pos.get(gene)
                 if pos is None:
                     continue
@@ -1369,7 +1455,12 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                 if counts_cache is not None:
                     try:
                         records = _records_from_counts_cache(counts_cache, gene_idx, gene)
-                        isoform_counts = {rec['var']: rec['count'] for rec in records}
+                        isoform_counts = {}
+                        for rec in records:
+                            iso_id = rec.get('isoform_id') or rec.get('var')
+                            if iso_id is None:
+                                continue
+                            isoform_counts[str(iso_id)] = rec['count']
                     except Exception as exc:
                         print(
                             "[auto][error] counts cache lookup failed "
@@ -1395,22 +1486,45 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                         sub_X = sub_X[row_idx, :]
                     counts = np.asarray(sub_X.sum(axis=0)).ravel()
                     isoforms = [str(value) for value in np.asarray(adata.var_names)[gene_idx]]
-                    isoform_counts = dict(zip(isoforms, counts))
+                    isoform_counts = {}
+                    for var, count in zip(isoforms, counts):
+                        gene_id, iso_id = parse_feature_identifier(var, gene_hint=gene)
+                        if gene_id is not None and gene_id != gene:
+                            continue
+                        isoform_counts[str(iso_id)] = float(count)
+                if structures:
+                    resolved_counts = defaultdict(float)
+                    unresolved = 0
+                    for iso_id, count in isoform_counts.items():
+                        resolved = resolve_isoform_id(str(iso_id), structures)
+                        if resolved:
+                            resolved_counts[resolved] += count
+                        else:
+                            unresolved += 1
+                    if unresolved:
+                        print(
+                            f"[auto][debug] {sample_name} {gene} unresolved_isoforms={unresolved}"
+                        )
+                    if resolved_counts:
+                        isoform_counts = resolved_counts
+                sample_isoforms = len(isoform_counts)
+                sample_reads_sum = float(sum(isoform_counts.values()))
+                sample_nonzero = sum(1 for value in isoform_counts.values() if value > 0)
+                print(
+                    f"[timing][auto] {sample_name} {gene} isoform_counts: "
+                    f"{time.time() - gene_start:.2f}s entries={sample_isoforms} "
+                    f"nonzero={sample_nonzero} sum={sample_reads_sum}"
+                )
                 for condition in sample_conditions:
                     store = condition_counts[condition][gene]
                     for iso_id, count in isoform_counts.items():
                         store[iso_id] += count
-                if assoc_path:
-                    structures, _strand_map = load_transcript_associations_auto(
-                        assoc_path, gene, index_dir=None
-                    )
-                    if structures:
-                        transcript_union[gene].update(structures)
             if adata is not None:
                 try:
                     adata.file.close()
                 except AttributeError:
                     pass
+            print(f"[timing][auto] {sample_name} total: {time.time() - sample_start:.2f}s")
 
     gene_model_db = _ensure_gene_model_db(gene_model, index_dir=index_dir) if gene_model else None
     if gene_model_db and os.path.exists(gene_model_db):
@@ -1448,6 +1562,47 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
         if not combined_records:
             print(f"[auto] No isoform counts for {gene}, skipping.")
             continue
+        condition_union_ids = set()
+        for condition in conditions:
+            counts_map = condition_counts[condition][gene]
+            if not counts_map:
+                continue
+            condition_records = [
+                {'isoform_id': iso_id, 'count': count, 'gene_id': gene}
+                for iso_id, count in counts_map.items()
+            ]
+            plotted_condition, _, _ = build_plotted_isoforms(
+                condition_records, transcript_structures, gene,
+                cluster_mode, cluster_features, min_count, max_isoforms
+            )
+            for iso in plotted_condition:
+                iso_key = iso.get('isoform_id', iso.get('resolved_id'))
+                if iso_key:
+                    condition_union_ids.add(str(iso_key))
+                resolved_id = iso.get('resolved_id')
+                if resolved_id:
+                    condition_union_ids.add(str(resolved_id))
+        if condition_union_ids:
+            print(
+                f"[auto][debug] {gene} union_isoforms_from_conditions="
+                f"{len(condition_union_ids)} max_isoforms={max_isoforms}"
+            )
+            combined_records = [
+                rec for rec in combined_records
+                if str(rec['isoform_id']) in condition_union_ids
+            ]
+
+        resolved_hits = 0
+        unresolved = []
+        for iso_id in combined_counts.keys():
+            if resolve_isoform_id(iso_id, transcript_structures):
+                resolved_hits += 1
+            elif len(unresolved) < 5:
+                unresolved.append(iso_id)
+        print(
+            f"[auto][debug] {gene} resolved_isoforms={resolved_hits} total_isoforms={len(combined_counts)} "
+            f"unresolved_sample={unresolved}"
+        )
 
         grouped_structures = None
         isoform_colors = None
@@ -1466,12 +1621,69 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                 isoform_colors = assign_cluster_colors(grouped_structures, plt.get_cmap(DEFAULT_COLORMAP).colors)
             else:
                 isoform_colors = assign_isoform_colors(grouped_structures, plt.get_cmap(DEFAULT_COLORMAP).colors)
+        structure_ids = set()
+        if grouped_structures:
+            for group in grouped_structures:
+                for structure in group:
+                    for iso in structure['items']:
+                        iso_key = iso.get('isoform_id')
+                        if iso_key:
+                            structure_ids.add(str(iso_key))
+                        resolved_id = iso.get('resolved_id')
+                        if resolved_id:
+                            structure_ids.add(str(resolved_id))
 
         for condition in conditions:
             counts_map = condition_counts[condition][gene]
             if not counts_map:
                 print(f"[auto] No counts for {gene} in {condition}, skipping.")
                 continue
+            nonzero = sum(1 for value in counts_map.values() if value > 0)
+            max_count = max(counts_map.values()) if counts_map else 0
+            min_nonzero = min((value for value in counts_map.values() if value > 0), default=0)
+            sum_counts = float(sum(counts_map.values()))
+            print(
+                f"[auto][debug] {gene} {condition} counts: total={len(counts_map)} "
+                f"nonzero={nonzero} max={max_count} min_nonzero={min_nonzero} sum={sum_counts}"
+            )
+            local_grouped_structures = grouped_structures
+            local_isoform_colors = isoform_colors
+            if structure_ids:
+                counts_keys = set(str(key) for key in counts_map.keys())
+                overlap_struct = len(counts_keys & structure_ids)
+                min_required = max(5, int(0.05 * len(structure_ids)))
+                if nonzero and overlap_struct < min_required:
+                    print(
+                        f"[auto][warn] {gene} {condition} grouped_structures overlap={overlap_struct} "
+                        f"< min_required={min_required}; rebuilding clusters for this condition."
+                    )
+                    local_grouped_structures = None
+                    local_isoform_colors = None
+            if structure_ids:
+                counts_keys = set(str(key) for key in counts_map.keys())
+                overlap_struct = len(counts_keys & structure_ids)
+                counts_only = counts_keys - structure_ids
+                struct_only = structure_ids - counts_keys
+                print(
+                    f"[auto][debug] {gene} {condition} key_overlap "
+                    f"counts={len(counts_keys)} structures={len(structure_ids)} "
+                    f"overlap={overlap_struct} counts_only={len(counts_only)} "
+                    f"structures_only={len(struct_only)}"
+                )
+                if counts_only or struct_only:
+                    sample_counts_only = list(counts_only)[:5]
+                    sample_struct_only = list(struct_only)[:5]
+                    print(
+                        f"[auto][debug] {gene} {condition} key_mismatch "
+                        f"sample_counts_only={sample_counts_only} "
+                        f"sample_structures_only={sample_struct_only}"
+                    )
+            if nonzero == 0:
+                sample_zero = list(counts_map.keys())[:5]
+                print(
+                    f"[auto][warn] {gene} {condition} has zero counts after filtering; "
+                    f"sample_isoforms={sample_zero}"
+                )
             isoform_records = [
                 {'isoform_id': iso_id, 'count': count, 'gene_id': gene}
                 for iso_id, count in counts_map.items()
@@ -1480,32 +1692,38 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
             condition_dir.mkdir(parents=True, exist_ok=True)
             out_path = condition_dir / f"{condition}__{cell_state_label}__{gene}.pdf"
             print(f"[auto] Plotting {gene} for {condition} -> {out_path}")
-            plotted, plot_cluster_label_map, plot_cluster_index_map = plot_isoform_structures(
-                isoform_records,
-                transcript_structures,
-                exon_lookup,
-                gene_maps,
-                cluster_mode,
-                gene,
-                intron_scale,
-                str(out_path),
-                max_isoforms=max_isoforms,
-                min_count=min_count,
-                row_height=row_height,
-                row_gap=row_gap,
-                group_gap=group_gap,
-                isoform_gap=isoform_gap,
-                cluster_strategy=cluster_strategy,
-                cluster_similarity_threshold=cluster_similarity_threshold,
-                cluster_features=cluster_features,
-                label_mode=label_mode,
-                min_split_fraction=min_split_fraction,
-                grouped_structures=grouped_structures,
-                isoform_colors=isoform_colors,
-                isoform_counts=counts_map,
-                cluster_isoforms=cluster_isoforms,
-                return_cluster_labels=True
-            )
+            try:
+                plotted, plot_cluster_label_map, plot_cluster_index_map = plot_isoform_structures(
+                    isoform_records,
+                    transcript_structures,
+                    exon_lookup,
+                    gene_maps,
+                    cluster_mode,
+                    gene,
+                    intron_scale,
+                    str(out_path),
+                    max_isoforms=max_isoforms,
+                    min_count=min_count,
+                    row_height=row_height,
+                    row_gap=row_gap,
+                    group_gap=group_gap,
+                    isoform_gap=isoform_gap,
+                    cluster_strategy=cluster_strategy,
+                    cluster_similarity_threshold=cluster_similarity_threshold,
+                    cluster_features=cluster_features,
+                    label_mode=label_mode,
+                    min_split_fraction=min_split_fraction,
+                    grouped_structures=local_grouped_structures,
+                    isoform_colors=local_isoform_colors,
+                    isoform_counts=counts_map,
+                    cluster_isoforms=cluster_isoforms,
+                    return_cluster_labels=True
+                )
+            except ValueError as exc:
+                print(
+                    f"[auto][warn] Plot skipped for {gene} in {condition}: {exc}"
+                )
+                continue
             export_plotted_isoforms(plotted, str(out_path), plot_cluster_label_map, plot_cluster_index_map)
     elapsed = time.time() - start_time
     print(f"[auto] Elapsed time (s): {elapsed:.2f}")
@@ -1529,6 +1747,28 @@ def coerce_read_count(value):
     if abs(count - rounded) < 1e-6:
         return rounded
     return max(1, rounded)
+
+
+def _normalize_isoform_count_key(key, target_gene):
+    if isinstance(key, (bytes, np.bytes_)):
+        key = key.decode()
+    key = str(key)
+    if key.startswith("b'") and key.endswith("'"):
+        key = key[2:-1]
+    gene_id, iso_id = parse_feature_identifier(key, gene_hint=target_gene)
+    return key, iso_id
+
+
+def _normalize_isoform_counts_map(isoform_counts, target_gene):
+    if isoform_counts is None:
+        return None
+    normalized = defaultdict(float)
+    for key, value in isoform_counts.items():
+        raw_key, iso_id = _normalize_isoform_count_key(key, target_gene)
+        normalized[raw_key] += value
+        if iso_id is not None:
+            normalized[str(iso_id)] += value
+    return normalized
 
 
 def build_feature_set(tokens, feature_mode):
@@ -2152,6 +2392,7 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
         cluster_strategy = 'substring'
     if cluster_similarity_threshold is None:
         cluster_similarity_threshold = 0.85 if cluster_isoforms else 0.4
+    isoform_counts = _normalize_isoform_counts_map(isoform_counts, target_gene)
     if grouped_structures is None:
         t_build = time.time()
         plotted, missing_structures, missing_ids = build_plotted_isoforms(
@@ -2355,13 +2596,28 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
     rows = []
     y_positions = []
     y = 0.0
+    def _lookup_isoform_count(isoform_counts_map, iso):
+        iso_key = iso.get('isoform_id', iso.get('resolved_id'))
+        if isoform_counts_map is None:
+            return iso_key, iso.get('count', 0)
+        if iso_key in isoform_counts_map:
+            return iso_key, isoform_counts_map[iso_key]
+        resolved_id = iso.get('resolved_id')
+        if resolved_id in isoform_counts_map:
+            return resolved_id, isoform_counts_map[resolved_id]
+        gene_id, parsed_id = parse_feature_identifier(str(iso_key), gene_hint=target_gene)
+        if parsed_id in isoform_counts_map:
+            return parsed_id, isoform_counts_map[parsed_id]
+        if resolved_id:
+            gene_id, parsed_id = parse_feature_identifier(str(resolved_id), gene_hint=target_gene)
+            if parsed_id in isoform_counts_map:
+                return parsed_id, isoform_counts_map[parsed_id]
+        return iso_key, 0
+
     for group_idx, group in enumerate(grouped_structures):
         for structure in group:
             for iso in structure['items']:
-                iso_key = iso.get('isoform_id', iso['resolved_id'])
-                iso_count = iso['count']
-                if isoform_counts is not None:
-                    iso_count = isoform_counts.get(iso_key, 0)
+                iso_key, iso_count = _lookup_isoform_count(isoform_counts, iso)
                 read_count = coerce_read_count(iso_count)
                 if read_count <= 0:
                     continue
@@ -2382,6 +2638,73 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
         y -= max(0.0, group_gap - isoform_gap)
         y -= isoform_gap
     total_height = max(1.0, y)
+    plotted_isoforms = {row['isoform'].get('resolved_id', row['isoform'].get('isoform_id')) for row in rows}
+    print(f"[plot] Rendered isoforms={len(plotted_isoforms)} rows={len(rows)} output={output_path}")
+    if not rows and isoform_counts is not None:
+        nonzero = sum(1 for value in isoform_counts.values() if value > 0)
+        if nonzero:
+            sample_counts = list(isoform_counts.keys())[:5]
+            sample_isoforms = []
+            structure_ids = set()
+            for group in grouped_structures:
+                for structure in group:
+                    for iso in structure['items']:
+                        iso_key = iso.get('isoform_id', iso.get('resolved_id'))
+                        if iso_key is not None:
+                            structure_ids.add(str(iso_key))
+                        sample_isoforms.append(iso_key)
+                        if len(sample_isoforms) >= 5:
+                            break
+                    if len(sample_isoforms) >= 5:
+                        break
+                if len(sample_isoforms) >= 5:
+                    break
+            print(
+                f"[plot][warn] No rows rendered; counts_nonzero={nonzero} "
+                f"sample_counts={sample_counts} sample_isoforms={sample_isoforms}"
+            )
+            counts_nonzero_keys = [key for key, value in isoform_counts.items() if value > 0]
+            counts_nonzero_set = set(counts_nonzero_keys)
+            overlap_struct = len(counts_nonzero_set & structure_ids)
+            sample_struct_counts = []
+            for iso_id in list(structure_ids)[:5]:
+                sample_struct_counts.append((iso_id, isoform_counts.get(iso_id)))
+            sample_count_values = []
+            for iso_id in counts_nonzero_keys[:5]:
+                sample_count_values.append((iso_id, isoform_counts.get(iso_id)))
+            print(
+                f"[plot][debug] rows=0 overlap_struct={overlap_struct} "
+                f"structures={len(structure_ids)} counts_nonzero={len(counts_nonzero_set)} "
+                f"sample_struct_counts={sample_struct_counts} "
+                f"sample_count_values={sample_count_values}"
+            )
+            if transcript_structures:
+                counts_keys = list(isoform_counts.keys())
+                counts_key_set = set(counts_keys)
+                ts_key_set = set(transcript_structures.keys())
+                overlap_raw = len(counts_key_set & ts_key_set)
+                parsed_ids = set()
+                resolved_ids = set()
+                for key in counts_keys:
+                    _raw_key, iso_id = _normalize_isoform_count_key(key, target_gene)
+                    if iso_id:
+                        parsed_ids.add(str(iso_id))
+                    resolved = resolve_isoform_id(str(key), transcript_structures)
+                    if resolved:
+                        resolved_ids.add(resolved)
+                overlap_parsed = len(parsed_ids & ts_key_set)
+                overlap_resolved = len(resolved_ids)
+                sample_mismatches = []
+                for key in counts_keys[:5]:
+                    _raw_key, iso_id = _normalize_isoform_count_key(key, target_gene)
+                    resolved = resolve_isoform_id(str(key), transcript_structures)
+                    sample_mismatches.append(f"{key}->{iso_id}|{resolved}")
+                print(
+                    "[plot][debug] key_match "
+                    f"counts={len(counts_key_set)} ts={len(ts_key_set)} "
+                    f"overlap_raw={overlap_raw} overlap_parsed={overlap_parsed} "
+                    f"overlap_resolved={overlap_resolved} sample={sample_mismatches}"
+                )
 
     # Scale figure height to the total stack height for consistent spacing.
     fig_height = max(1.5, total_height * 0.35)
