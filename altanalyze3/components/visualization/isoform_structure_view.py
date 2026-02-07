@@ -13,6 +13,7 @@ import sqlite3
 
 import anndata as ad
 import matplotlib.pyplot as plt
+import matplotlib.transforms as mtransforms
 import numpy as np
 import pandas as pd
 
@@ -1330,7 +1331,8 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                                           groupby_rev=True,
                                           check_defaults=False,
                                           gene_symbol_dict=None,
-                                          rebuild_index=False):
+                                          rebuild_index=False,
+                                          debug_transcripts=None):
     start_time = time.time()
     global _AUTO_DEBUG_PRINTED
     if not _AUTO_DEBUG_PRINTED:
@@ -1785,6 +1787,7 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                     isoform_colors=local_isoform_colors,
                     isoform_counts=counts_map,
                     cluster_isoforms=cluster_isoforms,
+                    debug_transcripts=debug_transcripts,
                     return_cluster_labels=True
                 )
             except ValueError as exc:
@@ -1792,7 +1795,14 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                     f"[auto][warn] Plot skipped for {gene} in {condition}: {exc}"
                 )
                 continue
-            export_plotted_isoforms(plotted, str(out_path), plot_cluster_label_map, plot_cluster_index_map)
+            export_plotted_isoforms(
+                plotted,
+                str(out_path),
+                plot_cluster_label_map,
+                plot_cluster_index_map,
+                isoform_counts=counts_map,
+                target_gene=gene
+            )
     elapsed = time.time() - start_time
     print(f"[auto] Elapsed time (s): {elapsed:.2f}")
 
@@ -2069,9 +2079,29 @@ def _format_token_list(tokens):
     return '|'.join(tokens)
 
 
-def build_plotted_rows(plotted, cluster_label_map=None, cluster_index_map=None):
+def build_plotted_rows(plotted, cluster_label_map=None, cluster_index_map=None,
+                       isoform_counts=None, target_gene=None):
     rows = []
     seen = set()
+    isoform_counts_map = _normalize_isoform_counts_map(isoform_counts, target_gene)
+    def _lookup_count(iso):
+        if isoform_counts_map is None:
+            return iso.get('count', 0)
+        isoform_id = iso.get('isoform_id') or iso.get('resolved_id')
+        resolved_id = iso.get('resolved_id') or isoform_id
+        if isoform_id in isoform_counts_map:
+            return isoform_counts_map[isoform_id]
+        if resolved_id in isoform_counts_map:
+            return isoform_counts_map[resolved_id]
+        if target_gene is None:
+            return 0
+        _gene_id, parsed_id = parse_feature_identifier(str(isoform_id), gene_hint=target_gene)
+        if parsed_id in isoform_counts_map:
+            return isoform_counts_map[parsed_id]
+        _gene_id, parsed_id = parse_feature_identifier(str(resolved_id), gene_hint=target_gene)
+        if parsed_id in isoform_counts_map:
+            return isoform_counts_map[parsed_id]
+        return 0
     for iso in plotted:
         isoform_id = iso.get('isoform_id') or iso.get('resolved_id')
         resolved_id = iso.get('resolved_id') or isoform_id
@@ -2079,10 +2109,13 @@ def build_plotted_rows(plotted, cluster_label_map=None, cluster_index_map=None):
         if key in seen:
             continue
         seen.add(key)
+        count = _lookup_count(iso)
+        if isoform_counts_map is not None and coerce_read_count(count) <= 0:
+            continue
         row = {
             'isoform_id': isoform_id,
             'resolved_id': resolved_id,
-            'count': iso.get('count', 0),
+            'count': count,
             'tokens_raw': _format_token_list(iso.get('tokens')),
             'tokens_trimmed': _format_token_list(iso.get('tokens_trimmed')),
             'cluster_tokens_exon': _format_token_list(
@@ -2100,10 +2133,17 @@ def build_plotted_rows(plotted, cluster_label_map=None, cluster_index_map=None):
     return rows
 
 
-def export_plotted_isoforms(plotted, output_path, cluster_label_map=None, cluster_index_map=None):
+def export_plotted_isoforms(plotted, output_path, cluster_label_map=None, cluster_index_map=None,
+                            isoform_counts=None, target_gene=None):
     if not plotted:
         return None, []
-    rows = build_plotted_rows(plotted, cluster_label_map, cluster_index_map)
+    rows = build_plotted_rows(
+        plotted,
+        cluster_label_map,
+        cluster_index_map,
+        isoform_counts=isoform_counts,
+        target_gene=target_gene
+    )
     output_base = os.path.splitext(output_path)[0]
     isoform_path = f"{output_base}_isoform_ids.tsv"
     pd.DataFrame(rows).to_csv(isoform_path, sep='\t', index=False)
@@ -2646,6 +2686,9 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
                     missing = [iso for iso in debug_isoforms[:2] if iso not in debug_lookup]
                     print(f"  Debug comparison skipped; missing: {missing}")
 
+    show_exon_labels = True
+    show_exon_edges = False
+
     # Track gene order for trans-splicing and compute panel offsets.
     genes_in_plot = OrderedDict()
     genes_in_plot[target_gene] = None
@@ -2725,6 +2768,35 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
     total_height = max(1.0, y)
     plotted_isoforms = {row['isoform'].get('resolved_id', row['isoform'].get('isoform_id')) for row in rows}
     print(f"[plot] Rendered isoforms={len(plotted_isoforms)} rows={len(rows)} output={output_path}")
+    if debug_transcripts:
+        print(f"[debug] transcript_associations gene={target_gene} debug_transcripts={debug_transcripts}")
+        debug_exon_ids = set()
+        for raw_id in debug_transcripts:
+            resolved, matches = resolve_isoform_id_fuzzy(raw_id, transcript_structures or {})
+            if not resolved:
+                sample = ", ".join(matches[:5]) if matches else ""
+                print(f"[debug] transcript {raw_id}: not found; matches={sample}")
+                continue
+            tokens = list(transcript_structures.get(resolved, []))
+            trimmed = strip_terminal_coords(list(tokens), target_gene)
+            print(f"[debug] transcript {raw_id} resolved={resolved}")
+            print(f"[debug] tokens_raw={'|'.join(tokens)}")
+            print(f"[debug] tokens_trimmed={'|'.join(trimmed)}")
+            for token in tokens:
+                gene_id, base, _coord = split_token(token, target_gene)
+                if gene_id == target_gene and base.startswith('E'):
+                    debug_exon_ids.add(base)
+        if debug_exon_ids:
+            print(f"[debug] gene_model exons for {target_gene}:")
+            for exon_id in sorted(debug_exon_ids):
+                seg = exon_lookup.get((target_gene, exon_id))
+                if not seg:
+                    print(f"  exon {exon_id}: not found in gene_model")
+                    continue
+                print(
+                    f"  exon {exon_id} start={seg['start']} end={seg['end']} "
+                    f"type={seg.get('type')}"
+                )
     if not rows and isoform_counts is not None:
         nonzero = sum(1 for value in isoform_counts.values() if value > 0)
         if nonzero:
@@ -2816,32 +2888,32 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
     effective_label_mode = label_mode
     if cluster_isoforms and label_mode == 'all':
         effective_label_mode = 'first'
-    # Draw exon labels once per gene using the full gene model.
-    exon_label_y = -row_height * 3.5
-    for gene, offset in gene_offsets.items():
-        gene_map = gene_maps.get(gene)
-        if not gene_map:
-            continue
-        seen_labels = set()
-        for seg in gene_map['segments']:
-            if seg.get('type') != 'E':
+    if show_exon_labels:
+        exon_label_y = -row_height * 3.5
+        for gene, offset in gene_offsets.items():
+            gene_map = gene_maps.get(gene)
+            if not gene_map:
                 continue
-            label = normalize_token(seg.get('exon_id', ''), gene, 'block')
-            if not label or label in seen_labels:
-                continue
-            seen_labels.add(label)
-            x0 = seg['display_start'] + offset
-            x1 = seg['display_end'] + offset
-            ax.text(
-                (x0 + x1) / 2.0,
-                exon_label_y,
-                label,
-                va='bottom',
-                ha='center',
-                fontsize=5,
-                color='black',
-                zorder=3
-            )
+            seen_labels = set()
+            for seg in gene_map['segments']:
+                if seg.get('type') != 'E':
+                    continue
+                label = normalize_token(seg.get('exon_id', ''), gene, 'block')
+                if not label or label in seen_labels:
+                    continue
+                seen_labels.add(label)
+                x0 = seg['display_start'] + offset
+                x1 = seg['display_end'] + offset
+                ax.text(
+                    (x0 + x1) / 2.0,
+                    exon_label_y,
+                    label,
+                    va='bottom',
+                    ha='center',
+                    fontsize=5,
+                    color='black',
+                    zorder=3
+                )
     for row in rows:
         iso = row['isoform']
         is_first_row = row_index == 0
@@ -2922,8 +2994,8 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
                     max(1e-6, span['x1'] - span['x0']),
                     row_height,
                     facecolor=row['color'],
-                    edgecolor='white',
-                    linewidth=0.000000,
+                    edgecolor='white' if show_exon_edges else 'none',
+                    linewidth=0.3 if show_exon_edges else 0.0,
                     zorder=2
                 )
             )
@@ -2947,22 +3019,28 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
                     label_text = row.get('group_label') or label_text
                 # Center the isoform label over its read stack.
                 ax.text(-total_width * 0.01, label_y, label_text,
-                        va='center', ha='right', fontsize=8, color=row['color'])
+                        va='center', ha='right', fontsize=4, color=row['color'])
                 if cluster_isoforms:
                     group_first_row[row['group_idx']] = False
                 else:
                     isoform_first_row[iso['resolved_id']] = False
 
-    gene_label_y = -row_height * 6.5
+    bottom_pad = row_height * 2.0
+    top_pad = row_height * (8.0 if show_exon_labels else 2.0)
+    gene_label_transform = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
     for gene, offset in gene_offsets.items():
         gene_map = gene_maps.get(gene)
         if not gene_map:
             continue
         center = offset + gene_map['total_length'] / 2.0
-        ax.text(center, gene_label_y, gene, ha='center', va='bottom', fontsize=7)
+        ax.text(center, -0.06, gene,
+                ha='center', va='top',
+                fontsize=7,
+                transform=gene_label_transform,
+                clip_on=False)
 
     # Tight vertical framing around the read stack.
-    ax.set_ylim(-row_height * 8.0, total_height)
+    ax.set_ylim(-top_pad, total_height + bottom_pad)
     ax.set_xlim(-total_width * 0.1, total_width + total_width * 0.02)
     ax.invert_yaxis()
     ax.axis('off')
@@ -3320,8 +3398,19 @@ def main():
                         cluster_isoforms=args.cluster_isoforms,
                         return_cluster_labels=True
                     )
+                    isoform_counts = {
+                        rec['isoform_id']: rec['count']
+                        for rec in isoform_records
+                        if rec.get('isoform_id') is not None
+                    }
                     isoform_path, _ = export_plotted_isoforms(
-                        plotted, output_path, plot_cluster_label_map, plot_cluster_index_map)
+                        plotted,
+                        output_path,
+                        plot_cluster_label_map,
+                        plot_cluster_index_map,
+                        isoform_counts=isoform_counts,
+                        target_gene=gene
+                    )
                     if isoform_path:
                         print(f"Saved plotted isoform IDs to: {isoform_path}")
             finally:
@@ -3476,7 +3565,13 @@ def main():
                         return_cluster_labels=True
                     )
                     isoform_path, _ = export_plotted_isoforms(
-                        plotted, out_path, plot_cluster_label_map, plot_cluster_index_map)
+                        plotted,
+                        out_path,
+                        plot_cluster_label_map,
+                        plot_cluster_index_map,
+                        isoform_counts=per_file_counts.get(path, {}),
+                        target_gene=gene
+                    )
                 if isoform_path:
                     print(f"Saved plotted isoform IDs to: {isoform_path}")
     finally:
