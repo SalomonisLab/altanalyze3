@@ -2688,6 +2688,7 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
 
     show_exon_labels = True
     show_exon_edges = False
+    show_gene_model_track = True
 
     # Track gene order for trans-splicing and compute panel offsets.
     genes_in_plot = OrderedDict()
@@ -2868,6 +2869,7 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
     fig_width = max(10.0, total_width / 3000.0)
     t_render = time.time()
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+    coord_transform = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
 
     row_index = 0
     group_label_y = {}
@@ -2888,32 +2890,70 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
     effective_label_mode = label_mode
     if cluster_isoforms and label_mode == 'all':
         effective_label_mode = 'first'
-    if show_exon_labels:
-        exon_label_y = -row_height * 3.5
+    gene_model_track_y = -0.16
+    gene_model_track_height = 0.036
+    gene_model_label_y = gene_model_track_y + gene_model_track_height + 0.003
+    if show_gene_model_track or show_exon_labels:
         for gene, offset in gene_offsets.items():
             gene_map = gene_maps.get(gene)
             if not gene_map:
                 continue
-            seen_labels = set()
-            for seg in gene_map['segments']:
-                if seg.get('type') != 'E':
-                    continue
-                label = normalize_token(seg.get('exon_id', ''), gene, 'block')
-                if not label or label in seen_labels:
-                    continue
-                seen_labels.add(label)
-                x0 = seg['display_start'] + offset
-                x1 = seg['display_end'] + offset
-                ax.text(
-                    (x0 + x1) / 2.0,
-                    exon_label_y,
-                    label,
-                    va='bottom',
-                    ha='center',
-                    fontsize=5,
-                    color='black',
-                    zorder=3
-                )
+            if show_gene_model_track:
+                exon_segments = [seg for seg in gene_map['segments'] if seg.get('type') == 'E']
+                exon_segments.sort(key=lambda s: (s['display_start'], s['display_end']))
+                if len(exon_segments) >= 2:
+                    for left, right in zip(exon_segments, exon_segments[1:]):
+                        x0 = left['display_end'] + offset
+                        x1 = right['display_start'] + offset
+                        if x1 > x0:
+                            ax.plot(
+                                [x0, x1],
+                                [gene_model_track_y + gene_model_track_height / 2.0] * 2,
+                                color='blue',
+                                linewidth=0.4,
+                                transform=coord_transform,
+                                clip_on=False,
+                                zorder=2
+                            )
+                for seg in exon_segments:
+                    x0 = seg['display_start'] + offset
+                    x1 = seg['display_end'] + offset
+                    ax.add_patch(
+                        plt.Rectangle(
+                            (x0, gene_model_track_y),
+                            max(1e-6, x1 - x0),
+                            gene_model_track_height,
+                            facecolor='blue',
+                            edgecolor='none',
+                            linewidth=0,
+                            transform=coord_transform,
+                            clip_on=False,
+                            zorder=3
+                        )
+                    )
+            if show_exon_labels:
+                seen_labels = set()
+                for seg in gene_map['segments']:
+                    if seg.get('type') != 'E':
+                        continue
+                    label = normalize_token(seg.get('exon_id', ''), gene, 'block')
+                    if not label or label in seen_labels:
+                        continue
+                    seen_labels.add(label)
+                    x0 = seg['display_start'] + offset
+                    x1 = seg['display_end'] + offset
+                    ax.text(
+                        (x0 + x1) / 2.0,
+                        gene_model_label_y,
+                        label,
+                        va='bottom',
+                        ha='center',
+                        fontsize=4.5,
+                        color='black',
+                        transform=coord_transform,
+                        clip_on=False,
+                        zorder=4
+                    )
     for row in rows:
         iso = row['isoform']
         is_first_row = row_index == 0
@@ -3028,14 +3068,79 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
     bottom_pad = row_height * 2.0
     top_pad = row_height * (8.0 if show_exon_labels else 2.0)
     gene_label_transform = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
+    def _format_chrom(chrom):
+        chrom = str(chrom or "")
+        if chrom and not chrom.startswith("chr"):
+            return f"chr{chrom}"
+        return chrom or "chr?"
+
+    def _format_coord(value):
+        return f"{int(value):,}"
+
+    coord_y = -0.26
+    coord_text_y = -0.29
+    gene_label_y = -0.50
     for gene, offset in gene_offsets.items():
         gene_map = gene_maps.get(gene)
         if not gene_map:
             continue
         center = offset + gene_map['total_length'] / 2.0
-        ax.text(center, -0.06, gene,
+        segments = gene_map.get('segments') or []
+        if segments:
+            chrom = _format_chrom(segments[0].get('chrom'))
+            gene_start = min(seg['start'] for seg in segments)
+            gene_end = max(seg['end'] for seg in segments)
+            tick_start = int(gene_start // 1000 * 1000)
+            tick_end = int(((gene_end + 999) // 1000) * 1000)
+            if tick_end < tick_start:
+                tick_start, tick_end = tick_end, tick_start
+            ticks = list(range(tick_start, tick_end + 1, 1000))
+            if ticks:
+                x0 = map_coord(gene_map, ticks[0]) + offset
+                x1 = map_coord(gene_map, ticks[-1]) + offset
+                ax.plot(
+                    [x0, x1],
+                    [coord_y, coord_y],
+                    color='black',
+                    linewidth=0.4,
+                    transform=coord_transform,
+                    clip_on=False
+                )
+                ax.text(
+                    x0,
+                    coord_text_y,
+                    chrom,
+                    ha='right',
+                    va='top',
+                    fontsize=4,
+                    transform=coord_transform,
+                    clip_on=False
+                )
+            for tick in ticks:
+                x = map_coord(gene_map, tick) + offset
+                ax.plot(
+                    [x, x],
+                    [coord_y, coord_y - 0.01],
+                    color='black',
+                    linewidth=0.4,
+                    transform=coord_transform,
+                    clip_on=False
+                )
+                if tick % 10000 == 0:
+                    coord_label = _format_coord(tick)
+                    ax.text(
+                        x,
+                        coord_text_y,
+                        coord_label,
+                        ha='center',
+                        va='top',
+                        fontsize=4,
+                        transform=coord_transform,
+                        clip_on=False
+                    )
+        ax.text(center, gene_label_y, gene,
                 ha='center', va='top',
-                fontsize=7,
+                fontsize=5.25,
                 transform=gene_label_transform,
                 clip_on=False)
 
