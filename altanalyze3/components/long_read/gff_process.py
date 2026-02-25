@@ -731,7 +731,9 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
     else:
         # Combine and report collapsed unique isoform structures 
         files = [file for file in os.listdir(directory) if file.endswith('.gff')]
+        files += [file for file in os.listdir(directory) if file.endswith('.gff.gz')]
         files += [file for file in os.listdir(directory) if file.endswith('.gtf')]
+        files += [file for file in os.listdir(directory) if file.endswith('.gtf.gz')]
         #files = [file for file in os.listdir(directory) if file.endswith('.txt')]
         if len(files)>1:
             collapse_isoforms = True

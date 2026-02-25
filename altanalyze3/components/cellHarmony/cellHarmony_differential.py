@@ -43,7 +43,13 @@ for _name in ("anndata", "anndata._core.anndata"):
     _logger = logging.getLogger(_name)
     _logger.setLevel(logging.ERROR)
     _logger.propagate = False
+    
+sys.path.insert(1, os.path.join(sys.path[0], '..'))
+
 from altanalyze3.components.visualization import NetPerspective
+from altanalyze3.components.goelite.resources import prepare_species_resources
+from altanalyze3.components.goelite.runner import GOEliteRunner, EnrichmentSettings
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -455,6 +461,9 @@ def compute_pseudobulk_per_population(adata, population_col, sample_col, covaria
 def _rank_genes_scanpy(two_group_adata, groupby, case_label, control_label, method):
     # Run Scanpy DE and return names, pvals_adj, log2fc, raw pvals as Series for the case vs control
     two_for_rank = _prepare_scanpy_rank_input(two_group_adata)
+
+    if 'log1p' in two_for_rank.uns and 'base' not in two_for_rank.uns['log1p']:
+        two_for_rank.uns['log1p']['base'] = None
 
     sc.tl.rank_genes_groups(two_for_rank,
                             groupby=groupby,
@@ -2035,9 +2044,6 @@ def run_goelite_for_clusters(de_store,
     if species_key is None:
         print("[INFO] GO-Elite skipped: no species provided.")
         return None
-
-    from altanalyze3.components.goelite.resources import prepare_species_resources
-    from altanalyze3.components.goelite.runner import GOEliteRunner, EnrichmentSettings
 
     cluster_gene_map = _build_goelite_cluster_gene_map(de_store)
     if not cluster_gene_map:

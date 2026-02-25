@@ -108,10 +108,48 @@ def combine_and_align_h5(
     metacell_random_cells=5,
     metacell_random_replacement=False,
     metacell_random_state=0,
-    ambient_correct_cutoff=None
+    ambient_correct_cutoff=None,
+    concat_on_disk=False,
+    concat_batch_size=50,
+    verbose_import=False
 ):
     start_time = time.time()
     os.makedirs(output_dir, exist_ok=True)
+
+    def _rss_mb():
+        import resource
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        if sys.platform == "darwin":
+            return rss / (1024 * 1024)
+        return rss / 1024.0
+
+    def _log_step(message, elapsed=None):
+        timing = f" time={elapsed:.2f}s" if elapsed is not None else ""
+        print(f"[mem][timing] {message}{timing} rss={_rss_mb():.1f}MB")
+
+    def _filter_cells_min_genes(adata, min_genes):
+        if min_genes is None:
+            return
+        X = adata.X
+        if sp.issparse(X):
+            X = X.tocsr()
+            n_genes = np.diff(X.indptr)
+        else:
+            n_genes = np.sum(X > 0, axis=1)
+        keep = np.asarray(n_genes).ravel() >= min_genes
+        adata._inplace_subset_obs(keep)
+
+    def _filter_genes_min_cells(adata, min_cells):
+        if min_cells is None:
+            return
+        X = adata.X
+        if sp.issparse(X):
+            X = X.tocsr()
+            n_cells = np.bincount(X.indices, minlength=X.shape[1])
+        else:
+            n_cells = np.sum(X > 0, axis=0)
+        keep = np.asarray(n_cells).ravel() >= min_cells
+        adata._inplace_subset_var(keep)
 
     reference_df = pd.read_csv(cellharmony_ref, sep='\t', index_col=0)
     cell_populations = reference_df.columns.tolist()
@@ -129,35 +167,37 @@ def combine_and_align_h5(
         adata_combined.var_names_make_unique()
         print(f"reimported adata shape: {adata_combined.shape} (cells x genes)")
     else:
+        if concat_batch_size and not concat_on_disk:
+            print("[warn] --concat_batch_size ignored unless --concat_on_disk is set.")
+            concat_batch_size = 0
+        use_on_disk = bool(concat_on_disk)
         adata_list = []
-        for path in tqdm(h5_files, desc="Loading input files"):
+        load_start = time.time()
+        _log_step("start loading inputs")
+
+        def _load_adata(path, sample_name_override=None):
             if path.endswith(".h5"):
                 sample_name = os.path.basename(path).replace(".h5", "")
-                adata = sc.read_10x_h5(path)
-
+                adata_local = sc.read_10x_h5(path)
             elif path.endswith(".h5ad"):
-                adata = sc.read_h5ad(path)
+                adata_local = sc.read_h5ad(path)
                 sample_name = os.path.basename(path).replace(".h5ad", "")
                 group_name = sample_name.split('__')[0] if '__' in sample_name else '_'.join(sample_name.split('_')[:-1])
                 if append_obs_field is not None:
-                    if append_obs_field not in adata.obs.columns:
+                    if append_obs_field not in adata_local.obs.columns:
                         raise ValueError(f"Field '{append_obs_field}' not found in adata.obs columns for {sample_name}.")
-                    appended_values = adata.obs[append_obs_field].astype(str).tolist()
-                    adata.obs_names = [f"{bc}.{val}" for bc, val in zip(adata.obs_names, appended_values)]
-
+                    appended_values = adata_local.obs[append_obs_field].astype(str).tolist()
+                    adata_local.obs_names = [f"{bc}.{val}" for bc, val in zip(adata_local.obs_names, appended_values)]
             elif path.endswith((
                 "_filtered_matrix.mtx.gz", "_counts.mtx.gz", "_matrix.mtx.gz",
                 "filtered_matrix.mtx.gz", "matrix.mtx.gz", "matrix.mtx", "quants_mat.mtx"
             )):
-                # Determine suffix and prefix
                 suffixes = [
                     "_filtered_matrix.mtx.gz", "_counts.mtx.gz", "_matrix.mtx.gz",
                     "filtered_matrix.mtx.gz", "matrix.mtx.gz", "matrix.mtx", "quants_mat.mtx"
                 ]
                 suffix = next(s for s in suffixes if path.endswith(s))
                 prefix = path[:-len(suffix)]
-
-                # Determine file names
                 if path.endswith(".gz"):
                     barcodes = prefix + ("_barcodes.tsv.gz" if any(path.endswith(f"_{s}") for s in ["filtered_matrix.mtx.gz", "counts.mtx.gz", "matrix.mtx.gz"]) else "barcodes.tsv.gz")
                     feature_options = [prefix + "_features.tsv.gz", prefix + "_genes.tsv.gz",
@@ -170,105 +210,188 @@ def combine_and_align_h5(
                             "quants_mat_rows.txt"
                             if path.endswith("quants_mat.mtx") 
                             else "barcodes.tsv"
-                        ) #avelin-fry
+                        )
                     )
                     feature_options = [
                         prefix + "_features.tsv", prefix + "_genes.tsv",
                         prefix + "features.tsv", prefix + "genes.tsv",
                         prefix + "quants_mat_cols.txt" 
-                    ] #avelin-fry
-                    
-                # Select existing feature file
+                    ]
                 features = next((f for f in feature_options if os.path.exists(f)), None)
                 if not features:
                     raise FileNotFoundError(f"Missing features or genes file for prefix: {prefix}")
                 if not os.path.exists(barcodes):
                     raise FileNotFoundError(f"Missing barcodes file for prefix: {prefix}")
-
-                # Setup tmpdir and copy files
                 tmpdir = tempfile.TemporaryDirectory()
                 tmp_path = tmpdir.name
-
-                # Normalize matrix file name inside tmpdir
                 matrix_dest = os.path.join(tmp_path, "matrix.mtx.gz" if path.endswith(".gz") else "matrix.mtx")
                 shutil.copy(path, matrix_dest)
                 shutil.copy(barcodes, os.path.join(tmp_path, os.path.basename(barcodes)))
                 shutil.copy(features, os.path.join(tmp_path, "features.tsv.gz" if features.endswith(".gz") else "features.tsv"))
-
-                # Determine sample name correctly
                 if os.path.basename(path) in ("matrix.mtx", "matrix.mtx.gz"):
-                    # If the file is literally matrix.mtx, use its parent folder name (e.g. "Chow-Flu-5")
                     base_dir = os.path.dirname(path)
                     sample_name = os.path.basename(os.path.normpath(base_dir))
                 else:
-                    # Otherwise use the prefix logic (for *_matrix.mtx.gz style files)
                     sample_name = os.path.basename(prefix)
-
                 try:
-                    adata = sc.read_10x_mtx(tmp_path, var_names='gene_symbols')
+                    adata_local = sc.read_10x_mtx(tmp_path, var_names='gene_symbols')
                 except Exception:
                     from scipy.io import mmread
                     from anndata import AnnData 
-
                     matrix_file = "matrix.mtx.gz" if path.endswith(".gz") else "matrix.mtx"
                     matrix = mmread(os.path.join(tmp_path, matrix_file)).tocsr()
-                    #print(f"\n[DEBUG] Loaded matrix from {os.path.basename(path)}: {matrix.shape} (raw)")
-
-                    #For Alevin-Fry, do NOT transpose
                     if "quants_mat" not in os.path.basename(path):
-                        # 10x-style: features (rows) × barcodes (cols)
                         matrix = matrix.T
-
                     barcodes_df = pd.read_csv(
                         os.path.join(tmp_path, os.path.basename(barcodes)), header=None
                     )
                     barcodes_list = barcodes_df[0].astype(str).tolist()
-
                     feature_file = "features.tsv.gz" if features.endswith(".gz") else "features.tsv"
                     genes_df = pd.read_csv(
                         os.path.join(tmp_path, feature_file), sep='\t', header=None
                     )
-
                     if genes_df.shape[1] != 2:
-                        #raise ValueError(f"Expected 2 columns in features.tsv for {sample_name}, got: {genes_df.shape[1]}")
                         gene_ids = genes_df[0].astype(str).tolist()
                         gene_symbols = genes_df[0].astype(str).tolist()
                     else:
                         gene_ids = genes_df[0].astype(str).tolist()
                         gene_symbols = genes_df[1].astype(str).tolist()
-
                     if matrix.shape[0] != len(barcodes_list):
                         raise ValueError(f"Mismatch between number of cells ({matrix.shape[0]}) and barcodes ({len(barcodes_list)})")
                     if matrix.shape[1] != len(gene_symbols):
                         raise ValueError(f"Mismatch between number of genes ({matrix.shape[1]}) and features ({len(gene_symbols)})")
-
-                    adata = AnnData(X=matrix)
-                    adata.obs_names = barcodes_list
-                    adata.var_names = gene_symbols
-                    adata.var["gene_ids"] = gene_ids
-
+                    adata_local = AnnData(X=matrix)
+                    adata_local.obs_names = barcodes_list
+                    adata_local.var_names = gene_symbols
+                    adata_local.var["gene_ids"] = gene_ids
             elif os.path.isdir(path):
-                adata = sc.read_10x_mtx(path, var_names='gene_symbols')
+                adata_local = sc.read_10x_mtx(path, var_names='gene_symbols')
                 sample_name = os.path.basename(os.path.normpath(path))
-
             else:
                 raise ValueError(f"Unsupported input: {path}")
 
-            apply_gene_translation(adata, translation_map, sample_name)
-            adata.var_names_make_unique()
+            if sample_name_override:
+                sample_name = str(sample_name_override)
+
+            if not issparse(adata_local.X):
+                adata_local.X = sp.csr_matrix(adata_local.X)
+            else:
+                adata_local.X = adata_local.X.tocsr()
+
+            apply_gene_translation(adata_local, translation_map, sample_name)
+            adata_local.var_names_make_unique()
 
             group_name = sample_name.split('__')[0] if '__' in sample_name else '_'.join(sample_name.split('_')[:-1])
             if sample_name and len(sample_name) > 0:
-                adata.obs_names = [f"{bc}.{sample_name}" for bc in adata.obs_names]
+                adata_local.obs_names = [f"{bc}.{sample_name}" for bc in adata_local.obs_names]
             else:
-                adata.obs_names = list(adata.obs_names)  # Leave barcodes as-is
+                adata_local.obs_names = list(adata_local.obs_names)
 
-            adata.obs["sample"] = sample_name
-            adata.obs["group"] = group_name
-            adata.obs["Library"] = sample_name
-            adata_list.append(adata)
+            adata_local.obs["sample"] = sample_name
+            adata_local.obs["group"] = group_name
+            adata_local.obs["Library"] = sample_name
+            return adata_local, sample_name
 
-        adata_combined = ad.concat(adata_list, label="sample", join="outer", fill_value=0)
+        if use_on_disk:
+            combined_path = os.path.join(output_dir, "combined_raw.h5ad")
+            batch_size = int(concat_batch_size) if concat_batch_size else 50
+            if batch_size <= 0:
+                batch_size = 50
+            concat_tmpdir = tempfile.TemporaryDirectory(prefix="concat_batches_", dir=output_dir)
+            print(
+                "[INFO] Performing memory-efficient on-disk concatenation in batches "
+                f"of {batch_size}; this can take a while."
+            )
+
+            def _concat_on_disk(inputs, output_path):
+                if hasattr(ad, "experimental") and hasattr(ad.experimental, "concat_on_disk"):
+                    ad.experimental.concat_on_disk(
+                        inputs,
+                        output_path,
+                        max_loaded_elems=12000000000,
+                        label="sample",
+                        join="outer",
+                        fill_value=0
+                    )
+                    return
+                raise RuntimeError(
+                    "On-disk concatenation requires anndata.experimental.concat_on_disk. "
+                    "Please upgrade anndata or disable concat_on_disk."
+                )
+
+            progress = tqdm(total=len(h5_files), desc="Loading input files")
+            batch_files = []
+            batch_index = 0
+            concat_start = time.time()
+            for start in range(0, len(h5_files), batch_size):
+                batch_start = time.time()
+                adata_list = []
+                batch = h5_files[start:start + batch_size]
+                for idx, entry in enumerate(batch, start=start + 1):
+                    sample_start = time.time()
+                    if isinstance(entry, (tuple, list)) and len(entry) >= 2:
+                        path, sample_override = entry[0], entry[1]
+                    else:
+                        path, sample_override = entry, None
+                    adata, sample_name = _load_adata(path, sample_name_override=sample_override)
+                    adata_list.append(adata)
+                    if verbose_import:
+                        _log_step(
+                            f"loaded {sample_name} shape={adata.shape}",
+                            elapsed=time.time() - sample_start
+                        )
+                    progress.update(1)
+                batch_concat_start = time.time()
+                batch_adata = ad.concat(adata_list, label="sample", join="outer", fill_value=0)
+                batch_path = os.path.join(concat_tmpdir.name, f"batch_concat_{batch_index}.h5ad")
+                write_start = time.time()
+                batch_adata.write(batch_path, compression="gzip")
+                if verbose_import:
+                    _log_step(
+                        f"wrote batch {batch_index} -> {batch_path}",
+                        elapsed=time.time() - write_start
+                    )
+                del batch_adata
+                del adata_list
+                batch_files.append(batch_path)
+                batch_index += 1
+            progress.close()
+            _log_step("completed batched in-memory concat", elapsed=time.time() - concat_start)
+            if len(batch_files) == 1:
+                shutil.copy(batch_files[0], combined_path)
+            else:
+                print(f"[INFO] Merging {len(batch_files)} batch files on disk...")
+                _concat_on_disk(batch_files, combined_path)
+            for path in batch_files:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            read_start = time.time()
+            adata_combined = sc.read_h5ad(combined_path)
+            _log_step("reloaded combined h5ad", elapsed=time.time() - read_start)
+            concat_tmpdir.cleanup()
+        else:
+            for entry in tqdm(h5_files, desc="Loading input files"):
+                sample_start = time.time()
+                if isinstance(entry, (tuple, list)) and len(entry) >= 2:
+                    path, sample_override = entry[0], entry[1]
+                else:
+                    path, sample_override = entry, None
+                adata, sample_name = _load_adata(path, sample_name_override=sample_override)
+                adata_list.append(adata)
+                if verbose_import:
+                    _log_step(
+                        f"loaded {sample_name} shape={adata.shape}",
+                        elapsed=time.time() - sample_start
+                    )
+            _log_step("completed input loading", elapsed=time.time() - load_start)
+
+        if not use_on_disk:
+            concat_start = time.time()
+            _log_step("start in-memory concat")
+            adata_combined = ad.concat(adata_list, label="sample", join="outer", fill_value=0)
+            _log_step("completed in-memory concat", elapsed=time.time() - concat_start)
         print(f"adata shape: {adata_combined.shape} (cells x genes)")
 
         if ambient_correct_cutoff is not None:
@@ -297,9 +420,11 @@ def combine_and_align_h5(
             adata_combined.var_names_make_unique()
             print(f"[INFO] SoupX correction complete. Corrected adata shape: {adata_combined.shape} (cells x genes)")
 
-        sc.pp.filter_cells(adata_combined, min_genes=min_genes)
+        if sp.issparse(adata_combined.X):
+            adata_combined.X = adata_combined.X.tocsr()
+        _filter_cells_min_genes(adata_combined, min_genes)
         print(f"Cells remaining after min_genes {min_genes} filtering: {adata_combined.n_obs}")
-        sc.pp.filter_genes(adata_combined, min_cells=min_cells)
+        _filter_genes_min_cells(adata_combined, min_cells)
         sc.pp.filter_cells(adata_combined, min_counts=min_counts)
         print(f"Cells remaining after min_counts {min_counts} filtering: {adata_combined.n_obs}")
 
@@ -407,17 +532,28 @@ def combine_and_align_h5(
     print('Aligning cells to reference...',alignment_mode)
     align_start_time = time.time()
     ref_matrix = reference_df.loc[genes_present].T
-    query_matrix = pd.DataFrame(
-        adata_filtered.X.toarray() if sp.issparse(adata_filtered.X) else adata_filtered.X,
-        index=adata_filtered.obs_names,
-        columns=adata_filtered.var_names
-    )
+    query_index = adata_filtered.obs_names
 
     if alignment_mode == "cosine":
         # Cosine method: L2 normalization + cosine similarity
-        ref_norm = ref_matrix.div(np.linalg.norm(ref_matrix, axis=1), axis=0)
-        query_norm = query_matrix.div(np.linalg.norm(query_matrix, axis=1), axis=0)
-        similarities = 1 - cdist(query_norm.values, ref_norm.values, metric="cosine")
+        query_X = adata_filtered.X
+        if sp.issparse(query_X):
+            query_X = query_X.tocsr()
+            row_norms = np.sqrt(query_X.multiply(query_X).sum(axis=1)).A1
+            row_norms[row_norms == 0] = 1.0
+            query_norm = sp.diags(1.0 / row_norms).dot(query_X)
+        else:
+            row_norms = np.linalg.norm(query_X, axis=1)
+            row_norms[row_norms == 0] = 1.0
+            query_norm = query_X / row_norms[:, None]
+
+        ref_values = ref_matrix.values
+        ref_norms = np.linalg.norm(ref_values, axis=1)
+        ref_norms[ref_norms == 0] = 1.0
+        ref_norm = ref_values / ref_norms[:, None]
+
+        similarities = query_norm.dot(ref_norm.T)
+        similarities = np.asarray(similarities)
         alignment_scores = similarities[np.arange(len(similarities)), np.argmax(similarities, axis=1)]
         best_matches = np.argmax(similarities, axis=1)
         assignments = ref_matrix.index[best_matches]
@@ -425,6 +561,11 @@ def combine_and_align_h5(
 
     elif alignment_mode == "classic":
         # Pearson correlation + z-score diff
+        query_matrix = pd.DataFrame(
+            adata_filtered.X.toarray() if sp.issparse(adata_filtered.X) else adata_filtered.X,
+            index=adata_filtered.obs_names,
+            columns=adata_filtered.var_names
+        )
         query_centered = query_matrix.sub(query_matrix.mean(axis=1), axis=0)
         ref_centered = ref_matrix.sub(ref_matrix.mean(axis=1), axis=0)
         query_std = query_centered.std(axis=1, ddof=0).replace(0, np.nan)
@@ -461,7 +602,7 @@ def combine_and_align_h5(
         raise ValueError(f"Invalid alignment_mode: {alignment_mode}")
 
     match_df = pd.DataFrame({
-        "CellBarcode": query_matrix.index,
+        "CellBarcode": query_index,
         ref_name: assignments,
         "AlignmentScore": alignment_scores
     })
@@ -501,11 +642,12 @@ def combine_and_align_h5(
 
         marker_genes = reference_df.index
         adata_filtered, genes_present, _ = subset_to_reference_genes(adata_combined, marker_genes)
-        query_matrix = pd.DataFrame(
-            adata_filtered.X.toarray() if sp.issparse(adata_filtered.X) else adata_filtered.X,
-            index=adata_filtered.obs_names,
-            columns=adata_filtered.var_names
-        )
+        if alignment_mode == "classic":
+            query_matrix = pd.DataFrame(
+                adata_filtered.X.toarray() if sp.issparse(adata_filtered.X) else adata_filtered.X,
+                index=adata_filtered.obs_names,
+                columns=adata_filtered.var_names
+            )
 
     if alignment_mode == "community":
         ordered_match_df = match_df.sort_values(ref_name, ascending=False)
@@ -809,7 +951,8 @@ def get_h5_and_mtx_files(folder_path):
       - .h5ad files
       - 10x-style triplets: matrix.mtx (+ barcodes.tsv + genes.tsv/features.tsv)
       - .tar.gz/.tgz archives containing 10x-formatted content
-    Returns a list of file paths (h5, h5ad, or matrix.mtx).
+    Returns a list of file paths (h5, h5ad, or matrix.mtx) or
+    (path, sample_name) tuples when a two-column mapping file is provided.
     """
 
     import tarfile
@@ -821,6 +964,43 @@ def get_h5_and_mtx_files(folder_path):
     if os.path.isfile(folder_path):
         if folder_path.endswith((".h5", ".h5ad", ".mtx", ".mtx.gz")):
             return [folder_path]
+        parsed_rows = []
+        try:
+            with open(folder_path, "r", encoding="utf-8") as handle:
+                for line_num, line in enumerate(handle, start=1):
+                    raw = line.strip()
+                    if not raw or raw.startswith("#"):
+                        continue
+                    parts = raw.split("\t") if "\t" in raw else raw.split()
+                    if len(parts) < 2:
+                        raise ValueError(
+                            f"Expected at least 2 columns in {folder_path} on line {line_num}"
+                        )
+                    parsed_rows.append((line_num, parts))
+        except UnicodeDecodeError:
+            parsed_rows = []
+        if parsed_rows:
+            verified_paths = []
+            missing_paths = []
+            for line_num, parts in parsed_rows:
+                sample_name = str(parts[0]).strip()
+                if not sample_name:
+                    raise ValueError(
+                        f"Missing sample name in {folder_path} on line {line_num}"
+                    )
+                raw_path = parts[1]
+                expanded_path = os.path.expandvars(os.path.expanduser(raw_path))
+                if not os.path.exists(expanded_path):
+                    missing_paths.append(raw_path)
+                else:
+                    verified_paths.append((expanded_path, sample_name))
+            if missing_paths:
+                raise FileNotFoundError(
+                    "Missing paths in the second column: " + ", ".join(missing_paths)
+                )
+            for verified, _sample_name in verified_paths:
+                print(f"[cellHarmony] Verified input path: {verified}")
+            return verified_paths
 
     # Walk all subdirectories
     for root, dirs, files in os.walk(folder_path):
@@ -1019,6 +1199,9 @@ if __name__ == '__main__':
     parser.add_argument('--metacell-random-replacement', action='store_true', help='Sample cells with replacement for random metacells')
     parser.add_argument('--metacell-random-state', type=int, default=0, help='Random state for metacell construction')
     parser.add_argument('--ambient_correct_cutoff', type=float, default=None, help='Apply SoupX ambient RNA correction with the specified contamination fraction (rho).')
+    parser.add_argument('--concat_on_disk', action='store_true', help='Concatenate inputs on disk to reduce peak memory usage')
+    parser.add_argument('--concat_batch_size', type=int, default=50, help='Batch size for on-disk concatenation (default: 50)')
+    parser.add_argument('--verbose_import', action='store_true', help='Log per-sample import timings during input loading')
 
     args = parser.parse_args()
 
@@ -1052,6 +1235,9 @@ if __name__ == '__main__':
     metacell_random_replacement = args.metacell_random_replacement
     metacell_random_state = args.metacell_random_state
     ambient_correct_cutoff = args.ambient_correct_cutoff
+    concat_on_disk = args.concat_on_disk
+    concat_batch_size = args.concat_batch_size
+    verbose_import = args.verbose_import
 
     h5_files = get_h5_and_mtx_files(h5_directory)
 
@@ -1106,7 +1292,10 @@ if __name__ == '__main__':
             metacell_random_cells=metacell_random_cells,
             metacell_random_replacement=metacell_random_replacement,
             metacell_random_state=metacell_random_state,
-            ambient_correct_cutoff=ambient_correct_cutoff
+            ambient_correct_cutoff=ambient_correct_cutoff,
+            concat_on_disk=concat_on_disk,
+            concat_batch_size=concat_batch_size,
+            verbose_import=verbose_import
         )
     finally:
         sys.stdout.flush()

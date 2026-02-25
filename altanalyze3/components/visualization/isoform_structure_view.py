@@ -962,14 +962,38 @@ def build_isoform_segments(tokens, exon_lookup, default_gene):
         if start > end:
             start, end = end, start
         coords = [c for c in group['coords'] if c is not None]
+        if seg['type'] == 'I' and not coords:
+            # Only draw intron retention when explicit coordinates are provided.
+            continue
         if coords:
             coord_min = min(coords)
             coord_max = max(coords)
             if seg['type'] == 'I' and len(coords) > 1:
-                # Intron tokens with explicit boundaries represent a bounded segment.
+                # Intron tokens with explicit boundaries can encode multiple segments.
+                if len(coords) % 2 == 0:
+                    for i in range(0, len(coords), 2):
+                        pair = coords[i:i + 2]
+                        pair_start = max(start, min(pair))
+                        pair_end = min(end, max(pair))
+                        if pair_end < pair_start:
+                            pair_start, pair_end = pair_end, pair_start
+                        segments.append({
+                            'gene': group['gene'],
+                            'start': pair_start,
+                            'end': pair_end,
+                            'type': seg['type'],
+                            'label': None
+                        })
+                    continue
+                # Fall back to a single bounded intron span if tokens are unmatched.
                 start = max(start, coord_min)
                 end = min(end, coord_max)
             else:
+                if seg['type'] == 'E' and len(coords) == 1 and idx not in (0, len(grouped) - 1):
+                    if direction == 1:
+                        start = max(start, coord_min)
+                    else:
+                        end = min(end, coord_max)
                 if idx == 0:
                     if direction == 1:
                         start = max(start, coord_min)
@@ -1332,7 +1356,8 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                                           check_defaults=False,
                                           gene_symbol_dict=None,
                                           rebuild_index=False,
-                                          debug_transcripts=None):
+                                          debug_transcripts=None,
+                                          process_genes_separately=None):
     start_time = time.time()
     global _AUTO_DEBUG_PRINTED
     if not _AUTO_DEBUG_PRINTED:
@@ -1366,6 +1391,41 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
             f"gene_model={'set' if gene_model else 'none'})"
         )
         _maybe_rebuild_indexes(True, h5ad_paths, transcript_paths, gene_model)
+    if process_genes_separately is None:
+        process_genes_separately = len(genes) >= 100
+    if process_genes_separately and len(genes) > 1:
+        for gene in genes:
+            plot_isoform_structures_by_conditions(
+                sample_dict=sample_dict,
+                conditions=conditions,
+                cell_states=cell_states,
+                barcode_sample_dict=barcode_sample_dict,
+                genes=[gene],
+                gene_model=gene_model,
+                output_dir=output_dir,
+                index_dir=index_dir,
+                cluster_mode=cluster_mode,
+                cluster_features=cluster_features,
+                cluster_strategy=cluster_strategy,
+                cluster_similarity_threshold=cluster_similarity_threshold,
+                min_split_fraction=min_split_fraction,
+                max_isoforms=max_isoforms,
+                min_count=min_count,
+                intron_scale=intron_scale,
+                row_height=row_height,
+                row_gap=row_gap,
+                group_gap=group_gap,
+                isoform_gap=isoform_gap,
+                label_mode=label_mode,
+                cluster_isoforms=cluster_isoforms,
+                groupby_rev=groupby_rev,
+                check_defaults=check_defaults,
+                gene_symbol_dict=gene_symbol_dict,
+                rebuild_index=False,
+                debug_transcripts=debug_transcripts,
+                process_genes_separately=False
+            )
+        return
     if isinstance(genes, str):
         genes = [genes]
     if isinstance(conditions, str):
@@ -1758,9 +1818,9 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                 for iso_id, count in counts_map.items()
             ]
             gene_label = _resolve_gene_output_label(gene, gene_symbol_dict)
-            condition_dir = output_dir / condition / gene_label
-            condition_dir.mkdir(parents=True, exist_ok=True)
-            out_path = condition_dir / f"{condition}__{cell_state_label}__{gene}.pdf"
+            gene_dir = output_dir / gene_label
+            gene_dir.mkdir(parents=True, exist_ok=True)
+            out_path = gene_dir / f"{condition}__{cell_state_label}__{gene_label}.pdf"
             print(f"[auto] Plotting {gene} for {condition} -> {out_path}")
             try:
                 plotted, plot_cluster_label_map, plot_cluster_index_map = plot_isoform_structures(
