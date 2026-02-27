@@ -114,6 +114,7 @@ def combine_and_align_h5(
     verbose_import=False
 ):
     start_time = time.time()
+    output_dir = os.path.abspath(output_dir)
     os.makedirs(output_dir, exist_ok=True)
 
     def _rss_mb():
@@ -1239,11 +1240,18 @@ if __name__ == '__main__':
     concat_batch_size = args.concat_batch_size
     verbose_import = args.verbose_import
 
-    h5_files = get_h5_and_mtx_files(h5_directory)
+    if h5ad_file:
+        h5_files = []
+    else:
+        if not h5_directory:
+            print("No --h5dir or --h5ad provided.")
+            sys.exit()
+        h5_files = get_h5_and_mtx_files(h5_directory)
 
     if len(h5_files) == 0:
-        print("No compatible h5, h5ad or .mtx files identified")
-        sys.exit()
+        if not h5ad_file:
+            print("No compatible h5, h5ad or .mtx files identified")
+            sys.exit()
 
     log_dir = os.path.join(output_dir, "logs")
     os.makedirs(log_dir, exist_ok=True)
