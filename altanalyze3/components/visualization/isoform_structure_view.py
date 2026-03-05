@@ -24,7 +24,7 @@ plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
 plt.rcParams['figure.facecolor'] = 'white'
 
 DEFAULT_COLORMAP = 'tab20'
-ISOFORM_STRUCTURE_VIEW_VERSION = "debug-20260206-c"
+ISOFORM_STRUCTURE_VIEW_VERSION = "debug-20260206-d"
 _AUTO_DEBUG_PRINTED = False
 AUTO_CLUSTER_DEFAULTS = {
     "cluster_mode": "block",
@@ -58,8 +58,10 @@ _H5AD_GENE_INDEX_CACHE = {}
 _H5AD_COUNTS_CACHE = {}
 _CLUSTER_DEBUG_PRINTED = False
 _SPLICE_FUZZ_CACHE = {}
+_SPLICE_FUZZ_COORDS = {}
 _SPLICE_FUZZ_TOLERANCE = 12
 _SPLICE_FUZZ_DEFAULT_GENE = None
+_SPLICE_FUZZ_COLLAPSE_BLOCK = False
 
 
 class _Tee:
@@ -114,6 +116,13 @@ def _cluster_debug_level():
         return int(value)
     except ValueError:
         return 1
+
+
+def _cluster_debug_ids():
+    value = os.environ.get("ISOFORM_CLUSTER_DEBUG_IDS", "")
+    if not value:
+        return set()
+    return {token.strip() for token in value.split(',') if token.strip()}
 
 
 def _cluster_debug_header():
@@ -2088,6 +2097,7 @@ def _block_base_from_token(token):
 
 def _build_splice_fuzz_cache(exon_lookup, tolerance=12):
     gene_to_entries = defaultdict(list)
+    gene_to_coords = defaultdict(dict)
     for (gene, exon_id), seg in exon_lookup.items():
         if not gene or not exon_id:
             continue
@@ -2097,6 +2107,7 @@ def _build_splice_fuzz_cache(exon_lookup, tolerance=12):
         except (TypeError, ValueError):
             continue
         base = str(exon_id)
+        gene_to_coords[gene][base] = (start, end)
         prefix = base.split('.', 1)[0] if '.' in base else base
         gene_to_entries[gene].append((base, prefix, start, end))
     cache = {}
@@ -2130,39 +2141,62 @@ def _build_splice_fuzz_cache(exon_lookup, tolerance=12):
                 for member in group['members']:
                     gene_map[member] = canonical
         cache[gene] = gene_map
-    return cache
+    return cache, gene_to_coords
 
 
 def _ensure_splice_fuzz_cache(exon_lookup, tolerance=12):
-    global _SPLICE_FUZZ_CACHE, _SPLICE_FUZZ_TOLERANCE
+    global _SPLICE_FUZZ_CACHE, _SPLICE_FUZZ_COORDS, _SPLICE_FUZZ_TOLERANCE
     if not exon_lookup:
         return
     if _SPLICE_FUZZ_CACHE and _SPLICE_FUZZ_TOLERANCE == tolerance:
         return
-    _SPLICE_FUZZ_CACHE = _build_splice_fuzz_cache(exon_lookup, tolerance=tolerance)
+    _SPLICE_FUZZ_CACHE, _SPLICE_FUZZ_COORDS = _build_splice_fuzz_cache(
+        exon_lookup, tolerance=tolerance
+    )
     _SPLICE_FUZZ_TOLERANCE = tolerance
 
 
-def _apply_splice_fuzz_tokens(tokens, default_gene):
+def _apply_splice_fuzz_tokens(tokens, default_gene, collapse_to_block=False):
     if not tokens:
         return tokens
     if not _SPLICE_FUZZ_CACHE:
         return tokens
-    gene_map_default = _SPLICE_FUZZ_CACHE.get(default_gene, {})
     fuzzed = []
+    token_block_bases = []
+    for tok in tokens:
+        gene_id, base, _coord = split_token(tok, default_gene)
+        token_block_bases.append(_block_base_from_token(base))
     for tok in tokens:
         gene_id, base, _coord = split_token(tok, default_gene)
         if not base:
             fuzzed.append(tok)
             continue
-        if gene_id and gene_id != default_gene:
-            gene_map = _SPLICE_FUZZ_CACHE.get(gene_id, {})
-            canonical = gene_map.get(base, base)
-            fuzzed.append(f"{gene_id}:{canonical}")
+        gene_key = gene_id or default_gene
+        gene_map = _SPLICE_FUZZ_CACHE.get(gene_key, {})
+        coords_map = _SPLICE_FUZZ_COORDS.get(gene_key, {})
+        canonical = gene_map.get(base, base)
+        coord = _coord
+        if coord is not None:
+            coords = coords_map.get(base) or coords_map.get(canonical)
+            if coords:
+                start, end = coords
+                if min(abs(coord - start), abs(coord - end)) <= _SPLICE_FUZZ_TOLERANCE:
+                    coord = None
+            if coord is not None:
+                # If an adjacent token is the same base exon, collapse the coord token.
+                idx = len(fuzzed)
+                prev_block = token_block_bases[idx - 1] if idx - 1 >= 0 else None
+                next_block = token_block_bases[idx + 1] if idx + 1 < len(token_block_bases) else None
+                if _block_base_from_token(base) in (prev_block, next_block):
+                    coord = None
+        if coord is None:
+            token_out = _block_base_from_token(canonical) if collapse_to_block else canonical
         else:
-            canonical = gene_map_default.get(base, base)
-            fuzzed.append(canonical)
-    return fuzzed
+            token_out = f"{canonical}_{coord}"
+        if gene_id and gene_id != default_gene:
+            token_out = f"{gene_id}:{token_out}"
+        fuzzed.append(token_out)
+    return _collapse_runs(fuzzed)
 
 
 def _normalize_middle_token(token):
@@ -2173,6 +2207,8 @@ def _normalize_middle_token(token):
     if _SPLICE_FUZZ_CACHE:
         gene_map = _SPLICE_FUZZ_CACHE.get(gene_id or default_gene, {})
         base = gene_map.get(base, base)
+    if _SPLICE_FUZZ_COLLAPSE_BLOCK:
+        base = _block_base_from_token(base)
     return base or ""
 
 
@@ -2496,6 +2532,64 @@ def cluster_by_subsequence(items, threshold=0.4):
             print(f"[cluster][debug] top_anchors={top_anchors}")
             print(f"[cluster][debug] top_middles={top_middles}")
     debug_counts = defaultdict(int)
+    debug_ids = _cluster_debug_ids()
+    debug_items = []
+    if debug_ids:
+        for item in items:
+            matched = []
+            for iso in item.get('items', []):
+                iso_id = iso.get('isoform_id') or iso.get('resolved_id')
+                if iso_id and str(iso_id) in debug_ids:
+                    matched.append(str(iso_id))
+            if matched:
+                debug_items.append((item, matched))
+        if debug_items:
+            print(
+                "[cluster][debug] subsequence debug_ids="
+                f"{sorted(debug_ids)} hits={len(debug_items)}"
+            )
+            for item, ids in debug_items:
+                print(
+                    f"  ids={ids} weight={item.get('weight')} anchor={item_anchor.get(id(item))}"
+                )
+                print(f"    middle={item_middle.get(id(item))}")
+                print(f"    middle_major={item_middle_major.get(id(item))}")
+                print(f"    cluster_seq_raw={item.get('cluster_seq_raw')}")
+                print(f"    cluster_seq={item.get('cluster_seq')}")
+                print(f"    junction_seq={item.get('junction_seq')}")
+            if len(debug_items) >= 2:
+                item_a, ids_a = debug_items[0]
+                item_b, ids_b = debug_items[1]
+                score = subsequence_similarity(item_a['cluster_seq'], item_b['cluster_seq'])
+                junction_score = subsequence_similarity(
+                    item_a.get('junction_seq') or [],
+                    item_b.get('junction_seq') or []
+                )
+                anchor_match = item_anchor.get(id(item_a)) == item_anchor.get(id(item_b))
+                mid_a = item_middle_major.get(id(item_a), ())
+                mid_b = item_middle_major.get(id(item_b), ())
+                mid_score = subsequence_similarity(list(mid_a), list(mid_b))
+                print(
+                    "[cluster][debug] subsequence debug_pair",
+                    f"{ids_a[0]} vs {ids_b[0]}",
+                    f"score={score:.3f} junction_score={junction_score:.3f}",
+                    f"anchor_match={str(anchor_match).lower()} middle_score={mid_score:.3f}"
+                )
+        else:
+            sample_ids = []
+            for item in items:
+                for iso in item.get('items', []):
+                    iso_id = iso.get('isoform_id') or iso.get('resolved_id')
+                    if iso_id:
+                        sample_ids.append(str(iso_id))
+                    if len(sample_ids) >= 5:
+                        break
+                if len(sample_ids) >= 5:
+                    break
+            print(
+                "[cluster][debug] subsequence debug_ids no hits "
+                f"requested={sorted(debug_ids)} sample_ids={sample_ids}"
+            )
 
     for item in sorted(items, key=lambda x: x['weight'], reverse=True):
         best_idx = None
@@ -3054,6 +3148,8 @@ def group_structures(plotted, target_gene, cluster_features, cluster_strategy,
     debug_level = _cluster_debug_level()
     global _SPLICE_FUZZ_DEFAULT_GENE
     _SPLICE_FUZZ_DEFAULT_GENE = target_gene
+    global _SPLICE_FUZZ_COLLAPSE_BLOCK
+    _SPLICE_FUZZ_COLLAPSE_BLOCK = cluster_mode == 'block'
     if exon_lookup and splice_fuzz_tolerance:
         _ensure_splice_fuzz_cache(exon_lookup, tolerance=splice_fuzz_tolerance)
     if debug_level:
@@ -3076,7 +3172,11 @@ def group_structures(plotted, target_gene, cluster_features, cluster_strategy,
                 list(trimmed_key), target_gene, normalize_mode=cluster_mode
             )
         if exon_lookup and splice_fuzz_tolerance and cluster_strategy == 'subsequence':
-            cluster_tokens = _apply_splice_fuzz_tokens(cluster_tokens, target_gene)
+            cluster_tokens = _apply_splice_fuzz_tokens(
+                cluster_tokens,
+                target_gene,
+                collapse_to_block=cluster_mode == 'block'
+            )
         exon_tokens = filter_exon_tokens(
             list(trimmed_key), target_gene, normalize_mode=cluster_mode
         )
@@ -3140,6 +3240,7 @@ def group_structures(plotted, target_gene, cluster_features, cluster_strategy,
             if cluster_strategy != 'anchor-weighted':
                 grouped_structures = _reassign_shorter_substrings(grouped_structures)
     _SPLICE_FUZZ_DEFAULT_GENE = None
+    _SPLICE_FUZZ_COLLAPSE_BLOCK = False
 
     if report:
         total_structures = len(structure_items)
