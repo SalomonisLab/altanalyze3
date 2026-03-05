@@ -667,7 +667,7 @@ def collapseIsoforms(gene_db, junction_db, gff_organization, mode):
     return collaped_db
 
 
-def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
+def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse", gene_id=None):
     """Only return isoforms with unique splice-site combinations"""
     memtrace_enabled = os.environ.get("ISOFORM_JUNC_MEMTRACE") == "1"
     memtrace_tag = "MEMTRACE_TEMP"  # MEMTRACE_TEMP
@@ -778,6 +778,8 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse"):
         return filtered_exonIDs_str,exonIDs
 
     def process_isoform(chr, strand, info, exons, file):
+        if gene_id is not None and gene_id not in info:
+            return
         transcript_id = info.split(';')[ti].split(td)[1]
 
         # exonIDs_simple requries further checking as justification for its structure is inconsistent with exonIDs
@@ -1253,6 +1255,17 @@ if __name__ == '__main__':
         default='collapse',
         help='Isoform consolidation mode (collapse, Ensembl, cluster, or any other value for raw).'
     )
+    parser.add_argument(
+        '--gene-id',
+        dest='gene_id',
+        default=None,
+        help='Restrict processing to isoforms whose info field contains this gene ID.'
+    )
     args = parser.parse_args()
 
-    consolidateLongReadGFFs(args.gff_input, args.gene_model, mode=args.mode)
+    consolidateLongReadGFFs(
+        args.gff_input,
+        args.gene_model,
+        mode=args.mode,
+        gene_id=args.gene_id,
+    )

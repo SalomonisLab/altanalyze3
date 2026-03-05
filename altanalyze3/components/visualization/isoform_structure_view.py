@@ -24,7 +24,7 @@ plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
 plt.rcParams['figure.facecolor'] = 'white'
 
 DEFAULT_COLORMAP = 'tab20'
-ISOFORM_STRUCTURE_VIEW_VERSION = "debug-20260206-a"
+ISOFORM_STRUCTURE_VIEW_VERSION = "debug-20260206-c"
 _AUTO_DEBUG_PRINTED = False
 AUTO_CLUSTER_DEFAULTS = {
     "cluster_mode": "block",
@@ -56,6 +56,10 @@ _GROUPBY_CACHE = {}
 _GROUPBY_ROWS_CACHE = {}
 _H5AD_GENE_INDEX_CACHE = {}
 _H5AD_COUNTS_CACHE = {}
+_CLUSTER_DEBUG_PRINTED = False
+_SPLICE_FUZZ_CACHE = {}
+_SPLICE_FUZZ_TOLERANCE = 12
+_SPLICE_FUZZ_DEFAULT_GENE = None
 
 
 class _Tee:
@@ -100,6 +104,25 @@ def _assert_default_alignment():
             mismatches.append(f"{key} auto={auto_value} cli={cli_value}")
     mismatch_text = "; ".join(mismatches) if mismatches else "unknown mismatch"
     raise ValueError(f"[assert] auto vs cli defaults mismatch: {mismatch_text}")
+
+
+def _cluster_debug_level():
+    value = os.environ.get("ISOFORM_CLUSTER_DEBUG", "")
+    if not value:
+        return 0
+    try:
+        return int(value)
+    except ValueError:
+        return 1
+
+
+def _cluster_debug_header():
+    global _CLUSTER_DEBUG_PRINTED
+    if _CLUSTER_DEBUG_PRINTED:
+        return
+    _CLUSTER_DEBUG_PRINTED = True
+    print(f"[cluster][debug] isoform_structure_view path: {__file__}")
+    print(f"[cluster][debug] isoform_structure_view version: {ISOFORM_STRUCTURE_VIEW_VERSION}")
 
 
 def _resolve_gene_output_label(gene, gene_symbol_dict):
@@ -941,15 +964,21 @@ def build_isoform_segments(tokens, exon_lookup, default_gene):
             })
 
     direction = None
-    for i in range(len(grouped) - 1):
-        seg1 = exon_lookup.get((grouped[i]['gene'], grouped[i]['base']))
-        seg2 = exon_lookup.get((grouped[i + 1]['gene'], grouped[i + 1]['base']))
-        if seg1 and seg2:
-            if seg2['start'] > seg1['start']:
-                direction = 1
-            elif seg2['start'] < seg1['start']:
-                direction = -1
+    for group in grouped:
+        seg = exon_lookup.get((group['gene'], group['base']))
+        if seg and seg.get('strand') in ('+', '-'):
+            direction = -1 if seg['strand'] == '-' else 1
             break
+    if direction is None:
+        for i in range(len(grouped) - 1):
+            seg1 = exon_lookup.get((grouped[i]['gene'], grouped[i]['base']))
+            seg2 = exon_lookup.get((grouped[i + 1]['gene'], grouped[i + 1]['base']))
+            if seg1 and seg2:
+                if seg2['start'] > seg1['start']:
+                    direction = 1
+                elif seg2['start'] < seg1['start']:
+                    direction = -1
+                break
     if direction is None:
         direction = 1
 
@@ -989,24 +1018,32 @@ def build_isoform_segments(tokens, exon_lookup, default_gene):
                 start = max(start, coord_min)
                 end = min(end, coord_max)
             else:
-                if seg['type'] == 'E' and len(coords) == 1 and idx not in (0, len(grouped) - 1):
-                    if direction == 1:
-                        start = max(start, coord_min)
+                if seg['type'] == 'I' and len(coords) == 1:
+                    coord = max(start, min(end, coord_min))
+                    if abs(coord - start) <= abs(coord - end):
+                        end = coord
                     else:
-                        end = min(end, coord_max)
-                if idx == 0:
-                    if direction == 1:
+                        start = coord
+                else:
+                    if seg['type'] == 'E' and len(coords) == 1 and idx not in (0, len(grouped) - 1):
+                        coord = coord_min
+                        if abs(coord - start) <= abs(coord - end):
+                            start = max(start, coord)
+                        else:
+                            end = min(end, coord)
+                    if idx == 0:
+                        if direction == 1:
+                            start = max(start, coord_min)
+                        else:
+                            end = min(end, coord_max)
+                    if idx == len(grouped) - 1:
+                        if direction == 1:
+                            end = min(end, coord_max)
+                        else:
+                            start = max(start, coord_min)
+                    if idx != 0 and idx != len(grouped) - 1 and len(coords) > 1:
                         start = max(start, coord_min)
-                    else:
                         end = min(end, coord_max)
-                if idx == len(grouped) - 1:
-                    if direction == 1:
-                        end = min(end, coord_max)
-                    else:
-                        start = max(start, coord_min)
-                if idx != 0 and idx != len(grouped) - 1 and len(coords) > 1:
-                    start = max(start, coord_min)
-                    end = min(end, coord_max)
         if end < start:
             start, end = end, start
         label = None
@@ -1357,6 +1394,7 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                                           gene_symbol_dict=None,
                                           rebuild_index=False,
                                           debug_transcripts=None,
+                                          inspect_isoforms=None,
                                           process_genes_separately=None):
     start_time = time.time()
     global _AUTO_DEBUG_PRINTED
@@ -1746,16 +1784,18 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
 
         grouped_structures = None
         isoform_colors = None
+        build_max_isoforms = max(max_isoforms, len(combined_records))
         plotted, _, _ = build_plotted_isoforms(
             combined_records, transcript_structures, gene,
-            cluster_mode, cluster_features, min_count, max_isoforms
+            cluster_mode, cluster_features, min_count, build_max_isoforms
         )
         if plotted:
             grouped_structures = group_structures(
                 plotted, gene, cluster_features,
                 cluster_strategy, cluster_similarity_threshold,
                 min_split_fraction, include_introns=cluster_isoforms,
-                report=cluster_isoforms
+                report=cluster_isoforms, cluster_mode=cluster_mode,
+                exon_lookup=exon_lookup
             )
             if cluster_isoforms:
                 isoform_colors = assign_cluster_colors(grouped_structures, plt.get_cmap(DEFAULT_COLORMAP).colors)
@@ -1778,6 +1818,10 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
             if not counts_map:
                 print(f"[auto] No counts for {gene} in {condition}, skipping.")
                 continue
+            isoform_records = [
+                {'isoform_id': iso_id, 'count': count, 'gene_id': gene}
+                for iso_id, count in counts_map.items()
+            ]
             nonzero = sum(1 for value in counts_map.values() if value > 0)
             max_count = max(counts_map.values()) if counts_map else 0
             min_nonzero = min((value for value in counts_map.values() if value > 0), default=0)
@@ -1807,16 +1851,39 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                         f"sample_counts_only={sample_counts_only} "
                         f"sample_structures_only={sample_struct_only}"
                     )
+                if nonzero and overlap_struct == 0:
+                    print(
+                        f"[auto][warn] {gene} {condition} has zero overlap with combined "
+                        "structures; rebuilding per-condition structures."
+                    )
+                    local_plotted, _missing_count, _missing_ids = build_plotted_isoforms(
+                        isoform_records,
+                        transcript_structures,
+                        gene,
+                        cluster_mode,
+                        cluster_features,
+                        min_count,
+                        max_isoforms
+                    )
+                    if local_plotted:
+                        local_grouped_structures = group_structures(
+                            local_plotted, gene, cluster_features,
+                            cluster_strategy, cluster_similarity_threshold,
+                            min_split_fraction, include_introns=cluster_isoforms,
+                            report=cluster_isoforms, cluster_mode=cluster_mode,
+                            exon_lookup=exon_lookup
+                        )
+                        palette = plt.get_cmap(DEFAULT_COLORMAP).colors
+                        if cluster_isoforms:
+                            local_isoform_colors = assign_cluster_colors(local_grouped_structures, palette)
+                        else:
+                            local_isoform_colors = assign_isoform_colors(local_grouped_structures, palette)
             if nonzero == 0:
                 sample_zero = list(counts_map.keys())[:5]
                 print(
                     f"[auto][warn] {gene} {condition} has zero counts after filtering; "
                     f"sample_isoforms={sample_zero}"
                 )
-            isoform_records = [
-                {'isoform_id': iso_id, 'count': count, 'gene_id': gene}
-                for iso_id, count in counts_map.items()
-            ]
             gene_label = _resolve_gene_output_label(gene, gene_symbol_dict)
             gene_dir = output_dir / gene_label
             gene_dir.mkdir(parents=True, exist_ok=True)
@@ -1848,6 +1915,7 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                     isoform_counts=counts_map,
                     cluster_isoforms=cluster_isoforms,
                     debug_transcripts=debug_transcripts,
+                    debug_isoforms=inspect_isoforms,
                     return_cluster_labels=True
                 )
             except ValueError as exc:
@@ -1919,6 +1987,261 @@ def build_feature_set(tokens, feature_mode):
     return set(tokens)
 
 
+def build_junction_sequence(tokens):
+    if len(tokens) < 2:
+        return []
+    return [f"{tokens[i]}->{tokens[i + 1]}" for i in range(len(tokens) - 1)]
+
+
+def _build_exon_triplets(tokens):
+    if len(tokens) < 3:
+        return []
+    return [tuple(tokens[i:i + 3]) for i in range(len(tokens) - 2)]
+
+
+def _trim_terminal_bounds(exon_seq, exon_support, min_anchor_weight):
+    if not exon_seq:
+        return 0, -1
+    left = 0
+    right = len(exon_seq) - 1
+    while left < right and exon_support.get(exon_seq[left], 0.0) < min_anchor_weight:
+        left += 1
+    while right > left and exon_support.get(exon_seq[right], 0.0) < min_anchor_weight:
+        right -= 1
+    return left, right
+
+
+def _trim_terminal_exons(exon_seq, exon_support, min_anchor_weight):
+    left, right = _trim_terminal_bounds(exon_seq, exon_support, min_anchor_weight)
+    if right < left:
+        return []
+    trimmed = exon_seq[left:right + 1]
+    return trimmed if trimmed else list(exon_seq)
+
+
+def _collapse_runs(tokens):
+    collapsed = []
+    for token in tokens:
+        if not collapsed or token != collapsed[-1]:
+            collapsed.append(token)
+    return collapsed
+
+
+def _anchor_event(exon_seq):
+    if not exon_seq:
+        return (), ()
+    if len(exon_seq) == 1:
+        return (exon_seq[0], exon_seq[0]), ()
+    return (exon_seq[0], exon_seq[-1]), tuple(exon_seq[1:-1])
+
+
+def _compute_item_anchor_middle(items):
+    exon_support = defaultdict(float)
+    total_weight = sum(item['weight'] for item in items) or 1.0
+    for item in items:
+        exon_seq = item.get('cluster_seq_exon') or item.get('cluster_seq') or []
+        for exon in set(exon_seq):
+            exon_support[exon] += item['weight']
+    min_anchor_weight = max(2.0, total_weight * 0.02)
+    item_anchor = {}
+    item_middle = {}
+    item_has_anchor = {}
+
+    for item in items:
+        block_seq = item.get('cluster_seq_exon') or item.get('cluster_seq') or []
+        token_seq = list(item.get('structure_key_trimmed') or [])
+        left, right = _trim_terminal_bounds(block_seq, exon_support, min_anchor_weight)
+        if right < left:
+            trimmed_block = []
+            middle_tokens = []
+        else:
+            trimmed_block = block_seq[left:right + 1]
+            exon_positions = []
+            for idx, token in enumerate(token_seq):
+                _gene_id, base, _coord = split_token(token, "")
+                if base.startswith('E'):
+                    exon_positions.append(idx)
+            if exon_positions and left < len(exon_positions) and right < len(exon_positions):
+                left_pos = exon_positions[left]
+                right_pos = exon_positions[right]
+                middle_tokens = token_seq[left_pos + 1:right_pos]
+            else:
+                middle_tokens = []
+        anchor_key, _middle_sig = _anchor_event(trimmed_block)
+        middle_sig = tuple(_collapse_runs(middle_tokens))
+        item_anchor[id(item)] = anchor_key
+        item_middle[id(item)] = middle_sig
+        item_has_anchor[id(item)] = len(trimmed_block) >= 2
+    return item_anchor, item_middle, item_has_anchor
+
+
+def _block_base_from_token(token):
+    _gene_id, base, _coord = split_token(token, "")
+    if not base:
+        return ""
+    if len(base) > 1 and '.' in base:
+        prefix = base[0]
+        number = base[1:].split('.', 1)[0]
+        return f"{prefix}{number}"
+    return base
+
+
+def _build_splice_fuzz_cache(exon_lookup, tolerance=12):
+    gene_to_entries = defaultdict(list)
+    for (gene, exon_id), seg in exon_lookup.items():
+        if not gene or not exon_id:
+            continue
+        try:
+            start = int(seg.get('start'))
+            end = int(seg.get('end'))
+        except (TypeError, ValueError):
+            continue
+        base = str(exon_id)
+        prefix = base.split('.', 1)[0] if '.' in base else base
+        gene_to_entries[gene].append((base, prefix, start, end))
+    cache = {}
+    for gene, entries in gene_to_entries.items():
+        by_prefix = defaultdict(list)
+        for base, prefix, start, end in entries:
+            by_prefix[prefix].append((base, start, end))
+        gene_map = {}
+        for prefix, items in by_prefix.items():
+            groups = []
+            for base, start, end in sorted(items, key=lambda x: (x[1], x[2])):
+                assigned = False
+                for group in groups:
+                    if abs(start - group['start']) <= tolerance and abs(end - group['end']) <= tolerance:
+                        group['members'].append(base)
+                        group['start'] = int(round((group['start'] * group['count'] + start) / (group['count'] + 1)))
+                        group['end'] = int(round((group['end'] * group['count'] + end) / (group['count'] + 1)))
+                        group['count'] += 1
+                        assigned = True
+                        break
+                if not assigned:
+                    groups.append({
+                        'base': base,
+                        'start': start,
+                        'end': end,
+                        'count': 1,
+                        'members': [base]
+                    })
+            for group in groups:
+                canonical = group['base']
+                for member in group['members']:
+                    gene_map[member] = canonical
+        cache[gene] = gene_map
+    return cache
+
+
+def _ensure_splice_fuzz_cache(exon_lookup, tolerance=12):
+    global _SPLICE_FUZZ_CACHE, _SPLICE_FUZZ_TOLERANCE
+    if not exon_lookup:
+        return
+    if _SPLICE_FUZZ_CACHE and _SPLICE_FUZZ_TOLERANCE == tolerance:
+        return
+    _SPLICE_FUZZ_CACHE = _build_splice_fuzz_cache(exon_lookup, tolerance=tolerance)
+    _SPLICE_FUZZ_TOLERANCE = tolerance
+
+
+def _apply_splice_fuzz_tokens(tokens, default_gene):
+    if not tokens:
+        return tokens
+    if not _SPLICE_FUZZ_CACHE:
+        return tokens
+    gene_map_default = _SPLICE_FUZZ_CACHE.get(default_gene, {})
+    fuzzed = []
+    for tok in tokens:
+        gene_id, base, _coord = split_token(tok, default_gene)
+        if not base:
+            fuzzed.append(tok)
+            continue
+        if gene_id and gene_id != default_gene:
+            gene_map = _SPLICE_FUZZ_CACHE.get(gene_id, {})
+            canonical = gene_map.get(base, base)
+            fuzzed.append(f"{gene_id}:{canonical}")
+        else:
+            canonical = gene_map_default.get(base, base)
+            fuzzed.append(canonical)
+    return fuzzed
+
+
+def _normalize_middle_token(token):
+    default_gene = _SPLICE_FUZZ_DEFAULT_GENE or ""
+    gene_id, base, _coord = split_token(token, default_gene)
+    if not base:
+        return ""
+    if _SPLICE_FUZZ_CACHE:
+        gene_map = _SPLICE_FUZZ_CACHE.get(gene_id or default_gene, {})
+        base = gene_map.get(base, base)
+    return base or ""
+
+
+def _compute_item_anchor_middle_for_subsequence(items):
+    exon_support = defaultdict(float)
+    total_weight = sum(item['weight'] for item in items) or 1.0
+    for item in items:
+        exon_seq = item.get('cluster_seq_exon') or item.get('cluster_seq') or []
+        for exon in set(exon_seq):
+            exon_support[exon] += item['weight']
+    min_anchor_weight = max(2.0, total_weight * 0.02)
+    item_anchor = {}
+    item_middle = {}
+    item_has_anchor = {}
+    item_middle_major = {}
+
+    for item in items:
+        block_seq = item.get('cluster_seq_exon') or item.get('cluster_seq') or []
+        token_seq = list(item.get('structure_key_trimmed') or [])
+        # Use raw tokens so coord-bearing splice sites survive middle signatures.
+        raw_token_seq = list(item.get('structure_key') or item.get('tokens') or token_seq)
+        left, right = _trim_terminal_bounds(block_seq, exon_support, min_anchor_weight)
+        if right < left:
+            trimmed_block = []
+            middle_tokens = []
+        else:
+            trimmed_block = block_seq[left:right + 1]
+            exon_positions = []
+            for idx, token in enumerate(raw_token_seq):
+                _gene_id, base, _coord = split_token(token, "")
+                if base.startswith('E'):
+                    exon_positions.append(idx)
+            if exon_positions and left < len(exon_positions) and right < len(exon_positions):
+                left_pos = exon_positions[left]
+                right_pos = exon_positions[right]
+                middle_tokens = raw_token_seq[left_pos + 1:right_pos]
+            else:
+                middle_tokens = []
+        anchor_key, _middle_sig = _anchor_event(trimmed_block)
+        anchor_blocks = {_block_base_from_token(value) for value in anchor_key if value}
+        if anchor_blocks:
+            anchor_tags = []
+            last_idx = len(raw_token_seq) - 1
+            for idx, token in enumerate(raw_token_seq):
+                _gene_id, base, coord = split_token(token, "")
+                if not base.startswith('E'):
+                    continue
+                if _block_base_from_token(base) not in anchor_blocks:
+                    continue
+                if coord is not None and idx in (0, last_idx):
+                    continue
+                if coord is not None:
+                    anchor_tags.append(token)
+                else:
+                    anchor_tags.append(base)
+            middle_tokens.extend(anchor_tags)
+        middle_sig = tuple(_collapse_runs(middle_tokens))
+        middle_major = tuple(
+            _collapse_runs(
+                [value for value in (_normalize_middle_token(tok) for tok in middle_tokens) if value]
+            )
+        )
+        item_anchor[id(item)] = anchor_key
+        item_middle[id(item)] = middle_sig
+        item_middle_major[id(item)] = middle_major
+        item_has_anchor[id(item)] = len(trimmed_block) >= 2
+    return item_anchor, item_middle, item_has_anchor, item_middle_major
+
+
 def strip_terminal_coords(tokens, default_gene):
     if not tokens:
         return []
@@ -1933,28 +2256,48 @@ def strip_terminal_coords(tokens, default_gene):
     return trimmed
 
 
-def filter_exon_tokens(tokens, default_gene):
+def filter_exon_tokens(tokens, default_gene, normalize_mode=None):
     exon_tokens = []
     for tok in tokens:
         gene_id, base, _ = split_token(tok, default_gene)
         if base.startswith('E'):
             if '_' in tok:
+                if gene_id != default_gene and ':' not in tok:
+                    tok = f"{gene_id}:{tok}"
+                exon_tokens.append(tok)
                 continue
             if gene_id != default_gene and ':' not in tok:
                 tok = f"{gene_id}:{base}"
+            else:
+                tok = base
+            if normalize_mode:
+                tok = normalize_token(tok, default_gene, normalize_mode)
+                if gene_id != default_gene and ':' not in tok:
+                    tok = f"{gene_id}:{tok}"
             exon_tokens.append(tok)
     return exon_tokens
 
 
-def filter_exon_intron_tokens(tokens, default_gene):
+def filter_exon_intron_tokens(tokens, default_gene, normalize_mode=None):
     kept_tokens = []
     for tok in tokens:
         gene_id, base, _ = split_token(tok, default_gene)
         if base.startswith(('E', 'I')):
-            if base.startswith('E') and '_' in tok:
-                continue
-            if gene_id != default_gene and ':' not in tok:
-                tok = f"{gene_id}:{base}"
+            if base.startswith('E'):
+                if '_' in tok:
+                    if gene_id != default_gene and ':' not in tok:
+                        tok = f"{gene_id}:{tok}"
+                else:
+                    if gene_id != default_gene and ':' not in tok:
+                        tok = f"{gene_id}:{base}"
+                    else:
+                        tok = base
+                    if normalize_mode:
+                        tok = normalize_token(tok, default_gene, normalize_mode)
+                        if gene_id != default_gene and ':' not in tok:
+                            tok = f"{gene_id}:{tok}"
+            elif gene_id != default_gene and ':' not in tok:
+                tok = f"{gene_id}:{tok}"
             kept_tokens.append(tok)
     return kept_tokens
 
@@ -2058,6 +2401,32 @@ def substring_similarity(seq_a, seq_b):
     return lcs / float(len(short))
 
 
+def longest_common_subsequence_length(seq_a, seq_b):
+    if not seq_a or not seq_b:
+        return 0
+    if len(seq_a) > len(seq_b):
+        seq_a, seq_b = seq_b, seq_a
+    prev = [0] * (len(seq_a) + 1)
+    for token in seq_b:
+        current = [0]
+        for idx, a_token in enumerate(seq_a, start=1):
+            if token == a_token:
+                current.append(prev[idx - 1] + 1)
+            else:
+                current.append(max(prev[idx], current[idx - 1]))
+        prev = current
+    return prev[-1]
+
+
+def subsequence_similarity(seq_a, seq_b):
+    if not seq_a or not seq_b:
+        return 0.0
+    short = seq_a if len(seq_a) <= len(seq_b) else seq_b
+    long = seq_b if short is seq_a else seq_a
+    lcs = longest_common_subsequence_length(short, long)
+    return lcs / float(len(short))
+
+
 def cluster_by_substring(items, threshold=0.4):
     clusters = []
 
@@ -2082,6 +2451,246 @@ def cluster_by_substring(items, threshold=0.4):
     return [cluster['items'] for cluster in clusters]
 
 
+def cluster_by_subsequence(items, threshold=0.4):
+    clusters = []
+
+    item_anchor, item_middle, item_has_anchor, item_middle_major = _compute_item_anchor_middle_for_subsequence(items)
+    strict_match = threshold >= 0.999
+    debug_level = _cluster_debug_level()
+    if debug_level:
+        _cluster_debug_header()
+        anchor_counts = defaultdict(int)
+        middle_counts = defaultdict(int)
+        middle_coord = 0
+        middle_intron = 0
+        middle_exon_variant = 0
+        anchor_ready = 0
+        for item in items:
+            anchor = item_anchor.get(id(item))
+            middle = item_middle.get(id(item))
+            if anchor is not None:
+                anchor_counts[anchor] += 1
+            if middle is not None:
+                middle_counts[middle] += 1
+                for token in middle:
+                    if token.startswith('E') and ('.' in token or '_' in token):
+                        middle_exon_variant += 1
+                        break
+                    if '_' in token:
+                        middle_coord += 1
+                        break
+                    if token.startswith('I'):
+                        middle_intron += 1
+                        break
+            if item_has_anchor.get(id(item), False):
+                anchor_ready += 1
+        print(
+            "[cluster][debug] subsequence",
+            f"items={len(items)} threshold={threshold:.4f} strict_match={str(strict_match).lower()}",
+            f"anchor_ready={anchor_ready} unique_anchors={len(anchor_counts)} unique_middles={len(middle_counts)}",
+            f"middle_coord={middle_coord} middle_intron={middle_intron} middle_exon_variant={middle_exon_variant}"
+        )
+        if debug_level >= 2:
+            top_anchors = sorted(anchor_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+            top_middles = sorted(middle_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+            print(f"[cluster][debug] top_anchors={top_anchors}")
+            print(f"[cluster][debug] top_middles={top_middles}")
+    debug_counts = defaultdict(int)
+
+    for item in sorted(items, key=lambda x: x['weight'], reverse=True):
+        best_idx = None
+        best_score = -1.0
+        item_anchor_key = item_anchor.get(id(item))
+        item_middle_sig = item_middle.get(id(item))
+        item_middle_major_sig = item_middle_major.get(id(item), item_middle_sig)
+        item_anchor_ok = item_has_anchor.get(id(item), False)
+        for idx, cluster in enumerate(clusters):
+            score = subsequence_similarity(item['cluster_seq'], cluster['rep_seq'])
+            if score < threshold:
+                if debug_level >= 2:
+                    debug_counts['score'] += 1
+                continue
+            junction_a = item.get('junction_seq') or []
+            junction_b = cluster.get('rep_junction_seq') or []
+            if junction_a and junction_b:
+                junction_score = subsequence_similarity(junction_a, junction_b)
+                if junction_score < threshold:
+                    if debug_level >= 2:
+                        debug_counts['junction'] += 1
+                    continue
+            rep_item = cluster.get('rep_item')
+            rep_anchor_ok = item_has_anchor.get(id(rep_item), False) if rep_item is not None else False
+            if item_anchor_ok and rep_anchor_ok:
+                if item_anchor_key != item_anchor.get(id(rep_item)):
+                    if debug_level >= 2:
+                        debug_counts['anchor_mismatch'] += 1
+                    continue
+                rep_middle_sig = item_middle.get(id(rep_item))
+                if strict_match:
+                    if item_middle_sig != rep_middle_sig:
+                        if debug_level >= 2:
+                            debug_counts['middle_mismatch'] += 1
+                        continue
+                else:
+                    rep_middle_major = item_middle_major.get(id(rep_item), rep_middle_sig)
+                    mid_score = subsequence_similarity(
+                        list(item_middle_major_sig),
+                        list(rep_middle_major)
+                    )
+                    if mid_score < threshold:
+                        if debug_level >= 2:
+                            debug_counts['middle_similarity'] += 1
+                        continue
+            if score >= threshold and score > best_score:
+                best_score = score
+                best_idx = idx
+        if best_idx is not None:
+            clusters[best_idx]['items'].append(item)
+            if item['weight'] > clusters[best_idx]['rep_weight']:
+                clusters[best_idx]['rep_seq'] = item['cluster_seq']
+                clusters[best_idx]['rep_junction_seq'] = item.get('junction_seq') or []
+                clusters[best_idx]['rep_weight'] = item['weight']
+                clusters[best_idx]['rep_item'] = item
+        else:
+            clusters.append({
+                'items': [item],
+                'rep_seq': item['cluster_seq'],
+                'rep_junction_seq': item.get('junction_seq') or [],
+                'rep_weight': item['weight'],
+                'rep_item': item
+            })
+    if debug_level >= 2:
+        print(f"[cluster][debug] subsequence rejects={dict(debug_counts)}")
+    return [cluster['items'] for cluster in clusters]
+
+
+def cluster_by_anchor_weighted(items, threshold=0.4):
+    grouped = cluster_by_subsequence(items, threshold=threshold)
+    return _merge_by_major_middle_events(grouped, threshold=threshold)
+
+
+def _merge_by_major_middle_events(groups, threshold=0.4):
+    if not groups:
+        return groups
+    items = [item for group in groups for item in group]
+    exon_support = defaultdict(float)
+    total_weight = sum(item['weight'] for item in items) or 1.0
+    for item in items:
+        exon_seq = item.get('cluster_seq_exon') or item.get('cluster_seq') or []
+        for exon in set(exon_seq):
+            exon_support[exon] += item['weight']
+    min_anchor_weight = max(2.0, total_weight * 0.02)
+    item_anchor = {}
+    item_middle = {}
+    item_has_anchor = {}
+
+    for item in items:
+        block_seq = item.get('cluster_seq_exon') or item.get('cluster_seq') or []
+        full_seq = item.get('cluster_seq_exon_full') or block_seq
+        token_seq = list(item.get('structure_key_trimmed') or [])
+        left, right = _trim_terminal_bounds(block_seq, exon_support, min_anchor_weight)
+        if right < left:
+            trimmed_block = []
+            trimmed_full = []
+            trimmed_tokens = []
+        else:
+            trimmed_block = block_seq[left:right + 1]
+            trimmed_full = full_seq[left:right + 1]
+            trimmed_tokens = token_seq
+        anchor_key, _middle_sig = _anchor_event(trimmed_block)
+        exon_positions = []
+        for idx, token in enumerate(trimmed_tokens):
+            _gene_id, base, _coord = split_token(token, "")
+            if base.startswith('E'):
+                exon_positions.append(idx)
+        if left >= 0 and right < len(exon_positions):
+            left_pos = exon_positions[left]
+            right_pos = exon_positions[right]
+            middle_tokens = trimmed_tokens[left_pos + 1:right_pos]
+        else:
+            middle_tokens = []
+        middle_full = tuple(_collapse_runs(middle_tokens))
+        item_anchor[id(item)] = anchor_key
+        item_middle[id(item)] = middle_full
+        item_has_anchor[id(item)] = len(trimmed_block) >= 2
+
+    anchor_sig_weights = defaultdict(lambda: defaultdict(float))
+    for item in items:
+        if not item_has_anchor.get(id(item), False):
+            continue
+        anchor = item_anchor.get(id(item), ())
+        middle = item_middle.get(id(item), ())
+        anchor_sig_weights[anchor][middle] += item['weight']
+
+    major_sigs_by_anchor = {}
+    for anchor, sig_weights in anchor_sig_weights.items():
+        sorted_sigs = sorted(sig_weights.items(), key=lambda x: x[1], reverse=True)
+        if not sorted_sigs:
+            continue
+        group_weight = sum(sig_weights.values()) or 1.0
+        min_major = 2 if len(sorted_sigs) > 1 else 1
+        major_sigs = []
+        cumulative = 0.0
+        empty_sig = () if () in sig_weights else None
+        if empty_sig is not None:
+            major_sigs.append(empty_sig)
+            cumulative += sig_weights[empty_sig]
+        for sig, weight in sorted_sigs:
+            if sig in major_sigs:
+                continue
+            major_sigs.append(sig)
+            cumulative += weight
+            if cumulative / group_weight >= 0.8 and len(major_sigs) >= min_major:
+                break
+        major_sigs_by_anchor[anchor] = major_sigs
+
+    merged = defaultdict(list)
+    unmerged = []
+    strict_match = threshold >= 0.999
+    for group in groups:
+        sig_weights = defaultdict(float)
+        for item in group:
+            if not item_has_anchor.get(id(item), False):
+                continue
+            anchor = item_anchor.get(id(item), ())
+            middle = item_middle.get(id(item), ())
+            sig_weights[(anchor, middle)] += item['weight']
+        if sig_weights:
+            (anchor, middle), _weight = max(sig_weights.items(), key=lambda x: x[1])
+        else:
+            anchor, middle = (), ()
+        major_sigs = major_sigs_by_anchor.get(anchor)
+        if not major_sigs:
+            unmerged.append(group)
+            continue
+        if middle in major_sigs:
+            merged[(anchor, middle)].append(group)
+            continue
+        if strict_match:
+            unmerged.append(group)
+            continue
+        best_sig = None
+        best_score = -1.0
+        for major_sig in major_sigs:
+            score = subsequence_similarity(list(middle), list(major_sig))
+            if score > best_score:
+                best_score = score
+                best_sig = major_sig
+        if best_sig is not None and best_score >= threshold:
+            merged[(anchor, best_sig)].append(group)
+        else:
+            unmerged.append(group)
+
+    merged_groups = []
+    for group_list in merged.values():
+        combined = []
+        for group in group_list:
+            combined.extend(group)
+        merged_groups.append(combined)
+    merged_groups.extend(unmerged)
+    return merged_groups
+
+
 def is_subsequence(short_seq, long_seq):
     if not short_seq:
         return True
@@ -2093,6 +2702,77 @@ def is_subsequence(short_seq, long_seq):
         else:
             return False
     return True
+
+
+def _is_contiguous_subsequence(short_seq, long_seq):
+    if not short_seq:
+        return True
+    if len(short_seq) > len(long_seq):
+        return False
+    for start in range(len(long_seq) - len(short_seq) + 1):
+        if long_seq[start:start + len(short_seq)] == short_seq:
+            return True
+    return False
+
+
+def _group_weight(group):
+    return sum(item['weight'] for item in group)
+
+
+def _merge_groups_by_exon_signature(groups):
+    if not groups:
+        return groups
+    group_weights = [_group_weight(group) for group in groups]
+    sig_to_groups = defaultdict(set)
+    for idx, group in enumerate(groups):
+        for structure in group:
+            sig = tuple(structure.get('cluster_seq_exon') or structure.get('cluster_seq') or [])
+            sig_to_groups[sig].add(idx)
+    for sig, indices in sig_to_groups.items():
+        if len(indices) <= 1:
+            continue
+        target_idx = max(indices, key=lambda i: group_weights[i])
+        for idx in sorted(indices, reverse=True):
+            if idx == target_idx:
+                continue
+            groups[target_idx].extend(groups[idx])
+            groups[idx] = []
+    return [group for group in groups if group]
+
+
+def _reassign_shorter_substrings(groups):
+    if not groups:
+        return groups
+    group_weights = [_group_weight(group) for group in groups]
+    reps = []
+    for idx, group in enumerate(groups):
+        rep = max(group, key=lambda item: item['weight'])
+        reps.append((idx, rep.get('cluster_seq_exon') or rep.get('cluster_seq') or []))
+    moves = []
+    for idx, group in enumerate(groups):
+        for structure in list(group):
+            seq = structure.get('cluster_seq_exon') or structure.get('cluster_seq') or []
+            best_idx = None
+            best_weight = None
+            for rep_idx, rep_seq in reps:
+                if rep_idx == idx:
+                    continue
+                if len(seq) >= len(rep_seq):
+                    continue
+                if group_weights[rep_idx] <= group_weights[idx]:
+                    continue
+                if not _is_contiguous_subsequence(seq, rep_seq):
+                    continue
+                if best_idx is None or group_weights[rep_idx] > best_weight:
+                    best_idx = rep_idx
+                    best_weight = group_weights[rep_idx]
+            if best_idx is not None:
+                moves.append((idx, best_idx, structure))
+    for from_idx, to_idx, structure in moves:
+        if structure in groups[from_idx]:
+            groups[from_idx].remove(structure)
+            groups[to_idx].append(structure)
+    return [group for group in groups if group]
 
 
 def build_plotted_isoforms(isoforms, transcript_structures, target_gene, cluster_mode,
@@ -2114,8 +2794,8 @@ def build_plotted_isoforms(isoforms, transcript_structures, target_gene, cluster
     for iso, resolved in resolved_items:
         tokens = transcript_structures[resolved]
         tokens_trimmed = strip_terminal_coords(tokens, target_gene)
-        cluster_tokens_exon = filter_exon_tokens(tokens_trimmed, target_gene)
-        cluster_tokens_exon_intron = filter_exon_intron_tokens(tokens_trimmed, target_gene)
+        cluster_tokens_exon = filter_exon_tokens(tokens_trimmed, target_gene, normalize_mode=cluster_mode)
+        cluster_tokens_exon_intron = filter_exon_intron_tokens(tokens_trimmed, target_gene, normalize_mode=cluster_mode)
         cluster_set = set(cluster_tokens_exon)
         tokens_norm = [normalize_token(tok, target_gene, cluster_mode) for tok in tokens]
         plotted.append({
@@ -2225,10 +2905,10 @@ def build_cluster_label_map(records, transcript_structures, target_gene, cluster
                             cluster_features, cluster_strategy,
                             cluster_similarity_threshold, min_split_fraction,
                             max_isoforms, min_count, cluster_isoforms,
-                            inspect_isoforms=None):
+                            inspect_isoforms=None, exon_lookup=None):
     if cluster_strategy is None:
         cluster_strategy = 'substring' if cluster_isoforms else 'jaccard'
-    if cluster_strategy in ('subsequence', 'overlap'):
+    if cluster_strategy == 'overlap':
         cluster_strategy = 'substring'
     if cluster_similarity_threshold is None:
         cluster_similarity_threshold = 0.85 if cluster_isoforms else 0.4
@@ -2269,7 +2949,8 @@ def build_cluster_label_map(records, transcript_structures, target_gene, cluster
         cluster_similarity_threshold,
         min_split_fraction,
         include_introns=cluster_isoforms,
-        report=False
+        report=False,
+        exon_lookup=exon_lookup
     )
     if cluster_isoforms:
         for group in grouped_structures:
@@ -2326,9 +3007,13 @@ def report_isoform_structures(records, transcript_structures, target_gene, isofo
         tokens = transcript_structures[resolved]
         trimmed = strip_terminal_coords(list(tokens), target_gene)
         if include_introns:
-            cluster_seq = filter_exon_intron_tokens(list(trimmed), target_gene)
+            cluster_seq = filter_exon_intron_tokens(
+                list(trimmed), target_gene, normalize_mode=cluster_mode
+            )
         else:
-            cluster_seq = filter_exon_tokens(list(trimmed), target_gene)
+            cluster_seq = filter_exon_tokens(
+                list(trimmed), target_gene, normalize_mode=cluster_mode
+            )
         resolved_ids.append(resolved)
         cluster_seqs.append(cluster_seq)
         rec = record_lookup.get(raw_id) or record_lookup.get(resolved)
@@ -2363,16 +3048,43 @@ def report_isoform_structures(records, transcript_structures, target_gene, isofo
 
 def group_structures(plotted, target_gene, cluster_features, cluster_strategy,
                      cluster_similarity_threshold, min_split_fraction,
-                     include_introns=False, report=False):
+                     include_introns=False, report=False, cluster_mode=None,
+                     exon_lookup=None, splice_fuzz_tolerance=12):
     structure_groups = OrderedDict()
+    debug_level = _cluster_debug_level()
+    global _SPLICE_FUZZ_DEFAULT_GENE
+    _SPLICE_FUZZ_DEFAULT_GENE = target_gene
+    if exon_lookup and splice_fuzz_tolerance:
+        _ensure_splice_fuzz_cache(exon_lookup, tolerance=splice_fuzz_tolerance)
+    if debug_level:
+        _cluster_debug_header()
+        print(
+            "[cluster][debug] group_structures",
+            f"strategy={cluster_strategy} threshold={cluster_similarity_threshold:.4f}",
+            f"mode={cluster_mode or 'default'} features={cluster_features} include_introns={str(include_introns).lower()}",
+            f"items={len(plotted)}"
+        )
     for iso in plotted:
         key = tuple(iso['tokens'])
         trimmed_key = tuple(strip_terminal_coords(list(key), target_gene))
         if include_introns:
-            cluster_tokens = filter_exon_intron_tokens(list(trimmed_key), target_gene)
+            cluster_tokens = filter_exon_intron_tokens(
+                list(trimmed_key), target_gene, normalize_mode=cluster_mode
+            )
         else:
-            cluster_tokens = filter_exon_tokens(list(trimmed_key), target_gene)
+            cluster_tokens = filter_exon_tokens(
+                list(trimmed_key), target_gene, normalize_mode=cluster_mode
+            )
+        if exon_lookup and splice_fuzz_tolerance and cluster_strategy == 'subsequence':
+            cluster_tokens = _apply_splice_fuzz_tokens(cluster_tokens, target_gene)
+        exon_tokens = filter_exon_tokens(
+            list(trimmed_key), target_gene, normalize_mode=cluster_mode
+        )
+        exon_tokens_full = filter_exon_tokens(
+            list(trimmed_key), target_gene, normalize_mode='full'
+        )
         cluster_set = set(cluster_tokens)
+        exon_set = set(exon_tokens)
         if key not in structure_groups:
             structure_groups[key] = {
                 'structure_key': key,
@@ -2381,7 +3093,12 @@ def group_structures(plotted, target_gene, cluster_features, cluster_strategy,
                 'weight': 0,
                 'feature_set': build_feature_set(list(trimmed_key), cluster_features),
                 'cluster_set': cluster_set,
-                'cluster_seq': cluster_tokens
+                'cluster_seq': cluster_tokens,
+                'cluster_set_exon': exon_set,
+                'cluster_seq_exon': exon_tokens,
+                'cluster_seq_exon_full': exon_tokens_full,
+                'junction_seq': build_junction_sequence(cluster_tokens),
+                'junction_seq_exon': build_junction_sequence(exon_tokens)
             }
         structure_groups[key]['items'].append(iso)
         structure_groups[key]['weight'] += iso['count']
@@ -2392,7 +3109,17 @@ def group_structures(plotted, target_gene, cluster_features, cluster_strategy,
             structure_items,
             threshold=cluster_similarity_threshold
         )
-    elif cluster_strategy in ('substring', 'subsequence', 'overlap'):
+    elif cluster_strategy == 'subsequence':
+        grouped_structures = cluster_by_subsequence(
+            structure_items,
+            threshold=cluster_similarity_threshold
+        )
+    elif cluster_strategy == 'anchor-weighted':
+        grouped_structures = cluster_by_anchor_weighted(
+            structure_items,
+            threshold=cluster_similarity_threshold
+        )
+    elif cluster_strategy in ('substring', 'overlap'):
         grouped_structures = cluster_by_substring(
             structure_items,
             threshold=cluster_similarity_threshold
@@ -2406,6 +3133,13 @@ def group_structures(plotted, target_gene, cluster_features, cluster_strategy,
         grouped_structures = [[item] for item in structure_items]
     else:
         grouped_structures = [[item] for item in sorted(structure_items, key=lambda x: x['weight'], reverse=True)]
+
+    if include_introns:
+        if cluster_strategy not in ('subsequence',):
+            grouped_structures = _merge_groups_by_exon_signature(grouped_structures)
+            if cluster_strategy != 'anchor-weighted':
+                grouped_structures = _reassign_shorter_substrings(grouped_structures)
+    _SPLICE_FUZZ_DEFAULT_GENE = None
 
     if report:
         total_structures = len(structure_items)
@@ -2573,7 +3307,7 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
     """
     if cluster_strategy is None:
         cluster_strategy = 'substring' if cluster_isoforms else 'jaccard'
-    if cluster_strategy in ('subsequence', 'overlap'):
+    if cluster_strategy == 'overlap':
         cluster_strategy = 'substring'
     if cluster_similarity_threshold is None:
         cluster_similarity_threshold = 0.85 if cluster_isoforms else 0.4
@@ -2631,7 +3365,9 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
             cluster_similarity_threshold,
             min_split_fraction,
             include_introns=cluster_isoforms,
-            report=cluster_isoforms
+            report=cluster_isoforms,
+            cluster_mode=cluster_mode,
+            exon_lookup=exon_lookup
         )
     else:
         missing_structures = 0
@@ -2703,8 +3439,8 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
                     raw_b = iso_b['tokens']
                     trim_a = strip_terminal_coords(raw_a, target_gene)
                     trim_b = strip_terminal_coords(raw_b, target_gene)
-                    cluster_a = filter_exon_tokens(trim_a, target_gene)
-                    cluster_b = filter_exon_tokens(trim_b, target_gene)
+                    cluster_a = filter_exon_tokens(trim_a, target_gene, normalize_mode=cluster_mode)
+                    cluster_b = filter_exon_tokens(trim_b, target_gene, normalize_mode=cluster_mode)
                     norm_a = iso_a['tokens_norm']
                     norm_b = iso_b['tokens_norm']
                     exon_a = exon_only(trim_a)
@@ -3277,9 +4013,9 @@ def main():
     parser.add_argument('--cluster-mode', choices=['full', 'base', 'block'],
                         default=CLI_CLUSTER_DEFAULTS["cluster_mode"],
                         help='How to group isoform structures for clustering')
-    parser.add_argument('--cluster-strategy', choices=['substring', 'subsequence', 'overlap', 'jaccard', 'feature', 'structure', 'count'],
+    parser.add_argument('--cluster-strategy', choices=['substring', 'subsequence', 'anchor-weighted', 'overlap', 'jaccard', 'feature', 'structure', 'count'],
                         default=CLI_CLUSTER_DEFAULTS["cluster_strategy"],
-                        help='How to order isoforms (substring/jaccard similarity, feature splits, structure grouping, or count)')
+                        help='How to order isoforms (substring/subsequence/anchor-weighted/jaccard similarity, feature splits, structure grouping, or count)')
     parser.add_argument('--cluster-similarity-threshold', '--cluster-overlap-threshold',
                         dest='cluster_similarity_threshold', type=float,
                         default=CLI_CLUSTER_DEFAULTS["cluster_similarity_threshold"],
@@ -3532,7 +4268,8 @@ def main():
                         args.max_isoforms,
                         args.min_count,
                         args.cluster_isoforms,
-                        inspect_isoforms=args.inspect_isoforms
+                        inspect_isoforms=args.inspect_isoforms,
+                        exon_lookup=exon_lookup
                     )
                     print(f"[timing] cluster_label_map: {time.time() - t_cluster_map:.2f}s")
                     output_path = _resolve_output_path(path, gene)
@@ -3689,7 +4426,8 @@ def main():
                         plotted, gene, args.cluster_features,
                         args.cluster_strategy, args.cluster_similarity_threshold,
                         args.min_split_fraction, include_introns=args.cluster_isoforms,
-                        report=args.cluster_isoforms
+                        report=args.cluster_isoforms, cluster_mode=args.cluster_mode,
+                        exon_lookup=exon_lookup
                     )
                     if args.cluster_isoforms:
                         isoform_colors = assign_cluster_colors(grouped_structures, plt.get_cmap(DEFAULT_COLORMAP).colors)
