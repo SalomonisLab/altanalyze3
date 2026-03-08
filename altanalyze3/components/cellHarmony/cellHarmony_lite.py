@@ -128,10 +128,15 @@ def combine_and_align_h5(
         timing = f" time={elapsed:.2f}s" if elapsed is not None else ""
         print(f"[mem][timing] {message}{timing} rss={_rss_mb():.1f}MB")
 
-    def _filter_cells_min_genes(adata, min_genes):
+    def _qc_matrix(adata):
+        if "counts" in adata.layers:
+            return adata.layers["counts"], "layers['counts']"
+        return adata.X, "X"
+
+    def _filter_cells_min_genes(adata, min_genes, matrix):
         if min_genes is None:
             return
-        X = adata.X
+        X = matrix
         if sp.issparse(X):
             X = X.tocsr()
             n_genes = np.diff(X.indptr)
@@ -140,10 +145,10 @@ def combine_and_align_h5(
         keep = np.asarray(n_genes).ravel() >= min_genes
         adata._inplace_subset_obs(keep)
 
-    def _filter_genes_min_cells(adata, min_cells):
+    def _filter_genes_min_cells(adata, min_cells, matrix):
         if min_cells is None:
             return
-        X = adata.X
+        X = matrix
         if sp.issparse(X):
             X = X.tocsr()
             n_cells = np.bincount(X.indices, minlength=X.shape[1])
@@ -152,6 +157,40 @@ def combine_and_align_h5(
         keep = np.asarray(n_cells).ravel() >= min_cells
         adata._inplace_subset_var(keep)
 
+    def _filter_cells_min_counts(adata, min_counts, matrix):
+        if min_counts is None:
+            return
+        X = matrix
+        if sp.issparse(X):
+            X = X.tocsr()
+            counts = np.asarray(X.sum(axis=1)).ravel()
+        else:
+            counts = np.sum(X, axis=1)
+        keep = np.asarray(counts).ravel() >= min_counts
+        adata._inplace_subset_obs(keep)
+
+    def _apply_qc_filters(adata):
+        matrix, source = _qc_matrix(adata)
+        if source != "X":
+            print(f"[qc] Using {source} for QC filters")
+        _filter_cells_min_genes(adata, min_genes, matrix)
+        print(f"Cells remaining after min_genes {min_genes} filtering: {adata.n_obs}")
+        matrix, _ = _qc_matrix(adata)
+        _filter_genes_min_cells(adata, min_cells, matrix)
+        matrix, _ = _qc_matrix(adata)
+        _filter_cells_min_counts(adata, min_counts, matrix)
+        print(f"Cells remaining after min_counts {min_counts} filtering: {adata.n_obs}")
+        if mit_percent is None:
+            return adata
+        matrix, _ = _qc_matrix(adata)
+        mito_genes = adata.var_names.str.upper().str.startswith("MT-")
+        mito_counts = np.asarray(matrix[:, mito_genes].sum(axis=1)).ravel()
+        total_counts = np.asarray(matrix.sum(axis=1)).ravel()
+        total_counts = np.maximum(total_counts, 1e-12)
+        adata.obs["pct_counts_mt"] = (mito_counts / total_counts) * 100
+        adata = adata[adata.obs["pct_counts_mt"] < mit_percent].copy()
+        print(f"Cells remaining after mito-percent filtering: {adata.n_obs}")
+        return adata
     reference_df = pd.read_csv(cellharmony_ref, sep='\t', index_col=0)
     cell_populations = reference_df.columns.tolist()
     ref_name = os.path.basename(cellharmony_ref)[:-4]
@@ -167,6 +206,8 @@ def combine_and_align_h5(
         apply_gene_translation(adata_combined, translation_map, os.path.basename(h5ad_file))
         adata_combined.var_names_make_unique()
         print(f"reimported adata shape: {adata_combined.shape} (cells x genes)")
+        print("...performing QC")
+        adata_combined = _apply_qc_filters(adata_combined)
     else:
         if concat_batch_size and not concat_on_disk:
             print("[warn] --concat_batch_size ignored unless --concat_on_disk is set.")
@@ -421,22 +462,7 @@ def combine_and_align_h5(
             adata_combined.var_names_make_unique()
             print(f"[INFO] SoupX correction complete. Corrected adata shape: {adata_combined.shape} (cells x genes)")
 
-        if sp.issparse(adata_combined.X):
-            adata_combined.X = adata_combined.X.tocsr()
-        _filter_cells_min_genes(adata_combined, min_genes)
-        print(f"Cells remaining after min_genes {min_genes} filtering: {adata_combined.n_obs}")
-        _filter_genes_min_cells(adata_combined, min_cells)
-        sc.pp.filter_cells(adata_combined, min_counts=min_counts)
-        print(f"Cells remaining after min_counts {min_counts} filtering: {adata_combined.n_obs}")
-
-        mito_genes = adata_combined.var_names.str.upper().str.startswith("MT-")
-        adata_combined.obs["pct_counts_mt"] = (
-            np.sum(adata_combined[:, mito_genes].X, axis=1).A1 /
-            np.sum(adata_combined.X, axis=1).A1
-        ) * 100
-
-        adata_combined = adata_combined[adata_combined.obs["pct_counts_mt"] < mit_percent].copy()
-        print(f"Cells remaining after mito-percent filtering: {adata_combined.n_obs}")
+        adata_combined = _apply_qc_filters(adata_combined)
 
     original_cell_adata = None
     metacell_membership = None

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import ast
 import csv
 import hashlib
 import json
@@ -1404,7 +1405,8 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                                           rebuild_index=False,
                                           debug_transcripts=None,
                                           inspect_isoforms=None,
-                                          process_genes_separately=None):
+                                          process_genes_separately=None,
+                                          isoform_filter=None):
     start_time = time.time()
     global _AUTO_DEBUG_PRINTED
     if not _AUTO_DEBUG_PRINTED:
@@ -1470,7 +1472,8 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                 gene_symbol_dict=gene_symbol_dict,
                 rebuild_index=False,
                 debug_transcripts=debug_transcripts,
-                process_genes_separately=False
+                process_genes_separately=False,
+                isoform_filter=isoform_filter
             )
         return
     if isinstance(genes, str):
@@ -1759,6 +1762,7 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
     cell_state_label = 'all'
     if cell_states:
         cell_state_label = '+'.join(cell_states)
+    filter_clauses = _normalize_isoform_filter_spec(isoform_filter)
 
     for gene in genes:
         transcript_structures = transcript_union.get(gene)
@@ -1776,6 +1780,11 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
             {'isoform_id': iso_id, 'count': count, 'gene_id': gene}
             for iso_id, count in combined_counts.items()
         ]
+        if filter_clauses:
+            combined_records = _filter_isoform_records_by_tokens(
+                combined_records, transcript_structures, filter_clauses
+            )
+            combined_counts = {rec['isoform_id']: rec['count'] for rec in combined_records}
         if not combined_records:
             print(f"[auto] No isoform counts for {gene}, skipping.")
             continue
@@ -1796,7 +1805,8 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
         build_max_isoforms = max(max_isoforms, len(combined_records))
         plotted, _, _ = build_plotted_isoforms(
             combined_records, transcript_structures, gene,
-            cluster_mode, cluster_features, min_count, build_max_isoforms
+            cluster_mode, cluster_features, min_count, build_max_isoforms,
+            isoform_filter=isoform_filter
         )
         if plotted:
             grouped_structures = group_structures(
@@ -1824,6 +1834,10 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
 
         for condition in conditions:
             counts_map = condition_counts[condition][gene]
+            if filter_clauses:
+                counts_map = _filter_counts_by_tokens(
+                    counts_map, transcript_structures, filter_clauses
+                )
             if not counts_map:
                 print(f"[auto] No counts for {gene} in {condition}, skipping.")
                 continue
@@ -1872,7 +1886,8 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                         cluster_mode,
                         cluster_features,
                         min_count,
-                        max_isoforms
+                        max_isoforms,
+                        isoform_filter=isoform_filter
                     )
                     if local_plotted:
                         local_grouped_structures = group_structures(
@@ -1896,7 +1911,10 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
             gene_label = _resolve_gene_output_label(gene, gene_symbol_dict)
             gene_dir = output_dir / gene_label
             gene_dir.mkdir(parents=True, exist_ok=True)
-            out_path = gene_dir / f"{condition}__{cell_state_label}__{gene_label}.pdf"
+            file_label = f"{condition}__{cell_state_label}__{gene_label}"
+            if filter_clauses:
+                file_label = f"{file_label}_custom"
+            out_path = gene_dir / f"{file_label}.pdf"
             print(f"[auto] Plotting {gene} for {condition} -> {out_path}")
             try:
                 plotted, plot_cluster_label_map, plot_cluster_index_map = plot_isoform_structures(
@@ -1925,6 +1943,7 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                     cluster_isoforms=cluster_isoforms,
                     debug_transcripts=debug_transcripts,
                     debug_isoforms=inspect_isoforms,
+                    isoform_filter=isoform_filter,
                     return_cluster_labels=True
                 )
             except ValueError as exc:
@@ -1949,6 +1968,143 @@ def filter_records_by_structures(records, transcript_structures):
         if resolve_isoform_id(rec['isoform_id'], transcript_structures):
             filtered.append(rec)
     return filtered
+
+
+def _parse_isoform_filter_pattern(pattern):
+    if pattern is None:
+        return []
+    if isinstance(pattern, (list, tuple)):
+        tokens = []
+        for token in pattern:
+            token_str = str(token).strip()
+            if token_str:
+                tokens.append(token_str)
+        return tokens
+    raw = str(pattern).strip()
+    if not raw:
+        return []
+    if "->" in raw and "|" not in raw:
+        return [part.strip() for part in raw.split("->") if part.strip()]
+    return [part.strip() for part in raw.split("|") if part.strip()]
+
+
+def _normalize_isoform_filter_spec(filter_spec):
+    if not filter_spec:
+        return []
+    if isinstance(filter_spec, list) and filter_spec and all(
+        isinstance(clause, list) and clause and all(isinstance(pattern, list) for pattern in clause)
+        for clause in filter_spec
+    ):
+        normalized = []
+        for clause in filter_spec:
+            clause_norm = []
+            for pattern in clause:
+                tokens = [str(tok).strip() for tok in pattern if str(tok).strip()]
+                if tokens:
+                    clause_norm.append(tokens)
+            if clause_norm:
+                normalized.append(clause_norm)
+        return normalized
+    if isinstance(filter_spec, str):
+        pattern = _parse_isoform_filter_pattern(filter_spec)
+        return [[pattern]] if pattern else []
+    if isinstance(filter_spec, tuple):
+        patterns = []
+        for item in filter_spec:
+            tokens = _parse_isoform_filter_pattern(item)
+            if tokens:
+                patterns.append(tokens)
+        return [patterns] if patterns else []
+    if isinstance(filter_spec, list):
+        clauses = []
+        for entry in filter_spec:
+            if isinstance(entry, (list, tuple)):
+                patterns = []
+                for item in entry:
+                    tokens = _parse_isoform_filter_pattern(item)
+                    if tokens:
+                        patterns.append(tokens)
+                if patterns:
+                    clauses.append(patterns)
+            else:
+                pattern = _parse_isoform_filter_pattern(entry)
+                if pattern:
+                    clauses.append([pattern])
+        return clauses
+    pattern = _parse_isoform_filter_pattern(filter_spec)
+    return [[pattern]] if pattern else []
+
+
+def _contains_token_sequence(tokens, pattern):
+    if not pattern:
+        return True
+    if len(pattern) == 1:
+        return pattern[0] in tokens
+    if len(pattern) > len(tokens):
+        return False
+    for start in range(len(tokens) - len(pattern) + 1):
+        if tokens[start:start + len(pattern)] == pattern:
+            return True
+    return False
+
+
+def _isoform_matches_filters(tokens, filter_clauses):
+    if not filter_clauses:
+        return True
+    for clause in filter_clauses:
+        if all(_contains_token_sequence(tokens, pattern) for pattern in clause):
+            return True
+    return False
+
+
+def _filter_isoform_records_by_tokens(records, transcript_structures, filter_clauses):
+    if not filter_clauses:
+        return records
+    filtered = []
+    for rec in records:
+        iso_id = rec.get('isoform_id') or rec.get('resolved_id') or rec.get('var')
+        if not iso_id:
+            continue
+        resolved = resolve_isoform_id(str(iso_id), transcript_structures)
+        if not resolved:
+            continue
+        tokens = transcript_structures.get(resolved) or []
+        if _isoform_matches_filters(tokens, filter_clauses):
+            filtered.append(rec)
+    return filtered
+
+
+def _filter_counts_by_tokens(counts_map, transcript_structures, filter_clauses):
+    if not filter_clauses:
+        return counts_map
+    filtered = defaultdict(float)
+    for iso_id, count in counts_map.items():
+        resolved = resolve_isoform_id(str(iso_id), transcript_structures)
+        if not resolved:
+            continue
+        tokens = transcript_structures.get(resolved) or []
+        if _isoform_matches_filters(tokens, filter_clauses):
+            filtered[iso_id] += count
+    return filtered
+
+
+def _parse_isoform_filter_arg(raw_values):
+    if not raw_values:
+        return None
+    if len(raw_values) == 1:
+        token = raw_values[0]
+        if token is None:
+            return None
+        stripped = str(token).strip()
+        if not stripped:
+            return None
+        if stripped.startswith(('[', '(')):
+            try:
+                return ast.literal_eval(stripped)
+            except (ValueError, SyntaxError):
+                return token
+        return token
+    return list(raw_values)
 
 
 def coerce_read_count(value):
@@ -2870,7 +3026,9 @@ def _reassign_shorter_substrings(groups):
 
 
 def build_plotted_isoforms(isoforms, transcript_structures, target_gene, cluster_mode,
-                           cluster_features, min_count, max_isoforms):
+                           cluster_features, min_count, max_isoforms,
+                           isoform_filter=None):
+    filter_clauses = _normalize_isoform_filter_spec(isoform_filter)
     filtered = [i for i in isoforms if i['count'] >= min_count]
     missing_ids = []
     resolved_items = []
@@ -2878,6 +3036,9 @@ def build_plotted_isoforms(isoforms, transcript_structures, target_gene, cluster
         resolved = resolve_isoform_id(iso['isoform_id'], transcript_structures)
         if not resolved:
             missing_ids.append(iso['isoform_id'])
+            continue
+        tokens = transcript_structures[resolved]
+        if filter_clauses and not _isoform_matches_filters(tokens, filter_clauses):
             continue
         resolved_items.append((iso, resolved))
 
@@ -2999,7 +3160,8 @@ def build_cluster_label_map(records, transcript_structures, target_gene, cluster
                             cluster_features, cluster_strategy,
                             cluster_similarity_threshold, min_split_fraction,
                             max_isoforms, min_count, cluster_isoforms,
-                            inspect_isoforms=None, exon_lookup=None):
+                            inspect_isoforms=None, exon_lookup=None,
+                            isoform_filter=None):
     if cluster_strategy is None:
         cluster_strategy = 'substring' if cluster_isoforms else 'jaccard'
     if cluster_strategy == 'overlap':
@@ -3013,7 +3175,8 @@ def build_cluster_label_map(records, transcript_structures, target_gene, cluster
         cluster_mode,
         cluster_features,
         min_count,
-        max_isoforms
+        max_isoforms,
+        isoform_filter=isoform_filter
     )
     plotted_ids = set()
     for iso in plotted:
@@ -3033,7 +3196,8 @@ def build_cluster_label_map(records, transcript_structures, target_gene, cluster
             cluster_mode,
             cluster_features,
             min_count,
-            max_isoforms
+            max_isoforms,
+            isoform_filter=isoform_filter
         )
     grouped_structures = group_structures(
         plotted,
@@ -3363,6 +3527,7 @@ def group_max_length(group):
 # - isoform_colors: precomputed isoform-to-color mapping.
 # - isoform_counts: per-file isoform counts for consistent ordering.
 # - cluster_isoforms: color isoforms by cluster and label with a representative isoform ID.
+# - isoform_filter: optional exon/junction patterns to restrict isoforms.
 # - debug_transcripts: transcript IDs to print segment details for.
 def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_maps,
                             cluster_mode, target_gene, intron_scale, output_path,
@@ -3378,6 +3543,7 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
                             isoform_counts=None,
                             transcript_associations_path=None,
                             cluster_isoforms=False,
+                            isoform_filter=None,
                             return_cluster_labels=False):
     """Render stacked isoform read tracks for a single gene.
 
@@ -3422,7 +3588,8 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
             cluster_mode,
             cluster_features,
             min_count,
-            max_isoforms
+            max_isoforms,
+            isoform_filter=isoform_filter
         )
         print(f"[timing] build_plotted_isoforms: {time.time() - t_build:.2f}s")
         if not plotted:
@@ -4135,6 +4302,8 @@ def main():
                         help='Assert auto and CLI default clustering settings match')
     parser.add_argument('--inspect-isoforms', nargs='*', default=None,
                         help='Isoform IDs to print structure details for')
+    parser.add_argument('--isoform-filter', nargs='*', default=None,
+                        help='Restrict isoforms to reads containing required exon/junction patterns')
     parser.add_argument('--intron-scale', type=float, default=0.2,
                         help='Scale factor for intron lengths (0-1)')
     parser.add_argument('--row-height', type=float, default=0.0125,
@@ -4153,6 +4322,8 @@ def main():
                         help='Isoform IDs to print clustering diagnostics for')
     parser.set_defaults(cluster_isoforms=CLI_CLUSTER_DEFAULTS["cluster_isoforms"])
     args = parser.parse_args()
+    isoform_filter = _parse_isoform_filter_arg(args.isoform_filter)
+    isoform_filter_clauses = _normalize_isoform_filter_spec(isoform_filter)
     log_path, log_handle, stdout_tee, stderr_tee = _init_logging(args.out)
     original_stdout = sys.stdout
     original_stderr = sys.stderr
@@ -4278,21 +4449,35 @@ def main():
             return os.path.splitext(os.path.basename(input_path))[0]
 
         def _resolve_output_path(input_path, gene):
+            def _append_custom_suffix(path, enabled):
+                if not enabled:
+                    return path
+                base, ext = os.path.splitext(path)
+                if ext:
+                    return f"{base}_custom{ext}"
+                return f"{path}_custom"
+
             if len(genes) > 1:
                 out_dir = args.out
                 if args.out.endswith('.pdf'):
                     out_dir = os.path.dirname(args.out) or "."
                 os.makedirs(out_dir, exist_ok=True)
                 basename = _infer_basename(input_path)
-                return os.path.join(out_dir, f"{basename}_{gene}_isoform_structures.pdf")
+                return _append_custom_suffix(
+                    os.path.join(out_dir, f"{basename}_{gene}_isoform_structures.pdf"),
+                    bool(isoform_filter_clauses),
+                )
             if os.path.isdir(input_path) or input_path.endswith('.mtx') or input_path.endswith('.mtx.gz'):
                 out_dir = args.out
                 if args.out.endswith('.pdf'):
                     out_dir = os.path.dirname(args.out) or "."
                 os.makedirs(out_dir, exist_ok=True)
                 basename = _infer_basename(input_path)
-                return os.path.join(out_dir, f"{basename}_isoform_structures.pdf")
-            return args.out
+                return _append_custom_suffix(
+                    os.path.join(out_dir, f"{basename}_isoform_structures.pdf"),
+                    bool(isoform_filter_clauses),
+                )
+            return _append_custom_suffix(args.out, bool(isoform_filter_clauses))
 
         input_paths = args.h5ad
         use_counts_cache = True
@@ -4370,7 +4555,8 @@ def main():
                         args.min_count,
                         args.cluster_isoforms,
                         inspect_isoforms=args.inspect_isoforms,
-                        exon_lookup=exon_lookup
+                        exon_lookup=exon_lookup,
+                        isoform_filter=isoform_filter
                     )
                     print(f"[timing] cluster_label_map: {time.time() - t_cluster_map:.2f}s")
                     output_path = _resolve_output_path(path, gene)
@@ -4399,6 +4585,7 @@ def main():
                         debug_transcripts=args.debug_transcripts,
                         transcript_associations_path=transcript_paths[0],
                         cluster_isoforms=args.cluster_isoforms,
+                        isoform_filter=isoform_filter,
                         return_cluster_labels=True
                     )
                     isoform_counts = {
@@ -4520,7 +4707,8 @@ def main():
                 plotted, _, _ = build_plotted_isoforms(
                     combined_records, transcript_structures, gene,
                     args.cluster_mode, args.cluster_features,
-                    args.min_count, args.max_isoforms
+                    args.min_count, args.max_isoforms,
+                    isoform_filter=isoform_filter
                 )
                 if plotted:
                     grouped_structures = group_structures(
@@ -4566,6 +4754,7 @@ def main():
                         isoform_counts=per_file_counts.get(path, {}),
                         transcript_associations_path=assoc_path,
                         cluster_isoforms=args.cluster_isoforms,
+                        isoform_filter=isoform_filter,
                         return_cluster_labels=True
                     )
                     isoform_path, _ = export_plotted_isoforms(
