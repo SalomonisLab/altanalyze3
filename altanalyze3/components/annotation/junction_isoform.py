@@ -100,15 +100,217 @@ def load_protein_summary(file_path):
 def get_longest_isoform(gene,isoforms,protein_dict):
     longest_isoform = 'N/A'
     longest_exons = 'N/A'
-    max_length = -1
+    best_rank = None
     for (isoform,exons) in isoforms:
-        length, _, _ = protein_dict.get((gene,isoform), (0, None, None))
-        #print(isoform,[length]);sys.exit()
-        if length > max_length:
-            max_length = length
-            longest_isoform = f"{isoform}|{length}"
+        length, nmd_status, _ = protein_dict.get((gene,isoform), (0, None, None))
+        # Prefer non-NMD transcripts when available, then maximize protein length.
+        is_nmd = _is_potential_nmd_status(nmd_status)
+        rank = (is_nmd, -int(length), str(isoform))
+        if best_rank is None or rank < best_rank:
+            best_rank = rank
+            nmd_suffix = "(NMD)" if is_nmd else ""
+            longest_isoform = f"{isoform}|{length}{nmd_suffix}"
             longest_exons = exons
     return (longest_isoform,longest_exons)
+
+
+def _is_ensembl_isoform(isoform_id):
+    return str(isoform_id).startswith("ENST")
+
+
+def _get_protein_length(gene, isoform_id, protein_dict):
+    length, _, _ = protein_dict.get((gene, isoform_id), (0, None, None))
+    try:
+        return int(length)
+    except Exception:
+        return 0
+
+
+def _is_potential_nmd_status(nmd_status):
+    status = str(nmd_status or "").strip().lower()
+    if not status:
+        return False
+    # Treat explicit non-NMD labels as non-NMD.
+    if "not" in status and "nmd" in status:
+        return False
+    return "nmd" in status
+
+
+def _is_potential_nmd(gene, isoform_id, protein_dict):
+    _, nmd_status, _ = protein_dict.get((gene, isoform_id), (0, None, None))
+    return _is_potential_nmd_status(nmd_status)
+
+
+def _prefer_non_nmd(gene, candidates, protein_dict):
+    if not candidates:
+        return []
+    non_nmd = [(iso, exons) for iso, exons in candidates if not _is_potential_nmd(gene, iso, protein_dict)]
+    return non_nmd if non_nmd else candidates
+
+
+def _format_isoform_with_length(gene, isoform_id, exons, protein_dict):
+    length = _get_protein_length(gene, isoform_id, protein_dict)
+    nmd_suffix = "(NMD)" if _is_potential_nmd(gene, isoform_id, protein_dict) else ""
+    return f"{isoform_id}|{length}{nmd_suffix}", exons
+
+
+def _candidate_pool_prioritized(isoforms):
+    """Always prioritize Ensembl isoforms when present for a junction."""
+    if not isoforms:
+        return []
+    ensembl = [(iso, exons) for iso, exons in isoforms if _is_ensembl_isoform(iso)]
+    return ensembl if ensembl else isoforms
+
+
+def _exon_jaccard_distance(exons_a, exons_b):
+    set_a = set(exons_a or [])
+    set_b = set(exons_b or [])
+    if not set_a and not set_b:
+        return 0.0
+    union = set_a | set_b
+    if not union:
+        return 0.0
+    inter = set_a & set_b
+    return 1.0 - (len(inter) / float(len(union)))
+
+
+def _top_k_by_protein_length(gene, isoforms, protein_dict, top_k=12):
+    if not isoforms:
+        return []
+    return sorted(
+        isoforms,
+        key=lambda pair: (
+            _is_potential_nmd(gene, pair[0], protein_dict),
+            -_get_protein_length(gene, pair[0], protein_dict),
+            str(pair[0]),
+        ),
+    )[:top_k]
+
+
+def _pick_best_single(gene, candidates, protein_dict, anchor_exons=None):
+    if not candidates:
+        return "N/A", "N/A"
+    if len(candidates) == 1:
+        isoform_id, exons = candidates[0]
+        return _format_isoform_with_length(gene, isoform_id, exons, protein_dict)
+
+    candidates = _prefer_non_nmd(gene, candidates, protein_dict)
+
+    # Length-first selection by design. Only use exon composition as a tie-breaker.
+    lengths = {
+        isoform_id: _get_protein_length(gene, isoform_id, protein_dict)
+        for isoform_id, _ in candidates
+    }
+    max_len = max(lengths.values()) if lengths else 0
+    longest = [(iso, exons) for iso, exons in candidates if lengths.get(iso, 0) == max_len]
+
+    if anchor_exons is None:
+        best_iso, best_exons = sorted(longest, key=lambda x: str(x[0]))[0]
+        return _format_isoform_with_length(gene, best_iso, best_exons, protein_dict)
+
+    if len(longest) == 1:
+        best_iso, best_exons = longest[0]
+        return _format_isoform_with_length(gene, best_iso, best_exons, protein_dict)
+
+    best = None
+    best_rank = None
+    for isoform_id, exons in longest:
+        length = lengths.get(isoform_id, 0)
+        dist = _exon_jaccard_distance(exons, anchor_exons)
+        rank = (dist, -length, str(isoform_id))
+        if best_rank is None or rank < best_rank:
+            best_rank = rank
+            best = (isoform_id, exons)
+
+    if best is None:
+        return "N/A", "N/A"
+    return _format_isoform_with_length(gene, best[0], best[1], protein_dict)
+
+
+def get_prioritized_isoform_pair(gene, isoforms1, isoforms2, protein_dict, top_k=12):
+    """Select representative isoforms for competing junctions efficiently.
+
+    Priority:
+    1) Ensembl isoforms when present for each junction.
+    2) If only one Ensembl isoform exists for a junction, use it directly.
+    3) Otherwise, length is primary; exon composition distance is only a tie-breaker
+       among equally longest candidates.
+    """
+    pool1 = _candidate_pool_prioritized(isoforms1)
+    pool2 = _candidate_pool_prioritized(isoforms2)
+
+    if not pool1 and not pool2:
+        return "N/A", "N/A", "N/A", "N/A"
+    if not pool1:
+        iso2, ex2 = _pick_best_single(gene, _top_k_by_protein_length(gene, pool2, protein_dict, top_k), protein_dict)
+        return "N/A", "N/A", iso2, ex2
+    if not pool2:
+        iso1, ex1 = _pick_best_single(gene, _top_k_by_protein_length(gene, pool1, protein_dict, top_k), protein_dict)
+        return iso1, ex1, "N/A", "N/A"
+
+    # Fast path requested: if one Ensembl candidate exists for a junction, don't over-scan that side.
+    if len(pool1) == 1:
+        iso1, ex1 = _format_isoform_with_length(gene, pool1[0][0], pool1[0][1], protein_dict)
+        iso2, ex2 = _pick_best_single(
+            gene,
+            _top_k_by_protein_length(gene, pool2, protein_dict, top_k),
+            protein_dict,
+            anchor_exons=pool1[0][1],
+        )
+        return iso1, ex1, iso2, ex2
+    if len(pool2) == 1:
+        iso2, ex2 = _format_isoform_with_length(gene, pool2[0][0], pool2[0][1], protein_dict)
+        iso1, ex1 = _pick_best_single(
+            gene,
+            _top_k_by_protein_length(gene, pool1, protein_dict, top_k),
+            protein_dict,
+            anchor_exons=pool2[0][1],
+        )
+        return iso1, ex1, iso2, ex2
+
+    cand1 = _top_k_by_protein_length(gene, pool1, protein_dict, top_k=top_k)
+    cand2 = _top_k_by_protein_length(gene, pool2, protein_dict, top_k=top_k)
+
+    if not cand1 and not cand2:
+        return "N/A", "N/A", "N/A", "N/A"
+    if not cand1:
+        iso2, ex2 = _pick_best_single(gene, cand2, protein_dict)
+        return "N/A", "N/A", iso2, ex2
+    if not cand2:
+        iso1, ex1 = _pick_best_single(gene, cand1, protein_dict)
+        return iso1, ex1, "N/A", "N/A"
+
+    cand1 = _prefer_non_nmd(gene, cand1, protein_dict)
+    cand2 = _prefer_non_nmd(gene, cand2, protein_dict)
+
+    lengths1 = {iso: _get_protein_length(gene, iso, protein_dict) for iso, _ in cand1}
+    lengths2 = {iso: _get_protein_length(gene, iso, protein_dict) for iso, _ in cand2}
+    max_len1 = max(lengths1.values()) if lengths1 else 0
+    max_len2 = max(lengths2.values()) if lengths2 else 0
+    top1 = [(iso, exons) for iso, exons in cand1 if lengths1.get(iso, 0) == max_len1]
+    top2 = [(iso, exons) for iso, exons in cand2 if lengths2.get(iso, 0) == max_len2]
+
+    best_pair = None
+    best_rank = None
+    for iso1, ex1 in top1:
+        len1 = lengths1.get(iso1, 0)
+        for iso2, ex2 in top2:
+            len2 = lengths2.get(iso2, 0)
+            dist = _exon_jaccard_distance(ex1, ex2)
+            rank = (dist, -(len1 + len2), -len1, -len2, str(iso1), str(iso2))
+            if best_rank is None or rank < best_rank:
+                best_rank = rank
+                best_pair = ((iso1, ex1), (iso2, ex2))
+
+    if best_pair is None:
+        iso1, ex1 = _pick_best_single(gene, cand1, protein_dict)
+        iso2, ex2 = _pick_best_single(gene, cand2, protein_dict)
+        return iso1, ex1, iso2, ex2
+
+    (iso1_id, ex1), (iso2_id, ex2) = best_pair
+    iso1, exons1 = _format_isoform_with_length(gene, iso1_id, ex1, protein_dict)
+    iso2, exons2 = _format_isoform_with_length(gene, iso2_id, ex2, protein_dict)
+    return iso1, exons1, iso2, exons2
 
 # 6. Annotate a stats file
 def annotate_junction_stats_file(file_path, transcript_dict, gene_symbol_dict, coord_dict, protein_dict, output_folder):
@@ -141,7 +343,6 @@ def annotate_junction_stats_file(file_path, transcript_dict, gene_symbol_dict, c
                     isoforms1 = transcript_dict.get(gene_id, {}).get(junction1, [])
                     if len(isoforms1) == 0:
                         isoforms1 = transcript_dict.get(gene_id, {}).get(junction1.split(":", 1)[1], [])
-                    longest_isoform1,longest_exons1 = get_longest_isoform(gene_id, isoforms1, protein_dict)
                     gene_id = original_gene_id
                     junction1 = original_junction1
 
@@ -149,7 +350,7 @@ def annotate_junction_stats_file(file_path, transcript_dict, gene_symbol_dict, c
                     # In the future, we need to catch these and assign gene IDs as a prefix to the junction and re-assign the gene (may not be indicated in the feature)
                     pass
             else:
-                longest_isoform1,longest_exons1 = get_longest_isoform(gene_id, isoforms1, protein_dict)
+                pass
 
             if len(isoforms2)==0:
                 #gene_id = "ENSG00000002016" > target_gene_id = "ENSG00000250132"
@@ -162,14 +363,17 @@ def annotate_junction_stats_file(file_path, transcript_dict, gene_symbol_dict, c
                     isoforms2 = transcript_dict.get(gene_id, {}).get(junction2, [])
                     if len(isoforms2) == 0:
                         isoforms2 = transcript_dict.get(gene_id, {}).get(junction2.split(":", 1)[1], [])
-                    longest_isoform2,longest_exons2 = get_longest_isoform(gene_id, isoforms2, protein_dict)
                     gene_id = original_gene_id
                     junction2 = original_junction2
                 except:
                     # In the future, we need to catch these and assign gene IDs as a prefix to the junction and re-assign the gene (may not be indicated in the feature)
                     pass # Errors can occur in re-assigning junction2 or other configurations of trans-splicing events (rare)
             else:
-                longest_isoform2,longest_exons2 = get_longest_isoform(gene_id, isoforms2, protein_dict)
+                pass
+
+            longest_isoform1,longest_exons1,longest_isoform2,longest_exons2 = get_prioritized_isoform_pair(
+                gene_id, isoforms1, isoforms2, protein_dict, top_k=12
+            )
 
             # Extract coordinates
             coord1 = coord_dict.get(junction1, 'N/A')

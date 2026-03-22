@@ -175,7 +175,7 @@ def process_junctions_in_chunks(junction_path, query_gene, outdir, total_lines, 
     sample_columns = None
     lookup_table = {}  # Direct UID to UID mapping
 
-    with tqdm(total=total_lines, desc="Processing junctionsX") as pbar:
+    with tqdm(total=total_lines, desc="Processing junctions") as pbar:
         with open(junction_path, 'r') as f:
             header = next(f).strip().split('\t')
             sample_columns = header[1:]

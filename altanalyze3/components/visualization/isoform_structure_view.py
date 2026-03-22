@@ -2,6 +2,7 @@
 import argparse
 import ast
 import csv
+import glob
 import hashlib
 import json
 import os
@@ -47,6 +48,7 @@ CLI_CLUSTER_DEFAULTS = {
     "min_count": 1,
     "cluster_isoforms": True,
 }
+MAX_ISOFORMS_TIE_SEED = 0
 
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), '..'))
 from long_read import isoform_matrix as iso
@@ -148,6 +150,20 @@ def _resolve_gene_output_label(gene, gene_symbol_dict):
     if os.altsep:
         label = label.replace(os.altsep, "_")
     return label
+
+
+def _resolve_gene_output_folder_label(gene, gene_symbol_dict, supplementary_annotation=None):
+    label = _resolve_gene_output_label(gene, gene_symbol_dict)
+    if supplementary_annotation is None:
+        return label
+    suffix = str(supplementary_annotation).strip()
+    if not suffix:
+        return label
+    suffix = suffix.replace(os.sep, "_")
+    if os.altsep:
+        suffix = suffix.replace(os.altsep, "_")
+    folder_label = f"{label}_{suffix}"
+    return folder_label
 
 
 def _resolve_transcript_associations_path(path):
@@ -257,6 +273,257 @@ def _h5ad_counts_cache_path(h5ad_path, groupby, group_values, groupby_rev, group
     )
 
 
+def _counts_cache_meta_path(cache_path):
+    return cache_path + ".meta.json"
+
+
+def _normalize_group_values(group_values):
+    if not group_values:
+        return []
+    normalized = []
+    seen = set()
+    for value in group_values:
+        token = str(value)
+        if token in seen:
+            continue
+        seen.add(token)
+        normalized.append(token)
+    normalized.sort()
+    return normalized
+
+
+def _write_isoform_counts_cache_metadata(cache_path, h5ad_path, groupby, group_values,
+                                         groupby_rev, groupby_sample):
+    meta_path = _counts_cache_meta_path(cache_path)
+    payload = {
+        "h5ad_path": os.path.abspath(h5ad_path) if h5ad_path else "",
+        "groupby": groupby or "",
+        "group_values": _normalize_group_values(group_values),
+        "groupby_rev": bool(groupby_rev),
+        "groupby_sample": str(groupby_sample or ""),
+    }
+    try:
+        with open(meta_path, "w") as handle:
+            json.dump(payload, handle, sort_keys=True)
+    except OSError:
+        return
+
+
+def _read_isoform_counts_cache_metadata(cache_path):
+    meta_path = _counts_cache_meta_path(cache_path)
+    if not os.path.exists(meta_path):
+        return None
+    try:
+        with open(meta_path) as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError, TypeError):
+        return None
+    payload["group_values"] = _normalize_group_values(payload.get("group_values", []))
+    payload["groupby"] = payload.get("groupby", "")
+    payload["groupby_rev"] = bool(payload.get("groupby_rev", False))
+    payload["groupby_sample"] = str(payload.get("groupby_sample", ""))
+    payload["h5ad_path"] = payload.get("h5ad_path", "")
+    return payload
+
+
+def _save_isoform_counts_cache_arrays(cache_path, counts, var_names):
+    counts_arr = np.asarray(counts, dtype=np.float32)
+    names = np.asarray(var_names, dtype=str)
+    max_len = max((len(name) for name in names), default=1)
+    names_bytes = np.asarray(names, dtype=f"S{max_len}")
+    counts_path = cache_path + ".counts.npy"
+    var_path = cache_path + ".var_names.npy"
+    np.save(counts_path, counts_arr)
+    np.save(var_path, names_bytes)
+    _H5AD_COUNTS_CACHE[cache_path] = {
+        "counts": counts_arr,
+        "var_names": names_bytes,
+    }
+
+
+def _find_disjoint_cover(target_states, candidate_state_sets):
+    target = frozenset(target_states)
+    if not target:
+        return []
+    candidate_sets = []
+    for state_set in candidate_state_sets:
+        state_set = frozenset(state_set)
+        if not state_set:
+            continue
+        if state_set.issubset(target):
+            candidate_sets.append(state_set)
+    if not candidate_sets:
+        return None
+    by_state = defaultdict(list)
+    for state_set in candidate_sets:
+        for state in state_set:
+            by_state[state].append(state_set)
+    for state, options in by_state.items():
+        options.sort(key=lambda s: len(s), reverse=True)
+    memo = {}
+
+    def solve(remaining):
+        if not remaining:
+            return []
+        key = tuple(sorted(remaining))
+        if key in memo:
+            return memo[key]
+        state = min(remaining, key=lambda s: len(by_state.get(s, [])))
+        options = by_state.get(state, [])
+        best = None
+        for option in options:
+            if not option.issubset(remaining):
+                continue
+            sub = solve(remaining - option)
+            if sub is None:
+                continue
+            trial = [option] + sub
+            if best is None or len(trial) < len(best):
+                best = trial
+        memo[key] = best
+        return best
+
+    return solve(target)
+
+
+def _try_compose_isoform_counts_cache(h5ad_path, cache_path, groupby, group_values,
+                                      groupby_rev, groupby_sample, source_paths):
+    if groupby != "cell_states":
+        return None
+    requested_states = frozenset(
+        value for value in _normalize_group_values(group_values)
+        if value and value != "all"
+    )
+    if not requested_states:
+        return None
+    index_dir = os.path.join(os.path.dirname(h5ad_path), INDEX_DIR_NAME)
+    pattern = os.path.join(
+        index_dir,
+        os.path.basename(h5ad_path) + ".isoform_counts.*.meta.json"
+    )
+    meta_files = glob.glob(pattern)
+    if not meta_files:
+        return None
+
+    entries = []
+    for meta_path in meta_files:
+        candidate_cache_path = meta_path[:-10]  # strip ".meta.json"
+        counts_path = candidate_cache_path + ".counts.npy"
+        var_path = candidate_cache_path + ".var_names.npy"
+        if not (os.path.exists(counts_path) and os.path.exists(var_path)):
+            continue
+        if _is_index_stale(counts_path, source_paths):
+            continue
+        meta = _read_isoform_counts_cache_metadata(candidate_cache_path)
+        if not meta:
+            continue
+        if meta.get("groupby") != (groupby or ""):
+            continue
+        if bool(meta.get("groupby_rev")) != bool(groupby_rev):
+            continue
+        if str(meta.get("groupby_sample", "")) != str(groupby_sample or ""):
+            continue
+        states = frozenset(
+            value for value in meta.get("group_values", [])
+            if value and value != "all"
+        )
+        if not states:
+            continue
+        entries.append((states, candidate_cache_path))
+
+    if not entries:
+        return None
+
+    state_to_paths = {}
+    for states, path in entries:
+        state_to_paths.setdefault(states, path)
+
+    payload_cache = {}
+
+    def load_counts(path):
+        payload = payload_cache.get(path)
+        if payload is not None:
+            return payload
+        loaded = _load_isoform_counts_cache(path)
+        if loaded is None:
+            payload_cache[path] = None
+            return None
+        counts = np.asarray(loaded["counts"], dtype=np.float64)
+        var_names = np.asarray(loaded["var_names"])
+        payload_cache[path] = (counts, var_names)
+        return payload_cache[path]
+
+    def compose_sum(paths):
+        base = None
+        base_names = None
+        for path in paths:
+            loaded = load_counts(path)
+            if loaded is None:
+                return None
+            counts, names = loaded
+            if base is None:
+                base = counts.copy()
+                base_names = names
+            else:
+                if base.shape != counts.shape or not np.array_equal(base_names, names):
+                    return None
+                base += counts
+        return base, base_names
+
+    subset_sets = [states for states in state_to_paths.keys() if states.issubset(requested_states)]
+    cover = _find_disjoint_cover(requested_states, subset_sets)
+    if cover:
+        cover_paths = [state_to_paths[frozenset(states)] for states in cover]
+        composed = compose_sum(cover_paths)
+        if composed is not None:
+            counts, names = composed
+            _save_isoform_counts_cache_arrays(cache_path, counts, names)
+            _write_isoform_counts_cache_metadata(
+                cache_path, h5ad_path, groupby, group_values, groupby_rev, groupby_sample
+            )
+            print(
+                f"[index] Composed isoform counts cache from subsets: {cache_path} "
+                f"sources={len(cover_paths)}"
+            )
+            return _load_isoform_counts_cache(cache_path)
+
+    supersets = sorted(
+        [states for states in state_to_paths.keys() if requested_states.issubset(states) and states != requested_states],
+        key=lambda states: len(states)
+    )
+    for superset_states in supersets:
+        diff_states = superset_states - requested_states
+        diff_sets = [states for states in state_to_paths.keys() if states.issubset(diff_states)]
+        diff_cover = _find_disjoint_cover(diff_states, diff_sets)
+        if not diff_cover:
+            continue
+        superset_path = state_to_paths[frozenset(superset_states)]
+        superset_loaded = load_counts(superset_path)
+        if superset_loaded is None:
+            continue
+        superset_counts, superset_names = superset_loaded
+        diff_paths = [state_to_paths[frozenset(states)] for states in diff_cover]
+        diff_composed = compose_sum(diff_paths)
+        if diff_composed is None:
+            continue
+        diff_counts, diff_names = diff_composed
+        if superset_counts.shape != diff_counts.shape or not np.array_equal(superset_names, diff_names):
+            continue
+        counts = superset_counts - diff_counts
+        counts[counts < 0] = 0
+        _save_isoform_counts_cache_arrays(cache_path, counts, superset_names)
+        _write_isoform_counts_cache_metadata(
+            cache_path, h5ad_path, groupby, group_values, groupby_rev, groupby_sample
+        )
+        print(
+            f"[index] Composed isoform counts cache from superset-difference: {cache_path} "
+            f"superset_size={len(superset_states)} subtract_sources={len(diff_paths)}"
+        )
+        return _load_isoform_counts_cache(cache_path)
+
+    return None
+
+
 def _load_isoform_counts_cache(cache_path):
     cached = _H5AD_COUNTS_CACHE.get(cache_path)
     if cached is not None:
@@ -264,18 +531,31 @@ def _load_isoform_counts_cache(cache_path):
     counts_path = cache_path + ".counts.npy"
     var_path = cache_path + ".var_names.npy"
     if os.path.exists(counts_path) and os.path.exists(var_path):
-        payload = {
-            "counts": np.load(counts_path, mmap_mode='r'),
-            "var_names": np.load(var_path, mmap_mode='r'),
-        }
+        try:
+            payload = {
+                "counts": np.load(counts_path, mmap_mode='r'),
+                "var_names": np.load(var_path, mmap_mode='r'),
+            }
+        except (ValueError, OSError) as exc:
+            print(f"[warn] Failed to load isoform counts cache: {cache_path} ({exc})")
+            for path in (counts_path, var_path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            return None
         _H5AD_COUNTS_CACHE[cache_path] = payload
         return payload
     legacy_path = cache_path + ".npz"
     if os.path.exists(legacy_path):
         try:
             cache = np.load(legacy_path, allow_pickle=True)
-        except ValueError as exc:
+        except (ValueError, OSError) as exc:
             print(f"[warn] Failed to load isoform counts cache: {legacy_path} ({exc})")
+            try:
+                os.remove(legacy_path)
+            except OSError:
+                pass
             return None
         payload = {
             "counts": np.asarray(cache["counts"]),
@@ -286,25 +566,79 @@ def _load_isoform_counts_cache(cache_path):
     return None
 
 
-def _build_isoform_counts_cache(adata, mask, cache_path):
+def _close_adata_file(adata):
+    if adata is None:
+        return
+    try:
+        adata.file.close()
+    except AttributeError:
+        pass
+    except Exception:
+        pass
+
+
+def _is_backed_h5ad_io_error(exc):
+    if not isinstance(exc, (OSError, KeyError, RuntimeError)):
+        return False
+    message = str(exc)
+    markers = (
+        "Input/output error",
+        "file read failed",
+        "Unable to synchronously open object",
+        "Unable to synchronously get dataspace",
+        "Unable to read raw data chunk",
+        "errno = 5",
+    )
+    return any(marker in message for marker in markers)
+
+
+def _run_backed_h5ad_operation(adata, h5ad_path, operation, op_name, max_attempts=3):
+    current = adata
+    for attempt in range(1, max_attempts + 1):
+        try:
+            result = operation(current)
+            if current is not adata:
+                _close_adata_file(current)
+            return result
+        except Exception as exc:
+            if current is not adata:
+                _close_adata_file(current)
+            if not h5ad_path or not _is_backed_h5ad_io_error(exc) or attempt >= max_attempts:
+                raise
+            print(
+                f"[warn] {op_name} failed for {h5ad_path} "
+                f"(attempt {attempt}/{max_attempts}); retrying: {exc}"
+            )
+            time.sleep(min(float(attempt), 3.0))
+            current = ad.read_h5ad(h5ad_path, backed='r')
+
+
+def _build_isoform_counts_cache(adata, mask, cache_path, h5ad_path=None, groupby=None,
+                                group_values=None, groupby_rev=True, groupby_sample=None):
     t_counts = time.time()
-    if mask is not None:
-        sub = adata[mask, :]
-    else:
-        sub = adata[:, :]
-    counts = np.asarray(sub.X.sum(axis=0)).ravel().astype(np.float32)
-    var_names = np.asarray(sub.var_names)
-    var_names = np.asarray(var_names, dtype=str)
+
+    def _compute_counts(active_adata):
+        if mask is not None:
+            sub = active_adata[mask, :]
+        else:
+            sub = active_adata[:, :]
+        counts = np.asarray(sub.X.sum(axis=0)).ravel().astype(np.float32)
+        var_names = np.asarray(sub.var_names, dtype=str)
+        return counts, var_names
+
+    counts, var_names = _run_backed_h5ad_operation(
+        adata,
+        h5ad_path,
+        _compute_counts,
+        "isoform counts cache build",
+    )
     max_len = max((len(name) for name in var_names), default=1)
     var_names_bytes = np.asarray(var_names, dtype=f"S{max_len}")
-    counts_path = cache_path + ".counts.npy"
-    var_path = cache_path + ".var_names.npy"
-    np.save(counts_path, counts)
-    np.save(var_path, var_names_bytes)
-    _H5AD_COUNTS_CACHE[cache_path] = {
-        "counts": counts,
-        "var_names": var_names_bytes,
-    }
+    _save_isoform_counts_cache_arrays(cache_path, counts, var_names_bytes)
+    if h5ad_path is not None:
+        _write_isoform_counts_cache_metadata(
+            cache_path, h5ad_path, groupby, group_values, groupby_rev, groupby_sample
+        )
     print(f"[index] isoform counts cache complete: {cache_path}")
     print(f"[timing] isoform counts cache build: {time.time() - t_counts:.2f}s")
 
@@ -351,21 +685,70 @@ def _load_or_build_counts_cache(h5ad_path, adata, mask, groupby, group_values,
         print(f"[index] Using isoform counts cache: {cache_path}")
         cached = _load_isoform_counts_cache(cache_path)
         if cached is not None:
+            _write_isoform_counts_cache_metadata(
+                cache_path, h5ad_path, groupby, group_values, groupby_rev, groupby_sample
+            )
             return cached
     if os.path.exists(legacy_path) and not _is_index_stale(legacy_path, source_paths):
         if allow_build and adata is not None:
             print(f"[index] Rebuilding legacy isoform counts cache: {legacy_path}")
-            _build_isoform_counts_cache(adata, mask, cache_path)
+            try:
+                _build_isoform_counts_cache(
+                    adata, mask, cache_path,
+                    h5ad_path=h5ad_path,
+                    groupby=groupby,
+                    group_values=group_values,
+                    groupby_rev=groupby_rev,
+                    groupby_sample=groupby_sample
+                )
+            except Exception as exc:
+                if _is_backed_h5ad_io_error(exc):
+                    print(
+                        f"[warn] Failed to rebuild isoform counts cache for {h5ad_path}; "
+                        f"continuing without cache: {exc}"
+                    )
+                    return None
+                raise
             return _load_isoform_counts_cache(cache_path)
         print(f"[index] Using isoform counts cache: {cache_path}")
         cached = _load_isoform_counts_cache(cache_path)
         if cached is not None:
+            _write_isoform_counts_cache_metadata(
+                cache_path, h5ad_path, groupby, group_values, groupby_rev, groupby_sample
+            )
             return cached
+    composed = _try_compose_isoform_counts_cache(
+        h5ad_path,
+        cache_path,
+        groupby,
+        group_values,
+        groupby_rev,
+        groupby_sample,
+        source_paths
+    )
+    if composed is not None:
+        return composed
     if not allow_build:
         return None
     if adata is None:
         return None
-    _build_isoform_counts_cache(adata, mask, cache_path)
+    try:
+        _build_isoform_counts_cache(
+            adata, mask, cache_path,
+            h5ad_path=h5ad_path,
+            groupby=groupby,
+            group_values=group_values,
+            groupby_rev=groupby_rev,
+            groupby_sample=groupby_sample
+        )
+    except Exception as exc:
+        if _is_backed_h5ad_io_error(exc):
+            print(
+                f"[warn] Failed to build isoform counts cache for {h5ad_path}; "
+                f"continuing without cache: {exc}"
+            )
+            return None
+        raise
     return _load_isoform_counts_cache(cache_path)
 
 def _decode_h5py_array(values):
@@ -490,6 +873,24 @@ def parse_feature_identifier(feature, gene_hint=None):
             return right, left
         return (gene_hint if looks_like_gene_id(gene_hint) else None), left
     return (gene_hint if looks_like_gene_id(gene_hint) else None), feature
+
+
+def _namespace_isoform_id(isoform_id, source_key):
+    isoform_text = str(isoform_id)
+    source_text = str(source_key)
+    suffix = f".{source_text}"
+    if isoform_text.endswith(suffix):
+        return isoform_text
+    return f"{isoform_text}{suffix}"
+
+
+def _namespace_transcript_structures(transcript_structures, source_key):
+    if not transcript_structures:
+        return {}
+    namespaced = {}
+    for transcript_id, tokens in transcript_structures.items():
+        namespaced[_namespace_isoform_id(transcript_id, source_key)] = tokens
+    return namespaced
 
 
 def read_gene_model(path):
@@ -859,6 +1260,50 @@ def _iter_alias_tokens(value, separators=('|', ':')):
             if sep in token:
                 pending.extend([part for part in token.split(sep) if part])
     return [t for t in seen if t]
+
+
+def _stable_seed(base_seed, *parts):
+    hasher = hashlib.sha256()
+    hasher.update(str(base_seed).encode("utf-8"))
+    for part in parts:
+        hasher.update(repr(part).encode("utf-8"))
+    return int.from_bytes(hasher.digest()[:8], "big", signed=False)
+
+
+def _stable_shuffle(items, base_seed, *parts):
+    ordered = list(items)
+    if len(ordered) <= 1:
+        return ordered
+    rng = np.random.default_rng(_stable_seed(base_seed, *parts))
+    order = rng.permutation(len(ordered))
+    return [ordered[idx] for idx in order]
+
+
+def _select_ranked_with_tie_sampling(items, limit, score_fn, base_seed=MAX_ISOFORMS_TIE_SEED,
+                                     context_parts=None):
+    if limit is None or limit <= 0:
+        return list(items)
+    ordered_items = list(items)
+    if len(ordered_items) <= limit:
+        return ordered_items
+    if context_parts is None:
+        context_parts = ()
+    groups = defaultdict(list)
+    for item in ordered_items:
+        groups[score_fn(item)].append(item)
+    scores = sorted(groups.keys(), reverse=True)
+    selected = []
+    for score in scores:
+        group = _stable_shuffle(groups[score], base_seed, *context_parts, score)
+        remaining = limit - len(selected)
+        if remaining <= 0:
+            break
+        if len(group) <= remaining:
+            selected.extend(group)
+        else:
+            selected.extend(group[:remaining])
+            break
+    return selected
 
 
 def load_transcript_associations(path, target_gene):
@@ -1353,10 +1798,18 @@ def load_isoform_counts_indexed(h5ad_path, target_gene, index_dir=None,
         else:
             row_idx = None
 
-        sub_X = adata[:, gene_idx].X
-        if row_idx is not None:
-            sub_X = sub_X[row_idx, :]
-        counts = np.asarray(sub_X.sum(axis=0)).ravel()
+        def _slice_counts(active_adata):
+            sub_X = active_adata[:, gene_idx].X
+            if row_idx is not None:
+                sub_X = sub_X[row_idx, :]
+            return np.asarray(sub_X.sum(axis=0)).ravel()
+
+        counts = _run_backed_h5ad_operation(
+            adata,
+            h5ad_path,
+            _slice_counts,
+            f"h5ad slice+sum {target_gene}",
+        )
         print(f"[timing] h5ad slice+sum: {time.time() - t_slice:.2f}s")
         var_names = np.asarray(adata.var_names)[gene_idx]
         gene_col = None
@@ -1406,7 +1859,15 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                                           debug_transcripts=None,
                                           inspect_isoforms=None,
                                           process_genes_separately=None,
-                                          isoform_filter=None):
+                                          isoform_filter=None,
+                                          combined_condition_view=False,
+                                          filter_junction_bias=0,
+                                          filter_profile_hard_split=True,
+                                          subsequence_anchor_hard_fail=True,
+                                          subsequence_middle_gate=True,
+                                          splice_fuzz_tolerance=12,
+                                          max_isoforms_tie_seed=MAX_ISOFORMS_TIE_SEED,
+                                          supplementary_annotation=None):
     start_time = time.time()
     global _AUTO_DEBUG_PRINTED
     if not _AUTO_DEBUG_PRINTED:
@@ -1473,7 +1934,15 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                 rebuild_index=False,
                 debug_transcripts=debug_transcripts,
                 process_genes_separately=False,
-                isoform_filter=isoform_filter
+                isoform_filter=isoform_filter,
+                combined_condition_view=combined_condition_view,
+                filter_junction_bias=filter_junction_bias,
+                filter_profile_hard_split=filter_profile_hard_split,
+                subsequence_anchor_hard_fail=subsequence_anchor_hard_fail,
+                subsequence_middle_gate=subsequence_middle_gate,
+                splice_fuzz_tolerance=splice_fuzz_tolerance,
+                max_isoforms_tie_seed=max_isoforms_tie_seed,
+                supplementary_annotation=supplementary_annotation
             )
         return
     if isinstance(genes, str):
@@ -1494,6 +1963,9 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
         condition: {gene: defaultdict(float) for gene in genes} for condition in conditions
     }
     transcript_union = {gene: {} for gene in genes}
+    condition_isoform_sources = {
+        condition: {gene: defaultdict(set) for gene in genes} for condition in conditions
+    }
 
     def infer_sample_name(sample_entry, h5ad_path):
         for key in ('library', 'gff_name'):
@@ -1622,12 +2094,14 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
             for gene in genes:
                 gene_start = time.time()
                 structures = None
+                namespaced_structures = None
                 if assoc_path:
                     structures, _strand_map = load_transcript_associations_auto(
                         assoc_path, gene, index_dir=None
                     )
                     if structures:
-                        transcript_union[gene].update(structures)
+                        namespaced_structures = _namespace_transcript_structures(structures, uid)
+                        transcript_union[gene].update(namespaced_structures)
                         sample_ids = list(structures.keys())[:5]
                         print(
                             f"[auto][debug] {sample_name} {gene} transcript_structures={len(structures)} "
@@ -1691,20 +2165,28 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                     gene_idx = np.asarray(gene_idx, dtype=np.int64).ravel()
                     gene_idx_list = [int(value) for value in gene_idx]
                     try:
-                        sub_X = adata[:, gene_idx_list].X
+                        def _slice_counts(active_adata):
+                            sub_X = active_adata[:, gene_idx_list].X
+                            if row_idx is not None:
+                                if row_idx.size == 0:
+                                    return np.zeros(len(gene_idx_list), dtype=np.float64)
+                                sub_X = sub_X[row_idx, :]
+                            return np.asarray(sub_X.sum(axis=0)).ravel()
+
+                        counts = _run_backed_h5ad_operation(
+                            adata,
+                            h5ad_path,
+                            _slice_counts,
+                            f"auto h5ad slice+sum {sample_name} {gene}",
+                        )
                     except Exception as exc:
                         print(
-                            "[auto][error] h5ad slice failed "
+                            "[auto][error] h5ad slice+sum failed "
                             f"gene={gene} sample={sample_name} idx_shape={getattr(gene_idx, 'shape', None)} "
-                            f"idx_dtype={getattr(gene_idx, 'dtype', None)} adata_X={type(adata.X)}: {exc}"
+                            f"idx_dtype={getattr(gene_idx, 'dtype', None)}: {exc}"
                         )
                         print(f"[auto][error] gene_idx_list sample={gene_idx_list[:10]}")
                         raise
-                    if row_idx is not None:
-                        if row_idx.size == 0:
-                            continue
-                        sub_X = sub_X[row_idx, :]
-                    counts = np.asarray(sub_X.sum(axis=0)).ravel()
                     isoforms = [str(value) for value in np.asarray(adata.var_names)[gene_idx]]
                     isoform_counts = {}
                     for var, count in zip(isoforms, counts):
@@ -1716,7 +2198,8 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                     resolved_counts = defaultdict(float)
                     unresolved = 0
                     for iso_id, count in isoform_counts.items():
-                        resolved = resolve_isoform_id(str(iso_id), structures)
+                        namespaced_iso_id = _namespace_isoform_id(iso_id, uid)
+                        resolved = resolve_isoform_id(str(namespaced_iso_id), namespaced_structures)
                         if resolved:
                             resolved_counts[resolved] += count
                         else:
@@ -1737,8 +2220,10 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                 )
                 for condition in sample_conditions:
                     store = condition_counts[condition][gene]
+                    source_store = condition_isoform_sources[condition][gene]
                     for iso_id, count in isoform_counts.items():
                         store[iso_id] += count
+                        source_store[str(iso_id)].add(str(uid))
             if adata is not None:
                 try:
                     adata.file.close()
@@ -1765,6 +2250,11 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
     filter_clauses = _normalize_isoform_filter_spec(isoform_filter)
 
     for gene in genes:
+        filter_junctions = _extract_filter_junctions(
+            filter_clauses,
+            default_gene=gene,
+            normalize_mode=cluster_mode
+        )
         transcript_structures = transcript_union.get(gene)
         if not transcript_structures:
             print(f"[auto] No transcript structures for {gene}, skipping.")
@@ -1788,6 +2278,45 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
         if not combined_records:
             print(f"[auto] No isoform counts for {gene}, skipping.")
             continue
+
+        # Downsample by taking top-k isoforms per condition, then unioning IDs.
+        # This keeps lower-depth conditions represented in shared clustering.
+        if max_isoforms and max_isoforms > 0:
+            by_id = {rec['isoform_id']: rec for rec in combined_records}
+            selected_ids = set()
+            per_condition_selected = {}
+            for condition in conditions:
+                cond_counts = condition_counts[condition][gene]
+                if filter_clauses:
+                    cond_counts = _filter_counts_by_tokens(
+                        cond_counts, transcript_structures, filter_clauses
+                    )
+                ranked = sorted(
+                    (
+                        (iso_id, count) for iso_id, count in cond_counts.items()
+                        if count > 0 and iso_id in by_id
+                    ),
+                    key=lambda x: x[1],
+                    reverse=True
+                )
+                ranked = _select_ranked_with_tie_sampling(
+                    ranked,
+                    max_isoforms,
+                    score_fn=lambda item: item[1],
+                    base_seed=max_isoforms_tie_seed,
+                    context_parts=("condition", gene, condition),
+                )
+                per_condition_selected[condition] = len(ranked)
+                selected_ids.update(iso_id for iso_id, _ in ranked)
+            if selected_ids:
+                combined_records = [by_id[iso_id] for iso_id in selected_ids]
+                combined_records.sort(key=lambda rec: rec.get('count', 0), reverse=True)
+                combined_counts = {rec['isoform_id']: rec['count'] for rec in combined_records}
+                print(
+                    f"[auto][downsample] {gene} max_isoforms_per_condition={max_isoforms} "
+                    f"selected_union={len(selected_ids)} per_condition={per_condition_selected}"
+                )
+
         resolved_hits = 0
         unresolved = []
         for iso_id in combined_counts.keys():
@@ -1802,11 +2331,15 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
 
         grouped_structures = None
         isoform_colors = None
-        build_max_isoforms = max(max_isoforms, len(combined_records))
+        # combined_records is already downsampled per-condition (top-k + union).
+        # Keep the full union for shared clustering to avoid reintroducing a
+        # global cap that can hide condition-specific isoforms.
+        build_max_isoforms = len(combined_records)
         plotted, _, _ = build_plotted_isoforms(
             combined_records, transcript_structures, gene,
             cluster_mode, cluster_features, min_count, build_max_isoforms,
-            isoform_filter=isoform_filter
+            isoform_filter=isoform_filter,
+            max_isoforms_tie_seed=max_isoforms_tie_seed
         )
         if plotted:
             grouped_structures = group_structures(
@@ -1814,7 +2347,13 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                 cluster_strategy, cluster_similarity_threshold,
                 min_split_fraction, include_introns=cluster_isoforms,
                 report=cluster_isoforms, cluster_mode=cluster_mode,
-                exon_lookup=exon_lookup
+                exon_lookup=exon_lookup,
+                filter_junctions=filter_junctions,
+                filter_junction_bias=filter_junction_bias,
+                filter_profile_hard_split=filter_profile_hard_split,
+                subsequence_anchor_hard_fail=subsequence_anchor_hard_fail,
+                subsequence_middle_gate=subsequence_middle_gate,
+                splice_fuzz_tolerance=splice_fuzz_tolerance
             )
             if cluster_isoforms:
                 isoform_colors = assign_cluster_colors(grouped_structures, plt.get_cmap(DEFAULT_COLORMAP).colors)
@@ -1887,7 +2426,8 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                         cluster_features,
                         min_count,
                         max_isoforms,
-                        isoform_filter=isoform_filter
+                        isoform_filter=isoform_filter,
+                        max_isoforms_tie_seed=max_isoforms_tie_seed
                     )
                     if local_plotted:
                         local_grouped_structures = group_structures(
@@ -1895,7 +2435,13 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                             cluster_strategy, cluster_similarity_threshold,
                             min_split_fraction, include_introns=cluster_isoforms,
                             report=cluster_isoforms, cluster_mode=cluster_mode,
-                            exon_lookup=exon_lookup
+                            exon_lookup=exon_lookup,
+                            filter_junctions=filter_junctions,
+                            filter_junction_bias=filter_junction_bias,
+                            filter_profile_hard_split=filter_profile_hard_split,
+                            subsequence_anchor_hard_fail=subsequence_anchor_hard_fail,
+                            subsequence_middle_gate=subsequence_middle_gate,
+                            splice_fuzz_tolerance=splice_fuzz_tolerance
                         )
                         palette = plt.get_cmap(DEFAULT_COLORMAP).colors
                         if cluster_isoforms:
@@ -1909,7 +2455,10 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                     f"sample_isoforms={sample_zero}"
                 )
             gene_label = _resolve_gene_output_label(gene, gene_symbol_dict)
-            gene_dir = output_dir / gene_label
+            gene_folder_label = _resolve_gene_output_folder_label(
+                gene, gene_symbol_dict, supplementary_annotation=supplementary_annotation
+            )
+            gene_dir = output_dir / gene_folder_label
             gene_dir.mkdir(parents=True, exist_ok=True)
             file_label = f"{condition}__{cell_state_label}__{gene_label}"
             if filter_clauses:
@@ -1944,6 +2493,12 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                     debug_transcripts=debug_transcripts,
                     debug_isoforms=inspect_isoforms,
                     isoform_filter=isoform_filter,
+                    filter_junction_bias=filter_junction_bias,
+                    filter_profile_hard_split=filter_profile_hard_split,
+                    subsequence_anchor_hard_fail=subsequence_anchor_hard_fail,
+                    subsequence_middle_gate=subsequence_middle_gate,
+                    splice_fuzz_tolerance=splice_fuzz_tolerance,
+                    max_isoforms_tie_seed=max_isoforms_tie_seed,
                     return_cluster_labels=True
                 )
             except ValueError as exc:
@@ -1957,8 +2512,132 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                 plot_cluster_label_map,
                 plot_cluster_index_map,
                 isoform_counts=counts_map,
-                target_gene=gene
+                target_gene=gene,
+                isoform_source_map=condition_isoform_sources.get(condition, {}).get(gene)
             )
+
+        if combined_condition_view:
+            gene_label = _resolve_gene_output_label(gene, gene_symbol_dict)
+            gene_folder_label = _resolve_gene_output_folder_label(
+                gene, gene_symbol_dict, supplementary_annotation=supplementary_annotation
+            )
+            gene_dir = output_dir / gene_folder_label
+            gene_dir.mkdir(parents=True, exist_ok=True)
+            combined_label = f"combined__{cell_state_label}__{gene_label}"
+            if filter_clauses:
+                combined_label = f"{combined_label}_custom"
+            combined_path = gene_dir / f"{combined_label}.pdf"
+            base_width = max(10.0, gene_maps.get(gene, {}).get('total_length', 0) / 3000.0)
+            base_height = max(2.5, 2.1 * len(conditions))
+            fig, axes = plt.subplots(
+                nrows=len(conditions),
+                ncols=1,
+                figsize=(base_width, base_height),
+                squeeze=False
+            )
+            axes = axes.ravel().tolist()
+            fig.subplots_adjust(hspace=0.25)
+
+            for idx, condition in enumerate(conditions):
+                ax = axes[idx]
+                counts_map = condition_counts[condition][gene]
+                if filter_clauses:
+                    counts_map = _filter_counts_by_tokens(
+                        counts_map, transcript_structures, filter_clauses
+                    )
+                isoform_records = combined_records
+                try:
+                    plot_isoform_structures(
+                        isoform_records,
+                        transcript_structures,
+                        exon_lookup,
+                        gene_maps,
+                        cluster_mode,
+                        gene,
+                        intron_scale,
+                        str(combined_path),
+                        max_isoforms=max_isoforms,
+                        min_count=min_count,
+                        row_height=row_height,
+                        row_gap=row_gap,
+                        group_gap=group_gap,
+                        isoform_gap=isoform_gap,
+                        cluster_strategy=cluster_strategy,
+                        cluster_similarity_threshold=cluster_similarity_threshold,
+                        cluster_features=cluster_features,
+                        label_mode=label_mode,
+                        min_split_fraction=min_split_fraction,
+                        grouped_structures=grouped_structures,
+                        isoform_colors=isoform_colors,
+                        isoform_counts=counts_map,
+                        cluster_isoforms=cluster_isoforms,
+                        debug_transcripts=debug_transcripts,
+                        debug_isoforms=inspect_isoforms,
+                        isoform_filter=isoform_filter,
+                        filter_junction_bias=filter_junction_bias,
+                        filter_profile_hard_split=filter_profile_hard_split,
+                        subsequence_anchor_hard_fail=subsequence_anchor_hard_fail,
+                        subsequence_middle_gate=subsequence_middle_gate,
+                        splice_fuzz_tolerance=splice_fuzz_tolerance,
+                        max_isoforms_tie_seed=max_isoforms_tie_seed,
+                        ax=ax,
+                        fig=fig,
+                        render_only=True,
+                        show_gene_model_track=(idx == len(conditions) - 1),
+                        show_exon_labels=(idx == len(conditions) - 1),
+                        show_genomic_coords=(idx == len(conditions) - 1),
+                        return_cluster_labels=False
+                    )
+                except ValueError as exc:
+                    ax.text(
+                        0.5,
+                        0.5,
+                        f"No isoforms ({exc})",
+                        transform=ax.transAxes,
+                        ha='center',
+                        va='center',
+                        fontsize=6,
+                        color='black'
+                    )
+
+                ax.set_axis_on()
+                ax.set_xticks([])
+                ax.set_yticks([])
+                for spine in ax.spines.values():
+                    spine.set_visible(False)
+                pad_px = 5.0
+                ax_height_px = max(float(getattr(ax.bbox, "height", 0.0)), 1.0)
+                pad_axes_y = pad_px / ax_height_px
+                ax.add_patch(
+                    plt.Rectangle(
+                        (0, -pad_axes_y),
+                        1,
+                        1 + (2 * pad_axes_y),
+                        transform=ax.transAxes,
+                        fill=False,
+                        linewidth=0.8,
+                        edgecolor='black',
+                        zorder=10,
+                        clip_on=False
+                    )
+                )
+                ax.text(
+                    1.01,
+                    0.5,
+                    condition,
+                    transform=ax.transAxes,
+                    ha='left',
+                    va='center',
+                    fontsize=9,
+                    fontweight='bold',
+                    color='black',
+                    clip_on=False
+                )
+
+            os.makedirs(os.path.dirname(str(combined_path)) or ".", exist_ok=True)
+            fig.savefig(str(combined_path), dpi=300, bbox_inches='tight')
+            plt.close(fig)
+            print(f"[auto] Plotting {gene} combined conditions -> {combined_path}")
     elapsed = time.time() - start_time
     print(f"[auto] Elapsed time (s): {elapsed:.2f}")
 
@@ -2035,6 +2714,62 @@ def _normalize_isoform_filter_spec(filter_spec):
     return [[pattern]] if pattern else []
 
 
+def _normalize_filter_pattern_tokens(pattern, default_gene="", normalize_mode=None):
+    normalized = []
+    for token in pattern:
+        tok = str(token).strip()
+        if not tok:
+            continue
+        gene_id, base, _coord = split_token(tok, default_gene)
+        if base.startswith('E'):
+            if '_' in tok:
+                # Keep explicit coordinate-bearing exon sites unchanged.
+                norm_tok = tok
+            else:
+                norm_tok = base
+                if normalize_mode:
+                    norm_tok = normalize_token(norm_tok, default_gene, normalize_mode)
+        elif base.startswith('I'):
+            # Keep intron identifiers intact (including coordinate-bearing novel sites).
+            norm_tok = tok
+        else:
+            norm_tok = tok
+        if gene_id and gene_id != default_gene and ':' not in norm_tok:
+            norm_tok = f"{gene_id}:{norm_tok}"
+        normalized.append(norm_tok)
+    return normalized
+
+
+def _extract_filter_junctions(filter_clauses, default_gene="", normalize_mode=None):
+    if not filter_clauses:
+        return []
+    junctions = []
+    seen = set()
+    for clause in filter_clauses:
+        for pattern in clause:
+            pattern_tokens = _normalize_filter_pattern_tokens(
+                pattern,
+                default_gene=default_gene,
+                normalize_mode=normalize_mode
+            )
+            if len(pattern_tokens) < 2:
+                continue
+            for idx in range(len(pattern_tokens) - 1):
+                junction = f"{pattern_tokens[idx]}->{pattern_tokens[idx + 1]}"
+                if junction in seen:
+                    continue
+                seen.add(junction)
+                junctions.append(junction)
+    return junctions
+
+
+def _reverse_junction_token(junction):
+    parts = str(junction).split("->", 1)
+    if len(parts) != 2:
+        return str(junction)
+    return f"{parts[1]}->{parts[0]}"
+
+
 def _contains_token_sequence(tokens, pattern):
     if not pattern:
         return True
@@ -2045,6 +2780,12 @@ def _contains_token_sequence(tokens, pattern):
     for start in range(len(tokens) - len(pattern) + 1):
         if tokens[start:start + len(pattern)] == pattern:
             return True
+    # Make filter patterns strand-order agnostic for exon/junction clauses.
+    rev_pattern = list(reversed(pattern))
+    if rev_pattern != list(pattern):
+        for start in range(len(tokens) - len(rev_pattern) + 1):
+            if tokens[start:start + len(rev_pattern)] == rev_pattern:
+                return True
     return False
 
 
@@ -2136,9 +2877,12 @@ def _normalize_isoform_counts_map(isoform_counts, target_gene):
     normalized = defaultdict(float)
     for key, value in isoform_counts.items():
         raw_key, iso_id = _normalize_isoform_count_key(key, target_gene)
+        raw_key = str(raw_key)
         normalized[raw_key] += value
         if iso_id is not None:
-            normalized[str(iso_id)] += value
+            iso_key = str(iso_id)
+            if iso_key != raw_key:
+                normalized[iso_key] += value
     return normalized
 
 
@@ -2643,7 +3387,10 @@ def cluster_by_substring(items, threshold=0.4):
     return [cluster['items'] for cluster in clusters]
 
 
-def cluster_by_subsequence(items, threshold=0.4):
+def cluster_by_subsequence(items, threshold=0.4,
+                           filter_profile_hard_split=True,
+                           anchor_hard_fail=True,
+                           middle_gate=True):
     clusters = []
 
     item_anchor, item_middle, item_has_anchor, item_middle_major = _compute_item_anchor_middle_for_subsequence(items)
@@ -2679,6 +3426,9 @@ def cluster_by_subsequence(items, threshold=0.4):
         print(
             "[cluster][debug] subsequence",
             f"items={len(items)} threshold={threshold:.4f} strict_match={str(strict_match).lower()}",
+            f"filter_profile_hard_split={str(bool(filter_profile_hard_split)).lower()}",
+            f"anchor_hard_fail={str(bool(anchor_hard_fail)).lower()}",
+            f"middle_gate={str(bool(middle_gate)).lower()}",
             f"anchor_ready={anchor_ready} unique_anchors={len(anchor_counts)} unique_middles={len(middle_counts)}",
             f"middle_coord={middle_coord} middle_intron={middle_intron} middle_exon_variant={middle_exon_variant}"
         )
@@ -2754,7 +3504,18 @@ def cluster_by_subsequence(items, threshold=0.4):
         item_middle_sig = item_middle.get(id(item))
         item_middle_major_sig = item_middle_major.get(id(item), item_middle_sig)
         item_anchor_ok = item_has_anchor.get(id(item), False)
+        item_filter_profile = item.get('filter_profile')
         for idx, cluster in enumerate(clusters):
+            rep_filter_profile = cluster.get('rep_filter_profile')
+            if (
+                filter_profile_hard_split and
+                item_filter_profile is not None and
+                rep_filter_profile is not None and
+                item_filter_profile != rep_filter_profile
+            ):
+                if debug_level >= 2:
+                    debug_counts['filter_profile'] += 1
+                continue
             score = subsequence_similarity(item['cluster_seq'], cluster['rep_seq'])
             if score < threshold:
                 if debug_level >= 2:
@@ -2771,26 +3532,27 @@ def cluster_by_subsequence(items, threshold=0.4):
             rep_item = cluster.get('rep_item')
             rep_anchor_ok = item_has_anchor.get(id(rep_item), False) if rep_item is not None else False
             if item_anchor_ok and rep_anchor_ok:
-                if item_anchor_key != item_anchor.get(id(rep_item)):
+                if anchor_hard_fail and item_anchor_key != item_anchor.get(id(rep_item)):
                     if debug_level >= 2:
                         debug_counts['anchor_mismatch'] += 1
                     continue
                 rep_middle_sig = item_middle.get(id(rep_item))
-                if strict_match:
-                    if item_middle_sig != rep_middle_sig:
-                        if debug_level >= 2:
-                            debug_counts['middle_mismatch'] += 1
-                        continue
-                else:
-                    rep_middle_major = item_middle_major.get(id(rep_item), rep_middle_sig)
-                    mid_score = subsequence_similarity(
-                        list(item_middle_major_sig),
-                        list(rep_middle_major)
-                    )
-                    if mid_score < threshold:
-                        if debug_level >= 2:
-                            debug_counts['middle_similarity'] += 1
-                        continue
+                if middle_gate:
+                    if strict_match:
+                        if item_middle_sig != rep_middle_sig:
+                            if debug_level >= 2:
+                                debug_counts['middle_mismatch'] += 1
+                            continue
+                    else:
+                        rep_middle_major = item_middle_major.get(id(rep_item), rep_middle_sig)
+                        mid_score = subsequence_similarity(
+                            list(item_middle_major_sig),
+                            list(rep_middle_major)
+                        )
+                        if mid_score < threshold:
+                            if debug_level >= 2:
+                                debug_counts['middle_similarity'] += 1
+                            continue
             if score >= threshold and score > best_score:
                 best_score = score
                 best_idx = idx
@@ -2801,13 +3563,15 @@ def cluster_by_subsequence(items, threshold=0.4):
                 clusters[best_idx]['rep_junction_seq'] = item.get('junction_seq') or []
                 clusters[best_idx]['rep_weight'] = item['weight']
                 clusters[best_idx]['rep_item'] = item
+                clusters[best_idx]['rep_filter_profile'] = item_filter_profile
         else:
             clusters.append({
                 'items': [item],
                 'rep_seq': item['cluster_seq'],
                 'rep_junction_seq': item.get('junction_seq') or [],
                 'rep_weight': item['weight'],
-                'rep_item': item
+                'rep_item': item,
+                'rep_filter_profile': item_filter_profile
             })
     if debug_level >= 2:
         print(f"[cluster][debug] subsequence rejects={dict(debug_counts)}")
@@ -3027,7 +3791,8 @@ def _reassign_shorter_substrings(groups):
 
 def build_plotted_isoforms(isoforms, transcript_structures, target_gene, cluster_mode,
                            cluster_features, min_count, max_isoforms,
-                           isoform_filter=None):
+                           isoform_filter=None,
+                           max_isoforms_tie_seed=MAX_ISOFORMS_TIE_SEED):
     filter_clauses = _normalize_isoform_filter_spec(isoform_filter)
     filtered = [i for i in isoforms if i['count'] >= min_count]
     missing_ids = []
@@ -3042,8 +3807,13 @@ def build_plotted_isoforms(isoforms, transcript_structures, target_gene, cluster
             continue
         resolved_items.append((iso, resolved))
 
-    resolved_items.sort(key=lambda x: x[0]['count'], reverse=True)
-    resolved_items = resolved_items[:max_isoforms]
+    resolved_items = _select_ranked_with_tie_sampling(
+        resolved_items,
+        max_isoforms,
+        score_fn=lambda item: item[0].get('count', 0),
+        base_seed=max_isoforms_tie_seed,
+        context_parts=("plot", target_gene),
+    )
 
     plotted = []
     for iso, resolved in resolved_items:
@@ -3075,7 +3845,7 @@ def _format_token_list(tokens):
 
 
 def build_plotted_rows(plotted, cluster_label_map=None, cluster_index_map=None,
-                       isoform_counts=None, target_gene=None):
+                       isoform_counts=None, target_gene=None, isoform_source_map=None):
     rows = []
     seen = set()
     isoform_counts_map = _normalize_isoform_counts_map(isoform_counts, target_gene)
@@ -3097,6 +3867,27 @@ def build_plotted_rows(plotted, cluster_label_map=None, cluster_index_map=None,
         if parsed_id in isoform_counts_map:
             return isoform_counts_map[parsed_id]
         return 0
+    def _lookup_sources(isoform_id, resolved_id):
+        if not isoform_source_map:
+            return []
+        candidates = [isoform_id, resolved_id]
+        for candidate in candidates:
+            if candidate in isoform_source_map and isoform_source_map[candidate]:
+                return sorted(str(val) for val in isoform_source_map[candidate])
+            key = str(candidate)
+            if key in isoform_source_map and isoform_source_map[key]:
+                return sorted(str(val) for val in isoform_source_map[key])
+        if target_gene is not None:
+            for candidate in candidates:
+                _gene_id, parsed_id = parse_feature_identifier(str(candidate), gene_hint=target_gene)
+                if parsed_id is None:
+                    continue
+                if parsed_id in isoform_source_map and isoform_source_map[parsed_id]:
+                    return sorted(str(val) for val in isoform_source_map[parsed_id])
+                parsed_key = str(parsed_id)
+                if parsed_key in isoform_source_map and isoform_source_map[parsed_key]:
+                    return sorted(str(val) for val in isoform_source_map[parsed_key])
+        return []
     for iso in plotted:
         isoform_id = iso.get('isoform_id') or iso.get('resolved_id')
         resolved_id = iso.get('resolved_id') or isoform_id
@@ -3107,8 +3898,14 @@ def build_plotted_rows(plotted, cluster_label_map=None, cluster_index_map=None,
         count = _lookup_count(iso)
         if isoform_counts_map is not None and coerce_read_count(count) <= 0:
             continue
+        source_keys = _lookup_sources(isoform_id, resolved_id)
+        isoform_id_with_source = str(isoform_id)
+        if source_keys:
+            source_suffix = '+'.join(source_keys)
+            if not isoform_id_with_source.endswith(f".{source_suffix}"):
+                isoform_id_with_source = f"{isoform_id_with_source}.{source_suffix}"
         row = {
-            'isoform_id': isoform_id,
+            'isoform_id': isoform_id_with_source,
             'resolved_id': resolved_id,
             'count': count,
             'tokens_raw': _format_token_list(iso.get('tokens')),
@@ -3129,7 +3926,7 @@ def build_plotted_rows(plotted, cluster_label_map=None, cluster_index_map=None,
 
 
 def export_plotted_isoforms(plotted, output_path, cluster_label_map=None, cluster_index_map=None,
-                            isoform_counts=None, target_gene=None):
+                            isoform_counts=None, target_gene=None, isoform_source_map=None):
     if not plotted:
         return None, []
     rows = build_plotted_rows(
@@ -3137,7 +3934,8 @@ def export_plotted_isoforms(plotted, output_path, cluster_label_map=None, cluste
         cluster_label_map,
         cluster_index_map,
         isoform_counts=isoform_counts,
-        target_gene=target_gene
+        target_gene=target_gene,
+        isoform_source_map=isoform_source_map
     )
     output_base = os.path.splitext(output_path)[0]
     isoform_path = f"{output_base}_isoform_ids.tsv"
@@ -3161,13 +3959,23 @@ def build_cluster_label_map(records, transcript_structures, target_gene, cluster
                             cluster_similarity_threshold, min_split_fraction,
                             max_isoforms, min_count, cluster_isoforms,
                             inspect_isoforms=None, exon_lookup=None,
-                            isoform_filter=None):
+                            isoform_filter=None, filter_junction_bias=0,
+                            filter_profile_hard_split=True,
+                            subsequence_anchor_hard_fail=True,
+                            subsequence_middle_gate=True,
+                            max_isoforms_tie_seed=MAX_ISOFORMS_TIE_SEED):
     if cluster_strategy is None:
         cluster_strategy = 'substring' if cluster_isoforms else 'jaccard'
     if cluster_strategy == 'overlap':
         cluster_strategy = 'substring'
     if cluster_similarity_threshold is None:
         cluster_similarity_threshold = 0.85 if cluster_isoforms else 0.4
+    filter_clauses = _normalize_isoform_filter_spec(isoform_filter)
+    filter_junctions = _extract_filter_junctions(
+        filter_clauses,
+        default_gene=target_gene,
+        normalize_mode=cluster_mode
+    )
     plotted, _, _ = build_plotted_isoforms(
         records,
         transcript_structures,
@@ -3176,7 +3984,8 @@ def build_cluster_label_map(records, transcript_structures, target_gene, cluster
         cluster_features,
         min_count,
         max_isoforms,
-        isoform_filter=isoform_filter
+        isoform_filter=isoform_filter,
+        max_isoforms_tie_seed=max_isoforms_tie_seed
     )
     plotted_ids = set()
     for iso in plotted:
@@ -3197,7 +4006,8 @@ def build_cluster_label_map(records, transcript_structures, target_gene, cluster
             cluster_features,
             min_count,
             max_isoforms,
-            isoform_filter=isoform_filter
+            isoform_filter=isoform_filter,
+            max_isoforms_tie_seed=max_isoforms_tie_seed
         )
     grouped_structures = group_structures(
         plotted,
@@ -3208,20 +4018,45 @@ def build_cluster_label_map(records, transcript_structures, target_gene, cluster
         min_split_fraction,
         include_introns=cluster_isoforms,
         report=False,
-        exon_lookup=exon_lookup
+        exon_lookup=exon_lookup,
+        filter_junctions=filter_junctions,
+        filter_junction_bias=filter_junction_bias,
+        filter_profile_hard_split=filter_profile_hard_split,
+        subsequence_anchor_hard_fail=subsequence_anchor_hard_fail,
+        subsequence_middle_gate=subsequence_middle_gate
     )
     if cluster_isoforms:
         for group in grouped_structures:
-            group.sort(key=structure_max_length, reverse=True)
+            if filter_junction_bias > 0:
+                group.sort(
+                    key=lambda structure: (
+                        structure_filter_profile_rank(structure),
+                        structure_max_length(structure),
+                        structure.get('weight', 0)
+                    ),
+                    reverse=True
+                )
+            else:
+                group.sort(key=structure_max_length, reverse=True)
             for structure in group:
                 structure['items'].sort(
                     key=lambda iso: (isoform_length(iso), iso.get('count', 0)),
                     reverse=True
                 )
-        grouped_structures.sort(
-            key=lambda group: (group_max_length(group), sum(item['weight'] for item in group)),
-            reverse=True
-        )
+        if filter_junction_bias > 0:
+            grouped_structures.sort(
+                key=lambda group: (
+                    group_filter_profile_rank(group),
+                    group_max_length(group),
+                    sum(item['weight'] for item in group)
+                ),
+                reverse=True
+            )
+        else:
+            grouped_structures.sort(
+                key=lambda group: (group_max_length(group), sum(item['weight'] for item in group)),
+                reverse=True
+            )
     label_map = {}
     for group in grouped_structures:
         label = select_cluster_label(group) if cluster_isoforms else None
@@ -3307,13 +4142,24 @@ def report_isoform_structures(records, transcript_structures, target_gene, isofo
 def group_structures(plotted, target_gene, cluster_features, cluster_strategy,
                      cluster_similarity_threshold, min_split_fraction,
                      include_introns=False, report=False, cluster_mode=None,
-                     exon_lookup=None, splice_fuzz_tolerance=12):
+                     exon_lookup=None, splice_fuzz_tolerance=12,
+                     filter_junctions=None, filter_junction_bias=0,
+                     filter_profile_hard_split=True,
+                     subsequence_anchor_hard_fail=True,
+                     subsequence_middle_gate=True):
     structure_groups = OrderedDict()
     debug_level = _cluster_debug_level()
     global _SPLICE_FUZZ_DEFAULT_GENE
     _SPLICE_FUZZ_DEFAULT_GENE = target_gene
     global _SPLICE_FUZZ_COLLAPSE_BLOCK
     _SPLICE_FUZZ_COLLAPSE_BLOCK = cluster_mode == 'block'
+    filter_junctions = set(filter_junctions or [])
+    filter_junction_order = tuple(sorted(filter_junctions)) if filter_junctions else tuple()
+    try:
+        filter_junction_bias = int(filter_junction_bias)
+    except (TypeError, ValueError):
+        filter_junction_bias = 0
+    filter_junction_bias = max(0, filter_junction_bias)
     if exon_lookup and splice_fuzz_tolerance:
         _ensure_splice_fuzz_cache(exon_lookup, tolerance=splice_fuzz_tolerance)
     if debug_level:
@@ -3322,7 +4168,11 @@ def group_structures(plotted, target_gene, cluster_features, cluster_strategy,
             "[cluster][debug] group_structures",
             f"strategy={cluster_strategy} threshold={cluster_similarity_threshold:.4f}",
             f"mode={cluster_mode or 'default'} features={cluster_features} include_introns={str(include_introns).lower()}",
-            f"items={len(plotted)}"
+            f"items={len(plotted)}",
+            f"filter_junction_bias={filter_junction_bias}",
+            f"filter_profile_hard_split={str(bool(filter_profile_hard_split)).lower()}",
+            f"subsequence_anchor_hard_fail={str(bool(subsequence_anchor_hard_fail)).lower()}",
+            f"subsequence_middle_gate={str(bool(subsequence_middle_gate)).lower()}"
         )
     for iso in plotted:
         key = tuple(iso['tokens'])
@@ -3341,6 +4191,28 @@ def group_structures(plotted, target_gene, cluster_features, cluster_strategy,
                 target_gene,
                 collapse_to_block=cluster_mode == 'block'
             )
+        junction_seq = build_junction_sequence(cluster_tokens)
+        filter_profile = None
+        if filter_junction_bias > 0 and filter_junctions:
+            junction_seq_set = set(junction_seq)
+            matched_junctions = set(
+                junction
+                for junction in filter_junction_order
+                if (
+                    junction in junction_seq_set or
+                    _reverse_junction_token(junction) in junction_seq_set
+                )
+            )
+            filter_profile = tuple(
+                1 if junction in matched_junctions else 0
+                for junction in filter_junction_order
+            )
+            bias_tokens = []
+            for junction in filter_junction_order:
+                state = "HIT" if junction in matched_junctions else "MISS"
+                bias_tokens.extend([f"FJ::{state}::{junction}"] * filter_junction_bias)
+            if bias_tokens:
+                cluster_tokens = bias_tokens + cluster_tokens
         exon_tokens = filter_exon_tokens(
             list(trimmed_key), target_gene, normalize_mode=cluster_mode
         )
@@ -3361,13 +4233,35 @@ def group_structures(plotted, target_gene, cluster_features, cluster_strategy,
                 'cluster_set_exon': exon_set,
                 'cluster_seq_exon': exon_tokens,
                 'cluster_seq_exon_full': exon_tokens_full,
-                'junction_seq': build_junction_sequence(cluster_tokens),
-                'junction_seq_exon': build_junction_sequence(exon_tokens)
+                'junction_seq': junction_seq,
+                'junction_seq_exon': build_junction_sequence(exon_tokens),
+                'filter_profile': filter_profile
             }
         structure_groups[key]['items'].append(iso)
         structure_groups[key]['weight'] += iso['count']
 
     structure_items = list(structure_groups.values())
+    if filter_junction_bias > 0 and filter_junctions:
+        profile_weights = defaultdict(float)
+        for structure in structure_items:
+            profile = structure.get('filter_profile')
+            profile_weights[profile] += float(structure.get('weight', 0))
+        top_profiles = sorted(
+            profile_weights.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )[:3]
+        print(
+            "[cluster][filter-bias]",
+            f"junctions={len(filter_junctions)}",
+            f"unique_profiles={len(profile_weights)}",
+            f"top_profiles={top_profiles}"
+        )
+        if len(profile_weights) <= 1:
+            print(
+                "[cluster][filter-bias][warn] All isoforms share the same filter profile; "
+                "changing filter_junction_bias cannot change clustering."
+            )
     if cluster_strategy == 'jaccard':
         grouped_structures = cluster_by_jaccard(
             structure_items,
@@ -3376,7 +4270,10 @@ def group_structures(plotted, target_gene, cluster_features, cluster_strategy,
     elif cluster_strategy == 'subsequence':
         grouped_structures = cluster_by_subsequence(
             structure_items,
-            threshold=cluster_similarity_threshold
+            threshold=cluster_similarity_threshold,
+            filter_profile_hard_split=filter_profile_hard_split,
+            anchor_hard_fail=subsequence_anchor_hard_fail,
+            middle_gate=subsequence_middle_gate
         )
     elif cluster_strategy == 'anchor-weighted':
         grouped_structures = cluster_by_anchor_weighted(
@@ -3463,8 +4360,13 @@ def assign_isoform_colors(grouped_structures, palette):
 
 def assign_cluster_colors(grouped_structures, palette):
     isoform_colors = {}
+    if len(grouped_structures) == 2:
+        primary = palette[0] if palette else "#1f77b4"
+        cluster_palette = [primary, "#ff7f0e"]
+    else:
+        cluster_palette = palette
     for group_idx, group in enumerate(grouped_structures):
-        color = palette[group_idx % len(palette)]
+        color = cluster_palette[group_idx % len(cluster_palette)]
         for structure in group:
             for iso in structure['items']:
                 iso_key = iso.get('isoform_id', iso['resolved_id'])
@@ -3473,20 +4375,30 @@ def assign_cluster_colors(grouped_structures, palette):
     return isoform_colors
 
 
-def select_cluster_label(group):
+def _select_cluster_label_from_items(items):
     best_label = None
     best_score = None
-    for structure in group:
-        for iso in structure['items']:
-            label = iso.get('resolved_id') or iso.get('isoform_id')
-            if not label:
-                continue
-            tokens = iso.get('tokens_trimmed') or iso.get('tokens') or []
-            score = (len(tokens), iso.get('count', 0), len(str(label)))
-            if best_score is None or score > best_score:
-                best_score = score
-                best_label = label
+    best_sort_key = None
+    for iso in items:
+        label = iso.get('resolved_id') or iso.get('isoform_id')
+        if not label:
+            continue
+        label_text = str(label)
+        tokens = iso.get('tokens_trimmed') or iso.get('tokens') or []
+        score = (len(tokens), iso.get('count', 0))
+        sort_key = (-score[0], -score[1], label_text)
+        if best_score is None or score > best_score or (score == best_score and sort_key < best_sort_key):
+            best_score = score
+            best_sort_key = sort_key
+            best_label = label_text
     return best_label
+
+
+def select_cluster_label(group):
+    items = []
+    for structure in group:
+        items.extend(structure.get('items', []))
+    return _select_cluster_label_from_items(items)
 
 
 def isoform_length(iso):
@@ -3500,6 +4412,17 @@ def structure_max_length(structure):
 
 def group_max_length(group):
     return max((structure_max_length(structure) for structure in group), default=0)
+
+
+def structure_filter_profile_rank(structure):
+    profile = structure.get('filter_profile')
+    if profile is None:
+        return (-1,)
+    return (sum(profile),) + tuple(profile)
+
+
+def group_filter_profile_rank(group):
+    return max((structure_filter_profile_rank(structure) for structure in group), default=(-1,))
 
 
 # Parameters:
@@ -3528,6 +4451,10 @@ def group_max_length(group):
 # - isoform_counts: per-file isoform counts for consistent ordering.
 # - cluster_isoforms: color isoforms by cluster and label with a representative isoform ID.
 # - isoform_filter: optional exon/junction patterns to restrict isoforms.
+# - ax/fig: optional matplotlib axes to render into (for combined views).
+# - render_only: skip writing output files when using a shared figure.
+# - show_gene_model_track/show_exon_labels: toggle gene model track visibility.
+# - show_genomic_coords: toggle coordinate scale and gene label rendering.
 # - debug_transcripts: transcript IDs to print segment details for.
 def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_maps,
                             cluster_mode, target_gene, intron_scale, output_path,
@@ -3544,6 +4471,18 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
                             transcript_associations_path=None,
                             cluster_isoforms=False,
                             isoform_filter=None,
+                            filter_junction_bias=0,
+                            filter_profile_hard_split=True,
+                            subsequence_anchor_hard_fail=True,
+                            subsequence_middle_gate=True,
+                            splice_fuzz_tolerance=12,
+                            ax=None,
+                            fig=None,
+                            render_only=False,
+                            show_gene_model_track=True,
+                            show_exon_labels=True,
+                            show_genomic_coords=True,
+                            max_isoforms_tie_seed=MAX_ISOFORMS_TIE_SEED,
                             return_cluster_labels=False):
     """Render stacked isoform read tracks for a single gene.
 
@@ -3564,6 +4503,10 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
     gene_gap: horizontal gap between genes in trans-splicing plots.
     cluster_strategy: ordering method for isoform structures.
     cluster_features: features used for clustering (tokens/junctions/both).
+    filter_junction_bias: repeat matched isoform_filter junctions in cluster tokens to strongly bias clustering.
+    filter_profile_hard_split: prevent merges across different isoform_filter junction hit/miss profiles.
+    subsequence_anchor_hard_fail: prevent merges when anchor events differ in subsequence clustering.
+    subsequence_middle_gate: enforce middle-event similarity gate in subsequence clustering.
     label_mode: label display mode (first/none/all).
     min_split_fraction: minimum weighted split for feature clustering.
     cluster_similarity_threshold: minimum similarity threshold for clustering.
@@ -3578,6 +4521,12 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
         cluster_strategy = 'substring'
     if cluster_similarity_threshold is None:
         cluster_similarity_threshold = 0.85 if cluster_isoforms else 0.4
+    filter_clauses = _normalize_isoform_filter_spec(isoform_filter)
+    filter_junctions = _extract_filter_junctions(
+        filter_clauses,
+        default_gene=target_gene,
+        normalize_mode=cluster_mode
+    )
     isoform_counts = _normalize_isoform_counts_map(isoform_counts, target_gene)
     if grouped_structures is None:
         t_build = time.time()
@@ -3589,7 +4538,8 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
             cluster_features,
             min_count,
             max_isoforms,
-            isoform_filter=isoform_filter
+            isoform_filter=isoform_filter,
+            max_isoforms_tie_seed=max_isoforms_tie_seed
         )
         print(f"[timing] build_plotted_isoforms: {time.time() - t_build:.2f}s")
         if not plotted:
@@ -3635,7 +4585,13 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
             include_introns=cluster_isoforms,
             report=cluster_isoforms,
             cluster_mode=cluster_mode,
-            exon_lookup=exon_lookup
+            exon_lookup=exon_lookup,
+            filter_junctions=filter_junctions,
+            filter_junction_bias=filter_junction_bias,
+            filter_profile_hard_split=filter_profile_hard_split,
+            subsequence_anchor_hard_fail=subsequence_anchor_hard_fail,
+            subsequence_middle_gate=subsequence_middle_gate,
+            splice_fuzz_tolerance=splice_fuzz_tolerance
         )
     else:
         missing_structures = 0
@@ -3649,6 +4605,36 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
                         continue
                     seen.add(iso_key)
                     plotted.append(iso)
+        if max_isoforms and len(plotted) > max_isoforms and isoform_counts is None:
+            plotted = _select_ranked_with_tie_sampling(
+                plotted,
+                max_isoforms,
+                score_fn=lambda iso: iso.get('count', 0),
+                base_seed=max_isoforms_tie_seed,
+                context_parts=("render", target_gene),
+            )
+            keep_ids = {
+                str(iso.get('isoform_id', iso.get('resolved_id')))
+                for iso in plotted
+                if iso.get('isoform_id', iso.get('resolved_id')) is not None
+            }
+            trimmed_groups = []
+            for group in grouped_structures:
+                trimmed_group = []
+                for structure in group:
+                    kept_items = [
+                        iso for iso in structure['items']
+                        if str(iso.get('isoform_id', iso.get('resolved_id'))) in keep_ids
+                    ]
+                    if not kept_items:
+                        continue
+                    structure_copy = dict(structure)
+                    structure_copy['items'] = kept_items
+                    structure_copy['weight'] = sum(float(iso.get('count', 0)) for iso in kept_items)
+                    trimmed_group.append(structure_copy)
+                if trimmed_group:
+                    trimmed_groups.append(trimmed_group)
+            grouped_structures = trimmed_groups
 
     if cluster_isoforms:
         for group in grouped_structures:
@@ -3750,9 +4736,7 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
                     missing = [iso for iso in debug_isoforms[:2] if iso not in debug_lookup]
                     print(f"  Debug comparison skipped; missing: {missing}")
 
-    show_exon_labels = True
     show_exon_edges = False
-    show_gene_model_track = True
 
     # Track gene order for trans-splicing and compute panel offsets.
     genes_in_plot = OrderedDict()
@@ -3781,6 +4765,7 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
 
     # Expand isoforms into per-read rows with per-isoform colors.
     colors = plt.get_cmap('tab20').colors
+    provided_isoform_colors = isoform_colors is not None
     if isoform_colors is None:
         if cluster_isoforms:
             isoform_colors = assign_cluster_colors(grouped_structures, colors)
@@ -3789,6 +4774,9 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
     rows = []
     y_positions = []
     y = 0.0
+    rendered_isoform_ids = set()
+    skipped_duplicate_isoforms = []
+    active_group_items = defaultdict(list)
     def _lookup_isoform_count(isoform_counts_map, iso):
         iso_key = iso.get('isoform_id', iso.get('resolved_id'))
         if isoform_counts_map is None:
@@ -3811,13 +4799,34 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
         for structure in group:
             for iso in structure['items']:
                 iso_key, iso_count = _lookup_isoform_count(isoform_counts, iso)
+                dedup_raw = iso.get('isoform_id')
+                if dedup_raw is None:
+                    dedup_raw = iso.get('resolved_id')
+                if dedup_raw is None:
+                    dedup_raw = iso_key
+                if dedup_raw is None:
+                    continue
+                _dedup_gene, dedup_iso_id = parse_feature_identifier(
+                    str(dedup_raw),
+                    gene_hint=target_gene
+                )
+                dedup_key = str(dedup_iso_id)
+                if dedup_key in rendered_isoform_ids:
+                    if len(skipped_duplicate_isoforms) < 5:
+                        skipped_duplicate_isoforms.append(dedup_key)
+                    continue
+                rendered_isoform_ids.add(dedup_key)
                 read_count = coerce_read_count(iso_count)
                 if read_count <= 0:
                     continue
+                active_group_items[group_idx].append(iso)
+                row_color = isoform_colors.get(iso_key)
+                if row_color is None:
+                    row_color = isoform_colors.get(dedup_key, colors[0])
                 for row_idx in range(read_count):
                     rows.append({
                         'isoform': iso,
-                        'color': isoform_colors.get(iso_key, colors[0]),
+                        'color': row_color,
                         'group_idx': group_idx,
                         'group_label': group_labels.get(group_idx),
                         'row_idx': row_idx,
@@ -3827,6 +4836,30 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
                     y += row_height + row_gap
                 y += isoform_gap
         y += max(0.0, group_gap - isoform_gap)
+    if cluster_isoforms and rows and not provided_isoform_colors:
+        active_groups = sorted({row['group_idx'] for row in rows})
+        if len(active_groups) == 2:
+            two_cluster_colors = {
+                active_groups[0]: (colors[0] if colors else "#1f77b4"),
+                active_groups[1]: "#ff7f0e"
+            }
+            for row in rows:
+                row['color'] = two_cluster_colors.get(row['group_idx'], row['color'])
+    if cluster_isoforms and active_group_items:
+        active_group_labels = {}
+        for group_idx, items in active_group_items.items():
+            active_label = _select_cluster_label_from_items(items)
+            if active_label:
+                active_group_labels[group_idx] = active_label
+        if active_group_labels:
+            group_labels.update(active_group_labels)
+            for row in rows:
+                row['group_label'] = group_labels.get(row['group_idx'])
+    if skipped_duplicate_isoforms:
+        print(
+            f"[plot][warn] Skipped duplicate isoform entries by isoform_id: "
+            f"count={len(skipped_duplicate_isoforms)} sample={skipped_duplicate_isoforms}"
+        )
     if rows:
         y -= max(0.0, group_gap - isoform_gap)
         y -= isoform_gap
@@ -3932,7 +4965,10 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
     fig_height = max(1.5, total_height * 0.35)
     fig_width = max(10.0, total_width / 3000.0)
     t_render = time.time()
-    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+    else:
+        fig = fig or ax.figure
     coord_transform = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
 
     row_index = 0
@@ -4129,84 +5165,85 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
                 else:
                     isoform_first_row[iso['resolved_id']] = False
 
-    bottom_pad = row_height * 2.0
+    bottom_pad = row_height * (2.0 if show_genomic_coords else 0.6)
     top_pad = row_height * (8.0 if show_exon_labels else 2.0)
-    gene_label_transform = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
-    def _format_chrom(chrom):
-        chrom = str(chrom or "")
-        if chrom and not chrom.startswith("chr"):
-            return f"chr{chrom}"
-        return chrom or "chr?"
+    if show_genomic_coords:
+        gene_label_transform = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
+        def _format_chrom(chrom):
+            chrom = str(chrom or "")
+            if chrom and not chrom.startswith("chr"):
+                return f"chr{chrom}"
+            return chrom or "chr?"
 
-    def _format_coord(value):
-        return f"{int(value):,}"
+        def _format_coord(value):
+            return f"{int(value):,}"
 
-    coord_y = -0.26
-    coord_text_y = -0.29
-    gene_label_y = -0.50
-    for gene, offset in gene_offsets.items():
-        gene_map = gene_maps.get(gene)
-        if not gene_map:
-            continue
-        center = offset + gene_map['total_length'] / 2.0
-        segments = gene_map.get('segments') or []
-        if segments:
-            chrom = _format_chrom(segments[0].get('chrom'))
-            gene_start = min(seg['start'] for seg in segments)
-            gene_end = max(seg['end'] for seg in segments)
-            tick_start = int(gene_start // 1000 * 1000)
-            tick_end = int(((gene_end + 999) // 1000) * 1000)
-            if tick_end < tick_start:
-                tick_start, tick_end = tick_end, tick_start
-            ticks = list(range(tick_start, tick_end + 1, 1000))
-            if ticks:
-                x0 = map_coord(gene_map, ticks[0]) + offset
-                x1 = map_coord(gene_map, ticks[-1]) + offset
-                ax.plot(
-                    [x0, x1],
-                    [coord_y, coord_y],
-                    color='black',
-                    linewidth=0.4,
-                    transform=coord_transform,
-                    clip_on=False
-                )
-                ax.text(
-                    x0,
-                    coord_text_y,
-                    chrom,
-                    ha='right',
-                    va='top',
-                    fontsize=4,
-                    transform=coord_transform,
-                    clip_on=False
-                )
-            for tick in ticks:
-                x = map_coord(gene_map, tick) + offset
-                ax.plot(
-                    [x, x],
-                    [coord_y, coord_y - 0.01],
-                    color='black',
-                    linewidth=0.4,
-                    transform=coord_transform,
-                    clip_on=False
-                )
-                if tick % 10000 == 0:
-                    coord_label = _format_coord(tick)
+        coord_y = -0.26
+        coord_text_y = -0.29
+        gene_label_y = -0.50
+        for gene, offset in gene_offsets.items():
+            gene_map = gene_maps.get(gene)
+            if not gene_map:
+                continue
+            center = offset + gene_map['total_length'] / 2.0
+            segments = gene_map.get('segments') or []
+            if segments:
+                chrom = _format_chrom(segments[0].get('chrom'))
+                gene_start = min(seg['start'] for seg in segments)
+                gene_end = max(seg['end'] for seg in segments)
+                tick_start = int(gene_start // 1000 * 1000)
+                tick_end = int(((gene_end + 999) // 1000) * 1000)
+                if tick_end < tick_start:
+                    tick_start, tick_end = tick_end, tick_start
+                ticks = list(range(tick_start, tick_end + 1, 1000))
+                if ticks:
+                    x0 = map_coord(gene_map, ticks[0]) + offset
+                    x1 = map_coord(gene_map, ticks[-1]) + offset
+                    ax.plot(
+                        [x0, x1],
+                        [coord_y, coord_y],
+                        color='black',
+                        linewidth=0.4,
+                        transform=coord_transform,
+                        clip_on=False
+                    )
                     ax.text(
-                        x,
+                        x0,
                         coord_text_y,
-                        coord_label,
-                        ha='center',
+                        chrom,
+                        ha='right',
                         va='top',
                         fontsize=4,
                         transform=coord_transform,
                         clip_on=False
                     )
-        ax.text(center, gene_label_y, gene,
-                ha='center', va='top',
-                fontsize=5.25,
-                transform=gene_label_transform,
-                clip_on=False)
+                for tick in ticks:
+                    x = map_coord(gene_map, tick) + offset
+                    ax.plot(
+                        [x, x],
+                        [coord_y, coord_y - 0.01],
+                        color='black',
+                        linewidth=0.4,
+                        transform=coord_transform,
+                        clip_on=False
+                    )
+                    if tick % 10000 == 0:
+                        coord_label = _format_coord(tick)
+                        ax.text(
+                            x,
+                            coord_text_y,
+                            coord_label,
+                            ha='center',
+                            va='top',
+                            fontsize=4,
+                            transform=coord_transform,
+                            clip_on=False
+                        )
+            ax.text(center, gene_label_y, gene,
+                    ha='center', va='top',
+                    fontsize=5.25,
+                    transform=gene_label_transform,
+                    clip_on=False)
 
     # Tight vertical framing around the read stack.
     ax.set_ylim(-top_pad, total_height + bottom_pad)
@@ -4214,11 +5251,15 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
     ax.invert_yaxis()
     ax.axis('off')
 
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    plt.tight_layout()
-    fig.savefig(output_path, dpi=300, bbox_inches='tight')
-    plt.close(fig)
-    print(f"[timing] render+save plot: {time.time() - t_render:.2f}s")
+    if not render_only:
+        if output_path:
+            os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+            plt.tight_layout()
+            fig.savefig(output_path, dpi=300, bbox_inches='tight')
+            plt.close(fig)
+        print(f"[timing] render+save plot: {time.time() - t_render:.2f}s")
+    else:
+        print(f"[timing] render plot: {time.time() - t_render:.2f}s")
 
     if missing_structures:
         print(f"Skipped {missing_structures} isoforms with no transcript_associations mapping.")
@@ -4276,6 +5317,8 @@ def main():
                         help='Optional sample name suffix to match when groupby is a TSV/TXT file')
     parser.add_argument('--max-isoforms', type=int, default=CLI_CLUSTER_DEFAULTS["max_isoforms"],
                         help='Maximum isoforms to display')
+    parser.add_argument('--max-isoforms-tie-seed', type=int, default=MAX_ISOFORMS_TIE_SEED,
+                        help='Fixed seed used to sample tied isoforms when max-isoforms truncates')
     parser.add_argument('--min-count', type=float, default=CLI_CLUSTER_DEFAULTS["min_count"],
                         help='Minimum summed count to include an isoform')
     parser.add_argument('--cluster-mode', choices=['full', 'base', 'block'],
@@ -4304,6 +5347,14 @@ def main():
                         help='Isoform IDs to print structure details for')
     parser.add_argument('--isoform-filter', nargs='*', default=None,
                         help='Restrict isoforms to reads containing required exon/junction patterns')
+    parser.add_argument('--filter-junction-bias', type=int, default=0,
+                        help='Bias clustering toward isoform-filter junction composition (0 disables)')
+    parser.add_argument('--filter-profile-hard-split', action=argparse.BooleanOptionalAction, default=True,
+                        help='Prevent merging subsequence clusters across different isoform-filter junction HIT/MISS profiles')
+    parser.add_argument('--subsequence-anchor-hard-fail', action=argparse.BooleanOptionalAction, default=True,
+                        help='Require anchor-event match when clustering with subsequence strategy')
+    parser.add_argument('--subsequence-middle-gate', action=argparse.BooleanOptionalAction, default=True,
+                        help='Require middle-event similarity gate when clustering with subsequence strategy')
     parser.add_argument('--intron-scale', type=float, default=0.2,
                         help='Scale factor for intron lengths (0-1)')
     parser.add_argument('--row-height', type=float, default=0.0125,
@@ -4556,7 +5607,12 @@ def main():
                         args.cluster_isoforms,
                         inspect_isoforms=args.inspect_isoforms,
                         exon_lookup=exon_lookup,
-                        isoform_filter=isoform_filter
+                        isoform_filter=isoform_filter,
+                        filter_junction_bias=args.filter_junction_bias,
+                        filter_profile_hard_split=args.filter_profile_hard_split,
+                        subsequence_anchor_hard_fail=args.subsequence_anchor_hard_fail,
+                        subsequence_middle_gate=args.subsequence_middle_gate,
+                        max_isoforms_tie_seed=args.max_isoforms_tie_seed
                     )
                     print(f"[timing] cluster_label_map: {time.time() - t_cluster_map:.2f}s")
                     output_path = _resolve_output_path(path, gene)
@@ -4586,6 +5642,11 @@ def main():
                         transcript_associations_path=transcript_paths[0],
                         cluster_isoforms=args.cluster_isoforms,
                         isoform_filter=isoform_filter,
+                        filter_junction_bias=args.filter_junction_bias,
+                        filter_profile_hard_split=args.filter_profile_hard_split,
+                        subsequence_anchor_hard_fail=args.subsequence_anchor_hard_fail,
+                        subsequence_middle_gate=args.subsequence_middle_gate,
+                        max_isoforms_tie_seed=args.max_isoforms_tie_seed,
                         return_cluster_labels=True
                     )
                     isoform_counts = {
@@ -4708,7 +5769,8 @@ def main():
                     combined_records, transcript_structures, gene,
                     args.cluster_mode, args.cluster_features,
                     args.min_count, args.max_isoforms,
-                    isoform_filter=isoform_filter
+                    isoform_filter=isoform_filter,
+                    max_isoforms_tie_seed=args.max_isoforms_tie_seed
                 )
                 if plotted:
                     grouped_structures = group_structures(
@@ -4716,7 +5778,16 @@ def main():
                         args.cluster_strategy, args.cluster_similarity_threshold,
                         args.min_split_fraction, include_introns=args.cluster_isoforms,
                         report=args.cluster_isoforms, cluster_mode=args.cluster_mode,
-                        exon_lookup=exon_lookup
+                        exon_lookup=exon_lookup,
+                        filter_junctions=_extract_filter_junctions(
+                            isoform_filter_clauses,
+                            default_gene=gene,
+                            normalize_mode=args.cluster_mode
+                        ),
+                        filter_junction_bias=args.filter_junction_bias,
+                        filter_profile_hard_split=args.filter_profile_hard_split,
+                        subsequence_anchor_hard_fail=args.subsequence_anchor_hard_fail,
+                        subsequence_middle_gate=args.subsequence_middle_gate
                     )
                     if args.cluster_isoforms:
                         isoform_colors = assign_cluster_colors(grouped_structures, plt.get_cmap(DEFAULT_COLORMAP).colors)
@@ -4755,6 +5826,11 @@ def main():
                         transcript_associations_path=assoc_path,
                         cluster_isoforms=args.cluster_isoforms,
                         isoform_filter=isoform_filter,
+                        filter_junction_bias=args.filter_junction_bias,
+                        filter_profile_hard_split=args.filter_profile_hard_split,
+                        subsequence_anchor_hard_fail=args.subsequence_anchor_hard_fail,
+                        subsequence_middle_gate=args.subsequence_middle_gate,
+                        max_isoforms_tie_seed=args.max_isoforms_tie_seed,
                         return_cluster_labels=True
                     )
                     isoform_path, _ = export_plotted_isoforms(
