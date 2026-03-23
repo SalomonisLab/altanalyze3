@@ -22,6 +22,7 @@ import csv
 import glob
 import math
 import os
+import re
 import shutil
 import subprocess
 from collections import defaultdict
@@ -43,6 +44,10 @@ def _import_pptx():
 @dataclass
 class GeneInput:
     gene: str
+    base_gene: str
+    supplementary_annotation: str
+    cell_types: str
+    conditions: str
     gene_dir: str
     combined_pdf: str
 
@@ -58,6 +63,70 @@ class GeneScore:
     weight_factor: float
 
 
+_SUPPLEMENTARY_ANNOTATION_RE = re.compile(r"^[EIU]\d+(?:\.\d+)?[A-Za-z0-9.-]*$")
+
+
+def _split_gene_label(name: str) -> Tuple[str, str]:
+    label = str(name or "").strip()
+    if "_" not in label:
+        return label, ""
+    base_gene, suffix = label.rsplit("_", 1)
+    if base_gene and _SUPPLEMENTARY_ANNOTATION_RE.match(suffix):
+        return base_gene, suffix
+    return label, ""
+
+
+def _strip_isoform_ids_suffix(base: str) -> str:
+    for suffix in ("_custom_isoform_ids.tsv", "_isoform_ids.tsv"):
+        if base.endswith(suffix):
+            return base[: -len(suffix)]
+    return os.path.splitext(base)[0]
+
+
+def _parse_isv_tsv_path(path: str) -> Tuple[Optional[str], str, str]:
+    base = os.path.basename(path)
+    if base.startswith("combined__"):
+        return None, "", ""
+    core = _strip_isoform_ids_suffix(base)
+    if "__" not in core:
+        return None, "", core
+    parts = core.split("__")
+    condition = parts[0].strip() if parts else ""
+    if len(parts) >= 3:
+        cell_types = parts[1].strip()
+        gene_token = "__".join(parts[2:]).strip()
+    else:
+        cell_types = ""
+        gene_token = parts[1].strip()
+    return condition or None, cell_types, gene_token
+
+
+def _join_ordered_unique(labels: List[str], separator: str) -> str:
+    ordered: List[str] = []
+    seen = set()
+    for label in labels:
+        for token in str(label or "").split(separator):
+            value = token.strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            ordered.append(value)
+    return separator.join(ordered)
+
+
+def _collect_gene_context(gene_dir: str) -> Tuple[str, str]:
+    tsv_paths = sorted(glob.glob(os.path.join(gene_dir, "*_isoform_ids.tsv")))
+    conditions = _join_ordered_unique(
+        [(_parse_isv_tsv_path(path)[0] or "") for path in tsv_paths],
+        "+",
+    )
+    cell_types = _join_ordered_unique(
+        [_parse_isv_tsv_path(path)[1] for path in tsv_paths],
+        "+",
+    )
+    return conditions, cell_types
+
+
 def find_gene_inputs(results_dir: str, combined_glob: str = "combined__*.pdf") -> List[GeneInput]:
     gene_inputs: List[GeneInput] = []
     for name in sorted(os.listdir(results_dir)):
@@ -70,7 +139,19 @@ def find_gene_inputs(results_dir: str, combined_glob: str = "combined__*.pdf") -
         # Prefer custom render when available.
         custom = sorted([m for m in matches if m.endswith("_custom.pdf")])
         selected = custom[0] if custom else sorted(matches)[0]
-        gene_inputs.append(GeneInput(gene=name, gene_dir=gene_dir, combined_pdf=selected))
+        base_gene, supplementary_annotation = _split_gene_label(name)
+        conditions, cell_types = _collect_gene_context(gene_dir)
+        gene_inputs.append(
+            GeneInput(
+                gene=name,
+                base_gene=base_gene,
+                supplementary_annotation=supplementary_annotation,
+                cell_types=cell_types,
+                conditions=conditions,
+                gene_dir=gene_dir,
+                combined_pdf=selected,
+            )
+        )
     return gene_inputs
 
 
@@ -204,12 +285,8 @@ def _structure_length_metric(structure: str) -> int:
 
 
 def _condition_from_tsv_path(path: str) -> Optional[str]:
-    base = os.path.basename(path)
-    if base.startswith("combined__"):
-        return None
-    if "__" not in base:
-        return None
-    return base.split("__", 1)[0]
+    condition, _cell_types, _gene_token = _parse_isv_tsv_path(path)
+    return condition
 
 
 def _condition_read_totals(gene_dir: str) -> Dict[str, float]:
@@ -445,7 +522,7 @@ def _short_unique_exon_label(gene_dir: str, max_each: int = 2) -> str:
 
     def _fmt(tokens: List[str]) -> str:
         if not tokens:
-            return "none"
+            return ""
         shown = tokens[:max_each]
         extra = len(tokens) - len(shown)
         txt = ",".join(shown)
@@ -453,7 +530,21 @@ def _short_unique_exon_label(gene_dir: str, max_each: int = 2) -> str:
             txt += f" (+{extra})"
         return txt
 
-    return f"{_fmt(uniq_a)} vs {_fmt(uniq_b)}"
+    parts = [label for label in (_fmt(uniq_a), _fmt(uniq_b)) if label]
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return parts[0]
+    return " vs ".join(parts)
+
+
+def _compose_gene_title(item: GeneInput, unique_exon_label: str) -> str:
+    title = item.base_gene
+    if item.supplementary_annotation:
+        title = f"{title} | {item.supplementary_annotation}"
+    if unique_exon_label:
+        title = f"{title} - {unique_exon_label}"
+    return title
 
 
 def compute_gene_shift_score(gene_dir: str) -> GeneScore:
@@ -599,21 +690,43 @@ def _collect_cluster_summaries(gene_dir: str) -> List[Dict[str, Any]]:
         structures = cluster_structure_counts.get(cluster, {})
         if not structures:
             continue
-        structure, structure_count = max(structures.items(), key=lambda kv: kv[1])
+        tx_len_map = cluster_tx_lengths.get(cluster, {})
+        cluster_lengths = sorted(tx_len_map.values(), reverse=True)
+        eligible_tx_ids = set(tx_len_map.keys())
+        if cluster_lengths:
+            keep_n = max(1, int(math.ceil(len(cluster_lengths) * 0.10)))
+            if len(cluster_lengths) < 100:
+                keep_n = max(keep_n, min(10, len(cluster_lengths)))
+            min_top_length = cluster_lengths[keep_n - 1]
+            eligible_tx_ids = {
+                tx_id for tx_id, length_metric in tx_len_map.items()
+                if length_metric >= min_top_length
+            }
+
+        eligible_structure_counts: Dict[str, float] = {}
+        for structure_name, structure_count_all in structures.items():
+            tx_counts_for_structure = structure_tx_counts.get((cluster, structure_name), {})
+            eligible_count = sum(
+                count for tx_id, count in tx_counts_for_structure.items()
+                if tx_id in eligible_tx_ids
+            )
+            if eligible_count > 0:
+                eligible_structure_counts[structure_name] = eligible_count
+        structure_pool = eligible_structure_counts if eligible_structure_counts else structures
+        structure, structure_count = max(
+            structure_pool.items(),
+            key=lambda kv: (kv[1], _structure_length_metric(kv[0]), kv[0]),
+        )
         tx_counts = structure_tx_counts.get((cluster, structure), {})
         top_tx, top_tx_count = ("NA", 0.0)
         if tx_counts:
             # Keep representative transcript frequency-driven, but restrict
-            # candidates to the top 10% longest reads in the cluster.
-            tx_len_map = cluster_tx_lengths.get(cluster, {})
-            cluster_lengths = sorted(tx_len_map.values(), reverse=True)
+            # candidates to the longest 10% within the cluster when available.
             eligible_tx_counts = tx_counts
-            if cluster_lengths:
-                keep_n = max(1, int(math.ceil(len(cluster_lengths) * 0.10)))
-                min_top_length = cluster_lengths[keep_n - 1]
+            if eligible_tx_ids:
                 constrained = {
                     tx: c for tx, c in tx_counts.items()
-                    if tx_len_map.get(tx, 0) >= min_top_length
+                    if tx in eligible_tx_ids
                 }
                 if constrained:
                     eligible_tx_counts = constrained
@@ -641,8 +754,7 @@ def summarize_clusters_from_tsvs(
     rows = _collect_cluster_summaries(gene_dir)
     if not rows:
         return "No cluster summaries found in TSV files."
-    if top_n and top_n > 0:
-        rows = rows[:top_n]
+    rows = _summarized_cluster_rows(rows, top_n)
     lines: List[str] = ["Most common structure + transcript by cluster ID:"]
     for row in rows:
         lines.append(
@@ -672,6 +784,36 @@ def _find_existing_gene_image(image_dir: str, gene: str, preferred_format: str) 
         if os.path.exists(alt) and os.path.getsize(alt) > 0:
             return alt
     return None
+
+
+def _summarized_cluster_rows(cluster_rows: List[Dict[str, Any]], top_n_isoforms: int) -> List[Dict[str, Any]]:
+    if top_n_isoforms and top_n_isoforms > 0:
+        return cluster_rows[:top_n_isoforms]
+    return cluster_rows
+
+
+def _cluster_examples_text(rows: List[Dict[str, Any]]) -> str:
+    if not rows:
+        return ""
+    parts: List[str] = []
+    for row in rows:
+        parts.append(
+            f"{row['cluster']}: {row['structure']}; transcript_id={row['transcript_id']} "
+            f"(structure_n={row['structure_n']}, tx_n={row['tx_n']})"
+        )
+    return " | ".join(parts)
+
+
+def _collect_fieldnames(rows: List[Dict[str, Any]]) -> List[str]:
+    ordered: List[str] = []
+    seen = set()
+    for row in rows:
+        for key in row.keys():
+            if key in seen:
+                continue
+            seen.add(key)
+            ordered.append(key)
+    return ordered
 
 
 def build_pptx_from_isv(
@@ -743,10 +885,7 @@ def build_pptx_from_isv(
             convert_pdf_to_image(item.combined_pdf, preferred_image_path, dpi=jpg_dpi, image_format=image_format)
             image_path = preferred_image_path
         cluster_rows = _collect_cluster_summaries(item.gene_dir)
-        if top_n_isoforms and top_n_isoforms > 0:
-            bottom_rows = cluster_rows[:top_n_isoforms]
-        else:
-            bottom_rows = cluster_rows
+        bottom_rows = _summarized_cluster_rows(cluster_rows, top_n_isoforms)
         if bottom_rows:
             lines = ["Most common structure + transcript by cluster ID:"]
             for row in bottom_rows:
@@ -757,7 +896,7 @@ def build_pptx_from_isv(
             bottom_summary = "\n".join(lines)
         else:
             bottom_summary = "No cluster summaries found in TSV files."
-        matched_event_rows = event_rows_by_gene.get(item.gene, [])
+        matched_event_rows = event_rows_by_gene.get(item.base_gene, [])
         if matched_event_rows:
             isoform_cluster_lookup = _build_isoform_cluster_lookup(item.gene_dir)
             event_summary = _render_event_summary(
@@ -774,22 +913,19 @@ def build_pptx_from_isv(
 
         # Title near top, centered.
         title_box = slide.shapes.add_textbox(
-            Inches(0.25), Inches(0.05), slide_w - Inches(0.5), Inches(0.35)
+            Inches(0.25), Inches(0.03), slide_w - Inches(0.5), Inches(0.28)
         )
         title_tf = title_box.text_frame
         title_tf.clear()
         p = title_tf.paragraphs[0]
         unique_exon_label = _short_unique_exon_label(item.gene_dir)
-        if unique_exon_label:
-            p.text = f"{item.gene} - {unique_exon_label}"
-        else:
-            p.text = item.gene
+        p.text = _compose_gene_title(item, unique_exon_label)
         title_text = p.text
         p.alignment = 1  # center
         p.font.size = Pt(20)
 
         score_box = slide.shapes.add_textbox(
-            Inches(0.25), Inches(0.32), slide_w - Inches(0.5), Inches(0.22)
+            Inches(0.25), Inches(0.46), slide_w - Inches(0.5), Inches(0.18)
         )
         score_tf = score_box.text_frame
         score_tf.clear()
@@ -806,16 +942,44 @@ def build_pptx_from_isv(
             f"cluster shifts={gene_score.cluster_shifts[0]:.3f},{gene_score.cluster_shifts[1]:.3f}"
         )
 
+        if item.cell_types:
+            context_box = slide.shapes.add_textbox(
+                Inches(0.25), Inches(0.69), slide_w - Inches(0.5), Inches(0.21)
+            )
+            context_tf = context_box.text_frame
+            context_tf.clear()
+            context_tf.word_wrap = True
+            cp = context_tf.paragraphs[0]
+            cp.alignment = 1  # center
+            cp.font.size = Pt(12)
+            cp.text = (
+                f"Cell types: {item.cell_types} | Conditions: {item.conditions}"
+                if item.conditions
+                else f"Cell types: {item.cell_types}"
+            )
+        elif item.conditions:
+            context_box = slide.shapes.add_textbox(
+                Inches(0.25), Inches(0.69), slide_w - Inches(0.5), Inches(0.21)
+            )
+            context_tf = context_box.text_frame
+            context_tf.clear()
+            context_tf.word_wrap = True
+            cp = context_tf.paragraphs[0]
+            cp.alignment = 1  # center
+            cp.font.size = Pt(12)
+            cp.text = f"Conditions: {item.conditions}"
+
         # Main image region.
         img_left = Inches(0.2)
-        img_top = Inches(0.58)
+        img_top = Inches(1.01)
         img_w = slide_w - Inches(0.4)
-        img_h = slide_h - Inches(1.68)
+        bottom_box_top = slide_h - Inches(2.20)
+        img_h = bottom_box_top - img_top - Inches(0.08)
         _add_picture_fit(slide, image_path, img_left, img_top, img_w, img_h)
 
         # Bottom summary text.
         bottom_box = slide.shapes.add_textbox(
-            Inches(0.2), slide_h - Inches(1.0), slide_w - Inches(0.4), Inches(0.9)
+            Inches(0.2), bottom_box_top, slide_w - Inches(0.4), Inches(0.9)
         )
         bottom_tf = bottom_box.text_frame
         bottom_tf.clear()
@@ -823,39 +987,38 @@ def build_pptx_from_isv(
         p2.text = bottom_summary
         p2.font.size = Pt(11)
 
-        top1 = cluster_rows[0] if len(cluster_rows) > 0 else {}
-        top2 = cluster_rows[1] if len(cluster_rows) > 1 else {}
-        tsv_rows.append(
-            {
-                "slide_rank": rank,
-                "gene": item.gene,
-                "title_text": title_text,
-                "unique_exon_label": unique_exon_label,
-                "shift_score": round(gene_score.score, 6),
-                "raw_ratio_shift": round(gene_score.raw_ratio_shift, 6),
-                "min_condition_reads": int(gene_score.min_condition_reads),
-                "read_weight": round(gene_score.read_weight, 6),
-                "weight_factor": round(gene_score.weight_factor, 6),
-                "major_cluster_1": gene_score.major_clusters[0],
-                "major_cluster_2": gene_score.major_clusters[1],
-                "cluster_shift_1": round(gene_score.cluster_shifts[0], 6),
-                "cluster_shift_2": round(gene_score.cluster_shifts[1], 6),
-                "top_cluster_1_label": top1.get("cluster", ""),
-                "top_cluster_1_structure": top1.get("structure", ""),
-                "top_cluster_1_transcript_id": top1.get("transcript_id", ""),
-                "top_cluster_1_structure_n": top1.get("structure_n", ""),
-                "top_cluster_1_tx_n": top1.get("tx_n", ""),
-                "top_cluster_2_label": top2.get("cluster", ""),
-                "top_cluster_2_structure": top2.get("structure", ""),
-                "top_cluster_2_transcript_id": top2.get("transcript_id", ""),
-                "top_cluster_2_structure_n": top2.get("structure_n", ""),
-                "top_cluster_2_tx_n": top2.get("tx_n", ""),
-                "matched_event_rows": len(matched_event_rows),
-                "bottom_summary": bottom_summary,
-                "combined_pdf": item.combined_pdf,
-                "image_path": image_path,
-            }
-        )
+        row: Dict[str, Any] = {
+            "slide_rank": rank,
+            "gene": item.gene,
+            "gene_symbol": item.base_gene,
+            "supplementary_annotation": item.supplementary_annotation,
+            "cell_types": item.cell_types,
+            "conditions": item.conditions,
+            "title_text": title_text,
+            "unique_exon_label": unique_exon_label,
+            "shift_score": round(gene_score.score, 6),
+            "raw_ratio_shift": round(gene_score.raw_ratio_shift, 6),
+            "min_condition_reads": int(gene_score.min_condition_reads),
+            "read_weight": round(gene_score.read_weight, 6),
+            "weight_factor": round(gene_score.weight_factor, 6),
+            "major_cluster_1": gene_score.major_clusters[0],
+            "major_cluster_2": gene_score.major_clusters[1],
+            "cluster_shift_1": round(gene_score.cluster_shifts[0], 6),
+            "cluster_shift_2": round(gene_score.cluster_shifts[1], 6),
+            "top_cluster_count": len(bottom_rows),
+            "top_cluster_examples": _cluster_examples_text(bottom_rows),
+            "matched_event_rows": len(matched_event_rows),
+            "bottom_summary": bottom_summary,
+            "combined_pdf": item.combined_pdf,
+            "image_path": image_path,
+        }
+        for idx, cluster_row in enumerate(bottom_rows, start=1):
+            row[f"top_cluster_{idx}_label"] = cluster_row.get("cluster", "")
+            row[f"top_cluster_{idx}_structure"] = cluster_row.get("structure", "")
+            row[f"top_cluster_{idx}_transcript_id"] = cluster_row.get("transcript_id", "")
+            row[f"top_cluster_{idx}_structure_n"] = cluster_row.get("structure_n", "")
+            row[f"top_cluster_{idx}_tx_n"] = cluster_row.get("tx_n", "")
+        tsv_rows.append(row)
 
     out_path = os.path.join(output_dir, pptx_name)
     if not out_path.lower().endswith(".pptx"):
@@ -868,7 +1031,7 @@ def build_pptx_from_isv(
     tsv_path = os.path.join(output_dir, tsv_base)
     if not tsv_path.lower().endswith(".tsv"):
         tsv_path += ".tsv"
-    fieldnames = list(tsv_rows[0].keys()) if tsv_rows else [
+    fieldnames = _collect_fieldnames(tsv_rows) if tsv_rows else [
         "slide_rank", "gene", "title_text", "bottom_summary", "combined_pdf", "image_path"
     ]
     with open(tsv_path, "w", newline="") as handle:
