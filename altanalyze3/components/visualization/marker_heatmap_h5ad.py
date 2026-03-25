@@ -307,10 +307,79 @@ def _build_heatmap(adata, cluster_key, genes, cluster_order, use_raw, layer):
     return heatmap_row_df, heatmap_col_df, cluster_counts, ordered_cells
 
 
+def _build_marker_centroids(adata, cluster_key, genes, cluster_order, use_raw, layer):
+    if not genes:
+        return pd.DataFrame()
+
+    expr_df = sc.get.obs_df(adata, keys=genes, use_raw=use_raw, layer=layer)
+    cluster_series = adata.obs[cluster_key].astype(str)
+    expr_df[cluster_key] = cluster_series.values
+
+    ordered_clusters = [cluster for cluster in cluster_order if cluster in set(cluster_series)]
+    if not ordered_clusters:
+        ordered_clusters = [str(cluster) for cluster in pd.unique(cluster_series)]
+
+    centroid_columns = {}
+    for cluster in ordered_clusters:
+        subset = expr_df.loc[expr_df[cluster_key] == str(cluster), genes]
+        if subset.empty:
+            continue
+        summed = subset.sum(axis=0).astype(float)
+        total_counts = float(summed.sum())
+        if total_counts <= 0:
+            normalized = pd.Series(0.0, index=genes)
+        else:
+            normalized = np.log2((summed / total_counts) * 10000.0 + 1.0)
+        centroid_columns[str(cluster)] = normalized.reindex(genes)
+
+    return pd.DataFrame(centroid_columns, index=genes)
+
+
+def _append_suffix_before_extension(path, suffix):
+    root, ext = os.path.splitext(path)
+    if ext:
+        return f"{root}{suffix}{ext}"
+    return f"{path}{suffix}"
+
+
 def _cluster_color_map(cluster_order):
     palette = plt.get_cmap("tab20")
     colors = [palette(i % palette.N) for i in range(len(cluster_order))]
     return {cluster: colors[i] for i, cluster in enumerate(cluster_order)}, ListedColormap(colors)
+
+
+def _axis_label_fontsize(label_count, axis):
+    label_count = max(1, int(label_count))
+    if axis == "x":
+        if label_count <= 6:
+            return 10
+        if label_count <= 12:
+            return 9
+        if label_count <= 20:
+            return 8
+        if label_count <= 32:
+            return 7
+        if label_count <= 48:
+            return 6
+        if label_count <= 72:
+            return 5
+        if label_count <= 96:
+            return 4
+        return 3
+
+    if label_count <= 20:
+        return 9
+    if label_count <= 40:
+        return 8
+    if label_count <= 80:
+        return 7
+    if label_count <= 140:
+        return 6
+    if label_count <= 220:
+        return 5
+    if label_count <= 320:
+        return 4
+    return 3
 
 
 def _plot_heatmap(heatmap_df, output_path, cluster_counts, cluster_order, column_clusters, row_clusters):
@@ -320,10 +389,10 @@ def _plot_heatmap(heatmap_df, output_path, cluster_counts, cluster_order, column
     from mpl_toolkits.axes_grid1 import make_axes_locatable
     from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
-    cluster_count = max(1, len(cluster_counts))
-    fixed_height = 7
-    fig_w = max(6.0, 0.25 * cluster_count)
-    fig, ax = plt.subplots(figsize=(fig_w, fixed_height))
+    fixed_width = 7.5
+    fixed_height = 8.5
+    fig, ax = plt.subplots(figsize=(fixed_width, fixed_height))
+    fig.subplots_adjust(left=0.08, right=0.88, top=0.82, bottom=0.08)
 
     vmin, vmax = -3.0, 3.0
     norm = TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax)
@@ -354,38 +423,41 @@ def _plot_heatmap(heatmap_df, output_path, cluster_counts, cluster_order, column
         if pos < total:
             boundaries.append(end + 0.5)
 
+    x_fontsize = _axis_label_fontsize(len(labels), axis="x")
     if centers:
         ax.set_xticks(centers)
-        ax.set_xticklabels(labels, rotation=45, ha="left", fontsize=7)
+        ax.set_xticklabels(labels, rotation=45, ha="left", fontsize=x_fontsize)
     else:
         ax.set_xticks([])
 
     ax.xaxis.tick_top()
-    ax.tick_params(axis="x", bottom=False, top=True, labelbottom=False, labeltop=True, length=0, pad=8)
+    ax.tick_params(axis="x", bottom=False, top=True, labelbottom=False, labeltop=True, length=0, pad=7.5)
 
-    n_genes = heatmap_df.shape[0]
-    if n_genes <= 25:
-        gene_fontsize = 9
-    elif n_genes <= 60:
-        gene_fontsize = 8
-    elif n_genes <= 120:
-        gene_fontsize = 7
-    elif n_genes <= 200:
-        gene_fontsize = 6
+    gene_fontsize = _axis_label_fontsize(heatmap_df.shape[0], axis="y")
+    if heatmap_df.shape[0] > 120:
+        y_positions = []
+        y_labels = []
+        prior_cluster = None
+        for idx, (label, cluster) in enumerate(zip(heatmap_df.index, row_clusters)):
+            cluster = str(cluster)
+            if cluster != prior_cluster:
+                y_positions.append(idx)
+                y_labels.append(label)
+                prior_cluster = cluster
     else:
-        gene_fontsize = 5
-
-    ax.set_yticks(np.arange(heatmap_df.shape[0]))
-    ax.set_yticklabels(heatmap_df.index, fontsize=gene_fontsize)
+        y_positions = np.arange(heatmap_df.shape[0])
+        y_labels = heatmap_df.index
+    ax.set_yticks(y_positions)
+    ax.set_yticklabels(y_labels, fontsize=gene_fontsize)
     ax.yaxis.tick_right()
-    ax.tick_params(axis="y", left=False, right=True, labelleft=False, labelright=True, pad=2)
+    ax.tick_params(axis="y", left=False, right=True, labelleft=False, labelright=True, pad=1)
 
     for boundary in boundaries:
         ax.axvline(boundary, color="white", linewidth=0.5)
 
     divider = make_axes_locatable(ax)
-    ax_top = divider.append_axes("top", size="1.5%", pad=0.02)
-    ax_left = divider.append_axes("left", size="3%", pad=0.02)
+    ax_top = divider.append_axes("top", size="1.125%", pad=0.02)
+    ax_left = divider.append_axes("left", size="1.5%", pad=0.02)
     cax = inset_axes(
         ax,
         width="35%",
@@ -416,7 +488,7 @@ def _plot_heatmap(heatmap_df, output_path, cluster_counts, cluster_order, column
     cbar.ax.text(-0.08, 0.5, f"{vmin:.0f}", ha="right", va="center", transform=cbar.ax.transAxes)
     cbar.ax.text(1.08, 0.5, f"{vmax:.0f}", ha="left", va="center", transform=cbar.ax.transAxes)
 
-    fig.savefig(output_path, bbox_inches="tight")
+    fig.savefig(output_path)
     plt.close(fig)
 
 
@@ -490,6 +562,7 @@ def main():
     markers_tsv = args.markers_tsv or os.path.join(out_dir, f"{base_name}_markers.tsv")
     heatmap_tsv = args.heatmap_tsv or os.path.join(out_dir, f"{base_name}_fold_matrix.tsv")
     heatmap_column_tsv = args.heatmap_column_tsv or os.path.join(out_dir, f"{base_name}_exp_matrix.tsv")
+    centroids_tsv = _append_suffix_before_extension(heatmap_tsv, ".centroids")
 
     log_file = open(log_path, "w")
     tee_out = Tee(sys.stdout, log_file)
@@ -505,6 +578,7 @@ def main():
         print(f"[INFO] Marker TSV: {markers_tsv}")
         print(f"[INFO] Heatmap TSV (fold matrix): {heatmap_tsv}")
         print(f"[INFO] Heatmap TSV (expression matrix): {heatmap_column_tsv}")
+        print(f"[INFO] Centroid TSV: {centroids_tsv}")
 
         layer = args.layer
         if args.use_raw and layer:
@@ -571,8 +645,14 @@ def main():
 
             effect_df = rg_df.pivot_table(index="names", columns="group", values="logfoldchanges", aggfunc="first")
 
-        selected = _select_unique_markers(pvals, cluster_order, args.top_n, effect_df=effect_df, pval_threshold=0.05)
-        print(f"[INFO] Selected {selected.shape[0]} markers after filtering.")
+        selected = _select_unique_markers(
+            fdr_df,
+            cluster_order,
+            args.top_n,
+            effect_df=effect_df,
+            pval_threshold=0.001,
+        )
+        print(f"[INFO] Selected {selected.shape[0]} markers after FDR/effect filtering.")
 
         if selected.empty:
             raise ValueError("No markers were selected. Check inputs and parameters.")
@@ -640,6 +720,18 @@ def main():
         heatmap_col_tsv_df.columns = [f"{c}:{b}" for c, b in zip(column_clusters, ordered_cells)]
         heatmap_col_tsv_df.to_csv(heatmap_column_tsv, sep="\t")
         print(f"Saved expression matrix TSV to: {heatmap_column_tsv}")
+
+        centroid_df = _build_marker_centroids(
+            adata,
+            args.cluster_key,
+            heatmap_df.index.tolist(),
+            cluster_order,
+            args.use_raw,
+            layer,
+        )
+        centroid_df.index = [f"{c}:{g}" for c, g in zip(row_clusters, centroid_df.index)]
+        centroid_df.to_csv(centroids_tsv, sep="\t")
+        print(f"Saved centroid matrix TSV to: {centroids_tsv}")
 
         print(f"Saved log to: {log_path}")
     finally:

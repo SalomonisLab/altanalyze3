@@ -48,6 +48,7 @@ CLI_CLUSTER_DEFAULTS = {
     "min_count": 1,
     "cluster_isoforms": True,
 }
+MAX_ISOFORMS_TIE_SEED = 0
 
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), '..'))
 from long_read import isoform_matrix as iso
@@ -1187,6 +1188,50 @@ def _iter_alias_tokens(value, separators=('|', ':')):
     return [t for t in seen if t]
 
 
+def _stable_seed(base_seed, *parts):
+    hasher = hashlib.sha256()
+    hasher.update(str(base_seed).encode("utf-8"))
+    for part in parts:
+        hasher.update(repr(part).encode("utf-8"))
+    return int.from_bytes(hasher.digest()[:8], "big", signed=False)
+
+
+def _stable_shuffle(items, base_seed, *parts):
+    ordered = list(items)
+    if len(ordered) <= 1:
+        return ordered
+    rng = np.random.default_rng(_stable_seed(base_seed, *parts))
+    order = rng.permutation(len(ordered))
+    return [ordered[idx] for idx in order]
+
+
+def _select_ranked_with_tie_sampling(items, limit, score_fn, base_seed=MAX_ISOFORMS_TIE_SEED,
+                                     context_parts=None):
+    if limit is None or limit <= 0:
+        return list(items)
+    ordered_items = list(items)
+    if len(ordered_items) <= limit:
+        return ordered_items
+    if context_parts is None:
+        context_parts = ()
+    groups = defaultdict(list)
+    for item in ordered_items:
+        groups[score_fn(item)].append(item)
+    scores = sorted(groups.keys(), reverse=True)
+    selected = []
+    for score in scores:
+        group = _stable_shuffle(groups[score], base_seed, *context_parts, score)
+        remaining = limit - len(selected)
+        if remaining <= 0:
+            break
+        if len(group) <= remaining:
+            selected.extend(group)
+        else:
+            selected.extend(group[:remaining])
+            break
+    return selected
+
+
 def load_transcript_associations(path, target_gene):
     t_start = time.time()
     structures = {}
@@ -1739,7 +1784,8 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                                           subsequence_anchor_hard_fail=True,
                                           subsequence_middle_gate=True,
                                           splice_fuzz_tolerance=12,
-                                          supplementary_annotation=None):
+                                          supplementary_annotation=None,
+                                          max_isoforms_tie_seed=MAX_ISOFORMS_TIE_SEED):
     start_time = time.time()
     global _AUTO_DEBUG_PRINTED
     if not _AUTO_DEBUG_PRINTED:
@@ -1813,7 +1859,8 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                 subsequence_anchor_hard_fail=subsequence_anchor_hard_fail,
                 subsequence_middle_gate=subsequence_middle_gate,
                 splice_fuzz_tolerance=splice_fuzz_tolerance,
-                supplementary_annotation=supplementary_annotation
+                supplementary_annotation=supplementary_annotation,
+                max_isoforms_tie_seed=max_isoforms_tie_seed
             )
         return
     if isinstance(genes, str):
@@ -2162,7 +2209,13 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                     key=lambda x: x[1],
                     reverse=True
                 )
-                ranked = ranked[:max_isoforms]
+                ranked = _select_ranked_with_tie_sampling(
+                    ranked,
+                    max_isoforms,
+                    score_fn=lambda item: item[1],
+                    base_seed=max_isoforms_tie_seed,
+                    context_parts=("auto", gene, condition),
+                )
                 per_condition_selected[condition] = len(ranked)
                 selected_ids.update(iso_id for iso_id, _ in ranked)
             if selected_ids:
@@ -2195,7 +2248,8 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
         plotted, _, _ = build_plotted_isoforms(
             combined_records, transcript_structures, gene,
             cluster_mode, cluster_features, min_count, build_max_isoforms,
-            isoform_filter=isoform_filter
+            isoform_filter=isoform_filter,
+            max_isoforms_tie_seed=max_isoforms_tie_seed
         )
         if plotted:
             grouped_structures = group_structures(
@@ -2282,7 +2336,8 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
                         cluster_features,
                         min_count,
                         max_isoforms,
-                        isoform_filter=isoform_filter
+                        isoform_filter=isoform_filter,
+                        max_isoforms_tie_seed=max_isoforms_tie_seed
                     )
                     if local_plotted:
                         local_grouped_structures = group_structures(
@@ -3644,7 +3699,8 @@ def _reassign_shorter_substrings(groups):
 
 def build_plotted_isoforms(isoforms, transcript_structures, target_gene, cluster_mode,
                            cluster_features, min_count, max_isoforms,
-                           isoform_filter=None):
+                           isoform_filter=None,
+                           max_isoforms_tie_seed=MAX_ISOFORMS_TIE_SEED):
     filter_clauses = _normalize_isoform_filter_spec(isoform_filter)
     filtered = [i for i in isoforms if i['count'] >= min_count]
     missing_ids = []
@@ -3659,8 +3715,13 @@ def build_plotted_isoforms(isoforms, transcript_structures, target_gene, cluster
             continue
         resolved_items.append((iso, resolved))
 
-    resolved_items.sort(key=lambda x: x[0]['count'], reverse=True)
-    resolved_items = resolved_items[:max_isoforms]
+    resolved_items = _select_ranked_with_tie_sampling(
+        resolved_items,
+        max_isoforms,
+        score_fn=lambda item: item[0].get('count', 0),
+        base_seed=max_isoforms_tie_seed,
+        context_parts=("plot", target_gene),
+    )
 
     plotted = []
     for iso, resolved in resolved_items:
@@ -3809,7 +3870,8 @@ def build_cluster_label_map(records, transcript_structures, target_gene, cluster
                             isoform_filter=None, filter_junction_bias=0,
                             filter_profile_hard_split=True,
                             subsequence_anchor_hard_fail=True,
-                            subsequence_middle_gate=True):
+                            subsequence_middle_gate=True,
+                            max_isoforms_tie_seed=MAX_ISOFORMS_TIE_SEED):
     if cluster_strategy is None:
         cluster_strategy = 'substring' if cluster_isoforms else 'jaccard'
     if cluster_strategy == 'overlap':
@@ -3830,7 +3892,8 @@ def build_cluster_label_map(records, transcript_structures, target_gene, cluster
         cluster_features,
         min_count,
         max_isoforms,
-        isoform_filter=isoform_filter
+        isoform_filter=isoform_filter,
+        max_isoforms_tie_seed=max_isoforms_tie_seed
     )
     plotted_ids = set()
     for iso in plotted:
@@ -3851,7 +3914,8 @@ def build_cluster_label_map(records, transcript_structures, target_gene, cluster
             cluster_features,
             min_count,
             max_isoforms,
-            isoform_filter=isoform_filter
+            isoform_filter=isoform_filter,
+            max_isoforms_tie_seed=max_isoforms_tie_seed
         )
     grouped_structures = group_structures(
         plotted,
@@ -4316,7 +4380,8 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
                             show_gene_model_track=True,
                             show_exon_labels=True,
                             show_genomic_coords=True,
-                            return_cluster_labels=False):
+                            return_cluster_labels=False,
+                            max_isoforms_tie_seed=MAX_ISOFORMS_TIE_SEED):
     """Render stacked isoform read tracks for a single gene.
 
     isoforms: list of dicts with isoform IDs and read counts.
@@ -4371,7 +4436,8 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
             cluster_features,
             min_count,
             max_isoforms,
-            isoform_filter=isoform_filter
+            isoform_filter=isoform_filter,
+            max_isoforms_tie_seed=max_isoforms_tie_seed
         )
         print(f"[timing] build_plotted_isoforms: {time.time() - t_build:.2f}s")
         if not plotted:
@@ -4438,8 +4504,13 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
                     seen.add(iso_key)
                     plotted.append(iso)
         if max_isoforms and len(plotted) > max_isoforms and isoform_counts is None:
-            plotted.sort(key=lambda iso: iso.get('count', 0), reverse=True)
-            plotted = plotted[:max_isoforms]
+            plotted = _select_ranked_with_tie_sampling(
+                plotted,
+                max_isoforms,
+                score_fn=lambda iso: iso.get('count', 0),
+                base_seed=max_isoforms_tie_seed,
+                context_parts=("grouped", target_gene),
+            )
             keep_ids = {
                 str(iso.get('isoform_id', iso.get('resolved_id')))
                 for iso in plotted
@@ -5132,6 +5203,8 @@ def main():
                         help='Optional sample name suffix to match when groupby is a TSV/TXT file')
     parser.add_argument('--max-isoforms', type=int, default=CLI_CLUSTER_DEFAULTS["max_isoforms"],
                         help='Maximum isoforms to display')
+    parser.add_argument('--max-isoforms-tie-seed', type=int, default=MAX_ISOFORMS_TIE_SEED,
+                        help='Fixed seed used to sample tied isoforms when max-isoforms truncates')
     parser.add_argument('--min-count', type=float, default=CLI_CLUSTER_DEFAULTS["min_count"],
                         help='Minimum summed count to include an isoform')
     parser.add_argument('--cluster-mode', choices=['full', 'base', 'block'],
@@ -5424,7 +5497,8 @@ def main():
                         filter_junction_bias=args.filter_junction_bias,
                         filter_profile_hard_split=args.filter_profile_hard_split,
                         subsequence_anchor_hard_fail=args.subsequence_anchor_hard_fail,
-                        subsequence_middle_gate=args.subsequence_middle_gate
+                        subsequence_middle_gate=args.subsequence_middle_gate,
+                        max_isoforms_tie_seed=args.max_isoforms_tie_seed
                     )
                     print(f"[timing] cluster_label_map: {time.time() - t_cluster_map:.2f}s")
                     output_path = _resolve_output_path(path, gene)
@@ -5458,6 +5532,7 @@ def main():
                         filter_profile_hard_split=args.filter_profile_hard_split,
                         subsequence_anchor_hard_fail=args.subsequence_anchor_hard_fail,
                         subsequence_middle_gate=args.subsequence_middle_gate,
+                        max_isoforms_tie_seed=args.max_isoforms_tie_seed,
                         return_cluster_labels=True
                     )
                     isoform_counts = {
@@ -5580,7 +5655,8 @@ def main():
                     combined_records, transcript_structures, gene,
                     args.cluster_mode, args.cluster_features,
                     args.min_count, args.max_isoforms,
-                    isoform_filter=isoform_filter
+                    isoform_filter=isoform_filter,
+                    max_isoforms_tie_seed=args.max_isoforms_tie_seed
                 )
                 if plotted:
                     grouped_structures = group_structures(
@@ -5597,7 +5673,8 @@ def main():
                         filter_junction_bias=args.filter_junction_bias,
                         filter_profile_hard_split=args.filter_profile_hard_split,
                         subsequence_anchor_hard_fail=args.subsequence_anchor_hard_fail,
-                        subsequence_middle_gate=args.subsequence_middle_gate
+                        subsequence_middle_gate=args.subsequence_middle_gate,
+                        max_isoforms_tie_seed=args.max_isoforms_tie_seed
                     )
                     if args.cluster_isoforms:
                         isoform_colors = assign_cluster_colors(grouped_structures, plt.get_cmap(DEFAULT_COLORMAP).colors)
@@ -5640,6 +5717,7 @@ def main():
                         filter_profile_hard_split=args.filter_profile_hard_split,
                         subsequence_anchor_hard_fail=args.subsequence_anchor_hard_fail,
                         subsequence_middle_gate=args.subsequence_middle_gate,
+                        max_isoforms_tie_seed=args.max_isoforms_tie_seed,
                         return_cluster_labels=True
                     )
                     isoform_path, _ = export_plotted_isoforms(

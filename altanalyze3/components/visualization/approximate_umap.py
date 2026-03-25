@@ -33,7 +33,6 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
-import sys
 
 import anndata as ad
 import matplotlib
@@ -67,6 +66,14 @@ def _str_to_bool(value: Optional[str]) -> bool:
     raise argparse.ArgumentTypeError(f"Expected a boolean value, got '{value}'.")
 
 
+def _clean_string(value: object) -> str:
+    if value is None:
+        return ""
+    if pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
 @dataclass
 class ApproximateUMAPResult:
     query_adata: ad.AnnData
@@ -74,6 +81,9 @@ class ApproximateUMAPResult:
     reference_choices: Dict[str, List[str]]
     cluster_key: str
     cluster_order: List[str]
+    plot_color_map: Optional[Dict[str, str]] = None
+    plot_obs_field: Optional[str] = None
+    plot_obs_value: Optional[str] = None
 
     def write_text_outputs(self, prefix: Union[str, Path]) -> Dict[str, str]:
         prefix = str(prefix)
@@ -110,6 +120,9 @@ class ApproximateUMAPResult:
         reference_cluster_key: str,
         query_cluster_key: str,
         output_path: Union[str, Path],
+        custom_color_map: Optional[Mapping[str, str]] = None,
+        restrict_obs_field: Optional[str] = None,
+        restrict_obs_value: Optional[str] = None,
     ) -> tuple[str, str]:
         output_path = Path(output_path)
         annotated, plain = _save_comparison_pdf(
@@ -119,6 +132,9 @@ class ApproximateUMAPResult:
             reference_cluster_key=reference_cluster_key,
             query_cluster_key=query_cluster_key,
             lineage_order=self.cluster_order,
+            custom_color_map=custom_color_map or self.plot_color_map,
+            restrict_obs_field=restrict_obs_field or self.plot_obs_field,
+            restrict_obs_value=restrict_obs_value or self.plot_obs_value,
             destination=output_path,
         )
         return annotated, plain
@@ -134,10 +150,18 @@ def approximate_umap(
     jitter: float = 0.05,
     num_reference_cells: int = 1,
     random_state: Optional[int] = None,
+    custom_color_tsv: Optional[Union[str, Path]] = None,
+    restrict_obs_field: Optional[str] = None,
+    restrict_obs_value: Optional[str] = None,
 ) -> ApproximateUMAPResult:
+    if bool(restrict_obs_field) != bool(restrict_obs_value):
+        raise ValueError(
+            "restrict_obs_field and restrict_obs_value must be supplied together."
+        )
     query_adata = _load_adata(query)
     reference_adata = _load_adata(reference)
     ref_cluster_key = reference_cluster_key or query_cluster_key
+    plot_color_map = _load_custom_color_map(custom_color_tsv) if custom_color_tsv else None
 
     _validate_inputs(
         query_adata,
@@ -359,6 +383,9 @@ def approximate_umap(
         reference_choices=sampled,
         cluster_key=query_cluster_key,
         cluster_order=list(cluster_order),
+        plot_color_map=plot_color_map,
+        plot_obs_field=restrict_obs_field,
+        plot_obs_value=restrict_obs_value,
     )
 
 
@@ -535,8 +562,24 @@ def _save_comparison_pdf(
     reference_cluster_key: str,
     query_cluster_key: str,
     lineage_order: Optional[Sequence[str]] = None,
+    custom_color_map: Optional[Mapping[str, str]] = None,
+    restrict_obs_field: Optional[str] = None,
+    restrict_obs_value: Optional[str] = None,
     destination: Path,
 ) -> tuple[str, str]:
+    reference = _subset_adata_for_plot(
+        reference,
+        obs_field=restrict_obs_field,
+        obs_value=restrict_obs_value,
+        dataset_label="reference",
+    )
+    query = _subset_adata_for_plot(
+        query,
+        obs_field=restrict_obs_field,
+        obs_value=restrict_obs_value,
+        dataset_label="query",
+    )
+
     if umap_key not in reference.obsm:
         raise KeyError(f"Reference AnnData missing '{umap_key}' in .obsm for plotting.")
     if umap_key not in query.obsm:
@@ -582,7 +625,14 @@ def _save_comparison_pdf(
             legend_preview += ", …"
         print(f"[debug] Legend categories passed to Matplotlib (n={len(categories)}): {legend_preview}")
 
-    palette = _resolve_colors(categories, reference, query, reference_cluster_key, query_cluster_key)
+    palette = _resolve_colors(
+        categories,
+        reference,
+        query,
+        reference_cluster_key,
+        query_cluster_key,
+        custom_color_map=custom_color_map,
+    )
 
     plt.rcParams.update(
         {
@@ -685,7 +735,24 @@ def _resolve_colors(
     query: ad.AnnData,
     reference_cluster_key: str,
     query_cluster_key: str,
+    custom_color_map: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, str]:
+    if custom_color_map:
+        sanitized_custom: Dict[str, str] = {}
+        for key, value in custom_color_map.items():
+            try:
+                sanitized_custom[str(key)] = to_hex(mcolors.to_rgb(value))
+            except ValueError:
+                continue
+        missing = [str(cat) for cat in categories if str(cat) not in sanitized_custom]
+        if not missing:
+            return {str(cat): sanitized_custom[str(cat)] for cat in categories}
+        print(
+            "[warn] Custom color TSV is missing colors for: "
+            + ", ".join(missing)
+            + ". Falling back to generated/default colors for those categories."
+        )
+
     candidates = [
         (query, f"{query_cluster_key}_colors"),
         (reference, f"{query_cluster_key}_colors"),
@@ -722,7 +789,62 @@ def _resolve_colors(
     rng = np.random.default_rng(123)
     rng.shuffle(palette)
 
-    return {str(cat): palette[i % len(palette)] for i, cat in enumerate(categories)}
+    resolved = {str(cat): palette[i % len(palette)] for i, cat in enumerate(categories)}
+    if custom_color_map:
+        for key, value in custom_color_map.items():
+            try:
+                resolved[str(key)] = to_hex(mcolors.to_rgb(value))
+            except ValueError:
+                continue
+    return resolved
+
+
+def _load_custom_color_map(path: Union[str, Path]) -> Dict[str, str]:
+    df = pd.read_csv(path, sep="\t", dtype=str).fillna("")
+    if df.shape[1] < 2:
+        raise ValueError("Custom colors TSV must contain at least two columns: annotation and color.")
+    label_column = df.columns[0]
+    color_column = df.columns[1]
+    color_map: Dict[str, str] = {}
+    for _, row in df.iterrows():
+        label = _clean_string(row.get(label_column))
+        color = _clean_string(row.get(color_column))
+        if not label or not color:
+            continue
+        try:
+            color_map[label] = to_hex(mcolors.to_rgb(color))
+        except ValueError as exc:
+            raise ValueError(f"Invalid color '{color}' for label '{label}' in {path}") from exc
+    if not color_map:
+        raise ValueError(f"No usable annotation/color pairs found in {path}")
+    print(f"[info] Loaded {len(color_map)} custom colors from {path}")
+    return color_map
+
+
+def _subset_adata_for_plot(
+    adata: ad.AnnData,
+    *,
+    obs_field: Optional[str],
+    obs_value: Optional[str],
+    dataset_label: str,
+) -> ad.AnnData:
+    if not obs_field:
+        return adata
+    if obs_field not in adata.obs:
+        print(f"[warn] {dataset_label} AnnData missing obs field '{obs_field}'; plotting all cells.")
+        return adata
+    value = _clean_string(obs_value)
+    mask = adata.obs[obs_field].astype(str) == value
+    if not bool(mask.any()):
+        raise ValueError(
+            f"No {dataset_label} cells matched obs['{obs_field}'] == '{value}' for plotting."
+        )
+    subset = adata[mask].copy()
+    print(
+        f"[info] Restricting {dataset_label} plot to obs['{obs_field}'] == '{value}' "
+        f"({subset.n_obs}/{adata.n_obs} cells)."
+    )
+    return subset
 
 
 def _compute_point_size(num_points: int) -> float:
@@ -804,6 +926,21 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--random-state", type=int, help="Seed for reproducible sampling.")
     parser.add_argument(
+        "--custom-colors-tsv",
+        help=(
+            "TSV with at least two columns: the first is the cell-type annotation "
+            "and the second is the color code."
+        ),
+    )
+    parser.add_argument(
+        "--restrict-obs-field",
+        help="obs column used to restrict which cells are drawn in the PDF comparison plot.",
+    )
+    parser.add_argument(
+        "--restrict-obs-value",
+        help="Specific obs value to match when --restrict-obs-field is supplied.",
+    )
+    parser.add_argument(
         "--output-prefix",
         help="Prefix for outputs (used within --outdir). Defaults to <query>-approximate-umap.",
     )
@@ -874,6 +1011,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         jitter=args.jitter,
         num_reference_cells=args.num_reference_cells,
         random_state=args.random_state,
+        custom_color_tsv=args.custom_colors_tsv,
+        restrict_obs_field=args.restrict_obs_field,
+        restrict_obs_value=args.restrict_obs_value,
     )
 
     query_path = Path(args.query)
@@ -932,6 +1072,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         reference_cluster_key=args.reference_cluster_key or args.query_cluster_key,
         query_cluster_key=args.query_cluster_key,
         output_path=output_pdf,
+        custom_color_map=result.plot_color_map,
+        restrict_obs_field=args.restrict_obs_field,
+        restrict_obs_value=args.restrict_obs_value,
     )
     logging.info("Annotated UMAP PDF: %s", annotated_pdf)
     logging.info("Label-free UMAP PDF: %s", plain_pdf)

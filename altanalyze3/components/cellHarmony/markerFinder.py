@@ -430,7 +430,11 @@ def find_markers_from_adata(
                 output_path=os.path.join(output_dir, heatmap_filename),
             )
 
-    return MarkerOutputs(markers=markers_df, heatmap_values=heatmap_df, cluster_assignments=clusters)
+    return MarkerOutputs(
+        markers=markers_df,
+        heatmap_values=heatmap_df,
+        cluster_assignments=clusters,
+    )
 
 
 def run_marker_finder_on_file(

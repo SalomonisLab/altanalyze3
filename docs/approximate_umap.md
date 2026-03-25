@@ -33,6 +33,9 @@ result = approximate_umap(
     jitter=0.05,
     num_reference_cells=2,
     random_state=42,
+    custom_color_tsv="cluster_colors.tsv",
+    restrict_obs_field="sample_group",
+    restrict_obs_value="MDS-pre",
 )
 
 print(result.query_adata)  # AnnData copy with `.obsm["X_umap"]` newly populated
@@ -57,6 +60,9 @@ python -m altanalyze3.components.visualization.approximate_umap \
   --reference path/to/reference.h5ad \
   --query-cluster-key leiden \
   --reference-cluster-key cellHarmony_cluster \
+  --custom-colors-tsv cluster_colors.tsv \
+  --restrict-obs-field sample_group \
+  --restrict-obs-value MDS-pre \
   --outdir outputs/ \
   --output-prefix my_query
 ```
@@ -94,6 +100,11 @@ inside `--outdir`) or an absolute path.
   seeds an approximate coordinate. Set to `0.0` to disable.
 - `random_state`: Seed for the NumPy random number generator, enabling reproducible
   layouts.
+- `custom_color_tsv`: Optional TSV where the first column is the cell-type
+  annotation and the second column is the color code used in the comparison PDF.
+- `restrict_obs_field` and `restrict_obs_value`: Optional plotting filter that
+  restricts the comparison PDF to cells with `obs[restrict_obs_field] ==
+  restrict_obs_value`. This affects plotting only, not coordinate projection.
 
 ## Returned data
 

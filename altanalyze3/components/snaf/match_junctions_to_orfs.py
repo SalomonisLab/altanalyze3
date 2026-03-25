@@ -330,7 +330,7 @@ with open(orf_sequences_file, "r") as orf_handle, open(output_file, "w") as out_
                                     tm_sequences = transmembrane_domain_seq_db[gene_id]
                                     tm_count = len([peptide for peptide in tm_sequences if peptide in protein_sequence])
                                     tm_ref_count = len([peptide for peptide in tm_sequences if peptide in uniprot_dict[gene_id]])                               
-                            results.append((gene_id,source_name,transcript_id,found,protein_info,protein_sequence,junction_seq,
+                            results.append((gene_id,source_name,transcript_id,transcript_structure,found,protein_info,protein_sequence,junction_seq,
                                     peptide,EM_domain_presence,TM_overlap,ref_isoform_seq,unique_peptide_seq,ref_length,tm_count,tm_ref_count,sequence))
 
                 else:
@@ -340,11 +340,11 @@ with open(orf_sequences_file, "r") as orf_handle, open(output_file, "w") as out_
              pass
 
     # Write results to output file
-    out_handle.write(f"symbol\tgene\tjunction_name\ttranscript_id\tPeptide in ORF\tprotein_info\tNovel-isoform-sequence\tjunc-seq\tjunction-peptide\tEM_domain_presence\tTM_overlap\tunique_peptide_seq\tref_isoform_seq\tprotein_length)\tref_length\ttm_count\tref_tm_count\ORF\n")
+    out_handle.write(f"symbol\tgene\tjunction_name\ttranscript_id\ttranscript_structure\tPeptide in ORF\tprotein_info\tNovel-isoform-sequence\tjunc-seq\tjunction-peptide\tEM_domain_presence\tTM_overlap\tunique_peptide_seq\tref_isoform_seq\tprotein_length)\tref_length\ttm_count\tref_tm_count\tORF\n")
 
-    for gene,junction_name, transcript_id, status, protein_info, protein_sequence, junc_seq, peptide, EM_domain_presence, TM_overlap, ref_isoform_seq, unique_peptide_seq, ref_length, tm_count, tm_ref_count, orf in results:
+    for gene,junction_name, transcript_id, transcript_structure, status, protein_info, protein_sequence, junc_seq, peptide, EM_domain_presence, TM_overlap, ref_isoform_seq, unique_peptide_seq, ref_length, tm_count, tm_ref_count, orf in results:
         if gene in gene_symbol_dict:
             symbol = gene_symbol_dict[gene]
         else:
             symbol = ''
-        out_handle.write(f"{symbol}\t{gene}\t{junction_name}\t{transcript_id}\t{status}\t{protein_info}\t{protein_sequence}\t{junc_seq}\t{peptide}\t{EM_domain_presence}\t{TM_overlap}\t{unique_peptide_seq}\t{ref_isoform_seq}\t{len(protein_sequence)}\t{ref_length}\t{tm_count}\t{tm_ref_count}\t{orf}\n")
+        out_handle.write(f"{symbol}\t{gene}\t{junction_name}\t{transcript_id}\t{transcript_structure}\t{status}\t{protein_info}\t{protein_sequence}\t{junc_seq}\t{peptide}\t{EM_domain_presence}\t{TM_overlap}\t{unique_peptide_seq}\t{ref_isoform_seq}\t{len(protein_sequence)}\t{ref_length}\t{tm_count}\t{tm_ref_count}\t{orf}\n")
