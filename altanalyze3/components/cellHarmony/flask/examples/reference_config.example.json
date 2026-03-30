@@ -1,0 +1,21 @@
+{
+  "species": [
+    {
+      "id": "human",
+      "label": "Human",
+      "references": [
+        {
+          "id": "human_example_reference",
+          "label": "Human example reference",
+          "states_tsv": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/flask/examples/example_states.tsv",
+          "reference_clusters_tsv": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/flask/examples/example_reference_clusters.tsv",
+          "reference_coords_tsv": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/flask/examples/example_reference_umap.tsv",
+          "cluster_key": "Population",
+          "soupx_options": [
+            "default"
+          ]
+        }
+      ]
+    }
+  ]
+}

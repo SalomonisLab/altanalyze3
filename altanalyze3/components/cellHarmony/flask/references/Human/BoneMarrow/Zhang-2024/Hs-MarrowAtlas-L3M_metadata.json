@@ -1,0 +1,11 @@
+{
+  "cluster_colors": null,
+  "cluster_key": "Level 3 Multimodal",
+  "lineage_order": null,
+  "n_cells": 71460,
+  "n_features": 36743,
+  "reference_clusters_tsv": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/flask/references/Human/BoneMarrow/Zhang-2024/adata_combined_rna_adt_annotated-titrated_reference_clusters.tsv",
+  "reference_coords_tsv": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/flask/references/Human/BoneMarrow/Zhang-2024/adata_combined_rna_adt_annotated-titrated_reference_umap.tsv",
+  "source_h5ad": "/Users/saljh8/Dropbox/Manuscripts/InProgress/Human-Titration/ShinyCell/adata_combined_rna_adt_annotated-titrated.h5ad",
+  "umap_key": "X_umap"
+}

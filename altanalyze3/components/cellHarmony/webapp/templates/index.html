@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ app_title }}</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/modern-normalize@3.0.1/modern-normalize.min.css">
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="hero">
+        <div class="hero-copy">
+          <div class="hero-brand">
+            <div>
+              <p class="eyebrow">ULTRA-FAST SINGLE-CELL WORKFLOW</p>
+              <h1>cellHarmony web</h1>
+            </div>
+          </div>
+          <p class="lede">Upload and QC single-cell data, visualize results and perform differential expression between samples</p>
+        </div>
+        <a class="docs-link" href="https://github.com/SalomonisLab/altanalyze3/blob/master/docs/cellHarmony.md" target="_blank" rel="noopener">Docs</a>
+      </header>
+
+      <main class="grid">
+        <section class="panel">
+          <h2>1. Upload</h2>
+          <form id="job-form">
+            <label class="field">
+              <span>Species</span>
+              <select id="species-select" required></select>
+            </label>
+            <label class="field">
+              <span>Reference</span>
+              <select id="reference-select" required></select>
+            </label>
+            <div class="field">
+              <div class="field-row">
+                <span>Samples</span>
+                <button type="button" class="ghost-btn" id="add-sample-btn">Add sample</button>
+              </div>
+              <div id="sample-container"></div>
+            </div>
+            <button class="primary-btn" type="submit">Create job</button>
+          </form>
+          <div class="notice hidden" id="job-created"></div>
+        </section>
+
+        <section class="panel">
+          <h2>2. QC and alignment</h2>
+          <form id="qc-form">
+            <label class="field">
+              <span>Job ID</span>
+              <input id="qc-job-id" name="job_id" placeholder="Paste job id" required>
+            </label>
+            <div class="two-col">
+              <label class="field">
+                <span>Min genes</span>
+                <input name="min_genes" value="200">
+              </label>
+              <label class="field">
+                <span>Min counts</span>
+                <input name="min_counts" value="500">
+              </label>
+            </div>
+            <div class="two-col">
+              <label class="field">
+                <span>Min cells</span>
+                <input name="min_cells" value="3">
+              </label>
+              <label class="field">
+                <span>Mito %</span>
+                <input name="mit_percent" value="15">
+              </label>
+            </div>
+            <label class="field">
+              <span>Alignment cutoff</span>
+              <input name="align_cutoff" value="0.1">
+            </label>
+            <button class="primary-btn" type="submit">Save QC and run</button>
+          </form>
+          <div class="progress-shell">
+            <div class="progress-track"><div class="progress-fill" id="job-progress"></div></div>
+            <div class="progress-label" id="job-progress-label">0%</div>
+          </div>
+          <pre class="log-view" id="job-log"></pre>
+        </section>
+
+        <section class="panel">
+          <h2>3. Results</h2>
+          <form id="results-form">
+            <label class="field">
+              <span>Job ID</span>
+              <input id="results-job-id" placeholder="Paste job id" required>
+            </label>
+            <label class="field">
+              <span>Gene</span>
+              <input id="gene-query" placeholder="e.g. MPO">
+            </label>
+            <div class="two-col">
+              <label class="field">
+                <span>UMAP display</span>
+                <select id="umap-mode">
+                  <option value="relative">Relative to reference</option>
+                  <option value="cluster">Cell-state clusters</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Expression display</span>
+                <select id="expression-mode">
+                  <option value="umap">UMAP</option>
+                  <option value="violin">Violin</option>
+                </select>
+              </label>
+            </div>
+          </form>
+          <div class="downloads" id="download-links"></div>
+        </section>
+      </main>
+
+      <section class="plots">
+        <article class="panel">
+          <div class="panel-head">
+            <h2>Approximate UMAP</h2>
+            <button class="ghost-btn" type="button" id="download-umap-image-btn">Download PDF</button>
+          </div>
+          <div id="umap-plot" class="plot-area"></div>
+        </article>
+        <article class="panel">
+          <div class="panel-head">
+            <h2>Expression</h2>
+            <button class="ghost-btn" type="button" id="download-expression-image-btn">Download PDF</button>
+          </div>
+          <div id="expression-plot" class="plot-area"></div>
+        </article>
+      </section>
+    </div>
+
+    <script>
+      window.__REFERENCE_REGISTRY__ = {{ registry_json | safe }};
+    </script>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

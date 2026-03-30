@@ -52,7 +52,21 @@ def _lookup_reference(species: str, reference_id: str, registry_path: Path) -> D
             continue
         for ref in entry.get("references", []):
             if ref.get("id") == reference_id:
-                return ref
+                resolved = dict(ref)
+                base_dir = registry_path.parent
+                for key in (
+                    "states_tsv",
+                    "reference_clusters_tsv",
+                    "reference_coords_tsv",
+                    "reference_h5ad",
+                ):
+                    value = resolved.get(key)
+                    if not value:
+                        continue
+                    path = Path(value)
+                    if not path.is_absolute():
+                        resolved[key] = str((base_dir / path).resolve())
+                return resolved
     raise ValueError(f"Reference '{reference_id}' for species '{species}' not found in registry.")
 
 
@@ -61,6 +75,16 @@ def _ensure_reference_fields(reference_entry: Dict) -> None:
     missing = [key for key in required if key not in reference_entry]
     if missing:
         raise ValueError(f"Reference metadata missing required keys: {', '.join(missing)}")
+
+
+def _first_reference_gene(states_tsv: str) -> Optional[str]:
+    try:
+        reference_df = pd.read_csv(states_tsv, sep="\t", index_col=0, nrows=1)
+    except Exception:
+        return None
+    if reference_df.empty:
+        return None
+    return str(reference_df.index[0])
 
 
 def run_cellharmony_pipeline(job_id: str, store: JobStore, registry_path: Path) -> Dict[str, Path]:
@@ -77,6 +101,7 @@ def run_cellharmony_pipeline(job_id: str, store: JobStore, registry_path: Path) 
     reference_entry = _lookup_reference(meta["species"], meta["reference"], registry_path)
     _ensure_reference_fields(reference_entry)
     store.append_log(job_id, "Reference metadata loaded.")
+    default_gene = _first_reference_gene(reference_entry["states_tsv"])
 
     uploads_dir = store.uploads_dir(job_id)
     outputs_dir = store.outputs_dir(job_id)
@@ -101,7 +126,7 @@ def run_cellharmony_pipeline(job_id: str, store: JobStore, registry_path: Path) 
         save_adata=True,
         unsupervised_cluster=False,
         alignment_mode="classic",
-        min_alignment_score=None,
+        min_alignment_score=float(qc.get("align_cutoff", 0.1)),
         gene_translation_file=None,
         metacell_align=False,
         ambient_correct_cutoff=None,
@@ -167,6 +192,7 @@ def run_cellharmony_pipeline(job_id: str, store: JobStore, registry_path: Path) 
         reference_cluster_key=reference_cluster_key,
         reference_coords_tsv=reference_entry["reference_coords_tsv"],
         reference_clusters_tsv=reference_entry["reference_clusters_tsv"],
+        default_gene=default_gene,
         message="Approximate UMAP completed.",
     )
     store.append_log(job_id, "cellHarmony-lite pipeline finished.")

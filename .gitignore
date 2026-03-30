@@ -49,3 +49,5 @@ cromwell-workflow-logs
 
 # IDE
 .vscode
+altanalyze3/components/cellHarmony/webapp/jobs/
+.venv/

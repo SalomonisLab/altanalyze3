@@ -6,10 +6,10 @@
       "references": [
         {
           "id": "hs_bm_reference",
-          "label": "Bone marrow reference (demo)",
-          "states_tsv": "/data/cellHarmony/references/human/hs_bm_reference_states.tsv",
-          "reference_clusters_tsv": "/data/cellHarmony/references/human/hs_bm_reference_clusters.tsv",
-          "reference_coords_tsv": "/data/cellHarmony/references/human/hs_bm_reference_umap.tsv",
+          "label": "Bone marrow CITE-Seq (Zhang 2024)",
+          "states_tsv": "references/Human/BoneMarrow/Zhang-2024/Hs-MarrowAtlas-L3M.txt",
+          "reference_clusters_tsv": "references/Human/BoneMarrow/Zhang-2024/Hs-MarrowAtlas-L3M_reference_clusters.tsv",
+          "reference_coords_tsv": "references/Human/BoneMarrow/Zhang-2024/Hs-MarrowAtlas-L3M_reference_umap.tsv",
           "cluster_key": "Population",
           "soupx_options": [
             "default",
