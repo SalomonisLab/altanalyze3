@@ -74,6 +74,30 @@ def _secure_filename(filename: str) -> str:
     return cleaned or "upload"
 
 
+def _normalize_root_path(root_path: Optional[str]) -> str:
+    value = str(root_path or "").strip()
+    if not value or value == "/":
+        return ""
+    return "/" + value.strip("/")
+
+
+def _with_root_path(root_path: str, path: str) -> str:
+    normalized_path = path if path.startswith("/") else f"/{path}"
+    return f"{root_path}{normalized_path}" if root_path else normalized_path
+
+
+def _is_api_request(request: Request) -> bool:
+    request_path = str(request.url.path or "")
+    scope_path = str(request.scope.get("path") or "")
+    root_path = _normalize_root_path(request.scope.get("root_path") or "")
+    api_prefix = _with_root_path(root_path, "/api/")
+    return (
+        request_path.startswith(api_prefix)
+        or request_path.startswith("/api/")
+        or scope_path.startswith("/api/")
+    )
+
+
 def _flatten_expr(values) -> np.ndarray:
     if sp.issparse(values):
         return np.asarray(values.todense()).ravel()
@@ -166,7 +190,7 @@ def _differential_options(meta: Dict) -> Dict:
     }
 
 
-def _build_differential_payload(job_id: str, meta: Dict) -> Dict:
+def _build_differential_payload(job_id: str, meta: Dict, root_path: str = "") -> Dict:
     options = _differential_options(meta)
     differential = dict(meta.get("differential") or {})
     artifacts = differential.get("artifacts") or {}
@@ -199,9 +223,9 @@ def _build_differential_payload(job_id: str, meta: Dict) -> Dict:
             {
                 "id": network_id,
                 "population": str(entry.get("population", network_id)),
-                "png_url": f"/api/jobs/{job_id}/differential/network/{network_id}?format=png",
-                "pdf_url": f"/api/jobs/{job_id}/differential/network/{network_id}?format=pdf",
-                "tsv_url": f"/api/jobs/{job_id}/differential/network/{network_id}?format=tsv",
+                "png_url": _with_root_path(root_path, f"/api/jobs/{job_id}/differential/network/{network_id}?format=png"),
+                "pdf_url": _with_root_path(root_path, f"/api/jobs/{job_id}/differential/network/{network_id}?format=pdf"),
+                "tsv_url": _with_root_path(root_path, f"/api/jobs/{job_id}/differential/network/{network_id}?format=tsv"),
             }
         )
 
@@ -220,27 +244,27 @@ def _build_differential_payload(job_id: str, meta: Dict) -> Dict:
         "case_label": differential.get("case_label"),
         "control_label": differential.get("control_label"),
         "go_terms_included": bool(differential.get("go_terms_included")),
-        "archive_url": f"/api/jobs/{job_id}/differential/archive" if artifacts.get("archive") else None,
-        "heatmap_svg_url": f"/api/jobs/{job_id}/differential/heatmap?format=svg" if artifacts.get("heatmap_svg") else None,
-        "heatmap_pdf_url": f"/api/jobs/{job_id}/differential/heatmap?format=pdf" if artifacts.get("heatmap_pdf") else None,
-        "heatmap_png_url": f"/api/jobs/{job_id}/differential/heatmap?format=png" if artifacts.get("heatmap_png") else None,
+        "archive_url": _with_root_path(root_path, f"/api/jobs/{job_id}/differential/archive") if artifacts.get("archive") else None,
+        "heatmap_svg_url": _with_root_path(root_path, f"/api/jobs/{job_id}/differential/heatmap?format=svg") if artifacts.get("heatmap_svg") else None,
+        "heatmap_pdf_url": _with_root_path(root_path, f"/api/jobs/{job_id}/differential/heatmap?format=pdf") if artifacts.get("heatmap_pdf") else None,
+        "heatmap_png_url": _with_root_path(root_path, f"/api/jobs/{job_id}/differential/heatmap?format=png") if artifacts.get("heatmap_png") else None,
         "cell_frequency_grouped_png_url": (
-            f"/api/jobs/{job_id}/differential/artifact/cell_frequency_grouped_png"
+            _with_root_path(root_path, f"/api/jobs/{job_id}/differential/artifact/cell_frequency_grouped_png")
             if artifacts.get("cell_frequency_grouped_png")
             else None
         ),
         "cell_frequency_grouped_pdf_url": (
-            f"/api/jobs/{job_id}/differential/artifact/cell_frequency_grouped_pdf"
+            _with_root_path(root_path, f"/api/jobs/{job_id}/differential/artifact/cell_frequency_grouped_pdf")
             if artifacts.get("cell_frequency_grouped_pdf")
             else None
         ),
         "cell_frequency_stacked_pdf_url": (
-            f"/api/jobs/{job_id}/differential/artifact/cell_frequency_stacked_pdf"
+            _with_root_path(root_path, f"/api/jobs/{job_id}/differential/artifact/cell_frequency_stacked_pdf")
             if artifacts.get("cell_frequency_stacked_pdf")
             else None
         ),
         "cell_frequency_tsv_url": (
-            f"/api/jobs/{job_id}/differential/artifact/cell_frequency_tsv"
+            _with_root_path(root_path, f"/api/jobs/{job_id}/differential/artifact/cell_frequency_tsv")
             if artifacts.get("cell_frequency_tsv")
             else None
         ),
@@ -519,7 +543,7 @@ def _build_differential_go_payload(meta: Dict, population: str) -> Dict:
     return {"population": population, "terms": terms, "default_gene": default_gene}
 
 
-def _build_differential_network_payload(meta: Dict, population: str) -> Dict:
+def _build_differential_network_payload(meta: Dict, population: str, root_path: str = "") -> Dict:
     entry = _differential_network_entry(meta, population)
     if not entry:
         return {"population": population, "elements": [], "default_gene": None}
@@ -592,7 +616,7 @@ def _build_differential_network_payload(meta: Dict, population: str) -> Dict:
         "population": population,
         "elements": list(nodes.values()) + edges,
         "default_gene": default_gene,
-        "pdf_url": f"/api/jobs/{meta['job_id']}/differential/network/{entry['id']}?format=pdf",
+        "pdf_url": _with_root_path(root_path, f"/api/jobs/{meta['job_id']}/differential/network/{entry['id']}?format=pdf"),
     }
 
 
@@ -967,8 +991,10 @@ def _render_expression_pdf(payload: Dict, mode: str) -> io.BytesIO:
 
 def create_app(test_config: dict | None = None) -> FastAPI:
     cfg = load_config(test_config)
-    app = FastAPI(title=cfg["APP_TITLE"])
+    cfg["ROOT_PATH"] = _normalize_root_path(cfg.get("ROOT_PATH"))
+    app = FastAPI(title=cfg["APP_TITLE"], root_path=cfg["ROOT_PATH"])
     app.state.config = cfg
+    app.state.root_path = cfg["ROOT_PATH"]
     app.state.job_store = JobStore(Path(cfg["JOB_STORAGE"]))
     app.state.job_runner = JobRunner(
         app.state.job_store,
@@ -978,13 +1004,13 @@ def create_app(test_config: dict | None = None) -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(request: Request, exc: RequestValidationError):
-        if request.url.path.startswith("/api/"):
+        if _is_api_request(request):
             return JSONResponse(status_code=422, content={"detail": str(exc)})
         raise exc
 
     @app.exception_handler(Exception)
     async def handle_unexpected_error(request: Request, exc: Exception):
-        if request.url.path.startswith("/api/"):
+        if _is_api_request(request):
             logging.exception("Unhandled API error for %s", request.url.path, exc_info=exc)
             return JSONResponse(status_code=500, content={"detail": f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__})
         raise exc
@@ -1001,6 +1027,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
                 "request": request,
                 "registry_json": json.dumps(registry),
                 "app_title": cfg["APP_TITLE"],
+                "app_root_path": cfg["ROOT_PATH"],
             },
         )
 
@@ -1079,7 +1106,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             log_tail = log_path.read_text(encoding="utf-8").splitlines(True)[-200:]
         meta["log_tail"] = log_tail
         meta["qc_log_tail"] = log_tail if meta.get("status") == "failed" else _filter_qc_log_lines(log_tail)
-        meta["differential_ui"] = _build_differential_payload(job_id, meta)
+        meta["differential_ui"] = _build_differential_payload(job_id, meta, root_path=app.state.root_path)
         return JSONResponse(meta)
 
     @app.get("/api/jobs/{job_id}/differential/status")
@@ -1088,7 +1115,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
-        return JSONResponse(_build_differential_payload(job_id, meta))
+        return JSONResponse(_build_differential_payload(job_id, meta, root_path=app.state.root_path))
 
     @app.post("/api/jobs/{job_id}/differential")
     async def run_differential(job_id: str, payload: DifferentialSettings):
@@ -1114,7 +1141,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         store.append_log(job_id, "Differential analysis queued by user request.")
         runner.submit_differential(job_id)
         updated = store.get_job(job_id)
-        return JSONResponse(_build_differential_payload(job_id, updated))
+        return JSONResponse(_build_differential_payload(job_id, updated, root_path=app.state.root_path))
 
     @app.get("/api/jobs/{job_id}/umap")
     async def umap(job_id: str):
@@ -1300,7 +1327,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
-        return JSONResponse(_build_differential_network_payload(meta, population))
+        return JSONResponse(_build_differential_network_payload(meta, population, root_path=app.state.root_path))
 
     @app.get("/api/jobs/{job_id}/differential/interactive/gene")
     async def differential_gene_data(job_id: str, population: str = Query(...), gene: str = Query(...)):

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ app_title }}</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/modern-normalize@3.0.1/modern-normalize.min.css">
-    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="stylesheet" href="{{ url_for('static', path='styles.css') }}">
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
     <script src="https://unpkg.com/cytoscape@3.30.4/dist/cytoscape.min.js"></script>
   </head>
@@ -204,8 +204,9 @@
     </div>
 
     <script>
+      window.__APP_ROOT_PATH__ = {{ app_root_path | tojson }};
       window.__REFERENCE_REGISTRY__ = {{ registry_json | safe }};
     </script>
-    <script src="/static/app.js"></script>
+    <script src="{{ url_for('static', path='app.js') }}"></script>
   </body>
 </html>

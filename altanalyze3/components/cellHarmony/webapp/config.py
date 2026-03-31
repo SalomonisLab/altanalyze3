@@ -14,6 +14,7 @@ def load_config(overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     cfg: Dict[str, Any] = {
         "APP_TITLE": "cellHarmony-lite Portal",
         "MAX_CONTENT_LENGTH": 1024 * 1024 * 1024,
+        "ROOT_PATH": os.getenv("CELLHARMONY_ROOT_PATH", "").strip(),
         "JOB_STORAGE": os.getenv("CELLHARMONY_JOB_STORAGE", str(DEFAULT_JOB_STORAGE)),
         "REFERENCE_REGISTRY": os.getenv("CELLHARMONY_REFERENCE_REGISTRY", str(DEFAULT_REFERENCE_REGISTRY)),
         "ALLOWED_EXTENSIONS": {"h5", "h5ad"},

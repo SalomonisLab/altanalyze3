@@ -38,6 +38,9 @@ Then open `http://<vm-ip>:8000`.
 Notes:
 
 - Job data is persisted to `cellHarmony/webapp/jobs` on the host via a bind mount.
+- If you serve the app under a subpath such as `/cell-harmony`, set
+  `CELLHARMONY_ROOT_PATH=/cell-harmony` so the frontend and API requests use
+  that prefix.
 - The container sets `CELLHARMONY_JOB_STORAGE=/srv/cellharmony/jobs`.
 - The default reference registry is baked into the image at:
   `/app/altanalyze3/components/cellHarmony/flask/reference_config.json`
@@ -61,6 +64,7 @@ docker compose down
 
 Environment variables:
 
+- `CELLHARMONY_ROOT_PATH`
 - `CELLHARMONY_JOB_STORAGE`
 - `CELLHARMONY_REFERENCE_REGISTRY`
 - `CELLHARMONY_MAX_FILES`

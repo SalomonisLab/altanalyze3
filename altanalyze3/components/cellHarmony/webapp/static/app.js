@@ -1,6 +1,7 @@
 "use strict";
 
 const MAX_SAMPLES = 7;
+const APP_ROOT_PATH = normalizeRootPath(window.__APP_ROOT_PATH__ || "");
 let registry = window.__REFERENCE_REGISTRY__ || { species: [] };
 let sampleCount = 0;
 let pollTimer = null;
@@ -12,6 +13,36 @@ let currentDifferentialGene = "";
 let currentDifferentialPopulation = "";
 let differentialCy = null;
 let lastDownloadArtifactSignature = "";
+
+function normalizeRootPath(rootPath) {
+  const value = String(rootPath || "").trim();
+  if (!value || value === "/") {
+    return "";
+  }
+  return `/${value.replace(/^\/+|\/+$/g, "")}`;
+}
+
+function withRootPath(path) {
+  if (!path) {
+    return APP_ROOT_PATH || "/";
+  }
+  if (/^https?:\/\//i.test(path)) {
+    return path;
+  }
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  return `${APP_ROOT_PATH}${normalizedPath}`;
+}
+
+function apiPath(path) {
+  if (!path) {
+    return withRootPath("/api");
+  }
+  if (path === "/api" || path.startsWith("/api/")) {
+    return withRootPath(path);
+  }
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  return withRootPath(`/api${normalizedPath}`);
+}
 
 document.addEventListener("DOMContentLoaded", () => {
   initSpeciesSelect();
@@ -146,7 +177,7 @@ async function handleJobSubmit(evt) {
   }
 
   try {
-    const resp = await fetch("/api/jobs", { method: "POST", body: formData });
+    const resp = await fetch(apiPath("/jobs"), { method: "POST", body: formData });
     const data = await resp.json();
     if (!resp.ok) {
       throw new Error(data.detail || "Failed to create job.");
@@ -180,7 +211,7 @@ async function handleQcSubmit(evt) {
     align_cutoff: evt.target.align_cutoff.value,
   };
   try {
-    let resp = await fetch(`/api/jobs/${jobId}/qc`, {
+    let resp = await fetch(apiPath(`/jobs/${jobId}/qc`), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -189,7 +220,7 @@ async function handleQcSubmit(evt) {
     if (!resp.ok) {
       throw new Error(data.detail || "Failed to save QC.");
     }
-    resp = await fetch(`/api/jobs/${jobId}/run`, { method: "POST" });
+    resp = await fetch(apiPath(`/jobs/${jobId}/run`), { method: "POST" });
     data = await resp.json();
     if (!resp.ok) {
       throw new Error(data.detail || "Failed to queue job.");
@@ -216,7 +247,7 @@ async function handleDifferentialSubmit(evt) {
   };
 
   try {
-    const resp = await fetch(`/api/jobs/${jobId}/differential`, {
+    const resp = await fetch(apiPath(`/jobs/${jobId}/differential`), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -244,7 +275,7 @@ async function handleResultsJobChange() {
 
 async function loadJobState(jobId) {
   try {
-    const resp = await fetch(`/api/jobs/${jobId}/status`);
+    const resp = await fetch(apiPath(`/jobs/${jobId}/status`));
     const data = await resp.json();
     if (!resp.ok) {
       throw new Error(data.detail || "Status request failed.");
@@ -265,7 +296,7 @@ function startStatusPolling(jobId) {
 
 async function pollStatus(jobId) {
   try {
-    const resp = await fetch(`/api/jobs/${jobId}/status`);
+    const resp = await fetch(apiPath(`/jobs/${jobId}/status`));
     const data = await resp.json();
     if (!resp.ok) {
       throw new Error(data.detail || "Status request failed.");
@@ -378,7 +409,7 @@ async function populateDownloadLinks(jobId, statusData = null) {
   container.innerHTML = "";
   let data = statusData;
   if (!data) {
-    const resp = await fetch(`/api/jobs/${jobId}/status`);
+    const resp = await fetch(apiPath(`/jobs/${jobId}/status`));
     data = await resp.json();
     if (!resp.ok) {
       return;
@@ -396,7 +427,7 @@ async function populateDownloadLinks(jobId, statusData = null) {
     }
     const btn = document.createElement("a");
     btn.className = "download-btn";
-    btn.href = `/api/jobs/${jobId}/download/${key}`;
+    btn.href = apiPath(`/jobs/${jobId}/download/${key}`);
     btn.textContent = `Download ${key}`;
     container.appendChild(btn);
   });
@@ -571,16 +602,16 @@ async function loadDifferentialVisualization() {
   try {
     let payload = null;
     if (mode === "heatmap") {
-      payload = await fetchDifferentialJson(`/api/jobs/${jobId}/differential/interactive/heatmap?population=${encodeURIComponent(population)}`);
+      payload = await fetchDifferentialJson(apiPath(`/jobs/${jobId}/differential/interactive/heatmap?population=${encodeURIComponent(population)}`));
       renderDifferentialHeatmap(payload);
     } else if (mode === "volcano") {
-      payload = await fetchDifferentialJson(`/api/jobs/${jobId}/differential/interactive/volcano?population=${encodeURIComponent(population)}`);
+      payload = await fetchDifferentialJson(apiPath(`/jobs/${jobId}/differential/interactive/volcano?population=${encodeURIComponent(population)}`));
       renderDifferentialVolcano(payload);
     } else if (mode === "network") {
-      payload = await fetchDifferentialJson(`/api/jobs/${jobId}/differential/interactive/network?population=${encodeURIComponent(population)}`);
+      payload = await fetchDifferentialJson(apiPath(`/jobs/${jobId}/differential/interactive/network?population=${encodeURIComponent(population)}`));
       renderDifferentialNetwork(payload);
     } else if (mode === "go") {
-      payload = await fetchDifferentialJson(`/api/jobs/${jobId}/differential/interactive/go?population=${encodeURIComponent(population)}`);
+      payload = await fetchDifferentialJson(apiPath(`/jobs/${jobId}/differential/interactive/go?population=${encodeURIComponent(population)}`));
       renderDifferentialGo(payload);
     }
     const nextGene = currentDifferentialGene || (payload && payload.default_gene) || "";
@@ -868,7 +899,7 @@ async function loadDifferentialGeneDetail(gene, population) {
   }
   try {
     const payload = await fetchDifferentialJson(
-      `/api/jobs/${jobId}/differential/interactive/gene?population=${encodeURIComponent(population)}&gene=${encodeURIComponent(gene)}`
+      apiPath(`/jobs/${jobId}/differential/interactive/gene?population=${encodeURIComponent(population)}&gene=${encodeURIComponent(gene)}`)
     );
     renderDifferentialGeneDetail(payload);
   } catch (err) {
@@ -1057,7 +1088,7 @@ async function loadUmap() {
     return;
   }
   try {
-    const resp = await fetch(`/api/jobs/${jobId}/umap`);
+    const resp = await fetch(apiPath(`/jobs/${jobId}/umap`));
     const data = await resp.json();
     if (!resp.ok) {
       throw new Error(data.detail || "UMAP not ready.");
@@ -1135,7 +1166,7 @@ async function loadExpression() {
     return;
   }
   try {
-    const resp = await fetch(`/api/jobs/${jobId}/expression?gene=${encodeURIComponent(gene)}`);
+    const resp = await fetch(apiPath(`/jobs/${jobId}/expression?gene=${encodeURIComponent(gene)}`));
     const data = await resp.json();
     if (!resp.ok) {
       throw new Error(data.detail || "Expression unavailable.");
@@ -1207,7 +1238,7 @@ function downloadUmapImage() {
     return;
   }
   const mode = document.getElementById("umap-mode").value;
-  window.open(`/api/jobs/${jobId}/umap/pdf?mode=${encodeURIComponent(mode)}`, "_blank");
+  window.open(apiPath(`/jobs/${jobId}/umap/pdf?mode=${encodeURIComponent(mode)}`), "_blank");
 }
 
 function downloadExpressionImage() {
@@ -1218,7 +1249,7 @@ function downloadExpressionImage() {
   }
   const mode = document.getElementById("expression-mode").value;
   window.open(
-    `/api/jobs/${jobId}/expression/pdf?gene=${encodeURIComponent(gene)}&mode=${encodeURIComponent(mode)}`,
+    apiPath(`/jobs/${jobId}/expression/pdf?gene=${encodeURIComponent(gene)}&mode=${encodeURIComponent(mode)}`),
     "_blank",
   );
 }
