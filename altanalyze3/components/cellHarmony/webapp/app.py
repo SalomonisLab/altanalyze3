@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -36,6 +37,12 @@ class QCSettings(BaseModel):
     min_cells: int = 3
     mit_percent: int = 15
     align_cutoff: float = 0.1
+
+
+class DifferentialSettings(BaseModel):
+    population_col: str
+    group1_samples: List[str]
+    group2_samples: List[str]
 
 
 class ApproximateUMAPRequest(BaseModel):
@@ -70,6 +77,13 @@ def _flatten_expr(values) -> np.ndarray:
     if sp.issparse(values):
         return np.asarray(values.todense()).ravel()
     return np.asarray(values).ravel()
+
+
+def _is_finite_number(value: object) -> bool:
+    try:
+        return bool(np.isfinite(float(value)))
+    except (TypeError, ValueError):
+        return False
 
 
 def _configure_matplotlib_pdf_style() -> None:
@@ -130,6 +144,131 @@ def _filter_qc_log_lines(lines: List[str]) -> List[str]:
     return [line for line in lines if any(marker in line for marker in qc_markers)]
 
 
+def _job_sample_names(meta: Dict) -> List[str]:
+    sample_names: List[str] = []
+    for record in meta.get("files", []):
+        sample_name = str(record.get("sample_name", "")).strip()
+        if sample_name:
+            sample_names.append(sample_name)
+    return sample_names
+
+
+def _differential_options(meta: Dict) -> Dict:
+    stored = dict(meta.get("differential_options") or {})
+    sample_names = stored.get("sample_names") or _job_sample_names(meta)
+    enabled = bool(stored.get("enabled", len(sample_names) >= 2))
+    return {
+        "enabled": enabled,
+        "sample_names": sample_names,
+        "population_columns": stored.get("population_columns", []),
+        "default_population_col": stored.get("default_population_col") or meta.get("cluster_key"),
+    }
+
+
+def _build_differential_payload(job_id: str, meta: Dict) -> Dict:
+    options = _differential_options(meta)
+    differential = dict(meta.get("differential") or {})
+    artifacts = differential.get("artifacts") or {}
+    networks = []
+    for entry in differential.get("networks") or []:
+        network_id = str(entry.get("id", "")).strip()
+        if not network_id:
+            continue
+        networks.append(
+            {
+                "id": network_id,
+                "population": str(entry.get("population", network_id)),
+                "png_url": f"/api/jobs/{job_id}/differential/network/{network_id}?format=png",
+                "pdf_url": f"/api/jobs/{job_id}/differential/network/{network_id}?format=pdf",
+                "tsv_url": f"/api/jobs/{job_id}/differential/network/{network_id}?format=tsv",
+            }
+        )
+
+    status = str(differential.get("status") or ("idle" if options["enabled"] else "unavailable"))
+    return {
+        **options,
+        "status": status,
+        "progress": int(differential.get("progress", 0) or 0),
+        "message": differential.get("message") or (
+            "Select a cell-state field and numerator/denominator sample groups to run cellHarmony-differential."
+            if options["enabled"]
+            else "Differential analysis is available when the job includes two or more samples."
+        ),
+        "config": differential.get("config") or {},
+        "run_id": differential.get("run_id"),
+        "case_label": differential.get("case_label"),
+        "control_label": differential.get("control_label"),
+        "go_terms_included": bool(differential.get("go_terms_included")),
+        "archive_url": f"/api/jobs/{job_id}/differential/archive" if artifacts.get("archive") else None,
+        "heatmap_svg_url": f"/api/jobs/{job_id}/differential/heatmap?format=svg" if artifacts.get("heatmap_svg") else None,
+        "heatmap_pdf_url": f"/api/jobs/{job_id}/differential/heatmap?format=pdf" if artifacts.get("heatmap_pdf") else None,
+        "heatmap_png_url": f"/api/jobs/{job_id}/differential/heatmap?format=png" if artifacts.get("heatmap_png") else None,
+        "cell_frequency_grouped_png_url": (
+            f"/api/jobs/{job_id}/differential/artifact/cell_frequency_grouped_png"
+            if artifacts.get("cell_frequency_grouped_png")
+            else None
+        ),
+        "cell_frequency_grouped_pdf_url": (
+            f"/api/jobs/{job_id}/differential/artifact/cell_frequency_grouped_pdf"
+            if artifacts.get("cell_frequency_grouped_pdf")
+            else None
+        ),
+        "cell_frequency_stacked_pdf_url": (
+            f"/api/jobs/{job_id}/differential/artifact/cell_frequency_stacked_pdf"
+            if artifacts.get("cell_frequency_stacked_pdf")
+            else None
+        ),
+        "cell_frequency_tsv_url": (
+            f"/api/jobs/{job_id}/differential/artifact/cell_frequency_tsv"
+            if artifacts.get("cell_frequency_tsv")
+            else None
+        ),
+        "networks": networks,
+    }
+
+
+def _validate_differential_request(meta: Dict, payload: DifferentialSettings) -> Dict:
+    options = _differential_options(meta)
+    if not options["enabled"]:
+        raise HTTPException(status_code=400, detail="Differential analysis requires two or more uploaded samples.")
+    if meta.get("status") != "completed":
+        raise HTTPException(status_code=400, detail="Run the cellHarmony analysis before starting differential analysis.")
+
+    population_options = {entry["value"] for entry in options.get("population_columns", []) if entry.get("value")}
+    if population_options and payload.population_col not in population_options:
+        raise HTTPException(status_code=400, detail="Selected cell-state field is not available for this job.")
+
+    group1_samples = [str(sample).strip() for sample in payload.group1_samples if str(sample).strip()]
+    group2_samples = [str(sample).strip() for sample in payload.group2_samples if str(sample).strip()]
+    if not group1_samples or not group2_samples:
+        raise HTTPException(status_code=400, detail="Both differential groups must include at least one sample.")
+
+    available_samples = set(options["sample_names"])
+    missing = sorted((set(group1_samples) | set(group2_samples)) - available_samples)
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Unknown samples selected: {', '.join(missing)}")
+
+    overlap = sorted(set(group1_samples) & set(group2_samples))
+    if overlap:
+        raise HTTPException(status_code=400, detail=f"Samples cannot appear in both groups: {', '.join(overlap)}")
+
+    return {
+        "population_col": payload.population_col,
+        "group1_samples": group1_samples,
+        "group2_samples": group2_samples,
+    }
+
+
+def _get_differential_artifact(meta: Dict, key: str) -> Path:
+    raw_path = str(meta.get("differential", {}).get("artifacts", {}).get(key, "")).strip()
+    if not raw_path:
+        raise HTTPException(status_code=404, detail="Differential artifact unavailable.")
+    path = Path(raw_path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Differential artifact unavailable.")
+    return path
+
+
 def _build_umap_payload(meta: Dict) -> Dict[str, List[Dict]]:
     artifacts = meta.get("artifacts", {})
     umap_path = artifacts.get("umap_coordinates")
@@ -161,6 +300,7 @@ def _build_umap_payload(meta: Dict) -> Dict[str, List[Dict]]:
             "y": float(row.UMAP2),
         }
         for row in merged.itertuples()
+        if _is_finite_number(row.UMAP1) and _is_finite_number(row.UMAP2)
     ]
 
     reference_points = []
@@ -170,6 +310,8 @@ def _build_umap_payload(meta: Dict) -> Dict[str, List[Dict]]:
         coords = ref_adata.obsm["X_umap"]
         labels = ref_adata.obs[ref_cluster_key].astype(str).tolist()
         for barcode, (x, y), population in zip(ref_adata.obs_names, coords, labels):
+            if not (_is_finite_number(x) and _is_finite_number(y)):
+                continue
             reference_points.append(
                 {
                     "barcode": str(barcode),
@@ -196,7 +338,11 @@ def _build_expression_payload(meta: Dict, gene: str) -> Dict:
 
     values = _flatten_expr(adata[:, gene].X)
     populations = adata.obs[cluster_key].astype(str).values
-    scatter_data = [{"population": pop, "value": float(val)} for pop, val in zip(populations, values)]
+    scatter_data = [
+        {"population": pop, "value": float(val)}
+        for pop, val in zip(populations, values)
+        if _is_finite_number(val)
+    ]
 
     umap_points = []
     umap_path = artifacts.get("umap_coordinates")
@@ -221,17 +367,19 @@ def _build_expression_payload(meta: Dict, gene: str) -> Dict:
                 "y": float(row.UMAP2),
             }
             for row in merged.itertuples()
+            if _is_finite_number(row.value) and _is_finite_number(row.UMAP1) and _is_finite_number(row.UMAP2)
         ]
 
     violin_data = []
     for pop in sorted(pd.unique(populations)):
         mask = populations == pop
         pop_values = values[mask].astype(float)
+        finite_values = pop_values[np.isfinite(pop_values)]
         violin_data.append(
             {
                 "population": pop,
-                "values": [float(v) for v in pop_values],
-                "mean": float(np.mean(pop_values)) if len(pop_values) else 0.0,
+                "values": [float(v) for v in finite_values],
+                "mean": float(np.mean(finite_values)) if len(finite_values) else 0.0,
             }
         )
     violin_data = sorted(violin_data, key=lambda x: x["mean"], reverse=True)[:10]
@@ -239,9 +387,36 @@ def _build_expression_payload(meta: Dict, gene: str) -> Dict:
     return {"gene": gene, "scatter": scatter_data, "violin": violin_data, "umap": umap_points}
 
 
+def _square_umap_axes(ax: plt.Axes, point_groups: List[List[Dict]]) -> None:
+    coords = [
+        (float(point["x"]), float(point["y"]))
+        for group in point_groups
+        for point in group
+        if _is_finite_number(point.get("x")) and _is_finite_number(point.get("y"))
+    ]
+    if not coords:
+        return
+
+    points = np.asarray(coords, dtype=float)
+    min_x, max_x = float(points[:, 0].min()), float(points[:, 0].max())
+    min_y, max_y = float(points[:, 1].min()), float(points[:, 1].max())
+    span_x = max(max_x - min_x, 1e-6)
+    span_y = max(max_y - min_y, 1e-6)
+    half_span = max(span_x, span_y) / 2.0
+    padding = max(half_span * 0.08, 0.5)
+    center_x = (min_x + max_x) / 2.0
+    center_y = (min_y + max_y) / 2.0
+    extent = half_span + padding
+
+    ax.set_xlim(center_x - extent, center_x + extent)
+    ax.set_ylim(center_y - extent, center_y + extent)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_box_aspect(1)
+
+
 def _render_umap_pdf(payload: Dict[str, List[Dict]], mode: str) -> io.BytesIO:
     _configure_matplotlib_pdf_style()
-    fig, ax = plt.subplots(figsize=(8.5, 7.0))
+    fig, ax = plt.subplots(figsize=(8.5, 8.5))
     if mode == "cluster":
         if payload["reference"]:
             ax.scatter(
@@ -288,6 +463,7 @@ def _render_umap_pdf(payload: Dict[str, List[Dict]], mode: str) -> io.BytesIO:
             )
         ax.legend(frameon=False)
         ax.set_title("Approximate UMAP relative to reference")
+    _square_umap_axes(ax, [payload["reference"], payload["query"]])
     ax.set_xlabel("UMAP1")
     ax.set_ylabel("UMAP2")
     fig.tight_layout()
@@ -300,7 +476,7 @@ def _render_umap_pdf(payload: Dict[str, List[Dict]], mode: str) -> io.BytesIO:
 
 def _render_expression_pdf(payload: Dict, mode: str) -> io.BytesIO:
     _configure_matplotlib_pdf_style()
-    fig, ax = plt.subplots(figsize=(8.5, 7.0))
+    fig, ax = plt.subplots(figsize=(8.5, 8.5))
     gene = payload["gene"]
     if mode == "violin":
         violin_data = payload["violin"]
@@ -339,6 +515,7 @@ def _render_expression_pdf(payload: Dict, mode: str) -> io.BytesIO:
         ax.set_xlabel("UMAP1")
         ax.set_ylabel("UMAP2")
         ax.set_title(f"{gene} expression")
+        _square_umap_axes(ax, [umap_points])
     fig.tight_layout()
     buf = io.BytesIO()
     fig.savefig(buf, format="pdf", bbox_inches="tight")
@@ -357,6 +534,19 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         Path(cfg["REFERENCE_REGISTRY"]),
         max_workers=cfg["JOB_WORKERS"],
     )
+
+    @app.exception_handler(RequestValidationError)
+    async def handle_validation_error(request: Request, exc: RequestValidationError):
+        if request.url.path.startswith("/api/"):
+            return JSONResponse(status_code=422, content={"detail": str(exc)})
+        raise exc
+
+    @app.exception_handler(Exception)
+    async def handle_unexpected_error(request: Request, exc: Exception):
+        if request.url.path.startswith("/api/"):
+            logging.exception("Unhandled API error for %s", request.url.path, exc_info=exc)
+            return JSONResponse(status_code=500, content={"detail": f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__})
+        raise exc
 
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
@@ -447,8 +637,43 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         if log_path.exists():
             log_tail = log_path.read_text(encoding="utf-8").splitlines(True)[-200:]
         meta["log_tail"] = log_tail
-        meta["qc_log_tail"] = _filter_qc_log_lines(log_tail)
+        meta["qc_log_tail"] = log_tail if meta.get("status") == "failed" else _filter_qc_log_lines(log_tail)
+        meta["differential_ui"] = _build_differential_payload(job_id, meta)
         return JSONResponse(meta)
+
+    @app.get("/api/jobs/{job_id}/differential/status")
+    async def differential_status(job_id: str):
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        meta = store.get_job(job_id)
+        return JSONResponse(_build_differential_payload(job_id, meta))
+
+    @app.post("/api/jobs/{job_id}/differential")
+    async def run_differential(job_id: str, payload: DifferentialSettings):
+        store, runner = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        meta = store.get_job(job_id)
+        config = _validate_differential_request(meta, payload)
+        options = _differential_options(meta)
+        store.update_job(
+            job_id,
+            differential={
+                "status": "queued",
+                "progress": 5,
+                "message": "Differential analysis queued.",
+                "config": config,
+                "artifacts": {},
+                "networks": [],
+                "go_terms_included": False,
+                "default_population_col": options.get("default_population_col"),
+            },
+        )
+        store.append_log(job_id, "Differential analysis queued by user request.")
+        runner.submit_differential(job_id)
+        updated = store.get_job(job_id)
+        return JSONResponse(_build_differential_payload(job_id, updated))
 
     @app.get("/api/jobs/{job_id}/umap")
     async def umap(job_id: str):
@@ -531,6 +756,78 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         if not path.exists():
             raise HTTPException(status_code=404, detail="Artifact missing on disk.")
         return FileResponse(path, filename=path.name)
+
+    @app.get("/api/jobs/{job_id}/differential/archive")
+    async def download_differential_archive(job_id: str):
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        meta = store.get_job(job_id)
+        path = _get_differential_artifact(meta, "archive")
+        return FileResponse(path, filename=path.name, media_type="application/zip")
+
+    @app.get("/api/jobs/{job_id}/differential/artifact/{artifact_key}")
+    async def download_differential_artifact(job_id: str, artifact_key: str):
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        meta = store.get_job(job_id)
+        path = _get_differential_artifact(meta, artifact_key)
+        suffix = path.suffix.lower()
+        media_type = {
+            ".pdf": "application/pdf",
+            ".png": "image/png",
+            ".svg": "image/svg+xml",
+            ".tsv": "text/tab-separated-values",
+            ".h5ad": "application/octet-stream",
+        }.get(suffix, "application/octet-stream")
+        return FileResponse(path, filename=path.name, media_type=media_type)
+
+    @app.get("/api/jobs/{job_id}/differential/heatmap")
+    async def download_differential_heatmap(job_id: str, format: str = Query("svg")):
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        meta = store.get_job(job_id)
+        if format not in {"svg", "pdf", "png"}:
+            raise HTTPException(status_code=400, detail="Heatmap format must be svg, pdf, or png.")
+        artifact_key = {
+            "pdf": "heatmap_pdf",
+            "png": "heatmap_png",
+            "svg": "heatmap_svg",
+        }[format]
+        path = _get_differential_artifact(meta, artifact_key)
+        media_type = {
+            "pdf": "application/pdf",
+            "png": "image/png",
+            "svg": "image/svg+xml",
+        }[format]
+        return FileResponse(path, filename=path.name, media_type=media_type)
+
+    @app.get("/api/jobs/{job_id}/differential/network/{network_id}")
+    async def download_differential_network(job_id: str, network_id: str, format: str = Query("png")):
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        meta = store.get_job(job_id)
+        differential = meta.get("differential", {})
+        selected = next((entry for entry in differential.get("networks", []) if entry.get("id") == network_id), None)
+        if selected is None:
+            raise HTTPException(status_code=404, detail="Differential network unavailable.")
+        if format not in {"png", "pdf", "tsv"}:
+            raise HTTPException(status_code=400, detail="Network format must be png, pdf, or tsv.")
+        raw_path = str(selected.get(format, "")).strip()
+        if not raw_path:
+            raise HTTPException(status_code=404, detail="Differential network artifact unavailable.")
+        path = Path(raw_path)
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="Differential network artifact missing on disk.")
+        media_type = {
+            "png": "image/png",
+            "pdf": "application/pdf",
+            "tsv": "text/tab-separated-values",
+        }[format]
+        return FileResponse(path, filename=path.name, media_type=media_type)
 
     @app.post("/api/tools/approximate-umap")
     async def run_approximate_umap(payload: ApproximateUMAPRequest):

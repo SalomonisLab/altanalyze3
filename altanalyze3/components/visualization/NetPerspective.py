@@ -248,13 +248,6 @@ def generate_network_for_genes(
     if filtered.empty or filtered["Symbol1"].nunique() + filtered["Symbol2"].nunique() < 2:
         raise NetworkGenerationError("No qualifying interactions among the supplied genes.")
 
-    try:
-        from igraph import Graph, plot as igraph_plot
-    except ImportError as exc:  # pragma: no cover - depends on optional igraph
-        raise ImportError(
-            "python-igraph is required to create gene regulatory network plots."
-        ) from exc
-
     edge_color_map = edge_color_map or {
         "transcriptional_target": "red",
         "Arrow": "grey",
@@ -262,6 +255,17 @@ def generate_network_for_genes(
     }
 
     nodes = sorted(set(filtered["Symbol1"]) | set(filtered["Symbol2"]))
+    fc_map = prepared.fold_change_map
+
+    pdf_path = sanitize_filename(f"{output_prefix}.pdf")
+    png_path = sanitize_filename(f"{output_prefix}.png")
+    os.makedirs(os.path.dirname(pdf_path) or ".", exist_ok=True)
+
+    try:
+        from igraph import Graph, plot as igraph_plot
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise ImportError("python-igraph is required to create gene regulatory network plots.") from exc
+
     g = Graph(directed=True)
     g.add_vertices(nodes)
     g.vs["name"] = nodes
@@ -270,7 +274,6 @@ def generate_network_for_genes(
     g.add_edges(edges)
     g.es["color"] = [edge_color_map.get(t, "gray") for t in filtered["InteractionType"]]
 
-    fc_map = prepared.fold_change_map
     g.vs["color"] = [
         "lightcoral" if fc_map.get(name, 0) > 0 else
         "deepskyblue" if fc_map.get(name, 0) < 0 else
@@ -280,34 +283,74 @@ def generate_network_for_genes(
     g.vs["label"] = g.vs["name"]
 
     layout = g.layout("fr")
+    node_count = max(1, len(nodes))
+    if node_count <= 4:
+        canvas_px = 240
+        margin_px = 12
+        vertex_size = 16
+        label_size = 10
+    elif node_count <= 8:
+        canvas_px = 300
+        margin_px = 16
+        vertex_size = 16
+        label_size = 10
+    elif node_count <= 12:
+        canvas_px = 380
+        margin_px = 18
+        vertex_size = 17
+        label_size = 10
+    elif node_count <= 20:
+        canvas_px = 520
+        margin_px = 24
+        vertex_size = 16
+        label_size = 9
+    elif node_count <= 32:
+        canvas_px = 720
+        margin_px = 32
+        vertex_size = 14
+        label_size = 8
+    else:
+        canvas_px = min(1200, int(520 + 18 * node_count))
+        margin_px = max(36, min(64, int(canvas_px * 0.05)))
+        vertex_size = 12
+        label_size = 7
+    png_scale = 2
+    try:
+        layout.fit_into(
+            (margin_px, margin_px, canvas_px - margin_px, canvas_px - margin_px),
+            keep_aspect_ratio=True,
+        )
+    except Exception:
+        pass
 
-    pdf_path = sanitize_filename(f"{output_prefix}.pdf")
-    png_path = sanitize_filename(f"{output_prefix}.png")
-    os.makedirs(os.path.dirname(pdf_path) or ".", exist_ok=True)
+    try:
+        igraph_plot(
+            g,
+            target=pdf_path,
+            layout=layout,
+            vertex_size=vertex_size,
+            bbox=(canvas_px, canvas_px),
+            margin=margin_px,
+            vertex_label_size=label_size,
+            edge_arrow_size=0.5,
+            vertex_frame_width=0,
+        )
 
-    igraph_plot(
-        g,
-        target=pdf_path,
-        layout=layout,
-        vertex_size=20,
-        bbox=(1400, 1400),
-        margin=50,
-        vertex_label_size=11,
-        edge_arrow_size=0.5,
-        vertex_frame_width=0,
-    )
-
-    igraph_plot(
-        g,
-        target=png_path,
-        layout=layout,
-        vertex_size=20,
-        bbox=(1400, 1400),
-        margin=50,
-        vertex_label_size=11,
-        edge_arrow_size=0.5,
-        vertex_frame_width=0,
-    )
+        igraph_plot(
+            g,
+            target=png_path,
+            layout=layout,
+            vertex_size=vertex_size * png_scale,
+            bbox=(canvas_px * png_scale, canvas_px * png_scale),
+            margin=margin_px * png_scale,
+            vertex_label_size=label_size * png_scale,
+            edge_arrow_size=0.5,
+            vertex_frame_width=0,
+        )
+    except Exception as exc:
+        raise ImportError(
+            "igraph network plotting failed. Install pycairo or cairocffi so the native igraph renderer can write PDF/PNG outputs."
+        ) from exc
 
     # Create a concise summary table describing the downstream targets by sign.
     summary = filtered.copy()

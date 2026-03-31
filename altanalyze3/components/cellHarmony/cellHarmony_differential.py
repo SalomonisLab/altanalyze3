@@ -30,6 +30,7 @@ import argparse
 import datetime
 import collections
 from collections import Counter
+from typing import List
 import numpy as np
 import pandas as pd
 import anndata as ad
@@ -1639,11 +1640,11 @@ def build_fixed_order_heatmap(
     vmax = max(1.0, np.log2(float(fc_thresh)) * 1.5)
     vmin = -vmax
 
-    fixed_height = 4.2  # shorter layout to reduce heatmap height
-    base_width = max(6.0, 0.25 * len(pop_order))
+    fixed_height = 4.2  # preserve the original working height
+    fixed_width = 7.5
     ax_labels = None
     if show_go_terms:
-        fig = plt.figure(figsize=(base_width, fixed_height))
+        fig = plt.figure(figsize=(fixed_width, fixed_height))
         plot_top = 0.78
         plot_bottom = 0.10
         gs = fig.add_gridspec(
@@ -1651,7 +1652,7 @@ def build_fixed_order_heatmap(
             3,
             width_ratios=[0.35, 0.50, 0.15],
             wspace=0.0,
-            left=0.38,
+            left=0.08,
             right=0.98,
             top=plot_top,
             bottom=plot_bottom,
@@ -1660,7 +1661,7 @@ def build_fixed_order_heatmap(
         ax = fig.add_subplot(gs[0, 1], sharey=ax_terms)
         ax_labels = fig.add_subplot(gs[0, 2], sharey=ax)
     else:
-        fig = plt.figure(figsize=(base_width, fixed_height))
+        fig = plt.figure(figsize=(fixed_width, fixed_height))
         ax = plt.gca()
         ax_terms = None
 
@@ -1697,9 +1698,10 @@ def build_fixed_order_heatmap(
 
     ax.set_yticks([])
     ax.set_xticks(np.arange(fold_df.shape[1]))
-    ax.set_xticklabels(list(fold_df.columns), rotation=45, ha="left", fontsize=5.5)
+    x_fontsize = _differential_heatmap_axis_label_fontsize(len(column_clusters), axis="x", labels=column_clusters)
+    ax.set_xticklabels(list(fold_df.columns), rotation=45, ha="left", fontsize=x_fontsize)
     ax.xaxis.tick_top()
-    ax.tick_params(axis="x", bottom=False, top=True, labelbottom=False, labeltop=True, length=0, pad=5)
+    ax.tick_params(axis="x", bottom=False, top=True, labelbottom=False, labeltop=True, length=0, pad=7.5)
     comparison_label = de_store.get("comparison_label")
     if comparison_label:
         title_text = "cellHarmony DE log2FC ({}) by {}".format(comparison_label, population_col)
@@ -1862,10 +1864,10 @@ def build_fixed_order_heatmap(
     )
     cbar = plt.colorbar(im, cax=cax, orientation="horizontal")
     cbar.ax.set_xlim(vmin, vmax)
-    cbar.set_label("log2 fold change", fontsize=6, labelpad=-2)
+    cbar.set_label("log2 fold change", fontsize=6)
     cbar.set_ticks([])
-    cbar.ax.text(-0.10, 0.32, f"{vmin:.1f}", ha="right", va="center", transform=cbar.ax.transAxes, fontsize=6)
-    cbar.ax.text(1.10, 0.32, f"{vmax:.1f}", ha="left", va="center", transform=cbar.ax.transAxes, fontsize=6)
+    cbar.ax.text(-0.08, 0.5, f"{vmin:.1f}", ha="right", va="center", transform=cbar.ax.transAxes, fontsize=6)
+    cbar.ax.text(1.08, 0.5, f"{vmax:.1f}", ha="left", va="center", transform=cbar.ax.transAxes, fontsize=6)
     cbar.outline.set_linewidth(0.5)
 
     if ax_labels is not None:
@@ -1923,16 +1925,18 @@ def build_fixed_order_heatmap(
     base_path, ext = os.path.splitext(pdf_path)
     if ext.lower() != ".pdf":
         pdf_path = base_path + ".pdf"
+    png_path = base_path + ".png"
     svg_path = base_path + ".svg"
 
     # Save high-quality raster and vector outputs
     _suppress_fonttools_logs()
     bbox = None if show_go_terms else "tight"
     plt.savefig(pdf_path, dpi=600, bbox_inches=bbox, pad_inches=0.02, transparent=False)
+    plt.savefig(png_path, dpi=300, bbox_inches=bbox, pad_inches=0.02, transparent=False)
     plt.savefig(svg_path, bbox_inches=bbox, transparent=False)
 
     plt.close(fig)
-    print(f"[INFO] Wrote heatmap images: {pdf_path}, {svg_path}")
+    print(f"[INFO] Wrote heatmap images: {pdf_path}, {png_path}, {svg_path}")
 
 
     return pdf_path, heatmap_path
@@ -1953,6 +1957,45 @@ def _normalize_goelite_species(species):
         "mus musculus": "mouse",
     }
     return mapping.get(value, value)
+
+
+def _differential_heatmap_axis_label_fontsize(label_count, axis, labels=None):
+    label_count = max(1, int(label_count))
+    if axis == "x":
+        max_label_len = max((len(str(label)) for label in (labels or [])), default=0)
+        if label_count <= 6:
+            size = 10
+        elif label_count <= 12:
+            size = 9
+        elif label_count <= 20:
+            size = 8
+        elif label_count <= 28:
+            size = 6
+        elif label_count <= 40:
+            size = 5
+        elif label_count <= 64:
+            size = 4
+        else:
+            size = 3
+        if max_label_len >= 10:
+            size -= 1
+        if max_label_len >= 14:
+            size -= 1
+        return max(3, size)
+
+    if label_count <= 20:
+        return 9
+    if label_count <= 40:
+        return 8
+    if label_count <= 80:
+        return 7
+    if label_count <= 140:
+        return 6
+    if label_count <= 220:
+        return 5
+    if label_count <= 320:
+        return 4
+    return 3
 
 def _is_url(path):
     try:
@@ -2460,7 +2503,7 @@ def _write_cell_frequency_plots(
 ):
     if not conditions:
         print("[WARN] Skipping cell frequency plots: no conditions provided.")
-        return
+        return {}
 
     condition_list = [str(c) for c in conditions]
     freq_obs = adata.obs.loc[
@@ -2470,7 +2513,7 @@ def _write_cell_frequency_plots(
 
     if freq_obs.empty:
         print("[WARN] Skipping cell frequency plots: no cells found for condition subset.")
-        return
+        return {}
 
     freq_obs[population_col] = freq_obs[population_col].astype(str)
     freq_obs[covariate_col] = freq_obs[covariate_col].astype(str)
@@ -2497,7 +2540,7 @@ def _write_cell_frequency_plots(
 
     if counts.empty:
         print("[WARN] Skipping cell frequency plots: all populations have zero cells for condition subset.")
-        return
+        return {}
 
     counts = counts.loc[:, [c for c in condition_list if c in counts.columns]]
 
@@ -2513,6 +2556,8 @@ def _write_cell_frequency_plots(
     pop_component = NetPerspective.safe_component(population_col)
     stacked_path = os.path.join(outdir, f"{comp_component}_stacked_{pop_component}.pdf")
     grouped_path = os.path.join(outdir, f"{comp_component}_by_condition_{pop_component}.pdf")
+    stacked_png_path = os.path.join(outdir, f"{comp_component}_stacked_{pop_component}.png")
+    grouped_png_path = os.path.join(outdir, f"{comp_component}_by_condition_{pop_component}.png")
 
     cmap = plt.get_cmap("tab20")
     colors = [cmap(i % cmap.N) for i in range(len(counts.columns))]
@@ -2541,6 +2586,7 @@ def _write_cell_frequency_plots(
     )
     plt.tight_layout(rect=[0, 0, 0.85, 1])
     fig1.savefig(stacked_path, bbox_inches="tight")
+    fig1.savefig(stacked_png_path, bbox_inches="tight", dpi=200)
     plt.close(fig1)
     print(f"[INFO] Wrote cell frequency stacked bar chart: {stacked_path}")
 
@@ -2570,6 +2616,7 @@ def _write_cell_frequency_plots(
     ax2.legend(loc="best", frameon=False)
     plt.tight_layout()
     fig2.savefig(grouped_path, bbox_inches="tight")
+    fig2.savefig(grouped_png_path, bbox_inches="tight", dpi=200)
     plt.close(fig2)
     print(f"[INFO] Wrote cell frequency comparison chart: {grouped_path}")
 
@@ -2604,6 +2651,13 @@ def _write_cell_frequency_plots(
     )
     freq_table.to_csv(freq_tsv_path, sep="\t", index=False, float_format="%.4f")
     print(f"[INFO] Wrote cell frequency table: {freq_tsv_path}")
+    return {
+        "stacked_pdf": stacked_path,
+        "stacked_png": stacked_png_path,
+        "grouped_pdf": grouped_path,
+        "grouped_png": grouped_png_path,
+        "tsv": freq_tsv_path,
+    }
 
 def _assign_integrated_groups(per_pop, population_order, alpha, fc_thresh, use_rawp, include_genes):
     if not include_genes:

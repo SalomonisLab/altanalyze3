@@ -24,7 +24,7 @@
       </header>
 
       <main class="grid">
-        <section class="panel">
+        <section class="panel" id="upload-panel">
           <h2>1. Upload</h2>
           <form id="job-form">
             <label class="field">
@@ -35,7 +35,7 @@
               <span>Reference</span>
               <select id="reference-select" required></select>
             </label>
-            <div class="field">
+            <div class="field sample-field">
               <div class="field-row">
                 <span>Samples</span>
                 <button type="button" class="ghost-btn" id="add-sample-btn">Add sample</button>
@@ -47,7 +47,7 @@
           <div class="notice hidden" id="job-created"></div>
         </section>
 
-        <section class="panel">
+        <section class="panel" id="qc-panel">
           <h2>2. QC and alignment</h2>
           <form id="qc-form">
             <label class="field">
@@ -87,7 +87,7 @@
           <pre class="log-view" id="job-log"></pre>
         </section>
 
-        <section class="panel">
+        <section class="panel" id="results-panel">
           <h2>3. Results</h2>
           <form id="results-form">
             <label class="field">
@@ -117,9 +117,41 @@
           </form>
           <div class="downloads" id="download-links"></div>
         </section>
+
+        <section class="panel hidden" id="differential-panel">
+          <h2>4. Differential</h2>
+          <p class="panel-copy" id="differential-intro">
+            Available after alignment completes for jobs with two or more samples.
+          </p>
+          <form id="differential-form">
+            <label class="field">
+              <span>Cell-state aligned to</span>
+              <select id="differential-population" required></select>
+            </label>
+            <div class="two-col">
+              <label class="field">
+                <span>Group 1 (numerator)</span>
+                <select id="differential-group1" multiple size="6" required></select>
+              </label>
+              <label class="field">
+                <span>Group 2 (denominator)</span>
+                <select id="differential-group2" multiple size="6" required></select>
+              </label>
+            </div>
+            <button class="primary-btn" type="submit" id="differential-run-btn">Run cellHarmony-differential</button>
+          </form>
+          <div class="progress-shell">
+            <div class="progress-track"><div class="progress-fill" id="differential-progress"></div></div>
+            <div class="progress-label" id="differential-progress-label">0%</div>
+          </div>
+          <div class="notice" id="differential-message">
+            Differential analysis is enabled when the job contains two or more samples.
+          </div>
+          <a class="download-btn hidden" id="differential-archive-link" href="#" target="_blank" rel="noopener">Download differential ZIP</a>
+        </section>
       </main>
 
-      <section class="plots">
+      <section class="plots" id="baseline-results-view">
         <article class="panel">
           <div class="panel-head">
             <h2>Approximate UMAP</h2>
@@ -133,6 +165,36 @@
             <button class="ghost-btn" type="button" id="download-expression-image-btn">Download PDF</button>
           </div>
           <div id="expression-plot" class="plot-area"></div>
+        </article>
+      </section>
+
+      <section class="plots hidden" id="differential-results-view">
+        <article class="panel">
+          <div class="panel-head">
+            <h2>Integrated cellHarmony Heatmap</h2>
+            <a class="ghost-btn hidden" id="download-differential-heatmap-btn" href="#" target="_blank" rel="noopener">Download PDF</a>
+          </div>
+          <div class="static-plot-shell">
+            <img id="differential-heatmap-image" class="static-plot hidden" alt="cellHarmony differential heatmap">
+            <div class="empty-state" id="differential-heatmap-empty">
+              Run cellHarmony-differential to generate the integrated heatmap with GO terms.
+            </div>
+          </div>
+        </article>
+        <article class="panel">
+          <div class="panel-head">
+            <h2>Networks</h2>
+            <div class="panel-head-actions">
+              <select id="differential-network-select" class="compact-select hidden"></select>
+              <a class="ghost-btn hidden" id="download-differential-network-btn" href="#" target="_blank" rel="noopener">Download PDF</a>
+            </div>
+          </div>
+          <div class="static-plot-shell">
+            <img id="differential-network-image" class="static-plot hidden" alt="cellHarmony differential network">
+            <div class="empty-state" id="differential-network-empty">
+              Interaction networks will appear here when the differential run finishes.
+            </div>
+          </div>
         </article>
       </section>
     </div>

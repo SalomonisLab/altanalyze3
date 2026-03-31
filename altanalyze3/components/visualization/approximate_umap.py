@@ -652,41 +652,42 @@ def _save_comparison_pdf(
 
     destination.parent.mkdir(parents=True, exist_ok=True)
 
-    fig1, axes1 = plt.subplots(1, 2, figsize=(10, 5), constrained_layout=True)
-    _scatter(axes1[0], ref_coords, ref_labels, palette, "Reference UMAP", annotate=True)
-    _scatter(axes1[1], qry_coords, qry_labels, palette, "Query Approximate UMAP", annotate=True)
-    fig1.legend(
-        handles=legend_handles,
-        loc="center left",
-        bbox_to_anchor=(1.02, 0.5),
-        frameon=False,
-        borderaxespad=0.0,
-        handlelength=0.6,
-        labelspacing=0.3,
-        columnspacing=0.6,
-        fontsize=6,
-    )
     annotated_path = destination
-    fig1.savefig(annotated_path, dpi=300, bbox_inches="tight")
-    plt.close(fig1)
-
     plain_path = destination.with_name(destination.stem + "-no-labels" + destination.suffix)
-    fig2, axes2 = plt.subplots(1, 2, figsize=(10, 5), constrained_layout=True)
-    _scatter(axes2[0], ref_coords, ref_labels, palette, "Reference UMAP", annotate=False)
-    _scatter(axes2[1], qry_coords, qry_labels, palette, "Query Approximate UMAP", annotate=False)
-    fig2.legend(
-        handles=legend_handles,
-        loc="center left",
-        bbox_to_anchor=(1.02, 0.5),
-        frameon=False,
-        borderaxespad=0.0,
-        handlelength=0.6,
-        labelspacing=0.3,
-        columnspacing=0.6,
-        fontsize=6,
-    )
-    fig2.savefig(plain_path, dpi=300, bbox_inches="tight")
-    plt.close(fig2)
+
+    def _render_pdf(path: Path, *, annotate: bool) -> None:
+        fig, axes = plt.subplots(1, 2, figsize=(10, 5), constrained_layout=True)
+        try:
+            _scatter(axes[0], ref_coords, ref_labels, palette, "Reference UMAP", annotate=annotate)
+            _scatter(axes[1], qry_coords, qry_labels, palette, "Query Approximate UMAP", annotate=annotate)
+            fig.legend(
+                handles=legend_handles,
+                loc="center left",
+                bbox_to_anchor=(1.02, 0.5),
+                frameon=False,
+                borderaxespad=0.0,
+                handlelength=0.6,
+                labelspacing=0.3,
+                columnspacing=0.6,
+                fontsize=6,
+            )
+            fig.savefig(path, dpi=300, bbox_inches="tight")
+        finally:
+            plt.close(fig)
+
+    annotated_ok = True
+    try:
+        _render_pdf(annotated_path, annotate=True)
+    except Exception as exc:
+        annotated_ok = False
+        print(
+            "[warn] Annotated approximate UMAP PDF rendering failed; "
+            f"falling back to unlabeled output. {type(exc).__name__}: {exc}"
+        )
+
+    _render_pdf(plain_path, annotate=False)
+    if not annotated_ok:
+        _render_pdf(annotated_path, annotate=False)
 
     return str(annotated_path), str(plain_path)
 

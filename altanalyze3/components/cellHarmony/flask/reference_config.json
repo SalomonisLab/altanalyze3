@@ -23,11 +23,11 @@
       "label": "Mouse",
       "references": [
         {
-          "id": "mm_lung_reference",
-          "label": "Mouse lung reference (demo)",
-          "states_tsv": "/data/cellHarmony/references/mouse/mm_lung_reference_states.tsv",
-          "reference_clusters_tsv": "/data/cellHarmony/references/mouse/mm_lung_reference_clusters.tsv",
-          "reference_coords_tsv": "/data/cellHarmony/references/mouse/mm_lung_reference_umap.tsv",
+          "id": "mm_bm_reference",
+          "label": "Bone marrow CITE-Seq (Ferchen 2025)",
+          "states_tsv": "references/Mouse/BoneMarrow/Ferchen-2025/Mm-MarrowAtlas-L4.txt",
+          "reference_clusters_tsv": "references/Mouse/BoneMarrow/Ferchen-2025/Mm-MarrowAtlas-L4_reference_clusters.tsv",
+          "reference_coords_tsv": "references/Mouse/BoneMarrow/Ferchen-2025/Mm-MarrowAtlas-L4_reference_umap.tsv",
           "cluster_key": "Population",
           "soupx_options": [
             "default"
