@@ -18,6 +18,40 @@ uvicorn altanalyze3.components.cellHarmony.webapp.app:app --reload
 
 Open `http://127.0.0.1:8000`.
 
+## Docker for a cloud VM
+
+This web app can run as a single container with persisted job storage. The
+Docker assets live in this directory:
+
+- [Dockerfile](./Dockerfile)
+- [docker-compose.yml](./docker-compose.yml)
+- [requirements.docker.txt](./requirements.docker.txt)
+
+From `altanalyze3/altanalyze3/components/cellHarmony/webapp`:
+
+```bash
+docker compose up --build
+```
+
+Then open `http://<vm-ip>:8000`.
+
+Notes:
+
+- Job data is persisted to `cellHarmony/webapp/jobs` on the host via a bind mount.
+- The container sets `CELLHARMONY_JOB_STORAGE=/srv/cellharmony/jobs`.
+- The default reference registry is baked into the image at:
+  `/app/altanalyze3/components/cellHarmony/flask/reference_config.json`
+- If you deploy behind Nginx or Caddy, keep the container on port `8000` and
+  terminate TLS at the reverse proxy.
+
+Useful commands:
+
+```bash
+docker compose up --build -d
+docker compose logs -f
+docker compose down
+```
+
 ## API docs
 
 - Browser API: FastAPI serves interactive OpenAPI docs at `http://127.0.0.1:8000/docs`
@@ -35,6 +69,52 @@ Environment variables:
 By default the app reuses the existing reference registry at:
 
 `altanalyze3/components/cellHarmony/flask/reference_config.json`
+
+## Daily retention cleanup
+
+The web app stores each job under `cellHarmony/webapp/jobs/<job_id>` with a
+`job.json` metadata file. A cleanup helper is included at:
+
+`cellHarmony/webapp/cleanup_jobs.py`
+
+It deletes only jobs that are safe to purge:
+
+- top-level terminal status only: `completed`, `failed`, `cancelled`, `canceled`
+- never deletes `uploaded`, `queued`, or `processing` jobs
+- never deletes a job whose nested differential status is still `queued` or `processing`
+- uses `updated_at` from `job.json` and falls back to `created_at`
+
+Recommended first pass:
+
+```bash
+cd altanalyze3/altanalyze3/components
+python3 cellHarmony/webapp/cleanup_jobs.py --retain-days 7 --keep-latest 5 --dry-run
+```
+
+Then enable real deletion:
+
+```bash
+cd altanalyze3/altanalyze3/components
+python3 cellHarmony/webapp/cleanup_jobs.py --retain-days 7 --keep-latest 5
+```
+
+For macOS, a launchd template is provided at:
+
+`cellHarmony/webapp/launchd/org.cellharmony.jobs-retention.plist`
+
+Update the paths in that plist for your machine, then install it:
+
+```bash
+cp cellHarmony/webapp/launchd/org.cellharmony.jobs-retention.plist ~/Library/LaunchAgents/
+launchctl unload ~/Library/LaunchAgents/org.cellharmony.jobs-retention.plist 2>/dev/null || true
+launchctl load ~/Library/LaunchAgents/org.cellharmony.jobs-retention.plist
+launchctl start org.cellharmony.jobs-retention
+```
+
+Check the logs at:
+
+- `/tmp/cellharmony_jobs_retention.log`
+- `/tmp/cellharmony_jobs_retention.err`
 
 ## Notes
 

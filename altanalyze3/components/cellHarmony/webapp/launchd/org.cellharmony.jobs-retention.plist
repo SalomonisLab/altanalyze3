@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>org.cellharmony.jobs-retention</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/env</string>
+    <string>python3</string>
+    <string>/Users/your-user/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/cleanup_jobs.py</string>
+    <string>--retain-days</string>
+    <string>7</string>
+    <string>--keep-latest</string>
+    <string>5</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/your-user/Documents/GitHub/altanalyze3/altanalyze3/components</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CELLHARMONY_JOB_STORAGE</key>
+    <string>/Users/your-user/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/jobs</string>
+  </dict>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>3</integer>
+    <key>Minute</key>
+    <integer>15</integer>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/cellharmony_jobs_retention.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/cellharmony_jobs_retention.err</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>

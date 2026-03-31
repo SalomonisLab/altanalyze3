@@ -1,0 +1,16 @@
+services:
+  cellharmony-web:
+    build:
+      context: ../..
+      dockerfile: cellHarmony/webapp/Dockerfile
+    image: cellharmony-web:latest
+    container_name: cellharmony-web
+    ports:
+      - "8000:8000"
+    environment:
+      CELLHARMONY_JOB_STORAGE: /srv/cellharmony/jobs
+      CELLHARMONY_REFERENCE_REGISTRY: /app/altanalyze3/components/cellHarmony/flask/reference_config.json
+      CELLHARMONY_JOB_WORKERS: "2"
+    volumes:
+      - ./jobs:/srv/cellharmony/jobs
+    restart: unless-stopped
