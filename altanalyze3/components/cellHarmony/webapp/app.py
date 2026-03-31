@@ -21,6 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
+from altanalyze3.components.cellHarmony.flask import pipeline as pipeline_mod
 from altanalyze3.components.cellHarmony.flask.job_manager import JobStore
 from altanalyze3.components.cellHarmony.flask.tasks import JobRunner
 from altanalyze3.components.visualization import approximate_umap as approx_mod
@@ -169,6 +170,26 @@ def _build_differential_payload(job_id: str, meta: Dict) -> Dict:
     options = _differential_options(meta)
     differential = dict(meta.get("differential") or {})
     artifacts = differential.get("artifacts") or {}
+    result_populations: List[str] = []
+    visualization_populations: Dict[str, List[str]] = {"heatmap": [], "volcano": [], "network": [], "go": []}
+    if str(differential.get("status") or "") == "completed":
+        try:
+            result_populations = _differential_result_populations(meta)
+        except Exception:
+            result_populations = []
+        try:
+            visualization_populations["heatmap"] = _differential_heatmap_populations(meta)
+        except Exception:
+            visualization_populations["heatmap"] = []
+        visualization_populations["volcano"] = result_populations
+        visualization_populations["network"] = list(
+            dict.fromkeys(
+                str(entry.get("population", "")).strip()
+                for entry in differential.get("networks") or []
+                if str(entry.get("population", "")).strip()
+            )
+        )
+        visualization_populations["go"] = _differential_go_populations(meta)
     networks = []
     for entry in differential.get("networks") or []:
         network_id = str(entry.get("id", "")).strip()
@@ -223,7 +244,427 @@ def _build_differential_payload(job_id: str, meta: Dict) -> Dict:
             if artifacts.get("cell_frequency_tsv")
             else None
         ),
+        "visualization_populations": visualization_populations,
+        "result_populations": result_populations,
+        "default_result_population": (
+            visualization_populations["heatmap"][0]
+            if visualization_populations["heatmap"]
+            else (result_populations[0] if result_populations else None)
+        ),
         "networks": networks,
+    }
+
+
+def _get_differential_detail_table(meta: Dict) -> pd.DataFrame:
+    differential = meta.get("differential", {}) or {}
+    artifacts = differential.get("artifacts", {}) or {}
+    raw_path = next(
+        (str(path).strip() for key, path in artifacts.items() if key.startswith("DEG_detailed_") and str(path).strip()),
+        "",
+    )
+    if not raw_path:
+        raise FileNotFoundError("Differential DEG detail table is unavailable.")
+    path = Path(raw_path)
+    if not path.exists():
+        raise FileNotFoundError("Differential DEG detail table is unavailable.")
+    frame = pd.read_csv(path, sep="\t")
+    if "population" not in frame.columns:
+        raise ValueError("Differential DEG detail table is missing the population column.")
+    frame["population"] = frame["population"].astype(str)
+    frame["gene"] = frame["gene"].astype(str)
+    return frame
+
+
+def _get_differential_heatmap_table(meta: Dict) -> pd.DataFrame:
+    path = _get_differential_artifact(meta, "heatmap_tsv")
+    return pd.read_csv(path, sep="\t", index_col=0)
+
+
+def _get_differential_go_table(meta: Dict) -> pd.DataFrame:
+    path = _get_differential_artifact(meta, "goelite_tsv")
+    frame = pd.read_csv(path, sep="\t")
+    if "population" in frame.columns:
+        frame["population"] = frame["population"].astype(str)
+    if "term_name" in frame.columns:
+        frame["term_name"] = frame["term_name"].astype(str)
+    return frame
+
+
+def _split_population_direction(raw_value: object) -> tuple[str, str]:
+    raw_text = str(raw_value or "").strip()
+    if "__" not in raw_text:
+        return raw_text, ""
+    population, direction = raw_text.rsplit("__", 1)
+    return population, direction
+
+
+def _parse_heatmap_row_key(raw_key: object) -> Dict[str, str]:
+    row_text = str(raw_key or "").strip()
+    cluster_group, _, gene = row_text.partition(":")
+    population, direction = _split_population_direction(cluster_group)
+    return {
+        "row_key": row_text,
+        "population": population,
+        "direction": direction or "unknown",
+        "gene": gene or row_text,
+    }
+
+
+def _differential_result_populations(meta: Dict) -> List[str]:
+    detailed = _get_differential_detail_table(meta)
+    ordered = list(dict.fromkeys(detailed["population"].astype(str).tolist()))
+    return [value for value in ordered if value]
+
+
+def _differential_heatmap_populations(meta: Dict) -> List[str]:
+    matrix = _get_differential_heatmap_table(meta)
+    ordered: List[str] = []
+    seen: set[str] = set()
+    for raw_key in matrix.index:
+        parsed = _parse_heatmap_row_key(raw_key)
+        population = parsed["population"]
+        if population and population not in seen:
+            seen.add(population)
+            ordered.append(population)
+    return ordered
+
+
+def _differential_go_populations(meta: Dict) -> List[str]:
+    try:
+        frame = _get_differential_go_table(meta)
+    except Exception:
+        return []
+    ordered: List[str] = []
+    seen: set[str] = set()
+    for raw_value in frame.get("population", pd.Series(dtype=str)).astype(str).tolist():
+        population, _ = _split_population_direction(raw_value)
+        if population and population not in seen:
+            seen.add(population)
+            ordered.append(population)
+    return ordered
+
+
+def _differential_network_entry(meta: Dict, population: str) -> Optional[Dict]:
+    differential = meta.get("differential", {}) or {}
+    for entry in differential.get("networks", []) or []:
+        if str(entry.get("population", "")).strip() == population:
+            return entry
+    return None
+
+
+def _differential_group_labels(meta: Dict) -> tuple[str, str]:
+    differential = meta.get("differential", {}) or {}
+    config = differential.get("config", {}) or {}
+    group1_samples = [str(value).strip() for value in config.get("group1_samples", []) if str(value).strip()]
+    group2_samples = [str(value).strip() for value in config.get("group2_samples", []) if str(value).strip()]
+    case_label = str(differential.get("case_label") or pipeline_mod._group_display_label(group1_samples) or "Group 1").strip()
+    control_label = str(differential.get("control_label") or pipeline_mod._group_display_label(group2_samples) or "Group 2").strip()
+    return case_label, control_label
+
+
+def _differential_population_col(meta: Dict) -> str:
+    differential = meta.get("differential", {}) or {}
+    config = differential.get("config", {}) or {}
+    population_col = str(config.get("population_col", "")).strip()
+    if not population_col:
+        raise ValueError("Differential population column is not configured.")
+    return population_col
+
+
+def _differential_gene_h5ad_path(meta: Dict) -> Path:
+    for key in ("differentials_only_h5ad",):
+        raw_path = str(meta.get("differential", {}).get("artifacts", {}).get(key, "")).strip()
+        if raw_path and Path(raw_path).exists():
+            return Path(raw_path)
+    raw_combined = str(meta.get("artifacts", {}).get("combined_h5ad", "")).strip()
+    if raw_combined and Path(raw_combined).exists():
+        return Path(raw_combined)
+    raise FileNotFoundError("Aligned AnnData output is unavailable for differential gene detail.")
+
+
+def _open_gene_detail_adata(meta: Dict, gene: str) -> tuple[ad.AnnData, Path]:
+    primary = _differential_gene_h5ad_path(meta)
+    adata = ad.read_h5ad(primary, backed="r")
+    if gene in adata.var_names:
+        return adata, primary
+    try:
+        adata.file.close()
+    except Exception:
+        pass
+
+    combined_path = str(meta.get("artifacts", {}).get("combined_h5ad", "")).strip()
+    if combined_path and Path(combined_path).exists():
+        fallback = Path(combined_path)
+        adata = ad.read_h5ad(fallback, backed="r")
+        if gene in adata.var_names:
+            return adata, fallback
+        try:
+            adata.file.close()
+        except Exception:
+            pass
+    raise KeyError(f"Gene '{gene}' not found in the aligned AnnData output.")
+
+
+def _close_backed_adata(adata: Optional[ad.AnnData]) -> None:
+    if adata is None:
+        return
+    try:
+        if getattr(adata, "isbacked", False):
+            adata.file.close()
+    except Exception:
+        pass
+
+
+def _build_differential_heatmap_payload(meta: Dict, population: str) -> Dict:
+    matrix = _get_differential_heatmap_table(meta)
+    column_labels = [str(label).split(":", 1)[0] for label in matrix.columns]
+    rows = []
+    for raw_key, values in matrix.iterrows():
+        parsed = _parse_heatmap_row_key(raw_key)
+        if parsed["population"] != population:
+            continue
+        row_values: List[Optional[float]] = []
+        for value in values.tolist():
+            row_values.append(float(value) if _is_finite_number(value) else None)
+        rows.append(
+            {
+                "row_key": parsed["row_key"],
+                "gene": parsed["gene"],
+                "direction": parsed["direction"],
+                "values": row_values,
+            }
+        )
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"No heatmap rows were found for '{population}'.")
+    return {
+        "population": population,
+        "columns": column_labels,
+        "rows": rows,
+        "default_gene": rows[0]["gene"],
+    }
+
+
+def _build_differential_volcano_payload(meta: Dict, population: str) -> Dict:
+    detailed = _get_differential_detail_table(meta)
+    subset = detailed.loc[detailed["population"] == population].copy()
+    if subset.empty:
+        raise HTTPException(status_code=404, detail=f"No differential genes were found for '{population}'.")
+    subset["log2fc"] = pd.to_numeric(subset.get("log2fc"), errors="coerce")
+    subset["fdr"] = pd.to_numeric(subset.get("fdr"), errors="coerce")
+    subset["pval"] = pd.to_numeric(subset.get("pval"), errors="coerce")
+    subset = subset.dropna(subset=["gene", "log2fc"])
+    subset["fdr_clamped"] = subset["fdr"].fillna(subset["pval"]).clip(lower=1e-300)
+    subset["score"] = -np.log10(subset["fdr_clamped"])
+    subset["direction"] = np.where(subset["log2fc"] >= 0, "up", "down")
+    subset = subset.sort_values(["fdr_clamped", "pval", "gene"], ascending=[True, True, True]).reset_index(drop=True)
+    points = [
+        {
+            "gene": str(row.gene),
+            "log2fc": float(row.log2fc),
+            "score": float(row.score),
+            "fdr": float(row.fdr) if _is_finite_number(row.fdr) else None,
+            "pval": float(row.pval) if _is_finite_number(row.pval) else None,
+            "direction": str(row.direction),
+        }
+        for row in subset.itertuples()
+        if _is_finite_number(row.log2fc) and _is_finite_number(row.score)
+    ]
+    return {
+        "population": population,
+        "points": points,
+        "default_gene": points[0]["gene"] if points else None,
+    }
+
+
+def _build_differential_go_payload(meta: Dict, population: str) -> Dict:
+    try:
+        frame = _get_differential_go_table(meta)
+    except HTTPException:
+        return {"population": population, "terms": [], "default_gene": None}
+    except FileNotFoundError:
+        return {"population": population, "terms": [], "default_gene": None}
+
+    if frame.empty or "population" not in frame.columns:
+        return {"population": population, "terms": [], "default_gene": None}
+
+    directions = frame["population"].map(_split_population_direction)
+    frame = frame.assign(
+        base_population=[value[0] for value in directions],
+        direction=[value[1] or "unknown" for value in directions],
+    )
+    subset = frame.loc[frame["base_population"] == population].copy()
+    if subset.empty:
+        return {"population": population, "terms": [], "default_gene": None}
+
+    subset["fdr"] = pd.to_numeric(subset.get("fdr"), errors="coerce")
+    subset["p_value"] = pd.to_numeric(subset.get("p_value"), errors="coerce")
+    subset["score"] = -np.log10(subset["fdr"].fillna(subset["p_value"]).clip(lower=1e-300))
+    subset = subset.sort_values(["fdr", "p_value", "term_name"], ascending=[True, True, True]).head(15)
+    terms = []
+    for row in subset.itertuples():
+        overlap_genes = [gene.strip() for gene in str(getattr(row, "overlap_genes", "")).split(",") if gene.strip()]
+        terms.append(
+            {
+                "term_id": str(getattr(row, "term_id", "")),
+                "term_name": str(getattr(row, "term_name", "")),
+                "direction": str(getattr(row, "direction", "unknown")),
+                "fdr": float(row.fdr) if _is_finite_number(row.fdr) else None,
+                "p_value": float(row.p_value) if _is_finite_number(row.p_value) else None,
+                "score": float(row.score) if _is_finite_number(row.score) else None,
+                "overlap_genes": overlap_genes,
+                "selected_gene": overlap_genes[0] if overlap_genes else None,
+            }
+        )
+    default_gene = next((term["selected_gene"] for term in terms if term["selected_gene"]), None)
+    return {"population": population, "terms": terms, "default_gene": default_gene}
+
+
+def _build_differential_network_payload(meta: Dict, population: str) -> Dict:
+    entry = _differential_network_entry(meta, population)
+    if not entry:
+        return {"population": population, "elements": [], "default_gene": None}
+
+    tsv_path = Path(str(entry.get("tsv", "")).strip())
+    if not tsv_path.exists():
+        return {"population": population, "elements": [], "default_gene": None}
+
+    detailed = _get_differential_detail_table(meta)
+    subset = detailed.loc[detailed["population"] == population, ["gene", "log2fc", "fdr", "pval"]].copy()
+    subset["gene"] = subset["gene"].astype(str)
+    subset["log2fc"] = pd.to_numeric(subset.get("log2fc"), errors="coerce")
+    fc_map = dict(zip(subset["gene"], subset["log2fc"]))
+
+    frame = pd.read_csv(tsv_path, sep="\t")
+    nodes: Dict[str, Dict[str, object]] = {}
+    edges = []
+    edge_index = 0
+    for row in frame.itertuples():
+        source = str(getattr(row, "Symbol1", "")).strip()
+        targets = [value.strip() for value in str(getattr(row, "Symbol2", "")).split("|") if value.strip()]
+        interaction_type = str(getattr(row, "InteractionType", "")).strip()
+        direction = str(getattr(row, "Direction", "")).strip().lower() or "neutral"
+        if not source or not targets:
+            continue
+        if source not in nodes:
+            source_fc = fc_map.get(source)
+            nodes[source] = {
+                "data": {
+                    "id": source,
+                    "label": source,
+                    "log2fc": float(source_fc) if _is_finite_number(source_fc) else 0.0,
+                }
+            }
+        for target in targets:
+            if target not in nodes:
+                target_fc = fc_map.get(target)
+                nodes[target] = {
+                    "data": {
+                        "id": target,
+                        "label": target,
+                        "log2fc": float(target_fc) if _is_finite_number(target_fc) else 0.0,
+                    }
+                }
+            edges.append(
+                {
+                    "data": {
+                        "id": f"e{edge_index}",
+                        "source": source,
+                        "target": target,
+                        "interaction_type": interaction_type,
+                        "direction": direction,
+                    }
+                }
+            )
+            edge_index += 1
+
+    ranked_nodes = sorted(
+        (
+            (
+                abs(float(element["data"].get("log2fc", 0.0) or 0.0)),
+                str(element["data"].get("id", "")),
+            )
+            for element in nodes.values()
+        ),
+        reverse=True,
+    )
+    default_gene = ranked_nodes[0][1] if ranked_nodes else None
+    return {
+        "population": population,
+        "elements": list(nodes.values()) + edges,
+        "default_gene": default_gene,
+        "pdf_url": f"/api/jobs/{meta['job_id']}/differential/network/{entry['id']}?format=pdf",
+    }
+
+
+def _build_differential_gene_detail_payload(meta: Dict, population: str, gene: str) -> Dict:
+    differential = meta.get("differential", {}) or {}
+    config = differential.get("config", {}) or {}
+    group1_samples = [str(value).strip() for value in config.get("group1_samples", []) if str(value).strip()]
+    group2_samples = [str(value).strip() for value in config.get("group2_samples", []) if str(value).strip()]
+    if not group1_samples or not group2_samples:
+        raise ValueError("Differential comparison groups are not configured.")
+    population_col = _differential_population_col(meta)
+    case_label, control_label = _differential_group_labels(meta)
+
+    adata = None
+    try:
+        adata, _ = _open_gene_detail_adata(meta, gene)
+        if population_col not in adata.obs.columns:
+            raise ValueError(f"'{population_col}' is not present in the aligned AnnData observations.")
+        sample_col, resolved_samples = pipeline_mod._resolve_samples_for_adata(adata, meta, group1_samples + group2_samples)
+        resolved_group1 = [resolved_samples[sample] for sample in group1_samples]
+        resolved_group2 = [resolved_samples[sample] for sample in group2_samples]
+
+        population_values = adata.obs[population_col].astype(str)
+        sample_values = adata.obs[sample_col].astype(str)
+        mask = (population_values == population) & sample_values.isin(resolved_group1 + resolved_group2)
+        if int(np.asarray(mask).sum()) == 0:
+            raise HTTPException(status_code=404, detail=f"No cells were found for '{population}' in the selected comparison groups.")
+
+        subset = adata[mask.to_numpy(), gene]
+        values = _flatten_expr(subset.X).astype(float)
+        subset_samples = sample_values.loc[mask].astype(str)
+        group_labels = np.where(subset_samples.isin(resolved_group1), case_label, control_label)
+    finally:
+        _close_backed_adata(adata)
+
+    groups = []
+    for label in (case_label, control_label):
+        group_values = values[group_labels == label]
+        finite_values = group_values[np.isfinite(group_values)]
+        groups.append(
+            {
+                "label": label,
+                "values": [float(value) for value in finite_values],
+                "n_cells": int(len(finite_values)),
+                "mean": float(np.mean(finite_values)) if len(finite_values) else 0.0,
+            }
+        )
+
+    detailed = _get_differential_detail_table(meta)
+    stats = detailed.loc[(detailed["population"] == population) & (detailed["gene"] == gene)].copy()
+    stats_payload = {
+        "p_value": None,
+        "fdr": None,
+        "log2fc": None,
+        "n_case": groups[0]["n_cells"],
+        "n_control": groups[1]["n_cells"],
+    }
+    if not stats.empty:
+        stats = stats.sort_values(["fdr", "pval"], ascending=[True, True]).iloc[0]
+        stats_payload = {
+            "p_value": float(stats["pval"]) if _is_finite_number(stats.get("pval")) else None,
+            "fdr": float(stats["fdr"]) if _is_finite_number(stats.get("fdr")) else None,
+            "log2fc": float(stats["log2fc"]) if _is_finite_number(stats.get("log2fc")) else None,
+            "n_case": int(stats["n_case"]) if _is_finite_number(stats.get("n_case")) else groups[0]["n_cells"],
+            "n_control": int(stats["n_control"]) if _is_finite_number(stats.get("n_control")) else groups[1]["n_cells"],
+        }
+
+    return {
+        "population": population,
+        "gene": gene,
+        "groups": groups,
+        "stats": stats_payload,
     }
 
 
@@ -828,6 +1269,46 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             "tsv": "text/tab-separated-values",
         }[format]
         return FileResponse(path, filename=path.name, media_type=media_type)
+
+    @app.get("/api/jobs/{job_id}/differential/interactive/heatmap")
+    async def differential_heatmap_data(job_id: str, population: str = Query(...)):
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        meta = store.get_job(job_id)
+        return JSONResponse(_build_differential_heatmap_payload(meta, population))
+
+    @app.get("/api/jobs/{job_id}/differential/interactive/volcano")
+    async def differential_volcano_data(job_id: str, population: str = Query(...)):
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        meta = store.get_job(job_id)
+        return JSONResponse(_build_differential_volcano_payload(meta, population))
+
+    @app.get("/api/jobs/{job_id}/differential/interactive/go")
+    async def differential_go_data(job_id: str, population: str = Query(...)):
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        meta = store.get_job(job_id)
+        return JSONResponse(_build_differential_go_payload(meta, population))
+
+    @app.get("/api/jobs/{job_id}/differential/interactive/network")
+    async def differential_network_data(job_id: str, population: str = Query(...)):
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        meta = store.get_job(job_id)
+        return JSONResponse(_build_differential_network_payload(meta, population))
+
+    @app.get("/api/jobs/{job_id}/differential/interactive/gene")
+    async def differential_gene_data(job_id: str, population: str = Query(...), gene: str = Query(...)):
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        meta = store.get_job(job_id)
+        return JSONResponse(_build_differential_gene_detail_payload(meta, population, gene))
 
     @app.post("/api/tools/approximate-umap")
     async def run_approximate_umap(payload: ApproximateUMAPRequest):

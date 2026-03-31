@@ -8,6 +8,10 @@ let currentUmapData = null;
 let currentExpressionData = null;
 let loadedResultsJobId = null;
 let currentDifferentialState = null;
+let currentDifferentialGene = "";
+let currentDifferentialPopulation = "";
+let differentialCy = null;
+let lastDownloadArtifactSignature = "";
 
 document.addEventListener("DOMContentLoaded", () => {
   initSpeciesSelect();
@@ -93,7 +97,15 @@ function hookForms() {
   document.getElementById("umap-mode").addEventListener("change", renderCurrentUmap);
   document.getElementById("download-umap-image-btn").addEventListener("click", downloadUmapImage);
   document.getElementById("download-expression-image-btn").addEventListener("click", downloadExpressionImage);
-  document.getElementById("differential-network-select").addEventListener("change", renderSelectedNetwork);
+  document.getElementById("differential-viz-mode").addEventListener("change", () => {
+    syncDifferentialPopulationSelect(currentDifferentialState);
+    updateDifferentialDownloadButton();
+    loadDifferentialVisualization();
+  });
+  document.getElementById("differential-result-population").addEventListener("change", () => {
+    currentDifferentialGene = "";
+    loadDifferentialVisualization();
+  });
 }
 
 async function parseApiResponse(resp) {
@@ -139,9 +151,10 @@ async function handleJobSubmit(evt) {
     if (!resp.ok) {
       throw new Error(data.detail || "Failed to create job.");
     }
-    const notice = document.getElementById("job-created");
-    notice.classList.remove("hidden");
-    notice.textContent = `Job created: ${data.job_id}`;
+    document.getElementById("upload-job-id").value = data.job_id;
+    const uploadJobIdDisplay = document.getElementById("upload-job-id-display");
+    uploadJobIdDisplay.textContent = data.job_id;
+    uploadJobIdDisplay.classList.remove("hidden");
     document.getElementById("qc-job-id").value = data.job_id;
     document.getElementById("results-job-id").value = data.job_id;
     loadedResultsJobId = null;
@@ -267,7 +280,14 @@ function applyJobStatus(jobId, data) {
   document.getElementById("job-progress").style.width = `${data.progress || 0}%`;
   document.getElementById("job-progress-label").textContent = `${data.progress || 0}%`;
   document.getElementById("job-log").textContent = (data.qc_log_tail || []).join("");
+  document.getElementById("qc-cell-status").textContent = buildQcCellSummary(data);
 
+  if (!document.getElementById("upload-job-id").value) {
+    document.getElementById("upload-job-id").value = jobId;
+    const uploadJobIdDisplay = document.getElementById("upload-job-id-display");
+    uploadJobIdDisplay.textContent = jobId;
+    uploadJobIdDisplay.classList.remove("hidden");
+  }
   if (!document.getElementById("qc-job-id").value) {
     document.getElementById("qc-job-id").value = jobId;
   }
@@ -278,7 +298,11 @@ function applyJobStatus(jobId, data) {
   updateDifferentialUi(data.differential_ui || null);
 
   if (data.status === "completed") {
-    populateDownloadLinks(jobId);
+    const artifactSignature = JSON.stringify(Object.keys(data.artifacts || {}).sort());
+    if (artifactSignature !== lastDownloadArtifactSignature) {
+      lastDownloadArtifactSignature = artifactSignature;
+      populateDownloadLinks(jobId, data);
+    }
     if (!document.getElementById("gene-query").value && data.default_gene) {
       document.getElementById("gene-query").value = data.default_gene;
     }
@@ -297,13 +321,68 @@ function applyJobStatus(jobId, data) {
   }
 }
 
-async function populateDownloadLinks(jobId) {
+function buildQcCellSummary(data) {
+  const lines = data.log_tail || [];
+  let beforeQc = null;
+  let afterMinGenes = null;
+  let afterMinCounts = null;
+  let afterMito = null;
+
+  for (const line of lines) {
+    let match = line.match(/(?:reimported\s+)?adata shape:\s*\((\d+),/i);
+    if (match) {
+      beforeQc = Number(match[1]);
+      continue;
+    }
+    match = line.match(/Cells remaining after min_genes .* filtering:\s*(\d+)/i);
+    if (match) {
+      afterMinGenes = Number(match[1]);
+      continue;
+    }
+    match = line.match(/Cells remaining after min_counts .* filtering:\s*(\d+)/i);
+    if (match) {
+      afterMinCounts = Number(match[1]);
+      continue;
+    }
+    match = line.match(/Cells remaining after mito-percent filtering:\s*(\d+)/i);
+    if (match) {
+      afterMito = Number(match[1]);
+    }
+  }
+
+  const segments = [];
+  if (beforeQc !== null) {
+    segments.push(`Cells before QC: ${beforeQc.toLocaleString()}`);
+  }
+  if (afterMinGenes !== null) {
+    segments.push(`After min genes: ${afterMinGenes.toLocaleString()}`);
+  }
+  if (afterMinCounts !== null) {
+    segments.push(`After min counts: ${afterMinCounts.toLocaleString()}`);
+  }
+  if (afterMito !== null) {
+    segments.push(`After mito filter: ${afterMito.toLocaleString()}`);
+  }
+
+  if (segments.length) {
+    return segments.join(" | ");
+  }
+  if (data.status === "queued" || data.status === "processing") {
+    return "QC cell counts will appear here while the analysis runs.";
+  }
+  return "QC cell counts will appear here while the analysis runs.";
+}
+
+async function populateDownloadLinks(jobId, statusData = null) {
   const container = document.getElementById("download-links");
   container.innerHTML = "";
-  const resp = await fetch(`/api/jobs/${jobId}/status`);
-  const data = await resp.json();
-  if (!resp.ok) {
-    return;
+  let data = statusData;
+  if (!data) {
+    const resp = await fetch(`/api/jobs/${jobId}/status`);
+    data = await resp.json();
+    if (!resp.ok) {
+      return;
+    }
   }
   const artifacts = data.artifacts || {};
   Object.keys(artifacts).forEach((key) => {
@@ -390,7 +469,7 @@ function updateDifferentialUi(state) {
     archiveLink.classList.add("hidden");
   }
 
-  if (state.status === "completed" && state.heatmap_svg_url) {
+  if (state.status === "completed" && (state.result_populations || []).length) {
     renderDifferentialResults(state);
     setResultMode("differential");
   } else {
@@ -433,90 +512,515 @@ function getMultiSelectValues(element) {
 }
 
 function renderDifferentialResults(state) {
-  const heatmapImage = document.getElementById("differential-heatmap-image");
-  const heatmapEmpty = document.getElementById("differential-heatmap-empty");
-  const heatmapDownload = document.getElementById("download-differential-heatmap-btn");
-  heatmapImage.src = `${state.heatmap_svg_url}&run=${encodeURIComponent(state.run_id || "latest")}`;
-  heatmapImage.classList.remove("hidden");
-  heatmapEmpty.classList.add("hidden");
-  if (state.heatmap_pdf_url) {
-    heatmapDownload.href = state.heatmap_pdf_url;
-    heatmapDownload.classList.remove("hidden");
-  } else {
-    heatmapDownload.classList.add("hidden");
-  }
+  syncDifferentialPopulationSelect(state);
+  updateDifferentialDownloadButton();
+  loadDifferentialVisualization();
+}
 
-  const networkSelect = document.getElementById("differential-network-select");
-  const networkDownload = document.getElementById("download-differential-network-btn");
-  const desiredNetwork = networkSelect.value;
-  networkSelect.innerHTML = "";
-  (state.networks || []).forEach((network) => {
+function differentialPopulationsForMode(state, mode) {
+  const mapping = (state && state.visualization_populations) || {};
+  const values = mapping[mode] || [];
+  return values.filter((value, index) => value && values.indexOf(value) === index);
+}
+
+function syncDifferentialPopulationSelect(state) {
+  const populationSelect = document.getElementById("differential-result-population");
+  const mode = document.getElementById("differential-viz-mode").value;
+  const populations = differentialPopulationsForMode(state, mode);
+  const fallbackPopulation = state.default_result_population || "";
+  const wantedPopulation = currentDifferentialPopulation || populationSelect.value || fallbackPopulation;
+  populationSelect.innerHTML = "";
+  populations.forEach((population) => {
     const option = document.createElement("option");
-    option.value = network.id;
-    option.textContent = network.population;
-    if (network.id === desiredNetwork) {
+    option.value = population;
+    option.textContent = population;
+    if (population === wantedPopulation) {
       option.selected = true;
     }
-    networkSelect.appendChild(option);
+    populationSelect.appendChild(option);
   });
+  populationSelect.disabled = populations.length === 0;
+  if (!populationSelect.value && populations.length) {
+    populationSelect.value = populations[0];
+  }
+  if (!populations.includes(populationSelect.value)) {
+    populationSelect.value = populations[0] || "";
+  }
+  currentDifferentialPopulation = populationSelect.value || "";
+}
 
-  if ((state.networks || []).length) {
-    networkSelect.classList.remove("hidden");
-    networkDownload.classList.remove("hidden");
-    if (!networkSelect.value) {
-      networkSelect.selectedIndex = 0;
+async function loadDifferentialVisualization() {
+  const state = currentDifferentialState;
+  const plotEmpty = document.getElementById("differential-plot-empty");
+  const jobId = document.getElementById("results-job-id").value.trim();
+  if (!state || state.status !== "completed") {
+    resetDifferentialResults();
+    return;
+  }
+
+  const population = document.getElementById("differential-result-population").value;
+  const mode = document.getElementById("differential-viz-mode").value;
+  if (!population) {
+    renderDifferentialEmpty(`No ${mode} data are available for this differential run.`);
+    resetDifferentialGeneDetail();
+    return;
+  }
+
+  currentDifferentialPopulation = population;
+  updateDifferentialDownloadButton();
+  try {
+    let payload = null;
+    if (mode === "heatmap") {
+      payload = await fetchDifferentialJson(`/api/jobs/${jobId}/differential/interactive/heatmap?population=${encodeURIComponent(population)}`);
+      renderDifferentialHeatmap(payload);
+    } else if (mode === "volcano") {
+      payload = await fetchDifferentialJson(`/api/jobs/${jobId}/differential/interactive/volcano?population=${encodeURIComponent(population)}`);
+      renderDifferentialVolcano(payload);
+    } else if (mode === "network") {
+      payload = await fetchDifferentialJson(`/api/jobs/${jobId}/differential/interactive/network?population=${encodeURIComponent(population)}`);
+      renderDifferentialNetwork(payload);
+    } else if (mode === "go") {
+      payload = await fetchDifferentialJson(`/api/jobs/${jobId}/differential/interactive/go?population=${encodeURIComponent(population)}`);
+      renderDifferentialGo(payload);
     }
-    renderSelectedNetwork();
-  } else {
-    networkSelect.classList.add("hidden");
-    networkDownload.classList.add("hidden");
-    const image = document.getElementById("differential-network-image");
-    const empty = document.getElementById("differential-network-empty");
-    if (state.cell_frequency_grouped_png_url) {
-      image.src = `${state.cell_frequency_grouped_png_url}?run=${encodeURIComponent(state.run_id || "latest")}`;
-      image.classList.remove("hidden");
-      empty.classList.remove("hidden");
-      empty.textContent = "Interaction network preview was unavailable for this run. Showing the cell-frequency comparison plot instead.";
+    const nextGene = currentDifferentialGene || (payload && payload.default_gene) || "";
+    if (nextGene) {
+      currentDifferentialGene = nextGene;
+      await loadDifferentialGeneDetail(nextGene, population);
     } else {
-      image.classList.add("hidden");
-      empty.classList.remove("hidden");
-      empty.textContent = "No interaction networks were generated for this comparison.";
+      resetDifferentialGeneDetail();
     }
+  } catch (err) {
+    destroyDifferentialNetwork();
+    renderDifferentialEmpty(err.message || "Unable to load the differential visualization.");
+    plotEmpty.classList.remove("hidden");
   }
 }
 
-function renderSelectedNetwork() {
-  const state = currentDifferentialState;
-  if (!state || !state.networks || !state.networks.length) {
+async function fetchDifferentialJson(url) {
+  const resp = await fetch(url);
+  const data = await parseApiResponse(resp);
+  if (!resp.ok) {
+    throw new Error(data.detail || "Differential data request failed.");
+  }
+  return data;
+}
+
+function renderDifferentialHeatmap(payload) {
+  destroyDifferentialNetwork();
+  const plot = document.getElementById("differential-plot-area");
+  const rows = payload.rows || [];
+  if (!rows.length) {
+    renderDifferentialEmpty(`No heatmap rows were found for ${payload.population}.`);
     return;
   }
-  const select = document.getElementById("differential-network-select");
-  const networkDownload = document.getElementById("download-differential-network-btn");
-  const selected = state.networks.find((network) => network.id === select.value) || state.networks[0];
-  const image = document.getElementById("differential-network-image");
-  const empty = document.getElementById("differential-network-empty");
-  image.src = `${selected.png_url}&run=${encodeURIComponent(state.run_id || "latest")}`;
-  image.classList.remove("hidden");
+  const z = rows.map((row) => row.values);
+  const y = rows.map((row) => row.gene);
+  const directions = rows.map((row) => payload.columns.map(() => row.direction));
+  const figureHeight = Math.max(560, Math.min(2800, rows.length * 18 + 180));
+  plot.classList.remove("hidden");
+  document.getElementById("differential-plot-empty").classList.add("hidden");
+  Plotly.newPlot(
+    plot,
+    [
+      {
+        z,
+        x: payload.columns,
+        y,
+        type: "heatmap",
+        colorscale: [
+          [0, "#06b6d4"],
+          [0.5, "#111827"],
+          [1, "#eab308"],
+        ],
+        zmid: 0,
+        customdata: directions,
+        hovertemplate: "%{y}<br>%{x}<br>log2FC=%{z:.3f}<br>%{customdata}<extra></extra>",
+        colorbar: { title: "log2FC" },
+      },
+    ],
+    {
+      title: `Heatmap: ${payload.population}`,
+      paper_bgcolor: "rgba(0,0,0,0)",
+      plot_bgcolor: "rgba(255,255,255,0.94)",
+      height: figureHeight,
+      margin: { t: 56, l: 170, r: 30, b: 110 },
+      xaxis: { tickangle: -40, automargin: true },
+      yaxis: { automargin: true, tickfont: { size: 10 } },
+    },
+    { responsive: true }
+  );
+  plot.on("plotly_click", (event) => {
+    const gene = event?.points?.[0]?.y;
+    if (gene) {
+      currentDifferentialGene = gene;
+      loadDifferentialGeneDetail(gene, payload.population);
+    }
+  });
+}
+
+function renderDifferentialVolcano(payload) {
+  destroyDifferentialNetwork();
+  const plot = document.getElementById("differential-plot-area");
+  const points = payload.points || [];
+  if (!points.length) {
+    renderDifferentialEmpty(`No volcano data were found for ${payload.population}.`);
+    return;
+  }
+  const up = points.filter((point) => point.direction === "up");
+  const down = points.filter((point) => point.direction === "down");
+  plot.classList.remove("hidden");
+  document.getElementById("differential-plot-empty").classList.add("hidden");
+  Plotly.newPlot(
+    plot,
+    [
+      {
+        x: down.map((point) => point.log2fc),
+        y: down.map((point) => point.score),
+        text: down.map((point) => point.gene),
+        customdata: down.map((point) => [point.gene, point.fdr, point.pval]),
+        type: "scattergl",
+        mode: "markers",
+        name: "Down",
+        marker: { color: "#2563eb", size: 8, opacity: 0.72 },
+        hovertemplate: "%{text}<br>log2FC=%{x:.3f}<br>-log10(FDR)=%{y:.3f}<extra></extra>",
+      },
+      {
+        x: up.map((point) => point.log2fc),
+        y: up.map((point) => point.score),
+        text: up.map((point) => point.gene),
+        customdata: up.map((point) => [point.gene, point.fdr, point.pval]),
+        type: "scattergl",
+        mode: "markers",
+        name: "Up",
+        marker: { color: "#dc2626", size: 8, opacity: 0.72 },
+        hovertemplate: "%{text}<br>log2FC=%{x:.3f}<br>-log10(FDR)=%{y:.3f}<extra></extra>",
+      },
+    ],
+    {
+      title: `Volcano: ${payload.population}`,
+      paper_bgcolor: "rgba(0,0,0,0)",
+      plot_bgcolor: "rgba(255,255,255,0.94)",
+      margin: { t: 56, l: 60, r: 20, b: 56 },
+      height: 640,
+      xaxis: { title: "log2 fold change", zeroline: true, zerolinecolor: "rgba(100,116,139,0.45)" },
+      yaxis: { title: "-log10(FDR)" },
+      hovermode: "closest",
+    },
+    { responsive: true }
+  );
+  plot.on("plotly_click", (event) => {
+    const gene = event?.points?.[0]?.text;
+    if (gene) {
+      currentDifferentialGene = gene;
+      loadDifferentialGeneDetail(gene, payload.population);
+    }
+  });
+}
+
+function renderDifferentialGo(payload) {
+  destroyDifferentialNetwork();
+  const plot = document.getElementById("differential-plot-area");
+  const terms = payload.terms || [];
+  if (!terms.length) {
+    renderDifferentialEmpty(`No GO term enrichment was available for ${payload.population}.`);
+    return;
+  }
+  const ordered = [...terms]
+    .map((term) => {
+      const overlapGenes = term.overlap_genes || [];
+      const selectedGene = overlapGenes.includes(currentDifferentialGene)
+        ? currentDifferentialGene
+        : (term.selected_gene || overlapGenes[0] || null);
+      return {
+        ...term,
+        selected_gene: selectedGene,
+      };
+    })
+    .reverse();
+  plot.classList.remove("hidden");
+  document.getElementById("differential-plot-empty").classList.add("hidden");
+  Plotly.newPlot(
+    plot,
+    [
+      {
+        x: ordered.map((term) => term.score),
+        y: ordered.map((term) => term.term_name),
+        type: "bar",
+        orientation: "h",
+        customdata: ordered.map((term) => [term.selected_gene, term.direction, (term.overlap_genes || []).join(", ")]),
+        marker: {
+          color: ordered.map((term) => (term.direction === "up" ? "#dc2626" : "#2563eb")),
+        },
+        hovertemplate: (
+          "%{y}<br>-log10(FDR)=%{x:.3f}"
+          + "<br>Selected gene: %{customdata[0]}"
+          + "<br>GO genes: %{customdata[2]}<extra></extra>"
+        ),
+      },
+    ],
+    {
+      title: `GO terms: ${payload.population}`,
+      paper_bgcolor: "rgba(0,0,0,0)",
+      plot_bgcolor: "rgba(255,255,255,0.94)",
+      margin: { t: 56, l: 260, r: 20, b: 56 },
+      height: Math.max(540, ordered.length * 34 + 120),
+      xaxis: { title: "-log10(FDR)" },
+      yaxis: { automargin: true },
+    },
+    { responsive: true }
+  );
+  plot.on("plotly_click", (event) => {
+    const gene = event?.points?.[0]?.customdata?.[0];
+    if (gene) {
+      currentDifferentialGene = gene;
+      loadDifferentialGeneDetail(gene, payload.population);
+    }
+  });
+}
+
+function renderDifferentialNetwork(payload) {
+  const plot = document.getElementById("differential-plot-area");
+  Plotly.purge(plot);
+  if (differentialCy) {
+    differentialCy.destroy();
+    differentialCy = null;
+  }
+  const elements = (payload.elements || []).map((element) => {
+    if (!element.data || !element.data.id || element.data.source) {
+      return element;
+    }
+    const log2fc = Number(element.data.log2fc || 0);
+    return {
+      data: {
+        ...element.data,
+        color: log2fc >= 0 ? "#fca5a5" : "#7dd3fc",
+      },
+    };
+  });
+  if (!elements.length) {
+    renderDifferentialEmpty(`No interaction network was available for ${payload.population}.`);
+    return;
+  }
+  plot.classList.remove("hidden");
+  document.getElementById("differential-plot-empty").classList.add("hidden");
+  differentialCy = cytoscape({
+    container: plot,
+    elements,
+    style: [
+      {
+        selector: "node",
+        style: {
+          "background-color": "data(color)",
+          label: "data(label)",
+          color: "#0f172a",
+          "font-size": 12,
+          "text-valign": "center",
+          "text-halign": "center",
+          width: 26,
+          height: 26,
+        },
+      },
+      {
+        selector: "edge",
+        style: {
+          width: 1.8,
+          "line-color": (edge) => (edge.data("direction") === "up" ? "#fca5a5" : "#7dd3fc"),
+          "target-arrow-color": (edge) => (edge.data("direction") === "up" ? "#fca5a5" : "#7dd3fc"),
+          "target-arrow-shape": "triangle",
+          "curve-style": "bezier",
+          opacity: 0.85,
+        },
+      },
+      {
+        selector: "node:selected",
+        style: {
+          "border-width": 3,
+          "border-color": "#0f172a",
+        },
+      },
+    ],
+    layout: {
+      name: "cose",
+      animate: true,
+      fit: true,
+      padding: 36,
+      randomize: true,
+      idealEdgeLength: 80,
+      nodeOverlap: 8,
+      componentSpacing: 90,
+    },
+  });
+  differentialCy.on("tap", "node", (event) => {
+    const gene = event?.target?.data("id");
+    if (gene) {
+      currentDifferentialGene = gene;
+      loadDifferentialGeneDetail(gene, payload.population);
+    }
+  });
+}
+
+async function loadDifferentialGeneDetail(gene, population) {
+  const jobId = document.getElementById("results-job-id").value.trim();
+  if (!gene || !population || !jobId) {
+    resetDifferentialGeneDetail();
+    return;
+  }
+  try {
+    const payload = await fetchDifferentialJson(
+      `/api/jobs/${jobId}/differential/interactive/gene?population=${encodeURIComponent(population)}&gene=${encodeURIComponent(gene)}`
+    );
+    renderDifferentialGeneDetail(payload);
+  } catch (err) {
+    resetDifferentialGeneDetail();
+    document.getElementById("differential-selected-gene").textContent = gene;
+    document.getElementById("differential-gene-empty").textContent = err.message || "Unable to load gene detail.";
+    document.getElementById("differential-gene-empty").classList.remove("hidden");
+  }
+}
+
+function renderDifferentialGeneDetail(payload) {
+  const plot = document.getElementById("differential-gene-plot");
+  const empty = document.getElementById("differential-gene-empty");
+  const stats = document.getElementById("differential-gene-stats");
+  document.getElementById("differential-selected-gene").textContent = `${payload.gene} in ${payload.population}`;
+  plot.classList.remove("hidden");
   empty.classList.add("hidden");
-  networkDownload.href = selected.pdf_url;
-  networkDownload.classList.remove("hidden");
+
+  const traces = (payload.groups || []).map((group, index) => ({
+    type: "violin",
+    name: group.label,
+    y: group.values,
+    points: "all",
+    pointpos: 0,
+    jitter: 0.28,
+    marker: {
+      size: 4,
+      opacity: 0.35,
+      color: index === 0 ? "#dc2626" : "#2563eb",
+    },
+    line: {
+      color: index === 0 ? "#dc2626" : "#2563eb",
+    },
+    box: { visible: true },
+    meanline: { visible: true },
+    hovertemplate: `${group.label}<br>expr=%{y:.3f}<extra></extra>`,
+  }));
+  Plotly.newPlot(
+    plot,
+    traces,
+    {
+      title: `Normalized expression: ${payload.gene}`,
+      paper_bgcolor: "rgba(0,0,0,0)",
+      plot_bgcolor: "rgba(255,255,255,0.94)",
+      margin: { t: 52, l: 50, r: 18, b: 48 },
+      height: 420,
+      yaxis: { title: "Normalized expression" },
+      xaxis: { automargin: true },
+      showlegend: false,
+    },
+    { responsive: true }
+  );
+  stats.classList.remove("hidden");
+  const pValue = formatDifferentialStat(payload.stats?.p_value);
+  const fdr = formatDifferentialStat(payload.stats?.fdr);
+  const log2fc = formatDifferentialStat(payload.stats?.log2fc);
+  stats.innerHTML = `
+    <div class="gene-stat-grid">
+      <div class="gene-stat">
+        <div class="gene-stat-label">p-value</div>
+        <div class="gene-stat-value">${pValue}</div>
+      </div>
+      <div class="gene-stat">
+        <div class="gene-stat-label">FDR</div>
+        <div class="gene-stat-value">${fdr}</div>
+      </div>
+      <div class="gene-stat">
+        <div class="gene-stat-label">log2FC</div>
+        <div class="gene-stat-value">${log2fc}</div>
+      </div>
+    </div>
+  `;
+}
+
+function formatDifferentialStat(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) {
+    return "NA";
+  }
+  const numeric = Number(value);
+  if (Math.abs(numeric) > 0 && Math.abs(numeric) < 1e-3) {
+    return numeric.toExponential(2);
+  }
+  return numeric.toFixed(3);
+}
+
+function updateDifferentialDownloadButton() {
+  const state = currentDifferentialState;
+  const button = document.getElementById("download-differential-left-btn");
+  if (!state || state.status !== "completed") {
+    button.classList.add("hidden");
+    return;
+  }
+  const mode = document.getElementById("differential-viz-mode").value;
+  const population = document.getElementById("differential-result-population").value;
+  if (mode === "heatmap" && state.heatmap_pdf_url) {
+    button.href = state.heatmap_pdf_url;
+    button.classList.remove("hidden");
+    return;
+  }
+  if (mode === "network" && population) {
+    const selected = (state.networks || []).find((entry) => entry.population === population);
+    if (selected?.pdf_url) {
+      button.href = selected.pdf_url;
+      button.classList.remove("hidden");
+      return;
+    }
+  }
+  button.classList.add("hidden");
+}
+
+function destroyDifferentialNetwork() {
+  if (differentialCy) {
+    differentialCy.destroy();
+    differentialCy = null;
+  }
+}
+
+function renderDifferentialEmpty(message) {
+  destroyDifferentialNetwork();
+  const plot = document.getElementById("differential-plot-area");
+  Plotly.purge(plot);
+  plot.classList.add("hidden");
+  const empty = document.getElementById("differential-plot-empty");
+  empty.textContent = message;
+  empty.classList.remove("hidden");
 }
 
 function resetDifferentialResults() {
-  const heatmapImage = document.getElementById("differential-heatmap-image");
-  const networkImage = document.getElementById("differential-network-image");
-  const heatmapDownload = document.getElementById("download-differential-heatmap-btn");
-  const networkDownload = document.getElementById("download-differential-network-btn");
-  heatmapImage.removeAttribute("src");
-  networkImage.removeAttribute("src");
-  heatmapImage.classList.add("hidden");
-  networkImage.classList.add("hidden");
-  heatmapDownload.classList.add("hidden");
-  networkDownload.classList.add("hidden");
-  document.getElementById("differential-heatmap-empty").classList.remove("hidden");
-  document.getElementById("differential-network-empty").classList.remove("hidden");
-  document.getElementById("differential-network-empty").textContent = "Interaction networks will appear here when the differential run finishes.";
-  document.getElementById("differential-network-select").classList.add("hidden");
+  destroyDifferentialNetwork();
+  const plot = document.getElementById("differential-plot-area");
+  Plotly.purge(plot);
+  plot.classList.add("hidden");
+  const empty = document.getElementById("differential-plot-empty");
+  empty.textContent = "Run cellHarmony-differential to explore the integrated heatmap, volcano plot, network, or GO terms.";
+  empty.classList.remove("hidden");
+  document.getElementById("download-differential-left-btn").classList.add("hidden");
+  const populationSelect = document.getElementById("differential-result-population");
+  populationSelect.innerHTML = "";
+  currentDifferentialPopulation = "";
+  currentDifferentialGene = "";
+  resetDifferentialGeneDetail();
+}
+
+function resetDifferentialGeneDetail() {
+  const plot = document.getElementById("differential-gene-plot");
+  Plotly.purge(plot);
+  plot.classList.add("hidden");
+  document.getElementById("differential-selected-gene").textContent = "Select a gene from the left panel.";
+  const empty = document.getElementById("differential-gene-empty");
+  empty.textContent = "Select a gene from the heatmap, volcano plot, network, or GO terms to compare expression between groups.";
+  empty.classList.remove("hidden");
+  document.getElementById("differential-gene-stats").classList.add("hidden");
 }
 
 function setResultMode(mode) {
@@ -525,10 +1029,26 @@ function setResultMode(mode) {
   if (mode === "differential") {
     baseline.classList.add("hidden");
     differential.classList.remove("hidden");
+    setResultsControlsDisabled(true);
     return;
   }
   baseline.classList.remove("hidden");
   differential.classList.add("hidden");
+  setResultsControlsDisabled(false);
+}
+
+function setResultsControlsDisabled(disabled) {
+  const controls = [
+    document.getElementById("gene-query"),
+    document.getElementById("umap-mode"),
+    document.getElementById("expression-mode"),
+  ];
+  controls.forEach((control) => {
+    if (!control) {
+      return;
+    }
+    control.disabled = disabled;
+  });
 }
 
 async function loadUmap() {
@@ -581,7 +1101,7 @@ function renderCurrentUmap() {
       text: currentUmapData.reference.map((p) => `${p.barcode}<br>${p.population}`),
       mode: "markers",
       type: "scattergl",
-      marker: { color: "#d1d5db", size: 1, opacity: 0.45 },
+      marker: { color: "#e5e7eb", size: 1, opacity: 0.3 },
       name: "Reference",
       showlegend: false,
     });

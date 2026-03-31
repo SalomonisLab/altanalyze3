@@ -7,6 +7,7 @@
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/modern-normalize@3.0.1/modern-normalize.min.css">
     <link rel="stylesheet" href="/static/styles.css">
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <script src="https://unpkg.com/cytoscape@3.30.4/dist/cytoscape.min.js"></script>
   </head>
   <body>
     <div class="shell">
@@ -42,18 +43,16 @@
               </div>
               <div id="sample-container"></div>
             </div>
-            <button class="primary-btn" type="submit">Create job</button>
+            <input id="upload-job-id" type="hidden">
+            <button class="primary-btn" type="submit">Upload</button>
+            <div class="notice hidden" id="upload-job-id-display"></div>
           </form>
-          <div class="notice hidden" id="job-created"></div>
         </section>
 
         <section class="panel" id="qc-panel">
           <h2>2. QC and alignment</h2>
           <form id="qc-form">
-            <label class="field">
-              <span>Job ID</span>
-              <input id="qc-job-id" name="job_id" placeholder="Paste job id" required>
-            </label>
+            <input id="qc-job-id" name="job_id" type="hidden" required>
             <div class="two-col">
               <label class="field">
                 <span>Min genes</span>
@@ -84,16 +83,14 @@
             <div class="progress-track"><div class="progress-fill" id="job-progress"></div></div>
             <div class="progress-label" id="job-progress-label">0%</div>
           </div>
+          <div class="notice" id="qc-cell-status">QC cell counts will appear here while the analysis runs.</div>
           <pre class="log-view" id="job-log"></pre>
         </section>
 
         <section class="panel" id="results-panel">
           <h2>3. Results</h2>
           <form id="results-form">
-            <label class="field">
-              <span>Job ID</span>
-              <input id="results-job-id" placeholder="Paste job id" required>
-            </label>
+            <input id="results-job-id" type="hidden">
             <label class="field">
               <span>Gene</span>
               <input id="gene-query" placeholder="e.g. MPO">
@@ -168,33 +165,40 @@
         </article>
       </section>
 
-      <section class="plots hidden" id="differential-results-view">
-        <article class="panel">
+      <section class="plots hidden differential-plots" id="differential-results-view">
+        <article class="panel differential-primary-panel">
           <div class="panel-head">
-            <h2>Integrated cellHarmony Heatmap</h2>
-            <a class="ghost-btn hidden" id="download-differential-heatmap-btn" href="#" target="_blank" rel="noopener">Download PDF</a>
+            <h2>Differential Explorer</h2>
+            <div class="panel-head-actions">
+              <select id="differential-viz-mode" class="compact-select">
+                <option value="heatmap">Heatmap</option>
+                <option value="volcano">Volcano</option>
+                <option value="network">Network</option>
+                <option value="go">GO Terms</option>
+              </select>
+              <select id="differential-result-population" class="compact-select"></select>
+              <a class="ghost-btn hidden" id="download-differential-left-btn" href="#" target="_blank" rel="noopener">Download PDF</a>
+            </div>
           </div>
-          <div class="static-plot-shell">
-            <img id="differential-heatmap-image" class="static-plot hidden" alt="cellHarmony differential heatmap">
-            <div class="empty-state" id="differential-heatmap-empty">
-              Run cellHarmony-differential to generate the integrated heatmap with GO terms.
+          <div class="interactive-plot-shell">
+            <div id="differential-plot-area" class="interactive-plot-area hidden"></div>
+            <div class="empty-state" id="differential-plot-empty">
+              Run cellHarmony-differential to explore the integrated heatmap, volcano plot, network, or GO terms.
             </div>
           </div>
         </article>
-        <article class="panel">
+        <article class="panel differential-secondary-panel">
           <div class="panel-head">
-            <h2>Networks</h2>
-            <div class="panel-head-actions">
-              <select id="differential-network-select" class="compact-select hidden"></select>
-              <a class="ghost-btn hidden" id="download-differential-network-btn" href="#" target="_blank" rel="noopener">Download PDF</a>
+            <h2>Gene Detail</h2>
+            <div class="selected-gene-label" id="differential-selected-gene">Select a gene from the left panel.</div>
+          </div>
+          <div class="interactive-plot-shell gene-detail-shell">
+            <div id="differential-gene-plot" class="interactive-plot-area hidden"></div>
+            <div class="empty-state" id="differential-gene-empty">
+              Select a gene from the heatmap, volcano plot, network, or GO terms to compare expression between groups.
             </div>
           </div>
-          <div class="static-plot-shell">
-            <img id="differential-network-image" class="static-plot hidden" alt="cellHarmony differential network">
-            <div class="empty-state" id="differential-network-empty">
-              Interaction networks will appear here when the differential run finishes.
-            </div>
-          </div>
+          <div class="gene-stats hidden" id="differential-gene-stats"></div>
         </article>
       </section>
     </div>
