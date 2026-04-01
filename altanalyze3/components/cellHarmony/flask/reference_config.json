@@ -15,6 +15,17 @@
             "default",
             "immune"
           ]
+        },
+        {
+          "id": "hs_lung_hlca_reference",
+          "label": "Human Lung Cell Atlas (HLCA)",
+          "states_tsv": "references/Human/Lung/HLCA/Hs-Lung-HLCA.txt",
+          "reference_clusters_tsv": "references/Human/Lung/HLCA/Hs-Lung-HLCA_clusters.tsv",
+          "reference_coords_tsv": "references/Human/Lung/HLCA/Hs-Lung-HLCA_umap.tsv",
+          "cluster_key": "ann_finest_level",
+          "soupx_options": [
+            "default"
+          ]
         }
       ]
     },

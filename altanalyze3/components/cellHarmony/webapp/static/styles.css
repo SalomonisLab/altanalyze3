@@ -70,6 +70,13 @@ body {
   line-height: 1.5;
 }
 
+.hero-links {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .docs-link {
   display: inline-flex;
   align-items: center;
@@ -323,6 +330,13 @@ select:disabled {
   border-radius: 12px;
   background: rgba(29, 78, 216, 0.08);
   color: #1d4ed8;
+}
+
+#upload-job-id-display {
+  font-size: 0.8rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .hidden {

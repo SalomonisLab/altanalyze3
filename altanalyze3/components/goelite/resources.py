@@ -24,6 +24,7 @@ from .structures import GOTermNode, GOTree
 
 DEFAULT_CACHE_ENV = "ALTA_GOELITE_DATA"
 DEFAULT_CACHE_ROOT = Path.home() / ".altanalyze3" / "goelite"
+BUNDLED_CACHE_ROOT = Path(__file__).resolve().parent.parent / "cellHarmony" / "goelite_cache"
 
 GO_ONTOLOGY_URL = "https://purl.obolibrary.org/obo/go/go-basic.obo"
 
@@ -50,6 +51,36 @@ def _species_cache_name(species: str) -> str:
     return SPECIES_CACHE_ALIAS.get(species.lower(), species.lower())
 
 
+def candidate_cache_dirs(cache_dir: Optional[str] = None) -> Tuple[Path, ...]:
+    """
+    Return cache roots to search for prebuilt GO-Elite assets.
+
+    The bundled cellHarmony cache is preferred by default so Docker images can
+    use repository-local data without attempting a download. If an explicit
+    cache_dir is supplied, that path is treated as the authoritative cache.
+    """
+
+    roots = []
+    if cache_dir:
+        roots.append(Path(cache_dir).expanduser())
+    else:
+        roots.append(BUNDLED_CACHE_ROOT)
+        if os.getenv(DEFAULT_CACHE_ENV):
+            roots.append(Path(os.environ[DEFAULT_CACHE_ENV]).expanduser())
+        else:
+            roots.append(DEFAULT_CACHE_ROOT)
+
+    seen = set()
+    ordered = []
+    for root in roots:
+        key = str(root.expanduser())
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(root)
+    return tuple(ordered)
+
+
 def resolve_cache_dir(cache_dir: Optional[str] = None) -> Path:
     """
     Determine the root cache directory, creating it if necessary.
@@ -70,6 +101,17 @@ def resolve_species_cache_dir(species: str, cache_dir: Optional[str] = None) -> 
     cache_root = resolve_cache_dir(cache_dir)
     cache_name = _species_cache_name(species)
     return cache_root / cache_name
+
+
+def _resolve_existing_species_dir(species: str, cache_root: Path) -> Optional[Path]:
+    species_key = species.lower()
+    species_dir = cache_root / _species_cache_name(species_key)
+    if species_dir.exists():
+        return species_dir
+    legacy_dir = cache_root / species_key
+    if legacy_dir.exists():
+        return legacy_dir
+    return None
 
 
 def _download(url: str, dest: Path, chunk_size: int = 1 << 18) -> None:
@@ -229,40 +271,51 @@ def load_cached_resources(
     cache_dir: Optional[str] = None,
     version: Optional[str] = None,
 ) -> ParsedGO:
-    cache_root = resolve_cache_dir(cache_dir)
     species_key = species.lower()
-    species_dir = resolve_species_cache_dir(species_key, cache_dir=cache_dir)
-    if not species_dir.exists():
-        legacy_dir = cache_root / species_key
-        if legacy_dir.exists():
-            species_dir = legacy_dir
+    last_error: Optional[FileNotFoundError] = None
 
-    if not species_dir.exists():
-        raise FileNotFoundError(f"No GO-Elite cache found for species '{species_key}' at {species_dir}")
+    for cache_root in candidate_cache_dirs(cache_dir):
+        species_dir = _resolve_existing_species_dir(species_key, cache_root)
+        if species_dir is None:
+            continue
 
-    if version is None:
-        latest_path = species_dir / "latest.json"
-        if not latest_path.exists():
-            raise FileNotFoundError(f"No cached version metadata found for species '{species_key}'.")
-        with open(latest_path, "r", encoding="utf-8") as handle:
-            version = json.load(handle)["version"]
+        selected_version = version
+        if selected_version is None:
+            latest_path = species_dir / "latest.json"
+            if not latest_path.exists():
+                last_error = FileNotFoundError(
+                    f"No cached version metadata found for species '{species_key}' in {species_dir}."
+                )
+                continue
+            with open(latest_path, "r", encoding="utf-8") as handle:
+                selected_version = json.load(handle)["version"]
 
-    version_dir = species_dir / version
-    if not version_dir.exists():
-        raise FileNotFoundError(f"Cached version '{version}' not found for species '{species_key}'.")
+        version_dir = species_dir / selected_version
+        if not version_dir.exists():
+            last_error = FileNotFoundError(
+                f"Cached version '{selected_version}' not found for species '{species_key}' in {species_dir}."
+            )
+            continue
 
-    data_dir = version_dir / "data"
-    tree_path = data_dir / "go_tree.json"
-    term_gene_base = data_dir / "term_gene"
+        data_dir = version_dir / "data"
+        tree_path = data_dir / "go_tree.json"
+        term_gene_base = data_dir / "term_gene"
 
-    tree = _read_tree_json(tree_path)
-    term_to_genes = _read_term_gene_table(term_gene_base)
+        tree = _read_tree_json(tree_path)
+        term_to_genes = _read_term_gene_table(term_gene_base)
 
-    for term_id, genes in term_to_genes.items():
-        if term_id in tree.nodes:
-            tree.nodes[term_id] = tree.nodes[term_id].with_genes(genes)
+        for term_id, genes in term_to_genes.items():
+            if term_id in tree.nodes:
+                tree.nodes[term_id] = tree.nodes[term_id].with_genes(genes)
 
-    return ParsedGO(tree=tree, term_to_genes=term_to_genes)
+        return ParsedGO(tree=tree, term_to_genes=term_to_genes)
+
+    if last_error is not None:
+        raise last_error
+    searched = ", ".join(str(path) for path in candidate_cache_dirs(cache_dir))
+    raise FileNotFoundError(
+        f"No GO-Elite cache found for species '{species_key}'. Checked: {searched}"
+    )
 
 
 def _build_species_resources(

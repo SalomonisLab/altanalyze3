@@ -6,6 +6,11 @@ production-oriented successor to the older Flask demo: same core workflow,
 cleaner API layer, easier deployment behind a reverse proxy, and a UI that can
 be tested immediately in a web browser.
 
+## Related docs
+
+- [cellHarmony-lite documentation](../../../../docs/cellHarmony.md)
+- [cellHarmony-differential documentation](../../../../docs/cellHarmony_differential.md)
+
 ## Quick start
 
 ```bash

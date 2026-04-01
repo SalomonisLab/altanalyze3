@@ -33,8 +33,8 @@ TEMPLATES = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 
 class QCSettings(BaseModel):
-    min_genes: int = 200
-    min_counts: int = 500
+    min_genes: int = 500
+    min_counts: int = 1000
     min_cells: int = 3
     mit_percent: int = 15
     align_cutoff: float = 0.1
@@ -341,16 +341,12 @@ def _differential_result_populations(meta: Dict) -> List[str]:
 
 
 def _differential_heatmap_populations(meta: Dict) -> List[str]:
-    matrix = _get_differential_heatmap_table(meta)
-    ordered: List[str] = []
-    seen: set[str] = set()
-    for raw_key in matrix.index:
-        parsed = _parse_heatmap_row_key(raw_key)
-        population = parsed["population"]
-        if population and population not in seen:
-            seen.add(population)
-            ordered.append(population)
-    return ordered
+    try:
+        detailed = _get_differential_detail_table(meta)
+    except Exception:
+        return []
+    ordered = list(dict.fromkeys(detailed["population"].astype(str).tolist()))
+    return [value for value in ordered if value]
 
 
 def _differential_go_populations(meta: Dict) -> List[str]:
@@ -440,26 +436,73 @@ def _close_backed_adata(adata: Optional[ad.AnnData]) -> None:
 
 
 def _build_differential_heatmap_payload(meta: Dict, population: str) -> Dict:
-    matrix = _get_differential_heatmap_table(meta)
-    column_labels = [str(label).split(":", 1)[0] for label in matrix.columns]
+    detailed = _get_differential_detail_table(meta).copy()
+    detailed["population"] = detailed["population"].astype(str)
+    subset = detailed.loc[detailed["population"] == population].copy()
+    if subset.empty:
+        raise HTTPException(status_code=404, detail=f"No heatmap rows were found for '{population}'.")
+
+    subset["gene"] = subset["gene"].astype(str)
+    subset["log2fc"] = pd.to_numeric(subset.get("log2fc"), errors="coerce")
+    subset["fdr"] = pd.to_numeric(subset.get("fdr"), errors="coerce")
+    subset["pval"] = pd.to_numeric(subset.get("pval"), errors="coerce")
+    subset["sig_metric"] = subset["fdr"].fillna(subset["pval"])
+    subset = subset.dropna(subset=["gene", "log2fc"])
+    subset = subset.sort_values(["sig_metric", "pval", "gene"], ascending=[True, True, True]).drop_duplicates(subset=["gene"])
+
+    detailed_matrix = (
+        detailed.assign(
+            gene=detailed["gene"].astype(str),
+            log2fc=pd.to_numeric(detailed.get("log2fc"), errors="coerce"),
+        )
+        .dropna(subset=["gene", "log2fc"])
+        .pivot_table(index="gene", columns="population", values="log2fc", aggfunc="first")
+    )
+    heatmap_matrix = None
+    heatmap_exact_rows: Dict[tuple[str, str], List[Optional[float]]] = {}
+    heatmap_gene_rows: Dict[str, List[Optional[float]]] = {}
+
+    try:
+        heatmap_frame = _get_differential_heatmap_table(meta)
+        heatmap_columns = [str(label).split(":", 1)[0] for label in heatmap_frame.columns]
+        column_labels = list(dict.fromkeys(heatmap_columns))
+        if len(column_labels) != len(heatmap_frame.columns):
+            column_labels = [str(label) for label in heatmap_frame.columns]
+        heatmap_matrix = heatmap_frame.copy()
+        heatmap_matrix.columns = column_labels
+        for raw_key, values in heatmap_matrix.iterrows():
+            parsed = _parse_heatmap_row_key(raw_key)
+            gene = parsed["gene"]
+            row_values = [float(value) if _is_finite_number(value) else 0.0 for value in values.tolist()]
+            row_key = (parsed["population"], gene)
+            heatmap_exact_rows.setdefault(row_key, row_values)
+            heatmap_gene_rows.setdefault(gene, row_values)
+    except Exception:
+        column_labels = list(dict.fromkeys(detailed["population"].astype(str).tolist()))
+
+    if not column_labels:
+        column_labels = list(dict.fromkeys(detailed["population"].astype(str).tolist()))
+
+    detailed_matrix = detailed_matrix.reindex(columns=column_labels).fillna(0.0)
+
     rows = []
-    for raw_key, values in matrix.iterrows():
-        parsed = _parse_heatmap_row_key(raw_key)
-        if parsed["population"] != population:
-            continue
-        row_values: List[Optional[float]] = []
-        for value in values.tolist():
-            row_values.append(float(value) if _is_finite_number(value) else None)
+    for row in subset.itertuples():
+        gene = str(row.gene)
+        values = (
+            heatmap_exact_rows.get((population, gene))
+            or heatmap_gene_rows.get(gene)
+            or (detailed_matrix.loc[gene].tolist() if gene in detailed_matrix.index else [0.0] * len(column_labels))
+        )
+        row_values = [float(value) if _is_finite_number(value) else 0.0 for value in values]
         rows.append(
             {
-                "row_key": parsed["row_key"],
-                "gene": parsed["gene"],
-                "direction": parsed["direction"],
+                "row_key": f"{population}:{gene}",
+                "gene": gene,
+                "direction": "up" if float(row.log2fc) >= 0 else "down",
                 "values": row_values,
             }
         )
-    if not rows:
-        raise HTTPException(status_code=404, detail=f"No heatmap rows were found for '{population}'.")
+
     return {
         "population": population,
         "columns": column_labels,
@@ -989,6 +1032,47 @@ def _render_expression_pdf(payload: Dict, mode: str) -> io.BytesIO:
     return buf
 
 
+def _render_differential_gene_pdf(payload: Dict) -> io.BytesIO:
+    _configure_matplotlib_pdf_style()
+    fig, ax = plt.subplots(figsize=(5.0, 5.4))
+
+    groups = payload.get("groups", [])
+    positions = np.arange(1, len(groups) + 1)
+    if len(groups):
+        parts = ax.violinplot(
+            [np.asarray(group.get("values", []), dtype=float) for group in groups],
+            positions=positions,
+            showmeans=False,
+            showmedians=True,
+            showextrema=False,
+        )
+        colors = ["#dc2626", "#2563eb"]
+        for idx, body in enumerate(parts["bodies"]):
+            color = colors[idx % len(colors)]
+            body.set_facecolor(color)
+            body.set_edgecolor(color)
+            body.set_alpha(0.35)
+        for idx, group in enumerate(groups, start=1):
+            vals = np.asarray(group.get("values", []), dtype=float)
+            if vals.size == 0:
+                continue
+            color = colors[(idx - 1) % len(colors)]
+            jitter = np.random.default_rng(0).normal(0, 0.035, size=len(vals))
+            ax.scatter(np.full(len(vals), idx) + jitter, vals, s=8, c=color, alpha=0.3, linewidths=0)
+
+    ax.set_xticks(positions)
+    ax.set_xticklabels([str(group.get("label", f"Group {idx}")) for idx, group in enumerate(groups, start=1)])
+    ax.set_ylabel("Normalized expression")
+    ax.set_title(f"{payload.get('gene', 'Gene')} in {payload.get('population', 'population')}")
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="pdf", bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
 def create_app(test_config: dict | None = None) -> FastAPI:
     cfg = load_config(test_config)
     cfg["ROOT_PATH"] = _normalize_root_path(cfg.get("ROOT_PATH"))
@@ -1336,6 +1420,23 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
         return JSONResponse(_build_differential_gene_detail_payload(meta, population, gene))
+
+    @app.get("/api/jobs/{job_id}/differential/interactive/gene/pdf")
+    async def differential_gene_pdf(job_id: str, population: str = Query(...), gene: str = Query(...)):
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        meta = store.get_job(job_id)
+        payload = _build_differential_gene_detail_payload(meta, population, gene)
+        pdf = _render_differential_gene_pdf(payload)
+        safe_gene = re.sub(r"[^A-Za-z0-9_.-]+", "_", gene).strip("._") or "gene"
+        safe_population = re.sub(r"[^A-Za-z0-9_.-]+", "_", population).strip("._") or "population"
+        filename = f"differential_gene_{safe_gene}_{safe_population}.pdf"
+        return StreamingResponse(
+            pdf,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     @app.post("/api/tools/approximate-umap")
     async def run_approximate_umap(payload: ApproximateUMAPRequest):

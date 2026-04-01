@@ -59,7 +59,7 @@ class JobStore:
             "files": files,
             "status": "uploaded",
             "message": "Files uploaded, awaiting QC.",
-            "progress": 5,
+            "progress": 0,
             "created_at": datetime.utcnow().isoformat() + "Z",
             "updated_at": datetime.utcnow().isoformat() + "Z",
             "qc": {},

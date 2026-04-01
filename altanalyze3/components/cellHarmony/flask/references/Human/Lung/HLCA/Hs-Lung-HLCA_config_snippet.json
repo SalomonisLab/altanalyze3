@@ -1,0 +1,11 @@
+{
+  "cluster_key": "ann_finest_level",
+  "id": "HLCA_full_superadata_v3_norm_log_deg_reference",
+  "label": "HLCA_full_superadata_v3_norm_log_deg reference",
+  "reference_clusters_tsv": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/flask/references/Human/Lung/HLCA/HLCA_full_superadata_v3_norm_log_deg_reference_clusters.tsv",
+  "reference_coords_tsv": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/flask/references/Human/Lung/HLCA/HLCA_full_superadata_v3_norm_log_deg_reference_umap.tsv",
+  "soupx_options": [
+    "default"
+  ],
+  "states_tsv": "/path/to/cellHarmony_reference_states.tsv"
+}

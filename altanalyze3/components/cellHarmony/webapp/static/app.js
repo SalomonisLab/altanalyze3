@@ -8,6 +8,7 @@ let pollTimer = null;
 let currentUmapData = null;
 let currentExpressionData = null;
 let loadedResultsJobId = null;
+let currentJobStatus = "";
 let currentDifferentialState = null;
 let currentDifferentialGene = "";
 let currentDifferentialPopulation = "";
@@ -48,6 +49,7 @@ document.addEventListener("DOMContentLoaded", () => {
   initSpeciesSelect();
   initSampleRows();
   hookForms();
+  updateWorkflowPanels(null);
   updateDifferentialUi(null);
 });
 
@@ -122,6 +124,7 @@ function hookForms() {
   document.getElementById("job-form").addEventListener("submit", handleJobSubmit);
   document.getElementById("qc-form").addEventListener("submit", handleQcSubmit);
   document.getElementById("differential-form").addEventListener("submit", handleDifferentialSubmit);
+  document.getElementById("results-form").addEventListener("submit", handleResultsSubmit);
   document.getElementById("results-job-id").addEventListener("change", handleResultsJobChange);
   document.getElementById("gene-query").addEventListener("change", () => refreshResults());
   document.getElementById("expression-mode").addEventListener("change", renderCurrentExpression);
@@ -151,6 +154,48 @@ async function parseApiResponse(resp) {
   }
 }
 
+function setUploadProgress(percent, visible = true) {
+  const shell = document.getElementById("upload-progress-shell");
+  const fill = document.getElementById("upload-progress");
+  const label = document.getElementById("upload-progress-label");
+  const normalized = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
+  shell.classList.toggle("hidden", !visible);
+  fill.style.width = `${normalized}%`;
+  label.textContent = `${normalized}%`;
+}
+
+function uploadFormDataWithProgress(url, formData, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.responseType = "text";
+
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable || !onProgress) {
+        return;
+      }
+      onProgress((event.loaded / event.total) * 100);
+    };
+
+    xhr.onload = () => {
+      const rawText = xhr.responseText || "";
+      let data = {};
+      if (rawText) {
+        try {
+          data = JSON.parse(rawText);
+        } catch (_) {
+          data = { detail: rawText.trim() || `HTTP ${xhr.status}` };
+        }
+      }
+      resolve({ ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, data });
+    };
+
+    xhr.onerror = () => reject(new Error("Upload failed."));
+    xhr.onabort = () => reject(new Error("Upload cancelled."));
+    xhr.send(formData);
+  });
+}
+
 async function handleJobSubmit(evt) {
   evt.preventDefault();
   const species = document.getElementById("species-select").value;
@@ -176,12 +221,18 @@ async function handleJobSubmit(evt) {
     formData.append("files", fileInput.files[0]);
   }
 
+  const submitBtn = document.getElementById("upload-submit-btn");
   try {
-    const resp = await fetch(apiPath("/jobs"), { method: "POST", body: formData });
-    const data = await resp.json();
+    submitBtn.disabled = true;
+    setUploadProgress(0, true);
+    const resp = await uploadFormDataWithProgress(apiPath("/jobs"), formData, (percent) => {
+      setUploadProgress(percent, true);
+    });
     if (!resp.ok) {
-      throw new Error(data.detail || "Failed to create job.");
+      throw new Error(resp.data.detail || "Failed to create job.");
     }
+    const data = resp.data;
+    setUploadProgress(100, true);
     document.getElementById("upload-job-id").value = data.job_id;
     const uploadJobIdDisplay = document.getElementById("upload-job-id-display");
     uploadJobIdDisplay.textContent = data.job_id;
@@ -192,7 +243,10 @@ async function handleJobSubmit(evt) {
     setResultMode("baseline");
     await loadJobState(data.job_id);
   } catch (err) {
+    setUploadProgress(0, false);
     alert(err.message);
+  } finally {
+    submitBtn.disabled = false;
   }
 }
 
@@ -273,6 +327,11 @@ async function handleResultsJobChange() {
   await loadJobState(jobId);
 }
 
+function handleResultsSubmit(evt) {
+  evt.preventDefault();
+  refreshResults();
+}
+
 async function loadJobState(jobId) {
   try {
     const resp = await fetch(apiPath(`/jobs/${jobId}/status`));
@@ -308,6 +367,8 @@ async function pollStatus(jobId) {
 }
 
 function applyJobStatus(jobId, data) {
+  currentJobStatus = String(data.status || "").trim().toLowerCase();
+  updateWorkflowPanels(data.status || null);
   document.getElementById("job-progress").style.width = `${data.progress || 0}%`;
   document.getElementById("job-progress-label").textContent = `${data.progress || 0}%`;
   document.getElementById("job-log").textContent = (data.qc_log_tail || []).join("");
@@ -349,6 +410,24 @@ function applyJobStatus(jobId, data) {
   if (!pipelineActive && !differentialActive && pollTimer) {
     clearInterval(pollTimer);
     pollTimer = null;
+  }
+}
+
+function updateWorkflowPanels(status) {
+  const normalizedStatus = String(status || "").trim().toLowerCase();
+  const hasUploadedJob = Boolean(normalizedStatus);
+  const hasCompletedAlignment = normalizedStatus === "completed";
+  const qcPanel = document.getElementById("qc-panel");
+  const resultsPanel = document.getElementById("results-panel");
+  const baseline = document.getElementById("baseline-results-view");
+  const differential = document.getElementById("differential-results-view");
+
+  qcPanel.classList.toggle("hidden", !hasUploadedJob);
+  resultsPanel.classList.toggle("hidden", !hasCompletedAlignment);
+
+  if (!hasCompletedAlignment) {
+    baseline.classList.add("hidden");
+    differential.classList.add("hidden");
   }
 }
 
@@ -645,9 +724,21 @@ function renderDifferentialHeatmap(payload) {
     renderDifferentialEmpty(`No heatmap rows were found for ${payload.population}.`);
     return;
   }
-  const z = rows.map((row) => row.values);
+  const originalZ = rows.map((row) => row.values);
+  const finiteValues = originalZ
+    .flat()
+    .filter((value) => value !== null && Number.isFinite(Number(value)))
+    .map((value) => Math.abs(Number(value)));
+  const maxAbs = finiteValues.length ? Math.max(...finiteValues) : 1;
+  const scaleFactor = Math.max(1, maxAbs);
+  const z = originalZ.map((row) =>
+    row.map((value) => (value === null || !Number.isFinite(Number(value)) ? null : Number(value) / scaleFactor))
+  );
   const y = rows.map((row) => row.gene);
   const directions = rows.map((row) => payload.columns.map(() => row.direction));
+  const hoverValues = originalZ.map((row) =>
+    row.map((value) => (value === null || !Number.isFinite(Number(value)) ? null : Number(value)))
+  );
   const figureHeight = Math.max(560, Math.min(2800, rows.length * 18 + 180));
   plot.classList.remove("hidden");
   document.getElementById("differential-plot-empty").classList.add("hidden");
@@ -660,14 +751,17 @@ function renderDifferentialHeatmap(payload) {
         y,
         type: "heatmap",
         colorscale: [
-          [0, "#06b6d4"],
+          [0, "#87ceeb"],
           [0.5, "#111827"],
-          [1, "#eab308"],
+          [1, "#ffff00"],
         ],
+        zmin: -1,
+        zmax: 1,
         zmid: 0,
         customdata: directions,
-        hovertemplate: "%{y}<br>%{x}<br>log2FC=%{z:.3f}<br>%{customdata}<extra></extra>",
-        colorbar: { title: "log2FC" },
+        text: hoverValues,
+        hovertemplate: "%{y}<br>%{x}<br>Scaled=%{z:.3f}<br>log2FC=%{text:.3f}<br>%{customdata}<extra></extra>",
+        colorbar: { title: "Scaled log2FC" },
       },
     ],
     {
@@ -713,7 +807,7 @@ function renderDifferentialVolcano(payload) {
         type: "scattergl",
         mode: "markers",
         name: "Down",
-        marker: { color: "#2563eb", size: 8, opacity: 0.72 },
+        marker: { color: "#2563eb", size: 16, opacity: 0.72 },
         hovertemplate: "%{text}<br>log2FC=%{x:.3f}<br>-log10(FDR)=%{y:.3f}<extra></extra>",
       },
       {
@@ -724,7 +818,7 @@ function renderDifferentialVolcano(payload) {
         type: "scattergl",
         mode: "markers",
         name: "Up",
-        marker: { color: "#dc2626", size: 8, opacity: 0.72 },
+        marker: { color: "#dc2626", size: 16, opacity: 0.72 },
         hovertemplate: "%{text}<br>log2FC=%{x:.3f}<br>-log10(FDR)=%{y:.3f}<extra></extra>",
       },
     ],
@@ -779,7 +873,7 @@ function renderDifferentialGo(payload) {
         y: ordered.map((term) => term.term_name),
         type: "bar",
         orientation: "h",
-        customdata: ordered.map((term) => [term.selected_gene, term.direction, (term.overlap_genes || []).join(", ")]),
+        customdata: ordered.map((term) => [term.selected_gene, term.direction, (term.overlap_genes || []).join(", "), term.overlap_genes || []]),
         marker: {
           color: ordered.map((term) => (term.direction === "up" ? "#dc2626" : "#2563eb")),
         },
@@ -802,7 +896,22 @@ function renderDifferentialGo(payload) {
     { responsive: true }
   );
   plot.on("plotly_click", (event) => {
-    const gene = event?.points?.[0]?.customdata?.[0];
+    const selectedGene = event?.points?.[0]?.customdata?.[0];
+    const overlapGenes = event?.points?.[0]?.customdata?.[3] || [];
+    let gene = selectedGene;
+    if (Array.isArray(overlapGenes) && overlapGenes.length > 1) {
+      const response = window.prompt(
+        `Select a gene from this GO term:\n${overlapGenes.join(", ")}`,
+        selectedGene || overlapGenes[0] || ""
+      );
+      if (response === null) {
+        return;
+      }
+      const trimmed = response.trim();
+      if (trimmed && overlapGenes.includes(trimmed)) {
+        gene = trimmed;
+      }
+    }
     if (gene) {
       currentDifferentialGene = gene;
       loadDifferentialGeneDetail(gene, payload.population);
@@ -901,6 +1010,7 @@ async function loadDifferentialGeneDetail(gene, population) {
     const payload = await fetchDifferentialJson(
       apiPath(`/jobs/${jobId}/differential/interactive/gene?population=${encodeURIComponent(population)}&gene=${encodeURIComponent(gene)}`)
     );
+    currentDifferentialPopulation = payload.population || population;
     renderDifferentialGeneDetail(payload);
   } catch (err) {
     resetDifferentialGeneDetail();
@@ -914,9 +1024,14 @@ function renderDifferentialGeneDetail(payload) {
   const plot = document.getElementById("differential-gene-plot");
   const empty = document.getElementById("differential-gene-empty");
   const stats = document.getElementById("differential-gene-stats");
+  const downloadButton = document.getElementById("download-differential-gene-btn");
   document.getElementById("differential-selected-gene").textContent = `${payload.gene} in ${payload.population}`;
   plot.classList.remove("hidden");
   empty.classList.add("hidden");
+  downloadButton.href = apiPath(
+    `/jobs/${document.getElementById("results-job-id").value.trim()}/differential/interactive/gene/pdf?population=${encodeURIComponent(payload.population)}&gene=${encodeURIComponent(payload.gene)}`
+  );
+  downloadButton.classList.remove("hidden");
 
   const traces = (payload.groups || []).map((group, index) => ({
     type: "violin",
@@ -1048,6 +1163,8 @@ function resetDifferentialGeneDetail() {
   Plotly.purge(plot);
   plot.classList.add("hidden");
   document.getElementById("differential-selected-gene").textContent = "Select a gene from the left panel.";
+  document.getElementById("download-differential-gene-btn").classList.add("hidden");
+  document.getElementById("download-differential-gene-btn").removeAttribute("href");
   const empty = document.getElementById("differential-gene-empty");
   empty.textContent = "Select a gene from the heatmap, volcano plot, network, or GO terms to compare expression between groups.";
   empty.classList.remove("hidden");
@@ -1057,6 +1174,12 @@ function resetDifferentialGeneDetail() {
 function setResultMode(mode) {
   const baseline = document.getElementById("baseline-results-view");
   const differential = document.getElementById("differential-results-view");
+  if (currentJobStatus !== "completed") {
+    baseline.classList.add("hidden");
+    differential.classList.add("hidden");
+    setResultsControlsDisabled(false);
+    return;
+  }
   if (mode === "differential") {
     baseline.classList.add("hidden");
     differential.classList.remove("hidden");

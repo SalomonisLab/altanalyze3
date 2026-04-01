@@ -1,0 +1,26 @@
+{
+  "species": "human",
+  "version": "20260401",
+  "built_at": "2026-04-01T01:49:48.519433",
+  "source": {
+    "obo": {
+      "path": "/Users/saljh8/.altanalyze3/goelite/Hs/20260401/downloads/go-basic.obo",
+      "url": "local",
+      "release": "releases_2026-01-23"
+    },
+    "gaf": {
+      "path": "/Users/saljh8/.altanalyze3/goelite/Hs/20260401/downloads/goa_human.gaf.gz",
+      "url": "local",
+      "release": "20260401"
+    }
+  },
+  "storage": {
+    "tree": "data/go_tree.json",
+    "term_gene": "data/term_gene.tsv.gz",
+    "term_gene_format": "tsv.gz"
+  },
+  "counts": {
+    "terms": 48251,
+    "annotations": 289006
+  }
+}

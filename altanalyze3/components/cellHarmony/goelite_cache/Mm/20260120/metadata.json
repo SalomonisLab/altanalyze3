@@ -1,0 +1,26 @@
+{
+  "species": "mouse",
+  "version": "20260120",
+  "built_at": "2026-01-20T03:30:54.843353",
+  "source": {
+    "obo": {
+      "path": "/Users/saljh8/.altanalyze3/goelite/Mm/20260120/downloads/go-basic.obo",
+      "url": "local",
+      "release": "releases_2025-10-10"
+    },
+    "gaf": {
+      "path": "/Users/saljh8/.altanalyze3/goelite/Mm/20260120/downloads/goa_mouse.gaf.gz",
+      "url": "local",
+      "release": "20260120"
+    }
+  },
+  "storage": {
+    "tree": "data/go_tree.json",
+    "term_gene": "data/term_gene.tsv.gz",
+    "term_gene_format": "tsv.gz"
+  },
+  "counts": {
+    "terms": 48196,
+    "annotations": 366209
+  }
+}

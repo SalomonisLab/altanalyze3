@@ -21,7 +21,10 @@
           </div>
           <p class="lede">Upload and QC single-cell data, visualize results and perform differential expression between samples</p>
         </div>
-        <a class="docs-link" href="https://github.com/SalomonisLab/altanalyze3/blob/master/docs/cellHarmony.md" target="_blank" rel="noopener">Docs</a>
+        <div class="hero-links">
+          <a class="docs-link" href="https://github.com/SalomonisLab/altanalyze3/blob/master/altanalyze3/components/cellHarmony/webapp/HOW_TO_USE.md" target="_blank" rel="noopener">How to Use</a>
+          <a class="docs-link" href="https://github.com/SalomonisLab/altanalyze3/blob/master/altanalyze3/components/cellHarmony/webapp/README.md" target="_blank" rel="noopener">cellHarmony ReadMe</a>
+        </div>
       </header>
 
       <main class="grid">
@@ -44,23 +47,27 @@
               <div id="sample-container"></div>
             </div>
             <input id="upload-job-id" type="hidden">
-            <button class="primary-btn" type="submit">Upload</button>
+            <button class="primary-btn" id="upload-submit-btn" type="submit">Upload</button>
+            <div class="progress-shell hidden" id="upload-progress-shell">
+              <div class="progress-track"><div class="progress-fill" id="upload-progress"></div></div>
+              <div class="progress-label" id="upload-progress-label">0%</div>
+            </div>
             <div class="notice hidden" id="upload-job-id-display"></div>
           </form>
         </section>
 
-        <section class="panel" id="qc-panel">
+        <section class="panel hidden" id="qc-panel">
           <h2>2. QC and alignment</h2>
           <form id="qc-form">
             <input id="qc-job-id" name="job_id" type="hidden" required>
             <div class="two-col">
               <label class="field">
                 <span>Min genes</span>
-                <input name="min_genes" value="200">
+                <input name="min_genes" value="500">
               </label>
               <label class="field">
                 <span>Min counts</span>
-                <input name="min_counts" value="500">
+                <input name="min_counts" value="1000">
               </label>
             </div>
             <div class="two-col">
@@ -87,7 +94,7 @@
           <pre class="log-view" id="job-log"></pre>
         </section>
 
-        <section class="panel" id="results-panel">
+        <section class="panel hidden" id="results-panel">
           <h2>3. Results</h2>
           <form id="results-form">
             <input id="results-job-id" type="hidden">
@@ -148,7 +155,7 @@
         </section>
       </main>
 
-      <section class="plots" id="baseline-results-view">
+      <section class="plots hidden" id="baseline-results-view">
         <article class="panel">
           <div class="panel-head">
             <h2>Approximate UMAP</h2>
@@ -190,7 +197,10 @@
         <article class="panel differential-secondary-panel">
           <div class="panel-head">
             <h2>Gene Detail</h2>
-            <div class="selected-gene-label" id="differential-selected-gene">Select a gene from the left panel.</div>
+            <div class="panel-head-actions">
+              <div class="selected-gene-label" id="differential-selected-gene">Select a gene from the left panel.</div>
+              <a class="ghost-btn hidden" id="download-differential-gene-btn" href="#" target="_blank" rel="noopener">Download PDF</a>
+            </div>
           </div>
           <div class="interactive-plot-shell gene-detail-shell">
             <div id="differential-gene-plot" class="interactive-plot-area hidden"></div>
