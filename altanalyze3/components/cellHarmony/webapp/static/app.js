@@ -388,9 +388,10 @@ function updateReferenceChangeState() {
   if (referenceRerunPending) {
     updateWorkflowPanels("uploaded");
     document.getElementById("differential-panel").classList.add("hidden");
+    document.getElementById("baseline-results-view").classList.add("hidden");
+    document.getElementById("differential-results-view").classList.add("hidden");
     clearGeneSuggestions();
     resetDifferentialResults();
-    setResultMode("baseline");
     document.getElementById("qc-cell-status").textContent =
       "Reference changed. Click Save QC and run to realign the uploaded data against the newly selected reference.";
     return;
@@ -599,6 +600,7 @@ async function handleQcSubmit(evt) {
       currentJobSpecies = configureData.species || currentJobSpecies;
       currentJobReference = configureData.reference || currentJobReference;
       referenceRerunPending = false;
+      currentDifferentialState = null;
       lastDownloadArtifactSignature = "";
       currentUmapData = null;
       currentExpressionData = null;
@@ -606,6 +608,7 @@ async function handleQcSubmit(evt) {
       clearGeneSuggestions();
       document.getElementById("download-links").innerHTML = "";
       resetDifferentialResults();
+      document.getElementById("differential-panel").classList.add("hidden");
       updateWorkflowPanels(configureData.status || "uploaded");
     }
 
@@ -769,12 +772,14 @@ function updateWorkflowPanels(status) {
   const hasCompletedAlignment = normalizedStatus === "completed";
   const qcPanel = document.getElementById("qc-panel");
   const resultsPanel = document.getElementById("results-panel");
+  const differentialPanel = document.getElementById("differential-panel");
   const previewPanel = document.getElementById("reference-preview-panel");
   const baseline = document.getElementById("baseline-results-view");
   const differential = document.getElementById("differential-results-view");
 
   qcPanel.classList.toggle("hidden", !hasUploadedJob);
   resultsPanel.classList.toggle("hidden", !hasCompletedAlignment);
+  differentialPanel.classList.toggle("hidden", !hasCompletedAlignment);
   previewPanel.classList.toggle("hidden", hasUploadedJob);
 
   if (!hasCompletedAlignment) {
