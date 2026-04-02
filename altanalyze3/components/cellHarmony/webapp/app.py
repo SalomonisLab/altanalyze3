@@ -4,6 +4,7 @@ import io
 import json
 import logging
 import re
+import shutil
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -35,9 +36,15 @@ TEMPLATES = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 class QCSettings(BaseModel):
     min_genes: int = 500
     min_counts: int = 1000
-    min_cells: int = 3
+    min_cells: int = 0
     mit_percent: int = 15
     align_cutoff: float = 0.1
+
+
+class JobConfigSettings(BaseModel):
+    species: str
+    reference: str
+    soupx_option: Optional[str] = None
 
 
 class DifferentialSettings(BaseModel):
@@ -111,12 +118,103 @@ def _is_finite_number(value: object) -> bool:
         return False
 
 
+def _normalize_gene_token(value: object) -> str:
+    return re.sub(r"[\s_.-]+", "", str(value or "").strip()).upper()
+
+
+def _resolve_gene_name(candidates, requested_gene: str) -> Optional[str]:
+    requested = str(requested_gene or "").strip()
+    if not requested:
+        return None
+    if requested in candidates:
+        return requested
+
+    requested_norm = _normalize_gene_token(requested)
+    normalized_map: Dict[str, str] = {}
+    for candidate in candidates:
+        candidate_str = str(candidate)
+        normalized_map.setdefault(_normalize_gene_token(candidate_str), candidate_str)
+    return normalized_map.get(requested_norm)
+
+
 def _configure_matplotlib_pdf_style() -> None:
     plt.rcParams["axes.linewidth"] = 0.5
     plt.rcParams["pdf.fonttype"] = 42
     plt.rcParams["font.family"] = "Arial"
     plt.rcParams["font.sans-serif"] = ["DejaVu Sans"]
     plt.rcParams["figure.facecolor"] = "white"
+
+
+def _clear_directory_contents(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    for child in path.iterdir():
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=False)
+        else:
+            child.unlink(missing_ok=True)
+
+
+_PAIRED_COLOR_STOPS = [
+    (0.0, (0.6509804129600525, 0.8078431487083435, 0.8901960849761963)),
+    (0.09090909090909091, (0.12156862765550613, 0.47058823704719543, 0.7058823704719543)),
+    (0.18181818181818182, (0.6980392336845398, 0.8745098114013672, 0.5411764979362488)),
+    (0.2727272727272727, (0.20000000298023224, 0.6274510025978088, 0.1725490242242813)),
+    (0.36363636363636365, (0.9843137264251709, 0.6039215922355652, 0.6000000238418579)),
+    (0.45454545454545453, (0.8901960849761963, 0.10196078568696976, 0.10980392247438431)),
+    (0.5454545454545454, (0.9921568632125854, 0.7490196228027344, 0.43529412150382996)),
+    (0.6363636363636364, (1.0, 0.49803921580314636, 0.0)),
+    (0.7272727272727273, (0.7921568751335144, 0.6980392336845398, 0.8392156958580017)),
+    (0.8181818181818182, (0.4156862795352936, 0.239215686917305, 0.6039215922355652)),
+    (0.9090909090909091, (1.0, 1.0, 0.6000000238418579)),
+    (1.0, (0.6941176652908325, 0.3490196168422699, 0.1568627506494522)),
+]
+
+
+def _interpolate_paired_color(value: float) -> tuple[float, float, float]:
+    clipped = max(0.0, min(1.0, float(value)))
+    for index in range(1, len(_PAIRED_COLOR_STOPS)):
+        right_pos, right_rgb = _PAIRED_COLOR_STOPS[index]
+        left_pos, left_rgb = _PAIRED_COLOR_STOPS[index - 1]
+        if clipped <= right_pos or index == len(_PAIRED_COLOR_STOPS) - 1:
+            span = max(right_pos - left_pos, 1e-9)
+            ratio = max(0.0, min(1.0, (clipped - left_pos) / span))
+            return tuple(left_rgb[channel] + (right_rgb[channel] - left_rgb[channel]) * ratio for channel in range(3))
+    return _PAIRED_COLOR_STOPS[-1][1]
+
+
+def _custom_shuffle_indices(indices: list[int]) -> list[int]:
+    shuffled: list[int] = []
+    for index, value in enumerate(indices):
+        if value not in shuffled:
+            shuffled.append(value)
+        from_end = indices[len(indices) - 1 - index] if indices else value
+        if from_end not in shuffled:
+            shuffled.append(from_end)
+        middle_index = int((index + len(indices)) / 2)
+        from_middle = indices[middle_index] if middle_index < len(indices) else indices[-1]
+        if from_middle not in shuffled:
+            shuffled.append(from_middle)
+    return shuffled
+
+
+def _seeded_shuffle(items: list[int], seed: int = 0) -> list[int]:
+    rng = np.random.default_rng(seed)
+    values = list(items)
+    for index in range(len(values) - 1, 0, -1):
+        swap_index = int(rng.integers(0, index + 1))
+        values[index], values[swap_index] = values[swap_index], values[index]
+    return values
+
+
+def _build_preview_palette(populations: list[str]) -> dict[str, tuple[float, float, float]]:
+    ordered = list(populations)
+    if len(ordered) <= 4:
+        base = ["#ff0000", "#0000ff", "#ffff00", "#00aa00", "#ffffff", "#000000", "#ff00ff"]
+        return {population: matplotlib.colors.to_rgb(base[index % len(base)]) for index, population in enumerate(ordered)}
+    indices = _seeded_shuffle(_custom_shuffle_indices(list(range(len(ordered)))), 0)
+    denominator = max(len(ordered) - 1, 1)
+    colors = [_interpolate_paired_color(index / denominator) for index in indices]
+    return {population: colors[index] for index, population in enumerate(ordered)}
 
 
 def _resolve_output_path(base_dir: Path, candidate: Optional[str]) -> Optional[Path]:
@@ -140,6 +238,67 @@ def _allowed_file(app: FastAPI, filename: str) -> bool:
 
 def _job_resources(app: FastAPI) -> tuple[JobStore, JobRunner]:
     return app.state.job_store, app.state.job_runner
+
+
+def _build_reference_preview_payload(app: FastAPI, species: str, reference_id: str) -> Dict:
+    registry_path = Path(app.state.config["REFERENCE_REGISTRY"])
+    reference_entry = pipeline_mod._lookup_reference(species, reference_id, registry_path)
+    pipeline_mod._ensure_reference_fields(reference_entry)
+    cluster_key = reference_entry.get("cluster_key", Path(reference_entry["states_tsv"]).stem)
+
+    adata = approx_mod._load_reference_from_tsv(
+        reference_entry["reference_coords_tsv"],
+        reference_entry["reference_clusters_tsv"],
+        umap_key="X_umap",
+        cluster_key=cluster_key,
+    )
+
+    coords = np.asarray(adata.obsm["X_umap"])
+    labels = adata.obs[cluster_key].astype(str).tolist()
+    frame = pd.DataFrame(
+        {
+            "x": coords[:, 0],
+            "y": coords[:, 1],
+            "population": labels,
+        }
+    )
+    frame = frame[
+        frame["x"].map(_is_finite_number)
+        & frame["y"].map(_is_finite_number)
+        & frame["population"].astype(str).str.strip().ne("")
+    ].copy()
+
+    if frame.empty:
+        raise HTTPException(status_code=500, detail="Reference preview contains no finite UMAP coordinates.")
+
+    centroids = (
+        frame.groupby("population", as_index=False)[["x", "y"]]
+        .median()
+        .sort_values("population")
+    )
+
+    return {
+        "species": species,
+        "reference": reference_id,
+        "reference_label": reference_entry.get("label", reference_id),
+        "cluster_key": cluster_key,
+        "points": [
+            {
+                "x": float(row.x),
+                "y": float(row.y),
+                "population": str(row.population),
+            }
+            for row in frame.itertuples(index=False)
+        ],
+        "labels": [
+            {
+                "x": float(row.x),
+                "y": float(row.y),
+                "population": str(row.population),
+            }
+            for row in centroids.itertuples(index=False)
+        ],
+    }
 
 
 def _load_reference_adata(meta: Dict) -> Optional[ad.AnnData]:
@@ -831,6 +990,101 @@ def _build_umap_payload(meta: Dict) -> Dict[str, List[Dict]]:
     return {"reference": reference_points, "query": query_points}
 
 
+def _reference_entry_for_meta(meta: Dict) -> Dict:
+    registry_path = Path(app.state.config["REFERENCE_REGISTRY"]) if "app" in globals() else None
+    if registry_path is None:
+        raise ValueError("Reference registry is unavailable.")
+    reference_entry = pipeline_mod._lookup_reference(meta["species"], meta["reference"], registry_path)
+    pipeline_mod._ensure_reference_fields(reference_entry)
+    return reference_entry
+
+
+def _load_reference_states_table(meta: Dict) -> pd.DataFrame:
+    reference_entry = _reference_entry_for_meta(meta)
+    states_path = Path(reference_entry["states_tsv"])
+    if not states_path.exists():
+        raise FileNotFoundError("Reference states TSV is unavailable for this job.")
+    return pd.read_csv(states_path, sep="\t", index_col=0)
+
+
+def _build_reference_expression_payload(meta: Dict, gene: str) -> Dict:
+    reference_df = _load_reference_states_table(meta)
+    resolved_gene = _resolve_gene_name(reference_df.index.astype(str), gene)
+    if not resolved_gene:
+        combined_path = str(meta.get("artifacts", {}).get("combined_h5ad", "")).strip()
+        if combined_path and Path(combined_path).exists():
+            fallback_adata = ad.read_h5ad(combined_path, backed="r")
+            try:
+                if len(fallback_adata.var_names):
+                    fallback_gene = str(fallback_adata.var_names[0])
+                    return _build_expression_payload(meta, fallback_gene)
+            finally:
+                _close_backed_adata(fallback_adata)
+        return {
+            "gene": gene,
+            "requested_gene": gene,
+            "resolved_gene": None,
+            "source": "missing",
+            "message": f"Gene '{gene}' was not found in the aligned data or the selected reference.",
+            "scatter": [],
+            "violin": [],
+            "umap": [],
+        }
+
+    series = pd.to_numeric(reference_df.loc[resolved_gene], errors="coerce").dropna()
+    ref_adata = _load_reference_adata(meta)
+    ref_cluster_key = meta.get("reference_cluster_key") or meta.get("cluster_key")
+
+    umap_points = []
+    scatter_data = []
+    if ref_adata is not None and ref_cluster_key and ref_cluster_key in ref_adata.obs.columns:
+        coords = np.asarray(ref_adata.obsm["X_umap"])
+        populations = ref_adata.obs[ref_cluster_key].astype(str).tolist()
+        value_map = {str(pop): float(val) for pop, val in series.items() if _is_finite_number(val)}
+        for barcode, (x, y), population in zip(ref_adata.obs_names, coords, populations):
+            if not (_is_finite_number(x) and _is_finite_number(y)):
+                continue
+            value = float(value_map.get(str(population), 0.0))
+            umap_points.append(
+                {
+                    "barcode": str(barcode),
+                    "population": str(population),
+                    "value": value,
+                    "x": float(x),
+                    "y": float(y),
+                }
+            )
+        scatter_data = [
+            {"population": str(pop), "value": float(val)}
+            for pop, val in value_map.items()
+            if _is_finite_number(val)
+        ]
+
+    violin_data = [
+        {
+            "population": str(pop),
+            "values": [float(val)],
+            "mean": float(val),
+        }
+        for pop, val in sorted(series.items(), key=lambda item: float(item[1]), reverse=True)[:10]
+        if _is_finite_number(val)
+    ]
+
+    return {
+        "gene": resolved_gene,
+        "requested_gene": gene,
+        "resolved_gene": resolved_gene,
+        "source": "reference",
+        "message": (
+            f"Showing reference expression for '{resolved_gene}' because the gene was not found "
+            "in the aligned AnnData output."
+        ),
+        "scatter": scatter_data,
+        "violin": violin_data,
+        "umap": umap_points,
+    }
+
+
 def _build_expression_payload(meta: Dict, gene: str) -> Dict:
     artifacts = meta.get("artifacts", {})
     h5ad_path = artifacts.get("combined_h5ad")
@@ -841,10 +1095,71 @@ def _build_expression_payload(meta: Dict, gene: str) -> Dict:
     cluster_key = meta.get("cluster_key")
     if not cluster_key or cluster_key not in adata.obs.columns:
         raise ValueError("Cluster assignments missing from AnnData output.")
-    if gene not in adata.var_names:
-        raise KeyError(f"Gene '{gene}' not found in AnnData output.")
+    resolved_gene = _resolve_gene_name(adata.var_names.astype(str), gene)
+    if not resolved_gene:
+        if len(adata.var_names):
+            fallback_gene = str(adata.var_names[0])
+            values = _flatten_expr(adata[:, fallback_gene].X)
+            populations = adata.obs[cluster_key].astype(str).values
+            scatter_data = [
+                {"population": pop, "value": float(val)}
+                for pop, val in zip(populations, values)
+                if _is_finite_number(val)
+            ]
 
-    values = _flatten_expr(adata[:, gene].X)
+            umap_points = []
+            umap_path = artifacts.get("umap_coordinates")
+            if umap_path and Path(umap_path).exists():
+                coords_df = pd.read_csv(umap_path, sep="\t")
+                barcode_col = coords_df.columns[0]
+                coords_df = coords_df.rename(columns={barcode_col: "CellBarcode", "umap_0": "UMAP1", "umap_1": "UMAP2"})
+                expr_df = pd.DataFrame(
+                    {
+                        "CellBarcode": adata.obs_names.astype(str),
+                        "population": populations,
+                        "value": values.astype(float),
+                    }
+                )
+                merged = pd.merge(coords_df, expr_df, on="CellBarcode", how="inner")
+                umap_points = [
+                    {
+                        "barcode": row.CellBarcode,
+                        "population": row.population,
+                        "value": float(row.value),
+                        "x": float(row.UMAP1),
+                        "y": float(row.UMAP2),
+                    }
+                    for row in merged.itertuples()
+                    if _is_finite_number(row.value) and _is_finite_number(row.UMAP1) and _is_finite_number(row.UMAP2)
+                ]
+
+            violin_data = []
+            for pop in sorted(pd.unique(populations)):
+                mask = populations == pop
+                pop_values = values[mask].astype(float)
+                finite_values = pop_values[np.isfinite(pop_values)]
+                violin_data.append(
+                    {
+                        "population": pop,
+                        "values": [float(v) for v in finite_values],
+                        "mean": float(np.mean(finite_values)) if len(finite_values) else 0.0,
+                    }
+                )
+            violin_data = sorted(violin_data, key=lambda x: x["mean"], reverse=True)[:10]
+
+            return {
+                "gene": fallback_gene,
+                "requested_gene": gene,
+                "resolved_gene": fallback_gene,
+                "source": "query",
+                "message": None,
+                "scatter": scatter_data,
+                "violin": violin_data,
+                "umap": umap_points,
+            }
+        return _build_reference_expression_payload(meta, gene)
+
+    values = _flatten_expr(adata[:, resolved_gene].X)
     populations = adata.obs[cluster_key].astype(str).values
     scatter_data = [
         {"population": pop, "value": float(val)}
@@ -892,7 +1207,30 @@ def _build_expression_payload(meta: Dict, gene: str) -> Dict:
         )
     violin_data = sorted(violin_data, key=lambda x: x["mean"], reverse=True)[:10]
 
-    return {"gene": gene, "scatter": scatter_data, "violin": violin_data, "umap": umap_points}
+    return {
+        "gene": resolved_gene,
+        "requested_gene": gene,
+        "resolved_gene": resolved_gene,
+        "source": "query",
+        "message": None,
+        "scatter": scatter_data,
+        "violin": violin_data,
+        "umap": umap_points,
+    }
+
+
+def _build_gene_suggestions_payload(meta: Dict) -> Dict:
+    artifacts = meta.get("artifacts", {})
+    h5ad_path = artifacts.get("combined_h5ad")
+    if not h5ad_path or not Path(h5ad_path).exists():
+        raise FileNotFoundError("Combined AnnData output unavailable for this job.")
+
+    adata = ad.read_h5ad(h5ad_path, backed="r")
+    try:
+        genes = [str(gene) for gene in adata.var_names.astype(str).tolist()]
+    finally:
+        _close_backed_adata(adata)
+    return {"genes": genes}
 
 
 def _square_umap_axes(ax: plt.Axes, point_groups: List[List[Dict]]) -> None:
@@ -930,25 +1268,35 @@ def _render_umap_pdf(payload: Dict[str, List[Dict]], mode: str) -> io.BytesIO:
             ax.scatter(
                 [p["x"] for p in payload["reference"]],
                 [p["y"] for p in payload["reference"]],
-                s=2,
-                c="#d1d5db",
-                alpha=0.45,
+                s=1,
+                c="#e5e7eb",
+                alpha=0.3,
                 linewidths=0,
-                label="Reference",
             )
-        populations = sorted({p["population"] for p in payload["query"]})
-        cmap = plt.get_cmap("tab20")
-        for idx, population in enumerate(populations):
+        populations = list(dict.fromkeys(p["population"] for p in payload["query"] if p.get("population")))
+        palette = _build_preview_palette(populations)
+        for population in populations:
             subset = [p for p in payload["query"] if p["population"] == population]
             ax.scatter(
                 [p["x"] for p in subset],
                 [p["y"] for p in subset],
                 s=4,
-                color=cmap(idx % cmap.N),
+                color=[palette.get(population, matplotlib.colors.to_rgb("#64748b"))],
+                alpha=0.5,
                 linewidths=0,
-                label=population,
             )
-        ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False, fontsize=7)
+            if subset:
+                xs = [float(point["x"]) for point in subset]
+                ys = [float(point["y"]) for point in subset]
+                ax.text(
+                    float(np.median(xs)),
+                    float(np.median(ys)),
+                    population,
+                    fontsize=9,
+                    color="#0f172a",
+                    ha="center",
+                    va="center",
+                )
         ax.set_title("Approximate UMAP by cell state")
     else:
         if payload["reference"]:
@@ -1119,6 +1467,10 @@ def create_app(test_config: dict | None = None) -> FastAPI:
     async def meta_species():
         return JSONResponse(_load_reference_registry(app))
 
+    @app.get("/api/meta/reference-preview")
+    async def reference_preview(species: str = Query(...), reference: str = Query(...)):
+        return JSONResponse(_build_reference_preview_payload(app, species, reference))
+
     @app.post("/api/jobs")
     async def create_job(
         species: str = Form(...),
@@ -1167,6 +1519,48 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.update_job(job_id, qc=qc.model_dump(), message="QC parameters saved.")
         return JSONResponse({"job_id": job_id, "qc": meta["qc"]})
+
+    @app.post("/api/jobs/{job_id}/configure")
+    async def configure_job(job_id: str, config: JobConfigSettings):
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+
+        registry_path = Path(app.state.config["REFERENCE_REGISTRY"])
+        reference_entry = pipeline_mod._lookup_reference(config.species, config.reference, registry_path)
+        pipeline_mod._ensure_reference_fields(reference_entry)
+
+        meta = store.get_job(job_id)
+        requested_soupx = config.soupx_option if config.soupx_option is not None else meta.get("soupx_option")
+        changed = (
+            str(meta.get("species") or "") != config.species
+            or str(meta.get("reference") or "") != config.reference
+            or str(meta.get("soupx_option") or "") != str(requested_soupx or "")
+        )
+        if changed:
+            _clear_directory_contents(store.outputs_dir(job_id))
+            _clear_directory_contents(store.logs_dir(job_id))
+            meta = store.update_job(
+                job_id,
+                species=config.species,
+                reference=config.reference,
+                soupx_option=requested_soupx,
+                status="uploaded",
+                progress=0,
+                message="Reference updated. Configure QC and rerun alignment.",
+                artifacts={},
+                differential={},
+            )
+        return JSONResponse(
+            {
+                "job_id": job_id,
+                "status": meta.get("status"),
+                "species": meta.get("species"),
+                "reference": meta.get("reference"),
+                "soupx_option": meta.get("soupx_option"),
+                "changed": changed,
+            }
+        )
 
     @app.post("/api/jobs/{job_id}/run")
     async def run_job(job_id: str):
@@ -1251,6 +1645,19 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
         except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+
+    @app.get("/api/jobs/{job_id}/genes")
+    async def job_genes(job_id: str):
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        meta = store.get_job(job_id)
+        try:
+            return JSONResponse(_build_gene_suggestions_payload(meta))
+        except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
         except ValueError as exc:
             raise HTTPException(status_code=500, detail=str(exc))

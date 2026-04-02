@@ -1,0 +1,13 @@
+{
+  "cluster_colors": null,
+  "cluster_key": "celltype_level3",
+  "downsample_max_cells": null,
+  "lineage_order": null,
+  "n_cells": 71439,
+  "n_features": 26727,
+  "reference_clusters_tsv": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/flask/references/Mouse/Lung/CellRef/LungMAP_MouseLung_CellRef.v1_reference_clusters.tsv",
+  "reference_coords_tsv": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/flask/references/Mouse/Lung/CellRef/LungMAP_MouseLung_CellRef.v1_reference_umap.tsv",
+  "source_h5ad": "/Users/saljh8/Dropbox/LungMAP/LungMAP.net/Datasets/CellRef-Mm/Downloads/LungMAP_MouseLung_CellRef.v1.h5ad",
+  "source_n_cells": 71439,
+  "umap_key": "X_umap"
+}

@@ -1,9 +1,9 @@
 {
-  "cluster_key": "ann_finest_level",
-  "id": "HLCA_full_superadata_v3_norm_log_deg_reference",
-  "label": "HLCA_full_superadata_v3_norm_log_deg reference",
-  "reference_clusters_tsv": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/flask/references/Human/Lung/HLCA/HLCA_full_superadata_v3_norm_log_deg_reference_clusters.tsv",
-  "reference_coords_tsv": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/flask/references/Human/Lung/HLCA/HLCA_full_superadata_v3_norm_log_deg_reference_umap.tsv",
+  "cluster_key": "HLCA",
+  "id": "COPD_combined_with_umap_and_markers_reference",
+  "label": "COPD_combined_with_umap_and_markers reference",
+  "reference_clusters_tsv": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/flask/references/Human/Lung/HLCA/COPD_combined_with_umap_and_markers_reference_clusters.tsv",
+  "reference_coords_tsv": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/flask/references/Human/Lung/HLCA/COPD_combined_with_umap_and_markers_reference_umap.tsv",
   "soupx_options": [
     "default"
   ],

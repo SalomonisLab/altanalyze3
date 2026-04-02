@@ -7,6 +7,7 @@ import warnings
 import matplotlib
 import numpy as np
 import pandas as pd
+from anndata import AnnData
 from pandas.errors import PerformanceWarning
 import scanpy as sc
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap, TwoSlopeNorm
@@ -520,13 +521,99 @@ def _markerfinder_stats(adata, cluster_key, use_raw, layer):
     return p_df, r_df
 
 
+def _load_text_expression_inputs(matrix_tsv, groups_tsv, cluster_key):
+    print(f"[INFO] Reading expression matrix TSV from: {matrix_tsv}")
+    expr_df = pd.read_csv(matrix_tsv, sep="\t", index_col=0)
+    if expr_df.empty:
+        raise ValueError(f"Expression matrix '{matrix_tsv}' is empty.")
+
+    expr_df.index = expr_df.index.astype(str)
+    expr_df.columns = expr_df.columns.astype(str)
+    expr_df = expr_df.loc[~expr_df.index.duplicated(keep="first")]
+    expr_df = expr_df.loc[:, ~expr_df.columns.duplicated(keep="first")]
+    expr_df = expr_df.apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    print(
+        f"[INFO] Loaded expression matrix with {expr_df.shape[0]} genes and "
+        f"{expr_df.shape[1]} cells."
+    )
+
+    print(f"[INFO] Reading groups file from: {groups_tsv}")
+    groups_df = pd.read_csv(groups_tsv, sep="\t", header=None, dtype=str)
+    if groups_df.empty:
+        raise ValueError(f"Groups file '{groups_tsv}' is empty.")
+    if groups_df.shape[1] < 2:
+        raise ValueError(
+            f"Groups file '{groups_tsv}' must contain at least 2 columns: cell barcode and group label."
+        )
+
+    label_col = 2 if groups_df.shape[1] >= 3 else 1
+    groups_df = groups_df.iloc[:, [0, label_col]].copy()
+    groups_df.columns = ["cell_id", cluster_key]
+    groups_df["cell_id"] = groups_df["cell_id"].astype(str)
+    groups_df[cluster_key] = groups_df[cluster_key].astype(str)
+    groups_df = groups_df.loc[~groups_df["cell_id"].duplicated(keep="first")]
+
+    group_cells = set(groups_df["cell_id"])
+    common_cells = [cell for cell in expr_df.columns if cell in group_cells]
+    if not common_cells:
+        raise ValueError(
+            "No overlapping cell identifiers were found between the expression matrix columns "
+            "and the groups file."
+        )
+
+    missing_group_count = expr_df.shape[1] - len(common_cells)
+    if missing_group_count:
+        print(
+            f"[INFO] Excluding {missing_group_count} matrix cells not present in the groups file."
+        )
+    extra_group_count = groups_df.shape[0] - len(common_cells)
+    if extra_group_count:
+        print(
+            f"[INFO] Ignoring {extra_group_count} group rows not present in the expression matrix."
+        )
+
+    expr_df = expr_df.loc[:, common_cells]
+    groups_df = groups_df.set_index("cell_id").loc[common_cells]
+
+    obs = pd.DataFrame(index=common_cells)
+    obs[cluster_key] = groups_df[cluster_key].values
+    var = pd.DataFrame(index=expr_df.index.astype(str))
+    adata = AnnData(X=expr_df.T.to_numpy(dtype=np.float32, copy=True), obs=obs, var=var)
+    adata.obs_names = pd.Index(list(map(str, common_cells)))
+    adata.var_names = pd.Index(expr_df.index.astype(str))
+    print(
+        f"[INFO] Built AnnData from text inputs with {adata.n_obs} cells and {adata.n_vars} genes."
+    )
+    return adata
+
+
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Create a marker heatmap from an h5ad file using unique markers per cluster."
+        description="Create a marker heatmap from an h5ad file or text expression inputs using unique markers per cluster."
     )
-    parser.add_argument("--h5ad", required=True, help="Input h5ad file.")
-    parser.add_argument("--cluster-key", required=True, help="obs column with cluster labels.")
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument("--h5ad", help="Input h5ad file.")
+    input_group.add_argument(
+        "--matrix-tsv",
+        help="Log2-normalized expression matrix TSV with genes as rows and cells as columns.",
+    )
+    parser.add_argument(
+        "--groups-tsv",
+        default=None,
+        help="Groups file for --matrix-tsv input. Column 1 is cell barcode, column 3 (or 2 if absent) is the cluster label.",
+    )
+    parser.add_argument(
+        "--groups-txt",
+        dest="groups_tsv",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--cluster-key",
+        default=None,
+        help="obs column with cluster labels for h5ad input. Ignored for --matrix-tsv, which uses the groups file.",
+    )
     parser.add_argument("--top-n", type=int, default=5, help="Markers per cluster (default 5).")
     parser.add_argument("--out", default="marker_heatmap.pdf", help="Output figure path.")
     parser.add_argument("--markers-tsv", default=None, help="Output TSV for marker statistics.")
@@ -585,12 +672,31 @@ def main():
             print("Warning: --layer ignored when --use-raw is set.")
             layer = None
 
-        print(f"[INFO] Reading AnnData from: {args.h5ad}")
-        adata = sc.read_h5ad(args.h5ad)
-        print(f"[INFO] Loaded AnnData with {adata.n_obs} cells and {adata.n_vars} genes.")
+        cluster_key = args.cluster_key
 
-        if args.cluster_key not in adata.obs:
-            raise KeyError(f"Cluster key '{args.cluster_key}' not found in adata.obs.")
+        if args.h5ad:
+            if not cluster_key:
+                raise ValueError("--cluster-key is required when --h5ad is used.")
+            print(f"[INFO] Reading AnnData from: {args.h5ad}")
+            adata = sc.read_h5ad(args.h5ad)
+            print(f"[INFO] Loaded AnnData with {adata.n_obs} cells and {adata.n_vars} genes.")
+        else:
+            if not args.groups_tsv:
+                raise ValueError("--groups-tsv is required when --matrix-tsv is used.")
+            if args.use_raw:
+                print("[WARN] --use-raw ignored for text matrix input.")
+            if layer:
+                print("[WARN] --layer ignored for text matrix input.")
+            cluster_key = "cluster"
+            adata = _load_text_expression_inputs(args.matrix_tsv, args.groups_tsv, cluster_key)
+            layer = None
+
+        if cluster_key not in adata.obs:
+            available_obs = ", ".join(sorted(map(str, adata.obs.columns.tolist())))
+            raise KeyError(
+                f"Cluster key '{cluster_key}' not found in adata.obs. "
+                f"Available obs columns: {available_obs}"
+            )
 
         if args.use_raw and adata.raw is None:
             raise ValueError("Requested --use-raw but adata.raw is not set.")
@@ -598,12 +704,12 @@ def main():
         if layer and layer not in adata.layers:
             raise KeyError(f"Layer '{layer}' not found in adata.layers.")
 
-        clusters = adata.obs[args.cluster_key].astype(str)
+        clusters = adata.obs[cluster_key].astype(str)
         lineage_order = _coerce_lineage_order(adata.uns.get("lineage_order", None))
         cluster_order = _resolve_cluster_order(clusters, lineage_order)
         print(f"[INFO] Resolved {len(cluster_order)} clusters.")
 
-        adata.obs[args.cluster_key] = pd.Categorical(clusters, categories=cluster_order, ordered=True)
+        adata.obs[cluster_key] = pd.Categorical(clusters, categories=cluster_order, ordered=True)
 
         effect_df = None
         fdr_df = None
@@ -611,7 +717,7 @@ def main():
             print(
                 f"[INFO] Running markerFinder using {'raw' if args.use_raw else (layer or 'X')} matrix."
             )
-            pvals, effect_df = _markerfinder_stats(adata, args.cluster_key, args.use_raw, layer)
+            pvals, effect_df = _markerfinder_stats(adata, cluster_key, args.use_raw, layer)
             fdr_df = pvals.apply(_bh_fdr, axis=0)
         else:
             n_genes = adata.raw.n_vars if args.use_raw and adata.raw is not None else adata.n_vars
@@ -619,7 +725,7 @@ def main():
 
             sc.tl.rank_genes_groups(
                 adata,
-                groupby=args.cluster_key,
+                groupby=cluster_key,
                 method=args.method,
                 use_raw=args.use_raw,
                 layer=layer,
@@ -665,14 +771,14 @@ def main():
             print("[INFO] Using all cells (no downsampling).")
         adata_plot = downsample_cells_per_group(
             adata,
-            args.cluster_key,
+            cluster_key,
             cells_per_cluster=args.cells_per_cluster,
             seed=args.seed,
             group_order=cluster_order,
         )
         print(f"[INFO] Heatmap will use {adata_plot.n_obs} cells.")
-        adata_plot.obs[args.cluster_key] = pd.Categorical(
-            adata_plot.obs[args.cluster_key].astype(str),
+        adata_plot.obs[cluster_key] = pd.Categorical(
+            adata_plot.obs[cluster_key].astype(str),
             categories=cluster_order,
             ordered=True,
         )
@@ -681,7 +787,7 @@ def main():
         print(f"[INFO] Building heatmap matrix for {len(selected_genes)} markers.")
         heatmap_df, heatmap_col_df, cluster_counts, ordered_cells = _build_heatmap(
             adata_plot,
-            args.cluster_key,
+            cluster_key,
             selected_genes,
             cluster_order,
             args.use_raw,
@@ -691,7 +797,7 @@ def main():
         if heatmap_df.empty:
             raise ValueError("Heatmap data is empty after filtering genes.")
 
-        column_clusters = adata_plot.obs[args.cluster_key].astype(str).loc[ordered_cells].tolist()
+        column_clusters = adata_plot.obs[cluster_key].astype(str).loc[ordered_cells].tolist()
         row_clusters = selected.set_index("gene").loc[heatmap_df.index, "cluster"].astype(str).tolist()
         print("[INFO] Rendering heatmap.")
         _plot_heatmap(heatmap_df, args.out, cluster_counts, cluster_order, column_clusters, row_clusters)
@@ -700,7 +806,7 @@ def main():
         print("[INFO] Computing marker statistics for TSV.")
         marker_stats = _compute_marker_stats(
             adata,
-            args.cluster_key,
+            cluster_key,
             selected,
             fdr_df,
             args.use_raw,
@@ -723,13 +829,12 @@ def main():
 
         centroid_df = _build_marker_centroids(
             adata,
-            args.cluster_key,
+            cluster_key,
             heatmap_df.index.tolist(),
             cluster_order,
             args.use_raw,
             layer,
         )
-        centroid_df.index = [f"{c}:{g}" for c, g in zip(row_clusters, centroid_df.index)]
         centroid_df.to_csv(centroids_tsv, sep="\t")
         print(f"Saved centroid matrix TSV to: {centroids_tsv}")
 

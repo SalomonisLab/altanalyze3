@@ -1,0 +1,13 @@
+{
+  "cluster_colors": null,
+  "cluster_key": "celltype",
+  "downsample_max_cells": null,
+  "lineage_order": null,
+  "n_cells": 123189,
+  "n_features": 55359,
+  "reference_clusters_tsv": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/flask/references/Mouse/Lung/Flu/20240322_global_ki67trace_reference_clusters.tsv",
+  "reference_coords_tsv": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/flask/references/Mouse/Lung/Flu/20240322_global_ki67trace_reference_umap.tsv",
+  "source_h5ad": "/Users/saljh8/Dropbox/LungMAP/LungMAP.net/Datasets/Flu-Mouse/alt/20240322_global_ki67trace.h5ad",
+  "source_n_cells": 123189,
+  "umap_key": "X_umap"
+}

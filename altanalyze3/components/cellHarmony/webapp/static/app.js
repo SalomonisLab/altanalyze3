@@ -8,12 +8,30 @@ let pollTimer = null;
 let currentUmapData = null;
 let currentExpressionData = null;
 let loadedResultsJobId = null;
+let loadedGeneSuggestionsJobId = null;
 let currentJobStatus = "";
+let currentJobSpecies = "";
+let currentJobReference = "";
+let referenceRerunPending = false;
 let currentDifferentialState = null;
 let currentDifferentialGene = "";
 let currentDifferentialPopulation = "";
 let differentialCy = null;
 let lastDownloadArtifactSignature = "";
+const PAIRED_COLOR_STOPS = [
+  [0.0, [0.6509804129600525, 0.8078431487083435, 0.8901960849761963]],
+  [0.09090909090909091, [0.12156862765550613, 0.47058823704719543, 0.7058823704719543]],
+  [0.18181818181818182, [0.6980392336845398, 0.8745098114013672, 0.5411764979362488]],
+  [0.2727272727272727, [0.20000000298023224, 0.6274510025978088, 0.1725490242242813]],
+  [0.36363636363636365, [0.9843137264251709, 0.6039215922355652, 0.6000000238418579]],
+  [0.45454545454545453, [0.8901960849761963, 0.10196078568696976, 0.10980392247438431]],
+  [0.5454545454545454, [0.9921568632125854, 0.7490196228027344, 0.43529412150382996]],
+  [0.6363636363636364, [1.0, 0.49803921580314636, 0.0]],
+  [0.7272727272727273, [0.7921568751335144, 0.6980392336845398, 0.8392156958580017]],
+  [0.8181818181818182, [0.4156862795352936, 0.239215686917305, 0.6039215922355652]],
+  [0.9090909090909091, [1.0, 1.0, 0.6000000238418579]],
+  [1.0, [0.6941176652908325, 0.3490196168422699, 0.1568627506494522]],
+];
 
 function normalizeRootPath(rootPath) {
   const value = String(rootPath || "").trim();
@@ -45,12 +63,272 @@ function apiPath(path) {
   return withRootPath(`/api${normalizedPath}`);
 }
 
+function interpolatePairedColor(t) {
+  const value = Math.max(0, Math.min(1, Number(t) || 0));
+  for (let index = 1; index < PAIRED_COLOR_STOPS.length; index += 1) {
+    const [rightPos, rightRgb] = PAIRED_COLOR_STOPS[index];
+    const [leftPos, leftRgb] = PAIRED_COLOR_STOPS[index - 1];
+    if (value <= rightPos || index === PAIRED_COLOR_STOPS.length - 1) {
+      const span = Math.max(rightPos - leftPos, 1e-9);
+      const ratio = Math.max(0, Math.min(1, (value - leftPos) / span));
+      const rgb = leftRgb.map((channel, channelIndex) => {
+        return channel + (rightRgb[channelIndex] - channel) * ratio;
+      });
+      return `rgb(${rgb.map((channel) => Math.round(channel * 255)).join(",")})`;
+    }
+  }
+  const fallback = PAIRED_COLOR_STOPS[PAIRED_COLOR_STOPS.length - 1][1];
+  return `rgb(${fallback.map((channel) => Math.round(channel * 255)).join(",")})`;
+}
+
+function customShuffleIndices(indices) {
+  const shuffled = [];
+  indices.forEach((value, index) => {
+    if (!shuffled.includes(value)) {
+      shuffled.push(value);
+    }
+    const fromEnd = indices[indices.length - 1 - index] ?? indices[indices.length - 1];
+    if (!shuffled.includes(fromEnd)) {
+      shuffled.push(fromEnd);
+    }
+    const fromMiddle = indices[Math.floor((index + indices.length) / 2)] ?? indices[indices.length - 1];
+    if (!shuffled.includes(fromMiddle)) {
+      shuffled.push(fromMiddle);
+    }
+  });
+  return shuffled;
+}
+
+function seededShuffle(items, seed = 0) {
+  let state = (seed >>> 0) || 1;
+  const nextRand = () => {
+    state = (1664525 * state + 1013904223) >>> 0;
+    return state / 4294967296;
+  };
+  const values = [...items];
+  for (let index = values.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(nextRand() * (index + 1));
+    [values[index], values[swapIndex]] = [values[swapIndex], values[index]];
+  }
+  return values;
+}
+
+function buildReferencePreviewColorMap(populations) {
+  const ordered = [...populations];
+  if (ordered.length <= 4) {
+    const base = ["#ff0000", "#0000ff", "#ffff00", "#00aa00", "#ffffff", "#000000", "#ff00ff"];
+    return new Map(ordered.map((population, index) => [population, base[index % base.length]]));
+  }
+
+  const indices = seededShuffle(customShuffleIndices(ordered.map((_, index) => index)), 0);
+  const colors = indices.map((index) => {
+    const denominator = Math.max(ordered.length - 1, 1);
+    return interpolatePairedColor(index / denominator);
+  });
+  return new Map(ordered.map((population, index) => [population, colors[index]]));
+}
+
+function networkEdgeColor(edge) {
+  const interactionType = String(edge?.data("interaction_type") || "").toLowerCase();
+  if (interactionType.includes("transcription")) {
+    return "#ef4444";
+  }
+  if (interactionType.includes("tbar")) {
+    return "#60a5fa";
+  }
+  return "#9ca3af";
+}
+
+function networkEdgeArrowShape(edge) {
+  const interactionType = String(edge?.data("interaction_type") || "").toLowerCase();
+  if (interactionType.includes("tbar")) {
+    return "tee";
+  }
+  return "triangle";
+}
+
+function finiteExtent(values, fallbackMin = 0, fallbackMax = 1) {
+  let min = Number.POSITIVE_INFINITY;
+  let max = Number.NEGATIVE_INFINITY;
+  (values || []).forEach((value) => {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+      return;
+    }
+    if (numeric < min) {
+      min = numeric;
+    }
+    if (numeric > max) {
+      max = numeric;
+    }
+  });
+  if (!Number.isFinite(min) || !Number.isFinite(max)) {
+    return [fallbackMin, fallbackMax];
+  }
+  return [min, max];
+}
+
+function relaxReferencePreviewLabels(labels, points, plotElement) {
+  if (!Array.isArray(labels) || labels.length <= 1) {
+    return labels || [];
+  }
+
+  const xValues = (points || []).map((point) => Number(point.x)).filter(Number.isFinite);
+  const yValues = (points || []).map((point) => Number(point.y)).filter(Number.isFinite);
+  labels.forEach((label) => {
+    if (Number.isFinite(Number(label.x))) {
+      xValues.push(Number(label.x));
+    }
+    if (Number.isFinite(Number(label.y))) {
+      yValues.push(Number(label.y));
+    }
+  });
+
+  const [xMin, xMax] = finiteExtent(xValues, 0, 1);
+  const [yMin, yMax] = finiteExtent(yValues, 0, 1);
+  const xRange = Math.max(xMax - xMin, 1);
+  const yRange = Math.max(yMax - yMin, 1);
+  const plotWidth = Math.max((plotElement?.clientWidth || 900) - 80, 480);
+  const plotHeight = 520;
+  const padX = (8 / plotWidth) * xRange;
+  const padY = (5 / plotHeight) * yRange;
+  const maxDx = xRange * 0.03;
+  const maxDy = yRange * 0.03;
+
+  const relaxed = labels.map((label) => {
+    const text = String(label.population || "");
+    const widthPx = Math.max(42, Math.min(170, text.length * 6.2));
+    const heightPx = 18;
+    return {
+      ...label,
+      x: Number(label.x),
+      y: Number(label.y),
+      anchorX: Number(label.x),
+      anchorY: Number(label.y),
+      halfWidth: (widthPx / plotWidth) * xRange * 0.5,
+      halfHeight: (heightPx / plotHeight) * yRange * 0.5,
+    };
+  });
+
+  for (let iteration = 0; iteration < 110; iteration += 1) {
+    for (let index = 0; index < relaxed.length; index += 1) {
+      const current = relaxed[index];
+      for (let compareIndex = index + 1; compareIndex < relaxed.length; compareIndex += 1) {
+        const other = relaxed[compareIndex];
+        const dx = other.x - current.x;
+        const dy = other.y - current.y;
+        const overlapX = current.halfWidth + other.halfWidth + padX - Math.abs(dx);
+        const overlapY = current.halfHeight + other.halfHeight + padY - Math.abs(dy);
+        if (overlapX <= 0 || overlapY <= 0) {
+          continue;
+        }
+
+        let pushX = overlapX * 0.35;
+        let pushY = overlapY * 0.35;
+        if (Math.abs(dx) < 1e-6) {
+          pushX *= index % 2 === 0 ? -1 : 1;
+        } else {
+          pushX *= dx > 0 ? -1 : 1;
+        }
+        if (Math.abs(dy) < 1e-6) {
+          pushY *= index % 2 === 0 ? -1 : 1;
+        } else {
+          pushY *= dy > 0 ? -1 : 1;
+        }
+
+        current.x += pushX;
+        other.x -= pushX;
+        current.y += pushY;
+        other.y -= pushY;
+      }
+    }
+
+    relaxed.forEach((label) => {
+      label.x += (label.anchorX - label.x) * 0.14;
+      label.y += (label.anchorY - label.y) * 0.14;
+      label.x = Math.max(label.anchorX - maxDx, Math.min(label.anchorX + maxDx, label.x));
+      label.y = Math.max(label.anchorY - maxDy, Math.min(label.anchorY + maxDy, label.y));
+    });
+  }
+
+  return relaxed;
+}
+
+function buildPopulationCentroids(points) {
+  const grouped = new Map();
+  (points || []).forEach((point) => {
+    const population = String(point.population || "").trim();
+    const x = Number(point.x);
+    const y = Number(point.y);
+    if (!population || !Number.isFinite(x) || !Number.isFinite(y)) {
+      return;
+    }
+    if (!grouped.has(population)) {
+      grouped.set(population, { population, xs: [], ys: [] });
+    }
+    const entry = grouped.get(population);
+    entry.xs.push(x);
+    entry.ys.push(y);
+  });
+  return Array.from(grouped.values()).map((entry) => ({
+    population: entry.population,
+    x: median(entry.xs),
+    y: median(entry.ys),
+  }));
+}
+
+function buildSquareUmapAxes(points, paddingFraction = 0.08) {
+  const finitePoints = (points || []).filter(
+    (point) => Number.isFinite(Number(point?.x)) && Number.isFinite(Number(point?.y))
+  );
+  if (!finitePoints.length) {
+    return {};
+  }
+  const xs = finitePoints.map((point) => Number(point.x));
+  const ys = finitePoints.map((point) => Number(point.y));
+  const [minX, maxX] = finiteExtent(xs, 0, 1);
+  const [minY, maxY] = finiteExtent(ys, 0, 1);
+  const xSpan = Math.max(maxX - minX, 1);
+  const ySpan = Math.max(maxY - minY, 1);
+  const xPad = xSpan * paddingFraction;
+  const yPad = ySpan * Math.max(0.02, paddingFraction * 0.45);
+  return {
+    xaxis: {
+      range: [minX - xPad, maxX + xPad],
+      showgrid: false,
+      zeroline: false,
+      showticklabels: false,
+      ticks: "",
+    },
+    yaxis: {
+      range: [minY - yPad, maxY + yPad],
+      showgrid: false,
+      zeroline: false,
+      showticklabels: false,
+      ticks: "",
+    },
+  };
+}
+
+function median(values) {
+  if (!Array.isArray(values) || !values.length) {
+    return 0;
+  }
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 0) {
+    return (sorted[middle - 1] + sorted[middle]) / 2;
+  }
+  return sorted[middle];
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   initSpeciesSelect();
   initSampleRows();
   hookForms();
   updateWorkflowPanels(null);
   updateDifferentialUi(null);
+  loadReferencePreview();
 });
 
 function initSpeciesSelect() {
@@ -76,11 +354,51 @@ function initSpeciesSelect() {
       option.textContent = ref.label;
       referenceSelect.appendChild(option);
     });
+    updateReferenceChangeState();
+    referenceSelect.dispatchEvent(new Event("change"));
+  });
+
+  referenceSelect.addEventListener("change", () => {
+    updateReferenceChangeState();
+    loadReferencePreview();
   });
 
   if (registry.species.length) {
     speciesSelect.value = registry.species[0].id;
     speciesSelect.dispatchEvent(new Event("change"));
+  }
+}
+
+function selectedReferenceDiffersFromLoadedJob() {
+  const species = document.getElementById("species-select").value;
+  const reference = document.getElementById("reference-select").value;
+  if (!currentJobSpecies || !currentJobReference) {
+    return false;
+  }
+  return species !== currentJobSpecies || reference !== currentJobReference;
+}
+
+function updateReferenceChangeState() {
+  referenceRerunPending = Boolean(
+    document.getElementById("qc-job-id").value.trim()
+      && currentJobStatus === "completed"
+      && selectedReferenceDiffersFromLoadedJob()
+  );
+
+  if (referenceRerunPending) {
+    updateWorkflowPanels("uploaded");
+    document.getElementById("differential-panel").classList.add("hidden");
+    clearGeneSuggestions();
+    resetDifferentialResults();
+    setResultMode("baseline");
+    document.getElementById("qc-cell-status").textContent =
+      "Reference changed. Click Save QC and run to realign the uploaded data against the newly selected reference.";
+    return;
+  }
+
+  updateWorkflowPanels(currentJobStatus);
+  if (currentJobStatus === "completed" && currentDifferentialState) {
+    updateDifferentialUi(currentDifferentialState);
   }
 }
 
@@ -265,6 +583,32 @@ async function handleQcSubmit(evt) {
     align_cutoff: evt.target.align_cutoff.value,
   };
   try {
+    if (selectedReferenceDiffersFromLoadedJob()) {
+      const configureResp = await fetch(apiPath(`/jobs/${jobId}/configure`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          species: document.getElementById("species-select").value,
+          reference: document.getElementById("reference-select").value,
+        }),
+      });
+      const configureData = await parseApiResponse(configureResp);
+      if (!configureResp.ok) {
+        throw new Error(configureData.detail || "Failed to update the job reference.");
+      }
+      currentJobSpecies = configureData.species || currentJobSpecies;
+      currentJobReference = configureData.reference || currentJobReference;
+      referenceRerunPending = false;
+      lastDownloadArtifactSignature = "";
+      currentUmapData = null;
+      currentExpressionData = null;
+      loadedResultsJobId = null;
+      clearGeneSuggestions();
+      document.getElementById("download-links").innerHTML = "";
+      resetDifferentialResults();
+      updateWorkflowPanels(configureData.status || "uploaded");
+    }
+
     let resp = await fetch(apiPath(`/jobs/${jobId}/qc`), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -368,11 +712,15 @@ async function pollStatus(jobId) {
 
 function applyJobStatus(jobId, data) {
   currentJobStatus = String(data.status || "").trim().toLowerCase();
-  updateWorkflowPanels(data.status || null);
+  currentJobSpecies = String(data.species || currentJobSpecies || "");
+  currentJobReference = String(data.reference || currentJobReference || "");
+  updateWorkflowPanels(referenceRerunPending ? "uploaded" : (data.status || null));
   document.getElementById("job-progress").style.width = `${data.progress || 0}%`;
   document.getElementById("job-progress-label").textContent = `${data.progress || 0}%`;
   document.getElementById("job-log").textContent = (data.qc_log_tail || []).join("");
-  document.getElementById("qc-cell-status").textContent = buildQcCellSummary(data);
+  if (!referenceRerunPending) {
+    document.getElementById("qc-cell-status").textContent = buildQcCellSummary(data);
+  }
 
   if (!document.getElementById("upload-job-id").value) {
     document.getElementById("upload-job-id").value = jobId;
@@ -388,8 +736,10 @@ function applyJobStatus(jobId, data) {
   }
 
   updateDifferentialUi(data.differential_ui || null);
+  updateReferenceChangeState();
 
-  if (data.status === "completed") {
+  if (data.status === "completed" && !referenceRerunPending) {
+    loadGeneSuggestions(jobId);
     const artifactSignature = JSON.stringify(Object.keys(data.artifacts || {}).sort());
     if (artifactSignature !== lastDownloadArtifactSignature) {
       lastDownloadArtifactSignature = artifactSignature;
@@ -419,16 +769,102 @@ function updateWorkflowPanels(status) {
   const hasCompletedAlignment = normalizedStatus === "completed";
   const qcPanel = document.getElementById("qc-panel");
   const resultsPanel = document.getElementById("results-panel");
+  const previewPanel = document.getElementById("reference-preview-panel");
   const baseline = document.getElementById("baseline-results-view");
   const differential = document.getElementById("differential-results-view");
 
   qcPanel.classList.toggle("hidden", !hasUploadedJob);
   resultsPanel.classList.toggle("hidden", !hasCompletedAlignment);
+  previewPanel.classList.toggle("hidden", hasUploadedJob);
 
   if (!hasCompletedAlignment) {
     baseline.classList.add("hidden");
     differential.classList.add("hidden");
   }
+}
+
+async function loadReferencePreview() {
+  const previewPanel = document.getElementById("reference-preview-panel");
+  if (currentJobStatus) {
+    previewPanel.classList.add("hidden");
+    return;
+  }
+
+  const species = document.getElementById("species-select").value;
+  const reference = document.getElementById("reference-select").value;
+  const plot = document.getElementById("reference-preview-plot");
+  if (!species || !reference) {
+    Plotly.purge(plot);
+    plot.innerHTML = "";
+    return;
+  }
+
+  try {
+    const resp = await fetch(
+      apiPath(`/meta/reference-preview?species=${encodeURIComponent(species)}&reference=${encodeURIComponent(reference)}`)
+    );
+    const payload = await parseApiResponse(resp);
+    if (!resp.ok) {
+      throw new Error(payload.detail || "Reference preview request failed.");
+    }
+    renderReferencePreview(payload);
+  } catch (err) {
+    Plotly.purge(plot);
+    plot.innerHTML = `<div class="empty-state">${err.message || "Unable to load reference preview."}</div>`;
+  }
+}
+
+function renderReferencePreview(payload) {
+  const plot = document.getElementById("reference-preview-plot");
+  const populations = [...new Set((payload.points || []).map((point) => point.population))];
+  const colorMap = buildReferencePreviewColorMap(populations);
+  const relaxedLabels = relaxReferencePreviewLabels(payload.labels || [], payload.points || [], plot);
+
+  const pointTrace = {
+    type: "scattergl",
+    mode: "markers",
+    x: (payload.points || []).map((point) => point.x),
+    y: (payload.points || []).map((point) => point.y),
+    text: (payload.points || []).map((point) => point.population),
+    hovertemplate: "%{text}<extra></extra>",
+    marker: {
+      size: 2,
+      opacity: 0.5,
+      color: (payload.points || []).map((point) => colorMap.get(point.population)),
+    },
+    showlegend: false,
+  };
+
+  Plotly.newPlot(
+    plot,
+    [pointTrace],
+    {
+      paper_bgcolor: "rgba(0,0,0,0)",
+      plot_bgcolor: "rgba(255,255,255,0.94)",
+      margin: { t: 8, l: 8, r: 8, b: 8 },
+      height: 640,
+      annotations: relaxedLabels.map((label) => ({
+        x: label.x,
+        y: label.y,
+        text: label.population,
+        showarrow: false,
+        xref: "x",
+        yref: "y",
+        xanchor: "center",
+        yanchor: "middle",
+        font: {
+          size: 11,
+          color: "#0f172a",
+        },
+        bgcolor: "rgba(255,255,255,0)",
+        opacity: 1,
+      })),
+      xaxis: { visible: false, showgrid: false, zeroline: false },
+      yaxis: { visible: false, showgrid: false, zeroline: false, scaleanchor: "x", scaleratio: 1 },
+      hovermode: "closest",
+    },
+    { responsive: true, displayModeBar: false }
+  );
 }
 
 function buildQcCellSummary(data) {
@@ -724,21 +1160,21 @@ function renderDifferentialHeatmap(payload) {
     renderDifferentialEmpty(`No heatmap rows were found for ${payload.population}.`);
     return;
   }
-  const originalZ = rows.map((row) => row.values);
-  const finiteValues = originalZ
+  const z = rows.map((row) => row.values);
+  const finiteValues = z
     .flat()
     .filter((value) => value !== null && Number.isFinite(Number(value)))
-    .map((value) => Math.abs(Number(value)));
-  const maxAbs = finiteValues.length ? Math.max(...finiteValues) : 1;
-  const scaleFactor = Math.max(1, maxAbs);
-  const z = originalZ.map((row) =>
-    row.map((value) => (value === null || !Number.isFinite(Number(value)) ? null : Number(value) / scaleFactor))
-  );
+    .map((value) => Number(value));
+  const [vmin, vmax] = finiteValues.length ? finiteExtent(finiteValues, -1, 1) : [-1, 1];
+  const contrastFactor = 2.0;
+  let colorMin = vmin / contrastFactor;
+  let colorMax = vmax / contrastFactor;
+  if (!(colorMin < colorMax)) {
+    colorMin = -1;
+    colorMax = 1;
+  }
   const y = rows.map((row) => row.gene);
   const directions = rows.map((row) => payload.columns.map(() => row.direction));
-  const hoverValues = originalZ.map((row) =>
-    row.map((value) => (value === null || !Number.isFinite(Number(value)) ? null : Number(value)))
-  );
   const figureHeight = Math.max(560, Math.min(2800, rows.length * 18 + 180));
   plot.classList.remove("hidden");
   document.getElementById("differential-plot-empty").classList.add("hidden");
@@ -755,13 +1191,12 @@ function renderDifferentialHeatmap(payload) {
           [0.5, "#111827"],
           [1, "#ffff00"],
         ],
-        zmin: -1,
-        zmax: 1,
+        zmin: colorMin,
+        zmax: colorMax,
         zmid: 0,
         customdata: directions,
-        text: hoverValues,
-        hovertemplate: "%{y}<br>%{x}<br>Scaled=%{z:.3f}<br>log2FC=%{text:.3f}<br>%{customdata}<extra></extra>",
-        colorbar: { title: "Scaled log2FC" },
+        hovertemplate: "%{y}<br>%{x}<br>log2FC=%{z:.3f}<br>%{customdata}<extra></extra>",
+        colorbar: { title: "log2FC" },
       },
     ],
     {
@@ -863,6 +1298,7 @@ function renderDifferentialGo(payload) {
       };
     })
     .reverse();
+  const yKeys = ordered.map((term, index) => `${term.term_name}__${term.direction || "unknown"}__${index}`);
   plot.classList.remove("hidden");
   document.getElementById("differential-plot-empty").classList.add("hidden");
   Plotly.newPlot(
@@ -870,7 +1306,7 @@ function renderDifferentialGo(payload) {
     [
       {
         x: ordered.map((term) => term.score),
-        y: ordered.map((term) => term.term_name),
+        y: yKeys,
         type: "bar",
         orientation: "h",
         customdata: ordered.map((term) => [term.selected_gene, term.direction, (term.overlap_genes || []).join(", "), term.overlap_genes || []]),
@@ -891,7 +1327,12 @@ function renderDifferentialGo(payload) {
       margin: { t: 56, l: 260, r: 20, b: 56 },
       height: Math.max(540, ordered.length * 34 + 120),
       xaxis: { title: "-log10(FDR)" },
-      yaxis: { automargin: true },
+      yaxis: {
+        automargin: true,
+        tickmode: "array",
+        tickvals: yKeys,
+        ticktext: ordered.map((term) => term.term_name),
+      },
     },
     { responsive: true }
   );
@@ -965,9 +1406,9 @@ function renderDifferentialNetwork(payload) {
         selector: "edge",
         style: {
           width: 1.8,
-          "line-color": (edge) => (edge.data("direction") === "up" ? "#fca5a5" : "#7dd3fc"),
-          "target-arrow-color": (edge) => (edge.data("direction") === "up" ? "#fca5a5" : "#7dd3fc"),
-          "target-arrow-shape": "triangle",
+          "line-color": networkEdgeColor,
+          "target-arrow-color": networkEdgeColor,
+          "target-arrow-shape": networkEdgeArrowShape,
           "curve-style": "bezier",
           opacity: 0.85,
         },
@@ -1171,6 +1612,34 @@ function resetDifferentialGeneDetail() {
   document.getElementById("differential-gene-stats").classList.add("hidden");
 }
 
+function clearGeneSuggestions() {
+  document.getElementById("gene-suggestions").innerHTML = "";
+  loadedGeneSuggestionsJobId = null;
+}
+
+async function loadGeneSuggestions(jobId) {
+  if (!jobId || loadedGeneSuggestionsJobId === jobId) {
+    return;
+  }
+  try {
+    const resp = await fetch(apiPath(`/jobs/${jobId}/genes`));
+    const data = await parseApiResponse(resp);
+    if (!resp.ok) {
+      throw new Error(data.detail || "Unable to load gene suggestions.");
+    }
+    const datalist = document.getElementById("gene-suggestions");
+    datalist.innerHTML = "";
+    (data.genes || []).forEach((gene) => {
+      const option = document.createElement("option");
+      option.value = gene;
+      datalist.appendChild(option);
+    });
+    loadedGeneSuggestionsJobId = jobId;
+  } catch (err) {
+    console.warn(err);
+  }
+}
+
 function setResultMode(mode) {
   const baseline = document.getElementById("baseline-results-view");
   const differential = document.getElementById("differential-results-view");
@@ -1229,6 +1698,14 @@ function renderCurrentUmap() {
   }
   const mode = document.getElementById("umap-mode").value;
   const traces = [];
+  const layout = {
+    paper_bgcolor: "rgba(0,0,0,0)",
+    plot_bgcolor: "rgba(255,255,255,0.9)",
+    margin: { t: 20, l: 40, r: 20, b: 40 },
+    hovermode: "closest",
+    xaxis: { showgrid: false, zeroline: false },
+    yaxis: { showgrid: false, zeroline: false },
+  };
   if (mode === "relative") {
     traces.push({
       x: currentUmapData.reference.map((p) => p.x),
@@ -1249,6 +1726,13 @@ function renderCurrentUmap() {
       name: "Query",
     });
   } else {
+    const populations = [...new Set(currentUmapData.query.map((p) => p.population))];
+    const colorMap = buildReferencePreviewColorMap(populations);
+    const labelPoints = relaxReferencePreviewLabels(
+      buildPopulationCentroids(currentUmapData.query),
+      currentUmapData.query,
+      document.getElementById("umap-plot")
+    );
     traces.push({
       x: currentUmapData.reference.map((p) => p.x),
       y: currentUmapData.reference.map((p) => p.y),
@@ -1259,32 +1743,48 @@ function renderCurrentUmap() {
       name: "Reference",
       showlegend: false,
     });
-    const populations = [...new Set(currentUmapData.query.map((p) => p.population))];
-    populations.forEach((population) => {
-      const subset = currentUmapData.query.filter((p) => p.population === population);
-      traces.push({
-        x: subset.map((p) => p.x),
-        y: subset.map((p) => p.y),
-        text: subset.map((p) => `${p.barcode}<br>${p.population}`),
-        mode: "markers",
-        type: "scattergl",
-        marker: { size: 2 },
-        name: population,
-      });
+    traces.push({
+      x: currentUmapData.query.map((p) => p.x),
+      y: currentUmapData.query.map((p) => p.y),
+      text: currentUmapData.query.map((p) => `${p.barcode}<br>${p.population}`),
+      mode: "markers",
+      type: "scattergl",
+      marker: {
+        size: 2,
+        opacity: 0.5,
+        color: currentUmapData.query.map((p) => colorMap.get(p.population)),
+      },
+      showlegend: false,
+      name: "Query",
     });
+    layout.annotations = labelPoints.map((label) => ({
+      x: label.x,
+      y: label.y,
+      text: label.population,
+      showarrow: false,
+      xref: "x",
+      yref: "y",
+      xanchor: "center",
+      yanchor: "middle",
+      font: {
+        size: 11,
+        color: "#0f172a",
+      },
+      bgcolor: "rgba(255,255,255,0)",
+      opacity: 1,
+    }));
+    Object.assign(layout, buildSquareUmapAxes(currentUmapData.query, 0.06));
   }
-  Plotly.newPlot("umap-plot", traces, {
-    paper_bgcolor: "rgba(0,0,0,0)",
-    plot_bgcolor: "rgba(255,255,255,0.9)",
-    margin: { t: 20, l: 40, r: 20, b: 40 },
-    legend: { orientation: "h" },
-    hovermode: "closest",
-  });
+  if (mode === "relative") {
+    layout.legend = { orientation: "h" };
+  }
+  Plotly.newPlot("umap-plot", traces, layout);
 }
 
 async function loadExpression() {
   const jobId = document.getElementById("results-job-id").value.trim();
-  const gene = document.getElementById("gene-query").value.trim();
+  const geneInput = document.getElementById("gene-query");
+  const gene = geneInput.value.trim();
   if (!jobId || !gene) {
     return;
   }
@@ -1294,19 +1794,77 @@ async function loadExpression() {
     if (!resp.ok) {
       throw new Error(data.detail || "Expression unavailable.");
     }
+    if (data?.gene && data.gene !== gene) {
+      geneInput.value = data.gene;
+    }
     currentExpressionData = data;
     renderCurrentExpression();
   } catch (err) {
-    alert(err.message);
+    currentExpressionData = {
+      gene,
+      requested_gene: gene,
+      resolved_gene: null,
+      source: "missing",
+      message: err.message || "Expression unavailable.",
+      scatter: [],
+      violin: [],
+      umap: [],
+    };
+    renderCurrentExpression();
   }
+}
+
+function renderExpressionMessage(message, title = "Expression unavailable") {
+  Plotly.newPlot("expression-plot", [], {
+    title,
+    paper_bgcolor: "rgba(0,0,0,0)",
+    plot_bgcolor: "rgba(255,255,255,0.9)",
+    margin: { t: 48, l: 32, r: 32, b: 32 },
+    xaxis: { visible: false },
+    yaxis: { visible: false },
+    annotations: [
+      {
+        text: message,
+        x: 0.5,
+        y: 0.5,
+        xref: "paper",
+        yref: "paper",
+        showarrow: false,
+        font: { size: 15, color: "#64748b" },
+        align: "center",
+      },
+    ],
+  }, { displayModeBar: false });
 }
 
 function renderCurrentExpression() {
   if (!currentExpressionData) {
     return;
   }
+  if (!currentExpressionData.umap?.length && !currentExpressionData.violin?.length) {
+    renderExpressionMessage(
+      currentExpressionData.message || `Gene '${currentExpressionData.requested_gene || currentExpressionData.gene}' was not found.`,
+      `${currentExpressionData.requested_gene || currentExpressionData.gene} expression`,
+    );
+    return;
+  }
   const mode = document.getElementById("expression-mode").value;
   if (mode === "violin") {
+    if (currentExpressionData.source === "reference") {
+      const trace = {
+        type: "bar",
+        x: currentExpressionData.violin.map((entry) => entry.population),
+        y: currentExpressionData.violin.map((entry) => entry.mean),
+        marker: { color: "#475569", opacity: 0.85 },
+      };
+      Plotly.newPlot("expression-plot", [trace], {
+        title: `${currentExpressionData.gene} (reference centroid expression, top 10 states)`,
+        paper_bgcolor: "rgba(0,0,0,0)",
+        plot_bgcolor: "rgba(255,255,255,0.9)",
+        margin: { t: 36, l: 48, r: 20, b: 120 },
+      });
+      return;
+    }
     const violinTraces = currentExpressionData.violin.map((entry) => ({
       type: "violin",
       name: entry.population,
@@ -1336,18 +1894,43 @@ function renderCurrentExpression() {
     marker: {
       size: 2,
       color: currentExpressionData.umap.map((p) => p.value),
-      colorscale: "Viridis",
+      colorscale: [
+        [0.0, "#e5e7eb"],
+        [0.15, "#f3f4f6"],
+        [0.35, "#fecaca"],
+        [0.6, "#f87171"],
+        [1.0, "#b91c1c"],
+      ],
       showscale: true,
       colorbar: { title: currentExpressionData.gene },
     },
     name: currentExpressionData.gene,
   };
-  Plotly.newPlot("expression-plot", [umapTrace], {
-    title: `${currentExpressionData.gene} expression`,
+  const expressionLayout = {
+    title: currentExpressionData.source === "reference"
+      ? `${currentExpressionData.gene} reference expression`
+      : `${currentExpressionData.gene} expression`,
     paper_bgcolor: "rgba(0,0,0,0)",
     plot_bgcolor: "rgba(255,255,255,0.9)",
     margin: { t: 36, l: 48, r: 20, b: 40 },
-  });
+    xaxis: { showgrid: false, zeroline: false },
+    yaxis: { showgrid: false, zeroline: false },
+    annotations: currentExpressionData.message
+      ? [
+          {
+            text: currentExpressionData.message,
+            x: 0.5,
+            y: 1.08,
+            xref: "paper",
+            yref: "paper",
+            showarrow: false,
+            font: { size: 12, color: "#64748b" },
+          },
+        ]
+      : [],
+  };
+  Object.assign(expressionLayout, buildSquareUmapAxes(currentExpressionData.umap, 0.06));
+  Plotly.newPlot("expression-plot", [umapTrace], expressionLayout);
 }
 
 async function refreshResults() {

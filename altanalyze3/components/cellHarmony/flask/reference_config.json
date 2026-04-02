@@ -17,12 +17,34 @@
           ]
         },
         {
+          "id": "hs_lung_cellref_reference",
+          "label": "LungMAP CellRef v1.1 (Guo 2023)",
+          "states_tsv": "references/Human/Lung/CellRef/Hs-CellRef.txt",
+          "reference_clusters_tsv": "references/Human/Lung/CellRef/Hs-CellRef_clusters.tsv",
+          "reference_coords_tsv": "references/Human/Lung/CellRef/Hs-CellRef_umap.tsv",
+          "cluster_key": "celltype_level3",
+          "soupx_options": [
+            "default"
+          ]
+        },
+        {
           "id": "hs_lung_hlca_reference",
-          "label": "Human Lung Cell Atlas (HLCA)",
+          "label": "Lung HLCA (Sikkema 2023)",
           "states_tsv": "references/Human/Lung/HLCA/Hs-Lung-HLCA.txt",
           "reference_clusters_tsv": "references/Human/Lung/HLCA/Hs-Lung-HLCA_clusters.tsv",
           "reference_coords_tsv": "references/Human/Lung/HLCA/Hs-Lung-HLCA_umap.tsv",
-          "cluster_key": "ann_finest_level",
+          "cluster_key": "HLCA",
+          "soupx_options": [
+            "default"
+          ]
+        },
+        {
+          "id": "hs_lung_natri_reference",
+          "label": "Lung ILD Atlas (Natri 2024)",
+          "states_tsv": "references/Human/Lung/Natri-2024/Hs-Lung-IPF-Natri.txt",
+          "reference_clusters_tsv": "references/Human/Lung/Natri-2024/Hs-Lung-IPF-Natri_clusters.tsv",
+          "reference_coords_tsv": "references/Human/Lung/Natri-2024/Hs-Lung-IPF-Natri_umap.tsv",
+          "cluster_key": "TGEN-IPF",
           "soupx_options": [
             "default"
           ]
@@ -39,6 +61,39 @@
           "states_tsv": "references/Mouse/BoneMarrow/Ferchen-2025/Mm-MarrowAtlas-L4.txt",
           "reference_clusters_tsv": "references/Mouse/BoneMarrow/Ferchen-2025/Mm-MarrowAtlas-L4_reference_clusters.tsv",
           "reference_coords_tsv": "references/Mouse/BoneMarrow/Ferchen-2025/Mm-MarrowAtlas-L4_reference_umap.tsv",
+          "cluster_key": "Population",
+          "soupx_options": [
+            "default"
+          ]
+        },
+        {
+          "id": "mm_lung_cellref_reference",
+          "label": "LungMAP CellRef v1.0",
+          "states_tsv": "references/Mouse/Lung/CellRef/Mm-CellRef.txt",
+          "reference_clusters_tsv": "references/Mouse/Lung/CellRef/Mm-CellRef_clusters.tsv",
+          "reference_coords_tsv": "references/Mouse/Lung/CellRef/Mm-CellRef_umap.tsv",
+          "cluster_key": "celltype_level3",
+          "soupx_options": [
+            "default"
+          ]
+        },
+        {
+          "id": "mm_lung_adult_airway_reference",
+          "label": "LungMAP Adult Lung/Airway v1.0",
+          "states_tsv": "references/Mouse/Lung/Adult-Lung-Airway/Mm-LungMAP-Adult-Lung-Airway.tsv",
+          "reference_clusters_tsv": "references/Mouse/Lung/Adult-Lung-Airway/Mm-LungMAP-Adult-Lung-Airway_clusters.tsv",
+          "reference_coords_tsv": "references/Mouse/Lung/Adult-Lung-Airway/Mm-LungMAP-Adult-Lung-Airway_umap.tsv",
+          "cluster_key": "Population",
+          "soupx_options": [
+            "default"
+          ]
+        },
+        {
+          "id": "mm_lung_flu_reference",
+          "label": "Lung Regeneration-Infection (Niethamer 2025)",
+          "states_tsv": "references/Mouse/Lung/Flu/Lung-Influenza.txt",
+          "reference_clusters_tsv": "references/Mouse/Lung/Flu/Lung-Influenza_clusters.tsv",
+          "reference_coords_tsv": "references/Mouse/Lung/Flu/Lung-Influenza_umap.tsv",
           "cluster_key": "Population",
           "soupx_options": [
             "default"

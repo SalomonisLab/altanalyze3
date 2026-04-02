@@ -33,6 +33,7 @@ def export_reference_umap_bundle(
     output_dir: str | Path,
     output_prefix: Optional[str] = None,
     umap_key: str = "X_umap",
+    downsample: Optional[int] = None,
 ) -> Dict[str, str]:
     h5ad_path = Path(h5ad_path)
     output_dir = Path(output_dir)
@@ -41,7 +42,10 @@ def export_reference_umap_bundle(
     if not h5ad_path.exists():
         raise FileNotFoundError(f"Reference h5ad file not found: {h5ad_path}")
 
+    print(f"[INFO] Importing reference h5ad: {h5ad_path}")
     adata = ad.read_h5ad(h5ad_path)
+    source_n_cells = int(adata.n_obs)
+    print(f"[INFO] Loaded AnnData with {source_n_cells:,} cells and {int(adata.n_vars):,} features.")
 
     if cluster_key not in adata.obs.columns:
         available_obs = ", ".join(sorted(map(str, adata.obs.columns.tolist())))
@@ -55,6 +59,22 @@ def export_reference_umap_bundle(
     embedding = np.asarray(adata.obsm[umap_key])
     if embedding.ndim != 2 or embedding.shape[1] < 2:
         raise ValueError(f"Embedding '{umap_key}' must be at least two-dimensional.")
+
+    if downsample is not None:
+        downsample = int(downsample)
+        if downsample <= 0:
+            raise ValueError("--downsample must be a positive integer.")
+        if adata.n_obs > downsample:
+            print(f"[INFO] Downsampling reference from {int(adata.n_obs):,} to {downsample:,} cells.")
+            rng = np.random.default_rng(0)
+            keep_idx = np.sort(rng.choice(adata.n_obs, size=downsample, replace=False))
+            adata = adata[keep_idx].copy()
+            embedding = np.asarray(adata.obsm[umap_key])
+            print(f"[INFO] Downsampling complete. Exporting {int(adata.n_obs):,} cells.")
+        else:
+            print(f"[INFO] Downsample threshold {downsample:,} not reached; exporting all {int(adata.n_obs):,} cells.")
+    else:
+        print(f"[INFO] No downsampling requested; exporting all {int(adata.n_obs):,} cells.")
 
     prefix = output_prefix or h5ad_path.stem
     coords_path = output_dir / f"{prefix}_reference_umap.tsv"
@@ -72,6 +92,7 @@ def export_reference_umap_bundle(
             "UMAP2": embedding[:, 1].astype(float),
         }
     )
+    print(f"[INFO] Writing UMAP coordinates: {coords_path}")
     coords_df.to_csv(coords_path, sep="\t", index=False)
 
     clusters_df = pd.DataFrame(
@@ -81,6 +102,7 @@ def export_reference_umap_bundle(
             "Population": cluster_values,
         }
     )
+    print(f"[INFO] Writing cluster assignments: {clusters_path}")
     clusters_df.to_csv(clusters_path, sep="\t", index=False)
 
     lineage_order = _coerce_lineage_order(adata.uns.get("lineage_order"))
@@ -102,12 +124,15 @@ def export_reference_umap_bundle(
         "cluster_key": cluster_key,
         "umap_key": umap_key,
         "n_cells": int(adata.n_obs),
+        "source_n_cells": source_n_cells,
         "n_features": int(adata.n_vars),
+        "downsample_max_cells": downsample,
         "reference_coords_tsv": str(coords_path),
         "reference_clusters_tsv": str(clusters_path),
         "lineage_order": lineage_order,
         "cluster_colors": cluster_colors,
     }
+    print(f"[INFO] Writing metadata: {metadata_path}")
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
 
     config_snippet = {
@@ -119,7 +144,9 @@ def export_reference_umap_bundle(
         "cluster_key": cluster_key,
         "soupx_options": ["default"],
     }
+    print(f"[INFO] Writing config snippet: {config_path}")
     config_path.write_text(json.dumps(config_snippet, indent=2, sort_keys=True), encoding="utf-8")
+    print("[INFO] Reference UMAP bundle export complete.")
 
     return {
         "reference_coords_tsv": str(coords_path),
@@ -149,6 +176,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="X_umap",
         help="obsm key holding the reference UMAP coordinates (default: X_umap).",
     )
+    parser.add_argument(
+        "--downsample",
+        type=int,
+        default=None,
+        help="Randomly downsample the exported reference to at most this many cells.",
+    )
     return parser
 
 
@@ -160,6 +193,7 @@ def main() -> None:
         output_dir=args.outdir,
         output_prefix=args.output_prefix,
         umap_key=args.umap_key,
+        downsample=args.downsample,
     )
     print("[INFO] Exported reference bundle:")
     for key, value in outputs.items():

@@ -87,7 +87,7 @@ Review the QC settings:
   default: `1000`
 - `Min cells`
 - `Mito %`
-- `Alignment cutoff`
+- `Minimum cosine similarity score`
 
 Then click **Save QC and run**.
 
@@ -397,4 +397,3 @@ docker compose up --build -d
 ### The app is served under a subpath such as `/cell-harmony`
 
 Make sure `CELLHARMONY_ROOT_PATH` is set consistently for that deployment.
-

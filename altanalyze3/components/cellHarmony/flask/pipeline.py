@@ -315,7 +315,7 @@ def run_cellharmony_pipeline(job_id: str, store: JobStore, registry_path: Path) 
         generate_umap=False,
         save_adata=True,
         unsupervised_cluster=False,
-        alignment_mode="classic",
+        alignment_mode="cosine",
         min_alignment_score=float(qc.get("align_cutoff", 0.1)),
         gene_translation_file=None,
         metacell_align=False,

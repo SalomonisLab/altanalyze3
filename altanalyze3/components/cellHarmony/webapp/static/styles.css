@@ -132,6 +132,12 @@ body {
 #upload-panel {
 }
 
+#reference-preview-panel {
+  grid-column: span 3;
+  min-height: 0;
+  padding: 8px;
+}
+
 #job-form {
   display: flex;
   flex: 1 1 auto;
@@ -392,6 +398,12 @@ select:disabled {
 
 .plot-area {
   min-height: 420px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+#reference-preview-plot {
+  min-height: 100%;
 }
 
 .static-plot-shell {
@@ -520,6 +532,11 @@ select:disabled {
   }
 
   #upload-panel {
+    height: auto;
+  }
+
+  #reference-preview-panel {
+    grid-column: auto;
     height: auto;
   }
 

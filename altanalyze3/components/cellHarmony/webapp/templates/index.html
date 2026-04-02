@@ -56,6 +56,10 @@
           </form>
         </section>
 
+        <section class="panel" id="reference-preview-panel">
+          <div id="reference-preview-plot" class="plot-area"></div>
+        </section>
+
         <section class="panel hidden" id="qc-panel">
           <h2>2. QC and alignment</h2>
           <form id="qc-form">
@@ -73,7 +77,7 @@
             <div class="two-col">
               <label class="field">
                 <span>Min cells</span>
-                <input name="min_cells" value="3">
+                <input name="min_cells" value="0">
               </label>
               <label class="field">
                 <span>Mito %</span>
@@ -81,7 +85,7 @@
               </label>
             </div>
             <label class="field">
-              <span>Alignment cutoff</span>
+              <span>Minimum cosine similarity score</span>
               <input name="align_cutoff" value="0.1">
             </label>
             <button class="primary-btn" type="submit">Save QC and run</button>
@@ -100,14 +104,15 @@
             <input id="results-job-id" type="hidden">
             <label class="field">
               <span>Gene</span>
-              <input id="gene-query" placeholder="e.g. MPO">
+              <input id="gene-query" placeholder="e.g. MPO" list="gene-suggestions">
+              <datalist id="gene-suggestions"></datalist>
             </label>
             <div class="two-col">
               <label class="field">
                 <span>UMAP display</span>
                 <select id="umap-mode">
                   <option value="relative">Relative to reference</option>
-                  <option value="cluster">Cell-state clusters</option>
+                  <option value="cluster" selected>Cell-state clusters</option>
                 </select>
               </label>
               <label class="field">

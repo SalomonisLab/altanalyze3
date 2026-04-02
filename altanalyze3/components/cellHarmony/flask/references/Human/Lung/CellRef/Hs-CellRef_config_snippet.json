@@ -1,0 +1,11 @@
+{
+  "cluster_key": "celltype_level3",
+  "id": "LungMAP_HumanLung_CellRef.v1.1_reference",
+  "label": "LungMAP_HumanLung_CellRef.v1.1 reference",
+  "reference_clusters_tsv": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/flask/references/Human/Lung/CellRef/LungMAP_HumanLung_CellRef.v1.1_reference_clusters.tsv",
+  "reference_coords_tsv": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/flask/references/Human/Lung/CellRef/LungMAP_HumanLung_CellRef.v1.1_reference_umap.tsv",
+  "soupx_options": [
+    "default"
+  ],
+  "states_tsv": "/path/to/cellHarmony_reference_states.tsv"
+}

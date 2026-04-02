@@ -93,7 +93,7 @@ def combine_and_align_h5(
     save_adata=False,
     unsupervised_cluster=False,
     append_obs_field=None,
-    alignment_mode="classic",
+    alignment_mode="cosine",
     min_alignment_score=None,
     gene_translation_file=None,
     metacell_align=False,

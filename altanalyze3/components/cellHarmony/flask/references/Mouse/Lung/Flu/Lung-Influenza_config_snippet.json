@@ -1,0 +1,11 @@
+{
+  "cluster_key": "celltype",
+  "id": "20240322_global_ki67trace_reference",
+  "label": "20240322_global_ki67trace reference",
+  "reference_clusters_tsv": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/flask/references/Mouse/Lung/Flu/20240322_global_ki67trace_reference_clusters.tsv",
+  "reference_coords_tsv": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/flask/references/Mouse/Lung/Flu/20240322_global_ki67trace_reference_umap.tsv",
+  "soupx_options": [
+    "default"
+  ],
+  "states_tsv": "/path/to/cellHarmony_reference_states.tsv"
+}
