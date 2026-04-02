@@ -48,6 +48,17 @@
           "soupx_options": [
             "default"
           ]
+        },
+        {
+          "id": "hs_lung_bpd_sun_reference",
+          "label": "BPD Atlas (Sun)",
+          "states_tsv": "references/Human/Lung/BPD-Sun/Hs-BPD_Sun.tsv",
+          "reference_clusters_tsv": "references/Human/Lung/BPD-Sun/Hs-BPD_Sun_clusters.tsv",
+          "reference_coords_tsv": "references/Human/Lung/BPD-Sun/Hs-BPD_Sun_umap.tsv",
+          "cluster_key": "cell type",
+          "soupx_options": [
+            "default"
+          ]
         }
       ]
     },

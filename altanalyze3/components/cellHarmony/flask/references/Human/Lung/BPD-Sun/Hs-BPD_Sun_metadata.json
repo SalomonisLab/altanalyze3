@@ -1,0 +1,13 @@
+{
+  "cluster_colors": null,
+  "cluster_key": "cell type",
+  "downsample_max_cells": null,
+  "lineage_order": null,
+  "n_cells": 271381,
+  "n_features": 36601,
+  "reference_clusters_tsv": "/Users/saljh8/Dropbox/LungMAP/LungMAP.net/Datasets/ShinyCell/BPD/BPD/BPD-adata_combined_annotated_czi_reference_clusters.tsv",
+  "reference_coords_tsv": "/Users/saljh8/Dropbox/LungMAP/LungMAP.net/Datasets/ShinyCell/BPD/BPD/BPD-adata_combined_annotated_czi_reference_umap.tsv",
+  "source_h5ad": "/Users/saljh8/Dropbox/LungMAP/LungMAP.net/Datasets/ShinyCell/BPD/BPD-adata_combined_annotated_czi.h5ad",
+  "source_n_cells": 271381,
+  "umap_key": "X_umap"
+}
