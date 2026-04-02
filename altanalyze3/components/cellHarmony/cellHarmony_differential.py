@@ -824,11 +824,6 @@ def run_de_for_comparisons(adata,
         else:
             p_base = fdr_values
 
-        sig = (np.abs(log2fc_values) > np.log2(float(fc_thresh))) & (p_base < float(alpha))
-        deg_names = pd.Index(df["gene"])[sig]
-        n_deg = int(sig.sum())
-
-
         # --- Correct fold computation: true mean-based log2 fold (per gene across cells) ---
         corrected_stats = _compute_pseudobulk_log2fc(pop_data, covariate_col, case_label, control_label)
         if not corrected_stats.empty:
@@ -845,6 +840,12 @@ def run_de_for_comparisons(adata,
                 print(f"[WARN] No corrected fold-change computed for population {pop} (insufficient data).")
             df["case_mean_expr"] = np.nan
             df["control_mean_expr"] = np.nan
+
+        # Apply DEG significance filtering using the final reported log2 fold-change.
+        final_log2fc_values = df["log2fc"].to_numpy(dtype=float)
+        sig = (np.abs(final_log2fc_values) > np.log2(float(fc_thresh))) & (p_base < float(alpha))
+        deg_names = pd.Index(df["gene"])[sig]
+        n_deg = int(sig.sum())
 
         if diagnostic_report:
             # --- DEBUGGING: PROSER2 in AT1 ---

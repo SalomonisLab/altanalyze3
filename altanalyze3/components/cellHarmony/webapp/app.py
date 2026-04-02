@@ -607,7 +607,10 @@ def _build_differential_heatmap_payload(meta: Dict, population: str) -> Dict:
     subset["pval"] = pd.to_numeric(subset.get("pval"), errors="coerce")
     subset["sig_metric"] = subset["fdr"].fillna(subset["pval"])
     subset = subset.dropna(subset=["gene", "log2fc"])
-    subset = subset.sort_values(["sig_metric", "pval", "gene"], ascending=[True, True, True]).drop_duplicates(subset=["gene"])
+    subset = subset.sort_values(
+        ["log2fc", "sig_metric", "pval", "gene"],
+        ascending=[False, True, True, True],
+    ).drop_duplicates(subset=["gene"])
 
     detailed_matrix = (
         detailed.assign(

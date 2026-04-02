@@ -1166,13 +1166,14 @@ function renderDifferentialHeatmap(payload) {
     .filter((value) => value !== null && Number.isFinite(Number(value)))
     .map((value) => Number(value));
   const [vmin, vmax] = finiteValues.length ? finiteExtent(finiteValues, -1, 1) : [-1, 1];
-  const contrastFactor = 2.0;
-  let colorMin = vmin / contrastFactor;
-  let colorMax = vmax / contrastFactor;
-  if (!(colorMin < colorMax)) {
-    colorMin = -1;
-    colorMax = 1;
+  const contrastFactor = 3.0;
+  const maxAbs = Math.max(Math.abs(vmin), Math.abs(vmax));
+  let colorExtent = maxAbs / contrastFactor;
+  if (!(colorExtent > 0)) {
+    colorExtent = 1;
   }
+  const colorMin = -colorExtent;
+  const colorMax = colorExtent;
   const y = rows.map((row) => row.gene);
   const directions = rows.map((row) => payload.columns.map(() => row.direction));
   const figureHeight = Math.max(560, Math.min(2800, rows.length * 18 + 180));
@@ -1187,16 +1188,21 @@ function renderDifferentialHeatmap(payload) {
         y,
         type: "heatmap",
         colorscale: [
-          [0, "#87ceeb"],
-          [0.5, "#111827"],
-          [1, "#ffff00"],
+          [0.0, "#00f0ff"],
+          [0.5, "#000000"],
+          [1.0, "#ffff00"],
         ],
         zmin: colorMin,
         zmax: colorMax,
         zmid: 0,
         customdata: directions,
         hovertemplate: "%{y}<br>%{x}<br>log2FC=%{z:.3f}<br>%{customdata}<extra></extra>",
-        colorbar: { title: "log2FC" },
+        colorbar: {
+          title: "log2FC",
+          tickmode: "array",
+          tickvals: [colorMin, 0, colorMax],
+          ticktext: [colorMin.toFixed(2), "0", colorMax.toFixed(2)],
+        },
       },
     ],
     {
