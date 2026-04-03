@@ -6,10 +6,22 @@ production-oriented successor to the older Flask demo: same core workflow,
 cleaner API layer, easier deployment behind a reverse proxy, and a UI that can
 be tested immediately in a web browser.
 
+Current web interface capabilities include:
+
+- upload one or more `.h5` or `.h5ad` single-cell files as a job
+- preserve compatible `.obs` metadata from uploaded `.h5ad` files
+- filter the displayed cells in the UMAP and expression viewers by selected
+  `.obs` fields and values
+- run differential analysis using a user-selected cell-state field from `.obs`
+- define numerator and denominator values from a separate `.obs` grouping field
+- optionally switch differential comparison type between `cells` and
+  `pseudobulk` when enough grouped values are available
+
 ## Related docs
 
 - [cellHarmony-lite documentation](../../../../docs/cellHarmony.md)
 - [cellHarmony-differential documentation](../../../../docs/cellHarmony_differential.md)
+- [How to Use cellHarmony web](./HOW_TO_USE.md)
 
 ## Quick start
 

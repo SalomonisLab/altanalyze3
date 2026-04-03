@@ -34,6 +34,9 @@ Practical expectations:
 - each sample should contain single-cell expression data
 - if you upload multiple files, they should be biologically comparable and
   intended to be processed against the same selected reference
+- when you upload `.h5ad` files, compatible `.obs` metadata are retained and
+  can be reused later in the interface for filtering displayed cells and for
+  differential grouping
 
 When uploading, you also provide:
 
@@ -136,6 +139,12 @@ Controls:
 - **Expression display**
   - `UMAP`
   - `Violin`
+- **Dot size**
+  - controls the point size used in the UMAP and violin viewers
+- **Filter data to display**
+  - **Annotation 1** and **Annotation 2** let you choose compatible `.obs`
+    metadata fields from the aligned `.h5ad`
+  - **Values** lets you restrict the viewers to one selected value or `All`
 
 ### What the UMAP viewer is showing
 
@@ -151,6 +160,7 @@ Two modes are available:
 - **Cell-state clusters**
   - colors uploaded cells by assigned aligned cell state
   - reference-only cells remain in the background as a light grey context layer
+  - can be restricted to selected subsets using **Filter data to display**
 
 ### What the Expression viewer is showing
 
@@ -162,10 +172,37 @@ Two modes are available:
 - **UMAP**
   - colors cells by normalized expression of the selected gene
   - useful for seeing where expression occurs in the aligned manifold
+  - can be restricted to selected subsets using **Filter data to display**
 
 - **Violin**
   - shows the distribution of normalized expression for that gene
   - useful for a quick expression summary across the aligned populations
+
+### How the cell-display filters work
+
+The **Filter data to display** controls affect only what is shown in:
+
+- the **Approximate UMAP**
+- the **Expression** viewer
+- the corresponding PDF downloads
+
+They do not rerun alignment or change the saved job outputs.
+
+Typical uses:
+
+- display only one uploaded sample
+- display only one biological subset such as a chosen cell annotation
+- combine a sample-level filter with a second annotation-level filter
+
+By default:
+
+- **Annotation 1** starts from the sample-related field used later in
+  differential grouping when available
+- **Annotation 2** starts from the aligned cell-state annotation field when
+  available
+
+Only manageable categorical `.obs` fields are shown. UMAP columns and very
+high-cardinality metadata are excluded from these dropdowns.
 
 ### What downloads are available in Panel 3
 
@@ -188,22 +225,45 @@ These files come from the completed alignment stage, not the differential stage.
 In this section:
 
 1. choose the aligned cell-state field in **Cell-state aligned to**
-2. assign samples to:
+2. choose the grouping source in **Group values from**
+3. if available, choose **Comparison Type**
+   - `cells`
+   - `pseudobulk`
+4. assign values to:
    - **Group 1 (numerator)**
    - **Group 2 (denominator)**
-3. click **Run cellHarmony-differential**
+5. click **Run cellHarmony-differential**
 
 Important grouping rule:
 
 - only two-group comparisons are supported
-- each group can contain one or more samples
+- each group can contain one or more selected values from the chosen grouping
+  field
+
+This step is flexible for `.h5ad` uploads:
+
+- **Cell-state aligned to** can use the reference-aligned field or another
+  compatible annotation stored in `.obs`
+- **Group values from** can be a different `.obs` field than the cell-state
+  field
+- this lets you compare values such as `condition`, `sample`, `Library`, or
+  another categorical annotation while still running DE within the chosen cell
+  states
 
 What happens during differential analysis:
 
 1. the aligned AnnData from the completed cellHarmony run is used
 2. cells are grouped by the selected aligned cell-state field
-3. Group 1 and Group 2 are compared within each aligned cell state
-4. differential statistics, heatmaps, GO results, and networks are generated
+3. Group 1 and Group 2 are defined from the selected **Group values from**
+   field
+4. Group 1 and Group 2 are compared within each selected cell state
+5. differential statistics, heatmaps, GO results, and networks are generated
+
+If **Comparison Type** is set to `pseudobulk`:
+
+- pseudobulk profiles are computed before DE testing
+- raw p-values are used in that workflow
+- internal minimum-cell filtering is applied to pseudobulk groups
 
 While this runs:
 
@@ -253,6 +313,8 @@ How to use it:
 Use this when you want to see:
 
 - how the selected cell state’s DE genes behave across the broader aligned atlas
+- how genes from a user-defined `.h5ad` cell annotation behave across the
+  populations used in the differential run
 
 ### Volcano view
 
@@ -385,6 +447,18 @@ Typical use:
 
 - some visualizations only exist for specific cell states
 - switch the visualization type or choose another applicable cell state
+
+### The wrong cells or groups seem to be selected
+
+Check that the intended fields were chosen in:
+
+- **Filter data to display**
+- **Cell-state aligned to**
+- **Group values from**
+
+If you uploaded `.h5ad` files with multiple annotation fields, the web app can
+use different `.obs` columns for display filtering and for differential
+analysis.
 
 ### Docker deployment changed but the app still behaves the old way
 
