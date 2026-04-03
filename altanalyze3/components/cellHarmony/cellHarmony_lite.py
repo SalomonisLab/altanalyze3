@@ -307,8 +307,18 @@ def combine_and_align_h5(
                     adata_local.var_names = gene_symbols
                     adata_local.var["gene_ids"] = gene_ids
             elif os.path.isdir(path):
-                adata_local = sc.read_10x_mtx(path, var_names='gene_symbols')
-                sample_name = os.path.basename(os.path.normpath(path))
+                suffixes = (
+                    "_filtered_matrix.mtx.gz", "_counts.mtx.gz", "_matrix.mtx.gz",
+                    "filtered_matrix.mtx.gz", "matrix.mtx.gz", "matrix.mtx", "quants_mat.mtx"
+                )
+                matrix_candidates = sorted(
+                    os.path.join(path, name)
+                    for name in os.listdir(path)
+                    if name.endswith(suffixes)
+                )
+                if not matrix_candidates:
+                    raise FileNotFoundError(f"No compatible matrix file found in directory: {path}")
+                return _load_adata(matrix_candidates[0], sample_name_override=sample_name_override)
             else:
                 raise ValueError(f"Unsupported input: {path}")
 

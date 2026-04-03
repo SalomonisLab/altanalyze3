@@ -6,7 +6,7 @@ import logging
 import re
 import shutil
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import anndata as ad
 import matplotlib
@@ -38,7 +38,7 @@ class QCSettings(BaseModel):
     min_counts: int = 1000
     min_cells: int = 0
     mit_percent: int = 15
-    align_cutoff: float = 0.1
+    align_cutoff: float = 0.4
 
 
 class JobConfigSettings(BaseModel):
@@ -49,8 +49,10 @@ class JobConfigSettings(BaseModel):
 
 class DifferentialSettings(BaseModel):
     population_col: str
+    sample_field: Optional[str] = None
     group1_samples: List[str]
     group2_samples: List[str]
+    comparison_type: str = "cells"
 
 
 class ApproximateUMAPRequest(BaseModel):
@@ -340,16 +342,22 @@ def _job_sample_names(meta: Dict) -> List[str]:
 def _differential_options(meta: Dict) -> Dict:
     stored = dict(meta.get("differential_options") or {})
     sample_names = stored.get("sample_names") or _job_sample_names(meta)
-    enabled = bool(stored.get("enabled", len(sample_names) >= 2))
+    sample_values = stored.get("sample_values") or {}
+    max_group_values = max((len(values) for values in sample_values.values() if isinstance(values, list)), default=0)
+    enabled = bool(stored.get("enabled", max_group_values >= 2 or len(sample_names) >= 2))
     return {
         "enabled": enabled,
         "sample_names": sample_names,
+        "sample_fields": stored.get("sample_fields", []),
+        "sample_values": sample_values,
+        "default_sample_field": stored.get("default_sample_field") or "",
         "population_columns": stored.get("population_columns", []),
         "default_population_col": stored.get("default_population_col") or meta.get("cluster_key"),
+        "comparison_types": ["cells", "pseudobulk"] if max(max_group_values, len(sample_names)) >= 4 else ["cells"],
     }
 
 
-def _build_differential_payload(job_id: str, meta: Dict, root_path: str = "") -> Dict:
+def _build_differential_payload(app: FastAPI, job_id: str, meta: Dict, root_path: str = "") -> Dict:
     options = _differential_options(meta)
     differential = dict(meta.get("differential") or {})
     artifacts = differential.get("artifacts") or {}
@@ -357,11 +365,11 @@ def _build_differential_payload(job_id: str, meta: Dict, root_path: str = "") ->
     visualization_populations: Dict[str, List[str]] = {"heatmap": [], "volcano": [], "network": [], "go": []}
     if str(differential.get("status") or "") == "completed":
         try:
-            result_populations = _differential_result_populations(meta)
+            result_populations = _differential_result_populations(app, meta)
         except Exception:
             result_populations = []
         try:
-            visualization_populations["heatmap"] = _differential_heatmap_populations(meta)
+            visualization_populations["heatmap"] = _differential_heatmap_populations(app, meta)
         except Exception:
             visualization_populations["heatmap"] = []
         visualization_populations["volcano"] = result_populations
@@ -372,7 +380,7 @@ def _build_differential_payload(job_id: str, meta: Dict, root_path: str = "") ->
                 if str(entry.get("population", "")).strip()
             )
         )
-        visualization_populations["go"] = _differential_go_populations(meta)
+        visualization_populations["go"] = _differential_go_populations(app, meta)
     networks = []
     for entry in differential.get("networks") or []:
         network_id = str(entry.get("id", "")).strip()
@@ -438,13 +446,11 @@ def _build_differential_payload(job_id: str, meta: Dict, root_path: str = "") ->
     }
 
 
-def _get_differential_detail_table(meta: Dict) -> pd.DataFrame:
-    differential = meta.get("differential", {}) or {}
-    artifacts = differential.get("artifacts", {}) or {}
-    raw_path = next(
-        (str(path).strip() for key, path in artifacts.items() if key.startswith("DEG_detailed_") and str(path).strip()),
-        "",
-    )
+def _get_differential_detail_table(app: FastAPI, meta: Dict) -> pd.DataFrame:
+    cache_entry = _get_differential_cache_entry(app, meta)
+    if isinstance(cache_entry.get("detail_table"), pd.DataFrame):
+        return cache_entry["detail_table"]
+    raw_path = cache_entry["signature"]["detail_path"]
     if not raw_path:
         raise FileNotFoundError("Differential DEG detail table is unavailable.")
     path = Path(raw_path)
@@ -455,21 +461,31 @@ def _get_differential_detail_table(meta: Dict) -> pd.DataFrame:
         raise ValueError("Differential DEG detail table is missing the population column.")
     frame["population"] = frame["population"].astype(str)
     frame["gene"] = frame["gene"].astype(str)
+    cache_entry["detail_table"] = frame
     return frame
 
 
-def _get_differential_heatmap_table(meta: Dict) -> pd.DataFrame:
+def _get_differential_heatmap_table(app: FastAPI, meta: Dict) -> pd.DataFrame:
+    cache_entry = _get_differential_cache_entry(app, meta)
+    if isinstance(cache_entry.get("heatmap_table"), pd.DataFrame):
+        return cache_entry["heatmap_table"]
     path = _get_differential_artifact(meta, "heatmap_tsv")
-    return pd.read_csv(path, sep="\t", index_col=0)
+    frame = pd.read_csv(path, sep="\t", index_col=0)
+    cache_entry["heatmap_table"] = frame
+    return frame
 
 
-def _get_differential_go_table(meta: Dict) -> pd.DataFrame:
+def _get_differential_go_table(app: FastAPI, meta: Dict) -> pd.DataFrame:
+    cache_entry = _get_differential_cache_entry(app, meta)
+    if isinstance(cache_entry.get("go_table"), pd.DataFrame):
+        return cache_entry["go_table"]
     path = _get_differential_artifact(meta, "goelite_tsv")
     frame = pd.read_csv(path, sep="\t")
     if "population" in frame.columns:
         frame["population"] = frame["population"].astype(str)
     if "term_name" in frame.columns:
         frame["term_name"] = frame["term_name"].astype(str)
+    cache_entry["go_table"] = frame
     return frame
 
 
@@ -493,24 +509,24 @@ def _parse_heatmap_row_key(raw_key: object) -> Dict[str, str]:
     }
 
 
-def _differential_result_populations(meta: Dict) -> List[str]:
-    detailed = _get_differential_detail_table(meta)
+def _differential_result_populations(app: FastAPI, meta: Dict) -> List[str]:
+    detailed = _get_differential_detail_table(app, meta)
     ordered = list(dict.fromkeys(detailed["population"].astype(str).tolist()))
     return [value for value in ordered if value]
 
 
-def _differential_heatmap_populations(meta: Dict) -> List[str]:
+def _differential_heatmap_populations(app: FastAPI, meta: Dict) -> List[str]:
     try:
-        detailed = _get_differential_detail_table(meta)
+        detailed = _get_differential_detail_table(app, meta)
     except Exception:
         return []
     ordered = list(dict.fromkeys(detailed["population"].astype(str).tolist()))
     return [value for value in ordered if value]
 
 
-def _differential_go_populations(meta: Dict) -> List[str]:
+def _differential_go_populations(app: FastAPI, meta: Dict) -> List[str]:
     try:
-        frame = _get_differential_go_table(meta)
+        frame = _get_differential_go_table(app, meta)
     except Exception:
         return []
     ordered: List[str] = []
@@ -561,26 +577,27 @@ def _differential_gene_h5ad_path(meta: Dict) -> Path:
     raise FileNotFoundError("Aligned AnnData output is unavailable for differential gene detail.")
 
 
-def _open_gene_detail_adata(meta: Dict, gene: str) -> tuple[ad.AnnData, Path]:
+def _open_gene_detail_adata(app: FastAPI, meta: Dict, gene: str) -> tuple[ad.AnnData, Path]:
+    cache_entry = _get_differential_cache_entry(app, meta)
     primary = _differential_gene_h5ad_path(meta)
-    adata = ad.read_h5ad(primary, backed="r")
-    if gene in adata.var_names:
+    adata = cache_entry.get("primary_adata")
+    if not isinstance(adata, ad.AnnData):
+        adata = ad.read_h5ad(primary)
+        cache_entry["primary_adata"] = adata
+        cache_entry["primary_var_names"] = adata.var_names.astype(str).to_numpy()
+    if gene in set(cache_entry["primary_var_names"]):
         return adata, primary
-    try:
-        adata.file.close()
-    except Exception:
-        pass
 
     combined_path = str(meta.get("artifacts", {}).get("combined_h5ad", "")).strip()
     if combined_path and Path(combined_path).exists():
         fallback = Path(combined_path)
-        adata = ad.read_h5ad(fallback, backed="r")
-        if gene in adata.var_names:
-            return adata, fallback
-        try:
-            adata.file.close()
-        except Exception:
-            pass
+        fallback_adata = cache_entry.get("fallback_adata")
+        if not isinstance(fallback_adata, ad.AnnData):
+            fallback_adata = ad.read_h5ad(fallback)
+            cache_entry["fallback_adata"] = fallback_adata
+            cache_entry["fallback_var_names"] = fallback_adata.var_names.astype(str).to_numpy()
+        if gene in set(cache_entry["fallback_var_names"]):
+            return fallback_adata, fallback
     raise KeyError(f"Gene '{gene}' not found in the aligned AnnData output.")
 
 
@@ -594,8 +611,212 @@ def _close_backed_adata(adata: Optional[ad.AnnData]) -> None:
         pass
 
 
-def _build_differential_heatmap_payload(meta: Dict, population: str) -> Dict:
-    detailed = _get_differential_detail_table(meta).copy()
+def _invalidate_expression_cache(app: FastAPI, job_id: str) -> None:
+    cache = getattr(app.state, "expression_cache", None)
+    if isinstance(cache, dict):
+        cache.pop(str(job_id), None)
+
+
+def _invalidate_differential_cache(app: FastAPI, job_id: str) -> None:
+    cache = getattr(app.state, "differential_cache", None)
+    if not isinstance(cache, dict):
+        return
+    entry = cache.pop(str(job_id), None)
+    if not isinstance(entry, dict):
+        return
+    for key in ("primary_adata", "fallback_adata"):
+        adata_obj = entry.get(key)
+        if isinstance(adata_obj, ad.AnnData):
+            try:
+                _close_backed_adata(adata_obj)
+            except Exception:
+                pass
+
+
+def _get_expression_cache(app: FastAPI, meta: Dict) -> Dict[str, Any]:
+    job_id = str(meta.get("job_id") or "").strip()
+    if not job_id:
+        raise ValueError("Job metadata is missing a job_id.")
+
+    artifacts = meta.get("artifacts", {})
+    h5ad_path = artifacts.get("combined_h5ad")
+    if not h5ad_path or not Path(h5ad_path).exists():
+        raise FileNotFoundError("Combined AnnData output unavailable for this job.")
+
+    cluster_key = meta.get("cluster_key")
+    if not cluster_key:
+        raise ValueError("Cluster assignments missing from AnnData output.")
+
+    umap_path = artifacts.get("umap_coordinates")
+    cache = app.state.expression_cache
+    cache_entry = cache.get(job_id)
+    if (
+        cache_entry
+        and cache_entry.get("h5ad_path") == str(h5ad_path)
+        and cache_entry.get("umap_path") == str(umap_path or "")
+        and cache_entry.get("cluster_key") == str(cluster_key)
+    ):
+        return cache_entry
+
+    adata = ad.read_h5ad(h5ad_path)
+    if cluster_key not in adata.obs.columns:
+        raise ValueError("Cluster assignments missing from AnnData output.")
+
+    obs_names = adata.obs_names.astype(str).to_numpy()
+    populations = adata.obs[cluster_key].astype(str).to_numpy()
+    umap_x = np.full(adata.n_obs, np.nan, dtype=float)
+    umap_y = np.full(adata.n_obs, np.nan, dtype=float)
+
+    if umap_path and Path(umap_path).exists():
+        coords_df = pd.read_csv(umap_path, sep="\t")
+        barcode_col = coords_df.columns[0]
+        coords_df = coords_df.rename(columns={barcode_col: "CellBarcode", "umap_0": "UMAP1", "umap_1": "UMAP2"})
+        coords_df["CellBarcode"] = coords_df["CellBarcode"].astype(str)
+        coords_df["UMAP1"] = pd.to_numeric(coords_df["UMAP1"], errors="coerce")
+        coords_df["UMAP2"] = pd.to_numeric(coords_df["UMAP2"], errors="coerce")
+        coords_indexed = coords_df.drop_duplicates(subset=["CellBarcode"]).set_index("CellBarcode")
+        reindexed = coords_indexed.reindex(obs_names)
+        umap_x = reindexed["UMAP1"].to_numpy(dtype=float)
+        umap_y = reindexed["UMAP2"].to_numpy(dtype=float)
+
+    obs_filter_values: Dict[str, np.ndarray] = {}
+    filter_fields: List[Dict[str, str]] = []
+    obs = adata.obs
+    excluded_columns = {"UMAP-X", "UMAP-Y", "UMAP_leiden_X", "UMAP_leiden_Y"}
+    for column in obs.columns:
+        column_text = str(column).strip()
+        if not column_text or column_text in excluded_columns or "umap" in column_text.lower():
+            continue
+        series = obs[column]
+        if pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series):
+            continue
+        values = (
+            series.astype(str)
+            .str.strip()
+            .replace({"nan": "", "None": ""})
+        )
+        unique_values = [value for value in pd.Index(values[values != ""]).unique().tolist() if value]
+        if len(unique_values) < 2 or len(unique_values) > 120:
+            continue
+        obs_filter_values[column_text] = values.to_numpy(dtype=str)
+        filter_fields.append({"value": column_text, "label": column_text})
+
+    sample_names = _job_sample_names(meta)
+    sample_filter_field = None
+    if sample_names:
+        try:
+            sample_filter_field, _ = pipeline_mod._resolve_samples_for_adata(adata, meta, sample_names)
+        except Exception:
+            sample_filter_field = next((column for column in ("Library", "group", "sample") if column in obs.columns), None)
+    else:
+        sample_filter_field = next((column for column in ("Library", "group", "sample") if column in obs.columns), None)
+
+    if sample_filter_field and str(sample_filter_field) not in obs_filter_values:
+        sample_values = (
+            obs[sample_filter_field].astype(str).str.strip().replace({"nan": "", "None": ""})
+        )
+        unique_values = [value for value in pd.Index(sample_values[sample_values != ""]).unique().tolist() if value]
+        if len(unique_values) >= 2:
+            obs_filter_values[str(sample_filter_field)] = sample_values.to_numpy(dtype=str)
+            filter_fields.insert(0, {"value": str(sample_filter_field), "label": str(sample_filter_field)})
+
+    seen_fields = set()
+    deduped_fields = []
+    for entry in filter_fields:
+        value = str(entry["value"])
+        if value in seen_fields:
+            continue
+        seen_fields.add(value)
+        deduped_fields.append(entry)
+    filter_fields = deduped_fields
+
+    default_secondary_field = str(cluster_key) if str(cluster_key) in obs_filter_values else ""
+    if default_secondary_field and default_secondary_field == str(sample_filter_field or ""):
+        default_secondary_field = next(
+            (entry["value"] for entry in filter_fields if entry["value"] != str(sample_filter_field or "")),
+            "",
+        )
+
+    filter_values = {
+        field: [value for value in pd.Index(values).unique().tolist() if value]
+        for field, values in obs_filter_values.items()
+    }
+
+    cache_entry = {
+        "job_id": job_id,
+        "h5ad_path": str(h5ad_path),
+        "umap_path": str(umap_path or ""),
+        "cluster_key": str(cluster_key),
+        "adata": adata,
+        "obs_names": obs_names,
+        "var_names": adata.var_names.astype(str).to_numpy(),
+        "populations": populations,
+        "umap_x": umap_x,
+        "umap_y": umap_y,
+        "obs_filter_values": obs_filter_values,
+        "display_filters_meta": {
+            "fields": filter_fields,
+            "values": filter_values,
+            "default_primary_field": str(sample_filter_field or ""),
+            "default_secondary_field": default_secondary_field,
+        },
+    }
+    cache[job_id] = cache_entry
+    return cache_entry
+
+
+def _get_differential_cache_entry(app: FastAPI, meta: Dict) -> Dict[str, Any]:
+    job_id = str(meta.get("job_id") or "").strip()
+    if not job_id:
+        raise ValueError("Job metadata is missing a job_id.")
+
+    differential = meta.get("differential", {}) or {}
+    artifacts = differential.get("artifacts", {}) or {}
+    detail_path = next(
+        (str(path).strip() for key, path in artifacts.items() if key.startswith("DEG_detailed_") and str(path).strip()),
+        "",
+    )
+    heatmap_path = str(artifacts.get("heatmap_tsv", "")).strip()
+    go_path = str(artifacts.get("goelite_tsv", "")).strip()
+    primary_h5ad_path = str(artifacts.get("differentials_only_h5ad", "")).strip()
+    fallback_h5ad_path = str(meta.get("artifacts", {}).get("combined_h5ad", "")).strip()
+    network_paths = {
+        str(entry.get("population", "")).strip(): str(entry.get("tsv", "")).strip()
+        for entry in differential.get("networks", []) or []
+        if str(entry.get("population", "")).strip() and str(entry.get("tsv", "")).strip()
+    }
+
+    cache = app.state.differential_cache
+    entry = cache.get(job_id)
+    current_signature = {
+        "detail_path": detail_path,
+        "heatmap_path": heatmap_path,
+        "go_path": go_path,
+        "primary_h5ad_path": primary_h5ad_path,
+        "fallback_h5ad_path": fallback_h5ad_path,
+        "network_paths": network_paths,
+    }
+    if entry and entry.get("signature") == current_signature:
+        return entry
+
+    _invalidate_differential_cache(app, job_id)
+    entry = {
+        "signature": current_signature,
+        "detail_table": None,
+        "heatmap_table": None,
+        "go_table": None,
+        "network_tables": {},
+        "primary_adata": None,
+        "fallback_adata": None,
+        "primary_var_names": None,
+        "fallback_var_names": None,
+    }
+    cache[job_id] = entry
+    return entry
+
+
+def _build_differential_heatmap_payload(app: FastAPI, meta: Dict, population: str) -> Dict:
+    detailed = _get_differential_detail_table(app, meta).copy()
     detailed["population"] = detailed["population"].astype(str)
     subset = detailed.loc[detailed["population"] == population].copy()
     if subset.empty:
@@ -620,29 +841,28 @@ def _build_differential_heatmap_payload(meta: Dict, population: str) -> Dict:
         .dropna(subset=["gene", "log2fc"])
         .pivot_table(index="gene", columns="population", values="log2fc", aggfunc="first")
     )
-    heatmap_matrix = None
     heatmap_exact_rows: Dict[tuple[str, str], List[Optional[float]]] = {}
-    heatmap_gene_rows: Dict[str, List[Optional[float]]] = {}
+    use_heatmap_columns = False
 
     try:
-        heatmap_frame = _get_differential_heatmap_table(meta)
+        heatmap_frame = _get_differential_heatmap_table(app, meta)
         heatmap_columns = [str(label).split(":", 1)[0] for label in heatmap_frame.columns]
         column_labels = list(dict.fromkeys(heatmap_columns))
         if len(column_labels) != len(heatmap_frame.columns):
             column_labels = [str(label) for label in heatmap_frame.columns]
-        heatmap_matrix = heatmap_frame.copy()
-        heatmap_matrix.columns = column_labels
-        for raw_key, values in heatmap_matrix.iterrows():
+        heatmap_frame = heatmap_frame.copy()
+        heatmap_frame.columns = column_labels
+        for raw_key, values in heatmap_frame.iterrows():
             parsed = _parse_heatmap_row_key(raw_key)
             gene = parsed["gene"]
             row_values = [float(value) if _is_finite_number(value) else 0.0 for value in values.tolist()]
             row_key = (parsed["population"], gene)
             heatmap_exact_rows.setdefault(row_key, row_values)
-            heatmap_gene_rows.setdefault(gene, row_values)
+        use_heatmap_columns = any(parsed_population == population for parsed_population, _ in heatmap_exact_rows.keys())
     except Exception:
-        column_labels = list(dict.fromkeys(detailed["population"].astype(str).tolist()))
+        use_heatmap_columns = False
 
-    if not column_labels:
+    if not use_heatmap_columns:
         column_labels = list(dict.fromkeys(detailed["population"].astype(str).tolist()))
 
     detailed_matrix = detailed_matrix.reindex(columns=column_labels).fillna(0.0)
@@ -652,7 +872,6 @@ def _build_differential_heatmap_payload(meta: Dict, population: str) -> Dict:
         gene = str(row.gene)
         values = (
             heatmap_exact_rows.get((population, gene))
-            or heatmap_gene_rows.get(gene)
             or (detailed_matrix.loc[gene].tolist() if gene in detailed_matrix.index else [0.0] * len(column_labels))
         )
         row_values = [float(value) if _is_finite_number(value) else 0.0 for value in values]
@@ -673,8 +892,8 @@ def _build_differential_heatmap_payload(meta: Dict, population: str) -> Dict:
     }
 
 
-def _build_differential_volcano_payload(meta: Dict, population: str) -> Dict:
-    detailed = _get_differential_detail_table(meta)
+def _build_differential_volcano_payload(app: FastAPI, meta: Dict, population: str) -> Dict:
+    detailed = _get_differential_detail_table(app, meta)
     subset = detailed.loc[detailed["population"] == population].copy()
     if subset.empty:
         raise HTTPException(status_code=404, detail=f"No differential genes were found for '{population}'.")
@@ -705,9 +924,9 @@ def _build_differential_volcano_payload(meta: Dict, population: str) -> Dict:
     }
 
 
-def _build_differential_go_payload(meta: Dict, population: str) -> Dict:
+def _build_differential_go_payload(app: FastAPI, meta: Dict, population: str) -> Dict:
     try:
-        frame = _get_differential_go_table(meta)
+        frame = _get_differential_go_table(app, meta)
     except HTTPException:
         return {"population": population, "terms": [], "default_gene": None}
     except FileNotFoundError:
@@ -748,7 +967,7 @@ def _build_differential_go_payload(meta: Dict, population: str) -> Dict:
     return {"population": population, "terms": terms, "default_gene": default_gene}
 
 
-def _build_differential_network_payload(meta: Dict, population: str, root_path: str = "") -> Dict:
+def _build_differential_network_payload(app: FastAPI, meta: Dict, population: str, root_path: str = "") -> Dict:
     entry = _differential_network_entry(meta, population)
     if not entry:
         return {"population": population, "elements": [], "default_gene": None}
@@ -757,13 +976,18 @@ def _build_differential_network_payload(meta: Dict, population: str, root_path: 
     if not tsv_path.exists():
         return {"population": population, "elements": [], "default_gene": None}
 
-    detailed = _get_differential_detail_table(meta)
+    detailed = _get_differential_detail_table(app, meta)
     subset = detailed.loc[detailed["population"] == population, ["gene", "log2fc", "fdr", "pval"]].copy()
     subset["gene"] = subset["gene"].astype(str)
     subset["log2fc"] = pd.to_numeric(subset.get("log2fc"), errors="coerce")
     fc_map = dict(zip(subset["gene"], subset["log2fc"]))
 
-    frame = pd.read_csv(tsv_path, sep="\t")
+    cache_entry = _get_differential_cache_entry(app, meta)
+    network_tables = cache_entry["network_tables"]
+    frame = network_tables.get(population)
+    if not isinstance(frame, pd.DataFrame):
+        frame = pd.read_csv(tsv_path, sep="\t")
+        network_tables[population] = frame
     nodes: Dict[str, Dict[str, object]] = {}
     edges = []
     edge_index = 0
@@ -825,37 +1049,49 @@ def _build_differential_network_payload(meta: Dict, population: str, root_path: 
     }
 
 
-def _build_differential_gene_detail_payload(meta: Dict, population: str, gene: str) -> Dict:
+def _build_differential_gene_detail_payload(app: FastAPI, meta: Dict, population: str, gene: str) -> Dict:
     differential = meta.get("differential", {}) or {}
     config = differential.get("config", {}) or {}
     group1_samples = [str(value).strip() for value in config.get("group1_samples", []) if str(value).strip()]
     group2_samples = [str(value).strip() for value in config.get("group2_samples", []) if str(value).strip()]
+    sample_field = str(config.get("sample_field", "")).strip()
     if not group1_samples or not group2_samples:
         raise ValueError("Differential comparison groups are not configured.")
     population_col = _differential_population_col(meta)
     case_label, control_label = _differential_group_labels(meta)
 
-    adata = None
-    try:
-        adata, _ = _open_gene_detail_adata(meta, gene)
-        if population_col not in adata.obs.columns:
-            raise ValueError(f"'{population_col}' is not present in the aligned AnnData observations.")
+    expression_cache = _get_expression_cache(app, meta)
+    adata = expression_cache["adata"]
+    resolved_gene = _resolve_gene_name(expression_cache["var_names"], gene)
+    if not resolved_gene:
+        raise KeyError(f"Gene '{gene}' not found in the aligned AnnData output.")
+    if population_col not in adata.obs.columns:
+        raise ValueError(f"'{population_col}' is not present in the aligned AnnData observations.")
+    if sample_field and sample_field in adata.obs.columns:
+        sample_col = sample_field
+        available_values = set(adata.obs[sample_col].astype(str))
+        missing = sorted((set(group1_samples) | set(group2_samples)) - available_values)
+        if missing:
+            raise ValueError(
+                f"Selected group values were not found in obs['{sample_col}']: {', '.join(missing)}"
+            )
+        resolved_group1 = group1_samples
+        resolved_group2 = group2_samples
+    else:
         sample_col, resolved_samples = pipeline_mod._resolve_samples_for_adata(adata, meta, group1_samples + group2_samples)
         resolved_group1 = [resolved_samples[sample] for sample in group1_samples]
         resolved_group2 = [resolved_samples[sample] for sample in group2_samples]
 
-        population_values = adata.obs[population_col].astype(str)
-        sample_values = adata.obs[sample_col].astype(str)
-        mask = (population_values == population) & sample_values.isin(resolved_group1 + resolved_group2)
-        if int(np.asarray(mask).sum()) == 0:
-            raise HTTPException(status_code=404, detail=f"No cells were found for '{population}' in the selected comparison groups.")
+    population_values = adata.obs[population_col].astype(str)
+    sample_values = adata.obs[sample_col].astype(str)
+    mask = (population_values == population) & sample_values.isin(resolved_group1 + resolved_group2)
+    if int(np.asarray(mask).sum()) == 0:
+        raise HTTPException(status_code=404, detail=f"No cells were found for '{population}' in the selected comparison groups.")
 
-        subset = adata[mask.to_numpy(), gene]
-        values = _flatten_expr(subset.X).astype(float)
-        subset_samples = sample_values.loc[mask].astype(str)
-        group_labels = np.where(subset_samples.isin(resolved_group1), case_label, control_label)
-    finally:
-        _close_backed_adata(adata)
+    subset = adata[mask.to_numpy(), resolved_gene]
+    values = _flatten_expr(subset.X).astype(float)
+    subset_samples = sample_values.loc[mask].astype(str)
+    group_labels = np.where(subset_samples.isin(resolved_group1), case_label, control_label)
 
     groups = []
     for label in (case_label, control_label):
@@ -870,8 +1106,8 @@ def _build_differential_gene_detail_payload(meta: Dict, population: str, gene: s
             }
         )
 
-    detailed = _get_differential_detail_table(meta)
-    stats = detailed.loc[(detailed["population"] == population) & (detailed["gene"] == gene)].copy()
+    detailed = _get_differential_detail_table(app, meta)
+    stats = detailed.loc[(detailed["population"] == population) & (detailed["gene"] == resolved_gene)].copy()
     stats_payload = {
         "p_value": None,
         "fdr": None,
@@ -891,7 +1127,7 @@ def _build_differential_gene_detail_payload(meta: Dict, population: str, gene: s
 
     return {
         "population": population,
-        "gene": gene,
+        "gene": resolved_gene,
         "groups": groups,
         "stats": stats_payload,
     }
@@ -908,12 +1144,17 @@ def _validate_differential_request(meta: Dict, payload: DifferentialSettings) ->
     if population_options and payload.population_col not in population_options:
         raise HTTPException(status_code=400, detail="Selected cell-state field is not available for this job.")
 
+    sample_field = str(payload.sample_field or options.get("default_sample_field") or "").strip()
+    sample_field_options = {entry["value"] for entry in options.get("sample_fields", []) if entry.get("value")}
+    if sample_field_options and sample_field not in sample_field_options:
+        raise HTTPException(status_code=400, detail="Selected group obs field is not available for this job.")
+
     group1_samples = [str(sample).strip() for sample in payload.group1_samples if str(sample).strip()]
     group2_samples = [str(sample).strip() for sample in payload.group2_samples if str(sample).strip()]
     if not group1_samples or not group2_samples:
         raise HTTPException(status_code=400, detail="Both differential groups must include at least one sample.")
 
-    available_samples = set(options["sample_names"])
+    available_samples = set((options.get("sample_values") or {}).get(sample_field, [])) if sample_field else set(options["sample_names"])
     missing = sorted((set(group1_samples) | set(group2_samples)) - available_samples)
     if missing:
         raise HTTPException(status_code=400, detail=f"Unknown samples selected: {', '.join(missing)}")
@@ -922,10 +1163,18 @@ def _validate_differential_request(meta: Dict, payload: DifferentialSettings) ->
     if overlap:
         raise HTTPException(status_code=400, detail=f"Samples cannot appear in both groups: {', '.join(overlap)}")
 
+    comparison_type = str(payload.comparison_type or "cells").strip().lower()
+    if comparison_type not in {"cells", "pseudobulk"}:
+        raise HTTPException(status_code=400, detail="Comparison Type must be either 'cells' or 'pseudobulk'.")
+    if comparison_type == "pseudobulk" and len(available_samples) < 4:
+        comparison_type = "cells"
+
     return {
         "population_col": payload.population_col,
+        "sample_field": sample_field,
         "group1_samples": group1_samples,
         "group2_samples": group2_samples,
+        "comparison_type": comparison_type,
     }
 
 
@@ -939,38 +1188,27 @@ def _get_differential_artifact(meta: Dict, key: str) -> Path:
     return path
 
 
-def _build_umap_payload(meta: Dict) -> Dict[str, List[Dict]]:
-    artifacts = meta.get("artifacts", {})
-    umap_path = artifacts.get("umap_coordinates")
-    assignments_path = artifacts.get("assignments")
-    if not umap_path or not Path(umap_path).exists():
-        raise FileNotFoundError("UMAP output not available yet.")
-    if not assignments_path or not Path(assignments_path).exists():
-        raise FileNotFoundError("cellHarmony assignments missing; rerun the job.")
+def _build_umap_payload(
+    app: FastAPI,
+    meta: Dict,
+    display_filters: Optional[List[tuple[str, List[str]]]] = None,
+) -> Dict[str, List[Dict]]:
+    cache_entry = _get_expression_cache(app, meta)
+    obs_names = cache_entry["obs_names"]
+    populations = cache_entry["populations"]
+    umap_x = cache_entry["umap_x"]
+    umap_y = cache_entry["umap_y"]
+    display_mask = _apply_display_filter_mask(cache_entry, display_filters)
 
-    query_df = pd.read_csv(umap_path, sep="\t")
-    barcode_col = query_df.columns[0]
-    query_df = query_df.rename(columns={barcode_col: "CellBarcode", "umap_0": "UMAP1", "umap_1": "UMAP2"})
-
-    assignments_df = pd.read_csv(assignments_path, sep="\t")
-    cluster_key = meta.get("cluster_key")
-    if not cluster_key or cluster_key not in assignments_df.columns:
-        cluster_candidates = [col for col in assignments_df.columns if col not in {"CellBarcode", "Similarity"}]
-        if not cluster_candidates:
-            raise ValueError("Cluster column missing in assignments file.")
-        cluster_key = cluster_candidates[0]
-
-    merged = pd.merge(assignments_df[["CellBarcode", cluster_key]], query_df, on="CellBarcode", how="inner")
-    merged["Population"] = merged[cluster_key].astype(str)
     query_points = [
         {
-            "barcode": row.CellBarcode,
-            "population": row.Population,
-            "x": float(row.UMAP1),
-            "y": float(row.UMAP2),
+            "barcode": barcode,
+            "population": population,
+            "x": float(x),
+            "y": float(y),
         }
-        for row in merged.itertuples()
-        if _is_finite_number(row.UMAP1) and _is_finite_number(row.UMAP2)
+        for barcode, population, x, y, keep in zip(obs_names, populations, umap_x, umap_y, display_mask)
+        if keep and _is_finite_number(x) and _is_finite_number(y)
     ]
 
     reference_points = []
@@ -1020,7 +1258,7 @@ def _build_reference_expression_payload(meta: Dict, gene: str) -> Dict:
             try:
                 if len(fallback_adata.var_names):
                     fallback_gene = str(fallback_adata.var_names[0])
-                    return _build_expression_payload(meta, fallback_gene)
+                    return _build_expression_payload(app, meta, fallback_gene)
             finally:
                 _close_backed_adata(fallback_adata)
         return {
@@ -1088,57 +1326,45 @@ def _build_reference_expression_payload(meta: Dict, gene: str) -> Dict:
     }
 
 
-def _build_expression_payload(meta: Dict, gene: str) -> Dict:
-    artifacts = meta.get("artifacts", {})
-    h5ad_path = artifacts.get("combined_h5ad")
-    if not h5ad_path or not Path(h5ad_path).exists():
-        raise FileNotFoundError("Combined AnnData output unavailable for this job.")
-
-    adata = ad.read_h5ad(h5ad_path)
-    cluster_key = meta.get("cluster_key")
-    if not cluster_key or cluster_key not in adata.obs.columns:
-        raise ValueError("Cluster assignments missing from AnnData output.")
-    resolved_gene = _resolve_gene_name(adata.var_names.astype(str), gene)
+def _build_expression_payload(
+    app: FastAPI,
+    meta: Dict,
+    gene: str,
+    display_filters: Optional[List[tuple[str, List[str]]]] = None,
+) -> Dict:
+    cache_entry = _get_expression_cache(app, meta)
+    adata = cache_entry["adata"]
+    populations = cache_entry["populations"]
+    obs_names = cache_entry["obs_names"]
+    umap_x = cache_entry["umap_x"]
+    umap_y = cache_entry["umap_y"]
+    display_mask = _apply_display_filter_mask(cache_entry, display_filters)
+    resolved_gene = _resolve_gene_name(cache_entry["var_names"], gene)
     if not resolved_gene:
-        if len(adata.var_names):
-            fallback_gene = str(adata.var_names[0])
+        if len(cache_entry["var_names"]):
+            fallback_gene = str(cache_entry["var_names"][0])
             values = _flatten_expr(adata[:, fallback_gene].X)
-            populations = adata.obs[cluster_key].astype(str).values
             scatter_data = [
                 {"population": pop, "value": float(val)}
                 for pop, val in zip(populations, values)
                 if _is_finite_number(val)
             ]
 
-            umap_points = []
-            umap_path = artifacts.get("umap_coordinates")
-            if umap_path and Path(umap_path).exists():
-                coords_df = pd.read_csv(umap_path, sep="\t")
-                barcode_col = coords_df.columns[0]
-                coords_df = coords_df.rename(columns={barcode_col: "CellBarcode", "umap_0": "UMAP1", "umap_1": "UMAP2"})
-                expr_df = pd.DataFrame(
-                    {
-                        "CellBarcode": adata.obs_names.astype(str),
-                        "population": populations,
-                        "value": values.astype(float),
-                    }
-                )
-                merged = pd.merge(coords_df, expr_df, on="CellBarcode", how="inner")
-                umap_points = [
-                    {
-                        "barcode": row.CellBarcode,
-                        "population": row.population,
-                        "value": float(row.value),
-                        "x": float(row.UMAP1),
-                        "y": float(row.UMAP2),
-                    }
-                    for row in merged.itertuples()
-                    if _is_finite_number(row.value) and _is_finite_number(row.UMAP1) and _is_finite_number(row.UMAP2)
-                ]
+            umap_points = [
+                {
+                    "barcode": barcode,
+                    "population": pop,
+                    "value": float(val),
+                    "x": float(x),
+                    "y": float(y),
+                }
+                for barcode, pop, val, x, y, keep in zip(obs_names, populations, values.astype(float), umap_x, umap_y, display_mask)
+                if keep and _is_finite_number(val) and _is_finite_number(x) and _is_finite_number(y)
+            ]
 
             violin_data = []
             for pop in sorted(pd.unique(populations)):
-                mask = populations == pop
+                mask = (populations == pop) & display_mask
                 pop_values = values[mask].astype(float)
                 finite_values = pop_values[np.isfinite(pop_values)]
                 violin_data.append(
@@ -1155,7 +1381,7 @@ def _build_expression_payload(meta: Dict, gene: str) -> Dict:
                 "requested_gene": gene,
                 "resolved_gene": fallback_gene,
                 "source": "query",
-                "message": None,
+                "message": None if int(np.asarray(display_mask).sum()) else "No cells match the current Display only filters.",
                 "scatter": scatter_data,
                 "violin": violin_data,
                 "umap": umap_points,
@@ -1163,42 +1389,27 @@ def _build_expression_payload(meta: Dict, gene: str) -> Dict:
         return _build_reference_expression_payload(meta, gene)
 
     values = _flatten_expr(adata[:, resolved_gene].X)
-    populations = adata.obs[cluster_key].astype(str).values
     scatter_data = [
         {"population": pop, "value": float(val)}
         for pop, val in zip(populations, values)
         if _is_finite_number(val)
     ]
 
-    umap_points = []
-    umap_path = artifacts.get("umap_coordinates")
-    if umap_path and Path(umap_path).exists():
-        coords_df = pd.read_csv(umap_path, sep="\t")
-        barcode_col = coords_df.columns[0]
-        coords_df = coords_df.rename(columns={barcode_col: "CellBarcode", "umap_0": "UMAP1", "umap_1": "UMAP2"})
-        expr_df = pd.DataFrame(
-            {
-                "CellBarcode": adata.obs_names.astype(str),
-                "population": populations,
-                "value": values.astype(float),
-            }
-        )
-        merged = pd.merge(coords_df, expr_df, on="CellBarcode", how="inner")
-        umap_points = [
-            {
-                "barcode": row.CellBarcode,
-                "population": row.population,
-                "value": float(row.value),
-                "x": float(row.UMAP1),
-                "y": float(row.UMAP2),
-            }
-            for row in merged.itertuples()
-            if _is_finite_number(row.value) and _is_finite_number(row.UMAP1) and _is_finite_number(row.UMAP2)
-        ]
+    umap_points = [
+        {
+            "barcode": barcode,
+            "population": pop,
+            "value": float(val),
+            "x": float(x),
+            "y": float(y),
+        }
+        for barcode, pop, val, x, y, keep in zip(obs_names, populations, values.astype(float), umap_x, umap_y, display_mask)
+        if keep and _is_finite_number(val) and _is_finite_number(x) and _is_finite_number(y)
+    ]
 
     violin_data = []
     for pop in sorted(pd.unique(populations)):
-        mask = populations == pop
+        mask = (populations == pop) & display_mask
         pop_values = values[mask].astype(float)
         finite_values = pop_values[np.isfinite(pop_values)]
         violin_data.append(
@@ -1215,25 +1426,67 @@ def _build_expression_payload(meta: Dict, gene: str) -> Dict:
         "requested_gene": gene,
         "resolved_gene": resolved_gene,
         "source": "query",
-        "message": None,
+        "message": None if int(np.asarray(display_mask).sum()) else "No cells match the current Display only filters.",
         "scatter": scatter_data,
         "violin": violin_data,
         "umap": umap_points,
     }
 
 
-def _build_gene_suggestions_payload(meta: Dict) -> Dict:
-    artifacts = meta.get("artifacts", {})
-    h5ad_path = artifacts.get("combined_h5ad")
-    if not h5ad_path or not Path(h5ad_path).exists():
-        raise FileNotFoundError("Combined AnnData output unavailable for this job.")
-
-    adata = ad.read_h5ad(h5ad_path, backed="r")
-    try:
-        genes = [str(gene) for gene in adata.var_names.astype(str).tolist()]
-    finally:
-        _close_backed_adata(adata)
+def _build_gene_suggestions_payload(app: FastAPI, meta: Dict) -> Dict:
+    cache_entry = _get_expression_cache(app, meta)
+    genes = [str(gene) for gene in cache_entry["var_names"].tolist()]
     return {"genes": genes}
+
+
+def _build_display_filter_payload(app: FastAPI, meta: Dict) -> Dict[str, Any]:
+    cache_entry = _get_expression_cache(app, meta)
+    return dict(cache_entry.get("display_filters_meta") or {})
+
+
+def _normalize_display_filter_values(values: Optional[List[str]]) -> List[str]:
+    if not values:
+        return []
+    ordered: List[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            ordered.append(text)
+    return ordered
+
+
+def _display_filter_specs(
+    filter1_field: Optional[str],
+    filter1_values: Optional[List[str]],
+    filter2_field: Optional[str],
+    filter2_values: Optional[List[str]],
+) -> List[tuple[str, List[str]]]:
+    specs: List[tuple[str, List[str]]] = []
+    for raw_field, raw_values in (
+        (filter1_field, filter1_values),
+        (filter2_field, filter2_values),
+    ):
+        field = str(raw_field or "").strip()
+        values = _normalize_display_filter_values(raw_values)
+        if field and values:
+            specs.append((field, values))
+    return specs
+
+
+def _apply_display_filter_mask(cache_entry: Dict[str, Any], display_filters: Optional[List[tuple[str, List[str]]]]) -> np.ndarray:
+    obs_names = cache_entry["obs_names"]
+    mask = np.ones(len(obs_names), dtype=bool)
+    if not display_filters:
+        return mask
+    obs_filter_values = cache_entry.get("obs_filter_values") or {}
+    for field, values in display_filters:
+        field_values = obs_filter_values.get(field)
+        if field_values is None or not values:
+            continue
+        mask &= np.isin(field_values, values)
+    return mask
 
 
 def _square_umap_axes(ax: plt.Axes, point_groups: List[List[Dict]]) -> None:
@@ -1361,12 +1614,22 @@ def _render_expression_pdf(payload: Dict, mode: str) -> io.BytesIO:
         ax.set_ylabel("Expression")
     else:
         umap_points = payload["umap"]
+        expression_cmap = matplotlib.colors.LinearSegmentedColormap.from_list(
+            "expression_grey_red",
+            [
+                (0.0, "#e5e7eb"),
+                (0.15, "#f3f4f6"),
+                (0.35, "#fecaca"),
+                (0.6, "#f87171"),
+                (1.0, "#b91c1c"),
+            ],
+        )
         sc = ax.scatter(
             [p["x"] for p in umap_points],
             [p["y"] for p in umap_points],
             s=4,
             c=[p["value"] for p in umap_points],
-            cmap="viridis",
+            cmap=expression_cmap,
             linewidths=0,
         )
         cbar = fig.colorbar(sc, ax=ax)
@@ -1431,6 +1694,8 @@ def create_app(test_config: dict | None = None) -> FastAPI:
     app.state.config = cfg
     app.state.root_path = cfg["ROOT_PATH"]
     app.state.job_store = JobStore(Path(cfg["JOB_STORAGE"]))
+    app.state.expression_cache = {}
+    app.state.differential_cache = {}
     app.state.job_runner = JobRunner(
         app.state.job_store,
         Path(cfg["REFERENCE_REGISTRY"]),
@@ -1499,6 +1764,8 @@ def create_app(test_config: dict | None = None) -> FastAPI:
 
         metadata = store.create_job(species, reference, soupx_option, files=[])
         job_id = metadata["job_id"]
+        _invalidate_expression_cache(app, job_id)
+        _invalidate_differential_cache(app, job_id)
         uploads_dir = store.uploads_dir(job_id)
         records = []
         for sample, upload in zip(normalized_samples, files):
@@ -1541,6 +1808,8 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             or str(meta.get("soupx_option") or "") != str(requested_soupx or "")
         )
         if changed:
+            _invalidate_expression_cache(app, job_id)
+            _invalidate_differential_cache(app, job_id)
             _clear_directory_contents(store.outputs_dir(job_id))
             _clear_directory_contents(store.logs_dir(job_id))
             meta = store.update_job(
@@ -1570,6 +1839,8 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         store, runner = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
+        _invalidate_expression_cache(app, job_id)
+        _invalidate_differential_cache(app, job_id)
         runner.submit(job_id)
         store.append_log(job_id, "Job queued by user request.")
         store.update_job(job_id, message="Job submitted to worker.", status="queued", progress=15)
@@ -1587,7 +1858,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             log_tail = log_path.read_text(encoding="utf-8").splitlines(True)[-200:]
         meta["log_tail"] = log_tail
         meta["qc_log_tail"] = log_tail if meta.get("status") == "failed" else _filter_qc_log_lines(log_tail)
-        meta["differential_ui"] = _build_differential_payload(job_id, meta, root_path=app.state.root_path)
+        meta["differential_ui"] = _build_differential_payload(app, job_id, meta, root_path=app.state.root_path)
         return JSONResponse(meta)
 
     @app.get("/api/jobs/{job_id}/differential/status")
@@ -1596,7 +1867,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
-        return JSONResponse(_build_differential_payload(job_id, meta, root_path=app.state.root_path))
+        return JSONResponse(_build_differential_payload(app, job_id, meta, root_path=app.state.root_path))
 
     @app.post("/api/jobs/{job_id}/differential")
     async def run_differential(job_id: str, payload: DifferentialSettings):
@@ -1606,6 +1877,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         meta = store.get_job(job_id)
         config = _validate_differential_request(meta, payload)
         options = _differential_options(meta)
+        _invalidate_differential_cache(app, job_id)
         store.update_job(
             job_id,
             differential={
@@ -1622,29 +1894,44 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         store.append_log(job_id, "Differential analysis queued by user request.")
         runner.submit_differential(job_id)
         updated = store.get_job(job_id)
-        return JSONResponse(_build_differential_payload(job_id, updated, root_path=app.state.root_path))
+        return JSONResponse(_build_differential_payload(app, job_id, updated, root_path=app.state.root_path))
 
     @app.get("/api/jobs/{job_id}/umap")
-    async def umap(job_id: str):
+    async def umap(
+        job_id: str,
+        filter1_field: Optional[str] = Query(None),
+        filter1_values: List[str] = Query([]),
+        filter2_field: Optional[str] = Query(None),
+        filter2_values: List[str] = Query([]),
+    ):
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
+        display_filters = _display_filter_specs(filter1_field, filter1_values, filter2_field, filter2_values)
         try:
-            return JSONResponse(_build_umap_payload(meta))
+            return JSONResponse(_build_umap_payload(app, meta, display_filters))
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
         except ValueError as exc:
             raise HTTPException(status_code=500, detail=str(exc))
 
     @app.get("/api/jobs/{job_id}/expression")
-    async def expression(job_id: str, gene: str = Query(...)):
+    async def expression(
+        job_id: str,
+        gene: str = Query(...),
+        filter1_field: Optional[str] = Query(None),
+        filter1_values: List[str] = Query([]),
+        filter2_field: Optional[str] = Query(None),
+        filter2_values: List[str] = Query([]),
+    ):
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
+        display_filters = _display_filter_specs(filter1_field, filter1_values, filter2_field, filter2_values)
         try:
-            return JSONResponse(_build_expression_payload(meta, gene))
+            return JSONResponse(_build_expression_payload(app, meta, gene, display_filters))
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
         except KeyError as exc:
@@ -1659,20 +1946,41 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
         try:
-            return JSONResponse(_build_gene_suggestions_payload(meta))
+            return JSONResponse(_build_gene_suggestions_payload(app, meta))
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+
+    @app.get("/api/jobs/{job_id}/display-filters")
+    async def job_display_filters(job_id: str):
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        meta = store.get_job(job_id)
+        try:
+            return JSONResponse(_build_display_filter_payload(app, meta))
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
         except ValueError as exc:
             raise HTTPException(status_code=500, detail=str(exc))
 
     @app.get("/api/jobs/{job_id}/umap/pdf")
-    async def umap_pdf(job_id: str, mode: str = Query("relative")):
+    async def umap_pdf(
+        job_id: str,
+        mode: str = Query("relative"),
+        filter1_field: Optional[str] = Query(None),
+        filter1_values: List[str] = Query([]),
+        filter2_field: Optional[str] = Query(None),
+        filter2_values: List[str] = Query([]),
+    ):
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
+        display_filters = _display_filter_specs(filter1_field, filter1_values, filter2_field, filter2_values)
         try:
-            payload = _build_umap_payload(meta)
+            payload = _build_umap_payload(app, meta, display_filters)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
         except ValueError as exc:
@@ -1685,13 +1993,22 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         )
 
     @app.get("/api/jobs/{job_id}/expression/pdf")
-    async def expression_pdf(job_id: str, gene: str = Query(...), mode: str = Query("umap")):
+    async def expression_pdf(
+        job_id: str,
+        gene: str = Query(...),
+        mode: str = Query("umap"),
+        filter1_field: Optional[str] = Query(None),
+        filter1_values: List[str] = Query([]),
+        filter2_field: Optional[str] = Query(None),
+        filter2_values: List[str] = Query([]),
+    ):
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
+        display_filters = _display_filter_specs(filter1_field, filter1_values, filter2_field, filter2_values)
         try:
-            payload = _build_expression_payload(meta, gene)
+            payload = _build_expression_payload(app, meta, gene, display_filters)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
         except KeyError as exc:
@@ -1797,7 +2114,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
-        return JSONResponse(_build_differential_heatmap_payload(meta, population))
+        return JSONResponse(_build_differential_heatmap_payload(app, meta, population))
 
     @app.get("/api/jobs/{job_id}/differential/interactive/volcano")
     async def differential_volcano_data(job_id: str, population: str = Query(...)):
@@ -1805,7 +2122,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
-        return JSONResponse(_build_differential_volcano_payload(meta, population))
+        return JSONResponse(_build_differential_volcano_payload(app, meta, population))
 
     @app.get("/api/jobs/{job_id}/differential/interactive/go")
     async def differential_go_data(job_id: str, population: str = Query(...)):
@@ -1813,7 +2130,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
-        return JSONResponse(_build_differential_go_payload(meta, population))
+        return JSONResponse(_build_differential_go_payload(app, meta, population))
 
     @app.get("/api/jobs/{job_id}/differential/interactive/network")
     async def differential_network_data(job_id: str, population: str = Query(...)):
@@ -1821,7 +2138,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
-        return JSONResponse(_build_differential_network_payload(meta, population, root_path=app.state.root_path))
+        return JSONResponse(_build_differential_network_payload(app, meta, population, root_path=app.state.root_path))
 
     @app.get("/api/jobs/{job_id}/differential/interactive/gene")
     async def differential_gene_data(job_id: str, population: str = Query(...), gene: str = Query(...)):
@@ -1829,7 +2146,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
-        return JSONResponse(_build_differential_gene_detail_payload(meta, population, gene))
+        return JSONResponse(_build_differential_gene_detail_payload(app, meta, population, gene))
 
     @app.get("/api/jobs/{job_id}/differential/interactive/gene/pdf")
     async def differential_gene_pdf(job_id: str, population: str = Query(...), gene: str = Query(...)):
@@ -1837,7 +2154,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
-        payload = _build_differential_gene_detail_payload(meta, population, gene)
+        payload = _build_differential_gene_detail_payload(app, meta, population, gene)
         pdf = _render_differential_gene_pdf(payload)
         safe_gene = re.sub(r"[^A-Za-z0-9_.-]+", "_", gene).strip("._") or "gene"
         safe_population = re.sub(r"[^A-Za-z0-9_.-]+", "_", population).strip("._") or "population"

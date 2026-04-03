@@ -224,7 +224,57 @@ def _candidate_population_columns(h5ad_path: Path, preferred: Optional[List[str]
     return options
 
 
-def _default_differential_state(enabled: bool, default_population_col: Optional[str]) -> Dict[str, object]:
+def _candidate_group_fields(
+    h5ad_path: Path,
+    preferred: Optional[List[str]] = None,
+    max_categories: int = 120,
+) -> Tuple[List[Dict[str, object]], Dict[str, List[str]]]:
+    if not h5ad_path.exists():
+        return [], {}
+
+    adata = ad.read_h5ad(h5ad_path, backed="r")
+    try:
+        obs = adata.obs.copy()
+    finally:
+        if getattr(adata, "file", None) is not None:
+            adata.file.close()
+
+    excluded_columns = {
+        "pct_counts_mt",
+        "UMAP-X",
+        "UMAP-Y",
+        "UMAP_leiden_X",
+        "UMAP_leiden_Y",
+    }
+
+    options: List[Dict[str, object]] = []
+    values_by_field: Dict[str, List[str]] = {}
+    for column in obs.columns:
+        column_text = str(column).strip()
+        if not column_text or column_text in excluded_columns or "umap" in column_text.lower():
+            continue
+        series = obs[column]
+        if pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series):
+            continue
+        values = series.astype(str).str.strip().replace({"nan": "", "None": ""})
+        unique_values = [value for value in pd.Index(values[values != ""]).unique().tolist() if value]
+        if len(unique_values) < 2 or len(unique_values) > max_categories:
+            continue
+        values_by_field[column_text] = unique_values
+        options.append(
+            {
+                "value": column_text,
+                "label": column_text,
+                "n_categories": len(unique_values),
+            }
+        )
+
+    preferred_order = {value: idx for idx, value in enumerate(preferred or [])}
+    options.sort(key=lambda item: (0 if item["value"] in preferred_order else 1, preferred_order.get(item["value"], 999), item["label"]))
+    return options, values_by_field
+
+
+def _default_differential_state(enabled: bool, default_population_col: Optional[str], default_sample_field: Optional[str]) -> Dict[str, object]:
     if enabled:
         message = "Select a cell-state field and numerator/denominator sample groups to run cellHarmony-differential."
     else:
@@ -238,6 +288,7 @@ def _default_differential_state(enabled: bool, default_population_col: Optional[
         "networks": [],
         "go_terms_included": False,
         "default_population_col": default_population_col,
+        "default_sample_field": default_sample_field,
     }
 
 
@@ -381,6 +432,10 @@ def run_cellharmony_pipeline(job_id: str, store: JobStore, registry_path: Path) 
         combined_h5ad_path,
         preferred=[query_cluster_key, reference_cluster_key],
     )
+    sample_fields, sample_values = _candidate_group_fields(
+        combined_h5ad_path,
+        preferred=["Library", "group", "sample"],
+    )
     default_population_col = next(
         (
             candidate["value"]
@@ -389,9 +444,32 @@ def run_cellharmony_pipeline(job_id: str, store: JobStore, registry_path: Path) 
         ),
         population_columns[0]["value"] if population_columns else None,
     )
+    default_sample_field = None
+    if sample_names:
+        adata_for_defaults = ad.read_h5ad(combined_h5ad_path, backed="r")
+        try:
+            default_sample_field, _ = _resolve_samples_for_adata(adata_for_defaults, meta, sample_names)
+        except Exception:
+            default_sample_field = None
+        finally:
+            if getattr(adata_for_defaults, "file", None) is not None:
+                adata_for_defaults.file.close()
+    if not default_sample_field:
+        default_sample_field = next(
+            (
+                candidate["value"]
+                for candidate in sample_fields
+                if candidate["value"] in {"Library", "group", "sample"}
+            ),
+            sample_fields[0]["value"] if sample_fields else None,
+        )
+    max_group_values = max((len(values) for values in sample_values.values()), default=0)
     differential_options = {
-        "enabled": len(sample_names) >= 2,
+        "enabled": bool(max_group_values >= 2 or len(sample_names) >= 2),
         "sample_names": sample_names,
+        "sample_fields": sample_fields,
+        "sample_values": sample_values,
+        "default_sample_field": default_sample_field,
         "population_columns": population_columns,
         "default_population_col": default_population_col,
     }
@@ -404,7 +482,7 @@ def run_cellharmony_pipeline(job_id: str, store: JobStore, registry_path: Path) 
         reference_clusters_tsv=reference_entry["reference_clusters_tsv"],
         default_gene=default_gene,
         differential_options=differential_options,
-        differential=_default_differential_state(len(sample_names) >= 2, default_population_col),
+        differential=_default_differential_state(bool(max_group_values >= 2 or len(sample_names) >= 2), default_population_col, default_sample_field),
         message="Approximate UMAP completed.",
     )
     store.append_log(job_id, "cellHarmony-lite pipeline finished.")
@@ -419,6 +497,8 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
     group1_samples = [str(sample).strip() for sample in config.get("group1_samples", []) if str(sample).strip()]
     group2_samples = [str(sample).strip() for sample in config.get("group2_samples", []) if str(sample).strip()]
     population_col = str(config.get("population_col", "")).strip()
+    sample_field = str(config.get("sample_field", "")).strip()
+    comparison_type = str(config.get("comparison_type", "cells") or "cells").strip().lower()
 
     if not population_col:
         raise ValueError("Differential analysis requires a cell-state field.")
@@ -465,13 +545,27 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
     if population_col not in adata.obs.columns:
         raise ValueError(f"'{population_col}' is not present in the aligned AnnData observations.")
 
-    sample_col, resolved_samples = _resolve_samples_for_adata(
-        adata,
-        meta,
-        group1_samples + group2_samples,
-    )
-    resolved_group1 = [resolved_samples[sample] for sample in group1_samples]
-    resolved_group2 = [resolved_samples[sample] for sample in group2_samples]
+    if sample_field and sample_field in adata.obs.columns:
+        sample_col = sample_field
+        available_values = set(adata.obs[sample_col].astype(str))
+        missing = sorted((set(group1_samples) | set(group2_samples)) - available_values)
+        if missing:
+            preview = ", ".join(sorted(available_values)[:10])
+            suffix = ", …" if len(available_values) > 10 else ""
+            raise ValueError(
+                f"Selected group values were not found in obs['{sample_col}']: {', '.join(missing)} "
+                f"(available values include: {preview}{suffix})"
+            )
+        resolved_group1 = group1_samples
+        resolved_group2 = group2_samples
+    else:
+        sample_col, resolved_samples = _resolve_samples_for_adata(
+            adata,
+            meta,
+            group1_samples + group2_samples,
+        )
+        resolved_group1 = [resolved_samples[sample] for sample in group1_samples]
+        resolved_group2 = [resolved_samples[sample] for sample in group2_samples]
     sample_values = adata.obs[sample_col].astype(str)
     print(
         f"[INFO] Differential sample matching uses obs['{sample_col}'] with "
@@ -485,6 +579,26 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
     web_group_col = "__cellharmony_web_group__"
     sample_values = adata.obs[sample_col].astype(str)
     adata.obs[web_group_col] = np.where(sample_values.isin(resolved_group1), case_label, control_label)
+    make_pseudobulk = comparison_type == "pseudobulk"
+
+    if make_pseudobulk:
+        pseudobulk_dir = run_root / "pseudobulk"
+        pseudobulk_dir.mkdir(parents=True, exist_ok=True)
+        _update_differential_state(
+            store,
+            job_id,
+            message="Computing pseudobulk profiles across aligned cell states.",
+            progress=30,
+        )
+        _, pb_h5ad = cellHarmony_differential.compute_pseudobulk_per_population(
+            adata,
+            population_col=population_col,
+            sample_col=sample_col,
+            covariate_col=web_group_col,
+            min_cells=10,
+            outdir=str(pseudobulk_dir),
+        )
+        adata = ad.read_h5ad(pb_h5ad)
 
     _update_differential_state(
         store,
@@ -501,8 +615,8 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
         method="wilcoxon",
         alpha=0.05,
         fc_thresh=1.2,
-        min_cells_per_group=20,
-        use_rawp=False,
+        min_cells_per_group=1 if make_pseudobulk else 20,
+        use_rawp=bool(make_pseudobulk),
         progress_callback=None,
     )
     pop_order = cellHarmony_differential._extract_lineage_order(adata, population_col)
@@ -680,6 +794,7 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
         "control_label": control_label,
         "group1_samples": group1_samples,
         "group2_samples": group2_samples,
+        "comparison_type": comparison_type,
         "go_terms_included": show_go_terms,
         "network_count": len(networks),
     }
@@ -715,8 +830,10 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
         control_label=control_label,
         config={
             "population_col": population_col,
+            "sample_field": sample_col,
             "group1_samples": group1_samples,
             "group2_samples": group2_samples,
+            "comparison_type": comparison_type,
         },
         artifacts={key: str(path) for key, path in differential_artifacts.items()},
         networks=networks,

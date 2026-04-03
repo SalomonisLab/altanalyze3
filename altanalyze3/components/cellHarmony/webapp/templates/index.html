@@ -84,10 +84,12 @@
                 <input name="mit_percent" value="15">
               </label>
             </div>
-            <label class="field">
-              <span>Minimum cosine similarity score</span>
-              <input name="align_cutoff" value="0.1">
-            </label>
+            <div class="two-col">
+              <label class="field">
+                <span>Minimum cosine similarity score</span>
+                <input name="align_cutoff" value="0.4">
+              </label>
+            </div>
             <button class="primary-btn" type="submit">Save QC and run</button>
           </form>
           <div class="progress-shell">
@@ -122,6 +124,38 @@
                   <option value="violin">Violin</option>
                 </select>
               </label>
+              <label class="field">
+                <span>Dot size</span>
+                <select id="plot-dot-scale" name="plot_dot_scale">
+                  <option value="0.25" selected>0.25</option>
+                  <option value="0.5">0.5</option>
+                  <option value="0.75">0.75</option>
+                  <option value="1">1</option>
+                </select>
+              </label>
+            </div>
+            <div class="stack">
+              <span class="field-group-label">Filter data to display</span>
+              <div class="display-filter-grid">
+                <label class="field compact-field">
+                  <span>Annotation 1</span>
+                  <select id="display-filter1-field"></select>
+                </label>
+                <label class="field compact-field">
+                  <span>Values</span>
+                  <select id="display-filter1-values"></select>
+                </label>
+              </div>
+              <div class="display-filter-grid">
+                <label class="field compact-field">
+                  <span>Annotation 2</span>
+                  <select id="display-filter2-field"></select>
+                </label>
+                <label class="field compact-field">
+                  <span>Values</span>
+                  <select id="display-filter2-values"></select>
+                </label>
+              </div>
             </div>
           </form>
           <div class="downloads" id="download-links"></div>
@@ -130,21 +164,34 @@
         <section class="panel hidden" id="differential-panel">
           <h2>4. Differential</h2>
           <p class="panel-copy" id="differential-intro">
-            Available after alignment completes for jobs with two or more samples.
+            Perform cell-state differential expression.
           </p>
           <form id="differential-form">
-            <label class="field">
-              <span>Cell-state aligned to</span>
-              <select id="differential-population" required></select>
+            <div class="two-col">
+              <label class="field">
+                <span>Cell-state aligned to</span>
+                <select id="differential-population" required></select>
+              </label>
+              <label class="field">
+                <span>Group values from</span>
+                <select id="differential-sample-field" required></select>
+              </label>
+            </div>
+            <label class="field hidden" id="differential-comparison-type-field">
+              <span>Comparison Type</span>
+              <select id="differential-comparison-type">
+                <option value="cells">cells</option>
+                <option value="pseudobulk">pseudobulk</option>
+              </select>
             </label>
             <div class="two-col">
               <label class="field">
-                <span>Group 1 (numerator)</span>
-                <select id="differential-group1" multiple size="6" required></select>
+                <span class="differential-group-label">Group 1 (numerator)</span>
+                <select id="differential-group1" multiple size="4" required></select>
               </label>
               <label class="field">
-                <span>Group 2 (denominator)</span>
-                <select id="differential-group2" multiple size="6" required></select>
+                <span class="differential-group-label">Group 2 (denominator)</span>
+                <select id="differential-group2" multiple size="4" required></select>
               </label>
             </div>
             <button class="primary-btn" type="submit" id="differential-run-btn">Run cellHarmony-differential</button>
@@ -167,6 +214,7 @@
             <button class="ghost-btn" type="button" id="download-umap-image-btn">Download PDF</button>
           </div>
           <div id="umap-plot" class="plot-area"></div>
+          <div class="plot-caption" id="umap-filter-summary"></div>
         </article>
         <article class="panel">
           <div class="panel-head">
@@ -174,6 +222,7 @@
             <button class="ghost-btn" type="button" id="download-expression-image-btn">Download PDF</button>
           </div>
           <div id="expression-plot" class="plot-area"></div>
+          <div class="plot-caption" id="expression-filter-summary"></div>
         </article>
       </section>
 

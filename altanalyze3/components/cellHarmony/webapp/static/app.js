@@ -1,6 +1,6 @@
 "use strict";
 
-const MAX_SAMPLES = 7;
+const MAX_SAMPLES = 15;
 const APP_ROOT_PATH = normalizeRootPath(window.__APP_ROOT_PATH__ || "");
 let registry = window.__REFERENCE_REGISTRY__ || { species: [] };
 let sampleCount = 0;
@@ -9,6 +9,8 @@ let currentUmapData = null;
 let currentExpressionData = null;
 let loadedResultsJobId = null;
 let loadedGeneSuggestionsJobId = null;
+let loadedDisplayFiltersJobId = null;
+let currentDisplayFiltersMeta = null;
 let currentJobStatus = "";
 let currentJobSpecies = "";
 let currentJobReference = "";
@@ -391,6 +393,7 @@ function updateReferenceChangeState() {
     document.getElementById("baseline-results-view").classList.add("hidden");
     document.getElementById("differential-results-view").classList.add("hidden");
     clearGeneSuggestions();
+    clearDisplayFilters();
     resetDifferentialResults();
     document.getElementById("qc-cell-status").textContent =
       "Reference changed. Click Save QC and run to realign the uploaded data against the newly selected reference.";
@@ -448,12 +451,53 @@ function hookForms() {
   document.getElementById("gene-query").addEventListener("change", () => refreshResults());
   document.getElementById("expression-mode").addEventListener("change", renderCurrentExpression);
   document.getElementById("umap-mode").addEventListener("change", renderCurrentUmap);
+  document.getElementById("display-filter1-field").addEventListener("change", () => {
+    syncDisplayFilterValueOptions(1);
+    refreshResults();
+  });
+  document.getElementById("display-filter2-field").addEventListener("change", () => {
+    syncDisplayFilterValueOptions(2);
+    refreshResults();
+  });
+  document.getElementById("display-filter1-values").addEventListener("change", () => refreshResults());
+  document.getElementById("display-filter2-values").addEventListener("change", () => refreshResults());
+  document.getElementById("plot-dot-scale").addEventListener("change", () => {
+    renderCurrentUmap();
+    renderCurrentExpression();
+  });
   document.getElementById("download-umap-image-btn").addEventListener("click", downloadUmapImage);
   document.getElementById("download-expression-image-btn").addEventListener("click", downloadExpressionImage);
   document.getElementById("differential-viz-mode").addEventListener("change", () => {
     syncDifferentialPopulationSelect(currentDifferentialState);
     updateDifferentialDownloadButton();
     loadDifferentialVisualization();
+  });
+  document.getElementById("differential-population").addEventListener("change", () => {
+    if (!currentDifferentialState) {
+      return;
+    }
+    currentDifferentialState = {
+      ...currentDifferentialState,
+      config: {
+        ...(currentDifferentialState.config || {}),
+        population_col: document.getElementById("differential-population").value,
+      },
+    };
+  });
+  document.getElementById("differential-sample-field").addEventListener("change", () => {
+    if (!currentDifferentialState) {
+      return;
+    }
+    currentDifferentialState = {
+      ...currentDifferentialState,
+      config: {
+        ...(currentDifferentialState.config || {}),
+        sample_field: document.getElementById("differential-sample-field").value,
+        group1_samples: [],
+        group2_samples: [],
+      },
+    };
+    updateDifferentialUi(currentDifferentialState);
   });
   document.getElementById("differential-result-population").addEventListener("change", () => {
     currentDifferentialGene = "";
@@ -606,6 +650,7 @@ async function handleQcSubmit(evt) {
       currentExpressionData = null;
       loadedResultsJobId = null;
       clearGeneSuggestions();
+      clearDisplayFilters();
       document.getElementById("download-links").innerHTML = "";
       resetDifferentialResults();
       document.getElementById("differential-panel").classList.add("hidden");
@@ -643,8 +688,10 @@ async function handleDifferentialSubmit(evt) {
   }
   const payload = {
     population_col: document.getElementById("differential-population").value,
+    sample_field: document.getElementById("differential-sample-field").value,
     group1_samples: getMultiSelectValues(document.getElementById("differential-group1")),
     group2_samples: getMultiSelectValues(document.getElementById("differential-group2")),
+    comparison_type: document.getElementById("differential-comparison-type").value || "cells",
   };
 
   try {
@@ -743,6 +790,7 @@ function applyJobStatus(jobId, data) {
 
   if (data.status === "completed" && !referenceRerunPending) {
     loadGeneSuggestions(jobId);
+    loadDisplayFilters(jobId);
     const artifactSignature = JSON.stringify(Object.keys(data.artifacts || {}).sort());
     if (artifactSignature !== lastDownloadArtifactSignature) {
       lastDownloadArtifactSignature = artifactSignature;
@@ -755,6 +803,8 @@ function applyJobStatus(jobId, data) {
       loadedResultsJobId = jobId;
       refreshResults();
     }
+  } else {
+    clearDisplayFilters();
   }
 
   const pipelineActive = data.status === "queued" || data.status === "processing";
@@ -874,6 +924,28 @@ function renderReferencePreview(payload) {
 
 function buildQcCellSummary(data) {
   const lines = data.log_tail || [];
+  let alignmentExcluded = null;
+  for (const line of lines) {
+    const match = line.match(/Applied min_alignment_score=.*?Excluded\s+(\d+)\s+cells,\s+kept\s+(\d+)/i);
+    if (match) {
+      alignmentExcluded = Number(match[1]);
+    }
+  }
+
+  if (String(data.status || "").trim().toLowerCase() === "completed") {
+    const createdAt = Date.parse(data.created_at || "");
+    const updatedAt = Date.parse(data.updated_at || "");
+    const exclusionSuffix =
+      alignmentExcluded !== null
+        ? ` ${alignmentExcluded.toLocaleString()} cells excluded due to poor alignment.`
+        : "";
+    if (Number.isFinite(createdAt) && Number.isFinite(updatedAt) && updatedAt >= createdAt) {
+      const elapsedSeconds = Math.max(0, Math.round((updatedAt - createdAt) / 1000));
+      return `Analysis completed and results saved in ${elapsedSeconds} seconds.${exclusionSuffix}`;
+    }
+    return `Analysis completed and results saved.${exclusionSuffix}`.trim();
+  }
+
   let beforeQc = null;
   let afterMinGenes = null;
   let afterMinCounts = null;
@@ -958,8 +1030,11 @@ function updateDifferentialUi(state) {
   const panel = document.getElementById("differential-panel");
   const intro = document.getElementById("differential-intro");
   const populationSelect = document.getElementById("differential-population");
+  const sampleFieldSelect = document.getElementById("differential-sample-field");
   const group1Select = document.getElementById("differential-group1");
   const group2Select = document.getElementById("differential-group2");
+  const comparisonField = document.getElementById("differential-comparison-type-field");
+  const comparisonSelect = document.getElementById("differential-comparison-type");
   const runBtn = document.getElementById("differential-run-btn");
   const progress = state ? state.progress || 0 : 0;
   const message = document.getElementById("differential-message");
@@ -968,20 +1043,47 @@ function updateDifferentialUi(state) {
   const enabled = Boolean(state && state.enabled);
   const config = (state && state.config) || {};
   const populationOptions = (state && state.population_columns) || [];
-  const sampleNames = (state && state.sample_names) || [];
-  const selectedPopulation = config.population_col || (state && state.default_population_col) || "";
-  const showPanel = Boolean(state && state.enabled && populationOptions.length);
+  const sampleFieldOptions = (state && state.sample_fields) || [];
+  const sampleValuesMap = (state && state.sample_values) || {};
+  const optionHasValue = (options, value) => {
+    const target = String(value || "").trim();
+    return Boolean(target) && (options || []).some((optionData) => String(optionData.value || "").trim() === target);
+  };
+  const differentialRunning = state && (state.status === "queued" || state.status === "processing");
+  const currentPopulationValue = populationSelect.value;
+  const currentSampleFieldValue = sampleFieldSelect.value;
+  const selectedPopulation = (
+    (differentialRunning && optionHasValue(populationOptions, currentPopulationValue) && currentPopulationValue)
+      || config.population_col
+      || (state && state.default_population_col)
+      || ""
+  );
+  const selectedSampleField = (
+    (differentialRunning && optionHasValue(sampleFieldOptions, currentSampleFieldValue) && currentSampleFieldValue)
+      || config.sample_field
+      || (state && state.default_sample_field)
+      || ""
+  );
+  populateSingleSelect(sampleFieldSelect, sampleFieldOptions, selectedSampleField);
+  const sampleValues = sampleValuesMap[sampleFieldSelect.value] || [];
+  const showComparisonType = sampleValues.length >= 4;
+  const selectedComparisonType = showComparisonType ? (config.comparison_type || "cells") : "cells";
+  const showPanel = Boolean(state && state.enabled && populationOptions.length && sampleFieldOptions.length);
 
   panel.classList.toggle("hidden", !showPanel);
 
   populateSingleSelect(populationSelect, populationOptions, selectedPopulation);
-  populateMultiSelect(group1Select, sampleNames, config.group1_samples || []);
-  populateMultiSelect(group2Select, sampleNames, config.group2_samples || []);
+  populateMultiSelect(group1Select, sampleValues, config.group1_samples || []);
+  populateMultiSelect(group2Select, sampleValues, config.group2_samples || []);
+  comparisonField.classList.toggle("hidden", !showComparisonType);
+  comparisonSelect.value = selectedComparisonType;
 
-  const disableInputs = !enabled || !populationOptions.length;
+  const disableInputs = !enabled || !populationOptions.length || !sampleFieldOptions.length;
   populationSelect.disabled = disableInputs;
+  sampleFieldSelect.disabled = disableInputs;
   group1Select.disabled = disableInputs;
   group2Select.disabled = disableInputs;
+  comparisonSelect.disabled = disableInputs || !showComparisonType;
   runBtn.disabled = disableInputs;
 
   document.getElementById("differential-progress").style.width = `${progress}%`;
@@ -1004,7 +1106,7 @@ function updateDifferentialUi(state) {
   }
 
   intro.textContent = enabled
-    ? "Use the aligned cellHarmony AnnData to compare two sample groups across a selected cell-state field."
+    ? "Perform cell-state differential expression."
     : "Differential analysis is only enabled when two or more samples were uploaded for the job.";
 
   let statusMessage = state.message || "";
@@ -1628,6 +1730,15 @@ function clearGeneSuggestions() {
   loadedGeneSuggestionsJobId = null;
 }
 
+function clearDisplayFilters() {
+  currentDisplayFiltersMeta = null;
+  loadedDisplayFiltersJobId = null;
+  document.getElementById("display-filter1-field").innerHTML = "";
+  document.getElementById("display-filter2-field").innerHTML = "";
+  document.getElementById("display-filter1-values").innerHTML = "";
+  document.getElementById("display-filter2-values").innerHTML = "";
+}
+
 async function loadGeneSuggestions(jobId) {
   if (!jobId || loadedGeneSuggestionsJobId === jobId) {
     return;
@@ -1649,6 +1760,127 @@ async function loadGeneSuggestions(jobId) {
   } catch (err) {
     console.warn(err);
   }
+}
+
+function populateSelectOptions(selectEl, options, selectedValue, includeBlank = false) {
+  selectEl.innerHTML = "";
+  if (includeBlank) {
+    const blank = document.createElement("option");
+    blank.value = "";
+    blank.textContent = "None";
+    selectEl.appendChild(blank);
+  }
+  (options || []).forEach((optionData) => {
+    const option = document.createElement("option");
+    option.value = optionData.value;
+    option.textContent = optionData.label;
+    if (selectedValue && optionData.value === selectedValue) {
+      option.selected = true;
+    }
+    selectEl.appendChild(option);
+  });
+}
+
+function syncDisplayFilterValueOptions(index) {
+  const fieldSelect = document.getElementById(`display-filter${index}-field`);
+  const valueSelect = document.getElementById(`display-filter${index}-values`);
+  const field = fieldSelect.value;
+  valueSelect.innerHTML = "";
+  const values = (currentDisplayFiltersMeta?.values && currentDisplayFiltersMeta.values[field]) || [];
+  const allOption = document.createElement("option");
+  allOption.value = "";
+  allOption.textContent = "All";
+  valueSelect.appendChild(allOption);
+  values.forEach((value) => {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = value;
+    valueSelect.appendChild(option);
+  });
+  valueSelect.value = "";
+  valueSelect.disabled = !field;
+}
+
+function populateDisplayFilterControls(meta) {
+  currentDisplayFiltersMeta = meta || null;
+  const fields = (meta && meta.fields) || [];
+  const primaryField = (meta && meta.default_primary_field) || "";
+  const secondaryField = (meta && meta.default_secondary_field) || "";
+  populateSelectOptions(document.getElementById("display-filter1-field"), fields, primaryField, false);
+  populateSelectOptions(document.getElementById("display-filter2-field"), fields, secondaryField, true);
+  syncDisplayFilterValueOptions(1);
+  syncDisplayFilterValueOptions(2);
+}
+
+async function loadDisplayFilters(jobId) {
+  if (!jobId || loadedDisplayFiltersJobId === jobId) {
+    return;
+  }
+  try {
+    const resp = await fetch(apiPath(`/jobs/${jobId}/display-filters`));
+    const data = await parseApiResponse(resp);
+    if (!resp.ok) {
+      throw new Error(data.detail || "Unable to load display filters.");
+    }
+    populateDisplayFilterControls(data);
+    loadedDisplayFiltersJobId = jobId;
+  } catch (err) {
+    console.warn(err);
+  }
+}
+
+function getDisplayFilterParams() {
+  const params = new URLSearchParams();
+  const appendFilter = (index) => {
+    const field = document.getElementById(`display-filter${index}-field`).value;
+    const value = document.getElementById(`display-filter${index}-values`).value;
+    if (!field || !value) {
+      return;
+    }
+    params.append(`filter${index}_field`, field);
+    params.append(`filter${index}_values`, value);
+  };
+  appendFilter(1);
+  appendFilter(2);
+  return params;
+}
+
+function getDisplayFilterSummary() {
+  const parts = [];
+  const appendFilter = (index) => {
+    const fieldSelect = document.getElementById(`display-filter${index}-field`);
+    const valueSelect = document.getElementById(`display-filter${index}-values`);
+    if (!fieldSelect || !valueSelect) {
+      return;
+    }
+    const field = fieldSelect.value;
+    const value = valueSelect.value;
+    if (!field || !value) {
+      return;
+    }
+    parts.push(`${field}: ${value}`);
+  };
+  appendFilter(1);
+  appendFilter(2);
+  return parts.join(" | ");
+}
+
+function updateBaselineFilterSummaries() {
+  const summary = getDisplayFilterSummary();
+  const text = summary ? `Display only: ${summary}` : "";
+  const umapSummary = document.getElementById("umap-filter-summary");
+  const expressionSummary = document.getElementById("expression-filter-summary");
+  if (umapSummary) {
+    umapSummary.textContent = text;
+  }
+  if (expressionSummary) {
+    expressionSummary.textContent = text;
+  }
+}
+
+function getPlotDotScale() {
+  const value = Number(document.getElementById("plot-dot-scale")?.value || "0.25");
+  return Number.isFinite(value) && value > 0 ? value * 4 : 1;
 }
 
 function setResultMode(mode) {
@@ -1676,6 +1908,10 @@ function setResultsControlsDisabled(disabled) {
     document.getElementById("gene-query"),
     document.getElementById("umap-mode"),
     document.getElementById("expression-mode"),
+    document.getElementById("display-filter1-field"),
+    document.getElementById("display-filter1-values"),
+    document.getElementById("display-filter2-field"),
+    document.getElementById("display-filter2-values"),
   ];
   controls.forEach((control) => {
     if (!control) {
@@ -1691,7 +1927,9 @@ async function loadUmap() {
     return;
   }
   try {
-    const resp = await fetch(apiPath(`/jobs/${jobId}/umap`));
+    const params = getDisplayFilterParams();
+    const suffix = params.toString() ? `?${params.toString()}` : "";
+    const resp = await fetch(apiPath(`/jobs/${jobId}/umap${suffix}`));
     const data = await resp.json();
     if (!resp.ok) {
       throw new Error(data.detail || "UMAP not ready.");
@@ -1707,6 +1945,8 @@ function renderCurrentUmap() {
   if (!currentUmapData) {
     return;
   }
+  updateBaselineFilterSummaries();
+  const dotScale = getPlotDotScale();
   const mode = document.getElementById("umap-mode").value;
   const traces = [];
   const layout = {
@@ -1724,7 +1964,7 @@ function renderCurrentUmap() {
       text: currentUmapData.reference.map((p) => `${p.barcode}<br>${p.population}`),
       mode: "markers",
       type: "scattergl",
-      marker: { color: "#94a3b8", size: 2 },
+      marker: { color: "#94a3b8", size: 2 * dotScale },
       name: "Reference",
     });
     traces.push({
@@ -1733,7 +1973,7 @@ function renderCurrentUmap() {
       text: currentUmapData.query.map((p) => `${p.barcode}<br>${p.population}`),
       mode: "markers",
       type: "scattergl",
-      marker: { color: "#f97316", size: 2 },
+      marker: { color: "#f97316", size: 2 * dotScale },
       name: "Query",
     });
   } else {
@@ -1750,7 +1990,7 @@ function renderCurrentUmap() {
       text: currentUmapData.reference.map((p) => `${p.barcode}<br>${p.population}`),
       mode: "markers",
       type: "scattergl",
-      marker: { color: "#e5e7eb", size: 1, opacity: 0.3 },
+      marker: { color: "#e5e7eb", size: Math.max(0.5, 1 * dotScale), opacity: 0.3 },
       name: "Reference",
       showlegend: false,
     });
@@ -1761,14 +2001,14 @@ function renderCurrentUmap() {
       mode: "markers",
       type: "scattergl",
       marker: {
-        size: 2,
+        size: 2 * dotScale,
         opacity: 0.5,
         color: currentUmapData.query.map((p) => colorMap.get(p.population)),
       },
       showlegend: false,
       name: "Query",
     });
-    layout.annotations = labelPoints.map((label) => ({
+    const labelAnnotations = labelPoints.map((label) => ({
       x: label.x,
       y: label.y,
       text: label.population,
@@ -1784,6 +2024,7 @@ function renderCurrentUmap() {
       bgcolor: "rgba(255,255,255,0)",
       opacity: 1,
     }));
+    layout.annotations = (layout.annotations || []).concat(labelAnnotations);
     Object.assign(layout, buildSquareUmapAxes(currentUmapData.query, 0.06));
   }
   if (mode === "relative") {
@@ -1800,7 +2041,9 @@ async function loadExpression() {
     return;
   }
   try {
-    const resp = await fetch(apiPath(`/jobs/${jobId}/expression?gene=${encodeURIComponent(gene)}`));
+    const params = getDisplayFilterParams();
+    params.set("gene", gene);
+    const resp = await fetch(apiPath(`/jobs/${jobId}/expression?${params.toString()}`));
     const data = await resp.json();
     if (!resp.ok) {
       throw new Error(data.detail || "Expression unavailable.");
@@ -1826,6 +2069,7 @@ async function loadExpression() {
 }
 
 function renderExpressionMessage(message, title = "Expression unavailable") {
+  updateBaselineFilterSummaries();
   Plotly.newPlot("expression-plot", [], {
     title,
     paper_bgcolor: "rgba(0,0,0,0)",
@@ -1838,6 +2082,7 @@ function renderExpressionMessage(message, title = "Expression unavailable") {
         text: message,
         x: 0.5,
         y: 0.5,
+        yshift: -3,
         xref: "paper",
         yref: "paper",
         showarrow: false,
@@ -1852,6 +2097,8 @@ function renderCurrentExpression() {
   if (!currentExpressionData) {
     return;
   }
+  updateBaselineFilterSummaries();
+  const dotScale = getPlotDotScale();
   if (!currentExpressionData.umap?.length && !currentExpressionData.violin?.length) {
     renderExpressionMessage(
       currentExpressionData.message || `Gene '${currentExpressionData.requested_gene || currentExpressionData.gene}' was not found.`,
@@ -1885,7 +2132,7 @@ function renderCurrentExpression() {
       points: "all",
       jitter: 0.18,
       pointpos: 0,
-      marker: { size: 3, opacity: 0.45 },
+      marker: { size: 3 * dotScale, opacity: 0.45 },
     }));
     Plotly.newPlot("expression-plot", violinTraces, {
       title: `${currentExpressionData.gene} (top 10 states by mean)`,
@@ -1896,27 +2143,52 @@ function renderCurrentExpression() {
     return;
   }
 
-  const umapTrace = {
-    x: currentExpressionData.umap.map((p) => p.x),
-    y: currentExpressionData.umap.map((p) => p.y),
-    text: currentExpressionData.umap.map((p) => `${p.barcode}<br>${p.population}<br>${currentExpressionData.gene}: ${p.value.toFixed(3)}`),
-    mode: "markers",
-    type: "scattergl",
-    marker: {
-      size: 2,
-      color: currentExpressionData.umap.map((p) => p.value),
-      colorscale: [
-        [0.0, "#e5e7eb"],
-        [0.15, "#f3f4f6"],
-        [0.35, "#fecaca"],
-        [0.6, "#f87171"],
-        [1.0, "#b91c1c"],
-      ],
-      showscale: true,
-      colorbar: { title: currentExpressionData.gene },
-    },
-    name: currentExpressionData.gene,
-  };
+  const zeroPoints = currentExpressionData.umap.filter((p) => Number(p.value) <= 0);
+  const expressedPoints = currentExpressionData.umap.filter((p) => Number(p.value) > 0);
+  const expressionTraces = [];
+
+  if (zeroPoints.length) {
+    expressionTraces.push({
+      x: zeroPoints.map((p) => p.x),
+      y: zeroPoints.map((p) => p.y),
+      text: zeroPoints.map((p) => `${p.barcode}<br>${p.population}<br>${currentExpressionData.gene}: 0.000`),
+      mode: "markers",
+      type: "scattergl",
+      marker: {
+        size: 2 * dotScale,
+        color: "#e5e7eb",
+        opacity: 0.9,
+      },
+      hoverinfo: "text",
+      name: `${currentExpressionData.gene} = 0`,
+      showlegend: false,
+    });
+  }
+
+  if (expressedPoints.length) {
+    expressionTraces.push({
+      x: expressedPoints.map((p) => p.x),
+      y: expressedPoints.map((p) => p.y),
+      text: expressedPoints.map((p) => `${p.barcode}<br>${p.population}<br>${currentExpressionData.gene}: ${p.value.toFixed(3)}`),
+      mode: "markers",
+      type: "scattergl",
+      marker: {
+        size: 2 * dotScale,
+        color: expressedPoints.map((p) => p.value),
+        colorscale: [
+          [0.0, "#f3f4f6"],
+          [0.15, "#fecaca"],
+          [0.35, "#fca5a5"],
+          [0.6, "#ef4444"],
+          [1.0, "#b91c1c"],
+        ],
+        showscale: true,
+        colorbar: { title: currentExpressionData.gene },
+      },
+      name: currentExpressionData.gene,
+      showlegend: false,
+    });
+  }
   const expressionLayout = {
     title: currentExpressionData.source === "reference"
       ? `${currentExpressionData.gene} reference expression`
@@ -1926,22 +2198,21 @@ function renderCurrentExpression() {
     margin: { t: 36, l: 48, r: 20, b: 40 },
     xaxis: { showgrid: false, zeroline: false },
     yaxis: { showgrid: false, zeroline: false },
-    annotations: currentExpressionData.message
-      ? [
-          {
-            text: currentExpressionData.message,
-            x: 0.5,
-            y: 1.08,
-            xref: "paper",
-            yref: "paper",
-            showarrow: false,
-            font: { size: 12, color: "#64748b" },
-          },
-        ]
-      : [],
+    annotations: [],
   };
+  if (currentExpressionData.message) {
+    expressionLayout.annotations.push({
+      text: currentExpressionData.message,
+      x: 0.5,
+      y: 1.08,
+      xref: "paper",
+      yref: "paper",
+      showarrow: false,
+      font: { size: 12, color: "#64748b" },
+    });
+  }
   Object.assign(expressionLayout, buildSquareUmapAxes(currentExpressionData.umap, 0.06));
-  Plotly.newPlot("expression-plot", [umapTrace], expressionLayout);
+  Plotly.newPlot("expression-plot", expressionTraces, expressionLayout);
 }
 
 async function refreshResults() {
@@ -1955,7 +2226,9 @@ function downloadUmapImage() {
     return;
   }
   const mode = document.getElementById("umap-mode").value;
-  window.open(apiPath(`/jobs/${jobId}/umap/pdf?mode=${encodeURIComponent(mode)}`), "_blank");
+  const params = getDisplayFilterParams();
+  params.set("mode", mode);
+  window.open(apiPath(`/jobs/${jobId}/umap/pdf?${params.toString()}`), "_blank");
 }
 
 function downloadExpressionImage() {
@@ -1965,8 +2238,11 @@ function downloadExpressionImage() {
     return;
   }
   const mode = document.getElementById("expression-mode").value;
+  const params = getDisplayFilterParams();
+  params.set("gene", gene);
+  params.set("mode", mode);
   window.open(
-    apiPath(`/jobs/${jobId}/expression/pdf?gene=${encodeURIComponent(gene)}&mode=${encodeURIComponent(mode)}`),
+    apiPath(`/jobs/${jobId}/expression/pdf?${params.toString()}`),
     "_blank",
   );
 }

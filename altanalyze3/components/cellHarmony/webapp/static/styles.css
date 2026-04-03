@@ -205,6 +205,19 @@ body {
   color: var(--muted);
 }
 
+.field-group-label {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.differential-group-label {
+  font-size: 0.72rem;
+  line-height: 1;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
 .field-row {
   display: flex;
   justify-content: space-between;
@@ -224,6 +237,13 @@ select {
 
 select[multiple] {
   min-height: 156px;
+}
+
+#differential-group1,
+#differential-group2 {
+  min-height: 104px;
+  max-height: 104px;
+  overflow-y: auto;
 }
 
 input:focus,
@@ -330,6 +350,22 @@ select:disabled {
   gap: 10px;
 }
 
+.display-filter-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: 10px;
+}
+
+.compact-field {
+  margin-bottom: 0;
+}
+
+#display-filter1-values,
+#display-filter2-values {
+  min-height: 0;
+  max-height: none;
+}
+
 .notice {
   margin-top: 12px;
   padding: 10px 12px;
@@ -400,6 +436,13 @@ select:disabled {
   min-height: 420px;
   flex: 1 1 auto;
   min-width: 0;
+}
+
+.plot-caption {
+  min-height: 18px;
+  margin-top: 6px;
+  font-size: 0.8rem;
+  color: var(--muted);
 }
 
 #reference-preview-plot {

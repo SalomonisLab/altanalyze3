@@ -135,6 +135,9 @@ def _validate_lineage_order_candidates(candidate_order, population_labels, popul
     """
     Ensure lineage_order pulled from adata.uns matches the population labels used for DE.
     Returns the sanitized candidate_order list if valid, otherwise raises ValueError.
+    The candidate may contain extra labels from the same annotation space, but it must
+    contain every population currently used for DE. Partial overlaps from another
+    annotation system should be rejected.
     """
     raw_list = [str(x) for x in list(candidate_order)]
     expected = [str(x) for x in population_labels]
@@ -157,6 +160,12 @@ def _validate_lineage_order_candidates(candidate_order, population_labels, popul
         print(f"[INFO] lineage_order missing {len(missing)} populations (e.g. {missing[:5]})")
     if unexpected:
         print(f"[INFO] lineage_order contains {len(unexpected)} populations not present in DE (e.g. {unexpected[:5]}); ignoring them.")
+
+    if missing:
+        raise ValueError(
+            f"lineage_order for '{population_col}' does not fully cover the DE populations; "
+            f"missing {len(missing)} values"
+        )
 
     filtered = [name for name in filtered if name in expected]
 
@@ -2454,7 +2463,17 @@ def write_differentials_only_h5ad(adata, de_store, out_path):
     adx = adata[:, keep_mask].copy()
     _sanitize_de_store(de_store)
     if adx.raw is not None:
-        adx.raw = adx.raw[:, keep_mask]
+        raw_var_names = adata.raw.var_names.astype(str)
+        raw_keep_mask = np.isin(raw_var_names, np.array(deg_union, dtype=str))
+        if raw_keep_mask.any():
+            raw_subset = ad.AnnData(
+                X=adata.raw[:, raw_keep_mask].X,
+                obs=adata.obs.copy(),
+                var=adata.raw.var.iloc[np.flatnonzero(raw_keep_mask)].copy(),
+            )
+            adx.raw = raw_subset
+        else:
+            adx.raw = None
     if "cellHarmony_DE" in adx.uns:
         del adx.uns["cellHarmony_DE"]
     adx.uns["cellHarmony_DE"] = de_store
