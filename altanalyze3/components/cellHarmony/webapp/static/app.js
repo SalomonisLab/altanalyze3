@@ -15,11 +15,17 @@ let currentJobStatus = "";
 let currentJobSpecies = "";
 let currentJobReference = "";
 let referenceRerunPending = false;
+let currentMarkerAnalysis = null;
 let currentDifferentialState = null;
 let currentDifferentialGene = "";
 let currentDifferentialPopulation = "";
 let differentialCy = null;
+let expressionCy = null;
 let lastDownloadArtifactSignature = "";
+const BASE_EXPRESSION_MODES = [
+  { value: "umap", label: "UMAP" },
+  { value: "violin", label: "Violin" },
+];
 const PAIRED_COLOR_STOPS = [
   [0.0, [0.6509804129600525, 0.8078431487083435, 0.8901960849761963]],
   [0.09090909090909091, [0.12156862765550613, 0.47058823704719543, 0.7058823704719543]],
@@ -147,6 +153,224 @@ function networkEdgeArrowShape(edge) {
     return "tee";
   }
   return "triangle";
+}
+
+function resetExpressionSurface() {
+  const plot = document.getElementById("expression-plot");
+  if (expressionCy) {
+    expressionCy.destroy();
+    expressionCy = null;
+  }
+  try {
+    Plotly.purge(plot);
+  } catch (_) {
+    // Ignore Plotly cleanup errors when the plot is not initialized.
+  }
+  plot.innerHTML = "";
+}
+
+function markerNetworkPopulations() {
+  return ((currentMarkerAnalysis && currentMarkerAnalysis.networks) || [])
+    .map((entry) => String(entry.population || "").trim())
+    .filter((value, index, values) => value && values.indexOf(value) === index);
+}
+
+function updateExpressionModeOptions() {
+  const modeSelect = document.getElementById("expression-mode");
+  const markerPopulationField = document.getElementById("expression-marker-population-field");
+  const markerPopulationSelect = document.getElementById("expression-marker-population");
+  const currentMode = modeSelect.value;
+  const modes = [...BASE_EXPRESSION_MODES];
+  if (currentMarkerAnalysis && currentMarkerAnalysis.enabled && currentMarkerAnalysis.expression_tsv) {
+    modes.push({ value: "marker_heatmap", label: "MarkerHeatmap" });
+  }
+  const networkPopulations = markerNetworkPopulations();
+  if (currentMarkerAnalysis && currentMarkerAnalysis.enabled && networkPopulations.length) {
+    modes.push({ value: "marker_network", label: "MarkerNetwork" });
+  }
+
+  modeSelect.innerHTML = "";
+  modes.forEach((mode) => {
+    const option = document.createElement("option");
+    option.value = mode.value;
+    option.textContent = mode.label;
+    modeSelect.appendChild(option);
+  });
+  modeSelect.value = modes.some((mode) => mode.value === currentMode) ? currentMode : "umap";
+
+  const currentPopulation = markerPopulationSelect.value;
+  markerPopulationSelect.innerHTML = "";
+  networkPopulations.forEach((population) => {
+    const option = document.createElement("option");
+    option.value = population;
+    option.textContent = population;
+    if (population === currentPopulation) {
+      option.selected = true;
+    }
+    markerPopulationSelect.appendChild(option);
+  });
+  if (!markerPopulationSelect.value && networkPopulations.length) {
+    markerPopulationSelect.value = networkPopulations[0];
+  }
+  markerPopulationField.classList.toggle("hidden", !(modeSelect.value === "marker_network" && networkPopulations.length));
+}
+
+function buildMarkerHeatmapViewerUrl(jobId) {
+  return withRootPath(`/jobs/${jobId}/marker/heatmap/viewer`);
+}
+
+async function logClientEvent(jobId, message) {
+  if (!jobId || !message) {
+    return;
+  }
+  try {
+    await fetch(apiPath(`/jobs/${jobId}/client-log`), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message }),
+    });
+  } catch (err) {
+    console.debug("Client log failed", err);
+  }
+}
+
+async function renderMarkerHeatmapViewer(jobId) {
+  resetExpressionSurface();
+  const plot = document.getElementById("expression-plot");
+  const params = getDisplayFilterParams();
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  const datasetPath = apiPath(`/jobs/${jobId}/marker/heatmap.tsv${suffix}`);
+  const datasetUrl = `${window.location.origin}${datasetPath}`;
+  const viewerPath = `${buildMarkerHeatmapViewerUrl(jobId)}${suffix}`;
+  const viewerUrl = `${window.location.origin}${viewerPath}`;
+  await logClientEvent(jobId, `MarkerHeatmap requested. dataset_url=${datasetUrl}`);
+  await logClientEvent(jobId, `MarkerHeatmap viewer_url=${viewerUrl}`);
+  try {
+    const resp = await fetch(datasetPath, {
+      method: "HEAD",
+      cache: "no-store",
+    });
+    await logClientEvent(
+      jobId,
+      `MarkerHeatmap preflight status=${resp.status} ok=${resp.ok} content_type=${resp.headers.get("content-type") || "-"} content_length=${resp.headers.get("content-length") || "-"}`
+    );
+    if (!resp.ok) {
+      throw new Error(`Marker heatmap TSV returned ${resp.status}.`);
+    }
+  } catch (err) {
+    await logClientEvent(jobId, `MarkerHeatmap preflight failed: ${err.message || err}`);
+      renderExpressionMessage(
+      `Marker heatmap TSV preflight failed.\n${err.message || err}`,
+      "MarkerHeatmap"
+    );
+    return;
+  }
+  try {
+    const viewerResp = await fetch(viewerPath, {
+      method: "GET",
+      cache: "no-store",
+    });
+    await logClientEvent(
+      jobId,
+      `MarkerHeatmap viewer preflight status=${viewerResp.status} ok=${viewerResp.ok} content_type=${viewerResp.headers.get("content-type") || "-"}`
+    );
+    if (!viewerResp.ok) {
+      throw new Error(`Marker heatmap viewer returned ${viewerResp.status}.`);
+    }
+  } catch (err) {
+    await logClientEvent(jobId, `MarkerHeatmap viewer preflight failed: ${err.message || err}`);
+    renderExpressionMessage(
+      `Marker heatmap viewer preflight failed.\n${err.message || err}`,
+      "MarkerHeatmap"
+    );
+    return;
+  }
+  const iframe = document.createElement("iframe");
+  iframe.className = "morpheus-frame";
+  iframe.loading = "lazy";
+  iframe.referrerPolicy = "no-referrer";
+  iframe.addEventListener("load", () => {
+    logClientEvent(jobId, `MarkerHeatmap iframe loaded src=${iframe.src}`);
+  });
+  iframe.addEventListener("error", () => {
+    logClientEvent(jobId, `MarkerHeatmap iframe error event fired src=${iframe.src}`);
+  });
+  iframe.src = viewerPath;
+  plot.appendChild(iframe);
+}
+
+function renderExpressionNetwork(payload) {
+  resetExpressionSurface();
+  const plot = document.getElementById("expression-plot");
+  const elements = (payload.elements || []).map((element) => {
+    if (!element.data || !element.data.id || element.data.source) {
+      return element;
+    }
+    const log2fc = Number(element.data.log2fc || 0);
+    return {
+      data: {
+        ...element.data,
+        color: log2fc >= 0 ? "#fca5a5" : "#7dd3fc",
+      },
+    };
+  });
+  if (!elements.length) {
+    renderExpressionMessage(`No marker network was available for ${payload.population}.`, `${payload.population} marker network`);
+    return;
+  }
+  expressionCy = cytoscape({
+    container: plot,
+    elements,
+    style: [
+      {
+        selector: "node",
+        style: {
+          "background-color": "data(color)",
+          label: "data(label)",
+          color: "#0f172a",
+          "font-size": 12,
+          "text-valign": "center",
+          "text-halign": "center",
+          width: 26,
+          height: 26,
+        },
+      },
+      {
+        selector: "edge",
+        style: {
+          width: 1.8,
+          "line-color": networkEdgeColor,
+          "target-arrow-color": networkEdgeColor,
+          "target-arrow-shape": networkEdgeArrowShape,
+          "curve-style": "bezier",
+          opacity: 0.85,
+        },
+      },
+      {
+        selector: "node:selected",
+        style: {
+          "border-width": 3,
+          "border-color": "#0f172a",
+        },
+      },
+    ],
+    layout: {
+      name: "cose",
+      animate: true,
+      fit: true,
+      padding: 36,
+      randomize: true,
+      idealEdgeLength: 80,
+      nodeOverlap: 8,
+      componentSpacing: 90,
+    },
+  });
+  expressionCy.on("tap", "node", (event) => {
+    const gene = event?.target?.data("id");
+    if (gene) {
+      document.getElementById("gene-query").value = gene;
+    }
+  });
 }
 
 function finiteExtent(values, fallbackMin = 0, fallbackMax = 1) {
@@ -449,7 +673,11 @@ function hookForms() {
   document.getElementById("results-form").addEventListener("submit", handleResultsSubmit);
   document.getElementById("results-job-id").addEventListener("change", handleResultsJobChange);
   document.getElementById("gene-query").addEventListener("change", () => refreshResults());
-  document.getElementById("expression-mode").addEventListener("change", renderCurrentExpression);
+  document.getElementById("expression-mode").addEventListener("change", () => {
+    updateExpressionModeOptions();
+    loadExpression();
+  });
+  document.getElementById("expression-marker-population").addEventListener("change", () => loadExpression());
   document.getElementById("umap-mode").addEventListener("change", renderCurrentUmap);
   document.getElementById("display-filter1-field").addEventListener("change", () => {
     syncDisplayFilterValueOptions(1);
@@ -626,6 +854,7 @@ async function handleQcSubmit(evt) {
     min_cells: evt.target.min_cells.value,
     mit_percent: evt.target.mit_percent.value,
     align_cutoff: evt.target.align_cutoff.value,
+    identify_markers: evt.target.identify_markers.value === "true",
   };
   try {
     if (selectedReferenceDiffersFromLoadedJob()) {
@@ -648,12 +877,14 @@ async function handleQcSubmit(evt) {
       lastDownloadArtifactSignature = "";
       currentUmapData = null;
       currentExpressionData = null;
+      currentMarkerAnalysis = null;
       loadedResultsJobId = null;
       clearGeneSuggestions();
       clearDisplayFilters();
       document.getElementById("download-links").innerHTML = "";
       resetDifferentialResults();
       document.getElementById("differential-panel").classList.add("hidden");
+      updateExpressionModeOptions();
       updateWorkflowPanels(configureData.status || "uploaded");
     }
 
@@ -764,6 +995,8 @@ function applyJobStatus(jobId, data) {
   currentJobStatus = String(data.status || "").trim().toLowerCase();
   currentJobSpecies = String(data.species || currentJobSpecies || "");
   currentJobReference = String(data.reference || currentJobReference || "");
+  currentMarkerAnalysis = data.marker_analysis && data.marker_analysis.enabled ? data.marker_analysis : null;
+  updateExpressionModeOptions();
   updateWorkflowPanels(referenceRerunPending ? "uploaded" : (data.status || null));
   document.getElementById("job-progress").style.width = `${data.progress || 0}%`;
   document.getElementById("job-progress-label").textContent = `${data.progress || 0}%`;
@@ -804,6 +1037,8 @@ function applyJobStatus(jobId, data) {
       refreshResults();
     }
   } else {
+    currentMarkerAnalysis = null;
+    updateExpressionModeOptions();
     clearDisplayFilters();
   }
 
@@ -924,6 +1159,8 @@ function renderReferencePreview(payload) {
 
 function buildQcCellSummary(data) {
   const lines = data.log_tail || [];
+  const status = String(data.status || "").trim().toLowerCase();
+  const message = String(data.message || "").trim();
   let alignmentExcluded = null;
   for (const line of lines) {
     const match = line.match(/Applied min_alignment_score=.*?Excluded\s+(\d+)\s+cells,\s+kept\s+(\d+)/i);
@@ -932,7 +1169,22 @@ function buildQcCellSummary(data) {
     }
   }
 
-  if (String(data.status || "").trim().toLowerCase() === "completed") {
+  if (status === "processing" && message) {
+    const genericMessages = new Set([
+      "Preparing inputs…",
+      "Preparing inputs...",
+      "Job submitted to worker.",
+    ]);
+    if (!genericMessages.has(message)) {
+      return message;
+    }
+  }
+
+  if (status === "failed" && message) {
+    return `Analysis failed. ${message}`;
+  }
+
+  if (status === "completed") {
     const createdAt = Date.parse(data.created_at || "");
     const updatedAt = Date.parse(data.updated_at || "");
     const exclusionSuffix =
@@ -1008,6 +1260,11 @@ async function populateDownloadLinks(jobId, statusData = null) {
     }
   }
   const artifacts = data.artifacts || {};
+  const labelMap = {
+    assignments: "Download assignments",
+    combined_h5ad: "Download combined_h5ad",
+    marker_genes_zip: "Download marker genes ZIP",
+  };
   Object.keys(artifacts).forEach((key) => {
     if (
       key === "umap_coordinates" ||
@@ -1020,7 +1277,7 @@ async function populateDownloadLinks(jobId, statusData = null) {
     const btn = document.createElement("a");
     btn.className = "download-btn";
     btn.href = apiPath(`/jobs/${jobId}/download/${key}`);
-    btn.textContent = `Download ${key}`;
+    btn.textContent = labelMap[key] || `Download ${key}`;
     container.appendChild(btn);
   });
 }
@@ -1737,6 +1994,7 @@ function clearDisplayFilters() {
   document.getElementById("display-filter2-field").innerHTML = "";
   document.getElementById("display-filter1-values").innerHTML = "";
   document.getElementById("display-filter2-values").innerHTML = "";
+  document.getElementById("display-filter-secondary-row").classList.remove("hidden");
 }
 
 async function loadGeneSuggestions(jobId) {
@@ -1806,10 +2064,17 @@ function populateDisplayFilterControls(meta) {
   const fields = (meta && meta.fields) || [];
   const primaryField = (meta && meta.default_primary_field) || "";
   const secondaryField = (meta && meta.default_secondary_field) || "";
+  const showSecondary = !meta || meta.show_secondary !== false;
   populateSelectOptions(document.getElementById("display-filter1-field"), fields, primaryField, false);
   populateSelectOptions(document.getElementById("display-filter2-field"), fields, secondaryField, true);
   syncDisplayFilterValueOptions(1);
   syncDisplayFilterValueOptions(2);
+  document.getElementById("display-filter-secondary-row").classList.toggle("hidden", !showSecondary);
+  if (!showSecondary) {
+    document.getElementById("display-filter2-field").value = "";
+    document.getElementById("display-filter2-values").innerHTML = "";
+    document.getElementById("display-filter2-values").disabled = true;
+  }
 }
 
 async function loadDisplayFilters(jobId) {
@@ -1957,7 +2222,111 @@ function renderCurrentUmap() {
     xaxis: { showgrid: false, zeroline: false },
     yaxis: { showgrid: false, zeroline: false },
   };
-  if (mode === "relative") {
+  if (mode === "frequency") {
+    const sampleField = String(currentUmapData.sample_field || "sample").trim() || "sample";
+    const queryPoints = (currentUmapData.query || []).filter((point) => String(point.sample || "").trim());
+    if (!queryPoints.length) {
+      Plotly.newPlot("umap-plot", [], {
+        ...layout,
+        title: "Cell frequency",
+        xaxis: { visible: false },
+        yaxis: { visible: false },
+        annotations: [
+          {
+            text: "Sample labels were not available for this job.",
+            x: 0.5,
+            y: 0.5,
+            xref: "paper",
+            yref: "paper",
+            showarrow: false,
+            font: { size: 15, color: "#64748b" },
+          },
+        ],
+      });
+      return;
+    }
+
+    const countsBySample = new Map();
+    queryPoints.forEach((point) => {
+      const sample = String(point.sample || "").trim();
+      const population = String(point.population || "").trim();
+      if (!sample || !population) {
+        return;
+      }
+      let sampleMap = countsBySample.get(sample);
+      if (!sampleMap) {
+        sampleMap = new Map();
+        countsBySample.set(sample, sampleMap);
+      }
+      sampleMap.set(population, (sampleMap.get(population) || 0) + 1);
+    });
+
+    const samples = [...countsBySample.keys()];
+    const populationStats = new Map();
+    countsBySample.forEach((sampleMap, sample) => {
+      let total = 0;
+      sampleMap.forEach((count) => {
+        total += count;
+      });
+      if (!(total > 0)) {
+        return;
+      }
+      sampleMap.forEach((count, population) => {
+        const fraction = count / total;
+        let entry = populationStats.get(population);
+        if (!entry) {
+          entry = { totalFraction: 0, sampleFractions: [] };
+          populationStats.set(population, entry);
+        }
+        entry.totalFraction += fraction;
+        entry.sampleFractions.push({ sample, fraction, count, total });
+      });
+    });
+
+    const ranked = [...populationStats.entries()]
+      .map(([population, entry]) => ({
+        population,
+        meanFraction: entry.sampleFractions.length ? entry.totalFraction / entry.sampleFractions.length : 0,
+        sampleFractions: entry.sampleFractions,
+      }))
+      .sort((a, b) => b.meanFraction - a.meanFraction || a.population.localeCompare(b.population));
+
+    Plotly.newPlot("umap-plot", [
+      {
+        type: "bar",
+        orientation: "h",
+        y: ranked.map((entry) => entry.population),
+        x: ranked.map((entry) => entry.meanFraction),
+        customdata: ranked.map((entry) => [
+          entry.sampleFractions
+            .sort((a, b) => b.fraction - a.fraction || a.sample.localeCompare(b.sample))
+            .map((item) => `${item.sample}: ${(item.fraction * 100).toFixed(1)}% (${item.count}/${item.total})`)
+            .join("<br>"),
+        ]),
+        marker: {
+          color: ranked.map((entry) => interpolatePairedColor(Math.min(1, Math.max(0, entry.meanFraction)))),
+        },
+        hovertemplate: "%{y}<br>Mean normalized frequency=%{x:.3f}<br>%{customdata[0]}<extra></extra>",
+      },
+    ], {
+      ...layout,
+      title: "Cell frequency",
+      margin: { t: 36, l: 170, r: 20, b: 40 },
+      xaxis: {
+        title: `Mean fraction of filtered cells per ${sampleField}`,
+        range: [0, 1],
+        tickformat: ".0%",
+        showgrid: false,
+        zeroline: false,
+      },
+      yaxis: {
+        automargin: true,
+        autorange: "reversed",
+        showgrid: false,
+        zeroline: false,
+      },
+    });
+  } else if (mode === "relative") {
     traces.push({
       x: currentUmapData.reference.map((p) => p.x),
       y: currentUmapData.reference.map((p) => p.y),
@@ -2030,14 +2399,69 @@ function renderCurrentUmap() {
   if (mode === "relative") {
     layout.legend = { orientation: "h" };
   }
-  Plotly.newPlot("umap-plot", traces, layout);
+  if (mode !== "frequency") {
+    Plotly.newPlot("umap-plot", traces, layout);
+  }
 }
 
 async function loadExpression() {
   const jobId = document.getElementById("results-job-id").value.trim();
+  const mode = document.getElementById("expression-mode").value;
   const geneInput = document.getElementById("gene-query");
   const gene = geneInput.value.trim();
-  if (!jobId || !gene) {
+  if (!jobId) {
+    return;
+  }
+  if (mode === "marker_heatmap") {
+    currentExpressionData = {
+      source: "marker_heatmap",
+      gene: gene || "",
+      requested_gene: gene || "",
+      resolved_gene: gene || "",
+      message: null,
+    };
+    renderCurrentExpression();
+    return;
+  }
+  if (mode === "marker_network") {
+    const population = document.getElementById("expression-marker-population").value.trim();
+    if (!population) {
+      currentExpressionData = {
+        source: "marker_network",
+        population: "",
+        elements: [],
+        message: "No marker network populations are available.",
+      };
+      renderCurrentExpression();
+      return;
+    }
+    try {
+      const resp = await fetch(apiPath(`/jobs/${jobId}/marker/network?population=${encodeURIComponent(population)}`));
+      const data = await parseApiResponse(resp);
+      if (!resp.ok) {
+        throw new Error(data.detail || "Marker network unavailable.");
+      }
+      currentExpressionData = {
+        ...data,
+        source: "marker_network",
+        gene: gene || "",
+        requested_gene: gene || "",
+        resolved_gene: gene || "",
+      };
+      renderCurrentExpression();
+      return;
+    } catch (err) {
+      currentExpressionData = {
+        source: "marker_network",
+        population,
+        elements: [],
+        message: err.message || "Marker network unavailable.",
+      };
+      renderCurrentExpression();
+      return;
+    }
+  }
+  if (!gene) {
     return;
   }
   try {
@@ -2069,7 +2493,7 @@ async function loadExpression() {
 }
 
 function renderExpressionMessage(message, title = "Expression unavailable") {
-  updateBaselineFilterSummaries();
+  resetExpressionSurface();
   Plotly.newPlot("expression-plot", [], {
     title,
     paper_bgcolor: "rgba(0,0,0,0)",
@@ -2097,8 +2521,32 @@ function renderCurrentExpression() {
   if (!currentExpressionData) {
     return;
   }
-  updateBaselineFilterSummaries();
   const dotScale = getPlotDotScale();
+  const mode = document.getElementById("expression-mode").value;
+  if (mode === "marker_heatmap") {
+    document.getElementById("expression-filter-summary").textContent = "Marker heatmap view uses the exported marker analysis matrix.";
+    const jobId = document.getElementById("results-job-id").value.trim();
+    if (!jobId || !currentMarkerAnalysis || !currentMarkerAnalysis.enabled || !currentMarkerAnalysis.expression_tsv) {
+      renderExpressionMessage("Marker heatmap output is unavailable for this job.", "MarkerHeatmap");
+      return;
+    }
+    renderMarkerHeatmapViewer(jobId);
+    return;
+  }
+  if (mode === "marker_network") {
+    const population = currentExpressionData.population || document.getElementById("expression-marker-population").value.trim();
+    document.getElementById("expression-filter-summary").textContent = population
+      ? `Marker network view for ${population}.`
+      : "Marker network view uses the exported marker analysis network.";
+    if (!(currentExpressionData.elements || []).length) {
+      renderExpressionMessage(currentExpressionData.message || "Marker network unavailable.", population ? `${population} marker network` : "MarkerNetwork");
+      return;
+    }
+    renderExpressionNetwork(currentExpressionData);
+    return;
+  }
+
+  updateBaselineFilterSummaries();
   if (!currentExpressionData.umap?.length && !currentExpressionData.violin?.length) {
     renderExpressionMessage(
       currentExpressionData.message || `Gene '${currentExpressionData.requested_gene || currentExpressionData.gene}' was not found.`,
@@ -2106,9 +2554,9 @@ function renderCurrentExpression() {
     );
     return;
   }
-  const mode = document.getElementById("expression-mode").value;
   if (mode === "violin") {
     if (currentExpressionData.source === "reference") {
+      resetExpressionSurface();
       const trace = {
         type: "bar",
         x: currentExpressionData.violin.map((entry) => entry.population),
@@ -2123,6 +2571,7 @@ function renderCurrentExpression() {
       });
       return;
     }
+    resetExpressionSurface();
     const violinTraces = currentExpressionData.violin.map((entry) => ({
       type: "violin",
       name: entry.population,
@@ -2212,6 +2661,7 @@ function renderCurrentExpression() {
     });
   }
   Object.assign(expressionLayout, buildSquareUmapAxes(currentExpressionData.umap, 0.06));
+  resetExpressionSurface();
   Plotly.newPlot("expression-plot", expressionTraces, expressionLayout);
 }
 
@@ -2234,10 +2684,25 @@ function downloadUmapImage() {
 function downloadExpressionImage() {
   const jobId = document.getElementById("results-job-id").value.trim();
   const gene = document.getElementById("gene-query").value.trim();
-  if (!jobId || !gene || !currentExpressionData) {
+  const mode = document.getElementById("expression-mode").value;
+  if (!jobId || !currentExpressionData) {
     return;
   }
-  const mode = document.getElementById("expression-mode").value;
+  if (mode === "marker_heatmap") {
+    window.open(apiPath(`/jobs/${jobId}/marker/heatmap.pdf`), "_blank");
+    return;
+  }
+  if (mode === "marker_network") {
+    const population = document.getElementById("expression-marker-population").value.trim();
+    if (!population) {
+      return;
+    }
+    window.open(apiPath(`/jobs/${jobId}/marker/network/pdf?population=${encodeURIComponent(population)}`), "_blank");
+    return;
+  }
+  if (!gene) {
+    return;
+  }
   const params = getDisplayFilterParams();
   params.set("gene", gene);
   params.set("mode", mode);

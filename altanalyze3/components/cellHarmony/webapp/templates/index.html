@@ -89,6 +89,13 @@
                 <span>Minimum cosine similarity score</span>
                 <input name="align_cutoff" value="0.4">
               </label>
+              <label class="field">
+                <span>Identify cell-state marker genes</span>
+                <select name="identify_markers">
+                  <option value="false">FALSE</option>
+                  <option value="true" selected>TRUE</option>
+                </select>
+              </label>
             </div>
             <button class="primary-btn" type="submit">Save QC and run</button>
           </form>
@@ -111,10 +118,11 @@
             </label>
             <div class="two-col">
               <label class="field">
-                <span>UMAP display</span>
+                <span>Cell type display</span>
                 <select id="umap-mode">
-                  <option value="relative">Relative to reference</option>
-                  <option value="cluster" selected>Cell-state clusters</option>
+                  <option value="relative">UMAP broad</option>
+                  <option value="cluster" selected>UMAP cell types</option>
+                  <option value="frequency">Cell frequency</option>
                 </select>
               </label>
               <label class="field">
@@ -123,6 +131,10 @@
                   <option value="umap">UMAP</option>
                   <option value="violin">Violin</option>
                 </select>
+              </label>
+              <label class="field hidden" id="expression-marker-population-field">
+                <span>Marker cell state</span>
+                <select id="expression-marker-population"></select>
               </label>
               <label class="field">
                 <span>Dot size</span>
@@ -146,7 +158,7 @@
                   <select id="display-filter1-values"></select>
                 </label>
               </div>
-              <div class="display-filter-grid">
+              <div class="display-filter-grid" id="display-filter-secondary-row">
                 <label class="field compact-field">
                   <span>Annotation 2</span>
                   <select id="display-filter2-field"></select>

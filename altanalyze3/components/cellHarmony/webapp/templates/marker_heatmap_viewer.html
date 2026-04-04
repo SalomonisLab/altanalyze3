@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Marker Heatmap</title>
+  <link rel="stylesheet" href="https://software.broadinstitute.org/morpheus/css/morpheus-latest.min.css" />
+  <style>
+    html, body, #morpheus-target {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #ffffff;
+    }
+    body {
+      font-family: Arial, sans-serif;
+    }
+    #fallback-message {
+      display: none;
+      box-sizing: border-box;
+      width: 100%;
+      height: 100%;
+      padding: 24px;
+      color: #475569;
+      font-size: 14px;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <div id="morpheus-target"></div>
+  <div id="fallback-message"></div>
+  <script src="https://software.broadinstitute.org/morpheus/js/morpheus-external-latest.min.js"></script>
+  <script src="https://software.broadinstitute.org/morpheus/js/morpheus-latest.min.js"></script>
+  <script>
+    (function () {
+      const jobId = {{ job_id|tojson }};
+      const rootPath = {{ root_path|tojson }};
+      function apiPath(path) {
+        const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+        return rootPath ? `${rootPath}${normalizedPath}` : normalizedPath;
+      }
+      async function logClient(message) {
+        try {
+          await fetch(apiPath(`/api/jobs/${jobId}/client-log`), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ message: `[marker-viewer] ${message}` }),
+          });
+        } catch (err) {
+          console.debug("Viewer log failed", err);
+        }
+      }
+      function showFallback(message) {
+        const target = document.getElementById("morpheus-target");
+        const fallback = document.getElementById("fallback-message");
+        if (target) {
+          target.style.display = "none";
+        }
+        fallback.style.display = "block";
+        fallback.textContent = message;
+      }
+      window.addEventListener("error", (event) => {
+        const details = [
+          event.message || "unknown error",
+          event.filename || "-",
+          event.lineno || 0,
+          event.colno || 0,
+        ].join(" | ");
+        logClient(`window.error ${details}`);
+      });
+      window.addEventListener("unhandledrejection", (event) => {
+        const reason = event.reason && event.reason.message ? event.reason.message : String(event.reason || "unknown rejection");
+        logClient(`window.unhandledrejection ${reason}`);
+      });
+      async function probeDataset(datasetUrl) {
+        try {
+          const headResp = await fetch(datasetUrl, { method: "HEAD", cache: "no-store" });
+          await logClient(
+            `dataset HEAD status=${headResp.status} ok=${headResp.ok} content_type=${headResp.headers.get("content-type") || "-"} content_length=${headResp.headers.get("content-length") || "-"}`
+          );
+        } catch (err) {
+          await logClient(`dataset HEAD failed: ${err && err.message ? err.message : err}`);
+        }
+        try {
+          const getResp = await fetch(datasetUrl, { method: "GET", cache: "no-store" });
+          await logClient(
+            `dataset GET status=${getResp.status} ok=${getResp.ok} content_type=${getResp.headers.get("content-type") || "-"} content_length=${getResp.headers.get("content-length") || "-"}`
+          );
+          if (!getResp.ok) {
+            throw new Error(`Dataset GET returned ${getResp.status}.`);
+          }
+        } catch (err) {
+          await logClient(`dataset GET failed: ${err && err.message ? err.message : err}`);
+          throw err;
+        }
+      }
+      async function render() {
+        const datasetUrl = `${window.location.origin}${apiPath(`/api/jobs/${jobId}/marker/heatmap.tsv`)}`;
+        await logClient(
+          `Initializing local Morpheus viewer. dataset_url=${datasetUrl} protocol=${window.location.protocol} ready_state=${document.readyState} ua=${navigator.userAgent}`
+        );
+        await probeDataset(datasetUrl);
+        if (!window.morpheus || !window.morpheus.HeatMap) {
+          await logClient(
+            `Morpheus scripts did not load. morpheus_present=${Boolean(window.morpheus)} heatmap_present=${Boolean(window.morpheus && window.morpheus.HeatMap)}`
+          );
+          showFallback("Morpheus assets failed to load.");
+          return;
+        }
+        try {
+          new window.morpheus.HeatMap({
+            el: document.getElementById("morpheus-target"),
+            dataset: datasetUrl,
+            rowSize: 14,
+            columnSize: 10,
+            drawGrid: false,
+            rows: [{ field: "id", display: ["text"] }],
+            columns: [{ field: "id", display: ["text"] }],
+            colorScheme: {
+              scalingMode: "fixed",
+              stepped: false,
+              values: [-2, 0, 2],
+              colors: ["#00f0ff", "#000000", "#ffff00"],
+            },
+          });
+          await logClient("Local Morpheus viewer initialized.");
+        } catch (err) {
+          await logClient(`Local Morpheus viewer failed: ${err && err.message ? err.message : err}`);
+          showFallback(`Unable to initialize Morpheus viewer. ${err && err.message ? err.message : err}`);
+        }
+      }
+      render();
+    }());
+  </script>
+</body>
+</html>

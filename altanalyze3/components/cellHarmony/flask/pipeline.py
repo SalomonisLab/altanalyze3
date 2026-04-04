@@ -13,7 +13,7 @@ import pandas as pd
 import scipy.sparse as sp
 
 from altanalyze3.components.cellHarmony import cellHarmony_differential, cellHarmony_lite
-from altanalyze3.components.visualization import NetPerspective, approximate_umap as approx_mod
+from altanalyze3.components.visualization import NetPerspective, approximate_umap as approx_mod, marker_heatmap_h5ad as marker_mod
 
 from .job_manager import JobStore
 
@@ -274,6 +274,34 @@ def _candidate_group_fields(
     return options, values_by_field
 
 
+def _upload_profile(meta: Dict) -> Dict[str, object]:
+    files = meta.get("files") or []
+    extensions: List[str] = []
+    for record in files:
+        filename = str((record or {}).get("filename") or "").strip().lower()
+        if "." not in filename:
+            continue
+        extensions.append(filename.rsplit(".", 1)[1])
+
+    total_files = len(extensions)
+    h5_count = sum(1 for ext in extensions if ext == "h5")
+    h5ad_count = sum(1 for ext in extensions if ext == "h5ad")
+    single_h5 = total_files == 1 and h5_count == 1
+    single_h5ad = total_files == 1 and h5ad_count == 1
+    multiple_h5 = total_files >= 2 and h5_count == total_files
+
+    return {
+        "total_files": total_files,
+        "extensions": extensions,
+        "single_h5": single_h5,
+        "single_h5ad": single_h5ad,
+        "multiple_h5": multiple_h5,
+        "differential_eligible": bool(single_h5ad or multiple_h5),
+        "allow_alternate_population_fields": bool(single_h5ad),
+        "show_secondary_display_filter": not single_h5,
+    }
+
+
 def _default_differential_state(enabled: bool, default_population_col: Optional[str], default_sample_field: Optional[str]) -> Dict[str, object]:
     if enabled:
         message = "Select a cell-state field and numerator/denominator sample groups to run cellHarmony-differential."
@@ -328,6 +356,51 @@ def _write_zip_archive(source_dir: Path, archive_path: Path) -> Path:
     return archive_path
 
 
+def _append_umap_to_assignments(assignments_path: Path, coordinates_path: Path) -> Path:
+    assignments = pd.read_csv(assignments_path, sep="\t")
+    if assignments.empty:
+        assignments["UMAP1"] = []
+        assignments["UMAP2"] = []
+        assignments.to_csv(assignments_path, sep="\t", index=False)
+        return assignments_path
+
+    barcode_column = str(assignments.columns[0])
+    coords = pd.read_csv(coordinates_path, sep="\t")
+    if coords.empty:
+        assignments["UMAP1"] = np.nan
+        assignments["UMAP2"] = np.nan
+        assignments.to_csv(assignments_path, sep="\t", index=False)
+        return assignments_path
+
+    coords_barcode_column = str(coords.columns[0])
+    rename_map = {coords_barcode_column: barcode_column}
+    if "umap_0" in coords.columns:
+        rename_map["umap_0"] = "UMAP1"
+    if "umap_1" in coords.columns:
+        rename_map["umap_1"] = "UMAP2"
+    coords = coords.rename(columns=rename_map)
+    required = [barcode_column, "UMAP1", "UMAP2"]
+    missing = [column for column in required if column not in coords.columns]
+    if missing:
+        raise ValueError(f"Approximate UMAP coordinates missing required columns: {', '.join(missing)}")
+    coords = coords[required].drop_duplicates(subset=[barcode_column])
+    merged = assignments.merge(coords, on=barcode_column, how="left", sort=False)
+    merged.to_csv(assignments_path, sep="\t", index=False)
+    return assignments_path
+
+
+def _write_selected_zip(source_dir: Path, archive_path: Path, *, suffixes: tuple[str, ...]) -> Path:
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as handle:
+        for file_path in sorted(source_dir.rglob("*")):
+            if not file_path.is_file():
+                continue
+            if suffixes and file_path.suffix.lower() not in suffixes:
+                continue
+            handle.write(file_path, arcname=str(file_path.relative_to(source_dir)))
+    return archive_path
+
+
 def run_cellharmony_pipeline(job_id: str, store: JobStore, registry_path: Path) -> Dict[str, Path]:
     """
     Execute the production cellHarmony-lite + approximate UMAP workflow for a job.
@@ -352,7 +425,7 @@ def run_cellharmony_pipeline(job_id: str, store: JobStore, registry_path: Path) 
     qc = meta.get("qc", {})
 
     store.append_log(job_id, "Running cellHarmony_lite pipeline.")
-    cellHarmony_lite.combine_and_align_h5(
+    _, combined_adata = cellHarmony_lite.combine_and_align_h5(
         h5_files=h5_files,
         h5ad_file=h5ad_file,
         cellharmony_ref=reference_entry["states_tsv"],
@@ -364,25 +437,67 @@ def run_cellharmony_pipeline(job_id: str, store: JobStore, registry_path: Path) 
         min_counts=int(qc.get("min_counts", 500)),
         mit_percent=int(qc.get("mit_percent", 10)),
         generate_umap=False,
-        save_adata=True,
+        save_adata=False,
         unsupervised_cluster=False,
         alignment_mode="cosine",
         min_alignment_score=float(qc.get("align_cutoff", 0.1)),
         gene_translation_file=None,
         metacell_align=False,
         ambient_correct_cutoff=None,
+        return_adata=True,
     )
 
     assignments_path = outputs_dir / "cellHarmony_lite_assignments.txt"
     combined_h5ad_path = outputs_dir / "combined_with_umap_and_markers.h5ad"
     if not assignments_path.exists():
         raise FileNotFoundError("cellHarmony-lite assignments file missing.")
-    if not combined_h5ad_path.exists():
-        raise FileNotFoundError("Combined AnnData output missing; ensure save_adata=True.")
 
     query_cluster_key = Path(reference_entry["states_tsv"]).stem
     reference_cluster_key = reference_entry.get("cluster_key", query_cluster_key)
 
+    marker_archive_path: Optional[Path] = None
+    marker_analysis: Dict[str, object] = {}
+    if bool(qc.get("identify_markers", False)):
+        store.update_job(
+            job_id,
+            progress=72,
+            message="Identifying the top 50 unique markers for 100 cells per cell state.",
+        )
+        store.append_log(job_id, "Identifying cell-state marker genes.")
+        marker_dir = outputs_dir / "marker_heatmap"
+        marker_dir.mkdir(parents=True, exist_ok=True)
+        marker_outputs = marker_mod.generate_marker_heatmap_from_adata(
+            combined_adata,
+            cluster_key=query_cluster_key,
+            out=str(marker_dir / "cell_state_marker_heatmap.pdf"),
+            top_n=50,
+            marker_method="markerfinder",
+            cells_per_cluster=100,
+            seed=0,
+            export_networks=True,
+            network_top_n=1000,
+        )
+        store.update_job(
+            job_id,
+            progress=78,
+            message="Exporting NetPerspective marker networks.",
+        )
+        marker_archive_path = outputs_dir / "cell_state_marker_genes.zip"
+        _write_selected_zip(marker_dir, marker_archive_path, suffixes=(".pdf", ".tsv", ".png"))
+        marker_analysis = {
+            "enabled": True,
+            "cluster_key": query_cluster_key,
+            "heatmap_pdf": str(marker_outputs["pdf"]),
+            "heatmap_tsv": str(marker_outputs["heatmap_tsv"]),
+            "expression_tsv": str(marker_outputs["heatmap_column_tsv"]),
+            "centroids_tsv": str(marker_outputs["centroids_tsv"]),
+            "markers_tsv": str(marker_outputs["markers_tsv"]),
+            "archive": str(marker_archive_path),
+            "networks": marker_outputs.get("networks", []),
+        }
+        store.append_log(job_id, "Cell-state marker gene export complete.")
+
+    store.update_job(job_id, progress=82, message="Running approximate UMAP placement.")
     store.append_log(job_id, "Running approximate UMAP placement.")
     reference_adata = approx_mod._load_reference_from_tsv(
         reference_entry["reference_coords_tsv"],
@@ -390,12 +505,8 @@ def run_cellharmony_pipeline(job_id: str, store: JobStore, registry_path: Path) 
         umap_key="X_umap",
         cluster_key=reference_cluster_key,
     )
-    query_adata = approx_mod._load_query_from_tsv(
-        assignments_path,
-        cluster_key=query_cluster_key,
-    )
     approx_result = approx_mod.approximate_umap(
-        query=query_adata,
+        query=combined_adata,
         reference=reference_adata,
         query_cluster_key=query_cluster_key,
         reference_cluster_key=reference_cluster_key,
@@ -403,10 +514,12 @@ def run_cellharmony_pipeline(job_id: str, store: JobStore, registry_path: Path) 
         jitter=0.05,
         num_reference_cells=1,
     )
+    approx_result.query_adata.write(combined_h5ad_path, compression="gzip")
 
     prefix = outputs_dir / "approximate"
     prefix.mkdir(parents=True, exist_ok=True)
     text_outputs = approx_result.write_text_outputs(prefix)
+    _append_umap_to_assignments(assignments_path, Path(text_outputs["coordinates"]))
     annotated_pdf, plain_pdf = approx_result.write_comparison_pdf(
         reference_adata=reference_adata,
         umap_key="X_umap",
@@ -419,23 +532,38 @@ def run_cellharmony_pipeline(job_id: str, store: JobStore, registry_path: Path) 
         "assignments": assignments_path,
         "combined_h5ad": combined_h5ad_path,
         "umap_coordinates": Path(text_outputs["coordinates"]),
-        "umap_augmented": Path(text_outputs["augmented"]),
         "umap_placeholder_expression": Path(text_outputs["placeholder_expression"]),
         "umap_pdf": Path(annotated_pdf),
         "umap_pdf_plain": Path(plain_pdf),
     }
+    if marker_archive_path is not None:
+        artifacts["marker_genes_zip"] = marker_archive_path
     for key, path in artifacts.items():
         store.add_artifact(job_id, key, path)
 
     sample_names = _job_sample_names(meta)
-    population_columns = _candidate_population_columns(
+    upload_profile = _upload_profile(meta)
+    all_population_columns = _candidate_population_columns(
         combined_h5ad_path,
         preferred=[query_cluster_key, reference_cluster_key],
     )
+    population_columns = list(all_population_columns)
+    if not upload_profile["allow_alternate_population_fields"]:
+        population_columns = [candidate for candidate in all_population_columns if candidate["value"] == query_cluster_key]
+        if not population_columns:
+            population_columns = [{"value": query_cluster_key, "label": query_cluster_key, "n_categories": 0}]
+
     sample_fields, sample_values = _candidate_group_fields(
         combined_h5ad_path,
         preferred=["Library", "group", "sample"],
     )
+    population_field_values = {str(candidate.get("value", "")).strip() for candidate in all_population_columns if str(candidate.get("value", "")).strip()}
+    sample_fields = [field for field in sample_fields if str(field.get("value", "")).strip() not in population_field_values]
+    sample_values = {
+        key: value
+        for key, value in sample_values.items()
+        if str(key).strip() not in population_field_values
+    }
     default_population_col = next(
         (
             candidate["value"]
@@ -464,14 +592,16 @@ def run_cellharmony_pipeline(job_id: str, store: JobStore, registry_path: Path) 
             sample_fields[0]["value"] if sample_fields else None,
         )
     max_group_values = max((len(values) for values in sample_values.values()), default=0)
+    differential_enabled = bool(upload_profile["differential_eligible"] and (max_group_values >= 2 or len(sample_names) >= 2))
     differential_options = {
-        "enabled": bool(max_group_values >= 2 or len(sample_names) >= 2),
+        "enabled": differential_enabled,
         "sample_names": sample_names,
         "sample_fields": sample_fields,
         "sample_values": sample_values,
         "default_sample_field": default_sample_field,
         "population_columns": population_columns,
         "default_population_col": default_population_col,
+        "upload_profile": upload_profile,
     }
 
     store.update_job(
@@ -481,8 +611,9 @@ def run_cellharmony_pipeline(job_id: str, store: JobStore, registry_path: Path) 
         reference_coords_tsv=reference_entry["reference_coords_tsv"],
         reference_clusters_tsv=reference_entry["reference_clusters_tsv"],
         default_gene=default_gene,
+        marker_analysis=marker_analysis,
         differential_options=differential_options,
-        differential=_default_differential_state(bool(max_group_values >= 2 or len(sample_names) >= 2), default_population_col, default_sample_field),
+        differential=_default_differential_state(differential_enabled, default_population_col, default_sample_field),
         message="Approximate UMAP completed.",
     )
     store.append_log(job_id, "cellHarmony-lite pipeline finished.")

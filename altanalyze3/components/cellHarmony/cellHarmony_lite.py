@@ -111,7 +111,8 @@ def combine_and_align_h5(
     ambient_correct_cutoff=None,
     concat_on_disk=False,
     concat_batch_size=50,
-    verbose_import=False
+    verbose_import=False,
+    return_adata=False,
 ):
     start_time = time.time()
     output_dir = os.path.abspath(output_dir)
@@ -879,6 +880,8 @@ def combine_and_align_h5(
             )
             adata_combined.obs['scanpy-leiden'] = adata_unsup.obs['leiden']
 
+    adata_combined.uns["lineage_order"] = reference_df.columns.tolist()
+
     if save_adata:
         # If unsupervised clustering was run, merge leiden clusters into adata_combined before saving
         if unsupervised_cluster and 'leiden' in adata_unsup.obs.columns:
@@ -900,11 +903,12 @@ def combine_and_align_h5(
                 sep="\t", index=False
             )
 
-        adata_combined.uns["lineage_order"] = reference_df.columns.tolist()
         adata_combined.write(os.path.join(output_dir, "combined_with_umap_and_markers.h5ad"), compression="gzip")
 
 
     print(f"Analysis completed in {time.time() - start_time:.2f} seconds.")
+    if return_adata:
+        return ordered_match_df, adata_combined
     return ordered_match_df
 
 def load_gene_translation(translation_path):

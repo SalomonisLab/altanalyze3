@@ -438,6 +438,15 @@ select:disabled {
   min-width: 0;
 }
 
+.morpheus-frame {
+  width: 100%;
+  min-height: 640px;
+  height: 100%;
+  border: 0;
+  border-radius: 14px;
+  background: #fff;
+}
+
 .plot-caption {
   min-height: 18px;
   margin-top: 6px;
