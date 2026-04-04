@@ -30,9 +30,6 @@ from altanalyze3.components.visualization import approximate_umap as approx_mod
 from .config import BASE_DIR, load_config
 
 
-TEMPLATES = Jinja2Templates(directory=str(BASE_DIR / "templates"))
-
-
 class QCSettings(BaseModel):
     min_genes: int = 500
     min_counts: int = 1000
@@ -2062,6 +2059,10 @@ def _render_differential_gene_pdf(payload: Dict) -> io.BytesIO:
 def create_app(test_config: dict | None = None) -> FastAPI:
     cfg = load_config(test_config)
     cfg["ROOT_PATH"] = _normalize_root_path(cfg.get("ROOT_PATH"))
+    template_dir = Path(str(cfg.get("TEMPLATE_DIR") or (BASE_DIR / "templates")))
+    static_dir = Path(str(cfg.get("STATIC_DIR") or (BASE_DIR / "static")))
+    index_template = str(cfg.get("INDEX_TEMPLATE") or "index.html")
+    templates = Jinja2Templates(directory=str(template_dir))
     app = FastAPI(title=cfg["APP_TITLE"], root_path=cfg["ROOT_PATH"])
     app.state.config = cfg
     app.state.root_path = cfg["ROOT_PATH"]
@@ -2087,14 +2088,14 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             return JSONResponse(status_code=500, content={"detail": f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__})
         raise exc
 
-    app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
         registry = _load_reference_registry(app)
-        return TEMPLATES.TemplateResponse(
+        return templates.TemplateResponse(
             request,
-            "index.html",
+            index_template,
             {
                 "request": request,
                 "registry_json": json.dumps(registry),

@@ -91,6 +91,8 @@ Review the QC settings:
 - `Min cells`
 - `Mito %`
 - `Minimum cosine similarity score`
+- `Identify cell-state marker genes`
+  default: `TRUE`
 
 Then click **Save QC and run**.
 
@@ -99,8 +101,10 @@ What happens during this step:
 1. the uploaded data are loaded
 2. cells are filtered by QC thresholds
 3. the filtered cells are aligned to the selected reference atlas
-4. approximate UMAP placement is generated relative to the reference
-5. alignment outputs are written to the job folder
+4. if marker analysis is enabled, cell-state marker genes are identified from the aligned dataset
+5. if marker analysis is enabled, a marker heatmap and marker-driven NetPerspective networks are exported
+6. approximate UMAP placement is generated relative to the reference
+7. alignment outputs are written to the job folder
 
 While it runs, Panel 2 shows:
 
@@ -123,6 +127,17 @@ When alignment completes:
 - the lower baseline viewers become available
 - if there are at least 2 samples, **Panel 4** can be used for differential analysis
 
+### What marker analysis adds
+
+When **Identify cell-state marker genes** is `TRUE`:
+
+- the web pipeline identifies the top unique marker genes per aligned cell state
+- a heatmap PDF and TSV outputs are exported
+- NetPerspective networks are exported for each aligned cell state
+- a ZIP archive of those marker outputs becomes available in **Panel 3**
+
+This marker analysis runs after alignment and before the approximate UMAP outputs are finalized.
+
 ## 4. Review the alignment outputs
 
 After alignment finishes, **3. Results** becomes active.
@@ -139,6 +154,8 @@ Controls:
 - **Expression display**
   - `UMAP`
   - `Violin`
+  - `MarkerHeatmap` when marker analysis outputs exist
+  - `MarkerNetwork` when marker networks exist
 - **Dot size**
   - controls the point size used in the UMAP and violin viewers
 - **Filter data to display**
@@ -178,12 +195,24 @@ Two modes are available:
   - shows the distribution of normalized expression for that gene
   - useful for a quick expression summary across the aligned populations
 
+Additional marker-analysis modes may also be available:
+
+- **MarkerHeatmap**
+  - opens the exported MarkerFinder heatmap in an embedded Morpheus viewer
+  - uses the marker heatmap matrix produced during the alignment job
+  - now respects the current **Filter data to display** barcode restrictions in the interactive viewer
+
+- **MarkerNetwork**
+  - displays the exported NetPerspective network for a selected marker-defined cell state
+  - uses the **Marker cell state** dropdown that appears when marker networks are available
+
 ### How the cell-display filters work
 
 The **Filter data to display** controls affect only what is shown in:
 
 - the **Approximate UMAP**
 - the **Expression** viewer
+- the interactive **MarkerHeatmap** viewer
 - the corresponding PDF downloads
 
 They do not rerun alignment or change the saved job outputs.
@@ -210,10 +239,14 @@ Depending on the job state, downloads may include:
 
 - assignments
 - combined h5ad
-- UMAP-augmented outputs
+- marker genes ZIP
 - viewer PDFs
 
-These files come from the completed alignment stage, not the differential stage.
+Notes:
+
+- **Download assignments** provides the combined assignments table with appended UMAP coordinates
+- **Download marker genes ZIP** appears only when marker analysis was enabled and completed
+- these files come from the completed alignment stage, not the differential stage
 
 ## 5. Run cellHarmony-differential
 

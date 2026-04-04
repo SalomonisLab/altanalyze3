@@ -20,6 +20,9 @@ def load_config(overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "ALLOWED_EXTENSIONS": {"h5", "h5ad"},
         "MAX_FILES_PER_JOB": int(os.getenv("CELLHARMONY_MAX_FILES", "7")),
         "JOB_WORKERS": int(os.getenv("CELLHARMONY_JOB_WORKERS", "2")),
+        "TEMPLATE_DIR": str(BASE_DIR / "templates"),
+        "STATIC_DIR": str(BASE_DIR / "static"),
+        "INDEX_TEMPLATE": "index.html",
     }
     if overrides:
         cfg.update(overrides)

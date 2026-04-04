@@ -10,12 +10,26 @@ Current web interface capabilities include:
 
 - upload one or more `.h5` or `.h5ad` single-cell files as a job
 - preserve compatible `.obs` metadata from uploaded `.h5ad` files
+- optionally identify cell-state marker genes during the alignment workflow
+- export marker heatmap outputs and NetPerspective marker networks
 - filter the displayed cells in the UMAP and expression viewers by selected
   `.obs` fields and values
+- filter the interactive MarkerHeatmap viewer by the same selected `.obs`
+  fields and values
 - run differential analysis using a user-selected cell-state field from `.obs`
 - define numerator and denominator values from a separate `.obs` grouping field
 - optionally switch differential comparison type between `cells` and
   `pseudobulk` when enough grouped values are available
+
+Results navigation now includes:
+
+- baseline Panel 3 expression modes:
+  - `UMAP`
+  - `Violin`
+  - `MarkerHeatmap` when marker outputs exist
+  - `MarkerNetwork` when marker networks exist
+- downloadable marker-analysis archive:
+  - `Download marker genes ZIP`
 
 ## Related docs
 
