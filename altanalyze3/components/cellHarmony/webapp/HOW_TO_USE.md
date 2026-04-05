@@ -1,506 +1,285 @@
 # How to Use cellHarmony web
 
-This guide is written for a first-time user of the `cellHarmony web` site. It
-explains what files to upload, what each step does, and what the viewers are
-showing at each stage of the workflow.
+This guide describes the current `cellHarmony web` interface after the explorer
+promotion. The app is organized into `Run`, `Explore`, and `Differential`
+tabs.
 
-## What this website does
+## What the app does
 
-`cellHarmony web` supports two main analysis stages:
+`cellHarmony web` is used to:
 
-1. **Alignment to a reference atlas**
-   - your uploaded single-cell data are quality controlled
-   - the cells are aligned to a reference atlas cell state
-   - the site then provides UMAP- and gene-expression-based viewers
+1. align single-cell data to a reference atlas
+2. inspect aligned cell states and gene expression interactively
+3. compare biological groups within aligned cell states
 
-2. **Differential analysis between sample groups**
-   - available after alignment completes for jobs with at least 2 samples
-   - compares two groups of samples within aligned cell states
-   - provides an interactive heatmap, volcano plot, network, GO terms, and a
-     gene-detail violin plot
-
-## What files you upload
-
-Upload one file per sample.
+## What you can upload
 
 Accepted file types:
 
 - `.h5`
 - `.h5ad`
 
-Practical expectations:
+Recommended interpretation:
 
-- each uploaded file should represent one sample
-- each sample should contain single-cell expression data
-- if you upload multiple files, they should be biologically comparable and
-  intended to be processed against the same selected reference
-- when you upload `.h5ad` files, compatible `.obs` metadata are retained and
-  can be reused later in the interface for filtering displayed cells and for
-  differential grouping
+- upload one file per biological sample
+- use matching species and one shared reference atlas per job
 
-When uploading, you also provide:
+Important input behavior:
 
-- a **sample name**
-- the **species**
-- the **reference atlas**
+- multiple `.h5` files support grouped differential analysis
+- a single `.h5ad` can also support grouped differential analysis when its
+  `.obs` metadata contain reusable biological grouping fields
+- a single `.h5` upload does not enable grouped differential analysis
 
-The sample name is what later appears in the differential grouping interface.
+When `.h5ad` files are uploaded, compatible `.obs` metadata are retained and
+later reused in:
 
-## 1. Open the app
+- Explore filters
+- Differential cell-state selection
+- Differential biological-group selection
 
-Open the web app in your browser.
+## Run tab
 
-Common locations:
+The `Run` tab contains the upload and QC/alignment workflow.
 
-- local run: `http://127.0.0.1:8000/`
-- VM or server run: `http://<server>:8000/`
-- subpath deployment: for example `https://<server>/cell-harmony/`
+### Before upload
 
-## 2. Upload the data
+You can:
 
-In **1. Upload**:
+- choose `Species`
+- choose `Reference`
+- inspect the reference preview
+- add one or more sample rows
 
-1. Select the **Species**.
-2. Select the **Reference**.
-3. Click **Add sample** for each file you want to include.
-4. For each sample row:
-   - enter the sample name
-   - choose the `.h5` or `.h5ad` file
-5. Click **Upload**.
+Each sample row includes:
 
-What happens here:
+- `Sample name`
+- `.h5` or `.h5ad` file selection
 
-- the files are copied into a new job folder on the server
-- the upload progress bar shows file transfer progress
-- once upload completes, a job ID is assigned
-- **Panel 2** appears only after upload succeeds
+### Upload
 
-At this point, no QC or alignment has been run yet. The upload step only
-creates the job and stores the input files.
+Click `Upload` after all sample rows are prepared.
 
-## 3. Run QC and alignment
+What happens:
 
-In **2. QC and alignment**:
+- files are copied into a new job directory
+- a job ID is assigned
+- QC/alignment controls become available in the same Run tab
 
-Review the QC settings:
+### QC and alignment
 
-- `Min genes`  
-  default: `500`
-- `Min counts`  
-  default: `1000`
+Available settings:
+
+- `Min genes`
+- `Min counts`
 - `Min cells`
 - `Mito %`
 - `Minimum cosine similarity score`
 - `Identify cell-state marker genes`
-  default: `TRUE`
 
-Then click **Save QC and run**.
+Then click `Save QC and run`.
 
-What happens during this step:
+What happens during alignment:
 
-1. the uploaded data are loaded
-2. cells are filtered by QC thresholds
-3. the filtered cells are aligned to the selected reference atlas
-4. if marker analysis is enabled, cell-state marker genes are identified from the aligned dataset
-5. if marker analysis is enabled, a marker heatmap and marker-driven NetPerspective networks are exported
-6. approximate UMAP placement is generated relative to the reference
-7. alignment outputs are written to the job folder
+1. files are loaded
+2. cells are filtered by QC
+3. data are normalized
+4. cells are aligned to the selected reference
+5. low-alignment cells are excluded using the cosine cutoff
+6. approximate UMAP placement is computed
+7. the combined aligned h5ad is written
 
-While it runs, Panel 2 shows:
+While it runs, the app shows:
 
-- a **progress bar**
-- a **QC cell summary bar**
-- a **log window**
+- a progress bar
+- QC counts
+- pipeline log output
 
-What those running summaries mean:
+When alignment finishes:
 
-- the QC summary bar reports the number of cells:
-  - before QC
-  - after `min_genes`
-  - after `min_counts`
-  - after `mito %`
-- the log window shows the live pipeline output
+- the app switches to `Explore`
+- gene suggestions become available
+- Explore downloads become active
+- Differential becomes usable when the job supports grouped comparison
 
-When alignment completes:
+## Optional marker analysis
 
-- **Panel 3** appears
-- the lower baseline viewers become available
-- if there are at least 2 samples, **Panel 4** can be used for differential analysis
+If `Identify cell-state marker genes` is `TRUE`:
 
-### What marker analysis adds
+- markerFinder is run on the aligned dataset
+- the app exports a marker heatmap PDF and TSVs
+- the app exports redundant top-ranked marker tables for network generation
+- NetPerspective networks are generated for marker-defined cell states
+- a marker ZIP archive becomes available in Explore
 
-When **Identify cell-state marker genes** is `TRUE`:
+This marker analysis is run after alignment and before final result browsing.
 
-- the web pipeline identifies the top unique marker genes per aligned cell state
-- a heatmap PDF and TSV outputs are exported
-- NetPerspective networks are exported for each aligned cell state
-- a ZIP archive of those marker outputs becomes available in **Panel 3**
+## Explore tab
 
-This marker analysis runs after alignment and before the approximate UMAP outputs are finalized.
+The Explore tab is the main aligned-data workspace. It remains available even
+after differential analysis is run.
 
-## 4. Review the alignment outputs
+The left column contains:
 
-After alignment finishes, **3. Results** becomes active.
+- `Dot size`
+- `Filter data to display`
+- Explore downloads
 
-This section lets you inspect a selected gene in the aligned dataset.
+The right side contains two viewers:
 
-Controls:
+- `Approximate UMAP`
+- `Expression`
 
-- **Gene**  
-  type a gene symbol of interest
-- **UMAP display**
-  - `Relative to reference`
-  - `Cell-state clusters`
-- **Expression display**
-  - `UMAP`
-  - `Violin`
-  - `MarkerHeatmap` when marker analysis outputs exist
-  - `MarkerNetwork` when marker networks exist
-- **Dot size**
-  - controls the point size used in the UMAP and violin viewers
-- **Filter data to display**
-  - **Annotation 1** and **Annotation 2** let you choose compatible `.obs`
-    metadata fields from the aligned `.h5ad`
-  - **Values** lets you restrict the viewers to one selected value or `All`
+### Filter data to display
 
-### What the UMAP viewer is showing
+These filters restrict the cells shown in the Explore viewers.
 
-The lower-left **Approximate UMAP** panel is based on the aligned query data
-after QC and reference mapping.
+Available controls:
 
-Two modes are available:
+- `Annotation 1`
+- `Values`
+- optionally `Annotation 2`
+- optionally second `Values`
 
-- **Relative to reference**
-  - shows the uploaded cells placed in the reference embedding
-  - useful for seeing how the uploaded dataset maps onto the atlas structure
+These filters affect only visualization. They do not rerun alignment or modify
+saved outputs.
 
-- **Cell-state clusters**
-  - colors uploaded cells by assigned aligned cell state
-  - reference-only cells remain in the background as a light grey context layer
-  - can be restricted to selected subsets using **Filter data to display**
+### Approximate UMAP
 
-### What the Expression viewer is showing
+The Approximate UMAP viewer supports:
 
-The lower-right **Expression** panel uses the currently selected gene and the
-aligned dataset after QC.
-
-Two modes are available:
-
-- **UMAP**
-  - colors cells by normalized expression of the selected gene
-  - useful for seeing where expression occurs in the aligned manifold
-  - can be restricted to selected subsets using **Filter data to display**
-
-- **Violin**
-  - shows the distribution of normalized expression for that gene
-  - useful for a quick expression summary across the aligned populations
-
-Additional marker-analysis modes may also be available:
-
-- **MarkerHeatmap**
-  - opens the exported MarkerFinder heatmap in an embedded Morpheus viewer
-  - uses the marker heatmap matrix produced during the alignment job
-  - now respects the current **Filter data to display** barcode restrictions in the interactive viewer
-
-- **MarkerNetwork**
-  - displays the exported NetPerspective network for a selected marker-defined cell state
-  - uses the **Marker cell state** dropdown that appears when marker networks are available
-
-### How the cell-display filters work
-
-The **Filter data to display** controls affect only what is shown in:
-
-- the **Approximate UMAP**
-- the **Expression** viewer
-- the interactive **MarkerHeatmap** viewer
-- the corresponding PDF downloads
-
-They do not rerun alignment or change the saved job outputs.
-
-Typical uses:
-
-- display only one uploaded sample
-- display only one biological subset such as a chosen cell annotation
-- combine a sample-level filter with a second annotation-level filter
-
-By default:
-
-- **Annotation 1** starts from the sample-related field used later in
-  differential grouping when available
-- **Annotation 2** starts from the aligned cell-state annotation field when
-  available
-
-Only manageable categorical `.obs` fields are shown. UMAP columns and very
-high-cardinality metadata are excluded from these dropdowns.
-
-### What downloads are available in Panel 3
-
-Depending on the job state, downloads may include:
-
-- assignments
-- combined h5ad
-- marker genes ZIP
-- viewer PDFs
+- `UMAP broad`
+- `UMAP cell types`
+- `Cell frequency`
 
 Notes:
 
-- **Download assignments** provides the combined assignments table with appended UMAP coordinates
-- **Download marker genes ZIP** appears only when marker analysis was enabled and completed
-- these files come from the completed alignment stage, not the differential stage
+- `UMAP broad` overlays aligned query cells relative to the reference context
+- `UMAP cell types` colors cells by aligned population
+- `Cell frequency` summarizes normalized fractions per sample using only the
+  currently filtered cells
+- aligned cell-type colors are kept consistent with the reference preview color
+  scheme
 
-## 5. Run cellHarmony-differential
+The `Download PDF` button exports the current Approximate UMAP mode.
 
-**4. Differential** becomes available only when:
+### Expression
 
-- alignment has completed
-- the job contains at least 2 samples
+The Expression viewer contains:
 
-In this section:
+- `Select gene`
+- `Select plot type`
+- optional `Marker cell state`
 
-1. choose the aligned cell-state field in **Cell-state aligned to**
-2. choose the grouping source in **Group values from**
-3. if available, choose **Comparison Type**
-   - `cells`
-   - `pseudobulk`
-4. assign values to:
-   - **Group 1 (numerator)**
-   - **Group 2 (denominator)**
-5. click **Run cellHarmony-differential**
+Supported plot types:
 
-Important grouping rule:
+- `UMAP`
+- `Violin`
+- `MarkerHeatmap` when marker outputs exist
+- `MarkerNetwork` when marker networks exist
 
-- only two-group comparisons are supported
-- each group can contain one or more selected values from the chosen grouping
-  field
+Behavior:
 
-This step is flexible for `.h5ad` uploads:
+- `UMAP` colors cells by expression of the selected gene
+- zero-expression cells remain in the background
+- `Violin` shows all cells as dots
+- `MarkerHeatmap` opens the exported marker matrix in an embedded Morpheus view
+- `MarkerNetwork` shows the exported marker network for one marker-defined cell
+  state
+- `Marker cell state` appears only when `MarkerNetwork` is selected
 
-- **Cell-state aligned to** can use the reference-aligned field or another
-  compatible annotation stored in `.obs`
-- **Group values from** can be a different `.obs` field than the cell-state
-  field
-- this lets you compare values such as `condition`, `sample`, `Library`, or
-  another categorical annotation while still running DE within the chosen cell
-  states
+The `Download PDF` button exports the current Expression mode. For
+`MarkerHeatmap`, the exported PDF is the saved marker heatmap PDF.
 
-What happens during differential analysis:
+### Explore downloads
 
-1. the aligned AnnData from the completed cellHarmony run is used
-2. cells are grouped by the selected aligned cell-state field
-3. Group 1 and Group 2 are defined from the selected **Group values from**
-   field
-4. Group 1 and Group 2 are compared within each selected cell state
-5. differential statistics, heatmaps, GO results, and networks are generated
+Available downloads may include:
 
-If **Comparison Type** is set to `pseudobulk`:
+- `Download assignments`
+- `Download combined_h5ad`
+- `Download marker genes ZIP`
 
-- pseudobulk profiles are computed before DE testing
-- raw p-values are used in that workflow
-- internal minimum-cell filtering is applied to pseudobulk groups
+Notes:
 
-While this runs:
+- assignments include appended UMAP coordinates
+- the combined h5ad contains the aligned dataset and approximate UMAP results
+- marker ZIP appears only when marker analysis was enabled and completed
 
-- the differential progress bar updates
-- the baseline Panel 3 controls are greyed out because the interface switches
-  to differential exploration mode
+## Differential tab
 
-When it completes:
+The Differential tab is for comparisons between biological groups.
 
-- the interactive differential explorer appears below
-- a ZIP archive is available for download
+It is enabled only when:
 
-## 6. Explore the differential results
+- two or more samples were uploaded for the job, or
+- one `.h5ad` contains multiple biological groups in compatible `.obs`
+  metadata
 
-The lower differential section has two panels:
+If that condition is not met, the tab shows a warning instead of the
+differential workflow.
 
-- a **large left panel** for the selected visualization
-- a **smaller right panel** for gene-level detail
+### Differential setup
 
-At the top of the left panel:
+Controls include:
 
-- choose the visualization mode:
-  - `Heatmap`
-  - `Volcano`
-  - `Network`
-  - `GO Terms`
-- choose the cell state relevant to that mode
+- `Cell-state aligned to`
+- `Group values from`
+- `Comparison Type`
+  - `cells`
+  - `pseudobulk`
+- `Group 1 (numerator)`
+- `Group 2 (denominator)`
 
-The cell-state dropdown is restricted to only the populations that exist for the
-selected visualization type.
+Behavior:
 
-### Heatmap view
+- `Cell-state aligned to` chooses the annotation field used as the differential
+  population axis
+- `Group values from` chooses the biological grouping field
+- `Group 1` and `Group 2` select the values to compare
 
-What it is showing:
+### Differential results
 
-- genes selected from the detailed differential output for the chosen cell state
-- fold-change patterns for those genes across aligned populations
-- the color scale summarizes the differential signal for those genes
+The left result viewer supports:
 
-How to use it:
+- `Heatmap`
+- `Volcano`
+- `Network`
+- `GO Terms`
 
-- switch to **Heatmap**
-- choose a cell state from the dropdown
-- inspect the gene rows
-- click a gene row to update the right-side gene-detail panel
+The right result viewer is:
 
-Use this when you want to see:
+- `Gene Detail`
 
-- how the selected cell state’s DE genes behave across the broader aligned atlas
-- how genes from a user-defined `.h5ad` cell annotation behave across the
-  populations used in the differential run
+Behavior:
 
-### Volcano view
+- selecting a gene from the left viewer updates Gene Detail
+- the Differential tab stays active while the differential job runs
+- after differential completes, Explore remains available and keeps its own
+  aligned-data plots
 
-What it is showing:
+The Differential tab also provides:
 
-- one point per gene for the selected cell state
-- x-axis: `log2 fold change`
-- y-axis: `-log10(FDR)`
+- a differential ZIP download
+- PDF export for the active left differential view
+- PDF export for the selected Gene Detail plot
 
-How to use it:
+## Resetting the interface
 
-- switch to **Volcano**
-- choose the cell state
-- click a point to select a gene
+After a dataset has been uploaded, a `Reset data` button appears in the header.
 
-Use this when you want to see:
+This resets the interface without a manual browser reload and returns the app
+to a fresh pre-upload state.
 
-- which genes are strongly shifted in Group 1 vs Group 2
-- both effect size and significance in the same view
+## Local run
 
-### Network view
-
-What it is showing:
-
-- an interactive network for the selected cell state
-- each node is a gene
-- edges represent the network relationships produced by the differential workflow
-
-How to use it:
-
-- switch to **Network**
-- choose the cell state
-- zoom, pan, and inspect the graph
-- click a node to send that gene to the right-side gene-detail panel
-
-Use this when you want to see:
-
-- gene relationships rather than only ranked DEGs
-
-### GO Terms view
-
-What it is showing:
-
-- the top GO-enrichment terms for the selected cell state
-- only the top 15 terms are shown
-- the hover contains the overlap genes associated with that GO term
-
-How to use it:
-
-- switch to **GO Terms**
-- choose the cell state
-- hover over a bar to inspect the overlap genes
-- click the term to choose a gene from that term for the right-side panel
-
-Use this when you want to see:
-
-- which biological processes are enriched in the selected aligned cell state
-
-## 7. Use the Gene Detail panel
-
-The right-side **Gene Detail** panel is driven by the current gene selected from
-the left-side visualization.
-
-It can be updated from:
-
-- a heatmap gene row
-- a volcano point
-- a network node
-- a GO term gene choice
-
-What it is showing:
-
-- a normalized expression **violin plot**
-- individual cell dots overlaid on the violins
-- Group 1 vs Group 2 for the selected gene in the selected cell state
-
-Below the violin plot, the statistics panel shows:
-
-- `P-value`
-- `FDR`
-- `log2FC`
-
-This panel answers:
-
-- whether the selected gene is more highly expressed in Group 1 or Group 2
-- how strong that change is
-- how statistically significant it is in that cell state
-
-## 8. Download the outputs
-
-Downloads are available from multiple places.
-
-Alignment-stage downloads:
-
-- assignments
-- combined h5ad
-- UMAP outputs
-- baseline viewer PDFs
-
-Differential-stage downloads:
-
-- differential PDF exports from the active left-side view
-- the differential ZIP archive
-
-The differential ZIP excludes `.h5ad` files from the packaged archive.
-
-## 9. Reopen an existing job
-
-If the server still retains the job files, the job can be revisited without
-re-uploading the original data.
-
-Typical use:
-
-- open the web app
-- load or revisit the existing job state on the same server
-- continue reviewing the alignment or differential outputs
-
-## 10. Troubleshooting
-
-### The page looks stale or controls do not update
-
-- do a hard refresh in the browser
-
-### The upload completed but later panels do not appear
-
-- wait for the server to finish updating job status
-- then refresh the job state in the interface
-
-### Differential results are empty for a view
-
-- some visualizations only exist for specific cell states
-- switch the visualization type or choose another applicable cell state
-
-### The wrong cells or groups seem to be selected
-
-Check that the intended fields were chosen in:
-
-- **Filter data to display**
-- **Cell-state aligned to**
-- **Group values from**
-
-If you uploaded `.h5ad` files with multiple annotation fields, the web app can
-use different `.obs` columns for display filtering and for differential
-analysis.
-
-### Docker deployment changed but the app still behaves the old way
-
-Rebuild the container:
+From the repo root:
 
 ```bash
-docker compose up --build -d
+uvicorn altanalyze3.components.cellHarmony.webapp.app:app --reload
 ```
 
-### The app is served under a subpath such as `/cell-harmony`
+Open:
 
-Make sure `CELLHARMONY_ROOT_PATH` is set consistently for that deployment.
+```text
+http://127.0.0.1:8000
+```

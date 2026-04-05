@@ -193,6 +193,25 @@ body {
   flex-wrap: wrap;
 }
 
+.differential-head-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.differential-head-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: nowrap;
+}
+
+.differential-head-download-row {
+  width: 100%;
+}
+
 .field {
   display: grid;
   gap: 6px;
@@ -564,6 +583,10 @@ select:disabled {
   max-width: 220px;
 }
 
+#differential-result-population {
+  min-width: 280px;
+}
+
 @media (max-width: 1100px) {
   .grid,
   .plots {
@@ -608,5 +631,351 @@ select:disabled {
 
   .gene-stat-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+.compact-shell {
+  min-height: 100vh;
+  padding: 18px 18px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.compact-hero {
+  max-width: 100%;
+  margin: 0;
+  align-items: center;
+  gap: 16px;
+  position: relative;
+  display: flex;
+  justify-content: space-between;
+}
+
+.compact-hero .hero-copy {
+  min-width: 0;
+}
+
+.compact-hero h1 {
+  font-size: 2.4rem;
+}
+
+.sandbox-main {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: block;
+}
+
+.sandbox-run-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.sandbox-run-grid.preupload-mode {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+}
+
+.sandbox-run-grid > .panel {
+  height: 660px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.sandbox-run-grid.preupload-mode #qc-panel {
+  display: none !important;
+}
+
+.sandbox-run-grid.preupload-mode #reference-preview-panel {
+  grid-column: 2;
+}
+
+.sandbox-run-grid.workflow-mode #reference-preview-panel {
+  display: none;
+}
+
+.sandbox-preview-panel {
+  min-height: 0;
+  height: 660px;
+  padding: 8px;
+}
+
+.sandbox-preview-panel.hidden {
+  display: none;
+}
+
+.workspace-tabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.hero-centered-tabs {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.hero-links {
+  margin-left: auto;
+}
+
+.workspace-tab-btn {
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: rgba(255, 255, 255, 0.78);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 9px 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.workspace-tab-btn.active {
+  background: linear-gradient(135deg, rgba(29, 78, 216, 0.12), rgba(15, 118, 110, 0.12));
+  color: var(--ink);
+  border-color: rgba(29, 78, 216, 0.28);
+  box-shadow: 0 12px 24px rgba(29, 78, 216, 0.08);
+}
+
+.workspace-panel {
+  display: none;
+  min-height: 0;
+}
+
+.workspace-panel.active {
+  display: block;
+  min-height: 0;
+}
+
+.explore-workspace {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 340px minmax(0, 1fr);
+  gap: 16px;
+}
+
+.explore-controls-panel,
+.explore-results-column,
+.differential-controls-panel,
+.differential-results-column {
+  min-height: 0;
+}
+
+.explore-controls-panel {
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+}
+
+.explore-controls-panel.hidden {
+  display: none;
+}
+
+.explore-controls-panel #results-form {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.panel-head-stack {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.panel-head-column {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+}
+
+.panel-head-topline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.panel-head-stack h2 {
+  margin: 0;
+}
+
+.expression-head-stack {
+  flex: 1 1 auto;
+}
+
+.expression-head-stack #gene-query {
+  max-width: 240px;
+}
+
+.inline-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  min-width: 180px;
+}
+
+.inline-field.hidden {
+  display: none;
+}
+
+.compact-inline-field {
+  min-width: 190px;
+}
+
+.inline-field span {
+  font-size: 0.72rem;
+}
+
+.explore-results-column {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.differential-workspace {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 340px minmax(0, 1fr);
+  gap: 16px;
+  align-items: stretch;
+}
+
+.differential-controls-panel {
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+  min-height: 860px;
+}
+
+.differential-controls-panel.hidden {
+  display: none;
+}
+
+.differential-results-column {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.explorer-empty {
+  min-height: 560px;
+  border-radius: 18px;
+  border: 1px dashed rgba(148, 163, 184, 0.35);
+  background: rgba(255, 255, 255, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1rem;
+}
+
+.explorer-empty.hidden {
+  display: none;
+}
+
+.plots {
+  margin-top: 0;
+}
+
+#baseline-results-view.hidden,
+#differential-results-view.hidden {
+  display: none;
+}
+
+#baseline-results-view {
+  min-height: 560px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+#differential-results-view {
+  min-height: 860px;
+}
+
+#reference-preview-plot {
+  min-height: 100%;
+}
+
+#baseline-results-view > .panel,
+#differential-results-view > .panel {
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+#upload-panel,
+#qc-panel {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+#sample-container {
+  max-height: 280px;
+}
+
+#job-log {
+  flex: 1 1 auto;
+  max-height: none;
+  min-height: 0;
+}
+
+.download-btn {
+  padding: 14px 16px;
+  font-size: 0.92rem;
+}
+
+@media (max-width: 1500px) {
+  .sandbox-run-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .explore-workspace,
+  .differential-workspace {
+    grid-template-columns: 300px minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 1180px) {
+  .compact-shell {
+    height: auto;
+  }
+
+  .compact-hero {
+    position: static;
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .sandbox-run-grid,
+  .explore-workspace,
+  .differential-workspace,
+  #baseline-results-view,
+  .differential-plots {
+    grid-template-columns: 1fr;
+  }
+
+  .sandbox-run-grid.preupload-mode #reference-preview-panel {
+    grid-column: auto;
+  }
+
+  .sandbox-run-grid > .panel,
+  .sandbox-preview-panel,
+  #reference-preview-panel {
+    height: auto;
+  }
+
+  .hero-centered-tabs,
+  .hero-links {
+    position: static;
+    transform: none;
+    margin-left: 0;
   }
 }

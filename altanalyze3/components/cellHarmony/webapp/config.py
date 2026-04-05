@@ -12,7 +12,7 @@ DEFAULT_REFERENCE_REGISTRY = BASE_DIR.parent / "flask" / "reference_config.json"
 
 def load_config(overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     cfg: Dict[str, Any] = {
-        "APP_TITLE": "cellHarmony-lite Portal",
+        "APP_TITLE": "cellHarmony web",
         "MAX_CONTENT_LENGTH": 1024 * 1024 * 1024,
         "ROOT_PATH": os.getenv("CELLHARMONY_ROOT_PATH", "").strip(),
         "JOB_STORAGE": os.getenv("CELLHARMONY_JOB_STORAGE", str(DEFAULT_JOB_STORAGE)),

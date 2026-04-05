@@ -12,6 +12,7 @@ let loadedGeneSuggestionsJobId = null;
 let loadedDisplayFiltersJobId = null;
 let currentDisplayFiltersMeta = null;
 let currentJobStatus = "";
+let previousJobStatus = "";
 let currentJobSpecies = "";
 let currentJobReference = "";
 let referenceRerunPending = false;
@@ -136,6 +137,23 @@ function buildReferencePreviewColorMap(populations) {
   return new Map(ordered.map((population, index) => [population, colors[index]]));
 }
 
+function buildStableUmapPopulationOrder(umapData) {
+  const ordered = [];
+  const seen = new Set();
+  const appendPopulation = (population) => {
+    const label = String(population || "").trim();
+    if (!label || seen.has(label)) {
+      return;
+    }
+    seen.add(label);
+    ordered.push(label);
+  };
+
+  (umapData?.reference || []).forEach((point) => appendPopulation(point.population));
+  (umapData?.query || []).forEach((point) => appendPopulation(point.population));
+  return ordered;
+}
+
 function networkEdgeColor(edge) {
   const interactionType = String(edge?.data("interaction_type") || "").toLowerCase();
   if (interactionType.includes("transcription")) {
@@ -167,6 +185,8 @@ function resetExpressionSurface() {
     // Ignore Plotly cleanup errors when the plot is not initialized.
   }
   plot.innerHTML = "";
+  plot.style.height = "";
+  plot.style.minHeight = "";
 }
 
 function markerNetworkPopulations() {
@@ -549,11 +569,13 @@ function median(values) {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  initExplorerSandbox();
   initSpeciesSelect();
   initSampleRows();
   hookForms();
   updateWorkflowPanels(null);
   updateDifferentialUi(null);
+  updateResetDataButton();
   loadReferencePreview();
 });
 
@@ -671,6 +693,7 @@ function hookForms() {
   document.getElementById("qc-form").addEventListener("submit", handleQcSubmit);
   document.getElementById("differential-form").addEventListener("submit", handleDifferentialSubmit);
   document.getElementById("results-form").addEventListener("submit", handleResultsSubmit);
+  document.getElementById("reset-data-btn").addEventListener("click", resetWorkspaceData);
   document.getElementById("results-job-id").addEventListener("change", handleResultsJobChange);
   document.getElementById("gene-query").addEventListener("change", () => refreshResults());
   document.getElementById("expression-mode").addEventListener("change", () => {
@@ -731,6 +754,101 @@ function hookForms() {
     currentDifferentialGene = "";
     loadDifferentialVisualization();
   });
+}
+
+function updateResetDataButton() {
+  const button = document.getElementById("reset-data-btn");
+  if (!button) {
+    return;
+  }
+  const hasDataset = Boolean(document.getElementById("upload-job-id").value.trim() || currentJobStatus);
+  button.classList.toggle("hidden", !hasDataset);
+}
+
+function resetWorkspaceData() {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+
+  currentUmapData = null;
+  currentExpressionData = null;
+  loadedResultsJobId = null;
+  loadedGeneSuggestionsJobId = null;
+  loadedDisplayFiltersJobId = null;
+  currentDisplayFiltersMeta = null;
+  previousJobStatus = "";
+  currentJobStatus = "";
+  currentJobSpecies = "";
+  currentJobReference = "";
+  referenceRerunPending = false;
+  currentMarkerAnalysis = null;
+  currentDifferentialState = null;
+  currentDifferentialGene = "";
+  currentDifferentialPopulation = "";
+  lastDownloadArtifactSignature = "";
+
+  if (differentialCy) {
+    differentialCy.destroy();
+    differentialCy = null;
+  }
+  if (expressionCy) {
+    expressionCy.destroy();
+    expressionCy = null;
+  }
+
+  document.getElementById("upload-job-id").value = "";
+  document.getElementById("qc-job-id").value = "";
+  document.getElementById("results-job-id").value = "";
+  const uploadJobIdDisplay = document.getElementById("upload-job-id-display");
+  uploadJobIdDisplay.textContent = "";
+  uploadJobIdDisplay.classList.add("hidden");
+
+  document.getElementById("download-links").innerHTML = "";
+  document.getElementById("job-log").textContent = "";
+  document.getElementById("qc-cell-status").textContent = "QC cell counts will appear here while the analysis runs.";
+  document.getElementById("differential-message").textContent =
+    "Differential analysis is enabled when the job contains two or more samples.";
+  document.getElementById("differential-archive-link").classList.add("hidden");
+
+  setUploadProgress(0, false);
+  document.getElementById("job-progress").style.width = "0%";
+  document.getElementById("job-progress-label").textContent = "0%";
+  document.getElementById("differential-progress").style.width = "0%";
+  document.getElementById("differential-progress-label").textContent = "0%";
+
+  clearGeneSuggestions();
+  clearDisplayFilters();
+  updateExpressionModeOptions();
+  resetDifferentialResults();
+  resetExpressionSurface();
+
+  const umapPlot = document.getElementById("umap-plot");
+  try {
+    Plotly.purge(umapPlot);
+  } catch (_) {
+    // Ignore Plotly cleanup errors when the plot is not initialized.
+  }
+  umapPlot.innerHTML = "";
+
+  const previewPlot = document.getElementById("reference-preview-plot");
+  try {
+    Plotly.purge(previewPlot);
+  } catch (_) {
+    // Ignore Plotly cleanup errors when the plot is not initialized.
+  }
+  previewPlot.innerHTML = "";
+
+  const sampleContainer = document.getElementById("sample-container");
+  sampleContainer.innerHTML = "";
+  sampleCount = 0;
+  addSampleRow();
+
+  setExplorerTab("run");
+  updateWorkflowPanels(null);
+  updateDifferentialUi(null);
+  updateResetDataButton();
+  loadReferencePreview();
 }
 
 async function parseApiResponse(resp) {
@@ -832,6 +950,7 @@ async function handleJobSubmit(evt) {
     document.getElementById("results-job-id").value = data.job_id;
     loadedResultsJobId = null;
     setResultMode("baseline");
+    updateResetDataButton();
     await loadJobState(data.job_id);
   } catch (err) {
     setUploadProgress(0, false);
@@ -936,7 +1055,7 @@ async function handleDifferentialSubmit(evt) {
       throw new Error(data.detail || "Failed to start differential analysis.");
     }
     updateDifferentialUi(data);
-    setResultMode("baseline");
+    setExplorerTab("differential");
     startStatusPolling(jobId);
   } catch (err) {
     alert(err.message);
@@ -992,6 +1111,7 @@ async function pollStatus(jobId) {
 }
 
 function applyJobStatus(jobId, data) {
+  previousJobStatus = currentJobStatus;
   currentJobStatus = String(data.status || "").trim().toLowerCase();
   currentJobSpecies = String(data.species || currentJobSpecies || "");
   currentJobReference = String(data.reference || currentJobReference || "");
@@ -1017,9 +1137,18 @@ function applyJobStatus(jobId, data) {
   if (!document.getElementById("results-job-id").value) {
     document.getElementById("results-job-id").value = jobId;
   }
+  updateResetDataButton();
 
   updateDifferentialUi(data.differential_ui || null);
   updateReferenceChangeState();
+
+  const alignmentJustCompleted =
+    previousJobStatus !== "completed" &&
+    currentJobStatus === "completed" &&
+    !referenceRerunPending;
+  if (alignmentJustCompleted) {
+    setExplorerTab("explore");
+  }
 
   if (data.status === "completed" && !referenceRerunPending) {
     loadGeneSuggestions(jobId);
@@ -1055,17 +1184,22 @@ function updateWorkflowPanels(status) {
   const normalizedStatus = String(status || "").trim().toLowerCase();
   const hasUploadedJob = Boolean(normalizedStatus);
   const hasCompletedAlignment = normalizedStatus === "completed";
+  const runGrid = document.getElementById("sandbox-run-grid");
   const qcPanel = document.getElementById("qc-panel");
-  const resultsPanel = document.getElementById("results-panel");
   const differentialPanel = document.getElementById("differential-panel");
+  const exploreControlsPanel = document.getElementById("explore-controls-panel");
   const previewPanel = document.getElementById("reference-preview-panel");
   const baseline = document.getElementById("baseline-results-view");
   const differential = document.getElementById("differential-results-view");
 
   qcPanel.classList.toggle("hidden", !hasUploadedJob);
-  resultsPanel.classList.toggle("hidden", !hasCompletedAlignment);
   differentialPanel.classList.toggle("hidden", !hasCompletedAlignment);
+  exploreControlsPanel.classList.toggle("hidden", !hasCompletedAlignment);
   previewPanel.classList.toggle("hidden", hasUploadedJob);
+  if (runGrid) {
+    runGrid.classList.toggle("preupload-mode", !hasUploadedJob);
+    runGrid.classList.toggle("workflow-mode", hasUploadedJob);
+  }
 
   if (!hasCompletedAlignment) {
     baseline.classList.add("hidden");
@@ -1285,6 +1419,8 @@ async function populateDownloadLinks(jobId, statusData = null) {
 function updateDifferentialUi(state) {
   currentDifferentialState = state;
   const panel = document.getElementById("differential-panel");
+  const emptyState = document.getElementById("differential-tab-empty");
+  const resultsView = document.getElementById("differential-results-view");
   const intro = document.getElementById("differential-intro");
   const populationSelect = document.getElementById("differential-population");
   const sampleFieldSelect = document.getElementById("differential-sample-field");
@@ -1347,6 +1483,13 @@ function updateDifferentialUi(state) {
   document.getElementById("differential-progress-label").textContent = `${progress}%`;
 
   if (!state) {
+    if (emptyState) {
+      emptyState.textContent = "Available after alignment completes for jobs with two or more samples.";
+      emptyState.classList.remove("hidden");
+    }
+    if (resultsView) {
+      resultsView.classList.add("hidden");
+    }
     intro.textContent = "Available after alignment completes for jobs with two or more samples.";
     message.textContent = "Differential analysis is enabled when the job contains two or more samples.";
     archiveLink.classList.add("hidden");
@@ -1356,10 +1499,21 @@ function updateDifferentialUi(state) {
   }
 
   if (!showPanel) {
+    if (emptyState) {
+      emptyState.textContent = "Differential gene analyses between biological groups (i.e., disease versus controls) are only enabled when two or more samples (multiple h5 files or a single h5ad) are uploaded for the job.";
+      emptyState.classList.remove("hidden");
+    }
+    if (resultsView) {
+      resultsView.classList.add("hidden");
+    }
     archiveLink.classList.add("hidden");
     resetDifferentialResults();
     setResultMode("baseline");
     return;
+  }
+
+  if (emptyState) {
+    emptyState.classList.add("hidden");
   }
 
   intro.textContent = enabled
@@ -1852,7 +2006,7 @@ function renderDifferentialGeneDetail(payload) {
     pointpos: 0,
     jitter: 0.28,
     marker: {
-      size: 4,
+      size: 2,
       opacity: 0.35,
       color: index === 0 ? "#dc2626" : "#2563eb",
     },
@@ -2144,7 +2298,7 @@ function updateBaselineFilterSummaries() {
 }
 
 function getPlotDotScale() {
-  const value = Number(document.getElementById("plot-dot-scale")?.value || "0.25");
+  const value = Number(document.getElementById("plot-dot-scale")?.value || "0.5");
   return Number.isFinite(value) && value > 0 ? value * 4 : 1;
 }
 
@@ -2157,14 +2311,8 @@ function setResultMode(mode) {
     setResultsControlsDisabled(false);
     return;
   }
-  if (mode === "differential") {
-    baseline.classList.add("hidden");
-    differential.classList.remove("hidden");
-    setResultsControlsDisabled(true);
-    return;
-  }
   baseline.classList.remove("hidden");
-  differential.classList.add("hidden");
+  differential.classList.toggle("hidden", mode !== "differential");
   setResultsControlsDisabled(false);
 }
 
@@ -2217,6 +2365,7 @@ function renderCurrentUmap() {
   const layout = {
     paper_bgcolor: "rgba(0,0,0,0)",
     plot_bgcolor: "rgba(255,255,255,0.9)",
+    height: 560,
     margin: { t: 20, l: 40, r: 20, b: 40 },
     hovermode: "closest",
     xaxis: { showgrid: false, zeroline: false },
@@ -2290,6 +2439,11 @@ function renderCurrentUmap() {
         sampleFractions: entry.sampleFractions,
       }))
       .sort((a, b) => b.meanFraction - a.meanFraction || a.population.localeCompare(b.population));
+    const maxLabelLength = ranked.reduce(
+      (maxLength, entry) => Math.max(maxLength, String(entry.population || "").length),
+      0
+    );
+    const leftMargin = Math.max(70, Math.min(120, 36 + maxLabelLength * 5));
 
     Plotly.newPlot("umap-plot", [
       {
@@ -2311,7 +2465,8 @@ function renderCurrentUmap() {
     ], {
       ...layout,
       title: "Cell frequency",
-      margin: { t: 36, l: 170, r: 20, b: 40 },
+      height: Math.max(320, ranked.length * 17 + 90),
+      margin: { t: 36, l: leftMargin, r: 20, b: 40 },
       xaxis: {
         title: `Mean fraction of filtered cells per ${sampleField}`,
         range: [0, 1],
@@ -2320,7 +2475,11 @@ function renderCurrentUmap() {
         zeroline: false,
       },
       yaxis: {
-        automargin: true,
+        tickmode: "array",
+        tickvals: ranked.map((entry) => entry.population),
+        ticktext: ranked.map((entry) => entry.population),
+        tickfont: { size: 9 },
+        automargin: false,
         autorange: "reversed",
         showgrid: false,
         zeroline: false,
@@ -2346,7 +2505,7 @@ function renderCurrentUmap() {
       name: "Query",
     });
   } else {
-    const populations = [...new Set(currentUmapData.query.map((p) => p.population))];
+    const populations = buildStableUmapPopulationOrder(currentUmapData);
     const colorMap = buildReferencePreviewColorMap(populations);
     const labelPoints = relaxReferencePreviewLabels(
       buildPopulationCentroids(currentUmapData.query),
@@ -2498,6 +2657,7 @@ function renderExpressionMessage(message, title = "Expression unavailable") {
     title,
     paper_bgcolor: "rgba(0,0,0,0)",
     plot_bgcolor: "rgba(255,255,255,0.9)",
+    height: 560,
     margin: { t: 48, l: 32, r: 32, b: 32 },
     xaxis: { visible: false },
     yaxis: { visible: false },
@@ -2556,21 +2716,22 @@ function renderCurrentExpression() {
   }
   if (mode === "violin") {
     if (currentExpressionData.source === "reference") {
-      resetExpressionSurface();
-      const trace = {
-        type: "bar",
-        x: currentExpressionData.violin.map((entry) => entry.population),
-        y: currentExpressionData.violin.map((entry) => entry.mean),
+    resetExpressionSurface();
+    const trace = {
+      type: "bar",
+      x: currentExpressionData.violin.map((entry) => entry.population),
+      y: currentExpressionData.violin.map((entry) => entry.mean),
         marker: { color: "#475569", opacity: 0.85 },
       };
-      Plotly.newPlot("expression-plot", [trace], {
-        title: `${currentExpressionData.gene} (reference centroid expression, top 10 states)`,
-        paper_bgcolor: "rgba(0,0,0,0)",
-        plot_bgcolor: "rgba(255,255,255,0.9)",
-        margin: { t: 36, l: 48, r: 20, b: 120 },
-      });
-      return;
-    }
+    Plotly.newPlot("expression-plot", [trace], {
+      title: `${currentExpressionData.gene} (reference centroid expression, top 10 states)`,
+      paper_bgcolor: "rgba(0,0,0,0)",
+      plot_bgcolor: "rgba(255,255,255,0.9)",
+      height: 560,
+      margin: { t: 36, l: 48, r: 20, b: 120 },
+    });
+    return;
+  }
     resetExpressionSurface();
     const violinTraces = currentExpressionData.violin.map((entry) => ({
       type: "violin",
@@ -2579,14 +2740,15 @@ function renderCurrentExpression() {
       box: { visible: false },
       meanline: { visible: true },
       points: "all",
-      jitter: 0.18,
+      jitter: 0.3,
       pointpos: 0,
-      marker: { size: 3 * dotScale, opacity: 0.45 },
+      marker: { size: 3 * dotScale, opacity: 0.55 },
     }));
     Plotly.newPlot("expression-plot", violinTraces, {
       title: `${currentExpressionData.gene} (top 10 states by mean)`,
       paper_bgcolor: "rgba(0,0,0,0)",
       plot_bgcolor: "rgba(255,255,255,0.9)",
+      height: 560,
       margin: { t: 36, l: 48, r: 20, b: 120 },
     });
     return;
@@ -2644,6 +2806,7 @@ function renderCurrentExpression() {
       : `${currentExpressionData.gene} expression`,
     paper_bgcolor: "rgba(0,0,0,0)",
     plot_bgcolor: "rgba(255,255,255,0.9)",
+    height: 560,
     margin: { t: 36, l: 48, r: 20, b: 40 },
     xaxis: { showgrid: false, zeroline: false },
     yaxis: { showgrid: false, zeroline: false },
@@ -2710,4 +2873,51 @@ function downloadExpressionImage() {
     apiPath(`/jobs/${jobId}/expression/pdf?${params.toString()}`),
     "_blank",
   );
+}
+
+let activeExplorerTab = "run";
+
+function initExplorerSandbox() {
+  const buttons = Array.from(document.querySelectorAll(".workspace-tab-btn"));
+  buttons.forEach((button) => {
+    button.addEventListener("click", () => {
+      const tab = String(button.dataset.tab || "run");
+      setExplorerTab(tab);
+    });
+  });
+  setExplorerTab("run");
+}
+
+function setExplorerTab(tab) {
+  activeExplorerTab = tab;
+  document.querySelectorAll(".workspace-tab-btn").forEach((button) => {
+    button.classList.toggle("active", button.dataset.tab === tab);
+  });
+  document.querySelectorAll(".workspace-panel").forEach((panel) => {
+    panel.classList.toggle("active", panel.dataset.tabPanel === tab);
+  });
+}
+
+function syncExplorerWorkspace(preferredTab = null) {
+  const baseline = document.getElementById("baseline-results-view");
+  const differential = document.getElementById("differential-results-view");
+  const hasBaseline = Boolean(baseline && !baseline.classList.contains("hidden"));
+  const hasDifferential = Boolean(differential && !differential.classList.contains("hidden"));
+
+  if (preferredTab === "run") {
+    setExplorerTab("run");
+    return;
+  }
+
+  if (preferredTab === "differential") {
+    setExplorerTab("differential");
+    return;
+  }
+  if (preferredTab === "explore" && hasBaseline) {
+    setExplorerTab("explore");
+    return;
+  }
+  if (!hasBaseline && !hasDifferential && activeExplorerTab === "explore") {
+      setExplorerTab("run");
+  }
 }

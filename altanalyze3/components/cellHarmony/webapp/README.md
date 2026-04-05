@@ -1,159 +1,192 @@
-# cellHarmony-lite FastAPI portal
+# cellHarmony web
 
-This directory provides a browser-testable FastAPI front end for the existing
-`cellHarmony_lite` and `approximate_umap` pipeline. It is intended as the
-production-oriented successor to the older Flask demo: same core workflow,
-cleaner API layer, easier deployment behind a reverse proxy, and a UI that can
-be tested immediately in a web browser.
+`cellHarmony web` aligns single-cell datasets to a reference atlas, provides an
+interactive Explore workspace for UMAP and gene-expression review, and supports
+group-based differential analysis in a dedicated Differential workspace.
 
-Current web interface capabilities include:
+## Run locally
 
-- upload one or more `.h5` or `.h5ad` single-cell files as a job
-- preserve compatible `.obs` metadata from uploaded `.h5ad` files
-- optionally identify cell-state marker genes during the alignment workflow
-- export marker heatmap outputs and NetPerspective marker networks
-- filter the displayed cells in the UMAP and expression viewers by selected
-  `.obs` fields and values
-- filter the interactive MarkerHeatmap viewer by the same selected `.obs`
-  fields and values
-- run differential analysis using a user-selected cell-state field from `.obs`
-- define numerator and denominator values from a separate `.obs` grouping field
-- optionally switch differential comparison type between `cells` and
-  `pseudobulk` when enough grouped values are available
-
-Results navigation now includes:
-
-- baseline Panel 3 expression modes:
-  - `UMAP`
-  - `Violin`
-  - `MarkerHeatmap` when marker outputs exist
-  - `MarkerNetwork` when marker networks exist
-- downloadable marker-analysis archive:
-  - `Download marker genes ZIP`
-
-## Related docs
-
-- [cellHarmony-lite documentation](../../../../docs/cellHarmony.md)
-- [cellHarmony-differential documentation](../../../../docs/cellHarmony_differential.md)
-- [How to Use cellHarmony web](./HOW_TO_USE.md)
-
-## Quick start
+From the repo root:
 
 ```bash
-cd altanalyze3/altanalyze3/components/cellHarmony/webapp
-python3 -m venv .venv
-source .venv/bin/activate
-pip install fastapi uvicorn python-multipart jinja2 plotly
 uvicorn altanalyze3.components.cellHarmony.webapp.app:app --reload
 ```
 
-Open `http://127.0.0.1:8000`.
+Open:
 
-## Docker for a cloud VM
-
-This web app can run as a single container with persisted job storage. The
-Docker assets live in this directory:
-
-- [Dockerfile](./Dockerfile)
-- [docker-compose.yml](./docker-compose.yml)
-- [requirements.docker.txt](./requirements.docker.txt)
-
-From `altanalyze3/altanalyze3/components/cellHarmony/webapp`:
-
-```bash
-docker compose up --build
+```text
+http://127.0.0.1:8000
 ```
 
-Then open `http://<vm-ip>:8000`.
+## Interface overview
+
+The promoted interface is organized into three top-level tabs:
+
+- `Run`
+  - upload files
+  - configure QC and alignment
+  - review the reference preview before upload
+- `Explore`
+  - inspect aligned UMAPs
+  - inspect gene expression by UMAP or violin plot
+  - review marker heatmaps and marker networks when marker analysis is enabled
+  - download assignments, the combined h5ad, and marker ZIP outputs
+- `Differential`
+  - compare biological groups after alignment completes
+  - inspect heatmap, volcano, network, GO terms, and gene detail views
+
+## Accepted inputs
+
+Upload one file per sample.
+
+Accepted formats:
+
+- `.h5`
+- `.h5ad`
+
+Behavior by input type:
+
+- multiple `.h5` files support group-based differential analysis
+- a single `.h5ad` can also support group-based differential analysis when the
+  `.obs` metadata contain multiple biological groups
+- a single `.h5` upload does not enable group differential analysis
+
+Compatible `.obs` metadata from uploaded `.h5ad` files are preserved and reused
+for:
+
+- Explore tab filtering
+- Differential cell-state selection
+- Differential biological-group selection
+
+## Alignment workflow
+
+In `Run`:
+
+1. choose `Species`
+2. choose `Reference`
+3. add one or more samples
+4. upload files
+5. review QC settings
+6. click `Save QC and run`
+
+QC/alignment settings include:
+
+- `Min genes`
+- `Min counts`
+- `Min cells`
+- `Mito %`
+- `Minimum cosine similarity score`
+- `Identify cell-state marker genes`
+
+When alignment completes:
+
+- the app switches to `Explore`
+- aligned results become available immediately
+- if the job supports grouped comparisons, the `Differential` tab becomes usable
+
+## Marker analysis
+
+When `Identify cell-state marker genes` is `TRUE`:
+
+- markerFinder is run on the aligned dataset
+- a marker heatmap PDF and TSV outputs are exported
+- redundant top-ranked marker tables are exported for network generation
+- NetPerspective marker networks are exported per cell state
+- a ZIP archive becomes available in Explore downloads
+
+Explore then exposes two additional expression modes:
+
+- `MarkerHeatmap`
+- `MarkerNetwork`
+
+## Explore workspace
+
+The Explore tab keeps aligned results available even after differential
+analysis has been run.
+
+### Approximate UMAP
+
+The left viewer supports:
+
+- `UMAP broad`
+- `UMAP cell types`
+- `Cell frequency`
 
 Notes:
 
-- Job data is persisted to `cellHarmony/webapp/jobs` on the host via a bind mount.
-- If you serve the app under a subpath such as `/cell-harmony`, set
-  `CELLHARMONY_ROOT_PATH=/cell-harmony` so the frontend and API requests use
-  that prefix.
-- The container sets `CELLHARMONY_JOB_STORAGE=/srv/cellharmony/jobs`.
-- The default reference registry is baked into the image at:
-  `/app/altanalyze3/components/cellHarmony/flask/reference_config.json`
-- If you deploy behind Nginx or Caddy, keep the container on port `8000` and
-  terminate TLS at the reverse proxy.
+- `Cell frequency` reports normalized fractions per sample using the currently
+  filtered cells
+- cluster colors are kept consistent with the reference preview color mapping
 
-Useful commands:
+### Expression
 
-```bash
-docker compose up --build -d
-docker compose logs -f
-docker compose down
-```
+The right viewer supports:
 
-## API docs
+- `UMAP`
+- `Violin`
+- `MarkerHeatmap` when marker outputs exist
+- `MarkerNetwork` when marker networks exist
 
-- Browser API: FastAPI serves interactive OpenAPI docs at `http://127.0.0.1:8000/docs`
-- Dedicated approximate UMAP endpoint notes: [approximate_umap_api.md](./approximate_umap_api.md)
+The `Marker cell state` dropdown only appears for `MarkerNetwork`.
 
-## Configuration
+### Explore filters
 
-Environment variables:
+`Filter data to display` restricts the visible cells used in:
 
-- `CELLHARMONY_ROOT_PATH`
-- `CELLHARMONY_JOB_STORAGE`
-- `CELLHARMONY_REFERENCE_REGISTRY`
-- `CELLHARMONY_MAX_FILES`
-- `CELLHARMONY_JOB_WORKERS`
+- Approximate UMAP
+- Expression UMAP
+- Violin
+- MarkerHeatmap
+- Cell frequency
 
-By default the app reuses the existing reference registry at:
+These filters affect visualization only. They do not rerun alignment.
 
-`altanalyze3/components/cellHarmony/flask/reference_config.json`
+## Differential workspace
 
-## Daily retention cleanup
+The Differential tab is used for comparisons between biological groups within
+cell states.
 
-The web app stores each job under `cellHarmony/webapp/jobs/<job_id>` with a
-`job.json` metadata file. A cleanup helper is included at:
+It is enabled only when:
 
-`cellHarmony/webapp/cleanup_jobs.py`
+- two or more samples were uploaded for the job, or
+- one `.h5ad` contains multiple biological groups in reusable `.obs` metadata
 
-It deletes only jobs that are safe to purge:
+Controls include:
 
-- top-level terminal status only: `completed`, `failed`, `cancelled`, `canceled`
-- never deletes `uploaded`, `queued`, or `processing` jobs
-- never deletes a job whose nested differential status is still `queued` or `processing`
-- uses `updated_at` from `job.json` and falls back to `created_at`
+- `Cell-state aligned to`
+- `Group values from`
+- `Comparison Type`
+  - `cells`
+  - `pseudobulk` when applicable
+- `Group 1 (numerator)`
+- `Group 2 (denominator)`
 
-Recommended first pass:
+The interactive explorer supports:
 
-```bash
-cd altanalyze3/altanalyze3/components
-python3 cellHarmony/webapp/cleanup_jobs.py --retain-days 7 --keep-latest 5 --dry-run
-```
+- `Heatmap`
+- `Volcano`
+- `Network`
+- `GO Terms`
 
-Then enable real deletion:
+Selecting genes from those results populates the `Gene Detail` viewer on the
+right.
 
-```bash
-cd altanalyze3/altanalyze3/components
-python3 cellHarmony/webapp/cleanup_jobs.py --retain-days 7 --keep-latest 5
-```
+## Downloads
 
-For macOS, a launchd template is provided at:
+Explore downloads can include:
 
-`cellHarmony/webapp/launchd/org.cellharmony.jobs-retention.plist`
+- assignments
+- combined h5ad
+- marker genes ZIP
 
-Update the paths in that plist for your machine, then install it:
+Differential downloads can include:
 
-```bash
-cp cellHarmony/webapp/launchd/org.cellharmony.jobs-retention.plist ~/Library/LaunchAgents/
-launchctl unload ~/Library/LaunchAgents/org.cellharmony.jobs-retention.plist 2>/dev/null || true
-launchctl load ~/Library/LaunchAgents/org.cellharmony.jobs-retention.plist
-launchctl start org.cellharmony.jobs-retention
-```
+- differential ZIP
+- PDF exports for the active differential panel
+- PDF export for the selected gene detail plot
 
-Check the logs at:
+## Data location
 
-- `/tmp/cellharmony_jobs_retention.log`
-- `/tmp/cellharmony_jobs_retention.err`
+Job data are stored under:
 
-## Notes
-
-- The portal reuses the current filesystem-backed `JobStore` and threaded
-  `JobRunner`, so it is immediately testable without extra infrastructure.
-- For a high-scale deployment, keep this FastAPI layer and swap the job runner
-  to Redis/Celery or Redis/RQ plus a real persistent metadata store.
+- `cellHarmony/webapp/jobs`
