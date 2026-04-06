@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import json
+import os
 from pathlib import Path
 import re
 import zipfile
@@ -23,6 +24,15 @@ def _flatten_matrix(x) -> np.ndarray:
         return np.asarray(x.todense()).ravel()
     arr = np.asarray(x)
     return arr.ravel()
+
+
+def _normalize_h5ad_compression(value: Optional[str]) -> Optional[str]:
+    raw = str(value or "").strip().lower()
+    if not raw or raw in {"none", "off", "false", "null"}:
+        return None
+    if raw in {"lzf", "gzip"}:
+        return raw
+    return "lzf"
 
 
 def _split_uploads(files: List[Dict[str, str]], uploads_dir: Path) -> Tuple[List[Tuple[str, str]], Optional[str]]:
@@ -227,7 +237,7 @@ def _candidate_population_columns(h5ad_path: Path, preferred: Optional[List[str]
 def _candidate_group_fields(
     h5ad_path: Path,
     preferred: Optional[List[str]] = None,
-    max_categories: int = 120,
+    max_categories: Optional[int] = 120,
 ) -> Tuple[List[Dict[str, object]], Dict[str, List[str]]]:
     if not h5ad_path.exists():
         return [], {}
@@ -258,7 +268,9 @@ def _candidate_group_fields(
             continue
         values = series.astype(str).str.strip().replace({"nan": "", "None": ""})
         unique_values = [value for value in pd.Index(values[values != ""]).unique().tolist() if value]
-        if len(unique_values) < 2 or len(unique_values) > max_categories:
+        if len(unique_values) < 2:
+            continue
+        if max_categories is not None and len(unique_values) > max_categories:
             continue
         values_by_field[column_text] = unique_values
         options.append(
@@ -306,7 +318,7 @@ def _default_differential_state(enabled: bool, default_population_col: Optional[
     if enabled:
         message = "Select a cell-state field and numerator/denominator sample groups to run cellHarmony-differential."
     else:
-        message = "Differential analysis is available when the job includes two or more samples."
+        message = "Differential gene analyses between biological groups (i.e., disease versus controls) are only enabled when two or more samples (multiple h5 files or a single h5ad) are uploaded for the job."
     return {
         "status": "idle",
         "progress": 0,
@@ -401,7 +413,14 @@ def _write_selected_zip(source_dir: Path, archive_path: Path, *, suffixes: tuple
     return archive_path
 
 
-def run_cellharmony_pipeline(job_id: str, store: JobStore, registry_path: Path) -> Dict[str, Path]:
+def run_cellharmony_pipeline(
+    job_id: str,
+    store: JobStore,
+    registry_path: Path,
+    *,
+    export_approx_pdfs: bool = True,
+    h5ad_compression: Optional[str] = "lzf",
+) -> Dict[str, Path]:
     """
     Execute the production cellHarmony-lite + approximate UMAP workflow for a job.
 
@@ -425,6 +444,22 @@ def run_cellharmony_pipeline(job_id: str, store: JobStore, registry_path: Path) 
     qc = meta.get("qc", {})
 
     store.append_log(job_id, "Running cellHarmony_lite pipeline.")
+    store.append_log(
+        job_id,
+        (
+            "[params] alignment "
+            f"input_mode={'single_h5ad' if h5ad_file else 'multi_h5'} "
+            f"n_h5={len(h5_files)} "
+            f"h5ad={'yes' if h5ad_file else 'no'} "
+            f"reference={reference_entry['states_tsv']} "
+            f"min_genes={int(qc.get('min_genes', 200))} "
+            f"min_cells={int(qc.get('min_cells', 3))} "
+            f"min_counts={int(qc.get('min_counts', 500))} "
+            f"mit_percent={int(qc.get('mit_percent', 10))} "
+            f"align_cutoff={float(qc.get('align_cutoff', 0.1))} "
+            f"identify_markers={bool(qc.get('identify_markers', False))}"
+        ),
+    )
     _, combined_adata = cellHarmony_lite.combine_and_align_h5(
         h5_files=h5_files,
         h5ad_file=h5ad_file,
@@ -464,6 +499,16 @@ def run_cellharmony_pipeline(job_id: str, store: JobStore, registry_path: Path) 
             message="Identifying the top 50 unique markers for 100 cells per cell state.",
         )
         store.append_log(job_id, "Identifying cell-state marker genes.")
+        store.append_log(
+            job_id,
+            (
+                "[params] markerfinder "
+                f"cluster_key={query_cluster_key} top_n=50 cells_per_cluster=100 "
+                "marker_method=markerfinder export_networks=True network_top_n=1000 "
+                f"network_jobs={max(1, min(4, os.cpu_count() or 1))} "
+                "write_heatmap_tsv=False write_expression_tsv=False write_heatmap_cache=True"
+            ),
+        )
         marker_dir = outputs_dir / "marker_heatmap"
         marker_dir.mkdir(parents=True, exist_ok=True)
         marker_outputs = marker_mod.generate_marker_heatmap_from_adata(
@@ -476,6 +521,10 @@ def run_cellharmony_pipeline(job_id: str, store: JobStore, registry_path: Path) 
             seed=0,
             export_networks=True,
             network_top_n=1000,
+            network_jobs=max(1, min(4, os.cpu_count() or 1)),
+            write_heatmap_tsv=False,
+            write_expression_tsv=False,
+            write_heatmap_cache=True,
         )
         store.update_job(
             job_id,
@@ -483,22 +532,37 @@ def run_cellharmony_pipeline(job_id: str, store: JobStore, registry_path: Path) 
             message="Exporting NetPerspective marker networks.",
         )
         marker_archive_path = outputs_dir / "cell_state_marker_genes.zip"
-        _write_selected_zip(marker_dir, marker_archive_path, suffixes=(".pdf", ".tsv", ".png"))
+        _write_selected_zip(marker_dir, marker_archive_path, suffixes=(".pdf", ".tsv", ".png", ".npz"))
         marker_analysis = {
             "enabled": True,
             "cluster_key": query_cluster_key,
             "heatmap_pdf": str(marker_outputs["pdf"]),
-            "heatmap_tsv": str(marker_outputs["heatmap_tsv"]),
-            "expression_tsv": str(marker_outputs["heatmap_column_tsv"]),
             "centroids_tsv": str(marker_outputs["centroids_tsv"]),
             "markers_tsv": str(marker_outputs["markers_tsv"]),
             "archive": str(marker_archive_path),
             "networks": marker_outputs.get("networks", []),
         }
+        if marker_outputs.get("heatmap_tsv"):
+            marker_analysis["heatmap_tsv"] = str(marker_outputs["heatmap_tsv"])
+        if marker_outputs.get("heatmap_cache"):
+            marker_analysis["heatmap_cache"] = str(marker_outputs["heatmap_cache"])
+        if marker_outputs.get("heatmap_column_tsv"):
+            marker_analysis["expression_tsv"] = str(marker_outputs["heatmap_column_tsv"])
         store.append_log(job_id, "Cell-state marker gene export complete.")
 
     store.update_job(job_id, progress=82, message="Running approximate UMAP placement.")
     store.append_log(job_id, "Running approximate UMAP placement.")
+    resolved_h5ad_compression = _normalize_h5ad_compression(h5ad_compression)
+    store.append_log(
+        job_id,
+        (
+            "[params] approximate_umap "
+            f"query_cluster_key={query_cluster_key} "
+            f"reference_cluster_key={reference_cluster_key} "
+            f"umap_key=X_umap jitter=0.05 num_reference_cells=1 export_pdf={bool(export_approx_pdfs)} "
+            f"h5ad_compression={resolved_h5ad_compression or 'none'}"
+        ),
+    )
     reference_adata = approx_mod._load_reference_from_tsv(
         reference_entry["reference_coords_tsv"],
         reference_entry["reference_clusters_tsv"],
@@ -513,29 +577,37 @@ def run_cellharmony_pipeline(job_id: str, store: JobStore, registry_path: Path) 
         umap_key="X_umap",
         jitter=0.05,
         num_reference_cells=1,
+        copy_query=False,
     )
-    approx_result.query_adata.write(combined_h5ad_path, compression="gzip")
+    approx_mod.ensure_h5ad_compat_for_write(approx_result.query_adata)
+    approx_result.query_adata.write(combined_h5ad_path, compression=resolved_h5ad_compression)
 
     prefix = outputs_dir / "approximate"
     prefix.mkdir(parents=True, exist_ok=True)
     text_outputs = approx_result.write_text_outputs(prefix)
     _append_umap_to_assignments(assignments_path, Path(text_outputs["coordinates"]))
-    annotated_pdf, plain_pdf = approx_result.write_comparison_pdf(
-        reference_adata=reference_adata,
-        umap_key="X_umap",
-        reference_cluster_key=reference_cluster_key,
-        query_cluster_key=query_cluster_key,
-        output_path=prefix.with_name(prefix.name + "-comparison.pdf"),
-    )
+    annotated_pdf = None
+    plain_pdf = None
+    if export_approx_pdfs:
+        annotated_pdf, plain_pdf = approx_result.write_comparison_pdf(
+            reference_adata=reference_adata,
+            umap_key="X_umap",
+            reference_cluster_key=reference_cluster_key,
+            query_cluster_key=query_cluster_key,
+            output_path=prefix.with_name(prefix.name + "-comparison.pdf"),
+        )
+    else:
+        store.append_log(job_id, "Skipping approximate UMAP PDF export (CELLHARMONY_EXPORT_APPROX_PDFS=false).")
 
     artifacts = {
         "assignments": assignments_path,
         "combined_h5ad": combined_h5ad_path,
         "umap_coordinates": Path(text_outputs["coordinates"]),
         "umap_placeholder_expression": Path(text_outputs["placeholder_expression"]),
-        "umap_pdf": Path(annotated_pdf),
-        "umap_pdf_plain": Path(plain_pdf),
     }
+    if annotated_pdf and plain_pdf:
+        artifacts["umap_pdf"] = Path(annotated_pdf)
+        artifacts["umap_pdf_plain"] = Path(plain_pdf)
     if marker_archive_path is not None:
         artifacts["marker_genes_zip"] = marker_archive_path
     for key, path in artifacts.items():
@@ -556,14 +628,24 @@ def run_cellharmony_pipeline(job_id: str, store: JobStore, registry_path: Path) 
     sample_fields, sample_values = _candidate_group_fields(
         combined_h5ad_path,
         preferred=["Library", "group", "sample"],
+        max_categories=None if upload_profile.get("single_h5ad") else 120,
     )
-    population_field_values = {str(candidate.get("value", "")).strip() for candidate in all_population_columns if str(candidate.get("value", "")).strip()}
-    sample_fields = [field for field in sample_fields if str(field.get("value", "")).strip() not in population_field_values]
-    sample_values = {
-        key: value
-        for key, value in sample_values.items()
-        if str(key).strip() not in population_field_values
-    }
+    if not upload_profile.get("single_h5ad"):
+        population_field_values = {
+            str(candidate.get("value", "")).strip()
+            for candidate in all_population_columns
+            if str(candidate.get("value", "")).strip()
+        }
+        sample_fields = [
+            field
+            for field in sample_fields
+            if str(field.get("value", "")).strip() not in population_field_values
+        ]
+        sample_values = {
+            key: value
+            for key, value in sample_values.items()
+            if str(key).strip() not in population_field_values
+        }
     default_population_col = next(
         (
             candidate["value"]
@@ -592,7 +674,8 @@ def run_cellharmony_pipeline(job_id: str, store: JobStore, registry_path: Path) 
             sample_fields[0]["value"] if sample_fields else None,
         )
     max_group_values = max((len(values) for values in sample_values.values()), default=0)
-    differential_enabled = bool(upload_profile["differential_eligible"] and (max_group_values >= 2 or len(sample_names) >= 2))
+    pseudobulk_allowed = bool(upload_profile.get("single_h5ad") or upload_profile.get("total_files", 0) >= 4)
+    differential_enabled = bool(upload_profile["differential_eligible"])
     differential_options = {
         "enabled": differential_enabled,
         "sample_names": sample_names,
@@ -601,6 +684,7 @@ def run_cellharmony_pipeline(job_id: str, store: JobStore, registry_path: Path) 
         "default_sample_field": default_sample_field,
         "population_columns": population_columns,
         "default_population_col": default_population_col,
+        "comparison_types": ["cells", "pseudobulk"] if pseudobulk_allowed else ["cells"],
         "upload_profile": upload_profile,
     }
 
@@ -671,6 +755,16 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
         progress=15,
     )
     print(f"[INFO] Running cellHarmony-differential for {case_label} vs {control_label}")
+    store.append_log(
+        job_id,
+        (
+            "[params] differential "
+            f"population_col={population_col} "
+            f"sample_field={sample_field or '<auto>'} "
+            f"comparison_type={comparison_type} "
+            f"group1={group1_samples} group2={group2_samples}"
+        ),
+    )
 
     adata = ad.read_h5ad(combined_h5ad)
     if population_col not in adata.obs.columns:
@@ -702,6 +796,14 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
         f"[INFO] Differential sample matching uses obs['{sample_col}'] with "
         f"group1={resolved_group1} and group2={resolved_group2}"
     )
+    store.append_log(
+        job_id,
+        (
+            "[params] differential_resolved_groups "
+            f"sample_col={sample_col} "
+            f"resolved_group1={resolved_group1} resolved_group2={resolved_group2}"
+        ),
+    )
 
     subset_mask = sample_values.isin(resolved_group1 + resolved_group2)
     if int(np.asarray(subset_mask).sum()) == 0:
@@ -721,6 +823,14 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
             message="Computing pseudobulk profiles across aligned cell states.",
             progress=30,
         )
+        store.append_log(
+            job_id,
+            (
+                "[params] pseudobulk "
+                f"population_col={population_col} sample_col={sample_col} "
+                f"covariate_col={web_group_col} min_cells=10"
+            ),
+        )
         _, pb_h5ad = cellHarmony_differential.compute_pseudobulk_per_population(
             adata,
             population_col=population_col,
@@ -736,6 +846,17 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
         job_id,
         message="Computing differential expression across aligned cell states.",
         progress=35,
+    )
+    store.append_log(
+        job_id,
+        (
+            "[params] differential_expression "
+            f"population_col={population_col} covariate_col={web_group_col} "
+            f"case_label={case_label} control_label={control_label} "
+            f"method=wilcoxon alpha=0.05 fc_thresh=1.2 "
+            f"min_cells_per_group={1 if make_pseudobulk else 20} "
+            f"use_rawp={bool(make_pseudobulk)}"
+        ),
     )
     de_store = cellHarmony_differential.run_de_for_comparisons(
         adata=adata,
@@ -774,6 +895,14 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
         job_id,
         message="Building GO-enriched cellHarmony heatmap.",
         progress=60,
+    )
+    store.append_log(
+        job_id,
+        (
+            "[params] enrichment_heatmap "
+            f"population_col={population_col} heatmap_fc_thresh=1.2 "
+            f"go_species={meta.get('species')} comparison_tag={comparison_tag}"
+        ),
     )
     background_genes = adata.var_names.astype(str)
     if "gene_symbols" in adata.var.columns:
@@ -823,10 +952,10 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
         goelite_payload=goelite_payload,
         show_go_terms=show_go_terms,
     )
-    heatmap_pdf = Path(heatmap_pdf)
-    heatmap_png = heatmap_pdf.with_suffix(".png")
-    heatmap_tsv = Path(heatmap_tsv)
-    heatmap_svg = heatmap_pdf.with_suffix(".svg")
+    heatmap_pdf = Path(heatmap_pdf) if heatmap_pdf else None
+    heatmap_png = heatmap_pdf.with_suffix(".png") if heatmap_pdf else None
+    heatmap_tsv = Path(heatmap_tsv) if heatmap_tsv else None
+    heatmap_svg = heatmap_pdf.with_suffix(".svg") if heatmap_pdf else None
 
     detailed_deg = de_store.get("detailed_deg", pd.DataFrame())
     summary_deg = de_store.get("summary_per_population", pd.DataFrame())
@@ -865,6 +994,10 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
         job_id,
         message="Rendering interaction networks for aligned cell states.",
         progress=80,
+    )
+    store.append_log(
+        job_id,
+        "[params] interaction_networks source=NetPerspective max_genes=None pval_column=fdr_or_pval"
     )
     networks: List[Dict[str, str]] = []
     try:
@@ -938,13 +1071,17 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
 
     differential_artifacts: Dict[str, Path] = {
         "archive": archive_path,
-        "heatmap_pdf": heatmap_pdf,
-        "heatmap_png": heatmap_png,
-        "heatmap_svg": heatmap_svg,
-        "heatmap_tsv": heatmap_tsv,
         "manifest": manifest_path,
         "differentials_only_h5ad": differential_h5ad_path,
     }
+    if heatmap_pdf is not None:
+        differential_artifacts["heatmap_pdf"] = heatmap_pdf
+    if heatmap_png is not None:
+        differential_artifacts["heatmap_png"] = heatmap_png
+    if heatmap_svg is not None:
+        differential_artifacts["heatmap_svg"] = heatmap_svg
+    if heatmap_tsv is not None:
+        differential_artifacts["heatmap_tsv"] = heatmap_tsv
     goelite_tsv = goelite_dir / f"GOElite_{NetPerspective.safe_component(comparison_tag)}.tsv"
     if goelite_tsv.exists():
         differential_artifacts["goelite_tsv"] = goelite_tsv

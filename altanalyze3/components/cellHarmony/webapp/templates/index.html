@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ app_title }}</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/modern-normalize@3.0.1/modern-normalize.min.css">
-    <link rel="stylesheet" href="{{ url_for('static', path='styles.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', path='styles.css') }}?v={{ styles_version }}">
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
     <script src="https://unpkg.com/cytoscape@3.30.4/dist/cytoscape.min.js"></script>
   </head>
@@ -109,6 +109,14 @@
               </div>
               <div class="notice" id="qc-cell-status">QC cell counts will appear here while the analysis runs.</div>
               <pre class="log-view" id="job-log"></pre>
+            </section>
+
+            <section class="panel hidden" id="qc-live-panel">
+              <div class="panel-head">
+                <h2>QC filter progress</h2>
+              </div>
+              <div id="qc-live-plot" class="plot-area"></div>
+              <div class="plot-caption" id="qc-live-caption">Live counts parsed from alignment log.</div>
             </section>
 
             <section class="panel sandbox-preview-panel" id="reference-preview-panel">
@@ -260,6 +268,7 @@
                 Differential analysis is enabled when the job contains two or more samples.
               </div>
               <a class="download-btn hidden" id="differential-archive-link" href="#" target="_blank" rel="noopener">Download differential ZIP</a>
+              <a class="download-btn hidden" id="differential-log-link" href="#" target="_blank" rel="noopener">Download log</a>
             </section>
 
             <section class="differential-results-column">
@@ -319,6 +328,6 @@
       window.__APP_ROOT_PATH__ = {{ app_root_path | tojson }};
       window.__REFERENCE_REGISTRY__ = {{ registry_json | safe }};
     </script>
-    <script src="{{ url_for('static', path='app.js') }}"></script>
-  </body>
+    <script src="{{ url_for('static', path='app.js') }}?v={{ app_js_version }}"></script>
+</body>
 </html>

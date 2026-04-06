@@ -39,12 +39,22 @@ class _JobLogStream(io.TextIOBase):
 class JobRunner:
     """Fire-and-forget background executor for processing jobs."""
 
-    def __init__(self, store: JobStore, registry_path: Path, max_workers: int = 2):
+    def __init__(
+        self,
+        store: JobStore,
+        registry_path: Path,
+        max_workers: int = 2,
+        *,
+        export_approx_pdfs: bool = True,
+        h5ad_compression: str = "lzf",
+    ):
         self.store = store
         self.registry_path = Path(registry_path)
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
         self._futures: Dict[str, Future] = {}
         self._lock = threading.Lock()
+        self.export_approx_pdfs = bool(export_approx_pdfs)
+        self.h5ad_compression = str(h5ad_compression or "lzf")
 
     def submit(self, job_id: str) -> None:
         self.submit_pipeline(job_id)
@@ -91,7 +101,13 @@ class JobRunner:
             time.sleep(0.1)
             log_stream = _JobLogStream(self.store, job_id)
             with contextlib.redirect_stdout(log_stream), contextlib.redirect_stderr(log_stream):
-                run_cellharmony_pipeline(job_id, self.store, self.registry_path)
+                run_cellharmony_pipeline(
+                    job_id,
+                    self.store,
+                    self.registry_path,
+                    export_approx_pdfs=self.export_approx_pdfs,
+                    h5ad_compression=self.h5ad_compression,
+                )
             log_stream.flush()
             self.store.update_job(job_id, status="completed", message="Job finished successfully.", progress=100)
             self.store.append_log(job_id, "Job completed.")

@@ -45,6 +45,7 @@ coverage.xml
 .hypothesis/
 cromwell-executions
 cromwell-workflow-logs
+_codex_archive/
 
 # IDE
 .vscode

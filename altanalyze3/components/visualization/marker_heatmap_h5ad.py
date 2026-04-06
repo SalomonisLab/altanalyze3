@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import sys
+import time
 import warnings
 
 import matplotlib
@@ -10,6 +12,7 @@ import pandas as pd
 from anndata import AnnData
 from pandas.errors import PerformanceWarning
 import scanpy as sc
+from scipy import sparse
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap, TwoSlopeNorm
 from altanalyze3.components.visualization import NetPerspective
 
@@ -51,6 +54,28 @@ class Tee:
     def flush(self):
         for stream in self.streams:
             stream.flush()
+
+
+def _log_step_timing(label, started_at, timings=None, key=None):
+    elapsed = max(0.0, float(time.perf_counter() - started_at))
+    print(f"[timing] {label}={elapsed:.2f}s")
+    if timings is not None:
+        timings[key or label] = round(elapsed, 2)
+    return elapsed
+
+
+def _write_heatmap_cache(cache_path, heatmap_df, row_clusters, column_clusters, ordered_cells):
+    matrix = np.asarray(heatmap_df.to_numpy(), dtype=np.float32)
+    row_ids = np.asarray([f"{c}:{g}" for c, g in zip(row_clusters, heatmap_df.index.tolist())], dtype=str)
+    col_ids = np.asarray([f"{c}:{b}" for c, b in zip(column_clusters, ordered_cells)], dtype=str)
+    col_barcodes = np.asarray([str(barcode) for barcode in ordered_cells], dtype=str)
+    np.savez_compressed(
+        cache_path,
+        matrix=matrix,
+        row_ids=row_ids,
+        col_ids=col_ids,
+        col_barcodes=col_barcodes,
+    )
 
 
 
@@ -251,56 +276,129 @@ def _get_expression_matrix(adata, use_raw, layer):
     return adata.X, adata.var_names
 
 
-def _compute_marker_stats(adata, cluster_key, markers_df, fdr_df, use_raw, layer):
+def _prepare_marker_stats_aggregates(adata, cluster_key, genes, use_raw, layer):
+    ordered_genes = pd.Index(pd.Series(genes, dtype=str)).drop_duplicates().tolist()
+    if not ordered_genes:
+        return None
+
+    matrix, var_names = _get_expression_matrix(adata, use_raw, layer)
+    var_names = pd.Index(var_names).astype(str)
+    gene_indexer = var_names.get_indexer(ordered_genes)
+    valid_gene_mask = gene_indexer >= 0
+    if not np.any(valid_gene_mask):
+        return None
+
+    selected_genes = pd.Index(ordered_genes)[valid_gene_mask].astype(str).tolist()
+    matrix = matrix[:, gene_indexer[valid_gene_mask]]
+
+    cluster_obs = adata.obs[cluster_key]
+    cluster_series = cluster_obs.astype(str)
+    unique_clusters = set(pd.unique(cluster_series))
+    if pd.api.types.is_categorical_dtype(cluster_obs):
+        cluster_order = [str(c) for c in cluster_obs.cat.categories if str(c) in unique_clusters]
+    else:
+        cluster_order = [str(c) for c in pd.unique(cluster_series)]
+    if not cluster_order:
+        return None
+
+    cluster_codes = pd.Categorical(cluster_series, categories=cluster_order, ordered=True).codes
+    valid_cells = cluster_codes >= 0
+    if not np.any(valid_cells):
+        return None
+
+    row_idx = np.nonzero(valid_cells)[0]
+    col_idx = cluster_codes[valid_cells]
+    indicator = sparse.csr_matrix(
+        (np.ones(len(row_idx), dtype=np.float32), (row_idx, col_idx)),
+        shape=(len(cluster_series), len(cluster_order)),
+    )
+
+    sums_matrix = indicator.T.dot(matrix)
+    if sparse.issparse(sums_matrix):
+        sums_values = sums_matrix.toarray()
+    else:
+        sums_values = np.asarray(sums_matrix)
+    counts_values = np.bincount(col_idx, minlength=len(cluster_order)).astype(float)
+    total_sum_values = np.asarray(matrix[valid_cells, :].sum(axis=0)).ravel().astype(float)
+    total_count = float(np.sum(valid_cells))
+
+    return {
+        "sums": pd.DataFrame(sums_values, index=cluster_order, columns=selected_genes),
+        "counts": pd.Series(counts_values, index=cluster_order),
+        "total_sum": pd.Series(total_sum_values, index=selected_genes),
+        "total_count": total_count,
+    }
+
+
+def _compute_marker_stats(adata, cluster_key, markers_df, fdr_df, use_raw, layer, aggregates=None):
     if markers_df.empty:
         return pd.DataFrame(columns=["Gene", "Fold", "Query Exp", "Ref Exp", "FDR p-value", "cluster"])
 
-    # Network export can intentionally repeat the same marker gene across clusters.
-    # Aggregate expression once per unique gene, then reuse those values while
-    # emitting one output row per marker record.
-    unique_genes = pd.Index(markers_df["gene"].astype(str)).unique().tolist()
-    expr_df = sc.get.obs_df(adata, keys=unique_genes, use_raw=use_raw, layer=layer)
-    cluster_series = adata.obs[cluster_key].astype(str)
-    expr_df[cluster_key] = cluster_series.values
-
-    sums = expr_df.groupby(cluster_key)[unique_genes].sum()
-    counts = expr_df.groupby(cluster_key).size()
-    total_sum = expr_df[unique_genes].sum(axis=0)
-    total_count = float(expr_df.shape[0])
-
-    rows = []
-    eps = 1e-9
-    for row in _progress(
-        markers_df.itertuples(index=False),
-        total=len(markers_df),
-        desc="Computing marker statistics",
-    ):
-        gene = row.gene
-        cluster = str(row.cluster)
-        if cluster not in sums.index or gene not in total_sum.index:
-            continue
-        query_sum = float(sums.loc[cluster, gene])
-        query_count = float(counts.loc[cluster])
-        query_mean = query_sum / max(query_count, 1.0)
-        ref_sum = float(total_sum[gene] - query_sum)
-        ref_count = max(total_count - query_count, 1.0)
-        ref_mean = ref_sum / ref_count
-        fold = float(np.log2((query_mean + eps) / (ref_mean + eps)))
-        fdr = np.nan
-        if fdr_df is not None and gene in fdr_df.index and cluster in fdr_df.columns:
-            fdr = float(fdr_df.loc[gene, cluster])
-        rows.append(
-            {
-                "Gene": gene,
-                "Fold": fold,
-                "Query Exp": query_mean,
-                "Ref Exp": ref_mean,
-                "FDR p-value": fdr,
-                "cluster": cluster,
-            }
+    if aggregates is None:
+        aggregates = _prepare_marker_stats_aggregates(
+            adata,
+            cluster_key,
+            markers_df["gene"].astype(str).tolist(),
+            use_raw,
+            layer,
         )
+    if not aggregates:
+        return pd.DataFrame(columns=["Gene", "Fold", "Query Exp", "Ref Exp", "FDR p-value", "cluster"])
 
-    return pd.DataFrame(rows)
+    sums = aggregates["sums"]
+    counts = aggregates["counts"]
+    total_sum = aggregates["total_sum"]
+    total_count = float(aggregates["total_count"])
+
+    sums_values = sums.to_numpy(dtype=float)
+    row_clusters = pd.Categorical(markers_df["cluster"].astype(str), categories=sums.index).codes
+    col_genes = pd.Categorical(markers_df["gene"].astype(str), categories=sums.columns).codes
+    valid = (row_clusters >= 0) & (col_genes >= 0)
+    if not np.any(valid):
+        return pd.DataFrame(columns=["Gene", "Fold", "Query Exp", "Ref Exp", "FDR p-value", "cluster"])
+
+    query_sum = np.full(len(markers_df), np.nan, dtype=float)
+    query_sum[valid] = sums_values[row_clusters[valid], col_genes[valid]]
+
+    marker_clusters = markers_df["cluster"].astype(str)
+    marker_genes = markers_df["gene"].astype(str)
+    query_count = counts.reindex(marker_clusters).to_numpy(dtype=float)
+    total_gene_sum = total_sum.reindex(marker_genes).to_numpy(dtype=float)
+
+    query_count = np.where(np.isfinite(query_count), query_count, 0.0)
+    total_gene_sum = np.where(np.isfinite(total_gene_sum), total_gene_sum, np.nan)
+
+    ref_sum = total_gene_sum - query_sum
+    ref_count = np.maximum(total_count - query_count, 1.0)
+    query_mean = query_sum / np.maximum(query_count, 1.0)
+    ref_mean = ref_sum / ref_count
+
+    eps = 1e-9
+    fold = np.log2((query_mean + eps) / (ref_mean + eps))
+
+    fdr = np.full(len(markers_df), np.nan, dtype=float)
+    if fdr_df is not None and not fdr_df.empty:
+        fdr_dedup = fdr_df.loc[~fdr_df.index.duplicated(keep="first")]
+        fdr_dedup = fdr_dedup.loc[:, ~fdr_dedup.columns.duplicated(keep="first")]
+        fdr_row = pd.Categorical(marker_genes, categories=fdr_dedup.index).codes
+        fdr_col = pd.Categorical(marker_clusters, categories=fdr_dedup.columns).codes
+        fdr_valid = (fdr_row >= 0) & (fdr_col >= 0)
+        if np.any(fdr_valid):
+            fdr_values = fdr_dedup.to_numpy(dtype=float)
+            fdr[fdr_valid] = fdr_values[fdr_row[fdr_valid], fdr_col[fdr_valid]]
+
+    out = pd.DataFrame(
+        {
+            "Gene": marker_genes,
+            "Fold": fold,
+            "Query Exp": query_mean,
+            "Ref Exp": ref_mean,
+            "FDR p-value": fdr,
+            "cluster": marker_clusters,
+        }
+    )
+    out = out.loc[np.isfinite(out["Query Exp"].to_numpy(dtype=float))].reset_index(drop=True)
+    return out
 
 
 def _order_cells_by_cluster(adata, cluster_key, cluster_order):
@@ -318,29 +416,34 @@ def _order_cells_by_cluster(adata, cluster_key, cluster_order):
     return ordered_cells, cluster_counts
 
 
-def _build_heatmap(adata, cluster_key, genes, cluster_order, use_raw, layer):
+def _build_heatmap(adata, cluster_key, genes, cluster_order, use_raw, layer, include_column_zscore=True):
     if not genes:
         return pd.DataFrame(), pd.DataFrame(), [], []
 
-    if use_raw:
-        if adata.raw is None:
-            raise ValueError("Requested use_raw=True but adata.raw is not set.")
-        gene_reference = adata.raw.var_names
-    else:
-        gene_reference = adata.var_names
-
-    genes_present = [g for g in genes if g in gene_reference]
+    matrix, gene_reference = _get_expression_matrix(adata, use_raw, layer)
+    gene_reference = pd.Index(gene_reference).astype(str)
+    genes_present = [str(g) for g in genes if str(g) in gene_reference]
     if not genes_present:
         return pd.DataFrame(), pd.DataFrame(), [], []
 
-    expr_df = sc.get.obs_df(adata, keys=genes_present, use_raw=use_raw, layer=layer)
     ordered_cells, cluster_counts = _order_cells_by_cluster(adata, cluster_key, cluster_order)
     if not ordered_cells:
         return pd.DataFrame(), pd.DataFrame(), [], []
 
-    expr_df = expr_df.loc[ordered_cells]
-    heatmap_raw_df = expr_df.T
-    heatmap_col_df = _zscore_columns(heatmap_raw_df)
+    gene_reference = pd.Index(gene_reference).astype(str)
+    cell_indexer = adata.obs_names.get_indexer(ordered_cells)
+    gene_indexer = gene_reference.get_indexer(genes_present)
+    if np.any(cell_indexer < 0) or np.any(gene_indexer < 0):
+        raise ValueError("Failed to align selected cells or genes for heatmap construction.")
+
+    submatrix = matrix[cell_indexer, :][:, gene_indexer]
+    if sparse.issparse(submatrix):
+        values = submatrix.toarray()
+    else:
+        values = np.asarray(submatrix)
+
+    heatmap_raw_df = pd.DataFrame(values.T, index=genes_present, columns=ordered_cells)
+    heatmap_col_df = _zscore_columns(heatmap_raw_df) if include_column_zscore else pd.DataFrame()
     heatmap_row_df = _zscore_rows(heatmap_raw_df)
     return heatmap_row_df, heatmap_col_df, cluster_counts, ordered_cells
 
@@ -371,6 +474,32 @@ def _build_marker_centroids(adata, cluster_key, genes, cluster_order, use_raw, l
         centroid_columns[str(cluster)] = normalized.reindex(genes)
 
     return pd.DataFrame(centroid_columns, index=genes)
+
+
+def _build_marker_centroids_from_aggregates(genes, cluster_order, aggregates):
+    if not genes or not aggregates:
+        return pd.DataFrame()
+    sums = aggregates.get("sums")
+    if sums is None or sums.empty:
+        return pd.DataFrame()
+
+    genes = [str(g) for g in genes if str(g) in sums.columns]
+    if not genes:
+        return pd.DataFrame()
+
+    ordered_clusters = [str(cluster) for cluster in cluster_order if str(cluster) in sums.index]
+    if not ordered_clusters:
+        ordered_clusters = [str(cluster) for cluster in sums.index]
+    if not ordered_clusters:
+        return pd.DataFrame()
+
+    cluster_gene_sums = sums.reindex(index=ordered_clusters, columns=genes, fill_value=0.0).to_numpy(dtype=float)
+    totals = cluster_gene_sums.sum(axis=1, keepdims=True)
+    normalized = np.zeros_like(cluster_gene_sums, dtype=float)
+    valid = totals[:, 0] > 0
+    if np.any(valid):
+        normalized[valid] = np.log2((cluster_gene_sums[valid] / totals[valid]) * 10000.0 + 1.0)
+    return pd.DataFrame(normalized.T, index=genes, columns=ordered_clusters)
 
 
 def _append_suffix_before_extension(path, suffix):
@@ -566,7 +695,33 @@ def _markerfinder_stats(adata, cluster_key, use_raw, layer):
     return p_df, r_df
 
 
-def _export_marker_networks(marker_stats, out_dir, network_top_n=1000):
+def _generate_single_marker_network(cluster, selected, interactions_df, output_prefix):
+    try:
+        pdf_path, png_path, tsv_path = NetPerspective.generate_network_for_genes(
+            selected,
+            interactions_df,
+            output_prefix,
+            gene_column="gene",
+            fold_change_column="log2fc",
+            pval_column="fdr" if "fdr" in selected.columns else None,
+            max_genes=None,
+        )
+    except NetPerspective.NetworkGenerationError as exc:
+        print(f"[WARN] No marker interaction edges found for {cluster}; skipping network export. {exc}")
+        return None
+    except ImportError as exc:
+        print(f"[WARN] Marker network export disabled: {exc}")
+        return None
+    return {
+        "id": os.path.basename(output_prefix),
+        "population": str(cluster),
+        "pdf": pdf_path,
+        "png": png_path,
+        "tsv": tsv_path,
+    }
+
+
+def _export_marker_networks(marker_stats, out_dir, network_top_n=1000, network_jobs=1):
     if marker_stats is None or marker_stats.empty:
         return []
     try:
@@ -585,6 +740,7 @@ def _export_marker_networks(marker_stats, out_dir, network_top_n=1000):
     working["Fold"] = pd.to_numeric(working.get("Fold"), errors="coerce")
     working["FDR p-value"] = pd.to_numeric(working.get("FDR p-value"), errors="coerce")
 
+    jobs = []
     for index, (cluster, cluster_df) in enumerate(working.groupby("cluster"), start=1):
         selected = (
             cluster_df.loc[:, [col for col in ("Gene", "Fold", "FDR p-value") if col in cluster_df.columns]]
@@ -602,32 +758,36 @@ def _export_marker_networks(marker_stats, out_dir, network_top_n=1000):
             network_id = f"{network_id}_{index}"
         used_ids.add(network_id)
         output_prefix = os.path.join(out_dir, network_id)
-        try:
-            pdf_path, png_path, tsv_path = NetPerspective.generate_network_for_genes(
-                selected,
-                interactions_df,
-                output_prefix,
-                gene_column="gene",
-                fold_change_column="log2fc",
-                pval_column="fdr" if "fdr" in selected.columns else None,
-                max_genes=None,
-            )
-        except NetPerspective.NetworkGenerationError as exc:
-            print(f"[WARN] No marker interaction edges found for {cluster}; skipping network export. {exc}")
-            continue
-        except ImportError as exc:
-            print(f"[WARN] Marker network export disabled: {exc}")
-            break
+        jobs.append((index, cluster, selected, output_prefix))
 
-        networks.append(
-            {
-                "id": network_id,
-                "population": str(cluster),
-                "pdf": pdf_path,
-                "png": png_path,
-                "tsv": tsv_path,
-            }
-        )
+    if not jobs:
+        return networks
+
+    max_workers = max(1, int(network_jobs or 1))
+    if max_workers <= 1:
+        for _, cluster, selected, output_prefix in jobs:
+            network = _generate_single_marker_network(cluster, selected, interactions_df, output_prefix)
+            if network is not None:
+                networks.append(network)
+        return networks
+
+    indexed_outputs = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {
+            executor.submit(_generate_single_marker_network, cluster, selected, interactions_df, output_prefix): idx
+            for idx, cluster, selected, output_prefix in jobs
+        }
+        for future in as_completed(future_map):
+            idx = future_map[future]
+            try:
+                network = future.result()
+            except Exception as exc:
+                print(f"[WARN] Marker network export task failed: {exc}")
+                continue
+            if network is not None:
+                indexed_outputs.append((idx, network))
+    indexed_outputs.sort(key=lambda x: x[0])
+    networks.extend([entry for _, entry in indexed_outputs])
     return networks
 
 
@@ -640,6 +800,7 @@ def generate_marker_heatmap_from_adata(
     markers_tsv=None,
     heatmap_tsv=None,
     heatmap_column_tsv=None,
+    heatmap_cache=None,
     marker_method="scanpy",
     method="wilcoxon",
     use_raw=False,
@@ -648,14 +809,34 @@ def generate_marker_heatmap_from_adata(
     seed=0,
     export_networks=False,
     network_top_n=1000,
+    network_jobs=1,
+    write_heatmap_tsv=True,
+    write_expression_tsv=True,
+    write_heatmap_cache=True,
 ):
+    total_started = time.perf_counter()
+    timings = {}
     out = str(out)
     out_dir = os.path.dirname(out) or "."
     base_name = os.path.splitext(os.path.basename(out))[0]
     markers_tsv = markers_tsv or os.path.join(out_dir, f"{base_name}_markers.tsv")
-    heatmap_tsv = heatmap_tsv or os.path.join(out_dir, f"{base_name}_fold_matrix.tsv")
-    heatmap_column_tsv = heatmap_column_tsv or os.path.join(out_dir, f"{base_name}_exp_matrix.tsv")
-    centroids_tsv = _append_suffix_before_extension(heatmap_tsv, ".centroids")
+    heatmap_tsv = (
+        heatmap_tsv or os.path.join(out_dir, f"{base_name}_fold_matrix.tsv")
+        if write_heatmap_tsv
+        else None
+    )
+    heatmap_column_tsv = (
+        heatmap_column_tsv or os.path.join(out_dir, f"{base_name}_exp_matrix.tsv")
+        if write_expression_tsv
+        else None
+    )
+    heatmap_cache = (
+        heatmap_cache or os.path.join(out_dir, f"{base_name}_fold_matrix.npz")
+        if write_heatmap_cache
+        else None
+    )
+    centroids_base = heatmap_tsv or os.path.join(out_dir, f"{base_name}_fold_matrix.tsv")
+    centroids_tsv = _append_suffix_before_extension(centroids_base, ".centroids")
     redundant_markers_tsv = os.path.join(out_dir, f"{base_name}_redundant_markers.tsv")
 
     if cluster_key not in adata.obs:
@@ -671,15 +852,23 @@ def generate_marker_heatmap_from_adata(
     if layer and layer not in adata.layers:
         raise KeyError(f"Layer '{layer}' not found in adata.layers.")
 
+    resolve_cluster_started = time.perf_counter()
     clusters = adata.obs[cluster_key].astype(str)
     lineage_order = _coerce_lineage_order(adata.uns.get("lineage_order", None))
     cluster_order = _resolve_cluster_order(clusters, lineage_order)
     print(f"[INFO] Resolved {len(cluster_order)} clusters.")
+    _log_step_timing(
+        "marker_heatmap.resolve_cluster_order",
+        resolve_cluster_started,
+        timings=timings,
+        key="resolve_cluster_order",
+    )
 
     adata.obs[cluster_key] = pd.Categorical(clusters, categories=cluster_order, ordered=True)
 
     effect_df = None
     fdr_df = None
+    marker_core_started = time.perf_counter()
     if marker_method == "markerfinder":
         print(f"[INFO] Running markerFinder using {'raw' if use_raw else (layer or 'X')} matrix.")
         pvals, effect_df = _markerfinder_stats(adata, cluster_key, use_raw, layer)
@@ -709,7 +898,14 @@ def generate_marker_heatmap_from_adata(
         if "logfoldchanges" not in rg_df.columns:
             raise ValueError("logfoldchanges missing; cannot enforce upregulated marker selection.")
         effect_df = rg_df.pivot_table(index="names", columns="group", values="logfoldchanges", aggfunc="first")
+    _log_step_timing(
+        "marker_heatmap.compute_markers",
+        marker_core_started,
+        timings=timings,
+        key="compute_markers",
+    )
 
+    unique_select_started = time.perf_counter()
     selected = _select_unique_markers(
         fdr_df,
         cluster_order,
@@ -718,9 +914,16 @@ def generate_marker_heatmap_from_adata(
         pval_threshold=0.001,
     )
     print(f"[INFO] Selected {selected.shape[0]} markers after FDR/effect filtering.")
+    _log_step_timing(
+        "marker_heatmap.select_unique_markers",
+        unique_select_started,
+        timings=timings,
+        key="select_unique_markers",
+    )
     if selected.empty:
         raise ValueError("No markers were selected. Check inputs and parameters.")
 
+    redundant_select_started = time.perf_counter()
     redundant_selected = _select_top_markers_per_cluster(
         fdr_df,
         cluster_order,
@@ -728,17 +931,30 @@ def generate_marker_heatmap_from_adata(
         effect_df=effect_df,
     )
     print(f"[INFO] Selected {redundant_selected.shape[0]} redundant markers for network export.")
+    _log_step_timing(
+        "marker_heatmap.select_redundant_markers",
+        redundant_select_started,
+        timings=timings,
+        key="select_redundant_markers",
+    )
 
     if cells_per_cluster and cells_per_cluster > 0:
         print(f"[INFO] Downsampling to {cells_per_cluster} cells per cluster (seed={seed}).")
     else:
         print("[INFO] Using all cells (no downsampling).")
+    downsample_started = time.perf_counter()
     adata_plot = downsample_cells_per_group(
         adata,
         cluster_key,
         cells_per_cluster=cells_per_cluster,
         seed=seed,
         group_order=cluster_order,
+    )
+    _log_step_timing(
+        "marker_heatmap.downsample_cells",
+        downsample_started,
+        timings=timings,
+        key="downsample_cells",
     )
     print(f"[INFO] Heatmap will use {adata_plot.n_obs} cells.")
     adata_plot.obs[cluster_key] = pd.Categorical(
@@ -749,6 +965,7 @@ def generate_marker_heatmap_from_adata(
 
     selected_genes = selected["gene"].tolist()
     print(f"[INFO] Building heatmap matrix for {len(selected_genes)} markers.")
+    build_heatmap_started = time.perf_counter()
     heatmap_df, heatmap_col_df, cluster_counts, ordered_cells = _build_heatmap(
         adata_plot,
         cluster_key,
@@ -756,6 +973,13 @@ def generate_marker_heatmap_from_adata(
         cluster_order,
         use_raw,
         layer,
+        include_column_zscore=write_expression_tsv,
+    )
+    _log_step_timing(
+        "marker_heatmap.build_heatmap_matrix",
+        build_heatmap_started,
+        timings=timings,
+        key="build_heatmap_matrix",
     )
     if heatmap_df.empty:
         raise ValueError("Heatmap data is empty after filtering genes.")
@@ -763,10 +987,42 @@ def generate_marker_heatmap_from_adata(
     column_clusters = adata_plot.obs[cluster_key].astype(str).loc[ordered_cells].tolist()
     row_clusters = selected.set_index("gene").loc[heatmap_df.index, "cluster"].astype(str).tolist()
     print("[INFO] Rendering heatmap.")
+    render_heatmap_started = time.perf_counter()
     _plot_heatmap(heatmap_df, out, cluster_counts, cluster_order, column_clusters, row_clusters)
+    _log_step_timing(
+        "marker_heatmap.render_heatmap_pdf",
+        render_heatmap_started,
+        timings=timings,
+        key="render_heatmap_pdf",
+    )
     print(f"Saved marker heatmap to: {out}")
 
     print("[INFO] Computing marker statistics for TSV.")
+    aggregate_stats_started = time.perf_counter()
+    stat_genes = pd.Index(
+        pd.concat(
+            [
+                selected["gene"].astype(str),
+                redundant_selected["gene"].astype(str),
+            ],
+            ignore_index=True,
+        )
+    ).drop_duplicates().tolist()
+    stats_aggregates = _prepare_marker_stats_aggregates(
+        adata,
+        cluster_key,
+        stat_genes,
+        use_raw,
+        layer,
+    )
+    _log_step_timing(
+        "marker_heatmap.prepare_stats_aggregates",
+        aggregate_stats_started,
+        timings=timings,
+        key="prepare_stats_aggregates",
+    )
+
+    marker_stats_started = time.perf_counter()
     marker_stats = _compute_marker_stats(
         adata,
         cluster_key,
@@ -774,10 +1030,25 @@ def generate_marker_heatmap_from_adata(
         fdr_df,
         use_raw,
         layer,
+        aggregates=stats_aggregates,
     )
-    marker_stats.to_csv(markers_tsv, sep="\t", index=False)
+    _log_step_timing(
+        "marker_heatmap.compute_marker_stats_unique",
+        marker_stats_started,
+        timings=timings,
+        key="compute_marker_stats_unique",
+    )
+    write_marker_stats_started = time.perf_counter()
+    marker_stats.to_csv(markers_tsv, sep="\t", index=False, float_format="%.4g")
+    _log_step_timing(
+        "marker_heatmap.write_marker_stats_tsv",
+        write_marker_stats_started,
+        timings=timings,
+        key="write_marker_stats_tsv",
+    )
     print(f"Saved marker stats TSV to: {markers_tsv}")
 
+    redundant_stats_started = time.perf_counter()
     redundant_marker_stats = _compute_marker_stats(
         adata,
         cluster_key,
@@ -785,39 +1056,107 @@ def generate_marker_heatmap_from_adata(
         fdr_df,
         use_raw,
         layer,
+        aggregates=stats_aggregates,
     )
-    redundant_marker_stats.to_csv(redundant_markers_tsv, sep="\t", index=False)
+    _log_step_timing(
+        "marker_heatmap.compute_marker_stats_redundant",
+        redundant_stats_started,
+        timings=timings,
+        key="compute_marker_stats_redundant",
+    )
+    write_redundant_stats_started = time.perf_counter()
+    redundant_marker_stats.to_csv(redundant_markers_tsv, sep="\t", index=False, float_format="%.4g")
+    _log_step_timing(
+        "marker_heatmap.write_redundant_marker_stats_tsv",
+        write_redundant_stats_started,
+        timings=timings,
+        key="write_redundant_marker_stats_tsv",
+    )
     print(f"Saved redundant marker stats TSV to: {redundant_markers_tsv}")
 
-    heatmap_tsv_df = heatmap_df.copy()
-    heatmap_tsv_df.index = [f"{c}:{g}" for c, g in zip(row_clusters, heatmap_tsv_df.index)]
-    heatmap_tsv_df.columns = [f"{c}:{b}" for c, b in zip(column_clusters, ordered_cells)]
-    heatmap_tsv_df.to_csv(heatmap_tsv, sep="\t")
-    print(f"Saved heatmap matrix TSV to: {heatmap_tsv}")
+    write_heatmap_matrices_started = time.perf_counter()
+    if write_heatmap_cache and heatmap_cache:
+        write_cache_started = time.perf_counter()
+        _write_heatmap_cache(
+            heatmap_cache,
+            heatmap_df,
+            row_clusters,
+            column_clusters,
+            ordered_cells,
+        )
+        _log_step_timing(
+            "marker_heatmap.write_heatmap_cache",
+            write_cache_started,
+            timings=timings,
+            key="write_heatmap_cache",
+        )
+        print(f"Saved heatmap cache to: {heatmap_cache}")
 
-    heatmap_col_tsv_df = heatmap_col_df.copy()
-    heatmap_col_tsv_df.index = [f"{c}:{g}" for c, g in zip(row_clusters, heatmap_col_tsv_df.index)]
-    heatmap_col_tsv_df.columns = [f"{c}:{b}" for c, b in zip(column_clusters, ordered_cells)]
-    heatmap_col_tsv_df.to_csv(heatmap_column_tsv, sep="\t")
-    print(f"Saved expression matrix TSV to: {heatmap_column_tsv}")
+    if write_heatmap_tsv and heatmap_tsv:
+        heatmap_tsv_df = heatmap_df.copy()
+        heatmap_tsv_df.index = [f"{c}:{g}" for c, g in zip(row_clusters, heatmap_tsv_df.index)]
+        heatmap_tsv_df.columns = [f"{c}:{b}" for c, b in zip(column_clusters, ordered_cells)]
+        heatmap_tsv_df.to_csv(heatmap_tsv, sep="\t", float_format="%.4g")
+        print(f"Saved heatmap matrix TSV to: {heatmap_tsv}")
+    else:
+        print("[INFO] Skipping fold heatmap TSV export.")
 
-    centroid_df = _build_marker_centroids(
-        adata,
-        cluster_key,
+    if write_expression_tsv and heatmap_column_tsv:
+        heatmap_col_tsv_df = heatmap_col_df.copy()
+        heatmap_col_tsv_df.index = [f"{c}:{g}" for c, g in zip(row_clusters, heatmap_col_tsv_df.index)]
+        heatmap_col_tsv_df.columns = [f"{c}:{b}" for c, b in zip(column_clusters, ordered_cells)]
+        heatmap_col_tsv_df.to_csv(heatmap_column_tsv, sep="\t", float_format="%.4g")
+    else:
+        print("[INFO] Skipping expression matrix TSV export.")
+    _log_step_timing(
+        "marker_heatmap.write_heatmap_tsvs",
+        write_heatmap_matrices_started,
+        timings=timings,
+        key="write_heatmap_tsvs",
+    )
+    if write_expression_tsv and heatmap_column_tsv:
+        print(f"Saved expression matrix TSV to: {heatmap_column_tsv}")
+
+    centroid_started = time.perf_counter()
+    centroid_df = _build_marker_centroids_from_aggregates(
         heatmap_df.index.tolist(),
         cluster_order,
-        use_raw,
-        layer,
+        stats_aggregates,
     )
     centroid_df.index = [_strip_marker_cluster_prefix(gene) for gene in centroid_df.index]
-    centroid_df.to_csv(centroids_tsv, sep="\t")
+    centroid_df.to_csv(centroids_tsv, sep="\t", float_format="%.4g")
+    _log_step_timing(
+        "marker_heatmap.build_and_write_centroids_tsv",
+        centroid_started,
+        timings=timings,
+        key="build_and_write_centroids_tsv",
+    )
     print(f"Saved centroid matrix TSV to: {centroids_tsv}")
 
     networks = []
     if export_networks:
         network_dir = os.path.join(out_dir, f"{base_name}_networks")
         print(f"[INFO] Exporting NetPerspective networks for up to {int(network_top_n)} markers per cluster.")
-        networks = _export_marker_networks(redundant_marker_stats, network_dir, network_top_n=network_top_n)
+        networks_started = time.perf_counter()
+        networks = _export_marker_networks(
+            redundant_marker_stats,
+            network_dir,
+            network_top_n=network_top_n,
+            network_jobs=network_jobs,
+        )
+        _log_step_timing(
+            "marker_heatmap.export_networks",
+            networks_started,
+            timings=timings,
+            key="export_networks",
+        )
+
+    _log_step_timing(
+        "marker_heatmap.total",
+        total_started,
+        timings=timings,
+        key="total",
+    )
 
     return {
         "pdf": out,
@@ -825,8 +1164,10 @@ def generate_marker_heatmap_from_adata(
         "redundant_markers_tsv": redundant_markers_tsv,
         "heatmap_tsv": heatmap_tsv,
         "heatmap_column_tsv": heatmap_column_tsv,
+        "heatmap_cache": heatmap_cache,
         "centroids_tsv": centroids_tsv,
         "networks": networks,
+        "timings": timings,
     }
 
 
@@ -958,6 +1299,27 @@ def main():
         default=1000,
         help="Top marker genes per cluster to use for network export (default 1000).",
     )
+    parser.add_argument(
+        "--network-jobs",
+        type=int,
+        default=1,
+        help="Parallel workers for per-cluster network generation (default 1).",
+    )
+    parser.add_argument(
+        "--skip-expression-tsv",
+        action="store_true",
+        help="Skip writing both expression-matrix and fold-heatmap TSV outputs.",
+    )
+    parser.add_argument(
+        "--heatmap-cache",
+        default=None,
+        help="Output compressed NPZ cache for the marker heatmap matrix.",
+    )
+    parser.add_argument(
+        "--skip-heatmap-cache",
+        action="store_true",
+        help="Skip writing the compressed heatmap cache NPZ.",
+    )
     parser.add_argument("--seed", type=int, default=0, help="Random seed for cell sampling.")
     args = parser.parse_args()
 
@@ -967,9 +1329,23 @@ def main():
     base_name = os.path.splitext(os.path.basename(args.out))[0]
     log_path = os.path.join(logs_dir, f"{base_name}.log")
     markers_tsv = args.markers_tsv or os.path.join(out_dir, f"{base_name}_markers.tsv")
-    heatmap_tsv = args.heatmap_tsv or os.path.join(out_dir, f"{base_name}_fold_matrix.tsv")
-    heatmap_column_tsv = args.heatmap_column_tsv or os.path.join(out_dir, f"{base_name}_exp_matrix.tsv")
-    centroids_tsv = _append_suffix_before_extension(heatmap_tsv, ".centroids")
+    heatmap_tsv = (
+        args.heatmap_tsv or os.path.join(out_dir, f"{base_name}_fold_matrix.tsv")
+        if not args.skip_expression_tsv
+        else None
+    )
+    heatmap_column_tsv = (
+        args.heatmap_column_tsv or os.path.join(out_dir, f"{base_name}_exp_matrix.tsv")
+        if not args.skip_expression_tsv
+        else None
+    )
+    heatmap_cache = (
+        args.heatmap_cache or os.path.join(out_dir, f"{base_name}_fold_matrix.npz")
+        if not args.skip_heatmap_cache
+        else None
+    )
+    centroids_base = heatmap_tsv or os.path.join(out_dir, f"{base_name}_fold_matrix.tsv")
+    centroids_tsv = _append_suffix_before_extension(centroids_base, ".centroids")
     redundant_markers_tsv = os.path.join(out_dir, f"{base_name}_redundant_markers.tsv")
 
     log_file = open(log_path, "w")
@@ -985,8 +1361,12 @@ def main():
         print(f"[INFO] Log file: {log_path}")
         print(f"[INFO] Marker TSV: {markers_tsv}")
         print(f"[INFO] Redundant marker TSV: {redundant_markers_tsv}")
-        print(f"[INFO] Heatmap TSV (fold matrix): {heatmap_tsv}")
-        print(f"[INFO] Heatmap TSV (expression matrix): {heatmap_column_tsv}")
+        if heatmap_tsv:
+            print(f"[INFO] Heatmap TSV (fold matrix): {heatmap_tsv}")
+        if heatmap_column_tsv:
+            print(f"[INFO] Heatmap TSV (expression matrix): {heatmap_column_tsv}")
+        if heatmap_cache:
+            print(f"[INFO] Heatmap cache (npz): {heatmap_cache}")
         print(f"[INFO] Centroid TSV: {centroids_tsv}")
 
         layer = args.layer
@@ -1026,164 +1406,54 @@ def main():
         if layer and layer not in adata.layers:
             raise KeyError(f"Layer '{layer}' not found in adata.layers.")
 
-        clusters = adata.obs[cluster_key].astype(str)
-        lineage_order = _coerce_lineage_order(adata.uns.get("lineage_order", None))
-        cluster_order = _resolve_cluster_order(clusters, lineage_order)
-        print(f"[INFO] Resolved {len(cluster_order)} clusters.")
-
-        adata.obs[cluster_key] = pd.Categorical(clusters, categories=cluster_order, ordered=True)
-
-        effect_df = None
-        fdr_df = None
-        if args.marker_method == "markerfinder":
-            print(
-                f"[INFO] Running markerFinder using {'raw' if args.use_raw else (layer or 'X')} matrix."
-            )
-            pvals, effect_df = _markerfinder_stats(adata, cluster_key, args.use_raw, layer)
-            fdr_df = pvals.apply(_bh_fdr, axis=0)
-        else:
-            n_genes = adata.raw.n_vars if args.use_raw and adata.raw is not None else adata.n_vars
-            print(f"[INFO] Running rank_genes_groups for {len(cluster_order)} clusters with {n_genes} genes.")
-
-            sc.tl.rank_genes_groups(
-                adata,
-                groupby=cluster_key,
-                method=args.method,
-                use_raw=args.use_raw,
-                layer=layer,
-                n_genes=n_genes,
-            )
-
-            rg_df = sc.get.rank_genes_groups_df(adata, group=None)
-            if rg_df.empty:
-                raise ValueError("rank_genes_groups produced no results.")
-
-            pval_col = "pvals_adj"
-            if pval_col not in rg_df.columns or not rg_df[pval_col].notna().any():
-                pval_col = "pvals"
-
-            pvals = rg_df.pivot_table(index="names", columns="group", values=pval_col, aggfunc="first")
-            if pval_col == "pvals_adj":
-                fdr_df = pvals.copy()
-            else:
-                fdr_df = pvals.apply(_bh_fdr, axis=0)
-
-            if "logfoldchanges" not in rg_df.columns:
-                raise ValueError("logfoldchanges missing; cannot enforce upregulated marker selection.")
-
-            effect_df = rg_df.pivot_table(index="names", columns="group", values="logfoldchanges", aggfunc="first")
-
-        selected = _select_unique_markers(
-            fdr_df,
-            cluster_order,
-            args.top_n,
-            effect_df=effect_df,
-            pval_threshold=0.001,
-        )
-        print(f"[INFO] Selected {selected.shape[0]} markers after FDR/effect filtering.")
-
-        redundant_selected = _select_top_markers_per_cluster(
-            fdr_df,
-            cluster_order,
-            250,
-            effect_df=effect_df,
-        )
-        print(f"[INFO] Selected {redundant_selected.shape[0]} redundant markers for network export.")
-
-        if selected.empty:
-            raise ValueError("No markers were selected. Check inputs and parameters.")
-
-        if args.cells_per_cluster and args.cells_per_cluster > 0:
-            print(
-                f"[INFO] Downsampling to {args.cells_per_cluster} cells per cluster (seed={args.seed})."
-            )
-        else:
-            print("[INFO] Using all cells (no downsampling).")
-        adata_plot = downsample_cells_per_group(
+        outputs = generate_marker_heatmap_from_adata(
             adata,
-            cluster_key,
+            cluster_key=cluster_key,
+            out=args.out,
+            top_n=args.top_n,
+            markers_tsv=markers_tsv,
+            heatmap_tsv=heatmap_tsv,
+            heatmap_column_tsv=heatmap_column_tsv,
+            heatmap_cache=heatmap_cache,
+            marker_method=args.marker_method,
+            method=args.method,
+            use_raw=args.use_raw,
+            layer=layer,
             cells_per_cluster=args.cells_per_cluster,
             seed=args.seed,
-            group_order=cluster_order,
+            export_networks=args.export_networks,
+            network_top_n=args.network_top_n,
+            network_jobs=args.network_jobs,
+            write_heatmap_tsv=not args.skip_expression_tsv,
+            write_expression_tsv=not args.skip_expression_tsv,
+            write_heatmap_cache=not args.skip_heatmap_cache,
         )
-        print(f"[INFO] Heatmap will use {adata_plot.n_obs} cells.")
-        adata_plot.obs[cluster_key] = pd.Categorical(
-            adata_plot.obs[cluster_key].astype(str),
-            categories=cluster_order,
-            ordered=True,
-        )
-
-        selected_genes = selected["gene"].tolist()
-        print(f"[INFO] Building heatmap matrix for {len(selected_genes)} markers.")
-        heatmap_df, heatmap_col_df, cluster_counts, ordered_cells = _build_heatmap(
-            adata_plot,
-            cluster_key,
-            selected_genes,
-            cluster_order,
-            args.use_raw,
-            layer,
-        )
-
-        if heatmap_df.empty:
-            raise ValueError("Heatmap data is empty after filtering genes.")
-
-        column_clusters = adata_plot.obs[cluster_key].astype(str).loc[ordered_cells].tolist()
-        row_clusters = selected.set_index("gene").loc[heatmap_df.index, "cluster"].astype(str).tolist()
-        print("[INFO] Rendering heatmap.")
-        _plot_heatmap(heatmap_df, args.out, cluster_counts, cluster_order, column_clusters, row_clusters)
-        print(f"Saved marker heatmap to: {args.out}")
-
-        print("[INFO] Computing marker statistics for TSV.")
-        marker_stats = _compute_marker_stats(
-            adata,
-            cluster_key,
-            selected,
-            fdr_df,
-            args.use_raw,
-            layer,
-        )
-        marker_stats.to_csv(markers_tsv, sep="\t", index=False)
-        print(f"Saved marker stats TSV to: {markers_tsv}")
-
-        redundant_marker_stats = _compute_marker_stats(
-            adata,
-            cluster_key,
-            redundant_selected,
-            fdr_df,
-            args.use_raw,
-            layer,
-        )
-        redundant_marker_stats.to_csv(redundant_markers_tsv, sep="\t", index=False)
-        print(f"Saved redundant marker stats TSV to: {redundant_markers_tsv}")
-
-        heatmap_tsv_df = heatmap_df.copy()
-        heatmap_tsv_df.index = [f"{c}:{g}" for c, g in zip(row_clusters, heatmap_tsv_df.index)]
-        heatmap_tsv_df.columns = [f"{c}:{b}" for c, b in zip(column_clusters, ordered_cells)]
-        heatmap_tsv_df.to_csv(heatmap_tsv, sep="\t")
-        print(f"Saved heatmap matrix TSV to: {heatmap_tsv}")
-
-        heatmap_col_tsv_df = heatmap_col_df.copy()
-        heatmap_col_tsv_df.index = [f"{c}:{g}" for c, g in zip(row_clusters, heatmap_col_tsv_df.index)]
-        heatmap_col_tsv_df.columns = [f"{c}:{b}" for c, b in zip(column_clusters, ordered_cells)]
-        heatmap_col_tsv_df.to_csv(heatmap_column_tsv, sep="\t")
-        print(f"Saved expression matrix TSV to: {heatmap_column_tsv}")
-
-        centroid_df = _build_marker_centroids(
-            adata,
-            cluster_key,
-            heatmap_df.index.tolist(),
-            cluster_order,
-            args.use_raw,
-            layer,
-        )
-        centroid_df.index = [_strip_marker_cluster_prefix(gene) for gene in centroid_df.index]
-        centroid_df.to_csv(centroids_tsv, sep="\t")
-        print(f"Saved centroid matrix TSV to: {centroids_tsv}")
-
-        if args.export_networks:
-            network_dir = os.path.join(out_dir, f"{base_name}_networks")
-            print(f"[INFO] Exporting NetPerspective networks for up to {int(args.network_top_n)} markers per cluster.")
-            _export_marker_networks(redundant_marker_stats, network_dir, network_top_n=args.network_top_n)
+        timings = outputs.get("timings", {}) if isinstance(outputs, dict) else {}
+        if timings:
+            ordered_keys = [
+                "resolve_cluster_order",
+                "compute_markers",
+                "select_unique_markers",
+                "select_redundant_markers",
+                "downsample_cells",
+                "build_heatmap_matrix",
+                "render_heatmap_pdf",
+                "prepare_stats_aggregates",
+                "compute_marker_stats_unique",
+                "write_marker_stats_tsv",
+                "compute_marker_stats_redundant",
+                "write_redundant_marker_stats_tsv",
+                "write_heatmap_cache",
+                "write_heatmap_tsvs",
+                "build_and_write_centroids_tsv",
+                "export_networks",
+                "total",
+            ]
+            summary = " | ".join(
+                f"{k}={float(timings[k]):.2f}s" for k in ordered_keys if k in timings
+            )
+            if summary:
+                print(f"[timing] marker_heatmap.summary {summary}")
 
         print(f"Saved log to: {log_path}")
     finally:

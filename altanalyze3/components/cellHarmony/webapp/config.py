@@ -10,6 +10,25 @@ DEFAULT_JOB_STORAGE = BASE_DIR / "jobs"
 DEFAULT_REFERENCE_REGISTRY = BASE_DIR.parent / "flask" / "reference_config.json"
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = str(raw).strip().lower()
+    if value in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if value in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _env_h5ad_compression(name: str, default: str = "lzf") -> str:
+    raw = str(os.getenv(name, default)).strip().lower()
+    if raw in {"lzf", "gzip", "none"}:
+        return raw
+    return default
+
+
 def load_config(overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     cfg: Dict[str, Any] = {
         "APP_TITLE": "cellHarmony web",
@@ -20,6 +39,8 @@ def load_config(overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "ALLOWED_EXTENSIONS": {"h5", "h5ad"},
         "MAX_FILES_PER_JOB": int(os.getenv("CELLHARMONY_MAX_FILES", "7")),
         "JOB_WORKERS": int(os.getenv("CELLHARMONY_JOB_WORKERS", "2")),
+        "EXPORT_APPROX_PDFS": _env_bool("CELLHARMONY_EXPORT_APPROX_PDFS", False),
+        "H5AD_COMPRESSION": _env_h5ad_compression("CELLHARMONY_H5AD_COMPRESSION", "lzf"),
         "TEMPLATE_DIR": str(BASE_DIR / "templates"),
         "STATIC_DIR": str(BASE_DIR / "static"),
         "INDEX_TEMPLATE": "index.html",

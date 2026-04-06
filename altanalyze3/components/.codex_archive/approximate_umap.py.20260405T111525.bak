@@ -29,13 +29,12 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-import time
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
 import anndata as ad
-import h5py
 import matplotlib
 import matplotlib.pyplot as plt
 import itertools
@@ -73,61 +72,6 @@ def _clean_string(value: object) -> str:
     if pd.isna(value):
         return ""
     return str(value).strip()
-
-
-def _log_timing(label: str, started_at: float) -> float:
-    elapsed = max(0.0, time.perf_counter() - started_at)
-    message = f"[timing] {label}={elapsed:.2f}s"
-    logging.info(message)
-    print(message)
-    return elapsed
-
-
-def ensure_h5ad_compat_for_write(adata: ad.AnnData) -> ad.AnnData:
-    """
-    Normalize known problematic uns payloads so files remain readable across
-    mixed anndata versions (notably older readers that fail on null IOSpec).
-    """
-    if not isinstance(getattr(adata, "uns", None), dict):
-        return adata
-    log1p_meta = adata.uns.get("log1p")
-    if isinstance(log1p_meta, dict) and log1p_meta.get("base", "__missing__") is None:
-        patched = dict(log1p_meta)
-        patched["base"] = float(np.e)
-        adata.uns["log1p"] = patched
-    return adata
-
-
-def _repair_null_log1p_base(path: Union[str, Path]) -> bool:
-    """
-    Repair legacy/invalid h5ad payloads where /uns/log1p/base is encoded as null.
-    Returns True if a patch was applied.
-    """
-    patched = False
-    with h5py.File(str(path), "r+") as handle:
-        if "uns" not in handle or "log1p" not in handle["uns"]:
-            return False
-        log1p_group = handle["uns"]["log1p"]
-        if not isinstance(log1p_group, h5py.Group) or "base" not in log1p_group:
-            return False
-        base_ds = log1p_group["base"]
-        encoding = str(base_ds.attrs.get("encoding-type", "")).strip().lower()
-        needs_patch = encoding == "null"
-        if not needs_patch:
-            try:
-                value = base_ds[()]
-                if isinstance(value, h5py.Empty):
-                    needs_patch = True
-            except Exception:
-                needs_patch = True
-        if not needs_patch:
-            return False
-        del log1p_group["base"]
-        new_ds = log1p_group.create_dataset("base", data=float(np.e))
-        new_ds.attrs["encoding-type"] = "numeric-scalar"
-        new_ds.attrs["encoding-version"] = "0.2.0"
-        patched = True
-    return patched
 
 
 @dataclass
@@ -209,19 +153,13 @@ def approximate_umap(
     custom_color_tsv: Optional[Union[str, Path]] = None,
     restrict_obs_field: Optional[str] = None,
     restrict_obs_value: Optional[str] = None,
-    copy_query: bool = True,
 ) -> ApproximateUMAPResult:
-    fn_started_at = time.perf_counter()
     if bool(restrict_obs_field) != bool(restrict_obs_value):
         raise ValueError(
             "restrict_obs_field and restrict_obs_value must be supplied together."
         )
-    step_started_at = time.perf_counter()
     query_adata = _load_adata(query)
     reference_adata = _load_adata(reference)
-    _log_timing("approximate_umap.load_inputs", step_started_at)
-
-    step_started_at = time.perf_counter()
     ref_cluster_key = reference_cluster_key or query_cluster_key
     plot_color_map = _load_custom_color_map(custom_color_tsv) if custom_color_tsv else None
 
@@ -234,9 +172,7 @@ def approximate_umap(
         jitter=jitter,
         num_reference_cells=num_reference_cells,
     )
-    _log_timing("approximate_umap.validate_inputs", step_started_at)
 
-    step_started_at = time.perf_counter()
     ref_clusters = reference_adata.obs[ref_cluster_key].astype(str)
     qry_clusters = query_adata.obs[query_cluster_key].astype(str)
 
@@ -309,9 +245,7 @@ def approximate_umap(
             "The following query clusters are absent from the reference: "
             + ", ".join(missing_clusters)
         )
-    _log_timing("approximate_umap.resolve_cluster_order", step_started_at)
 
-    step_started_at = time.perf_counter()
     logging.info(
         "Reference: %d cells across %d clusters.",
         reference_adata.n_obs,
@@ -337,12 +271,9 @@ def approximate_umap(
             "Skipping reference-only clusters:",
             ", ".join(unused_clusters),
         )
-    _log_timing("approximate_umap.dataset_summary", step_started_at)
 
-    step_started_at = time.perf_counter()
     coords_df = _embedding_to_df(reference_adata, umap_key)
-    cells_by_cluster: Dict[str, np.ndarray] = {}
-    coord_arrays_by_cluster: Dict[str, np.ndarray] = {}
+    cells_by_cluster: Dict[str, List[str]] = {}
     cluster_bounds: Dict[str, Tuple[float, float, float, float]] = {}
     coords_by_cluster = coords_df.copy()
     coords_by_cluster["cluster"] = ref_clusters.loc[coords_df.index].astype(str)
@@ -351,26 +282,20 @@ def approximate_umap(
         cluster_coords = coords_by_cluster[coords_by_cluster["cluster"] == cluster_key][["umap_0", "umap_1"]]
         if cluster_coords.empty:
             continue
-        cluster_cells = cluster_coords.index.to_numpy(dtype=object, copy=False)
-        cluster_coords_np = cluster_coords[["umap_0", "umap_1"]].to_numpy(dtype=np.float32, copy=False)
         q1 = cluster_coords.quantile(0.25)
         q3 = cluster_coords.quantile(0.75)
         iqr = q3 - q1
         lower = q1 - 1.5 * iqr
         upper = q3 + 1.5 * iqr
-        mask = (
-            (cluster_coords_np[:, 0] >= float(lower["umap_0"]))
-            & (cluster_coords_np[:, 0] <= float(upper["umap_0"]))
-            & (cluster_coords_np[:, 1] >= float(lower["umap_1"]))
-            & (cluster_coords_np[:, 1] <= float(upper["umap_1"]))
+        mask = cluster_coords.apply(
+            lambda row: (lower["umap_0"] <= row["umap_0"] <= upper["umap_0"])
+            and (lower["umap_1"] <= row["umap_1"] <= upper["umap_1"]),
+            axis=1,
         )
-        filtered_cells = cluster_cells[mask]
-        filtered_coords = cluster_coords_np[mask]
-        if filtered_cells.size == 0:
-            filtered_cells = cluster_cells
-            filtered_coords = cluster_coords_np
-        cells_by_cluster[cluster_key] = filtered_cells
-        coord_arrays_by_cluster[cluster_key] = filtered_coords
+        filtered = cluster_coords[mask]
+        if filtered.empty:
+            filtered = cluster_coords
+        cells_by_cluster[cluster_key] = filtered.index.tolist()
         x_low, x_high = float(lower["umap_0"]), float(upper["umap_0"])
         y_low, y_high = float(lower["umap_1"]), float(upper["umap_1"])
         if not np.isfinite(x_low) or not np.isfinite(x_high) or x_high <= x_low:
@@ -382,12 +307,12 @@ def approximate_umap(
             center = float(cluster_coords["umap_1"].median())
             y_low, y_high = center - span / 2.0, center + span / 2.0
         cluster_bounds[cluster_key] = (x_low, x_high, y_low, y_high)
-    _log_timing("approximate_umap.prepare_reference_clusters", step_started_at)
+
+    reference_counts = {cluster: len(indices) for cluster, indices in cells_by_cluster.items()}
+    query_counts = Counter(qry_clusters.astype(str))
 
     rng = np.random.default_rng(random_state)
-    qry_clusters_array = qry_clusters.to_numpy(dtype=str, copy=False)
-    obs_names_array = query_adata.obs_names.to_numpy(dtype=object, copy=False)
-    coordinates_array = np.zeros((query_adata.n_obs, 2), dtype=np.float32)
+    records: List[Dict[str, float]] = []
     sampled: Dict[str, List[str]] = {}
 
     logging.info(
@@ -400,85 +325,45 @@ def approximate_umap(
         f"with jitter {jitter:.3f}."
     )
 
-    step_started_at = time.perf_counter()
-    for cluster in cluster_order:
+    for barcode, cluster in zip(query_adata.obs_names, qry_clusters):
         cluster = str(cluster)
-        query_indices = np.flatnonzero(qry_clusters_array == cluster)
-        if query_indices.size == 0:
-            continue
-
         ref_cells = cells_by_cluster.get(cluster)
-        ref_coords = coord_arrays_by_cluster.get(cluster)
-        if ref_cells is None or ref_coords is None or ref_cells.size == 0:
+        if not ref_cells:
             raise ValueError(
                 f"Reference cluster '{cluster}' has no cells and cannot be sampled."
             )
 
-        reference_count = int(ref_cells.size)
-        query_count = int(query_indices.size)
+        reference_count = reference_counts.get(cluster, 0)
+        query_count = query_counts.get(cluster, 0)
         sample_size = num_reference_cells
-        high_density_cluster = bool(reference_count and query_count > 4 * reference_count)
-        if high_density_cluster:
+        if reference_count and query_count > 4 * reference_count:
             sample_size = max(2, num_reference_cells)
 
-        sampled_cells_matrix: Optional[np.ndarray] = None
-        if sample_size == 1:
-            sampled_idx = rng.integers(0, reference_count, size=query_count, endpoint=False)
-            base_coords = ref_coords[sampled_idx]
-            sampled_cells_matrix = ref_cells[sampled_idx][:, None]
-        else:
-            replace = reference_count < sample_size
-            if replace:
-                sampled_idx_matrix = rng.integers(
-                    0,
-                    reference_count,
-                    size=(query_count, sample_size),
-                    endpoint=False,
-                )
-            else:
-                sampled_idx_matrix = np.empty((query_count, sample_size), dtype=np.int32)
-                for idx in range(query_count):
-                    sampled_idx_matrix[idx, :] = rng.choice(
-                        reference_count,
-                        size=sample_size,
-                        replace=False,
-                    )
-            sampled_coords = ref_coords[sampled_idx_matrix]
-            if high_density_cluster:
-                base_coords = sampled_coords.mean(axis=1)
-            else:
-                base_coords = sampled_coords[:, 0, :]
-            sampled_cells_matrix = ref_cells[sampled_idx_matrix]
+        replace = len(ref_cells) < sample_size
+        sampled_cells = rng.choice(ref_cells, size=sample_size, replace=replace).tolist()
 
-        if jitter:
-            offsets = rng.uniform(-jitter, jitter, size=(query_count, 2)).astype(np.float32)
-            approx_coords = base_coords + offsets
-        else:
-            approx_coords = base_coords.copy()
-
-        if high_density_cluster and cluster in cluster_bounds:
+        if reference_count and query_count > 4 * reference_count and cluster in cluster_bounds:
+            coords_subset = coords_df.loc[sampled_cells, ["umap_0", "umap_1"]].to_numpy()
+            base = coords_subset.mean(axis=0)
+            offset = rng.uniform(-jitter, jitter, size=2) if jitter else 0.0
+            approx = base + offset
             x_low, x_high, y_low, y_high = cluster_bounds[cluster]
-            approx_coords[:, 0] = np.clip(approx_coords[:, 0], x_low, x_high)
-            approx_coords[:, 1] = np.clip(approx_coords[:, 1], y_low, y_high)
+            approx[0] = float(np.clip(approx[0], x_low, x_high))
+            approx[1] = float(np.clip(approx[1], y_low, y_high))
+        else:
+            base = coords_df.loc[sampled_cells[0], ["umap_0", "umap_1"]].to_numpy()
+            offset = rng.uniform(-jitter, jitter, size=2) if jitter else 0.0
+            approx = base + offset
 
-        coordinates_array[query_indices, :] = approx_coords
-        if sampled_cells_matrix is not None:
-            for local_idx, query_obs_index in enumerate(query_indices):
-                barcode = str(obs_names_array[int(query_obs_index)])
-                sampled[barcode] = sampled_cells_matrix[local_idx].astype(str).tolist()
-    _log_timing("approximate_umap.assign_coordinates", step_started_at)
+        records.append({"barcode": barcode, "umap_0": float(approx[0]), "umap_1": float(approx[1])})
+        sampled[barcode] = sampled_cells
 
-    step_started_at = time.perf_counter()
-    print(f"Processed {query_adata.n_obs} query cells.")
+    print(f"Processed {len(records)} query cells.")
 
-    coordinates = pd.DataFrame(
-        coordinates_array,
-        index=query_adata.obs_names,
-        columns=["umap_0", "umap_1"],
-    )
+    coordinates = pd.DataFrame.from_records(records).set_index("barcode")
 
-    query_with_umap = query_adata.copy() if copy_query else query_adata
-    query_with_umap.obsm[umap_key] = coordinates_array
+    query_with_umap = query_adata.copy()
+    query_with_umap.obsm[umap_key] = coordinates.loc[query_with_umap.obs_names].to_numpy()
     if cluster_order:
         query_with_umap.obs[query_cluster_key] = pd.Categorical(
             query_with_umap.obs[query_cluster_key],
@@ -491,8 +376,6 @@ def approximate_umap(
             preview += ", …"
         print(f"[debug] Stored query lineage_order (uns['lineage_order']) with n={len(cluster_order)}: {preview}")
         print(f"[info] Stored lineage_order on query AnnData (n={len(cluster_order)}).")
-    _log_timing("approximate_umap.finalize_outputs", step_started_at)
-    _log_timing("approximate_umap.total", fn_started_at)
 
     return ApproximateUMAPResult(
         query_adata=query_with_umap,
@@ -509,22 +392,7 @@ def approximate_umap(
 def _load_adata(obj: AnnDataLike) -> ad.AnnData:
     if isinstance(obj, ad.AnnData):
         return obj
-    path = str(obj)
-    try:
-        _repair_null_log1p_base(path)
-    except Exception:
-        # Best-effort compatibility repair; fall through to normal loading.
-        pass
-    try:
-        return ad.read_h5ad(path)
-    except Exception as exc:
-        message = str(exc)
-        if "encoding_type='null'" not in message or "/uns/log1p" not in message:
-            raise
-        if _repair_null_log1p_base(path):
-            print(f"[compat] Repaired invalid /uns/log1p/base encoding in {path}")
-            return ad.read_h5ad(path)
-        raise
+    return ad.read_h5ad(str(obj))
 
 
 def _create_minimal_adata(barcodes: Sequence[str]) -> ad.AnnData:
@@ -1108,7 +976,6 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    main_started_at = time.perf_counter()
     args = _parse_args(argv)
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
 
@@ -1122,7 +989,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         return 2
 
-    step_started_at = time.perf_counter()
     if args.reference:
         reference_source: AnnDataLike = ad.read_h5ad(args.reference)
     else:
@@ -1133,9 +999,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             umap_key=args.umap_key,
             cluster_key=ref_cluster_key,
         )
-    _log_timing("main.load_reference_source", step_started_at)
 
-    step_started_at = time.perf_counter()
     if args.query:
         query_source: AnnDataLike = args.query
     else:
@@ -1143,9 +1007,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.query_clusters_tsv,
             cluster_key=args.query_cluster_key,
         )
-    _log_timing("main.load_query_source", step_started_at)
 
-    step_started_at = time.perf_counter()
     result = approximate_umap(
         query=query_source,
         reference=reference_source,
@@ -1158,11 +1020,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         custom_color_tsv=args.custom_colors_tsv,
         restrict_obs_field=args.restrict_obs_field,
         restrict_obs_value=args.restrict_obs_value,
-        copy_query=False,
     )
-    _log_timing("main.compute_approximate_umap", step_started_at)
 
-    step_started_at = time.perf_counter()
     query_path = Path(args.query)
     out_dir = Path(args.outdir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1182,7 +1041,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         else:
             output_pdf = out_dir / f"{prefix_name}-comparison.pdf"
         output_pdf.parent.mkdir(parents=True, exist_ok=True)
-    _log_timing("main.prepare_output_paths", step_started_at)
 
     full_command = " ".join(sys.argv)
     save_h5ad = bool(args.save_updated_h5ad)
@@ -1202,24 +1060,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     elif save_h5ad:
         output_h5ad = out_dir / default_h5ad_name
 
-    step_started_at = time.perf_counter()
     if save_h5ad:
         output_h5ad.parent.mkdir(parents=True, exist_ok=True)
         logging.info("Writing augmented AnnData to %s", output_h5ad)
         print(f"[info] Saving augmented AnnData to {output_h5ad} (command: {full_command})")
-        ensure_h5ad_compat_for_write(result.query_adata)
         result.query_adata.write(output_h5ad, compression="gzip")
     else:
         logging.info("Skipping augmented AnnData export (enable with --save-updated-h5ad).")
         print(f"[info] Skipping augmented AnnData export (enable with --save-updated-h5ad). Command: {full_command}")
-    _log_timing("main.write_h5ad", step_started_at)
 
-    step_started_at = time.perf_counter()
     logging.info("Writing legacy-style exports with prefix %s", prefix)
     result.write_text_outputs(prefix)
-    _log_timing("main.write_text_outputs", step_started_at)
 
-    step_started_at = time.perf_counter()
     if output_pdf is not None:
         logging.info("Writing comparison PDFs to %s (annotated) and companion without labels", output_pdf)
         reference_for_plot = reference_source if isinstance(reference_source, ad.AnnData) else _load_adata(reference_source)
@@ -1237,10 +1089,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         logging.info("Label-free UMAP PDF: %s", plain_pdf)
     else:
         logging.info("Skipping comparison PDF generation (--skip-pdf).")
-    _log_timing("main.write_pdfs", step_started_at)
 
     logging.info("Approximate UMAP mapping completed.")
-    _log_timing("main.total", main_started_at)
     return 0
 
 

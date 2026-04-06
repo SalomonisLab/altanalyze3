@@ -122,6 +122,15 @@ def _is_finite_number(value: object) -> bool:
         return False
 
 
+def _normalize_h5ad_compression(value: Optional[str]) -> Optional[str]:
+    raw = str(value or "").strip().lower()
+    if not raw or raw in {"none", "off", "false", "null"}:
+        return None
+    if raw in {"lzf", "gzip"}:
+        return raw
+    return "lzf"
+
+
 def _normalize_gene_token(value: object) -> str:
     return re.sub(r"[\s_.-]+", "", str(value or "").strip()).upper()
 
@@ -144,7 +153,7 @@ def _resolve_gene_name(candidates, requested_gene: str) -> Optional[str]:
 def _configure_matplotlib_pdf_style() -> None:
     plt.rcParams["axes.linewidth"] = 0.5
     plt.rcParams["pdf.fonttype"] = 42
-    plt.rcParams["font.family"] = "Arial"
+    plt.rcParams["font.family"] = "sans-serif"
     plt.rcParams["font.sans-serif"] = ["DejaVu Sans"]
     plt.rcParams["figure.facecolor"] = "white"
 
@@ -225,6 +234,118 @@ def _build_marker_heatmap_viewer_html(job_id: str, root_path: str) -> str:
         fallback.style.display = "block";
         fallback.textContent = message;
       }}
+      function loadScript(src) {{
+        return new Promise((resolve, reject) => {{
+          const existing = Array.from(document.scripts).find((script) => script.src === src);
+          if (existing) {{
+            if (existing.dataset.loaded === "true") {{
+              resolve();
+              return;
+            }}
+            existing.addEventListener("load", () => resolve(), {{ once: true }});
+            existing.addEventListener("error", () => reject(new Error(`Failed to load ${{src}}`)), {{ once: true }});
+            return;
+          }}
+          const script = document.createElement("script");
+          script.src = src;
+          script.async = true;
+          script.crossOrigin = "anonymous";
+          script.addEventListener("load", () => {{
+            script.dataset.loaded = "true";
+            resolve();
+          }}, {{ once: true }});
+          script.addEventListener("error", () => reject(new Error(`Failed to load ${{src}}`)), {{ once: true }});
+          document.head.appendChild(script);
+        }});
+      }}
+      async function ensurePdfLibraries() {{
+        if (!(window.jspdf && window.jspdf.jsPDF)) {{
+          const sources = [
+            "https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js",
+            "https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js",
+          ];
+          let lastError = null;
+          for (const source of sources) {{
+            try {{
+              await loadScript(source);
+              if (window.jspdf && window.jspdf.jsPDF) {{
+                break;
+              }}
+            }} catch (err) {{
+              lastError = err;
+            }}
+          }}
+          if (!(window.jspdf && window.jspdf.jsPDF)) {{
+            throw lastError || new Error("Unable to load jsPDF.");
+          }}
+        }}
+        if (!window.html2canvas) {{
+          const sources = [
+            "https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js",
+            "https://unpkg.com/html2canvas@1.4.1/dist/html2canvas.min.js",
+          ];
+          let lastError = null;
+          for (const source of sources) {{
+            try {{
+              await loadScript(source);
+              if (window.html2canvas) {{
+                break;
+              }}
+            }} catch (err) {{
+              lastError = err;
+            }}
+          }}
+          if (!window.html2canvas) {{
+            throw lastError || new Error("Unable to load html2canvas.");
+          }}
+        }}
+      }}
+      async function exportPdf(filename) {{
+        await ensurePdfLibraries();
+        const target = document.getElementById("morpheus-target");
+        const canvas = await window.html2canvas(target, {{
+          backgroundColor: "#ffffff",
+          scale: 2,
+          useCORS: true,
+          logging: false,
+        }});
+        const dataUrl = canvas.toDataURL("image/png");
+        const width = canvas.width || target.clientWidth || 1;
+        const height = canvas.height || target.clientHeight || 1;
+        const orientation = width >= height ? "landscape" : "portrait";
+        const pdf = new window.jspdf.jsPDF({{
+          orientation,
+          unit: "pt",
+          format: "a4",
+          compress: true,
+        }});
+        const pageWidth = pdf.internal.pageSize.getWidth();
+        const pageHeight = pdf.internal.pageSize.getHeight();
+        const margin = 18;
+        const availableWidth = pageWidth - margin * 2;
+        const availableHeight = pageHeight - margin * 2;
+        const scale = Math.min(availableWidth / width, availableHeight / height, 1);
+        const renderWidth = width * scale;
+        const renderHeight = height * scale;
+        const x = (pageWidth - renderWidth) / 2;
+        const y = (pageHeight - renderHeight) / 2;
+        pdf.addImage(dataUrl, "PNG", x, y, renderWidth, renderHeight, undefined, "FAST");
+        pdf.save(String(filename || "marker_heatmap.pdf"));
+        await logClient(`marker heatmap PDF exported filename=${{filename || "marker_heatmap.pdf"}}`);
+      }}
+      window.addEventListener("message", (event) => {{
+        if (event.origin !== window.location.origin) {{
+          return;
+        }}
+        const payload = event.data || {{}};
+        if (payload.type !== "marker-heatmap-export-pdf") {{
+          return;
+        }}
+        exportPdf(payload.filename).catch((err) => {{
+          logClient(`marker heatmap PDF export failed: ${{err && err.message ? err.message : err}}`);
+          showFallback(`Unable to export the current marker heatmap PDF. ${{err && err.message ? err.message : err}}`);
+        }});
+      }});
       window.addEventListener("error", (event) => {{
         const details = [
           event.message || "unknown error",
@@ -482,6 +603,29 @@ def _filter_qc_log_lines(lines: List[str]) -> List[str]:
     return [line for line in lines if any(marker in line for marker in qc_markers)]
 
 
+def _derive_live_pipeline_message(status: object, log_lines: List[str], fallback: object) -> str:
+    normalized_status = str(status or "").strip().lower()
+    if normalized_status != "processing":
+      return str(fallback or "")
+    stage_markers = (
+        "Running approximate UMAP placement.",
+        "Exporting NetPerspective marker networks.",
+        "Identifying cell-state marker genes.",
+        "Running cellHarmony_lite pipeline.",
+        "Reference metadata loaded.",
+    )
+    for line in reversed(log_lines):
+        text = str(line or "")
+        for marker in stage_markers:
+            if marker in text:
+                return marker
+        if "Aligning cells to reference" in text:
+            return "Aligning cells to reference..."
+        if "Normalization steps" in text:
+            return "Normalizing expression values..."
+    return str(fallback or "")
+
+
 def _job_sample_names(meta: Dict) -> List[str]:
     sample_names: List[str] = []
     for record in meta.get("files", []):
@@ -499,14 +643,26 @@ def _differential_options(meta: Dict) -> Dict:
     sample_fields = list(stored.get("sample_fields", []))
     max_group_values = max((len(values) for values in sample_values.values() if isinstance(values, list)), default=0)
     upload_profile = dict(stored.get("upload_profile") or pipeline_mod._upload_profile(meta))
+    if upload_profile.get("single_h5ad"):
+        combined_h5ad_raw = str(meta.get("artifacts", {}).get("combined_h5ad", "")).strip()
+        if combined_h5ad_raw:
+            combined_h5ad_path = Path(combined_h5ad_raw)
+        else:
+            combined_h5ad_path = None
+        if combined_h5ad_path is not None and combined_h5ad_path.exists():
+            rebuilt_fields, rebuilt_values = pipeline_mod._candidate_group_fields(
+                combined_h5ad_path,
+                preferred=["Library", "group", "sample"],
+                max_categories=None,
+            )
+            if rebuilt_fields:
+                sample_fields = rebuilt_fields
+                sample_values = rebuilt_values
     default_population_col = stored.get("default_population_col") or meta.get("cluster_key")
     if not upload_profile.get("allow_alternate_population_fields"):
         population_columns = [entry for entry in population_columns if entry.get("value") == default_population_col]
         if not population_columns and default_population_col:
             population_columns = [{"value": default_population_col, "label": default_population_col, "n_categories": 0}]
-    population_field_values = {str(entry.get("value") or "").strip() for entry in population_columns if str(entry.get("value") or "").strip()}
-    sample_fields = [entry for entry in sample_fields if str(entry.get("value") or "").strip() not in population_field_values]
-    sample_values = {key: values for key, values in sample_values.items() if str(key).strip() not in population_field_values}
     default_sample_field = stored.get("default_sample_field") or ""
     if default_sample_field and default_sample_field not in {str(entry.get("value") or "").strip() for entry in sample_fields}:
         default_sample_field = sample_fields[0]["value"] if sample_fields else ""
@@ -516,9 +672,13 @@ def _differential_options(meta: Dict) -> Dict:
     enabled = bool(
         stored.get(
             "enabled",
-            bool(upload_profile.get("differential_eligible")) and (max_group_values >= 2 or len(sample_names) >= 2),
+            bool(upload_profile.get("differential_eligible")),
         )
     )
+    comparison_types = stored.get("comparison_types")
+    if not isinstance(comparison_types, list) or not comparison_types:
+        pseudobulk_allowed = bool(upload_profile.get("single_h5ad") or upload_profile.get("total_files", 0) >= 4)
+        comparison_types = ["cells", "pseudobulk"] if pseudobulk_allowed else ["cells"]
     return {
         "enabled": enabled,
         "sample_names": sample_names,
@@ -527,7 +687,7 @@ def _differential_options(meta: Dict) -> Dict:
         "default_sample_field": default_sample_field,
         "population_columns": population_columns,
         "default_population_col": default_population_col,
-        "comparison_types": ["cells", "pseudobulk"] if max(max_group_values, len(sample_names)) >= 4 else ["cells"],
+        "comparison_types": comparison_types,
         "upload_profile": upload_profile,
     }
 
@@ -579,7 +739,7 @@ def _build_differential_payload(app: FastAPI, job_id: str, meta: Dict, root_path
         "message": differential.get("message") or (
             "Select a cell-state field and numerator/denominator sample groups to run cellHarmony-differential."
             if options["enabled"]
-            else "Differential analysis is available when the job includes two or more samples."
+            else "Differential gene analyses between biological groups (i.e., disease versus controls) are only enabled when two or more samples (multiple h5 files or a single h5ad) are uploaded for the job."
         ),
         "config": differential.get("config") or {},
         "run_id": differential.get("run_id"),
@@ -806,6 +966,100 @@ def _invalidate_differential_cache(app: FastAPI, job_id: str) -> None:
                 _close_backed_adata(adata_obj)
             except Exception:
                 pass
+
+
+def _invalidate_marker_heatmap_cache(app: FastAPI, job_id: str) -> None:
+    cache = getattr(app.state, "marker_heatmap_cache", None)
+    if isinstance(cache, dict):
+        cache.pop(str(job_id), None)
+
+
+def _get_marker_heatmap_cache_entry(app: FastAPI, meta: Dict) -> Dict[str, Any]:
+    job_id = str(meta.get("job_id") or "").strip()
+    if not job_id:
+        raise ValueError("Job metadata is missing a job_id.")
+
+    marker_analysis = meta.get("marker_analysis") or {}
+    cache_path_text = str(marker_analysis.get("heatmap_cache", "")).strip()
+    heatmap_tsv_text = str(marker_analysis.get("heatmap_tsv", "")).strip()
+    expression_tsv_text = str(marker_analysis.get("expression_tsv", "")).strip()
+
+    cache_path = Path(cache_path_text) if cache_path_text else None
+    heatmap_tsv_path = Path(heatmap_tsv_text) if heatmap_tsv_text else None
+    expression_tsv_path = Path(expression_tsv_text) if expression_tsv_text else None
+
+    cache_signature = {
+        "heatmap_cache": str(cache_path or ""),
+        "heatmap_tsv": str(heatmap_tsv_path or ""),
+        "expression_tsv": str(expression_tsv_path or ""),
+    }
+    cache = app.state.marker_heatmap_cache
+    existing = cache.get(job_id)
+    if existing and existing.get("signature") == cache_signature:
+        return existing
+
+    tsv_path: Optional[Path] = None
+    if heatmap_tsv_path and heatmap_tsv_path.exists():
+        tsv_path = heatmap_tsv_path
+    elif expression_tsv_path and expression_tsv_path.exists():
+        tsv_path = expression_tsv_path
+
+    if cache_path and cache_path.exists():
+        with np.load(cache_path, allow_pickle=False) as npz_data:
+            matrix = np.asarray(npz_data["matrix"], dtype=np.float32)
+            row_ids = np.asarray(npz_data["row_ids"], dtype=str)
+            col_ids = np.asarray(npz_data["col_ids"], dtype=str)
+            if "col_barcodes" in npz_data:
+                col_barcodes = np.asarray(npz_data["col_barcodes"], dtype=str)
+            else:
+                col_barcodes = np.asarray(
+                    [value.split(":", 1)[1] if ":" in value else value for value in col_ids],
+                    dtype=str,
+                )
+        entry = {
+            "signature": cache_signature,
+            "source": "cache",
+            "source_path": cache_path,
+            "matrix": matrix,
+            "row_ids": row_ids,
+            "col_ids": col_ids,
+            "col_barcodes": col_barcodes,
+            "tsv_path": tsv_path,
+        }
+        cache[job_id] = entry
+        return entry
+
+    if tsv_path and tsv_path.exists():
+        frame = pd.read_csv(tsv_path, sep="\t", index_col=0)
+        col_ids = frame.columns.astype(str).to_numpy()
+        entry = {
+            "signature": cache_signature,
+            "source": "tsv",
+            "source_path": tsv_path,
+            "matrix": np.asarray(frame.to_numpy(), dtype=np.float32),
+            "row_ids": frame.index.astype(str).to_numpy(),
+            "col_ids": col_ids,
+            "col_barcodes": np.asarray(
+                [value.split(":", 1)[1] if ":" in value else value for value in col_ids],
+                dtype=str,
+            ),
+            "tsv_path": tsv_path,
+        }
+        cache[job_id] = entry
+        return entry
+
+    raise FileNotFoundError("Marker heatmap matrix unavailable.")
+
+
+def _marker_heatmap_subset_to_tsv(
+    matrix: np.ndarray,
+    row_ids: np.ndarray,
+    col_ids: np.ndarray,
+) -> str:
+    frame = pd.DataFrame(matrix, index=row_ids, columns=col_ids)
+    buffer = io.StringIO()
+    frame.to_csv(buffer, sep="\t", float_format="%.4g")
+    return buffer.getvalue()
 
 
 def _get_expression_cache(app: FastAPI, meta: Dict) -> Dict[str, Any]:
@@ -1419,8 +1673,8 @@ def _validate_differential_request(meta: Dict, payload: DifferentialSettings) ->
     sample_field_options = {entry["value"] for entry in options.get("sample_fields", []) if entry.get("value")}
     if sample_field_options and sample_field not in sample_field_options:
         raise HTTPException(status_code=400, detail="Selected group obs field is not available for this job.")
-    if sample_field and sample_field in population_options:
-        raise HTTPException(status_code=400, detail="Group values must come from a grouping field, not a cell-state annotation field.")
+    if sample_field and sample_field == payload.population_col:
+        raise HTTPException(status_code=400, detail="Group values must come from a different obs field than the selected cell-state field.")
 
     group1_samples = [str(sample).strip() for sample in payload.group1_samples if str(sample).strip()]
     group2_samples = [str(sample).strip() for sample in payload.group2_samples if str(sample).strip()]
@@ -1439,7 +1693,9 @@ def _validate_differential_request(meta: Dict, payload: DifferentialSettings) ->
     comparison_type = str(payload.comparison_type or "cells").strip().lower()
     if comparison_type not in {"cells", "pseudobulk"}:
         raise HTTPException(status_code=400, detail="Comparison Type must be either 'cells' or 'pseudobulk'.")
-    if comparison_type == "pseudobulk" and len(available_samples) < 4:
+    upload_profile = dict((meta.get("differential_options") or {}).get("upload_profile") or pipeline_mod._upload_profile(meta))
+    pseudobulk_allowed = bool(upload_profile.get("single_h5ad") or upload_profile.get("total_files", 0) >= 4)
+    if comparison_type == "pseudobulk" and not pseudobulk_allowed:
         comparison_type = "cells"
 
     return {
@@ -1775,32 +2031,31 @@ def _apply_display_filter_mask(cache_entry: Dict[str, Any], display_filters: Opt
 def _filter_marker_heatmap_matrix(
     app: FastAPI,
     meta: Dict,
-    matrix_path: Path,
     display_filters: Optional[List[tuple[str, List[str]]]],
 ) -> tuple[str, int]:
     cache_entry = _get_expression_cache(app, meta)
+    marker_matrix = _get_marker_heatmap_cache_entry(app, meta)
     display_mask = _apply_display_filter_mask(cache_entry, display_filters)
-    allowed_barcodes = {
-        str(barcode)
-        for barcode, keep in zip(cache_entry["obs_names"], display_mask)
-        if bool(keep)
-    }
-    if not allowed_barcodes:
+    allowed_barcodes = np.asarray(
+        [str(barcode) for barcode, keep in zip(cache_entry["obs_names"], display_mask) if bool(keep)],
+        dtype=str,
+    )
+    if allowed_barcodes.size == 0:
         raise HTTPException(status_code=404, detail="No cells match the current display filters for the marker heatmap.")
 
-    frame = pd.read_csv(matrix_path, sep="\t", index_col=0)
-    keep_columns = []
-    for column in frame.columns:
-        column_text = str(column)
-        barcode = column_text.split(":", 1)[1] if ":" in column_text else column_text
-        if barcode in allowed_barcodes:
-            keep_columns.append(column_text)
-    if not keep_columns:
+    keep_mask = np.isin(marker_matrix["col_barcodes"], allowed_barcodes)
+    keep_count = int(np.count_nonzero(keep_mask))
+    if keep_count == 0:
         raise HTTPException(status_code=404, detail="No heatmap columns match the current display filters.")
 
-    buffer = io.StringIO()
-    frame.loc[:, keep_columns].to_csv(buffer, sep="\t")
-    return buffer.getvalue(), len(keep_columns)
+    return (
+        _marker_heatmap_subset_to_tsv(
+            marker_matrix["matrix"][:, keep_mask],
+            marker_matrix["row_ids"],
+            marker_matrix["col_ids"][keep_mask],
+        ),
+        keep_count,
+    )
 
 
 def _square_umap_axes(ax: plt.Axes, point_groups: List[List[Dict]]) -> None:
@@ -2056,6 +2311,272 @@ def _render_differential_gene_pdf(payload: Dict) -> io.BytesIO:
     return buf
 
 
+def _render_differential_heatmap_pdf(payload: Dict) -> io.BytesIO:
+    _configure_matplotlib_pdf_style()
+    rows = payload.get("rows", []) or []
+    columns = payload.get("columns", []) or []
+    if not rows or not columns:
+        raise HTTPException(status_code=404, detail="No differential heatmap rows were found.")
+
+    matrix = np.asarray([row.get("values", []) for row in rows], dtype=float)
+    finite = matrix[np.isfinite(matrix)]
+    max_abs = float(np.max(np.abs(finite))) if finite.size else 1.0
+    color_extent = max(max_abs / 3.0, 1.0)
+    cmap = matplotlib.colors.LinearSegmentedColormap.from_list(
+        "differential_heatmap",
+        ["#00f0ff", "#000000", "#ffff00"],
+    )
+    figure_height = max(6.0, min(28.0, len(rows) * 0.18 + 2.0))
+    figure_width = max(7.0, min(18.0, len(columns) * 0.65 + 2.5))
+    fig, ax = plt.subplots(figsize=(figure_width, figure_height))
+    image = ax.imshow(matrix, aspect="auto", cmap=cmap, vmin=-color_extent, vmax=color_extent)
+    ax.set_title(f"Heatmap: {payload.get('population', '')}")
+    ax.set_xticks(np.arange(len(columns), dtype=float))
+    ax.set_xticklabels([str(value) for value in columns], rotation=40, ha="right")
+    y_labels = [str(row.get("gene", "")) for row in rows]
+    tick_step = max(1, int(np.ceil(len(y_labels) / 80)))
+    tick_positions = np.arange(0, len(y_labels), tick_step, dtype=int)
+    ax.set_yticks(tick_positions)
+    ax.set_yticklabels([y_labels[index] for index in tick_positions], fontsize=8)
+    cbar = fig.colorbar(image, ax=ax, pad=0.02)
+    cbar.set_label("log2FC")
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="pdf", bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def _render_differential_volcano_pdf(payload: Dict) -> io.BytesIO:
+    _configure_matplotlib_pdf_style()
+    points = payload.get("points", []) or []
+    if not points:
+        raise HTTPException(status_code=404, detail="No differential volcano points were found.")
+
+    up = [point for point in points if str(point.get("direction", "")).lower() == "up"]
+    down = [point for point in points if str(point.get("direction", "")).lower() == "down"]
+
+    fig, ax = plt.subplots(figsize=(8.0, 6.5))
+    if down:
+        ax.scatter(
+            [float(point.get("log2fc", 0.0)) for point in down],
+            [float(point.get("score", 0.0)) for point in down],
+            s=26,
+            c="#2563eb",
+            alpha=0.72,
+            linewidths=0,
+            label="Down",
+        )
+    if up:
+        ax.scatter(
+            [float(point.get("log2fc", 0.0)) for point in up],
+            [float(point.get("score", 0.0)) for point in up],
+            s=26,
+            c="#dc2626",
+            alpha=0.72,
+            linewidths=0,
+            label="Up",
+        )
+    ax.set_title(f"Volcano: {payload.get('population', '')}")
+    ax.set_xlabel("log2 fold change")
+    ax.set_ylabel("-log10(FDR)")
+    ax.axvline(0.0, color="#94a3b8", linewidth=0.8, alpha=0.6)
+    if up or down:
+        ax.legend(frameon=False)
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="pdf", bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def _render_differential_go_pdf(payload: Dict) -> io.BytesIO:
+    _configure_matplotlib_pdf_style()
+    terms = payload.get("terms", []) or []
+    if not terms:
+        raise HTTPException(status_code=404, detail="No differential GO terms were available.")
+
+    ordered = list(reversed(terms))
+    scores = [float(term.get("score", 0.0) or 0.0) for term in ordered]
+    labels = [str(term.get("term_name", "")) for term in ordered]
+    colors = ["#dc2626" if str(term.get("direction", "")).lower() == "up" else "#2563eb" for term in ordered]
+
+    fig_height = max(5.5, min(18.0, len(ordered) * 0.42 + 1.6))
+    fig, ax = plt.subplots(figsize=(9.0, fig_height))
+    positions = np.arange(len(ordered), dtype=float)
+    ax.barh(positions, scores, color=colors, edgecolor="none", height=0.78)
+    ax.set_yticks(positions)
+    ax.set_yticklabels(labels, fontsize=9)
+    ax.set_xlabel("-log10(FDR)")
+    ax.set_title(f"GO terms: {payload.get('population', '')}")
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="pdf", bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def _network_positions(node_ids: List[str]) -> Dict[str, tuple[float, float]]:
+    ordered = list(node_ids)
+    positions: Dict[str, tuple[float, float]] = {}
+    if not ordered:
+        return positions
+    if len(ordered) == 1:
+        positions[ordered[0]] = (0.0, 0.0)
+        return positions
+
+    positions[ordered[0]] = (0.0, 0.0)
+    remaining = ordered[1:]
+    placed = 0
+    ring_index = 1
+    while placed < len(remaining):
+        ring_capacity = max(8, ring_index * 10)
+        ring_nodes = remaining[placed:placed + ring_capacity]
+        radius = 1.3 * ring_index
+        for index, node_id in enumerate(ring_nodes):
+            angle = (2.0 * np.pi * index) / max(len(ring_nodes), 1)
+            positions[node_id] = (radius * float(np.cos(angle)), radius * float(np.sin(angle)))
+        placed += len(ring_nodes)
+        ring_index += 1
+    return positions
+
+
+def _render_network_pdf(payload: Dict, title: str) -> io.BytesIO:
+    _configure_matplotlib_pdf_style()
+    elements = payload.get("elements", []) or []
+    node_map: Dict[str, Dict[str, Any]] = {}
+    edges: List[Dict[str, Any]] = []
+    for element in elements:
+        data = element.get("data") or {}
+        if not data:
+            continue
+        if data.get("source") and data.get("target"):
+            edges.append(data)
+            continue
+        node_id = str(data.get("id", "")).strip()
+        if node_id:
+            node_map[node_id] = data
+    if not node_map:
+        raise HTTPException(status_code=404, detail="No interaction network was available.")
+
+    ordered_nodes = [
+        node_id
+        for _, node_id in sorted(
+            (
+                (abs(float((data.get("log2fc") or 0.0))), str(node_id))
+                for node_id, data in node_map.items()
+            ),
+            reverse=True,
+        )
+    ]
+    positions = _network_positions(ordered_nodes)
+    fig, ax = plt.subplots(figsize=(8.2, 7.4))
+    for edge in edges:
+        source = str(edge.get("source", "")).strip()
+        target = str(edge.get("target", "")).strip()
+        if source not in positions or target not in positions:
+            continue
+        interaction_type = str(edge.get("interaction_type", "")).lower()
+        color = "#9ca3af"
+        if "transcription" in interaction_type:
+            color = "#ef4444"
+        elif "tbar" in interaction_type:
+            color = "#60a5fa"
+        start = positions[source]
+        end = positions[target]
+        ax.annotate(
+            "",
+            xy=end,
+            xytext=start,
+            arrowprops={
+                "arrowstyle": "-|>",
+                "color": color,
+                "linewidth": 1.0,
+                "shrinkA": 14,
+                "shrinkB": 14,
+                "alpha": 0.8,
+            },
+        )
+
+    for node_id in ordered_nodes:
+        data = node_map[node_id]
+        x, y = positions[node_id]
+        log2fc = float(data.get("log2fc", 0.0) or 0.0)
+        color = "#fca5a5" if log2fc >= 0 else "#7dd3fc"
+        ax.scatter([x], [y], s=320, c=[color], edgecolors="white", linewidths=1.0, zorder=3)
+        ax.text(x, y, str(data.get("label") or node_id), ha="center", va="center", fontsize=9, zorder=4)
+
+    coords = np.asarray(list(positions.values()), dtype=float)
+    if coords.size:
+        span = max(float(coords[:, 0].max() - coords[:, 0].min()), float(coords[:, 1].max() - coords[:, 1].min()), 1.0)
+        padding = span * 0.2
+        ax.set_xlim(float(coords[:, 0].min()) - padding, float(coords[:, 0].max()) + padding)
+        ax.set_ylim(float(coords[:, 1].min()) - padding, float(coords[:, 1].max()) + padding)
+    ax.set_title(title)
+    ax.set_aspect("equal", adjustable="box")
+    ax.axis("off")
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="pdf", bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def _render_marker_heatmap_pdf(frame: pd.DataFrame, title: str = "Marker heatmap") -> io.BytesIO:
+    _configure_matplotlib_pdf_style()
+    if frame.empty:
+        raise HTTPException(status_code=404, detail="Marker heatmap matrix unavailable.")
+    values = frame.apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    matrix = values.to_numpy(dtype=float)
+    finite = matrix[np.isfinite(matrix)]
+    max_abs = float(np.max(np.abs(finite))) if finite.size else 2.0
+    color_extent = max(2.0, max_abs)
+    cmap = matplotlib.colors.LinearSegmentedColormap.from_list(
+        "marker_heatmap",
+        ["#00f0ff", "#000000", "#ffff00"],
+    )
+
+    fig_height = max(5.5, min(24.0, matrix.shape[0] * 0.12 + 1.8))
+    fig_width = max(7.5, min(24.0, matrix.shape[1] * 0.08 + 2.6))
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+    image = ax.imshow(matrix, aspect="auto", cmap=cmap, vmin=-color_extent, vmax=color_extent)
+    ax.set_title(title)
+
+    row_labels = [str(index) for index in values.index]
+    row_step = max(1, int(np.ceil(len(row_labels) / 80)))
+    row_positions = np.arange(0, len(row_labels), row_step, dtype=int)
+    ax.set_yticks(row_positions)
+    ax.set_yticklabels([row_labels[index] for index in row_positions], fontsize=8)
+
+    col_labels = [str(label) for label in values.columns]
+    if len(col_labels) <= 60:
+        ax.set_xticks(np.arange(len(col_labels), dtype=float))
+        ax.set_xticklabels(col_labels, rotation=90, fontsize=6)
+    else:
+        col_step = max(1, int(np.ceil(len(col_labels) / 40)))
+        col_positions = np.arange(0, len(col_labels), col_step, dtype=int)
+        ax.set_xticks(col_positions)
+        ax.set_xticklabels([col_labels[index] for index in col_positions], rotation=90, fontsize=6)
+
+    cbar = fig.colorbar(image, ax=ax, pad=0.02)
+    cbar.set_label("Fold")
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="pdf", bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
 def create_app(test_config: dict | None = None) -> FastAPI:
     cfg = load_config(test_config)
     cfg["ROOT_PATH"] = _normalize_root_path(cfg.get("ROOT_PATH"))
@@ -2069,10 +2590,13 @@ def create_app(test_config: dict | None = None) -> FastAPI:
     app.state.job_store = JobStore(Path(cfg["JOB_STORAGE"]))
     app.state.expression_cache = {}
     app.state.differential_cache = {}
+    app.state.marker_heatmap_cache = {}
     app.state.job_runner = JobRunner(
         app.state.job_store,
         Path(cfg["REFERENCE_REGISTRY"]),
         max_workers=cfg["JOB_WORKERS"],
+        export_approx_pdfs=cfg.get("EXPORT_APPROX_PDFS", False),
+        h5ad_compression=cfg.get("H5AD_COMPRESSION", "lzf"),
     )
 
     @app.exception_handler(RequestValidationError)
@@ -2093,6 +2617,8 @@ def create_app(test_config: dict | None = None) -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
         registry = _load_reference_registry(app)
+        css_version = int((static_dir / "styles.css").stat().st_mtime) if (static_dir / "styles.css").exists() else 0
+        js_version = int((static_dir / "app.js").stat().st_mtime) if (static_dir / "app.js").exists() else 0
         return templates.TemplateResponse(
             request,
             index_template,
@@ -2101,6 +2627,8 @@ def create_app(test_config: dict | None = None) -> FastAPI:
                 "registry_json": json.dumps(registry),
                 "app_title": cfg["APP_TITLE"],
                 "app_root_path": cfg["ROOT_PATH"],
+                "styles_version": css_version,
+                "app_js_version": js_version,
             },
         )
 
@@ -2139,6 +2667,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         job_id = metadata["job_id"]
         _invalidate_expression_cache(app, job_id)
         _invalidate_differential_cache(app, job_id)
+        _invalidate_marker_heatmap_cache(app, job_id)
         uploads_dir = store.uploads_dir(job_id)
         records = []
         for sample, upload in zip(normalized_samples, files):
@@ -2183,6 +2712,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         if changed:
             _invalidate_expression_cache(app, job_id)
             _invalidate_differential_cache(app, job_id)
+            _invalidate_marker_heatmap_cache(app, job_id)
             _clear_directory_contents(store.outputs_dir(job_id))
             _clear_directory_contents(store.logs_dir(job_id))
             meta = store.update_job(
@@ -2215,6 +2745,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Job not found.")
         _invalidate_expression_cache(app, job_id)
         _invalidate_differential_cache(app, job_id)
+        _invalidate_marker_heatmap_cache(app, job_id)
         store.update_job(job_id, marker_analysis={})
         runner.submit(job_id)
         store.append_log(job_id, "Job queued by user request.")
@@ -2228,13 +2759,18 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
         log_path = store.logs_dir(job_id) / "pipeline.log"
+        log_head: List[str] = []
         log_tail: List[str] = []
         if log_path.exists():
-            log_tail = log_path.read_text(encoding="utf-8").splitlines(True)[-200:]
+            all_lines = log_path.read_text(encoding="utf-8").splitlines(True)
+            log_head = all_lines[:80]
+            log_tail = all_lines[-200:]
+        meta["log_head"] = log_head
         meta["log_tail"] = log_tail
         meta["qc_log_tail"] = log_tail if meta.get("status") == "failed" else _filter_qc_log_lines(log_tail)
+        meta["message"] = _derive_live_pipeline_message(meta.get("status"), log_tail, meta.get("message"))
         meta["differential_ui"] = _build_differential_payload(app, job_id, meta, root_path=app.state.root_path)
-        return JSONResponse(meta)
+        return JSONResponse(meta, headers={"Cache-Control": "no-store"})
 
     @app.get("/api/jobs/{job_id}/differential/status")
     async def differential_status(job_id: str):
@@ -2242,7 +2778,10 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
-        return JSONResponse(_build_differential_payload(app, job_id, meta, root_path=app.state.root_path))
+        return JSONResponse(
+            _build_differential_payload(app, job_id, meta, root_path=app.state.root_path),
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.post("/api/jobs/{job_id}/differential")
     async def run_differential(job_id: str, payload: DifferentialSettings):
@@ -2434,31 +2973,22 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
         display_filters = _display_filter_specs(filter1_field, filter1_values, filter2_field, filter2_values)
-        marker_analysis = meta.get("marker_analysis") or {}
-        path = Path(str(marker_analysis.get("heatmap_tsv", "")).strip())
-        if not path.exists():
-            fallback_path = Path(str(marker_analysis.get("expression_tsv", "")).strip())
-            if fallback_path.exists():
-                path = fallback_path
+        try:
+            matrix_entry = _get_marker_heatmap_cache_entry(app, meta)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Marker heatmap matrix unavailable.")
         origin = str(request.headers.get("origin") or "").strip()
         referer = str(request.headers.get("referer") or "").strip()
         user_agent = str(request.headers.get("user-agent") or "").strip()
         request_method = str(request.method or "").upper()
-        if path.exists():
-            store.append_log(
-                job_id,
-                f"[marker-heatmap] heatmap.tsv requested method={request_method} "
-                f"path={path} size={path.stat().st_size} filters={display_filters or '-'} origin={origin or '-'} "
-                f"referer={referer or '-'} ua={user_agent or '-'}",
-            )
-        else:
-            store.append_log(
-                job_id,
-                f"[marker-heatmap] heatmap.tsv requested but missing method={request_method} "
-                f"path={path} filters={display_filters or '-'} origin={origin or '-'} referer={referer or '-'} ua={user_agent or '-'}",
-            )
-        if not path.exists():
-            raise HTTPException(status_code=404, detail="Marker heatmap matrix unavailable.")
+        source_path = matrix_entry.get("source_path")
+        source_size = source_path.stat().st_size if isinstance(source_path, Path) and source_path.exists() else "-"
+        store.append_log(
+            job_id,
+            f"[marker-heatmap] heatmap.tsv requested method={request_method} "
+            f"source={matrix_entry.get('source')} path={source_path or '-'} size={source_size} "
+            f"filters={display_filters or '-'} origin={origin or '-'} referer={referer or '-'} ua={user_agent or '-'}",
+        )
         common_headers = {
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
@@ -2467,7 +2997,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         if request_method == "OPTIONS":
             return JSONResponse({"ok": True}, headers=common_headers)
         if display_filters:
-            filtered_tsv, kept_columns = _filter_marker_heatmap_matrix(app, meta, path, display_filters)
+            filtered_tsv, kept_columns = _filter_marker_heatmap_matrix(app, meta, display_filters)
             store.append_log(
                 job_id,
                 f"[marker-heatmap] filtered matrix generated columns={kept_columns} filters={display_filters}",
@@ -2483,11 +3013,30 @@ def create_app(test_config: dict | None = None) -> FastAPI:
                 media_type="text/tab-separated-values",
                 headers={**common_headers, "X-Marker-Columns": str(kept_columns)},
             )
-        return FileResponse(
-            path,
-            filename=path.name,
+        col_count = int(len(matrix_entry["col_ids"]))
+        if request_method == "HEAD":
+            return Response(
+                status_code=200,
+                headers={**common_headers, "X-Marker-Columns": str(col_count)},
+                media_type="text/tab-separated-values",
+            )
+        tsv_path = matrix_entry.get("tsv_path")
+        if isinstance(tsv_path, Path) and tsv_path.exists():
+            return FileResponse(
+                tsv_path,
+                filename=tsv_path.name,
+                media_type="text/tab-separated-values",
+                headers=common_headers,
+            )
+        payload = _marker_heatmap_subset_to_tsv(
+            matrix_entry["matrix"],
+            matrix_entry["row_ids"],
+            matrix_entry["col_ids"],
+        )
+        return Response(
+            content=payload,
             media_type="text/tab-separated-values",
-            headers=common_headers,
+            headers={**common_headers, "X-Marker-Columns": str(col_count)},
         )
 
     @app.get("/jobs/{job_id}/marker/heatmap/viewer", response_class=HTMLResponse)
@@ -2496,17 +3045,15 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
-        marker_analysis = meta.get("marker_analysis") or {}
-        path = Path(str(marker_analysis.get("heatmap_tsv", "")).strip())
-        if not path.exists():
-            fallback_path = Path(str(marker_analysis.get("expression_tsv", "")).strip())
-            if fallback_path.exists():
-                path = fallback_path
-        if not path.exists():
+        try:
+            matrix_entry = _get_marker_heatmap_cache_entry(app, meta)
+        except FileNotFoundError:
             raise HTTPException(status_code=404, detail="Marker heatmap matrix unavailable.")
+        source_path = matrix_entry.get("source_path")
+        source_size = source_path.stat().st_size if isinstance(source_path, Path) and source_path.exists() else "-"
         store.append_log(
             job_id,
-            f"[marker-viewer] viewer route requested path={path} size={path.stat().st_size}",
+            f"[marker-viewer] viewer route requested source={matrix_entry.get('source')} path={source_path or '-'} size={source_size}",
         )
         try:
             content = _build_marker_heatmap_viewer_html(
@@ -2520,16 +3067,37 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             raise
 
     @app.get("/api/jobs/{job_id}/marker/heatmap.pdf")
-    async def marker_heatmap_pdf(job_id: str):
+    async def marker_heatmap_pdf(
+        job_id: str,
+        filter1_field: Optional[str] = Query(None),
+        filter1_values: List[str] = Query([]),
+        filter2_field: Optional[str] = Query(None),
+        filter2_values: List[str] = Query([]),
+    ):
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
-        marker_analysis = meta.get("marker_analysis") or {}
-        path = Path(str(marker_analysis.get("heatmap_pdf", "")).strip())
-        if not path.exists():
-            raise HTTPException(status_code=404, detail="Marker heatmap PDF unavailable.")
-        return FileResponse(path, filename=path.name, media_type="application/pdf")
+        display_filters = _display_filter_specs(filter1_field, filter1_values, filter2_field, filter2_values)
+        try:
+            matrix_entry = _get_marker_heatmap_cache_entry(app, meta)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Marker heatmap matrix unavailable.")
+        if display_filters:
+            filtered_tsv, _ = _filter_marker_heatmap_matrix(app, meta, display_filters)
+            frame = pd.read_csv(io.StringIO(filtered_tsv), sep="\t", index_col=0)
+        else:
+            frame = pd.DataFrame(
+                matrix_entry["matrix"],
+                index=matrix_entry["row_ids"],
+                columns=matrix_entry["col_ids"],
+            )
+        pdf = _render_marker_heatmap_pdf(frame, title="MarkerHeatmap")
+        return StreamingResponse(
+            pdf,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{job_id}_marker_heatmap.pdf"'},
+        )
 
     @app.get("/api/jobs/{job_id}/marker/network/pdf")
     async def marker_network_pdf(job_id: str, population: str = Query(...)):
@@ -2537,18 +3105,14 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
-        marker_analysis = meta.get("marker_analysis") or {}
-        networks = marker_analysis.get("networks") or []
-        entry = next(
-            (item for item in networks if str(item.get("population", "")).strip() == str(population).strip()),
-            None,
+        payload = _build_marker_network_payload(meta, population)
+        pdf = _render_network_pdf(payload, f"{population} marker network")
+        safe_population = re.sub(r"[^A-Za-z0-9_.-]+", "_", population).strip("._") or "population"
+        return StreamingResponse(
+            pdf,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{job_id}_{safe_population}_marker_network.pdf"'},
         )
-        if not entry:
-            raise HTTPException(status_code=404, detail="Marker network PDF unavailable.")
-        path = Path(str(entry.get("pdf", "")).strip())
-        if not path.exists():
-            raise HTTPException(status_code=404, detail="Marker network PDF unavailable.")
-        return FileResponse(path, filename=path.name, media_type="application/pdf")
 
     @app.get("/api/jobs/{job_id}/download/{artifact}")
     async def download(job_id: str, artifact: str):
@@ -2563,6 +3127,16 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         if not path.exists():
             raise HTTPException(status_code=404, detail="Artifact missing on disk.")
         return FileResponse(path, filename=path.name, headers={"Access-Control-Allow-Origin": "*"})
+
+    @app.get("/api/jobs/{job_id}/log")
+    async def download_log(job_id: str):
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        path = store.logs_dir(job_id) / "pipeline.log"
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="Log file unavailable.")
+        return FileResponse(path, filename=path.name, media_type="text/plain")
 
     @app.get("/api/jobs/{job_id}/differential/archive")
     async def download_differential_archive(job_id: str):
@@ -2693,6 +3267,35 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
+    @app.get("/api/jobs/{job_id}/differential/interactive/pdf")
+    async def differential_rendered_pdf(job_id: str, mode: str = Query(...), population: str = Query(...)):
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        meta = store.get_job(job_id)
+        mode_key = str(mode or "").strip().lower()
+        if mode_key == "heatmap":
+            payload = _build_differential_heatmap_payload(app, meta, population)
+            pdf = _render_differential_heatmap_pdf(payload)
+        elif mode_key == "volcano":
+            payload = _build_differential_volcano_payload(app, meta, population)
+            pdf = _render_differential_volcano_pdf(payload)
+        elif mode_key == "go":
+            payload = _build_differential_go_payload(app, meta, population)
+            pdf = _render_differential_go_pdf(payload)
+        elif mode_key == "network":
+            payload = _build_differential_network_payload(app, meta, population, root_path=app.state.root_path)
+            pdf = _render_network_pdf(payload, f"{population} network")
+        else:
+            raise HTTPException(status_code=400, detail="Differential mode must be heatmap, volcano, network, or go.")
+        safe_population = re.sub(r"[^A-Za-z0-9_.-]+", "_", population).strip("._") or "population"
+        filename = f"differential_{mode_key}_{safe_population}.pdf"
+        return StreamingResponse(
+            pdf,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
     @app.post("/api/tools/approximate-umap")
     async def run_approximate_umap(payload: ApproximateUMAPRequest):
         if not payload.query and not payload.query_clusters_tsv:
@@ -2746,6 +3349,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             custom_color_tsv=payload.custom_colors_tsv,
             restrict_obs_field=payload.restrict_obs_field,
             restrict_obs_value=payload.restrict_obs_value,
+            copy_query=False,
         )
 
         out_dir = Path(payload.outdir)
@@ -2753,11 +3357,14 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         prefix_name = payload.output_prefix or f"{query_path.stem}-approximate-umap"
         prefix = out_dir / prefix_name
 
-        output_pdf = _resolve_output_path(
-            out_dir,
-            payload.output_pdf or f"{prefix_name}-comparison.pdf",
-        )
-        output_pdf.parent.mkdir(parents=True, exist_ok=True)
+        export_approx_pdfs = bool(app.state.config.get("EXPORT_APPROX_PDFS", False)) or bool(payload.output_pdf)
+        output_pdf: Optional[Path] = None
+        if export_approx_pdfs:
+            output_pdf = _resolve_output_path(
+                out_dir,
+                payload.output_pdf or f"{prefix_name}-comparison.pdf",
+            )
+            output_pdf.parent.mkdir(parents=True, exist_ok=True)
 
         save_h5ad = bool(payload.save_updated_h5ad)
         output_h5ad: Optional[Path] = None
@@ -2769,30 +3376,36 @@ def create_app(test_config: dict | None = None) -> FastAPI:
 
         if save_h5ad and output_h5ad is not None:
             output_h5ad.parent.mkdir(parents=True, exist_ok=True)
-            result.query_adata.write(output_h5ad, compression="gzip")
+            compression = _normalize_h5ad_compression(app.state.config.get("H5AD_COMPRESSION", "lzf"))
+            approx_mod.ensure_h5ad_compat_for_write(result.query_adata)
+            result.query_adata.write(output_h5ad, compression=compression)
 
         text_outputs = result.write_text_outputs(prefix)
-        reference_for_plot = (
-            reference_source if isinstance(reference_source, ad.AnnData) else ad.read_h5ad(str(reference_source))
-        )
-        annotated_pdf, plain_pdf = result.write_comparison_pdf(
-            reference_adata=reference_for_plot,
-            umap_key=payload.umap_key,
-            reference_cluster_key=payload.reference_cluster_key or payload.query_cluster_key,
-            query_cluster_key=payload.query_cluster_key,
-            output_path=output_pdf,
-            custom_color_map=result.plot_color_map,
-            restrict_obs_field=payload.restrict_obs_field,
-            restrict_obs_value=payload.restrict_obs_value,
-        )
+        annotated_pdf = None
+        plain_pdf = None
+        if export_approx_pdfs and output_pdf is not None:
+            reference_for_plot = (
+                reference_source if isinstance(reference_source, ad.AnnData) else ad.read_h5ad(str(reference_source))
+            )
+            annotated_pdf, plain_pdf = result.write_comparison_pdf(
+                reference_adata=reference_for_plot,
+                umap_key=payload.umap_key,
+                reference_cluster_key=payload.reference_cluster_key or payload.query_cluster_key,
+                query_cluster_key=payload.query_cluster_key,
+                output_path=output_pdf,
+                custom_color_map=result.plot_color_map,
+                restrict_obs_field=payload.restrict_obs_field,
+                restrict_obs_value=payload.restrict_obs_value,
+            )
 
         outputs = {
             "coordinates": text_outputs["coordinates"],
             "augmented": text_outputs["augmented"],
             "placeholder_expression": text_outputs["placeholder_expression"],
-            "comparison_pdf": annotated_pdf,
-            "comparison_pdf_plain": plain_pdf,
         }
+        if annotated_pdf and plain_pdf:
+            outputs["comparison_pdf"] = annotated_pdf
+            outputs["comparison_pdf_plain"] = plain_pdf
         if output_h5ad is not None:
             outputs["updated_h5ad"] = str(output_h5ad)
 

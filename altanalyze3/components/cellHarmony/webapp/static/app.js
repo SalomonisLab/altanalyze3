@@ -23,6 +23,8 @@ let currentDifferentialPopulation = "";
 let differentialCy = null;
 let expressionCy = null;
 let lastDownloadArtifactSignature = "";
+let svg2PdfLoaderPromise = null;
+let cytoscapeSvgLoaderPromise = null;
 const BASE_EXPRESSION_MODES = [
   { value: "umap", label: "UMAP" },
   { value: "violin", label: "Violin" },
@@ -70,6 +72,322 @@ function apiPath(path) {
   }
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
   return withRootPath(`/api${normalizedPath}`);
+}
+
+let jsPdfLoaderPromise = null;
+
+function loadExternalScript(src) {
+  return new Promise((resolve, reject) => {
+    const existing = Array.from(document.scripts).find((script) => script.src === src);
+    if (existing) {
+      if (existing.dataset.loaded === "true") {
+        resolve();
+        return;
+      }
+      existing.addEventListener("load", () => resolve(), { once: true });
+      existing.addEventListener("error", () => reject(new Error(`Failed to load ${src}`)), { once: true });
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = src;
+    script.async = true;
+    script.crossOrigin = "anonymous";
+    script.addEventListener("load", () => {
+      script.dataset.loaded = "true";
+      resolve();
+    }, { once: true });
+    script.addEventListener("error", () => reject(new Error(`Failed to load ${src}`)), { once: true });
+    document.head.appendChild(script);
+  });
+}
+
+async function ensureJsPdfLoaded() {
+  if (window.jspdf && window.jspdf.jsPDF) {
+    return window.jspdf.jsPDF;
+  }
+  if (!jsPdfLoaderPromise) {
+    jsPdfLoaderPromise = (async () => {
+      const sources = [
+        "https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js",
+        "https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js",
+      ];
+      let lastError = null;
+      for (const source of sources) {
+        try {
+          await loadExternalScript(source);
+          if (window.jspdf && window.jspdf.jsPDF) {
+            return window.jspdf.jsPDF;
+          }
+        } catch (err) {
+          lastError = err;
+        }
+      }
+      throw lastError || new Error("Unable to load jsPDF.");
+    })();
+  }
+  return jsPdfLoaderPromise;
+}
+
+async function ensureSvg2PdfLoaded() {
+  const JsPdf = await ensureJsPdfLoaded();
+  if (JsPdf && JsPdf.API && typeof JsPdf.API.svg === "function") {
+    return;
+  }
+  if (!svg2PdfLoaderPromise) {
+    svg2PdfLoaderPromise = (async () => {
+      const sources = [
+        "https://cdn.jsdelivr.net/npm/svg2pdf.js@2.5.0/dist/svg2pdf.umd.min.js",
+        "https://unpkg.com/svg2pdf.js@2.5.0/dist/svg2pdf.umd.min.js",
+      ];
+      let lastError = null;
+      for (const source of sources) {
+        try {
+          await loadExternalScript(source);
+          if (JsPdf && JsPdf.API && typeof JsPdf.API.svg === "function") {
+            return;
+          }
+        } catch (err) {
+          lastError = err;
+        }
+      }
+      throw lastError || new Error("Unable to load svg2pdf.js.");
+    })();
+  }
+  await svg2PdfLoaderPromise;
+}
+
+async function ensureCytoscapeSvgLoaded() {
+  if (window.cytoscape && window.cytoscape.prototype && typeof window.cytoscape.prototype.svg === "function") {
+    return;
+  }
+  if (!cytoscapeSvgLoaderPromise) {
+    cytoscapeSvgLoaderPromise = (async () => {
+      const sources = [
+        "https://cdn.jsdelivr.net/npm/cytoscape-svg@0.4.0/cytoscape-svg.js",
+        "https://unpkg.com/cytoscape-svg@0.4.0/cytoscape-svg.js",
+      ];
+      let lastError = null;
+      for (const source of sources) {
+        try {
+          await loadExternalScript(source);
+          if (window.cytoscapeSvg && window.cytoscape) {
+            window.cytoscapeSvg(window.cytoscape);
+          }
+          if (window.cytoscape && window.cytoscape.prototype && typeof window.cytoscape.prototype.svg === "function") {
+            return;
+          }
+        } catch (err) {
+          lastError = err;
+        }
+      }
+      throw lastError || new Error("Unable to load the Cytoscape SVG exporter.");
+    })();
+  }
+  await cytoscapeSvgLoaderPromise;
+}
+
+function slugifyFilenamePart(value, fallback = "plot") {
+  const text = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return text || fallback;
+}
+
+function buildPdfFilename(parts, fallback = "plot") {
+  const tokens = (parts || [])
+    .map((part) => slugifyFilenamePart(part, ""))
+    .filter(Boolean);
+  return `${tokens.length ? tokens.join("_") : fallback}.pdf`;
+}
+
+function getImageDimensions(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => {
+      resolve({
+        width: image.naturalWidth || image.width || 1,
+        height: image.naturalHeight || image.height || 1,
+      });
+    };
+    image.onerror = () => reject(new Error("Unable to read the exported image."));
+    image.src = dataUrl;
+  });
+}
+
+async function saveImageDataUrlAsPdf(dataUrl, filename) {
+  const JsPdf = await ensureJsPdfLoaded();
+  const { width, height } = await getImageDimensions(dataUrl);
+  const orientation = width >= height ? "landscape" : "portrait";
+  const pdf = new JsPdf({
+    orientation,
+    unit: "pt",
+    format: "a4",
+    compress: true,
+  });
+  const pageWidth = pdf.internal.pageSize.getWidth();
+  const pageHeight = pdf.internal.pageSize.getHeight();
+  const margin = 18;
+  const availableWidth = pageWidth - margin * 2;
+  const availableHeight = pageHeight - margin * 2;
+  const scale = Math.min(availableWidth / width, availableHeight / height, 1);
+  const renderWidth = width * scale;
+  const renderHeight = height * scale;
+  const x = (pageWidth - renderWidth) / 2;
+  const y = (pageHeight - renderHeight) / 2;
+  pdf.addImage(dataUrl, "PNG", x, y, renderWidth, renderHeight, undefined, "FAST");
+  pdf.save(filename);
+}
+
+function decodeSvgPayload(svgPayload) {
+  const raw = String(svgPayload || "");
+  if (raw.startsWith("data:image/svg+xml;base64,")) {
+    return window.atob(raw.split(",")[1] || "");
+  }
+  if (raw.startsWith("data:image/svg+xml")) {
+    return decodeURIComponent(raw.slice(raw.indexOf(",") + 1));
+  }
+  return raw;
+}
+
+function getSvgIntrinsicSize(svgElement) {
+  const parseLength = (value) => {
+    const text = String(value || "").trim();
+    if (!text) {
+      return null;
+    }
+    const numeric = Number.parseFloat(text.replace(/px$/i, ""));
+    return Number.isFinite(numeric) ? numeric : null;
+  };
+  const width = parseLength(svgElement.getAttribute("width"));
+  const height = parseLength(svgElement.getAttribute("height"));
+  const viewBox = String(svgElement.getAttribute("viewBox") || "")
+    .trim()
+    .split(/[\s,]+/)
+    .map((token) => Number.parseFloat(token));
+  if (viewBox.length === 4 && Number.isFinite(viewBox[2]) && Number.isFinite(viewBox[3]) && viewBox[2] > 0 && viewBox[3] > 0) {
+    return {
+      width: width || viewBox[2],
+      height: height || viewBox[3],
+    };
+  }
+  return {
+    width: width || 960,
+    height: height || 640,
+  };
+}
+
+async function saveSvgMarkupAsPdf(svgMarkup, filename) {
+  const JsPdf = await ensureJsPdfLoaded();
+  await ensureSvg2PdfLoaded();
+  const parser = new DOMParser();
+  const documentSvg = parser.parseFromString(svgMarkup, "image/svg+xml").documentElement;
+  if (!documentSvg || String(documentSvg.nodeName || "").toLowerCase() !== "svg") {
+    throw new Error("The current plot could not be converted to SVG.");
+  }
+  documentSvg.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  documentSvg.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
+  const { width, height } = getSvgIntrinsicSize(documentSvg);
+  const orientation = width >= height ? "landscape" : "portrait";
+  const pdf = new JsPdf({
+    orientation,
+    unit: "pt",
+    format: "a4",
+    compress: true,
+  });
+  const pageWidth = pdf.internal.pageSize.getWidth();
+  const pageHeight = pdf.internal.pageSize.getHeight();
+  const margin = 18;
+  const availableWidth = pageWidth - margin * 2;
+  const availableHeight = pageHeight - margin * 2;
+  const scale = Math.min(availableWidth / width, availableHeight / height, 1);
+  const renderWidth = width * scale;
+  const renderHeight = height * scale;
+  const x = (pageWidth - renderWidth) / 2;
+  const y = (pageHeight - renderHeight) / 2;
+  await pdf.svg(documentSvg, {
+    x,
+    y,
+    width: renderWidth,
+    height: renderHeight,
+  });
+  pdf.save(filename);
+}
+
+async function exportPlotlyElementToPdf(elementOrId, filename) {
+  const element = typeof elementOrId === "string" ? document.getElementById(elementOrId) : elementOrId;
+  if (!element || !element.data || !element.layout) {
+    throw new Error("The current Plotly view is not available.");
+  }
+  const width = Math.max(Math.round(element.clientWidth || 960), 720);
+  const height = Math.max(Math.round(element.clientHeight || 640), 480);
+  const dataUrl = await Plotly.toImage(element, {
+    format: "png",
+    width,
+    height,
+    scale: 2,
+  });
+  await saveImageDataUrlAsPdf(dataUrl, filename);
+}
+
+async function exportCytoscapeToPdf(cy, filename) {
+  if (!cy) {
+    throw new Error("The current network view is not available.");
+  }
+  const dataUrl = cy.png({
+    full: true,
+    scale: 2,
+    bg: "#ffffff",
+  });
+  await saveImageDataUrlAsPdf(dataUrl, filename);
+}
+
+async function exportPlotlyElementToVectorPdf(elementOrId, filename) {
+  const element = typeof elementOrId === "string" ? document.getElementById(elementOrId) : elementOrId;
+  if (!element || !element.data || !element.layout) {
+    throw new Error("The current Plotly view is not available.");
+  }
+  const width = Math.max(
+    Math.round(element.clientWidth || element.offsetWidth || element.layout?.width || 960),
+    720,
+  );
+  const height = Math.max(
+    Math.round(element.clientHeight || element.offsetHeight || element.layout?.height || 640) + 24,
+    520,
+  );
+  const svgPayload = await Plotly.toImage(element, {
+    format: "svg",
+    width,
+    height,
+    scale: 1,
+  });
+  const svgMarkup = decodeSvgPayload(svgPayload);
+  if (!svgMarkup) {
+    throw new Error("The current Plotly view could not be exported.");
+  }
+  await saveSvgMarkupAsPdf(svgMarkup, filename);
+}
+
+async function exportCytoscapeToVectorPdf(cy, filename) {
+  if (!cy) {
+    throw new Error("The current network view is not available.");
+  }
+  await ensureCytoscapeSvgLoaded();
+  if (typeof cy.svg !== "function") {
+    throw new Error("The Cytoscape SVG exporter is not available.");
+  }
+  const svgMarkup = cy.svg({
+    full: false,
+    scale: 1,
+    bg: "#ffffff",
+  });
+  await saveSvgMarkupAsPdf(svgMarkup, filename);
+}
+
+function showDownloadError(error) {
+  const message = error && error.message ? error.message : "Unable to export the current plot.";
+  window.alert(message);
 }
 
 function interpolatePairedColor(t) {
@@ -195,13 +513,20 @@ function markerNetworkPopulations() {
     .filter((value, index, values) => value && values.indexOf(value) === index);
 }
 
+function markerHeatmapAvailable() {
+  if (!currentMarkerAnalysis || !currentMarkerAnalysis.enabled) {
+    return false;
+  }
+  return Boolean(currentMarkerAnalysis.heatmap_tsv || currentMarkerAnalysis.heatmap_cache);
+}
+
 function updateExpressionModeOptions() {
   const modeSelect = document.getElementById("expression-mode");
   const markerPopulationField = document.getElementById("expression-marker-population-field");
   const markerPopulationSelect = document.getElementById("expression-marker-population");
   const currentMode = modeSelect.value;
   const modes = [...BASE_EXPRESSION_MODES];
-  if (currentMarkerAnalysis && currentMarkerAnalysis.enabled && currentMarkerAnalysis.expression_tsv) {
+  if (markerHeatmapAvailable()) {
     modes.push({ value: "marker_heatmap", label: "MarkerHeatmap" });
   }
   const networkPopulations = markerNetworkPopulations();
@@ -716,8 +1041,22 @@ function hookForms() {
     renderCurrentUmap();
     renderCurrentExpression();
   });
-  document.getElementById("download-umap-image-btn").addEventListener("click", downloadUmapImage);
-  document.getElementById("download-expression-image-btn").addEventListener("click", downloadExpressionImage);
+  document.getElementById("download-umap-image-btn").addEventListener("click", (event) => {
+    event.preventDefault();
+    downloadUmapImage();
+  });
+  document.getElementById("download-expression-image-btn").addEventListener("click", (event) => {
+    event.preventDefault();
+    downloadExpressionImage();
+  });
+  document.getElementById("download-differential-left-btn").addEventListener("click", (event) => {
+    event.preventDefault();
+    downloadDifferentialLeftPdf();
+  });
+  document.getElementById("download-differential-gene-btn").addEventListener("click", (event) => {
+    event.preventDefault();
+    downloadDifferentialGenePdf();
+  });
   document.getElementById("differential-viz-mode").addEventListener("change", () => {
     syncDifferentialPopulationSelect(currentDifferentialState);
     updateDifferentialDownloadButton();
@@ -754,6 +1093,8 @@ function hookForms() {
     currentDifferentialGene = "";
     loadDifferentialVisualization();
   });
+  initToggleMultiSelect(document.getElementById("differential-group1"));
+  initToggleMultiSelect(document.getElementById("differential-group2"));
 }
 
 function updateResetDataButton() {
@@ -838,6 +1179,18 @@ function resetWorkspaceData() {
     // Ignore Plotly cleanup errors when the plot is not initialized.
   }
   previewPlot.innerHTML = "";
+
+  const qcLivePlot = document.getElementById("qc-live-plot");
+  try {
+    Plotly.purge(qcLivePlot);
+  } catch (_) {
+    // Ignore Plotly cleanup errors when the plot is not initialized.
+  }
+  qcLivePlot.innerHTML = "";
+  const qcLiveCaption = document.getElementById("qc-live-caption");
+  if (qcLiveCaption) {
+    qcLiveCaption.textContent = "Live counts parsed from alignment log.";
+  }
 
   const sampleContainer = document.getElementById("sample-container");
   sampleContainer.innerHTML = "";
@@ -1078,7 +1431,7 @@ function handleResultsSubmit(evt) {
 
 async function loadJobState(jobId) {
   try {
-    const resp = await fetch(apiPath(`/jobs/${jobId}/status`));
+    const resp = await fetch(apiPath(`/jobs/${jobId}/status?t=${Date.now()}`), { cache: "no-store" });
     const data = await resp.json();
     if (!resp.ok) {
       throw new Error(data.detail || "Status request failed.");
@@ -1099,7 +1452,7 @@ function startStatusPolling(jobId) {
 
 async function pollStatus(jobId) {
   try {
-    const resp = await fetch(apiPath(`/jobs/${jobId}/status`));
+    const resp = await fetch(apiPath(`/jobs/${jobId}/status?t=${Date.now()}`), { cache: "no-store" });
     const data = await resp.json();
     if (!resp.ok) {
       throw new Error(data.detail || "Status request failed.");
@@ -1120,7 +1473,8 @@ function applyJobStatus(jobId, data) {
   updateWorkflowPanels(referenceRerunPending ? "uploaded" : (data.status || null));
   document.getElementById("job-progress").style.width = `${data.progress || 0}%`;
   document.getElementById("job-progress-label").textContent = `${data.progress || 0}%`;
-  document.getElementById("job-log").textContent = (data.qc_log_tail || []).join("");
+  document.getElementById("job-log").textContent = formatPanelLogTail(data.log_head || [], data.log_tail || []);
+  renderQcLiveProgress(data);
   if (!referenceRerunPending) {
     document.getElementById("qc-cell-status").textContent = buildQcCellSummary(data);
   }
@@ -1146,13 +1500,12 @@ function applyJobStatus(jobId, data) {
     previousJobStatus !== "completed" &&
     currentJobStatus === "completed" &&
     !referenceRerunPending;
+
   if (alignmentJustCompleted) {
     setExplorerTab("explore");
   }
 
   if (data.status === "completed" && !referenceRerunPending) {
-    loadGeneSuggestions(jobId);
-    loadDisplayFilters(jobId);
     const artifactSignature = JSON.stringify(Object.keys(data.artifacts || {}).sort());
     if (artifactSignature !== lastDownloadArtifactSignature) {
       lastDownloadArtifactSignature = artifactSignature;
@@ -1161,6 +1514,8 @@ function applyJobStatus(jobId, data) {
     if (!document.getElementById("gene-query").value && data.default_gene) {
       document.getElementById("gene-query").value = data.default_gene;
     }
+    loadGeneSuggestions(jobId);
+    loadDisplayFilters(jobId);
     if (loadedResultsJobId !== jobId) {
       loadedResultsJobId = jobId;
       refreshResults();
@@ -1186,6 +1541,7 @@ function updateWorkflowPanels(status) {
   const hasCompletedAlignment = normalizedStatus === "completed";
   const runGrid = document.getElementById("sandbox-run-grid");
   const qcPanel = document.getElementById("qc-panel");
+  const qcLivePanel = document.getElementById("qc-live-panel");
   const differentialPanel = document.getElementById("differential-panel");
   const exploreControlsPanel = document.getElementById("explore-controls-panel");
   const previewPanel = document.getElementById("reference-preview-panel");
@@ -1193,6 +1549,7 @@ function updateWorkflowPanels(status) {
   const differential = document.getElementById("differential-results-view");
 
   qcPanel.classList.toggle("hidden", !hasUploadedJob);
+  qcLivePanel.classList.toggle("hidden", !hasUploadedJob);
   differentialPanel.classList.toggle("hidden", !hasCompletedAlignment);
   exploreControlsPanel.classList.toggle("hidden", !hasCompletedAlignment);
   previewPanel.classList.toggle("hidden", hasUploadedJob);
@@ -1291,10 +1648,219 @@ function renderReferencePreview(payload) {
   );
 }
 
+function parseProgressPercent(value) {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : 0;
+  }
+  if (typeof value === "string") {
+    const parsed = Number.parseFloat(value.replace("%", "").trim());
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+}
+
+function getStatusLogLines(data) {
+  const head = Array.isArray(data && data.log_head) ? data.log_head : [];
+  const tail = Array.isArray(data && data.log_tail) ? data.log_tail : [];
+  return head.concat(tail).map((line) => String(line || ""));
+}
+
+function formatPanelLogTail(headLines, tailLines) {
+  const head = Array.isArray(headLines) ? headLines : [];
+  const tail = Array.isArray(tailLines) ? tailLines : [];
+  if (!head.length && !tail.length) {
+    return "";
+  }
+  const noisyPatterns = [
+    /\[mem\]\[timing\]/i,
+    /Loading input files:\s+\d+%/i,
+    /Downsampling clusters:\s+\d+%/i,
+    /Computing marker statistics:\s+\d+%/i,
+  ];
+  const cleanHead = head.filter((line) => {
+    const value = String(line || "");
+    return !noisyPatterns.some((pattern) => pattern.test(value));
+  });
+  const filteredTail = tail.filter((line) => {
+    const value = String(line || "");
+    return !noisyPatterns.some((pattern) => pattern.test(value));
+  });
+  const selectedTail = (filteredTail.length ? filteredTail : tail).slice(-120);
+  if (!cleanHead.length) {
+    return selectedTail.join("");
+  }
+  const seen = new Set(cleanHead.map((line) => String(line)));
+  const dedupedTail = selectedTail.filter((line) => !seen.has(String(line)));
+  return cleanHead.concat(dedupedTail).join("");
+}
+
+function extractQcThresholdState(lines) {
+  const state = {
+    total: null,
+    minGenesThreshold: null,
+    afterMinGenes: null,
+    minCountsThreshold: null,
+    afterMinCounts: null,
+    afterMito: null,
+  };
+  const values = Array.isArray(lines) ? lines : [];
+  for (const rawLine of values) {
+    const line = String(rawLine || "");
+    let match = line.match(/(?:reimported\s+)?adata shape:\s*\((\d+),/i);
+    if (match) {
+      state.total = Number(match[1]);
+      continue;
+    }
+    match = line.match(/Cells remaining after min_genes\s+([0-9.]+)\s+filtering:\s*(\d+)/i);
+    if (match) {
+      state.minGenesThreshold = Number(match[1]);
+      state.afterMinGenes = Number(match[2]);
+      continue;
+    }
+    match = line.match(/Cells remaining after min_counts\s+([0-9.]+)\s+filtering:\s*(\d+)/i);
+    if (match) {
+      state.minCountsThreshold = Number(match[1]);
+      state.afterMinCounts = Number(match[2]);
+      continue;
+    }
+    match = line.match(/Cells remaining after mito-percent filtering:\s*(\d+)/i);
+    if (match) {
+      state.afterMito = Number(match[1]);
+    }
+  }
+  if (!Number.isFinite(state.total)) {
+    const fallbackTotal = [state.afterMito, state.afterMinCounts, state.afterMinGenes].find((value) => Number.isFinite(value));
+    if (Number.isFinite(fallbackTotal)) {
+      state.total = fallbackTotal;
+    }
+  }
+  return state;
+}
+
+function getQcThresholdInput(name) {
+  const input = document.querySelector(`#qc-form [name="${name}"]`);
+  const parsed = Number.parseFloat(String((input && input.value) || "").trim());
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function renderQcLiveProgress(data) {
+  const plot = document.getElementById("qc-live-plot");
+  const caption = document.getElementById("qc-live-caption");
+  if (!plot || !caption) {
+    return;
+  }
+  const lines = getStatusLogLines(data);
+  const state = extractQcThresholdState(lines);
+  const total = Number.isFinite(state.total) ? state.total : null;
+
+  if (!Number.isFinite(total) || total <= 0) {
+    try {
+      Plotly.purge(plot);
+    } catch (_) {
+      // Ignore cleanup errors when no Plotly instance exists yet.
+    }
+    plot.innerHTML = "<div class=\"empty-state\">QC metrics will appear here as filters are applied.</div>";
+    caption.textContent = "Live counts parsed from alignment log.";
+    return;
+  }
+
+  const minGenesThreshold = Number.isFinite(state.minGenesThreshold)
+    ? state.minGenesThreshold
+    : getQcThresholdInput("min_genes");
+  const minCountsThreshold = Number.isFinite(state.minCountsThreshold)
+    ? state.minCountsThreshold
+    : getQcThresholdInput("min_counts");
+  const mitoThreshold = getQcThresholdInput("mit_percent");
+
+  const rows = [];
+  if (Number.isFinite(state.afterMinGenes)) {
+    const label = Number.isFinite(minGenesThreshold) ? `min genes \u2265 ${minGenesThreshold}` : "min genes filter";
+    rows.push({ label, kept: state.afterMinGenes });
+  }
+  if (Number.isFinite(state.afterMinCounts)) {
+    const label = Number.isFinite(minCountsThreshold) ? `min counts \u2265 ${minCountsThreshold}` : "min counts filter";
+    rows.push({ label, kept: state.afterMinCounts });
+  }
+  if (Number.isFinite(state.afterMito)) {
+    const label = Number.isFinite(mitoThreshold) ? `mito % \u2264 ${mitoThreshold}` : "mito % filter";
+    rows.push({ label, kept: state.afterMito });
+  }
+
+  if (!rows.length) {
+    try {
+      Plotly.purge(plot);
+    } catch (_) {
+      // Ignore cleanup errors when no Plotly instance exists yet.
+    }
+    plot.innerHTML = "<div class=\"empty-state\">QC metrics will appear here as filters are applied.</div>";
+    caption.textContent = `Total detected cells: ${total.toLocaleString()}.`;
+    return;
+  }
+
+  const labels = rows.map((row) => row.label);
+  const kept = rows.map((row) => Math.max(0, Math.min(total, Number(row.kept) || 0)));
+  const filtered = kept.map((value) => Math.max(0, total - value));
+  const maxLabelLength = labels.reduce((max, value) => Math.max(max, String(value).length), 0);
+  const marginLeft = Math.min(210, Math.max(120, 18 + maxLabelLength * 6));
+
+  const traces = [
+    {
+      type: "bar",
+      orientation: "h",
+      y: labels,
+      x: kept,
+      name: "retained",
+      marker: { color: "rgba(5, 150, 105, 0.85)" },
+      hovertemplate: "%{y}<br>Retained: %{x:,}<extra></extra>",
+    },
+    {
+      type: "bar",
+      orientation: "h",
+      y: labels,
+      x: filtered,
+      name: "filtered out",
+      marker: { color: "rgba(59, 130, 246, 0.35)" },
+      hovertemplate: "%{y}<br>Filtered out: %{x:,}<extra></extra>",
+    },
+  ];
+
+  Plotly.react(
+    plot,
+    traces,
+    {
+      barmode: "stack",
+      paper_bgcolor: "rgba(0,0,0,0)",
+      plot_bgcolor: "rgba(255,255,255,0.88)",
+      margin: { t: 10, l: marginLeft, r: 16, b: 48 },
+      height: 540,
+      xaxis: {
+        title: { text: "Cells (relative to total detected)" },
+        range: [0, total],
+        tickformat: ",d",
+        showgrid: true,
+        gridcolor: "rgba(148,163,184,0.2)",
+      },
+      yaxis: {
+        autorange: "reversed",
+      },
+      legend: {
+        orientation: "h",
+        x: 0,
+        y: 1.15,
+      },
+    },
+    { responsive: true, displayModeBar: false }
+  );
+
+  caption.textContent = `Total detected cells: ${total.toLocaleString()}.`;
+}
+
 function buildQcCellSummary(data) {
-  const lines = data.log_tail || [];
+  const lines = getStatusLogLines(data);
+  const qcState = extractQcThresholdState(lines);
   const status = String(data.status || "").trim().toLowerCase();
   const message = String(data.message || "").trim();
+  const progress = parseProgressPercent(data.progress);
   let alignmentExcluded = null;
   for (const line of lines) {
     const match = line.match(/Applied min_alignment_score=.*?Excluded\s+(\d+)\s+cells,\s+kept\s+(\d+)/i);
@@ -1303,14 +1869,45 @@ function buildQcCellSummary(data) {
     }
   }
 
-  if (status === "processing" && message) {
-    const genericMessages = new Set([
-      "Preparing inputs…",
-      "Preparing inputs...",
-      "Job submitted to worker.",
-    ]);
-    if (!genericMessages.has(message)) {
-      return message;
+  const stageMarkers = [
+    "Running approximate UMAP placement.",
+    "Exporting NetPerspective marker networks.",
+    "Identifying cell-state marker genes.",
+    "Running cellHarmony_lite pipeline.",
+    "Reference metadata loaded.",
+  ];
+  if (status !== "completed" && status !== "failed") {
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const line = String(lines[index] || "");
+      const matchedStage = stageMarkers.find((marker) => line.includes(marker));
+      if (matchedStage) {
+        return matchedStage;
+      }
+      if (line.includes("Aligning cells to reference")) {
+        return "Aligning cells to reference...";
+      }
+      if (line.includes("Normalization steps")) {
+        return "Normalizing expression values...";
+      }
+    }
+    if (progress >= 82) {
+      return "Running approximate UMAP placement.";
+    }
+    if (progress >= 78) {
+      return "Exporting NetPerspective marker networks.";
+    }
+    if (progress >= 72) {
+      return "Identifying the top 50 unique markers for 100 cells per cell state.";
+    }
+    if (message) {
+      const genericMessages = new Set([
+        "Preparing inputs…",
+        "Preparing inputs...",
+        "Job submitted to worker.",
+      ]);
+      if (!genericMessages.has(message)) {
+        return message;
+      }
     }
   }
 
@@ -1332,45 +1929,18 @@ function buildQcCellSummary(data) {
     return `Analysis completed and results saved.${exclusionSuffix}`.trim();
   }
 
-  let beforeQc = null;
-  let afterMinGenes = null;
-  let afterMinCounts = null;
-  let afterMito = null;
-
-  for (const line of lines) {
-    let match = line.match(/(?:reimported\s+)?adata shape:\s*\((\d+),/i);
-    if (match) {
-      beforeQc = Number(match[1]);
-      continue;
-    }
-    match = line.match(/Cells remaining after min_genes .* filtering:\s*(\d+)/i);
-    if (match) {
-      afterMinGenes = Number(match[1]);
-      continue;
-    }
-    match = line.match(/Cells remaining after min_counts .* filtering:\s*(\d+)/i);
-    if (match) {
-      afterMinCounts = Number(match[1]);
-      continue;
-    }
-    match = line.match(/Cells remaining after mito-percent filtering:\s*(\d+)/i);
-    if (match) {
-      afterMito = Number(match[1]);
-    }
-  }
-
   const segments = [];
-  if (beforeQc !== null) {
-    segments.push(`Cells before QC: ${beforeQc.toLocaleString()}`);
+  if (Number.isFinite(qcState.total)) {
+    segments.push(`Cells before QC: ${qcState.total.toLocaleString()}`);
   }
-  if (afterMinGenes !== null) {
-    segments.push(`After min genes: ${afterMinGenes.toLocaleString()}`);
+  if (Number.isFinite(qcState.afterMinGenes)) {
+    segments.push(`After min genes: ${qcState.afterMinGenes.toLocaleString()}`);
   }
-  if (afterMinCounts !== null) {
-    segments.push(`After min counts: ${afterMinCounts.toLocaleString()}`);
+  if (Number.isFinite(qcState.afterMinCounts)) {
+    segments.push(`After min counts: ${qcState.afterMinCounts.toLocaleString()}`);
   }
-  if (afterMito !== null) {
-    segments.push(`After mito filter: ${afterMito.toLocaleString()}`);
+  if (Number.isFinite(qcState.afterMito)) {
+    segments.push(`After mito filter: ${qcState.afterMito.toLocaleString()}`);
   }
 
   if (segments.length) {
@@ -1414,6 +1984,13 @@ async function populateDownloadLinks(jobId, statusData = null) {
     btn.textContent = labelMap[key] || `Download ${key}`;
     container.appendChild(btn);
   });
+  if (jobId && data && data.status === "completed") {
+    const logBtn = document.createElement("a");
+    logBtn.className = "download-btn";
+    logBtn.href = apiPath(`/jobs/${jobId}/log`);
+    logBtn.textContent = "Download log";
+    container.appendChild(logBtn);
+  }
 }
 
 function updateDifferentialUi(state) {
@@ -1432,6 +2009,7 @@ function updateDifferentialUi(state) {
   const progress = state ? state.progress || 0 : 0;
   const message = document.getElementById("differential-message");
   const archiveLink = document.getElementById("differential-archive-link");
+  const logLink = document.getElementById("differential-log-link");
 
   const enabled = Boolean(state && state.enabled);
   const config = (state && state.config) || {};
@@ -1459,8 +2037,11 @@ function updateDifferentialUi(state) {
   );
   populateSingleSelect(sampleFieldSelect, sampleFieldOptions, selectedSampleField);
   const sampleValues = sampleValuesMap[sampleFieldSelect.value] || [];
-  const showComparisonType = sampleValues.length >= 4;
-  const selectedComparisonType = showComparisonType ? (config.comparison_type || "cells") : "cells";
+  const comparisonTypes = (state && state.comparison_types) || ["cells"];
+  const showComparisonType = comparisonTypes.includes("pseudobulk");
+  const selectedComparisonType = showComparisonType && comparisonTypes.includes(config.comparison_type)
+    ? (config.comparison_type || "cells")
+    : "cells";
   const showPanel = Boolean(state && state.enabled && populationOptions.length && sampleFieldOptions.length);
 
   panel.classList.toggle("hidden", !showPanel);
@@ -1469,6 +2050,10 @@ function updateDifferentialUi(state) {
   populateMultiSelect(group1Select, sampleValues, config.group1_samples || []);
   populateMultiSelect(group2Select, sampleValues, config.group2_samples || []);
   comparisonField.classList.toggle("hidden", !showComparisonType);
+  Array.from(comparisonSelect.options).forEach((option) => {
+    option.hidden = !comparisonTypes.includes(option.value);
+    option.disabled = !comparisonTypes.includes(option.value);
+  });
   comparisonSelect.value = selectedComparisonType;
 
   const disableInputs = !enabled || !populationOptions.length || !sampleFieldOptions.length;
@@ -1493,6 +2078,7 @@ function updateDifferentialUi(state) {
     intro.textContent = "Available after alignment completes for jobs with two or more samples.";
     message.textContent = "Differential analysis is enabled when the job contains two or more samples.";
     archiveLink.classList.add("hidden");
+    logLink.classList.add("hidden");
     resetDifferentialResults();
     setResultMode("baseline");
     return;
@@ -1507,6 +2093,7 @@ function updateDifferentialUi(state) {
       resultsView.classList.add("hidden");
     }
     archiveLink.classList.add("hidden");
+    logLink.classList.add("hidden");
     resetDifferentialResults();
     setResultMode("baseline");
     return;
@@ -1532,10 +2119,23 @@ function updateDifferentialUi(state) {
   } else {
     archiveLink.classList.add("hidden");
   }
+  if (loadedResultsJobId && state && state.status === "completed") {
+    logLink.href = apiPath(`/jobs/${loadedResultsJobId}/log`);
+    logLink.classList.remove("hidden");
+  } else {
+    logLink.classList.add("hidden");
+  }
 
-  if (state.status === "completed" && (state.result_populations || []).length) {
-    renderDifferentialResults(state);
+  if (state.status === "completed") {
     setResultMode("differential");
+    if ((state.result_populations || []).length) {
+      renderDifferentialResults(state);
+    } else {
+      resetDifferentialResults();
+      renderDifferentialEmpty(
+        "Differential analysis completed, but no significant DE genes were available for the selected comparison."
+      );
+    }
   } else {
     resetDifferentialResults();
     setResultMode("baseline");
@@ -1568,6 +2168,26 @@ function populateMultiSelect(element, values, selectedValues) {
     option.textContent = value;
     option.selected = existingSelections.has(value);
     element.appendChild(option);
+  });
+}
+
+function initToggleMultiSelect(element) {
+  if (!element || element.dataset.toggleMultiSelectBound === "true") {
+    return;
+  }
+  element.dataset.toggleMultiSelectBound = "true";
+  element.addEventListener("mousedown", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLOptionElement)) {
+      return;
+    }
+    event.preventDefault();
+    if (element.disabled) {
+      return;
+    }
+    target.selected = !target.selected;
+    element.focus();
+    element.dispatchEvent(new Event("change", { bubbles: true }));
   });
 }
 
@@ -1993,9 +2613,7 @@ function renderDifferentialGeneDetail(payload) {
   document.getElementById("differential-selected-gene").textContent = `${payload.gene} in ${payload.population}`;
   plot.classList.remove("hidden");
   empty.classList.add("hidden");
-  downloadButton.href = apiPath(
-    `/jobs/${document.getElementById("results-job-id").value.trim()}/differential/interactive/gene/pdf?population=${encodeURIComponent(payload.population)}&gene=${encodeURIComponent(payload.gene)}`
-  );
+  downloadButton.href = "#";
   downloadButton.classList.remove("hidden");
 
   const traces = (payload.groups || []).map((group, index) => ({
@@ -2070,24 +2688,17 @@ function updateDifferentialDownloadButton() {
   const button = document.getElementById("download-differential-left-btn");
   if (!state || state.status !== "completed") {
     button.classList.add("hidden");
+    button.href = "#";
     return;
   }
-  const mode = document.getElementById("differential-viz-mode").value;
   const population = document.getElementById("differential-result-population").value;
-  if (mode === "heatmap" && state.heatmap_pdf_url) {
-    button.href = state.heatmap_pdf_url;
-    button.classList.remove("hidden");
+  if (!population) {
+    button.classList.add("hidden");
+    button.href = "#";
     return;
   }
-  if (mode === "network" && population) {
-    const selected = (state.networks || []).find((entry) => entry.population === population);
-    if (selected?.pdf_url) {
-      button.href = selected.pdf_url;
-      button.classList.remove("hidden");
-      return;
-    }
-  }
-  button.classList.add("hidden");
+  button.href = "#";
+  button.classList.remove("hidden");
 }
 
 function destroyDifferentialNetwork() {
@@ -2686,7 +3297,7 @@ function renderCurrentExpression() {
   if (mode === "marker_heatmap") {
     document.getElementById("expression-filter-summary").textContent = "Marker heatmap view uses the exported marker analysis matrix.";
     const jobId = document.getElementById("results-job-id").value.trim();
-    if (!jobId || !currentMarkerAnalysis || !currentMarkerAnalysis.enabled || !currentMarkerAnalysis.expression_tsv) {
+    if (!jobId || !markerHeatmapAvailable()) {
       renderExpressionMessage("Marker heatmap output is unavailable for this job.", "MarkerHeatmap");
       return;
     }
@@ -2833,18 +3444,31 @@ async function refreshResults() {
   await loadExpression();
 }
 
-function downloadUmapImage() {
+async function downloadUmapImage() {
   const jobId = document.getElementById("results-job-id").value.trim();
   if (!jobId || !currentUmapData) {
     return;
   }
   const mode = document.getElementById("umap-mode").value;
+  if (mode === "frequency") {
+    try {
+      await exportPlotlyElementToVectorPdf(
+        "umap-plot",
+        buildPdfFilename([jobId, "cell_frequency"], "cell_frequency"),
+      );
+      return;
+    } catch (error) {
+      console.error(error);
+      showDownloadError(error);
+      return;
+    }
+  }
   const params = getDisplayFilterParams();
   params.set("mode", mode);
   window.open(apiPath(`/jobs/${jobId}/umap/pdf?${params.toString()}`), "_blank");
 }
 
-function downloadExpressionImage() {
+async function downloadExpressionImage() {
   const jobId = document.getElementById("results-job-id").value.trim();
   const gene = document.getElementById("gene-query").value.trim();
   const mode = document.getElementById("expression-mode").value;
@@ -2852,7 +3476,8 @@ function downloadExpressionImage() {
     return;
   }
   if (mode === "marker_heatmap") {
-    window.open(apiPath(`/jobs/${jobId}/marker/heatmap.pdf`), "_blank");
+    const params = getDisplayFilterParams();
+    window.open(apiPath(`/jobs/${jobId}/marker/heatmap.pdf?${params.toString()}`), "_blank");
     return;
   }
   if (mode === "marker_network") {
@@ -2863,6 +3488,18 @@ function downloadExpressionImage() {
     window.open(apiPath(`/jobs/${jobId}/marker/network/pdf?population=${encodeURIComponent(population)}`), "_blank");
     return;
   }
+  if (mode === "violin") {
+    try {
+      await exportPlotlyElementToVectorPdf(
+        "expression-plot",
+        buildPdfFilename([jobId, gene || "gene", "violin"], "violin"),
+      );
+    } catch (error) {
+      console.error(error);
+      showDownloadError(error);
+    }
+    return;
+  }
   if (!gene) {
     return;
   }
@@ -2871,6 +3508,57 @@ function downloadExpressionImage() {
   params.set("mode", mode);
   window.open(
     apiPath(`/jobs/${jobId}/expression/pdf?${params.toString()}`),
+    "_blank",
+  );
+}
+
+async function downloadDifferentialLeftPdf() {
+  const jobId = document.getElementById("results-job-id").value.trim();
+  const state = currentDifferentialState;
+  if (!jobId || !state || state.status !== "completed") {
+    return;
+  }
+  const mode = document.getElementById("differential-viz-mode").value;
+  const population = document.getElementById("differential-result-population").value;
+  if (!population) {
+    return;
+  }
+  if (mode === "network") {
+    window.open(
+      apiPath(`/jobs/${jobId}/differential/interactive/pdf?mode=${encodeURIComponent(mode)}&population=${encodeURIComponent(population)}`),
+      "_blank",
+    );
+    return;
+  }
+  window.open(
+    apiPath(`/jobs/${jobId}/differential/interactive/pdf?mode=${encodeURIComponent(mode)}&population=${encodeURIComponent(population)}`),
+    "_blank",
+  );
+}
+
+async function downloadDifferentialGenePdf() {
+  const jobId = document.getElementById("results-job-id").value.trim();
+  if (!jobId || !currentDifferentialGene) {
+    return;
+  }
+  const plot = document.getElementById("differential-gene-plot");
+  if (plot && plot.data && plot.layout) {
+    try {
+      await exportPlotlyElementToVectorPdf(
+        plot,
+        buildPdfFilename([jobId, currentDifferentialPopulation || "population", currentDifferentialGene, "gene_detail"], "gene_detail"),
+      );
+      return;
+    } catch (error) {
+      console.error(error);
+      showDownloadError(error);
+      return;
+    }
+  }
+  window.open(
+    apiPath(
+      `/jobs/${jobId}/differential/interactive/gene/pdf?population=${encodeURIComponent(currentDifferentialPopulation)}&gene=${encodeURIComponent(currentDifferentialGene)}`
+    ),
     "_blank",
   );
 }

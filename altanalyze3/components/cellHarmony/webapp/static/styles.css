@@ -146,6 +146,7 @@ body {
 }
 
 #qc-panel,
+#qc-live-panel,
 #results-panel,
 #differential-panel {
   min-height: 0;
@@ -446,6 +447,11 @@ select:disabled {
   margin-top: 14px;
 }
 
+#differential-archive-link,
+#differential-log-link {
+  margin-top: 8px;
+}
+
 .download-btn {
   background: rgba(29, 78, 216, 0.08);
   color: #1e40af;
@@ -685,6 +691,10 @@ select:disabled {
   display: none !important;
 }
 
+.sandbox-run-grid.preupload-mode #qc-live-panel {
+  display: none !important;
+}
+
 .sandbox-run-grid.preupload-mode #reference-preview-panel {
   grid-column: 2;
 }
@@ -701,6 +711,19 @@ select:disabled {
 
 .sandbox-preview-panel.hidden {
   display: none;
+}
+
+#qc-live-panel {
+  min-height: 0;
+}
+
+#qc-live-plot {
+  min-height: 540px;
+}
+
+#qc-live-caption {
+  min-height: 36px;
+  margin-top: 8px;
 }
 
 .workspace-tabs {
@@ -917,14 +940,34 @@ select:disabled {
   overflow: hidden;
 }
 
+#qc-form .primary-btn {
+  margin-top: 8px;
+  margin-bottom: 10px;
+  position: relative;
+  z-index: 1;
+}
+
+#qc-panel > .progress-shell {
+  margin-top: 0;
+}
+
+#qc-cell-status {
+  flex: 0 0 auto;
+  min-height: 56px;
+  line-height: 1.3;
+}
+
 #sample-container {
   max-height: 280px;
 }
 
 #job-log {
-  flex: 1 1 auto;
-  max-height: none;
-  min-height: 0;
+  flex: 0 0 180px;
+  min-height: 180px;
+  max-height: 180px;
+  overflow-y: auto;
+  overflow-x: auto;
+  white-space: pre;
 }
 
 .download-btn {

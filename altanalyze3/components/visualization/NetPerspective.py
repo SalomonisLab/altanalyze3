@@ -54,6 +54,9 @@ INTERACTION_TABLES = [
     ),
 ]
 
+_INTERACTION_CACHE: Dict[tuple, pd.DataFrame] = {}
+NETWORK_CANVAS_SCALE = 0.5
+
 
 class NetworkGenerationError(RuntimeError):
     """Raised when a network cannot be generated for the provided genes."""
@@ -119,6 +122,11 @@ def load_interaction_data(interaction_path: Optional[str] = None) -> pd.DataFram
     else:
         paths = [interaction_path]
 
+    cache_key = tuple(str(p) for p in paths)
+    cached = _INTERACTION_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
     loaded_tables = []
     for path in paths:
         if not os.path.exists(path):
@@ -132,6 +140,7 @@ def load_interaction_data(interaction_path: Optional[str] = None) -> pd.DataFram
         )
 
     df = pd.concat(loaded_tables, axis=0, ignore_index=True)
+    _INTERACTION_CACHE[cache_key] = df
     return df
 
 
@@ -314,6 +323,8 @@ def generate_network_for_genes(
         margin_px = max(36, min(64, int(canvas_px * 0.05)))
         vertex_size = 12
         label_size = 7
+    canvas_px = max(120, int(round(canvas_px * NETWORK_CANVAS_SCALE)))
+    margin_px = max(8, int(round(margin_px * NETWORK_CANVAS_SCALE)))
     png_scale = 2
     try:
         layout.fit_into(
