@@ -5,8 +5,15 @@ const APP_ROOT_PATH = normalizeRootPath(window.__APP_ROOT_PATH__ || "");
 let registry = window.__REFERENCE_REGISTRY__ || { species: [] };
 let sampleCount = 0;
 let pollTimer = null;
-let currentUmapData = null;
-let currentExpressionData = null;
+const VISUALIZATION_PANELS = ["viz1", "viz2"];
+const VISUALIZATION_DEFAULT_MODE = {
+  viz1: "cluster",
+  viz2: "expression_umap",
+};
+let panelPlotData = {
+  viz1: null,
+  viz2: null,
+};
 let loadedResultsJobId = null;
 let loadedGeneSuggestionsJobId = null;
 let loadedDisplayFiltersJobId = null;
@@ -21,12 +28,18 @@ let currentDifferentialState = null;
 let currentDifferentialGene = "";
 let currentDifferentialPopulation = "";
 let differentialCy = null;
-let expressionCy = null;
+let expressionCyByPanel = {
+  viz1: null,
+  viz2: null,
+};
 let lastDownloadArtifactSignature = "";
 let svg2PdfLoaderPromise = null;
 let cytoscapeSvgLoaderPromise = null;
-const BASE_EXPRESSION_MODES = [
-  { value: "umap", label: "UMAP" },
+const BASE_VISUALIZATION_MODES = [
+  { value: "cluster", label: "UMAP cell types" },
+  { value: "relative", label: "UMAP broad" },
+  { value: "frequency", label: "Cell frequency" },
+  { value: "expression_umap", label: "UMAP" },
   { value: "violin", label: "Violin" },
 ];
 const PAIRED_COLOR_STOPS = [
@@ -491,11 +504,34 @@ function networkEdgeArrowShape(edge) {
   return "triangle";
 }
 
-function resetExpressionSurface() {
-  const plot = document.getElementById("expression-plot");
-  if (expressionCy) {
-    expressionCy.destroy();
-    expressionCy = null;
+function panelElementId(panelKey, suffix) {
+  return `${panelKey}-${suffix}`;
+}
+
+function panelPlotId(panelKey) {
+  return panelElementId(panelKey, "plot");
+}
+
+function getPanelSelectValue(panelKey, suffix) {
+  return String(document.getElementById(panelElementId(panelKey, suffix))?.value || "").trim();
+}
+
+function setPanelSummary(panelKey, text) {
+  const summary = document.getElementById(panelElementId(panelKey, "filter-summary"));
+  if (summary) {
+    summary.textContent = String(text || "");
+  }
+}
+
+function resetVisualizationSurface(panelKey) {
+  const plot = document.getElementById(panelPlotId(panelKey));
+  if (!plot) {
+    return;
+  }
+  const cy = expressionCyByPanel[panelKey];
+  if (cy) {
+    cy.destroy();
+    expressionCyByPanel[panelKey] = null;
   }
   try {
     Plotly.purge(plot);
@@ -520,12 +556,8 @@ function markerHeatmapAvailable() {
   return Boolean(currentMarkerAnalysis.heatmap_tsv || currentMarkerAnalysis.heatmap_cache);
 }
 
-function updateExpressionModeOptions() {
-  const modeSelect = document.getElementById("expression-mode");
-  const markerPopulationField = document.getElementById("expression-marker-population-field");
-  const markerPopulationSelect = document.getElementById("expression-marker-population");
-  const currentMode = modeSelect.value;
-  const modes = [...BASE_EXPRESSION_MODES];
+function availableVisualizationModes() {
+  const modes = [...BASE_VISUALIZATION_MODES];
   if (markerHeatmapAvailable()) {
     modes.push({ value: "marker_heatmap", label: "MarkerHeatmap" });
   }
@@ -533,31 +565,60 @@ function updateExpressionModeOptions() {
   if (currentMarkerAnalysis && currentMarkerAnalysis.enabled && networkPopulations.length) {
     modes.push({ value: "marker_network", label: "MarkerNetwork" });
   }
+  return modes;
+}
 
-  modeSelect.innerHTML = "";
-  modes.forEach((mode) => {
-    const option = document.createElement("option");
-    option.value = mode.value;
-    option.textContent = mode.label;
-    modeSelect.appendChild(option);
-  });
-  modeSelect.value = modes.some((mode) => mode.value === currentMode) ? currentMode : "umap";
+function updateExpressionModeOptions() {
+  const modes = availableVisualizationModes();
+  const networkPopulations = markerNetworkPopulations();
 
-  const currentPopulation = markerPopulationSelect.value;
-  markerPopulationSelect.innerHTML = "";
-  networkPopulations.forEach((population) => {
-    const option = document.createElement("option");
-    option.value = population;
-    option.textContent = population;
-    if (population === currentPopulation) {
-      option.selected = true;
+  VISUALIZATION_PANELS.forEach((panelKey) => {
+    const modeSelect = document.getElementById(panelElementId(panelKey, "mode"));
+    const markerPopulationField = document.getElementById(panelElementId(panelKey, "marker-population-field"));
+    const markerPopulationSelect = document.getElementById(panelElementId(panelKey, "marker-population"));
+    const geneField = document.getElementById(panelElementId(panelKey, "gene-field"));
+    if (!modeSelect || !markerPopulationField || !markerPopulationSelect || !geneField) {
+      return;
     }
-    markerPopulationSelect.appendChild(option);
+    const currentMode = modeSelect.value;
+    modeSelect.innerHTML = "";
+    modes.forEach((mode) => {
+      const option = document.createElement("option");
+      option.value = mode.value;
+      option.textContent = mode.label;
+      modeSelect.appendChild(option);
+    });
+    const defaultMode = VISUALIZATION_DEFAULT_MODE[panelKey] || "cluster";
+    modeSelect.value = modes.some((mode) => mode.value === currentMode) ? currentMode : defaultMode;
+
+    const currentPopulation = markerPopulationSelect.value;
+    markerPopulationSelect.innerHTML = "";
+    networkPopulations.forEach((population) => {
+      const option = document.createElement("option");
+      option.value = population;
+      option.textContent = population;
+      if (population === currentPopulation) {
+        option.selected = true;
+      }
+      markerPopulationSelect.appendChild(option);
+    });
+    if (!markerPopulationSelect.value && networkPopulations.length) {
+      markerPopulationSelect.value = networkPopulations[0];
+    }
+
+    const mode = modeSelect.value;
+    const showMarkerPopulation = mode === "marker_network" && networkPopulations.length > 0;
+    const showGene = mode === "expression_umap" || mode === "violin";
+    markerPopulationField.classList.toggle("hidden", !showMarkerPopulation);
+    geneField.classList.toggle("hidden", !showGene);
   });
-  if (!markerPopulationSelect.value && networkPopulations.length) {
-    markerPopulationSelect.value = networkPopulations[0];
+}
+
+function setPanelGeneValue(panelKey, value) {
+  const input = document.getElementById(panelElementId(panelKey, "gene-query"));
+  if (input) {
+    input.value = String(value || "");
   }
-  markerPopulationField.classList.toggle("hidden", !(modeSelect.value === "marker_network" && networkPopulations.length));
 }
 
 function buildMarkerHeatmapViewerUrl(jobId) {
@@ -579,10 +640,10 @@ async function logClientEvent(jobId, message) {
   }
 }
 
-async function renderMarkerHeatmapViewer(jobId) {
-  resetExpressionSurface();
-  const plot = document.getElementById("expression-plot");
-  const params = getDisplayFilterParams();
+async function renderMarkerHeatmapViewer(jobId, panelKey) {
+  resetVisualizationSurface(panelKey);
+  const plot = document.getElementById(panelPlotId(panelKey));
+  const params = getDisplayFilterParams(panelKey);
   const suffix = params.toString() ? `?${params.toString()}` : "";
   const datasetPath = apiPath(`/jobs/${jobId}/marker/heatmap.tsv${suffix}`);
   const datasetUrl = `${window.location.origin}${datasetPath}`;
@@ -604,7 +665,8 @@ async function renderMarkerHeatmapViewer(jobId) {
     }
   } catch (err) {
     await logClientEvent(jobId, `MarkerHeatmap preflight failed: ${err.message || err}`);
-      renderExpressionMessage(
+    renderVisualizationMessage(
+      panelKey,
       `Marker heatmap TSV preflight failed.\n${err.message || err}`,
       "MarkerHeatmap"
     );
@@ -624,7 +686,8 @@ async function renderMarkerHeatmapViewer(jobId) {
     }
   } catch (err) {
     await logClientEvent(jobId, `MarkerHeatmap viewer preflight failed: ${err.message || err}`);
-    renderExpressionMessage(
+    renderVisualizationMessage(
+      panelKey,
       `Marker heatmap viewer preflight failed.\n${err.message || err}`,
       "MarkerHeatmap"
     );
@@ -644,9 +707,9 @@ async function renderMarkerHeatmapViewer(jobId) {
   plot.appendChild(iframe);
 }
 
-function renderExpressionNetwork(payload) {
-  resetExpressionSurface();
-  const plot = document.getElementById("expression-plot");
+function renderExpressionNetwork(panelKey, payload) {
+  resetVisualizationSurface(panelKey);
+  const plot = document.getElementById(panelPlotId(panelKey));
   const elements = (payload.elements || []).map((element) => {
     if (!element.data || !element.data.id || element.data.source) {
       return element;
@@ -660,10 +723,10 @@ function renderExpressionNetwork(payload) {
     };
   });
   if (!elements.length) {
-    renderExpressionMessage(`No marker network was available for ${payload.population}.`, `${payload.population} marker network`);
+    renderVisualizationMessage(panelKey, `No marker network was available for ${payload.population}.`, `${payload.population} marker network`);
     return;
   }
-  expressionCy = cytoscape({
+  expressionCyByPanel[panelKey] = cytoscape({
     container: plot,
     elements,
     style: [
@@ -710,10 +773,10 @@ function renderExpressionNetwork(payload) {
       componentSpacing: 90,
     },
   });
-  expressionCy.on("tap", "node", (event) => {
+  expressionCyByPanel[panelKey].on("tap", "node", (event) => {
     const gene = event?.target?.data("id");
     if (gene) {
-      document.getElementById("gene-query").value = gene;
+      setPanelGeneValue(panelKey, gene);
     }
   });
 }
@@ -1020,34 +1083,40 @@ function hookForms() {
   document.getElementById("results-form").addEventListener("submit", handleResultsSubmit);
   document.getElementById("reset-data-btn").addEventListener("click", resetWorkspaceData);
   document.getElementById("results-job-id").addEventListener("change", handleResultsJobChange);
-  document.getElementById("gene-query").addEventListener("change", () => refreshResults());
-  document.getElementById("expression-mode").addEventListener("change", () => {
-    updateExpressionModeOptions();
-    loadExpression();
+  VISUALIZATION_PANELS.forEach((panelKey) => {
+    document.getElementById(panelElementId(panelKey, "mode")).addEventListener("change", () => {
+      updateExpressionModeOptions();
+      loadVisualizationPanel(panelKey);
+    });
+    document.getElementById(panelElementId(panelKey, "gene-query")).addEventListener("change", () => {
+      loadVisualizationPanel(panelKey);
+    });
+    document.getElementById(panelElementId(panelKey, "marker-population")).addEventListener("change", () => {
+      loadVisualizationPanel(panelKey);
+    });
+    document.getElementById(panelElementId(panelKey, "filter1-field")).addEventListener("change", () => {
+      syncDisplayFilterValueOptions(panelKey, 1);
+      loadVisualizationPanel(panelKey);
+    });
+    document.getElementById(panelElementId(panelKey, "filter2-field")).addEventListener("change", () => {
+      syncDisplayFilterValueOptions(panelKey, 2);
+      loadVisualizationPanel(panelKey);
+    });
+    document.getElementById(panelElementId(panelKey, "filter1-values")).addEventListener("change", () => {
+      loadVisualizationPanel(panelKey);
+    });
+    document.getElementById(panelElementId(panelKey, "filter2-values")).addEventListener("change", () => {
+      loadVisualizationPanel(panelKey);
+    });
+    document.getElementById(`download-${panelKey}-image-btn`).addEventListener("click", (event) => {
+      event.preventDefault();
+      downloadVisualizationImage(panelKey);
+    });
   });
-  document.getElementById("expression-marker-population").addEventListener("change", () => loadExpression());
-  document.getElementById("umap-mode").addEventListener("change", renderCurrentUmap);
-  document.getElementById("display-filter1-field").addEventListener("change", () => {
-    syncDisplayFilterValueOptions(1);
-    refreshResults();
-  });
-  document.getElementById("display-filter2-field").addEventListener("change", () => {
-    syncDisplayFilterValueOptions(2);
-    refreshResults();
-  });
-  document.getElementById("display-filter1-values").addEventListener("change", () => refreshResults());
-  document.getElementById("display-filter2-values").addEventListener("change", () => refreshResults());
   document.getElementById("plot-dot-scale").addEventListener("change", () => {
-    renderCurrentUmap();
-    renderCurrentExpression();
-  });
-  document.getElementById("download-umap-image-btn").addEventListener("click", (event) => {
-    event.preventDefault();
-    downloadUmapImage();
-  });
-  document.getElementById("download-expression-image-btn").addEventListener("click", (event) => {
-    event.preventDefault();
-    downloadExpressionImage();
+    VISUALIZATION_PANELS.forEach((panelKey) => {
+      renderVisualizationPanel(panelKey);
+    });
   });
   document.getElementById("download-differential-left-btn").addEventListener("click", (event) => {
     event.preventDefault();
@@ -1112,8 +1181,10 @@ function resetWorkspaceData() {
     pollTimer = null;
   }
 
-  currentUmapData = null;
-  currentExpressionData = null;
+  panelPlotData = {
+    viz1: null,
+    viz2: null,
+  };
   loadedResultsJobId = null;
   loadedGeneSuggestionsJobId = null;
   loadedDisplayFiltersJobId = null;
@@ -1133,10 +1204,13 @@ function resetWorkspaceData() {
     differentialCy.destroy();
     differentialCy = null;
   }
-  if (expressionCy) {
-    expressionCy.destroy();
-    expressionCy = null;
-  }
+  VISUALIZATION_PANELS.forEach((panelKey) => {
+    const cy = expressionCyByPanel[panelKey];
+    if (cy) {
+      cy.destroy();
+      expressionCyByPanel[panelKey] = null;
+    }
+  });
 
   document.getElementById("upload-job-id").value = "";
   document.getElementById("qc-job-id").value = "";
@@ -1162,15 +1236,12 @@ function resetWorkspaceData() {
   clearDisplayFilters();
   updateExpressionModeOptions();
   resetDifferentialResults();
-  resetExpressionSurface();
 
-  const umapPlot = document.getElementById("umap-plot");
-  try {
-    Plotly.purge(umapPlot);
-  } catch (_) {
-    // Ignore Plotly cleanup errors when the plot is not initialized.
-  }
-  umapPlot.innerHTML = "";
+  VISUALIZATION_PANELS.forEach((panelKey) => {
+    resetVisualizationSurface(panelKey);
+    setPanelSummary(panelKey, "");
+    setPanelGeneValue(panelKey, "");
+  });
 
   const previewPlot = document.getElementById("reference-preview-plot");
   try {
@@ -1347,8 +1418,10 @@ async function handleQcSubmit(evt) {
       referenceRerunPending = false;
       currentDifferentialState = null;
       lastDownloadArtifactSignature = "";
-      currentUmapData = null;
-      currentExpressionData = null;
+      panelPlotData = {
+        viz1: null,
+        viz2: null,
+      };
       currentMarkerAnalysis = null;
       loadedResultsJobId = null;
       clearGeneSuggestions();
@@ -1511,8 +1584,17 @@ function applyJobStatus(jobId, data) {
       lastDownloadArtifactSignature = artifactSignature;
       populateDownloadLinks(jobId, data);
     }
-    if (!document.getElementById("gene-query").value && data.default_gene) {
-      document.getElementById("gene-query").value = data.default_gene;
+    if (data.default_gene) {
+      VISUALIZATION_PANELS.forEach((panelKey) => {
+        const mode = getPanelSelectValue(panelKey, "mode");
+        if (!requiresGeneMode(mode)) {
+          return;
+        }
+        const input = document.getElementById(panelElementId(panelKey, "gene-query"));
+        if (input && !String(input.value || "").trim()) {
+          input.value = data.default_gene;
+        }
+      });
     }
     loadGeneSuggestions(jobId);
     loadDisplayFilters(jobId);
@@ -2755,11 +2837,28 @@ function clearGeneSuggestions() {
 function clearDisplayFilters() {
   currentDisplayFiltersMeta = null;
   loadedDisplayFiltersJobId = null;
-  document.getElementById("display-filter1-field").innerHTML = "";
-  document.getElementById("display-filter2-field").innerHTML = "";
-  document.getElementById("display-filter1-values").innerHTML = "";
-  document.getElementById("display-filter2-values").innerHTML = "";
-  document.getElementById("display-filter-secondary-row").classList.remove("hidden");
+  VISUALIZATION_PANELS.forEach((panelKey) => {
+    const filter1Field = document.getElementById(panelElementId(panelKey, "filter1-field"));
+    const filter2Field = document.getElementById(panelElementId(panelKey, "filter2-field"));
+    const filter1Values = document.getElementById(panelElementId(panelKey, "filter1-values"));
+    const filter2Values = document.getElementById(panelElementId(panelKey, "filter2-values"));
+    const secondaryRow = document.getElementById(panelElementId(panelKey, "filter-secondary-row"));
+    if (filter1Field) {
+      filter1Field.innerHTML = "";
+    }
+    if (filter2Field) {
+      filter2Field.innerHTML = "";
+    }
+    if (filter1Values) {
+      filter1Values.innerHTML = "";
+    }
+    if (filter2Values) {
+      filter2Values.innerHTML = "";
+    }
+    if (secondaryRow) {
+      secondaryRow.classList.remove("hidden");
+    }
+  });
 }
 
 async function loadGeneSuggestions(jobId) {
@@ -2804,9 +2903,9 @@ function populateSelectOptions(selectEl, options, selectedValue, includeBlank = 
   });
 }
 
-function syncDisplayFilterValueOptions(index) {
-  const fieldSelect = document.getElementById(`display-filter${index}-field`);
-  const valueSelect = document.getElementById(`display-filter${index}-values`);
+function syncDisplayFilterValueOptions(panelKey, index) {
+  const fieldSelect = document.getElementById(panelElementId(panelKey, `filter${index}-field`));
+  const valueSelect = document.getElementById(panelElementId(panelKey, `filter${index}-values`));
   const field = fieldSelect.value;
   valueSelect.innerHTML = "";
   const values = (currentDisplayFiltersMeta?.values && currentDisplayFiltersMeta.values[field]) || [];
@@ -2824,22 +2923,28 @@ function syncDisplayFilterValueOptions(index) {
   valueSelect.disabled = !field;
 }
 
-function populateDisplayFilterControls(meta) {
-  currentDisplayFiltersMeta = meta || null;
+function populateDisplayFilterControlsForPanel(panelKey, meta) {
   const fields = (meta && meta.fields) || [];
   const primaryField = (meta && meta.default_primary_field) || "";
   const secondaryField = (meta && meta.default_secondary_field) || "";
   const showSecondary = !meta || meta.show_secondary !== false;
-  populateSelectOptions(document.getElementById("display-filter1-field"), fields, primaryField, false);
-  populateSelectOptions(document.getElementById("display-filter2-field"), fields, secondaryField, true);
-  syncDisplayFilterValueOptions(1);
-  syncDisplayFilterValueOptions(2);
-  document.getElementById("display-filter-secondary-row").classList.toggle("hidden", !showSecondary);
+  populateSelectOptions(document.getElementById(panelElementId(panelKey, "filter1-field")), fields, primaryField, false);
+  populateSelectOptions(document.getElementById(panelElementId(panelKey, "filter2-field")), fields, secondaryField, true);
+  syncDisplayFilterValueOptions(panelKey, 1);
+  syncDisplayFilterValueOptions(panelKey, 2);
+  document.getElementById(panelElementId(panelKey, "filter-secondary-row")).classList.toggle("hidden", !showSecondary);
   if (!showSecondary) {
-    document.getElementById("display-filter2-field").value = "";
-    document.getElementById("display-filter2-values").innerHTML = "";
-    document.getElementById("display-filter2-values").disabled = true;
+    document.getElementById(panelElementId(panelKey, "filter2-field")).value = "";
+    document.getElementById(panelElementId(panelKey, "filter2-values")).innerHTML = "";
+    document.getElementById(panelElementId(panelKey, "filter2-values")).disabled = true;
   }
+}
+
+function populateDisplayFilterControls(meta) {
+  currentDisplayFiltersMeta = meta || null;
+  VISUALIZATION_PANELS.forEach((panelKey) => {
+    populateDisplayFilterControlsForPanel(panelKey, meta);
+  });
 }
 
 async function loadDisplayFilters(jobId) {
@@ -2859,11 +2964,11 @@ async function loadDisplayFilters(jobId) {
   }
 }
 
-function getDisplayFilterParams() {
+function getDisplayFilterParams(panelKey) {
   const params = new URLSearchParams();
   const appendFilter = (index) => {
-    const field = document.getElementById(`display-filter${index}-field`).value;
-    const value = document.getElementById(`display-filter${index}-values`).value;
+    const field = document.getElementById(panelElementId(panelKey, `filter${index}-field`)).value;
+    const value = document.getElementById(panelElementId(panelKey, `filter${index}-values`)).value;
     if (!field || !value) {
       return;
     }
@@ -2875,11 +2980,11 @@ function getDisplayFilterParams() {
   return params;
 }
 
-function getDisplayFilterSummary() {
+function getDisplayFilterSummary(panelKey) {
   const parts = [];
   const appendFilter = (index) => {
-    const fieldSelect = document.getElementById(`display-filter${index}-field`);
-    const valueSelect = document.getElementById(`display-filter${index}-values`);
+    const fieldSelect = document.getElementById(panelElementId(panelKey, `filter${index}-field`));
+    const valueSelect = document.getElementById(panelElementId(panelKey, `filter${index}-values`));
     if (!fieldSelect || !valueSelect) {
       return;
     }
@@ -2895,17 +3000,10 @@ function getDisplayFilterSummary() {
   return parts.join(" | ");
 }
 
-function updateBaselineFilterSummaries() {
-  const summary = getDisplayFilterSummary();
+function updateBaselineFilterSummaries(panelKey) {
+  const summary = getDisplayFilterSummary(panelKey);
   const text = summary ? `Display only: ${summary}` : "";
-  const umapSummary = document.getElementById("umap-filter-summary");
-  const expressionSummary = document.getElementById("expression-filter-summary");
-  if (umapSummary) {
-    umapSummary.textContent = text;
-  }
-  if (expressionSummary) {
-    expressionSummary.textContent = text;
-  }
+  setPanelSummary(panelKey, text);
 }
 
 function getPlotDotScale() {
@@ -2928,50 +3026,155 @@ function setResultMode(mode) {
 }
 
 function setResultsControlsDisabled(disabled) {
-  const controls = [
-    document.getElementById("gene-query"),
-    document.getElementById("umap-mode"),
-    document.getElementById("expression-mode"),
-    document.getElementById("display-filter1-field"),
-    document.getElementById("display-filter1-values"),
-    document.getElementById("display-filter2-field"),
-    document.getElementById("display-filter2-values"),
-  ];
-  controls.forEach((control) => {
-    if (!control) {
-      return;
-    }
-    control.disabled = disabled;
+  VISUALIZATION_PANELS.forEach((panelKey) => {
+    const controls = [
+      document.getElementById(panelElementId(panelKey, "mode")),
+      document.getElementById(panelElementId(panelKey, "gene-query")),
+      document.getElementById(panelElementId(panelKey, "marker-population")),
+      document.getElementById(panelElementId(panelKey, "filter1-field")),
+      document.getElementById(panelElementId(panelKey, "filter1-values")),
+      document.getElementById(panelElementId(panelKey, "filter2-field")),
+      document.getElementById(panelElementId(panelKey, "filter2-values")),
+    ];
+    controls.forEach((control) => {
+      if (!control) {
+        return;
+      }
+      control.disabled = disabled;
+    });
   });
 }
 
-async function loadUmap() {
+function isUmapMode(mode) {
+  return mode === "relative" || mode === "cluster" || mode === "frequency";
+}
+
+function requiresGeneMode(mode) {
+  return mode === "expression_umap" || mode === "violin";
+}
+
+function panelModeLabel(mode) {
+  const labels = {
+    relative: "umap_broad",
+    cluster: "umap_cell_types",
+    frequency: "cell_frequency",
+    expression_umap: "expression_umap",
+    violin: "violin",
+    marker_heatmap: "marker_heatmap",
+    marker_network: "marker_network",
+  };
+  return labels[mode] || "plot";
+}
+
+async function loadVisualizationPanel(panelKey) {
   const jobId = document.getElementById("results-job-id").value.trim();
-  if (!jobId) {
+  const mode = getPanelSelectValue(panelKey, "mode");
+  if (!jobId || !mode) {
     return;
   }
   try {
-    const params = getDisplayFilterParams();
-    const suffix = params.toString() ? `?${params.toString()}` : "";
-    const resp = await fetch(apiPath(`/jobs/${jobId}/umap${suffix}`));
-    const data = await resp.json();
-    if (!resp.ok) {
-      throw new Error(data.detail || "UMAP not ready.");
+    if (isUmapMode(mode)) {
+      const params = getDisplayFilterParams(panelKey);
+      const suffix = params.toString() ? `?${params.toString()}` : "";
+      const resp = await fetch(apiPath(`/jobs/${jobId}/umap${suffix}`));
+      const data = await parseApiResponse(resp);
+      if (!resp.ok) {
+        throw new Error(data.detail || "UMAP not ready.");
+      }
+      panelPlotData[panelKey] = { source: "umap", payload: data };
+      renderVisualizationPanel(panelKey);
+      return;
     }
-    currentUmapData = data;
-    renderCurrentUmap();
+
+    if (mode === "marker_heatmap") {
+      panelPlotData[panelKey] = { source: "marker_heatmap", payload: {} };
+      renderVisualizationPanel(panelKey);
+      return;
+    }
+
+    if (mode === "marker_network") {
+      const population = getPanelSelectValue(panelKey, "marker-population");
+      if (!population) {
+        panelPlotData[panelKey] = {
+          source: "marker_network",
+          payload: { population: "", elements: [], message: "No marker network populations are available." },
+        };
+        renderVisualizationPanel(panelKey);
+        return;
+      }
+      const resp = await fetch(apiPath(`/jobs/${jobId}/marker/network?population=${encodeURIComponent(population)}`));
+      const data = await parseApiResponse(resp);
+      if (!resp.ok) {
+        throw new Error(data.detail || "Marker network unavailable.");
+      }
+      panelPlotData[panelKey] = { source: "marker_network", payload: data };
+      renderVisualizationPanel(panelKey);
+      return;
+    }
+
+    if (requiresGeneMode(mode)) {
+      const geneInput = document.getElementById(panelElementId(panelKey, "gene-query"));
+      const gene = String(geneInput?.value || "").trim();
+      if (!gene) {
+        panelPlotData[panelKey] = {
+          source: "missing_gene",
+          payload: { message: "Select a gene to render this plot.", umap: [], violin: [], gene: "", requested_gene: "" },
+        };
+        renderVisualizationPanel(panelKey);
+        return;
+      }
+      const params = getDisplayFilterParams(panelKey);
+      params.set("gene", gene);
+      const resp = await fetch(apiPath(`/jobs/${jobId}/expression?${params.toString()}`));
+      const data = await parseApiResponse(resp);
+      if (!resp.ok) {
+        throw new Error(data.detail || "Expression unavailable.");
+      }
+      if (data?.gene && data.gene !== gene && geneInput) {
+        geneInput.value = data.gene;
+      }
+      panelPlotData[panelKey] = { source: "expression", payload: data };
+      renderVisualizationPanel(panelKey);
+      return;
+    }
   } catch (err) {
-    alert(err.message);
+    panelPlotData[panelKey] = {
+      source: "error",
+      payload: { message: err.message || "Plot unavailable." },
+    };
+    renderVisualizationPanel(panelKey);
   }
 }
 
-function renderCurrentUmap() {
-  if (!currentUmapData) {
-    return;
-  }
-  updateBaselineFilterSummaries();
-  const dotScale = getPlotDotScale();
-  const mode = document.getElementById("umap-mode").value;
+function renderVisualizationMessage(panelKey, message, title = "Visualization unavailable") {
+  resetVisualizationSurface(panelKey);
+  setPanelSummary(panelKey, "");
+  Plotly.newPlot(panelPlotId(panelKey), [], {
+    title,
+    paper_bgcolor: "rgba(0,0,0,0)",
+    plot_bgcolor: "rgba(255,255,255,0.9)",
+    height: 560,
+    margin: { t: 48, l: 32, r: 32, b: 32 },
+    xaxis: { visible: false },
+    yaxis: { visible: false },
+    annotations: [
+      {
+        text: message,
+        x: 0.5,
+        y: 0.5,
+        yshift: -3,
+        xref: "paper",
+        yref: "paper",
+        showarrow: false,
+        font: { size: 15, color: "#64748b" },
+        align: "center",
+      },
+    ],
+  }, { displayModeBar: false });
+}
+
+function renderPanelUmap(panelKey, umapData, mode, dotScale) {
+  updateBaselineFilterSummaries(panelKey);
   const traces = [];
   const layout = {
     paper_bgcolor: "rgba(0,0,0,0)",
@@ -2983,10 +3186,10 @@ function renderCurrentUmap() {
     yaxis: { showgrid: false, zeroline: false },
   };
   if (mode === "frequency") {
-    const sampleField = String(currentUmapData.sample_field || "sample").trim() || "sample";
-    const queryPoints = (currentUmapData.query || []).filter((point) => String(point.sample || "").trim());
+    const sampleField = String(umapData.sample_field || "sample").trim() || "sample";
+    const queryPoints = (umapData.query || []).filter((point) => String(point.sample || "").trim());
     if (!queryPoints.length) {
-      Plotly.newPlot("umap-plot", [], {
+      Plotly.newPlot(panelPlotId(panelKey), [], {
         ...layout,
         title: "Cell frequency",
         xaxis: { visible: false },
@@ -3021,7 +3224,6 @@ function renderCurrentUmap() {
       sampleMap.set(population, (sampleMap.get(population) || 0) + 1);
     });
 
-    const samples = [...countsBySample.keys()];
     const populationStats = new Map();
     countsBySample.forEach((sampleMap, sample) => {
       let total = 0;
@@ -3050,13 +3252,10 @@ function renderCurrentUmap() {
         sampleFractions: entry.sampleFractions,
       }))
       .sort((a, b) => b.meanFraction - a.meanFraction || a.population.localeCompare(b.population));
-    const maxLabelLength = ranked.reduce(
-      (maxLength, entry) => Math.max(maxLength, String(entry.population || "").length),
-      0
-    );
+    const maxLabelLength = ranked.reduce((maxLength, entry) => Math.max(maxLength, String(entry.population || "").length), 0);
     const leftMargin = Math.max(70, Math.min(120, 36 + maxLabelLength * 5));
 
-    Plotly.newPlot("umap-plot", [
+    Plotly.newPlot(panelPlotId(panelKey), [
       {
         type: "bar",
         orientation: "h",
@@ -3096,255 +3295,108 @@ function renderCurrentUmap() {
         zeroline: false,
       },
     });
-  } else if (mode === "relative") {
+    return;
+  }
+  if (mode === "relative") {
     traces.push({
-      x: currentUmapData.reference.map((p) => p.x),
-      y: currentUmapData.reference.map((p) => p.y),
-      text: currentUmapData.reference.map((p) => `${p.barcode}<br>${p.population}`),
+      x: umapData.reference.map((p) => p.x),
+      y: umapData.reference.map((p) => p.y),
+      text: umapData.reference.map((p) => `${p.barcode}<br>${p.population}`),
       mode: "markers",
       type: "scattergl",
       marker: { color: "#94a3b8", size: 2 * dotScale },
       name: "Reference",
     });
     traces.push({
-      x: currentUmapData.query.map((p) => p.x),
-      y: currentUmapData.query.map((p) => p.y),
-      text: currentUmapData.query.map((p) => `${p.barcode}<br>${p.population}`),
+      x: umapData.query.map((p) => p.x),
+      y: umapData.query.map((p) => p.y),
+      text: umapData.query.map((p) => `${p.barcode}<br>${p.population}`),
       mode: "markers",
       type: "scattergl",
       marker: { color: "#f97316", size: 2 * dotScale },
       name: "Query",
     });
-  } else {
-    const populations = buildStableUmapPopulationOrder(currentUmapData);
-    const colorMap = buildReferencePreviewColorMap(populations);
-    const labelPoints = relaxReferencePreviewLabels(
-      buildPopulationCentroids(currentUmapData.query),
-      currentUmapData.query,
-      document.getElementById("umap-plot")
-    );
-    traces.push({
-      x: currentUmapData.reference.map((p) => p.x),
-      y: currentUmapData.reference.map((p) => p.y),
-      text: currentUmapData.reference.map((p) => `${p.barcode}<br>${p.population}`),
-      mode: "markers",
-      type: "scattergl",
-      marker: { color: "#e5e7eb", size: Math.max(0.5, 1 * dotScale), opacity: 0.3 },
-      name: "Reference",
-      showlegend: false,
-    });
-    traces.push({
-      x: currentUmapData.query.map((p) => p.x),
-      y: currentUmapData.query.map((p) => p.y),
-      text: currentUmapData.query.map((p) => `${p.barcode}<br>${p.population}`),
-      mode: "markers",
-      type: "scattergl",
-      marker: {
-        size: 2 * dotScale,
-        opacity: 0.5,
-        color: currentUmapData.query.map((p) => colorMap.get(p.population)),
-      },
-      showlegend: false,
-      name: "Query",
-    });
-    const labelAnnotations = labelPoints.map((label) => ({
-      x: label.x,
-      y: label.y,
-      text: label.population,
-      showarrow: false,
-      xref: "x",
-      yref: "y",
-      xanchor: "center",
-      yanchor: "middle",
-      font: {
-        size: 11,
-        color: "#0f172a",
-      },
-      bgcolor: "rgba(255,255,255,0)",
-      opacity: 1,
-    }));
-    layout.annotations = (layout.annotations || []).concat(labelAnnotations);
-    Object.assign(layout, buildSquareUmapAxes(currentUmapData.query, 0.06));
-  }
-  if (mode === "relative") {
     layout.legend = { orientation: "h" };
+    Plotly.newPlot(panelPlotId(panelKey), traces, layout);
+    return;
   }
-  if (mode !== "frequency") {
-    Plotly.newPlot("umap-plot", traces, layout);
-  }
+  const populations = buildStableUmapPopulationOrder(umapData);
+  const colorMap = buildReferencePreviewColorMap(populations);
+  const labelPoints = relaxReferencePreviewLabels(
+    buildPopulationCentroids(umapData.query),
+    umapData.query,
+    document.getElementById(panelPlotId(panelKey))
+  );
+  traces.push({
+    x: umapData.reference.map((p) => p.x),
+    y: umapData.reference.map((p) => p.y),
+    text: umapData.reference.map((p) => `${p.barcode}<br>${p.population}`),
+    mode: "markers",
+    type: "scattergl",
+    marker: { color: "#e5e7eb", size: Math.max(0.5, 1 * dotScale), opacity: 0.3 },
+    name: "Reference",
+    showlegend: false,
+  });
+  traces.push({
+    x: umapData.query.map((p) => p.x),
+    y: umapData.query.map((p) => p.y),
+    text: umapData.query.map((p) => `${p.barcode}<br>${p.population}`),
+    mode: "markers",
+    type: "scattergl",
+    marker: {
+      size: 2 * dotScale,
+      opacity: 0.5,
+      color: umapData.query.map((p) => colorMap.get(p.population)),
+    },
+    showlegend: false,
+    name: "Query",
+  });
+  layout.annotations = labelPoints.map((label) => ({
+    x: label.x,
+    y: label.y,
+    text: label.population,
+    showarrow: false,
+    xref: "x",
+    yref: "y",
+    xanchor: "center",
+    yanchor: "middle",
+    font: { size: 11, color: "#0f172a" },
+    bgcolor: "rgba(255,255,255,0)",
+    opacity: 1,
+  }));
+  Object.assign(layout, buildSquareUmapAxes(umapData.query, 0.06));
+  Plotly.newPlot(panelPlotId(panelKey), traces, layout);
 }
 
-async function loadExpression() {
-  const jobId = document.getElementById("results-job-id").value.trim();
-  const mode = document.getElementById("expression-mode").value;
-  const geneInput = document.getElementById("gene-query");
-  const gene = geneInput.value.trim();
-  if (!jobId) {
-    return;
-  }
-  if (mode === "marker_heatmap") {
-    currentExpressionData = {
-      source: "marker_heatmap",
-      gene: gene || "",
-      requested_gene: gene || "",
-      resolved_gene: gene || "",
-      message: null,
-    };
-    renderCurrentExpression();
-    return;
-  }
-  if (mode === "marker_network") {
-    const population = document.getElementById("expression-marker-population").value.trim();
-    if (!population) {
-      currentExpressionData = {
-        source: "marker_network",
-        population: "",
-        elements: [],
-        message: "No marker network populations are available.",
-      };
-      renderCurrentExpression();
-      return;
-    }
-    try {
-      const resp = await fetch(apiPath(`/jobs/${jobId}/marker/network?population=${encodeURIComponent(population)}`));
-      const data = await parseApiResponse(resp);
-      if (!resp.ok) {
-        throw new Error(data.detail || "Marker network unavailable.");
-      }
-      currentExpressionData = {
-        ...data,
-        source: "marker_network",
-        gene: gene || "",
-        requested_gene: gene || "",
-        resolved_gene: gene || "",
-      };
-      renderCurrentExpression();
-      return;
-    } catch (err) {
-      currentExpressionData = {
-        source: "marker_network",
-        population,
-        elements: [],
-        message: err.message || "Marker network unavailable.",
-      };
-      renderCurrentExpression();
-      return;
-    }
-  }
-  if (!gene) {
-    return;
-  }
-  try {
-    const params = getDisplayFilterParams();
-    params.set("gene", gene);
-    const resp = await fetch(apiPath(`/jobs/${jobId}/expression?${params.toString()}`));
-    const data = await resp.json();
-    if (!resp.ok) {
-      throw new Error(data.detail || "Expression unavailable.");
-    }
-    if (data?.gene && data.gene !== gene) {
-      geneInput.value = data.gene;
-    }
-    currentExpressionData = data;
-    renderCurrentExpression();
-  } catch (err) {
-    currentExpressionData = {
-      gene,
-      requested_gene: gene,
-      resolved_gene: null,
-      source: "missing",
-      message: err.message || "Expression unavailable.",
-      scatter: [],
-      violin: [],
-      umap: [],
-    };
-    renderCurrentExpression();
-  }
-}
-
-function renderExpressionMessage(message, title = "Expression unavailable") {
-  resetExpressionSurface();
-  Plotly.newPlot("expression-plot", [], {
-    title,
-    paper_bgcolor: "rgba(0,0,0,0)",
-    plot_bgcolor: "rgba(255,255,255,0.9)",
-    height: 560,
-    margin: { t: 48, l: 32, r: 32, b: 32 },
-    xaxis: { visible: false },
-    yaxis: { visible: false },
-    annotations: [
-      {
-        text: message,
-        x: 0.5,
-        y: 0.5,
-        yshift: -3,
-        xref: "paper",
-        yref: "paper",
-        showarrow: false,
-        font: { size: 15, color: "#64748b" },
-        align: "center",
-      },
-    ],
-  }, { displayModeBar: false });
-}
-
-function renderCurrentExpression() {
-  if (!currentExpressionData) {
-    return;
-  }
-  const dotScale = getPlotDotScale();
-  const mode = document.getElementById("expression-mode").value;
-  if (mode === "marker_heatmap") {
-    document.getElementById("expression-filter-summary").textContent = "Marker heatmap view uses the exported marker analysis matrix.";
-    const jobId = document.getElementById("results-job-id").value.trim();
-    if (!jobId || !markerHeatmapAvailable()) {
-      renderExpressionMessage("Marker heatmap output is unavailable for this job.", "MarkerHeatmap");
-      return;
-    }
-    renderMarkerHeatmapViewer(jobId);
-    return;
-  }
-  if (mode === "marker_network") {
-    const population = currentExpressionData.population || document.getElementById("expression-marker-population").value.trim();
-    document.getElementById("expression-filter-summary").textContent = population
-      ? `Marker network view for ${population}.`
-      : "Marker network view uses the exported marker analysis network.";
-    if (!(currentExpressionData.elements || []).length) {
-      renderExpressionMessage(currentExpressionData.message || "Marker network unavailable.", population ? `${population} marker network` : "MarkerNetwork");
-      return;
-    }
-    renderExpressionNetwork(currentExpressionData);
-    return;
-  }
-
-  updateBaselineFilterSummaries();
-  if (!currentExpressionData.umap?.length && !currentExpressionData.violin?.length) {
-    renderExpressionMessage(
-      currentExpressionData.message || `Gene '${currentExpressionData.requested_gene || currentExpressionData.gene}' was not found.`,
-      `${currentExpressionData.requested_gene || currentExpressionData.gene} expression`,
+function renderPanelExpression(panelKey, expressionData, mode, dotScale) {
+  updateBaselineFilterSummaries(panelKey);
+  if (!expressionData?.umap?.length && !expressionData?.violin?.length) {
+    renderVisualizationMessage(
+      panelKey,
+      expressionData?.message || `Gene '${expressionData?.requested_gene || expressionData?.gene || ""}' was not found.`,
+      `${expressionData?.requested_gene || expressionData?.gene || "gene"} expression`,
     );
     return;
   }
   if (mode === "violin") {
-    if (currentExpressionData.source === "reference") {
-    resetExpressionSurface();
-    const trace = {
-      type: "bar",
-      x: currentExpressionData.violin.map((entry) => entry.population),
-      y: currentExpressionData.violin.map((entry) => entry.mean),
+    resetVisualizationSurface(panelKey);
+    if (expressionData.source === "reference") {
+      const trace = {
+        type: "bar",
+        x: expressionData.violin.map((entry) => entry.population),
+        y: expressionData.violin.map((entry) => entry.mean),
         marker: { color: "#475569", opacity: 0.85 },
       };
-    Plotly.newPlot("expression-plot", [trace], {
-      title: `${currentExpressionData.gene} (reference centroid expression, top 10 states)`,
-      paper_bgcolor: "rgba(0,0,0,0)",
-      plot_bgcolor: "rgba(255,255,255,0.9)",
-      height: 560,
-      margin: { t: 36, l: 48, r: 20, b: 120 },
-    });
-    return;
-  }
-    resetExpressionSurface();
-    const violinTraces = currentExpressionData.violin.map((entry) => ({
+      Plotly.newPlot(panelPlotId(panelKey), [trace], {
+        title: `${expressionData.gene} (reference centroid expression, top 10 states)`,
+        paper_bgcolor: "rgba(0,0,0,0)",
+        plot_bgcolor: "rgba(255,255,255,0.9)",
+        height: 560,
+        margin: { t: 36, l: 48, r: 20, b: 120 },
+      });
+      return;
+    }
+    const violinTraces = expressionData.violin.map((entry) => ({
       type: "violin",
       name: entry.population,
       y: entry.values,
@@ -3355,8 +3407,8 @@ function renderCurrentExpression() {
       pointpos: 0,
       marker: { size: 3 * dotScale, opacity: 0.55 },
     }));
-    Plotly.newPlot("expression-plot", violinTraces, {
-      title: `${currentExpressionData.gene} (top 10 states by mean)`,
+    Plotly.newPlot(panelPlotId(panelKey), violinTraces, {
+      title: `${expressionData.gene} (top 10 states by mean)`,
       paper_bgcolor: "rgba(0,0,0,0)",
       plot_bgcolor: "rgba(255,255,255,0.9)",
       height: 560,
@@ -3364,16 +3416,14 @@ function renderCurrentExpression() {
     });
     return;
   }
-
-  const zeroPoints = currentExpressionData.umap.filter((p) => Number(p.value) <= 0);
-  const expressedPoints = currentExpressionData.umap.filter((p) => Number(p.value) > 0);
-  const expressionTraces = [];
-
+  const zeroPoints = expressionData.umap.filter((p) => Number(p.value) <= 0);
+  const expressedPoints = expressionData.umap.filter((p) => Number(p.value) > 0);
+  const traces = [];
   if (zeroPoints.length) {
-    expressionTraces.push({
+    traces.push({
       x: zeroPoints.map((p) => p.x),
       y: zeroPoints.map((p) => p.y),
-      text: zeroPoints.map((p) => `${p.barcode}<br>${p.population}<br>${currentExpressionData.gene}: 0.000`),
+      text: zeroPoints.map((p) => `${p.barcode}<br>${p.population}<br>${expressionData.gene}: 0.000`),
       mode: "markers",
       type: "scattergl",
       marker: {
@@ -3382,16 +3432,15 @@ function renderCurrentExpression() {
         opacity: 0.9,
       },
       hoverinfo: "text",
-      name: `${currentExpressionData.gene} = 0`,
+      name: `${expressionData.gene} = 0`,
       showlegend: false,
     });
   }
-
   if (expressedPoints.length) {
-    expressionTraces.push({
+    traces.push({
       x: expressedPoints.map((p) => p.x),
       y: expressedPoints.map((p) => p.y),
-      text: expressedPoints.map((p) => `${p.barcode}<br>${p.population}<br>${currentExpressionData.gene}: ${p.value.toFixed(3)}`),
+      text: expressedPoints.map((p) => `${p.barcode}<br>${p.population}<br>${expressionData.gene}: ${p.value.toFixed(3)}`),
       mode: "markers",
       type: "scattergl",
       marker: {
@@ -3405,16 +3454,16 @@ function renderCurrentExpression() {
           [1.0, "#b91c1c"],
         ],
         showscale: true,
-        colorbar: { title: currentExpressionData.gene },
+        colorbar: { title: expressionData.gene },
       },
-      name: currentExpressionData.gene,
+      name: expressionData.gene,
       showlegend: false,
     });
   }
   const expressionLayout = {
-    title: currentExpressionData.source === "reference"
-      ? `${currentExpressionData.gene} reference expression`
-      : `${currentExpressionData.gene} expression`,
+    title: expressionData.source === "reference"
+      ? `${expressionData.gene} reference expression`
+      : `${expressionData.gene} expression`,
     paper_bgcolor: "rgba(0,0,0,0)",
     plot_bgcolor: "rgba(255,255,255,0.9)",
     height: 560,
@@ -3423,9 +3472,9 @@ function renderCurrentExpression() {
     yaxis: { showgrid: false, zeroline: false },
     annotations: [],
   };
-  if (currentExpressionData.message) {
+  if (expressionData.message) {
     expressionLayout.annotations.push({
-      text: currentExpressionData.message,
+      text: expressionData.message,
       x: 0.5,
       y: 1.08,
       xref: "paper",
@@ -3434,82 +3483,83 @@ function renderCurrentExpression() {
       font: { size: 12, color: "#64748b" },
     });
   }
-  Object.assign(expressionLayout, buildSquareUmapAxes(currentExpressionData.umap, 0.06));
-  resetExpressionSurface();
-  Plotly.newPlot("expression-plot", expressionTraces, expressionLayout);
+  Object.assign(expressionLayout, buildSquareUmapAxes(expressionData.umap, 0.06));
+  resetVisualizationSurface(panelKey);
+  Plotly.newPlot(panelPlotId(panelKey), traces, expressionLayout);
 }
 
-async function refreshResults() {
-  await loadUmap();
-  await loadExpression();
-}
-
-async function downloadUmapImage() {
-  const jobId = document.getElementById("results-job-id").value.trim();
-  if (!jobId || !currentUmapData) {
+function renderVisualizationPanel(panelKey) {
+  const mode = getPanelSelectValue(panelKey, "mode");
+  const data = panelPlotData[panelKey];
+  const dotScale = getPlotDotScale();
+  if (!data) {
+    renderVisualizationMessage(panelKey, "Complete an alignment to visualize results.");
     return;
   }
-  const mode = document.getElementById("umap-mode").value;
-  if (mode === "frequency") {
-    try {
-      await exportPlotlyElementToVectorPdf(
-        "umap-plot",
-        buildPdfFilename([jobId, "cell_frequency"], "cell_frequency"),
-      );
-      return;
-    } catch (error) {
-      console.error(error);
-      showDownloadError(error);
-      return;
-    }
-  }
-  const params = getDisplayFilterParams();
-  params.set("mode", mode);
-  window.open(apiPath(`/jobs/${jobId}/umap/pdf?${params.toString()}`), "_blank");
-}
-
-async function downloadExpressionImage() {
-  const jobId = document.getElementById("results-job-id").value.trim();
-  const gene = document.getElementById("gene-query").value.trim();
-  const mode = document.getElementById("expression-mode").value;
-  if (!jobId || !currentExpressionData) {
+  if (data.source === "error") {
+    renderVisualizationMessage(panelKey, data.payload?.message || "Plot unavailable.");
     return;
   }
   if (mode === "marker_heatmap") {
-    const params = getDisplayFilterParams();
+    const jobId = document.getElementById("results-job-id").value.trim();
+    setPanelSummary(panelKey, "Marker heatmap view uses the exported marker analysis matrix.");
+    if (!jobId || !markerHeatmapAvailable()) {
+      renderVisualizationMessage(panelKey, "Marker heatmap output is unavailable for this job.", "MarkerHeatmap");
+      return;
+    }
+    renderMarkerHeatmapViewer(jobId, panelKey);
+    return;
+  }
+  if (mode === "marker_network") {
+    const population = String(data.payload?.population || getPanelSelectValue(panelKey, "marker-population") || "").trim();
+    setPanelSummary(panelKey, population ? `Marker network view for ${population}.` : "Marker network view.");
+    if (!(data.payload?.elements || []).length) {
+      renderVisualizationMessage(panelKey, data.payload?.message || "Marker network unavailable.", population ? `${population} marker network` : "MarkerNetwork");
+      return;
+    }
+    renderExpressionNetwork(panelKey, data.payload);
+    return;
+  }
+  if (isUmapMode(mode)) {
+    renderPanelUmap(panelKey, data.payload || {}, mode, dotScale);
+    return;
+  }
+  renderPanelExpression(panelKey, data.payload || {}, mode, dotScale);
+}
+
+async function refreshResults() {
+  await Promise.all(VISUALIZATION_PANELS.map((panelKey) => loadVisualizationPanel(panelKey)));
+}
+
+async function downloadVisualizationImage(panelKey) {
+  const jobId = document.getElementById("results-job-id").value.trim();
+  const mode = getPanelSelectValue(panelKey, "mode");
+  if (!jobId || !mode || !panelPlotData[panelKey]) {
+    return;
+  }
+  if (mode === "marker_heatmap") {
+    const params = getDisplayFilterParams(panelKey);
     window.open(apiPath(`/jobs/${jobId}/marker/heatmap.pdf?${params.toString()}`), "_blank");
     return;
   }
   if (mode === "marker_network") {
-    const population = document.getElementById("expression-marker-population").value.trim();
+    const population = getPanelSelectValue(panelKey, "marker-population");
     if (!population) {
       return;
     }
     window.open(apiPath(`/jobs/${jobId}/marker/network/pdf?population=${encodeURIComponent(population)}`), "_blank");
     return;
   }
-  if (mode === "violin") {
-    try {
-      await exportPlotlyElementToVectorPdf(
-        "expression-plot",
-        buildPdfFilename([jobId, gene || "gene", "violin"], "violin"),
-      );
-    } catch (error) {
-      console.error(error);
-      showDownloadError(error);
-    }
-    return;
+  try {
+    const gene = getPanelSelectValue(panelKey, "gene-query");
+    await exportPlotlyElementToVectorPdf(
+      panelPlotId(panelKey),
+      buildPdfFilename([jobId, panelKey, panelModeLabel(mode), gene || "gene"], panelModeLabel(mode)),
+    );
+  } catch (error) {
+    console.error(error);
+    showDownloadError(error);
   }
-  if (!gene) {
-    return;
-  }
-  const params = getDisplayFilterParams();
-  params.set("gene", gene);
-  params.set("mode", mode);
-  window.open(
-    apiPath(`/jobs/${jobId}/expression/pdf?${params.toString()}`),
-    "_blank",
-  );
 }
 
 async function downloadDifferentialLeftPdf() {

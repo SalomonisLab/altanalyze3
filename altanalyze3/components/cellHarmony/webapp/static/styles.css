@@ -380,8 +380,10 @@ select:disabled {
   margin-bottom: 0;
 }
 
-#display-filter1-values,
-#display-filter2-values {
+#viz1-filter1-values,
+#viz1-filter2-values,
+#viz2-filter1-values,
+#viz2-filter2-values {
   min-height: 0;
   max-height: none;
 }
@@ -832,6 +834,20 @@ select:disabled {
 
 .expression-head-stack #gene-query {
   max-width: 240px;
+}
+
+.viz-controls-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.viz-controls-grid .inline-field {
+  min-width: 0;
+}
+
+.viz-filter-stack {
+  gap: 8px;
 }
 
 .inline-field {

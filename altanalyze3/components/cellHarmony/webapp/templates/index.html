@@ -144,29 +144,6 @@
                     <option value="1">1</option>
                   </select>
                 </label>
-                <div class="stack">
-                  <span class="field-group-label">Filter data to display</span>
-                  <div class="display-filter-grid">
-                    <label class="field compact-field">
-                      <span>Annotation 1</span>
-                      <select id="display-filter1-field"></select>
-                    </label>
-                    <label class="field compact-field">
-                      <span>Values</span>
-                      <select id="display-filter1-values"></select>
-                    </label>
-                  </div>
-                  <div class="display-filter-grid" id="display-filter-secondary-row">
-                    <label class="field compact-field">
-                      <span>Annotation 2</span>
-                      <select id="display-filter2-field"></select>
-                    </label>
-                    <label class="field compact-field">
-                      <span>Values</span>
-                      <select id="display-filter2-values"></select>
-                    </label>
-                  </div>
-                </div>
               </form>
               <div class="downloads" id="download-links"></div>
             </section>
@@ -176,49 +153,108 @@
                 <article class="panel">
                   <div class="panel-head panel-head-column">
                     <div class="panel-head-topline">
-                      <h2>Approximate UMAP</h2>
-                      <button class="ghost-btn" type="button" id="download-umap-image-btn">Download PDF</button>
+                      <h2>Visualization Panel 1</h2>
+                      <button class="ghost-btn" type="button" id="download-viz1-image-btn">Download PDF</button>
                     </div>
-                    <div class="panel-head-stack">
+                    <div class="panel-head-stack viz-controls-grid">
                       <label class="field inline-field compact-inline-field">
                         <span>Select plot type</span>
-                        <select id="umap-mode" class="compact-select">
+                        <select id="viz1-mode" class="compact-select">
                           <option value="relative">UMAP broad</option>
                           <option value="cluster" selected>UMAP cell types</option>
                           <option value="frequency">Cell frequency</option>
+                          <option value="expression_umap">UMAP</option>
+                          <option value="violin">Violin</option>
                         </select>
                       </label>
+                      <label class="field inline-field compact-inline-field" id="viz1-gene-field">
+                        <span>Select gene</span>
+                        <input id="viz1-gene-query" placeholder="e.g. MPO" list="gene-suggestions">
+                      </label>
+                      <label class="field hidden inline-field" id="viz1-marker-population-field">
+                        <span>Marker cell state</span>
+                        <select id="viz1-marker-population"></select>
+                      </label>
+                    </div>
+                    <div class="stack viz-filter-stack">
+                      <span class="field-group-label">Filter data to display</span>
+                      <div class="display-filter-grid">
+                        <label class="field compact-field">
+                          <span>Annotation 1</span>
+                          <select id="viz1-filter1-field"></select>
+                        </label>
+                        <label class="field compact-field">
+                          <span>Values</span>
+                          <select id="viz1-filter1-values"></select>
+                        </label>
+                      </div>
+                      <div class="display-filter-grid" id="viz1-filter-secondary-row">
+                        <label class="field compact-field">
+                          <span>Annotation 2</span>
+                          <select id="viz1-filter2-field"></select>
+                        </label>
+                        <label class="field compact-field">
+                          <span>Values</span>
+                          <select id="viz1-filter2-values"></select>
+                        </label>
+                      </div>
                     </div>
                   </div>
-                  <div id="umap-plot" class="plot-area"></div>
-                  <div class="plot-caption" id="umap-filter-summary"></div>
+                  <div id="viz1-plot" class="plot-area"></div>
+                  <div class="plot-caption" id="viz1-filter-summary"></div>
                 </article>
                 <article class="panel">
                   <div class="panel-head panel-head-column">
                     <div class="panel-head-topline">
-                      <h2>Expression</h2>
-                      <button class="ghost-btn" type="button" id="download-expression-image-btn">Download PDF</button>
+                      <h2>Visualization Panel 2</h2>
+                      <button class="ghost-btn" type="button" id="download-viz2-image-btn">Download PDF</button>
                     </div>
-                    <div class="panel-head-stack expression-head-stack">
-                      <label class="field inline-field compact-inline-field">
-                        <span>Select gene</span>
-                        <input id="gene-query" placeholder="e.g. MPO" list="gene-suggestions">
-                      </label>
+                    <div class="panel-head-stack viz-controls-grid">
                       <label class="field inline-field compact-inline-field">
                         <span>Select plot type</span>
-                        <select id="expression-mode" class="compact-select">
-                          <option value="umap">UMAP</option>
+                        <select id="viz2-mode" class="compact-select">
+                          <option value="relative">UMAP broad</option>
+                          <option value="cluster">UMAP cell types</option>
+                          <option value="frequency">Cell frequency</option>
+                          <option value="expression_umap" selected>UMAP</option>
                           <option value="violin">Violin</option>
                         </select>
                       </label>
-                      <label class="field hidden inline-field" id="expression-marker-population-field">
+                      <label class="field inline-field compact-inline-field" id="viz2-gene-field">
+                        <span>Select gene</span>
+                        <input id="viz2-gene-query" placeholder="e.g. MPO" list="gene-suggestions">
+                      </label>
+                      <label class="field hidden inline-field" id="viz2-marker-population-field">
                         <span>Marker cell state</span>
-                        <select id="expression-marker-population"></select>
+                        <select id="viz2-marker-population"></select>
                       </label>
                     </div>
+                    <div class="stack viz-filter-stack">
+                      <span class="field-group-label">Filter data to display</span>
+                      <div class="display-filter-grid">
+                        <label class="field compact-field">
+                          <span>Annotation 1</span>
+                          <select id="viz2-filter1-field"></select>
+                        </label>
+                        <label class="field compact-field">
+                          <span>Values</span>
+                          <select id="viz2-filter1-values"></select>
+                        </label>
+                      </div>
+                      <div class="display-filter-grid" id="viz2-filter-secondary-row">
+                        <label class="field compact-field">
+                          <span>Annotation 2</span>
+                          <select id="viz2-filter2-field"></select>
+                        </label>
+                        <label class="field compact-field">
+                          <span>Values</span>
+                          <select id="viz2-filter2-values"></select>
+                        </label>
+                      </div>
+                    </div>
                   </div>
-                  <div id="expression-plot" class="plot-area"></div>
-                  <div class="plot-caption" id="expression-filter-summary"></div>
+                  <div id="viz2-plot" class="plot-area"></div>
+                  <div class="plot-caption" id="viz2-filter-summary"></div>
                 </article>
               </section>
             </section>
