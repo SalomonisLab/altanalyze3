@@ -2501,6 +2501,63 @@ def _sanitize_de_store(de_store):
             detailed[col] = detailed[col].apply(lambda v: str(v) if not isinstance(v, str) else v)
         de_store["detailed_deg"] = detailed
 
+    # H5AD/AnnData uns writing treats dictionary keys and DataFrame column names as
+    # HDF5 dataset/group paths. Labels containing "/" cause nested-path collisions
+    # (e.g., "AT1" and "AT1/AT2"), so make all uns keys/columns HDF5-safe.
+    def _sanitize_h5_label(label):
+        return str(label).replace("/", "|")
+
+    def _dedupe_labels(labels):
+        seen = {}
+        deduped = []
+        for raw in labels:
+            key = str(raw)
+            count = seen.get(key, 0)
+            if count == 0:
+                deduped.append(key)
+            else:
+                deduped.append(f"{key}__{count + 1}")
+            seen[key] = count + 1
+        return deduped
+
+    def _sanitize_dataframe_for_h5(df):
+        out = df.copy()
+        raw_cols = [str(col) for col in out.columns]
+        safe_cols = _dedupe_labels([_sanitize_h5_label(col) for col in raw_cols])
+        if safe_cols != raw_cols:
+            out.columns = safe_cols
+        return out
+
+    def _sanitize_uns_obj(value):
+        if isinstance(value, pd.DataFrame):
+            return _sanitize_dataframe_for_h5(value)
+        if isinstance(value, dict):
+            out = {}
+            for raw_key, raw_val in value.items():
+                safe_key_base = _sanitize_h5_label(raw_key)
+                safe_key = safe_key_base
+                suffix = 2
+                while safe_key in out:
+                    safe_key = f"{safe_key_base}__{suffix}"
+                    suffix += 1
+                out[safe_key] = _sanitize_uns_obj(raw_val)
+            return out
+        if isinstance(value, list):
+            return [_sanitize_uns_obj(v) for v in value]
+        if isinstance(value, tuple):
+            return tuple(_sanitize_uns_obj(v) for v in value)
+        return value
+
+    sanitized = _sanitize_uns_obj(de_store)
+    if isinstance(sanitized, dict):
+        # Keep column labels and lineage/order labels aligned after sanitization.
+        for list_key in ("population_order", "lineage_order"):
+            values = sanitized.get(list_key)
+            if isinstance(values, list):
+                sanitized[list_key] = _dedupe_labels([_sanitize_h5_label(v) for v in values])
+        de_store.clear()
+        de_store.update(sanitized)
+
 def _unique_preserve_order(values):
     seen = set()
     ordered = []
