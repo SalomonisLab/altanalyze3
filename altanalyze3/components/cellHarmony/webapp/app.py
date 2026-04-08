@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import shutil
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -576,18 +577,58 @@ def _build_reference_preview_payload(app: FastAPI, species: str, reference_id: s
     }
 
 
-def _load_reference_adata(meta: Dict) -> Optional[ad.AnnData]:
+def _get_cache_lock(app: FastAPI, lock_name: str, cache_key: str) -> threading.Lock:
+    lock_map = getattr(app.state, lock_name, None)
+    if not isinstance(lock_map, dict):
+        lock_map = {}
+        setattr(app.state, lock_name, lock_map)
+    global_lock = getattr(app.state, "cache_registry_lock", None)
+    if global_lock is None:
+        global_lock = threading.Lock()
+        app.state.cache_registry_lock = global_lock
+    with global_lock:
+        lock = lock_map.get(cache_key)
+        if lock is None:
+            lock = threading.Lock()
+            lock_map[cache_key] = lock
+        return lock
+
+
+def _load_reference_adata(app: FastAPI, meta: Dict) -> Optional[ad.AnnData]:
     coords = meta.get("reference_coords_tsv")
     clusters = meta.get("reference_clusters_tsv")
     if not coords or not clusters:
         return None
     cluster_key = meta.get("reference_cluster_key") or meta.get("cluster_key")
-    return approx_mod._load_reference_from_tsv(
-        coords,
-        clusters,
-        umap_key="X_umap",
-        cluster_key=cluster_key,
+    cache_key = json.dumps(
+        {
+            "coords": str(coords),
+            "clusters": str(clusters),
+            "cluster_key": str(cluster_key or ""),
+        },
+        sort_keys=True,
     )
+    cache = getattr(app.state, "reference_adata_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        app.state.reference_adata_cache = cache
+    cached = cache.get(cache_key)
+    if isinstance(cached, ad.AnnData):
+        return cached
+
+    lock = _get_cache_lock(app, "reference_adata_cache_locks", cache_key)
+    with lock:
+        cached = cache.get(cache_key)
+        if isinstance(cached, ad.AnnData):
+            return cached
+        ref_adata = approx_mod._load_reference_from_tsv(
+            coords,
+            clusters,
+            umap_key="X_umap",
+            cluster_key=cluster_key,
+        )
+        cache[cache_key] = ref_adata
+        return ref_adata
 
 
 def _filter_qc_log_lines(lines: List[str]) -> List[str]:
@@ -950,6 +991,9 @@ def _invalidate_expression_cache(app: FastAPI, job_id: str) -> None:
     cache = getattr(app.state, "expression_cache", None)
     if isinstance(cache, dict):
         cache.pop(str(job_id), None)
+    locks = getattr(app.state, "expression_cache_locks", None)
+    if isinstance(locks, dict):
+        locks.pop(str(job_id), None)
 
 
 def _invalidate_differential_cache(app: FastAPI, job_id: str) -> None:
@@ -1087,136 +1131,147 @@ def _get_expression_cache(app: FastAPI, meta: Dict) -> Dict[str, Any]:
     ):
         return cache_entry
 
-    adata = ad.read_h5ad(h5ad_path)
-    if cluster_key not in adata.obs.columns:
-        raise ValueError("Cluster assignments missing from AnnData output.")
+    lock = _get_cache_lock(app, "expression_cache_locks", job_id)
+    with lock:
+        cache_entry = cache.get(job_id)
+        if (
+            cache_entry
+            and cache_entry.get("h5ad_path") == str(h5ad_path)
+            and cache_entry.get("umap_path") == str(umap_path or "")
+            and cache_entry.get("cluster_key") == str(cluster_key)
+        ):
+            return cache_entry
 
-    obs_names = adata.obs_names.astype(str).to_numpy()
-    populations = adata.obs[cluster_key].astype(str).to_numpy()
-    umap_x = np.full(adata.n_obs, np.nan, dtype=float)
-    umap_y = np.full(adata.n_obs, np.nan, dtype=float)
+        adata = ad.read_h5ad(h5ad_path)
+        if cluster_key not in adata.obs.columns:
+            raise ValueError("Cluster assignments missing from AnnData output.")
 
-    if umap_path and Path(umap_path).exists():
-        coords_df = pd.read_csv(umap_path, sep="\t")
-        barcode_col = coords_df.columns[0]
-        coords_df = coords_df.rename(columns={barcode_col: "CellBarcode", "umap_0": "UMAP1", "umap_1": "UMAP2"})
-        coords_df["CellBarcode"] = coords_df["CellBarcode"].astype(str)
-        coords_df["UMAP1"] = pd.to_numeric(coords_df["UMAP1"], errors="coerce")
-        coords_df["UMAP2"] = pd.to_numeric(coords_df["UMAP2"], errors="coerce")
-        coords_indexed = coords_df.drop_duplicates(subset=["CellBarcode"]).set_index("CellBarcode")
-        reindexed = coords_indexed.reindex(obs_names)
-        umap_x = reindexed["UMAP1"].to_numpy(dtype=float)
-        umap_y = reindexed["UMAP2"].to_numpy(dtype=float)
+        obs_names = adata.obs_names.astype(str).to_numpy()
+        populations = adata.obs[cluster_key].astype(str).to_numpy()
+        umap_x = np.full(adata.n_obs, np.nan, dtype=float)
+        umap_y = np.full(adata.n_obs, np.nan, dtype=float)
 
-    obs_filter_values: Dict[str, np.ndarray] = {}
-    filter_fields: List[Dict[str, str]] = []
-    obs = adata.obs
-    upload_profile = pipeline_mod._upload_profile(meta)
-    excluded_columns = {"UMAP-X", "UMAP-Y", "UMAP_leiden_X", "UMAP_leiden_Y"}
-    for column in obs.columns:
-        column_text = str(column).strip()
-        if not column_text or column_text in excluded_columns or "umap" in column_text.lower():
-            continue
-        series = obs[column]
-        if pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series):
-            continue
-        values = (
-            series.astype(str)
-            .str.strip()
-            .replace({"nan": "", "None": ""})
-        )
-        unique_values = [value for value in pd.Index(values[values != ""]).unique().tolist() if value]
-        if len(unique_values) < 2 or len(unique_values) > 120:
-            continue
-        obs_filter_values[column_text] = values.to_numpy(dtype=str)
-        filter_fields.append({"value": column_text, "label": column_text})
+        if umap_path and Path(umap_path).exists():
+            coords_df = pd.read_csv(umap_path, sep="\t")
+            barcode_col = coords_df.columns[0]
+            coords_df = coords_df.rename(columns={barcode_col: "CellBarcode", "umap_0": "UMAP1", "umap_1": "UMAP2"})
+            coords_df["CellBarcode"] = coords_df["CellBarcode"].astype(str)
+            coords_df["UMAP1"] = pd.to_numeric(coords_df["UMAP1"], errors="coerce")
+            coords_df["UMAP2"] = pd.to_numeric(coords_df["UMAP2"], errors="coerce")
+            coords_indexed = coords_df.drop_duplicates(subset=["CellBarcode"]).set_index("CellBarcode")
+            reindexed = coords_indexed.reindex(obs_names)
+            umap_x = reindexed["UMAP1"].to_numpy(dtype=float)
+            umap_y = reindexed["UMAP2"].to_numpy(dtype=float)
 
-    sample_names = _job_sample_names(meta)
-    sample_filter_field = None
-    if sample_names:
-        try:
-            sample_filter_field, _ = pipeline_mod._resolve_samples_for_adata(adata, meta, sample_names)
-        except Exception:
-            sample_filter_field = next((column for column in ("Library", "group", "sample") if column in obs.columns), None)
-    else:
-        sample_filter_field = next((column for column in ("Library", "group", "sample") if column in obs.columns), None)
-
-    if sample_filter_field and str(sample_filter_field) not in obs_filter_values:
-        sample_values = (
-            obs[sample_filter_field].astype(str).str.strip().replace({"nan": "", "None": ""})
-        )
-        unique_values = [value for value in pd.Index(sample_values[sample_values != ""]).unique().tolist() if value]
-        if len(unique_values) >= 2:
-            obs_filter_values[str(sample_filter_field)] = sample_values.to_numpy(dtype=str)
-            filter_fields.insert(0, {"value": str(sample_filter_field), "label": str(sample_filter_field)})
-
-    seen_fields = set()
-    deduped_fields = []
-    for entry in filter_fields:
-        value = str(entry["value"])
-        if value in seen_fields:
-            continue
-        seen_fields.add(value)
-        deduped_fields.append(entry)
-    filter_fields = deduped_fields
-
-    default_secondary_field = str(cluster_key) if str(cluster_key) in obs_filter_values else ""
-    if upload_profile.get("single_h5"):
-        preferred_primary_field = str(cluster_key) if str(cluster_key) in obs_filter_values else (filter_fields[0]["value"] if filter_fields else "")
-        filter_fields = [entry for entry in filter_fields if entry["value"] == preferred_primary_field] if preferred_primary_field else filter_fields[:1]
-        filter_values = {
-            field: [value for value in pd.Index(values).unique().tolist() if value]
-            for field, values in obs_filter_values.items()
-            if field == preferred_primary_field
-        }
-        default_primary_field = preferred_primary_field
-        default_secondary_field = ""
-    else:
-        if default_secondary_field and default_secondary_field == str(sample_filter_field or ""):
-            default_secondary_field = next(
-                (entry["value"] for entry in filter_fields if entry["value"] != str(sample_filter_field or "")),
-                "",
+        obs_filter_values: Dict[str, np.ndarray] = {}
+        filter_fields: List[Dict[str, str]] = []
+        obs = adata.obs
+        upload_profile = pipeline_mod._upload_profile(meta)
+        excluded_columns = {"UMAP-X", "UMAP-Y", "UMAP_leiden_X", "UMAP_leiden_Y"}
+        for column in obs.columns:
+            column_text = str(column).strip()
+            if not column_text or column_text in excluded_columns or "umap" in column_text.lower():
+                continue
+            series = obs[column]
+            if pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series):
+                continue
+            values = (
+                series.astype(str)
+                .str.strip()
+                .replace({"nan": "", "None": ""})
             )
-        filter_values = {
-            field: [value for value in pd.Index(values).unique().tolist() if value]
-            for field, values in obs_filter_values.items()
+            unique_values = [value for value in pd.Index(values[values != ""]).unique().tolist() if value]
+            if len(unique_values) < 2 or len(unique_values) > 120:
+                continue
+            obs_filter_values[column_text] = values.to_numpy(dtype=str)
+            filter_fields.append({"value": column_text, "label": column_text})
+
+        sample_names = _job_sample_names(meta)
+        sample_filter_field = None
+        if sample_names:
+            try:
+                sample_filter_field, _ = pipeline_mod._resolve_samples_for_adata(adata, meta, sample_names)
+            except Exception:
+                sample_filter_field = next((column for column in ("Library", "group", "sample") if column in obs.columns), None)
+        else:
+            sample_filter_field = next((column for column in ("Library", "group", "sample") if column in obs.columns), None)
+
+        if sample_filter_field and str(sample_filter_field) not in obs_filter_values:
+            sample_values = (
+                obs[sample_filter_field].astype(str).str.strip().replace({"nan": "", "None": ""})
+            )
+            unique_values = [value for value in pd.Index(sample_values[sample_values != ""]).unique().tolist() if value]
+            if len(unique_values) >= 2:
+                obs_filter_values[str(sample_filter_field)] = sample_values.to_numpy(dtype=str)
+                filter_fields.insert(0, {"value": str(sample_filter_field), "label": str(sample_filter_field)})
+
+        seen_fields = set()
+        deduped_fields = []
+        for entry in filter_fields:
+            value = str(entry["value"])
+            if value in seen_fields:
+                continue
+            seen_fields.add(value)
+            deduped_fields.append(entry)
+        filter_fields = deduped_fields
+
+        default_secondary_field = str(cluster_key) if str(cluster_key) in obs_filter_values else ""
+        if upload_profile.get("single_h5"):
+            preferred_primary_field = str(cluster_key) if str(cluster_key) in obs_filter_values else (filter_fields[0]["value"] if filter_fields else "")
+            filter_fields = [entry for entry in filter_fields if entry["value"] == preferred_primary_field] if preferred_primary_field else filter_fields[:1]
+            filter_values = {
+                field: [value for value in pd.Index(values).unique().tolist() if value]
+                for field, values in obs_filter_values.items()
+                if field == preferred_primary_field
+            }
+            default_primary_field = preferred_primary_field
+            default_secondary_field = ""
+        else:
+            if default_secondary_field and default_secondary_field == str(sample_filter_field or ""):
+                default_secondary_field = next(
+                    (entry["value"] for entry in filter_fields if entry["value"] != str(sample_filter_field or "")),
+                    "",
+                )
+            filter_values = {
+                field: [value for value in pd.Index(values).unique().tolist() if value]
+                for field, values in obs_filter_values.items()
+            }
+            default_primary_field = str(sample_filter_field or "")
+
+        sample_labels = None
+        if sample_filter_field and str(sample_filter_field) in obs.columns:
+            sample_labels = (
+                obs[sample_filter_field]
+                .astype(str)
+                .str.strip()
+                .replace({"nan": "", "None": ""})
+                .to_numpy(dtype=str)
+            )
+
+        cache_entry = {
+            "job_id": job_id,
+            "h5ad_path": str(h5ad_path),
+            "umap_path": str(umap_path or ""),
+            "cluster_key": str(cluster_key),
+            "adata": adata,
+            "obs_names": obs_names,
+            "var_names": adata.var_names.astype(str).to_numpy(),
+            "populations": populations,
+            "sample_field": str(sample_filter_field or ""),
+            "sample_labels": sample_labels,
+            "umap_x": umap_x,
+            "umap_y": umap_y,
+            "obs_filter_values": obs_filter_values,
+            "display_filters_meta": {
+                "fields": filter_fields,
+                "values": filter_values,
+                "default_primary_field": default_primary_field,
+                "default_secondary_field": default_secondary_field,
+                "show_secondary": bool(upload_profile.get("show_secondary_display_filter", True)),
+            },
         }
-        default_primary_field = str(sample_filter_field or "")
-
-    sample_labels = None
-    if sample_filter_field and str(sample_filter_field) in obs.columns:
-        sample_labels = (
-            obs[sample_filter_field]
-            .astype(str)
-            .str.strip()
-            .replace({"nan": "", "None": ""})
-            .to_numpy(dtype=str)
-        )
-
-    cache_entry = {
-        "job_id": job_id,
-        "h5ad_path": str(h5ad_path),
-        "umap_path": str(umap_path or ""),
-        "cluster_key": str(cluster_key),
-        "adata": adata,
-        "obs_names": obs_names,
-        "var_names": adata.var_names.astype(str).to_numpy(),
-        "populations": populations,
-        "sample_field": str(sample_filter_field or ""),
-        "sample_labels": sample_labels,
-        "umap_x": umap_x,
-        "umap_y": umap_y,
-        "obs_filter_values": obs_filter_values,
-        "display_filters_meta": {
-            "fields": filter_fields,
-            "values": filter_values,
-            "default_primary_field": default_primary_field,
-            "default_secondary_field": default_secondary_field,
-            "show_secondary": bool(upload_profile.get("show_secondary_display_filter", True)),
-        },
-    }
-    cache[job_id] = cache_entry
-    return cache_entry
+        cache[job_id] = cache_entry
+        return cache_entry
 
 
 def _get_differential_cache_entry(app: FastAPI, meta: Dict) -> Dict[str, Any]:
@@ -1751,7 +1806,7 @@ def _build_umap_payload(
     ]
 
     reference_points = []
-    ref_adata = _load_reference_adata(meta)
+    ref_adata = _load_reference_adata(app, meta)
     if ref_adata is not None:
         ref_cluster_key = meta.get("reference_cluster_key") or cluster_key
         coords = ref_adata.obsm["X_umap"]
@@ -1812,7 +1867,7 @@ def _build_reference_expression_payload(meta: Dict, gene: str) -> Dict:
         }
 
     series = pd.to_numeric(reference_df.loc[resolved_gene], errors="coerce").dropna()
-    ref_adata = _load_reference_adata(meta)
+    ref_adata = _load_reference_adata(app, meta)
     ref_cluster_key = meta.get("reference_cluster_key") or meta.get("cluster_key")
 
     umap_points = []
@@ -2589,8 +2644,12 @@ def create_app(test_config: dict | None = None) -> FastAPI:
     app.state.root_path = cfg["ROOT_PATH"]
     app.state.job_store = JobStore(Path(cfg["JOB_STORAGE"]))
     app.state.expression_cache = {}
+    app.state.expression_cache_locks = {}
     app.state.differential_cache = {}
     app.state.marker_heatmap_cache = {}
+    app.state.reference_adata_cache = {}
+    app.state.reference_adata_cache_locks = {}
+    app.state.cache_registry_lock = threading.Lock()
     app.state.job_runner = JobRunner(
         app.state.job_store,
         Path(cfg["REFERENCE_REGISTRY"]),

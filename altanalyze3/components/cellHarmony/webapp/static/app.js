@@ -17,6 +17,8 @@ let panelPlotData = {
 let loadedResultsJobId = null;
 let loadedGeneSuggestionsJobId = null;
 let loadedDisplayFiltersJobId = null;
+let exploreWarmupJobId = null;
+let exploreWarmupPromise = null;
 let currentDisplayFiltersMeta = null;
 let currentJobStatus = "";
 let previousJobStatus = "";
@@ -1188,6 +1190,8 @@ function resetWorkspaceData() {
   loadedResultsJobId = null;
   loadedGeneSuggestionsJobId = null;
   loadedDisplayFiltersJobId = null;
+  exploreWarmupJobId = null;
+  exploreWarmupPromise = null;
   currentDisplayFiltersMeta = null;
   previousJobStatus = "";
   currentJobStatus = "";
@@ -1597,11 +1601,7 @@ function applyJobStatus(jobId, data) {
       });
     }
     loadGeneSuggestions(jobId);
-    loadDisplayFilters(jobId);
-    if (loadedResultsJobId !== jobId) {
-      loadedResultsJobId = jobId;
-      refreshResults();
-    }
+    void warmExploreResults(jobId);
   } else {
     currentMarkerAnalysis = null;
     updateExpressionModeOptions();
@@ -2837,6 +2837,8 @@ function clearGeneSuggestions() {
 function clearDisplayFilters() {
   currentDisplayFiltersMeta = null;
   loadedDisplayFiltersJobId = null;
+  exploreWarmupJobId = null;
+  exploreWarmupPromise = null;
   VISUALIZATION_PANELS.forEach((panelKey) => {
     const filter1Field = document.getElementById(panelElementId(panelKey, "filter1-field"));
     const filter2Field = document.getElementById(panelElementId(panelKey, "filter2-field"));
@@ -2962,6 +2964,30 @@ async function loadDisplayFilters(jobId) {
   } catch (err) {
     console.warn(err);
   }
+}
+
+async function warmExploreResults(jobId) {
+  if (!jobId) {
+    return;
+  }
+  if (exploreWarmupPromise && exploreWarmupJobId === jobId) {
+    return exploreWarmupPromise;
+  }
+  const warmupPromise = (async () => {
+    await loadDisplayFilters(jobId);
+    if (loadedResultsJobId !== jobId) {
+      loadedResultsJobId = jobId;
+    }
+    await refreshResults();
+  })();
+  exploreWarmupJobId = jobId;
+  exploreWarmupPromise = warmupPromise.finally(() => {
+    if (exploreWarmupJobId === jobId) {
+      exploreWarmupJobId = null;
+      exploreWarmupPromise = null;
+    }
+  });
+  return exploreWarmupPromise;
 }
 
 function getDisplayFilterParams(panelKey) {
