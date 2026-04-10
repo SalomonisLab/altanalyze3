@@ -75,7 +75,7 @@ Available settings:
 - `Min cells`
 - `Mito %`
 - `Minimum cosine similarity score`
-- `Identify cell-state marker genes`
+- `% Ambient RNA correction`
 
 Then click `Save QC and run`.
 
@@ -86,8 +86,9 @@ What happens during alignment:
 3. data are normalized
 4. cells are aligned to the selected reference
 5. low-alignment cells are excluded using the cosine cutoff
-6. approximate UMAP placement is computed
-7. the combined aligned h5ad is written
+6. markerFinder and marker network analysis are run
+7. approximate UMAP placement is computed
+8. the combined aligned h5ad is written
 
 While it runs, the app shows:
 
@@ -102,9 +103,9 @@ When alignment finishes:
 - Explore downloads become active
 - Differential becomes usable when the job supports grouped comparison
 
-## Optional marker analysis
+## Marker analysis
 
-If `Identify cell-state marker genes` is `TRUE`:
+Marker analysis is always run:
 
 - markerFinder is run on the aligned dataset
 - the app exports a marker heatmap PDF and TSVs

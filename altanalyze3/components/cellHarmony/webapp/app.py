@@ -21,7 +21,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from altanalyze3.components.cellHarmony.flask import pipeline as pipeline_mod
 from altanalyze3.components.cellHarmony.flask.job_manager import JobStore
@@ -37,7 +37,7 @@ class QCSettings(BaseModel):
     min_cells: int = 0
     mit_percent: int = 15
     align_cutoff: float = 0.4
-    identify_markers: bool = True
+    ambient_percent: float = Field(default=0.0, ge=0.0, le=100.0)
 
 
 class JobConfigSettings(BaseModel):

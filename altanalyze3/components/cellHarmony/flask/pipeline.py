@@ -457,9 +457,12 @@ def run_cellharmony_pipeline(
             f"min_counts={int(qc.get('min_counts', 500))} "
             f"mit_percent={int(qc.get('mit_percent', 10))} "
             f"align_cutoff={float(qc.get('align_cutoff', 0.1))} "
-            f"identify_markers={bool(qc.get('identify_markers', False))}"
+            f"ambient_percent={float(qc.get('ambient_percent', 0.0))} "
+            "identify_markers=True"
         ),
     )
+    ambient_percent = float(qc.get("ambient_percent", 0.0) or 0.0)
+    ambient_rho = ambient_percent / 100.0 if ambient_percent > 0 else None
     _, combined_adata = cellHarmony_lite.combine_and_align_h5(
         h5_files=h5_files,
         h5ad_file=h5ad_file,
@@ -478,7 +481,7 @@ def run_cellharmony_pipeline(
         min_alignment_score=float(qc.get("align_cutoff", 0.1)),
         gene_translation_file=None,
         metacell_align=False,
-        ambient_correct_cutoff=None,
+        ambient_correct_cutoff=ambient_rho,
         return_adata=True,
     )
 
@@ -492,63 +495,62 @@ def run_cellharmony_pipeline(
 
     marker_archive_path: Optional[Path] = None
     marker_analysis: Dict[str, object] = {}
-    if bool(qc.get("identify_markers", False)):
-        store.update_job(
-            job_id,
-            progress=72,
-            message="Identifying the top 50 unique markers for 100 cells per cell state.",
-        )
-        store.append_log(job_id, "Identifying cell-state marker genes.")
-        store.append_log(
-            job_id,
-            (
-                "[params] markerfinder "
-                f"cluster_key={query_cluster_key} top_n=50 cells_per_cluster=100 "
-                "marker_method=markerfinder export_networks=True network_top_n=1000 "
-                f"network_jobs={max(1, min(4, os.cpu_count() or 1))} "
-                "write_heatmap_tsv=False write_expression_tsv=False write_heatmap_cache=True"
-            ),
-        )
-        marker_dir = outputs_dir / "marker_heatmap"
-        marker_dir.mkdir(parents=True, exist_ok=True)
-        marker_outputs = marker_mod.generate_marker_heatmap_from_adata(
-            combined_adata,
-            cluster_key=query_cluster_key,
-            out=str(marker_dir / "cell_state_marker_heatmap.pdf"),
-            top_n=50,
-            marker_method="markerfinder",
-            cells_per_cluster=100,
-            seed=0,
-            export_networks=True,
-            network_top_n=1000,
-            network_jobs=max(1, min(4, os.cpu_count() or 1)),
-            write_heatmap_tsv=False,
-            write_expression_tsv=False,
-            write_heatmap_cache=True,
-        )
-        store.update_job(
-            job_id,
-            progress=78,
-            message="Exporting NetPerspective marker networks.",
-        )
-        marker_archive_path = outputs_dir / "cell_state_marker_genes.zip"
-        _write_selected_zip(marker_dir, marker_archive_path, suffixes=(".pdf", ".tsv", ".png", ".npz"))
-        marker_analysis = {
-            "enabled": True,
-            "cluster_key": query_cluster_key,
-            "heatmap_pdf": str(marker_outputs["pdf"]),
-            "centroids_tsv": str(marker_outputs["centroids_tsv"]),
-            "markers_tsv": str(marker_outputs["markers_tsv"]),
-            "archive": str(marker_archive_path),
-            "networks": marker_outputs.get("networks", []),
-        }
-        if marker_outputs.get("heatmap_tsv"):
-            marker_analysis["heatmap_tsv"] = str(marker_outputs["heatmap_tsv"])
-        if marker_outputs.get("heatmap_cache"):
-            marker_analysis["heatmap_cache"] = str(marker_outputs["heatmap_cache"])
-        if marker_outputs.get("heatmap_column_tsv"):
-            marker_analysis["expression_tsv"] = str(marker_outputs["heatmap_column_tsv"])
-        store.append_log(job_id, "Cell-state marker gene export complete.")
+    store.update_job(
+        job_id,
+        progress=72,
+        message="Identifying the top 50 unique markers for 100 cells per cell state.",
+    )
+    store.append_log(job_id, "Identifying cell-state marker genes.")
+    store.append_log(
+        job_id,
+        (
+            "[params] markerfinder "
+            f"cluster_key={query_cluster_key} top_n=50 cells_per_cluster=100 "
+            "marker_method=markerfinder export_networks=True network_top_n=1000 "
+            f"network_jobs={max(1, min(4, os.cpu_count() or 1))} "
+            "write_heatmap_tsv=False write_expression_tsv=False write_heatmap_cache=True"
+        ),
+    )
+    marker_dir = outputs_dir / "marker_heatmap"
+    marker_dir.mkdir(parents=True, exist_ok=True)
+    marker_outputs = marker_mod.generate_marker_heatmap_from_adata(
+        combined_adata,
+        cluster_key=query_cluster_key,
+        out=str(marker_dir / "cell_state_marker_heatmap.pdf"),
+        top_n=50,
+        marker_method="markerfinder",
+        cells_per_cluster=100,
+        seed=0,
+        export_networks=True,
+        network_top_n=1000,
+        network_jobs=max(1, min(4, os.cpu_count() or 1)),
+        write_heatmap_tsv=False,
+        write_expression_tsv=False,
+        write_heatmap_cache=True,
+    )
+    store.update_job(
+        job_id,
+        progress=78,
+        message="Exporting NetPerspective marker networks.",
+    )
+    marker_archive_path = outputs_dir / "cell_state_marker_genes.zip"
+    _write_selected_zip(marker_dir, marker_archive_path, suffixes=(".pdf", ".tsv", ".png", ".npz"))
+    marker_analysis = {
+        "enabled": True,
+        "cluster_key": query_cluster_key,
+        "heatmap_pdf": str(marker_outputs["pdf"]),
+        "centroids_tsv": str(marker_outputs["centroids_tsv"]),
+        "markers_tsv": str(marker_outputs["markers_tsv"]),
+        "archive": str(marker_archive_path),
+        "networks": marker_outputs.get("networks", []),
+    }
+    if marker_outputs.get("heatmap_tsv"):
+        marker_analysis["heatmap_tsv"] = str(marker_outputs["heatmap_tsv"])
+    if marker_outputs.get("heatmap_cache"):
+        marker_analysis["heatmap_cache"] = str(marker_outputs["heatmap_cache"])
+    if marker_outputs.get("heatmap_column_tsv"):
+        marker_analysis["expression_tsv"] = str(marker_outputs["heatmap_column_tsv"])
+    store.append_log(job_id, "Cell-state marker gene export complete.")
 
     store.update_job(job_id, progress=82, message="Running approximate UMAP placement.")
     store.append_log(job_id, "Running approximate UMAP placement.")

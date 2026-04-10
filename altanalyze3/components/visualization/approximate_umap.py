@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -45,11 +46,28 @@ import matplotlib.colors as mcolors
 from matplotlib.colors import to_hex
 from matplotlib.lines import Line2D
 from pandas.api.types import is_categorical_dtype
+import scipy.sparse as sp
 
 __all__ = ["ApproximateUMAPResult", "approximate_umap", "main"]
 
 
 AnnDataLike = Union[str, Path, ad.AnnData]
+
+
+_PAIRED_COLOR_STOPS = [
+    (0.0, (0.6509804129600525, 0.8078431487083435, 0.8901960849761963)),
+    (0.09090909090909091, (0.12156862765550613, 0.47058823704719543, 0.7058823704719543)),
+    (0.18181818181818182, (0.6980392336845398, 0.8745098114013672, 0.5411764979362488)),
+    (0.2727272727272727, (0.20000000298023224, 0.6274510025978088, 0.1725490242242813)),
+    (0.36363636363636365, (0.9843137264251709, 0.6039215922355652, 0.6000000238418579)),
+    (0.45454545454545453, (0.8901960849761963, 0.10196078568696976, 0.10980392247438431)),
+    (0.5454545454545454, (0.9921568632125854, 0.7490196228027344, 0.43529412150382996)),
+    (0.6363636363636364, (1.0, 0.49803921580314636, 0.0)),
+    (0.7272727272727273, (0.7921568751335144, 0.6980392336845398, 0.8392156958580017)),
+    (0.8181818181818182, (0.4156862795352936, 0.239215686917305, 0.6039215922355652)),
+    (0.9090909090909091, (1.0, 1.0, 0.6000000238418579)),
+    (1.0, (0.6941176652908325, 0.3490196168422699, 0.1568627506494522)),
+]
 
 
 def _str_to_bool(value: Optional[str]) -> bool:
@@ -73,6 +91,198 @@ def _clean_string(value: object) -> str:
     if pd.isna(value):
         return ""
     return str(value).strip()
+
+
+def _flatten_expr(values) -> np.ndarray:
+    if sp.issparse(values):
+        return np.asarray(values.todense()).ravel()
+    return np.asarray(values).ravel()
+
+
+def _interpolate_paired_color(value: float) -> tuple[float, float, float]:
+    clipped = max(0.0, min(1.0, float(value)))
+    for index in range(1, len(_PAIRED_COLOR_STOPS)):
+        right_pos, right_rgb = _PAIRED_COLOR_STOPS[index]
+        left_pos, left_rgb = _PAIRED_COLOR_STOPS[index - 1]
+        if clipped <= right_pos or index == len(_PAIRED_COLOR_STOPS) - 1:
+            span = max(right_pos - left_pos, 1e-9)
+            ratio = max(0.0, min(1.0, (clipped - left_pos) / span))
+            return tuple(
+                left_rgb[channel] + (right_rgb[channel] - left_rgb[channel]) * ratio
+                for channel in range(3)
+            )
+    return _PAIRED_COLOR_STOPS[-1][1]
+
+
+def _custom_shuffle_indices(indices: list[int]) -> list[int]:
+    shuffled: list[int] = []
+    for index, value in enumerate(indices):
+        if value not in shuffled:
+            shuffled.append(value)
+        from_end = indices[len(indices) - 1 - index] if indices else value
+        if from_end not in shuffled:
+            shuffled.append(from_end)
+        middle_index = int((index + len(indices)) / 2)
+        from_middle = indices[middle_index] if middle_index < len(indices) else indices[-1]
+        if from_middle not in shuffled:
+            shuffled.append(from_middle)
+    return shuffled
+
+
+def _seeded_shuffle_js(items: list[int], seed: int = 0) -> list[int]:
+    state = (int(seed) & 0xFFFFFFFF) or 1
+
+    def _next_rand() -> float:
+        nonlocal state
+        state = (1664525 * state + 1013904223) & 0xFFFFFFFF
+        return state / 4294967296.0
+
+    values = list(items)
+    for index in range(len(values) - 1, 0, -1):
+        swap_index = int(np.floor(_next_rand() * (index + 1)))
+        values[index], values[swap_index] = values[swap_index], values[index]
+    return values
+
+
+def _build_preview_palette(populations: list[str]) -> dict[str, str]:
+    ordered = list(populations)
+    if len(ordered) <= 4:
+        base = ["#ff0000", "#0000ff", "#ffff00", "#00aa00", "#ffffff", "#000000", "#ff00ff"]
+        return {population: base[index % len(base)] for index, population in enumerate(ordered)}
+    indices = _seeded_shuffle_js(_custom_shuffle_indices(list(range(len(ordered)))), 0)
+    denominator = max(len(ordered) - 1, 1)
+    colors = [to_hex(_interpolate_paired_color(index / denominator)) for index in indices]
+    return {population: colors[index] for index, population in enumerate(ordered)}
+
+
+def _build_stable_umap_population_order(reference_labels: Sequence[str], query_labels: Sequence[str]) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for population in itertools.chain(reference_labels, query_labels):
+        label = _clean_string(population)
+        if not label or label in seen:
+            continue
+        seen.add(label)
+        ordered.append(label)
+    return ordered
+
+
+def _finite_extent(values: Sequence[float], fallback_min: float = 0.0, fallback_max: float = 1.0) -> tuple[float, float]:
+    finite = [float(value) for value in values if np.isfinite(float(value))]
+    if not finite:
+        return fallback_min, fallback_max
+    return float(min(finite)), float(max(finite))
+
+
+def _median(values: Sequence[float]) -> float:
+    arr = np.asarray(list(values), dtype=float)
+    if arr.size == 0:
+        return 0.0
+    return float(np.median(arr))
+
+
+def _build_population_centroids(coords: np.ndarray, labels: Sequence[str]) -> list[dict[str, float | str]]:
+    grouped: dict[str, dict[str, list[float]]] = {}
+    for (x, y), population in zip(coords, labels):
+        label = _clean_string(population)
+        if not label or not np.isfinite(x) or not np.isfinite(y):
+            continue
+        entry = grouped.setdefault(label, {"xs": [], "ys": []})
+        entry["xs"].append(float(x))
+        entry["ys"].append(float(y))
+    return [
+        {"population": population, "x": _median(values["xs"]), "y": _median(values["ys"])}
+        for population, values in grouped.items()
+    ]
+
+
+def _relax_umap_labels(
+    labels: list[dict[str, float | str]],
+    points: np.ndarray,
+    *,
+    plot_width: int = 900,
+    plot_height: int = 520,
+) -> list[dict[str, float | str]]:
+    if len(labels) <= 1:
+        return labels
+    x_values = [float(x) for x in points[:, 0] if np.isfinite(x)]
+    y_values = [float(y) for y in points[:, 1] if np.isfinite(y)]
+    for label in labels:
+        x = float(label.get("x", np.nan))
+        y = float(label.get("y", np.nan))
+        if np.isfinite(x):
+            x_values.append(x)
+        if np.isfinite(y):
+            y_values.append(y)
+    x_min, x_max = _finite_extent(x_values, 0.0, 1.0)
+    y_min, y_max = _finite_extent(y_values, 0.0, 1.0)
+    x_range = max(x_max - x_min, 1.0)
+    y_range = max(y_max - y_min, 1.0)
+    effective_width = max(plot_width - 80, 480)
+    pad_x = (8 / effective_width) * x_range
+    pad_y = (5 / plot_height) * y_range
+    max_dx = x_range * 0.03
+    max_dy = y_range * 0.03
+    relaxed: list[dict[str, float | str]] = []
+    for label in labels:
+        text = _clean_string(label.get("population"))
+        width_px = max(42, min(170, len(text) * 6.2))
+        height_px = 18
+        x = float(label.get("x", 0.0))
+        y = float(label.get("y", 0.0))
+        relaxed.append(
+            {
+                **label,
+                "x": x,
+                "y": y,
+                "anchor_x": x,
+                "anchor_y": y,
+                "half_width": (width_px / effective_width) * x_range * 0.5,
+                "half_height": (height_px / plot_height) * y_range * 0.5,
+            }
+        )
+    for _ in range(110):
+        for index, current in enumerate(relaxed):
+            for compare_index in range(index + 1, len(relaxed)):
+                other = relaxed[compare_index]
+                dx = float(other["x"]) - float(current["x"])
+                dy = float(other["y"]) - float(current["y"])
+                overlap_x = float(current["half_width"]) + float(other["half_width"]) + pad_x - abs(dx)
+                overlap_y = float(current["half_height"]) + float(other["half_height"]) + pad_y - abs(dy)
+                if overlap_x <= 0 or overlap_y <= 0:
+                    continue
+                shift_x = overlap_x * 0.5 * (1 if dx >= 0 else -1)
+                shift_y = overlap_y * 0.5 * (1 if dy >= 0 else -1)
+                current["x"] = float(current["x"]) - shift_x
+                other["x"] = float(other["x"]) + shift_x
+                current["y"] = float(current["y"]) - shift_y
+                other["y"] = float(other["y"]) + shift_y
+        for item in relaxed:
+            item["x"] = float(np.clip(float(item["x"]), float(item["anchor_x"]) - max_dx, float(item["anchor_x"]) + max_dx))
+            item["y"] = float(np.clip(float(item["y"]), float(item["anchor_y"]) - max_dy, float(item["anchor_y"]) + max_dy))
+    return relaxed
+
+
+def _square_umap_axes(axis: matplotlib.axes.Axes, coords: np.ndarray, padding_fraction: float = 0.06) -> None:
+    if coords.size == 0:
+        return
+    xs = coords[:, 0]
+    ys = coords[:, 1]
+    finite_mask = np.isfinite(xs) & np.isfinite(ys)
+    if not np.any(finite_mask):
+        return
+    xs = xs[finite_mask]
+    ys = ys[finite_mask]
+    min_x, max_x = float(xs.min()), float(xs.max())
+    min_y, max_y = float(ys.min()), float(ys.max())
+    x_span = max(max_x - min_x, 1.0)
+    y_span = max(max_y - min_y, 1.0)
+    x_pad = x_span * padding_fraction
+    y_pad = y_span * max(0.02, padding_fraction * 0.45)
+    axis.set_xlim(min_x - x_pad, max_x + x_pad)
+    axis.set_ylim(min_y - y_pad, max_y + y_pad)
+    axis.set_xticks([])
+    axis.set_yticks([])
 
 
 def _log_timing(label: str, started_at: float) -> float:
@@ -140,6 +350,7 @@ class ApproximateUMAPResult:
     plot_color_map: Optional[Dict[str, str]] = None
     plot_obs_field: Optional[str] = None
     plot_obs_value: Optional[str] = None
+    plot_obs_mode: str = "include"
 
     def write_text_outputs(self, prefix: Union[str, Path]) -> Dict[str, str]:
         prefix = str(prefix)
@@ -179,6 +390,7 @@ class ApproximateUMAPResult:
         custom_color_map: Optional[Mapping[str, str]] = None,
         restrict_obs_field: Optional[str] = None,
         restrict_obs_value: Optional[str] = None,
+        restrict_obs_mode: Optional[str] = None,
     ) -> tuple[str, str]:
         output_path = Path(output_path)
         annotated, plain = _save_comparison_pdf(
@@ -191,9 +403,42 @@ class ApproximateUMAPResult:
             custom_color_map=custom_color_map or self.plot_color_map,
             restrict_obs_field=restrict_obs_field or self.plot_obs_field,
             restrict_obs_value=restrict_obs_value or self.plot_obs_value,
+            restrict_obs_mode=restrict_obs_mode or self.plot_obs_mode,
             destination=output_path,
         )
         return annotated, plain
+
+    def write_expression_pdfs(
+        self,
+        *,
+        genes: Sequence[str],
+        output_dir: Union[str, Path],
+        query_cluster_key: str,
+        umap_key: str = "X_umap",
+        restrict_obs_field: Optional[str] = None,
+        restrict_obs_value: Optional[str] = None,
+        restrict_obs_mode: Optional[str] = None,
+    ) -> List[str]:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        written: List[str] = []
+        for gene in genes:
+            gene_text = _clean_string(gene)
+            if not gene_text:
+                continue
+            pdf_path = output_dir / f"{_sanitize_filename_component(gene_text)}-expression.pdf"
+            _save_expression_pdf(
+                self.query_adata,
+                gene_text,
+                query_cluster_key=query_cluster_key,
+                umap_key=umap_key,
+                restrict_obs_field=restrict_obs_field or self.plot_obs_field,
+                restrict_obs_value=restrict_obs_value or self.plot_obs_value,
+                restrict_obs_mode=restrict_obs_mode or self.plot_obs_mode,
+                destination=pdf_path,
+            )
+            written.append(str(pdf_path))
+        return written
 
 
 def approximate_umap(
@@ -209,6 +454,7 @@ def approximate_umap(
     custom_color_tsv: Optional[Union[str, Path]] = None,
     restrict_obs_field: Optional[str] = None,
     restrict_obs_value: Optional[str] = None,
+    restrict_obs_mode: str = "include",
     copy_query: bool = True,
 ) -> ApproximateUMAPResult:
     fn_started_at = time.perf_counter()
@@ -216,6 +462,8 @@ def approximate_umap(
         raise ValueError(
             "restrict_obs_field and restrict_obs_value must be supplied together."
         )
+    if restrict_obs_mode not in {"include", "exclude"}:
+        raise ValueError("restrict_obs_mode must be either 'include' or 'exclude'.")
     step_started_at = time.perf_counter()
     query_adata = _load_adata(query)
     reference_adata = _load_adata(reference)
@@ -503,6 +751,7 @@ def approximate_umap(
         plot_color_map=plot_color_map,
         plot_obs_field=restrict_obs_field,
         plot_obs_value=restrict_obs_value,
+        plot_obs_mode=restrict_obs_mode,
     )
 
 
@@ -697,18 +946,21 @@ def _save_comparison_pdf(
     custom_color_map: Optional[Mapping[str, str]] = None,
     restrict_obs_field: Optional[str] = None,
     restrict_obs_value: Optional[str] = None,
+    restrict_obs_mode: str = "include",
     destination: Path,
 ) -> tuple[str, str]:
     reference = _subset_adata_for_plot(
         reference,
         obs_field=restrict_obs_field,
         obs_value=restrict_obs_value,
+        obs_mode=restrict_obs_mode,
         dataset_label="reference",
     )
     query = _subset_adata_for_plot(
         query,
         obs_field=restrict_obs_field,
         obs_value=restrict_obs_value,
+        obs_mode=restrict_obs_mode,
         dataset_label="query",
     )
 
@@ -723,10 +975,7 @@ def _save_comparison_pdf(
     ref_labels = reference.obs[reference_cluster_key].astype(str)
     qry_labels = query.obs[query_cluster_key].astype(str)
 
-    categories: List[str] = []
-    for lab in pd.unique(ref_labels.tolist() + qry_labels.tolist()):
-        if lab not in categories:
-            categories.append(lab)
+    categories = _build_stable_umap_population_order(ref_labels.tolist(), qry_labels.tolist())
     if lineage_order:
         lineage_order = [str(item) for item in lineage_order]
         lineage_set = set(lineage_order)
@@ -777,11 +1026,6 @@ def _save_comparison_pdf(
         }
     )
 
-    legend_handles = [
-        Line2D([0], [0], marker="o", color="w", label=cat, markerfacecolor=palette[cat], markersize=3)
-        for cat in categories
-    ]
-
     destination.parent.mkdir(parents=True, exist_ok=True)
 
     annotated_path = destination
@@ -790,19 +1034,8 @@ def _save_comparison_pdf(
     def _render_pdf(path: Path, *, annotate: bool) -> None:
         fig, axes = plt.subplots(1, 2, figsize=(10, 5), constrained_layout=True)
         try:
-            _scatter(axes[0], ref_coords, ref_labels, palette, "Reference UMAP", annotate=annotate)
-            _scatter(axes[1], qry_coords, qry_labels, palette, "Query Approximate UMAP", annotate=annotate)
-            fig.legend(
-                handles=legend_handles,
-                loc="center left",
-                bbox_to_anchor=(1.02, 0.5),
-                frameon=False,
-                borderaxespad=0.0,
-                handlelength=0.6,
-                labelspacing=0.3,
-                columnspacing=0.6,
-                fontsize=6,
-            )
+            _scatter(axes[0], ref_coords, ref_labels, palette, "Reference UMAP", annotate=annotate, use_reference_grey=False)
+            _scatter(axes[1], qry_coords, qry_labels, palette, "Query Approximate UMAP", annotate=annotate, use_reference_grey=False)
             fig.savefig(path, dpi=300, bbox_inches="tight")
         finally:
             plt.close(fig)
@@ -831,16 +1064,17 @@ def _scatter(
     title: str,
     *,
     annotate: bool,
+    use_reference_grey: bool = False,
 ) -> None:
-    colors = [palette.get(label, "#999999") for label in labels]
+    colors = ["#e5e7eb" if use_reference_grey else palette.get(label, "#999999") for label in labels]
     point_size = _compute_point_size(coords.shape[0])
-    axis.scatter(coords[:, 0], coords[:, 1], c=colors, s=point_size, linewidths=0, alpha=0.85)
+    axis.scatter(coords[:, 0], coords[:, 1], c=colors, s=point_size, linewidths=0, alpha=0.5 if not use_reference_grey else 0.3)
     axis.set_title(title, fontsize=12)
-    axis.set_xlabel("UMAP1", fontsize=10)
-    axis.set_ylabel("UMAP2", fontsize=10)
-    axis.tick_params(labelsize=8)
     axis.spines["top"].set_visible(False)
     axis.spines["right"].set_visible(False)
+    axis.spines["bottom"].set_visible(False)
+    axis.spines["left"].set_visible(False)
+    _square_umap_axes(axis, coords, 0.06)
     if annotate:
         _annotate_clusters(axis, coords, labels)
 
@@ -870,6 +1104,7 @@ def _resolve_colors(
     query_cluster_key: str,
     custom_color_map: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, str]:
+    generated = _build_preview_palette([str(cat) for cat in categories])
     if custom_color_map:
         sanitized_custom: Dict[str, str] = {}
         for key, value in custom_color_map.items():
@@ -877,59 +1112,16 @@ def _resolve_colors(
                 sanitized_custom[str(key)] = to_hex(mcolors.to_rgb(value))
             except ValueError:
                 continue
+        resolved = {str(cat): sanitized_custom.get(str(cat), generated.get(str(cat), "#999999")) for cat in categories}
         missing = [str(cat) for cat in categories if str(cat) not in sanitized_custom]
-        if not missing:
-            return {str(cat): sanitized_custom[str(cat)] for cat in categories}
-        print(
-            "[warn] Custom color TSV is missing colors for: "
-            + ", ".join(missing)
-            + ". Falling back to generated/default colors for those categories."
-        )
-
-    candidates = [
-        (query, f"{query_cluster_key}_colors"),
-        (reference, f"{query_cluster_key}_colors"),
-        (reference, f"{reference_cluster_key}_colors"),
-    ]
-    palette: Optional[List[str]] = None
-    for adata_obj, key in candidates:
-        if key in adata_obj.uns:
-            colors = adata_obj.uns[key]
-            if isinstance(colors, Iterable) and not isinstance(colors, (str, bytes)):
-                palette = list(dict.fromkeys(colors))  # preserve order, drop duplicates
-                break
-
-    if not palette or len(palette) < len(categories):
-        base_palette = [
-            to_hex(matplotlib.colors.hsv_to_rgb([h, 0.65, 0.95]))
-            for h in np.linspace(0, 1, len(categories), endpoint=False)
-        ]
-        palette = base_palette
-    else:
-        sanitized: List[str] = []
-        for color in palette:
-            try:
-                sanitized.append(to_hex(mcolors.to_rgb(color)))
-            except ValueError:
-                continue
-        if len(sanitized) < len(categories):
-            extra_needed = len(categories) - len(sanitized)
-            cmap = plt.get_cmap("tab20", max(len(categories), 1))
-            generated = [to_hex(cmap(i)) for i in range(len(categories))]
-            sanitized.extend(generated[:extra_needed])
-        palette = sanitized
-
-    rng = np.random.default_rng(123)
-    rng.shuffle(palette)
-
-    resolved = {str(cat): palette[i % len(palette)] for i, cat in enumerate(categories)}
-    if custom_color_map:
-        for key, value in custom_color_map.items():
-            try:
-                resolved[str(key)] = to_hex(mcolors.to_rgb(value))
-            except ValueError:
-                continue
-    return resolved
+        if missing:
+            print(
+                "[warn] Custom color TSV is missing colors for: "
+                + ", ".join(missing)
+                + ". Falling back to web-app palette for those categories."
+            )
+        return resolved
+    return generated
 
 
 def _load_custom_color_map(path: Union[str, Path]) -> Dict[str, str]:
@@ -958,7 +1150,8 @@ def _subset_adata_for_plot(
     adata: ad.AnnData,
     *,
     obs_field: Optional[str],
-    obs_value: Optional[str],
+    obs_value: Optional[Union[str, Sequence[str]]],
+    obs_mode: str = "include",
     dataset_label: str,
 ) -> ad.AnnData:
     if not obs_field:
@@ -966,55 +1159,144 @@ def _subset_adata_for_plot(
     if obs_field not in adata.obs:
         print(f"[warn] {dataset_label} AnnData missing obs field '{obs_field}'; plotting all cells.")
         return adata
-    value = _clean_string(obs_value)
-    mask = adata.obs[obs_field].astype(str) == value
+    raw_values: list[str]
+    if isinstance(obs_value, (list, tuple, set, np.ndarray, pd.Index)):
+        raw_values = [_clean_string(item) for item in obs_value]
+    else:
+        raw_text = _clean_string(obs_value)
+        raw_values = [value for value in re.split(r"[|,]", raw_text) if _clean_string(value)]
+    values = [value for value in raw_values if value]
+    if not values:
+        return adata
+    series = adata.obs[obs_field].astype(str)
+    include_mask = series.isin(values)
+    mask = ~include_mask if obs_mode == "exclude" else include_mask
     if not bool(mask.any()):
+        action = "excluded" if obs_mode == "exclude" else "matched"
         raise ValueError(
-            f"No {dataset_label} cells matched obs['{obs_field}'] == '{value}' for plotting."
+            f"No {dataset_label} cells {action} obs['{obs_field}'] in {values!r} for plotting."
         )
     subset = adata[mask].copy()
+    action_text = "Excluding" if obs_mode == "exclude" else "Restricting"
     print(
-        f"[info] Restricting {dataset_label} plot to obs['{obs_field}'] == '{value}' "
-        f"({subset.n_obs}/{adata.n_obs} cells)."
+        f"[info] {action_text} {dataset_label} plot with obs['{obs_field}'] in {values!r} "
+        f"({subset.n_obs}/{adata.n_obs} cells retained)."
     )
     return subset
 
 
 def _compute_point_size(num_points: int) -> float:
-    base = 0.6  # one-tenth of the previous default size (6)
+    base = 2.0
     scale = (1000.0 / max(num_points, 1)) ** 0.5
     size = base * scale
-    return float(np.clip(size, 0.1, 2.0))
+    return float(np.clip(size, 0.5, 8.0))
 
 
 def _annotate_clusters(axis: matplotlib.axes.Axes, coords: np.ndarray, labels: pd.Series) -> None:
-    unique_labels = pd.unique(labels)
-    if len(unique_labels) == 0:
+    label_points = _build_population_centroids(coords, labels.astype(str).tolist())
+    if len(label_points) == 0:
         return
-
-    x_span = float(np.ptp(coords[:, 0])) or 1.0
-    y_span = float(np.ptp(coords[:, 1])) or 1.0
-
-    for idx, cluster in enumerate(unique_labels):
-        mask = labels == cluster
-        if not np.any(mask):
-            continue
-        centroid = coords[mask].mean(axis=0)
-        angle = 2 * np.pi * idx / max(len(unique_labels), 1)
-        offset = np.array([np.cos(angle) * x_span * 0.06, np.sin(angle) * y_span * 0.06])
-        text_pos = centroid + offset
-
-        axis.annotate(
-            str(cluster),
-            xy=centroid,
-            xytext=text_pos,
-            textcoords="data",
+    relaxed = _relax_umap_labels(label_points, coords)
+    for label in relaxed:
+        axis.text(
+            float(label["x"]),
+            float(label["y"]),
+            str(label["population"]),
             ha="center",
             va="center",
             fontsize=7,
-            arrowprops={"arrowstyle": "-", "color": "#555555", "lw": 0.6},
+            color="#0f172a",
             zorder=5,
         )
+
+
+def _sanitize_filename_component(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "").strip()).strip("._")
+    return cleaned or "output"
+
+
+def _save_expression_pdf(
+    query: ad.AnnData,
+    gene: str,
+    *,
+    query_cluster_key: str,
+    umap_key: str,
+    restrict_obs_field: Optional[str],
+    restrict_obs_value: Optional[Union[str, Sequence[str]]],
+    restrict_obs_mode: str,
+    destination: Path,
+) -> str:
+    if gene not in set(query.var_names.astype(str).tolist()):
+        raise KeyError(f"Gene '{gene}' was not found in the query AnnData.")
+    subset = _subset_adata_for_plot(
+        query,
+        obs_field=restrict_obs_field,
+        obs_value=restrict_obs_value,
+        obs_mode=restrict_obs_mode,
+        dataset_label="query",
+    )
+    if umap_key not in subset.obsm:
+        raise KeyError(f"Query AnnData missing '{umap_key}' for expression plotting.")
+    coords = _embedding_to_df(subset, umap_key).to_numpy()
+    values = _flatten_expr(subset[:, gene].X).astype(float)
+    zero_mask = np.isfinite(values) & (values <= 0)
+    expr_mask = np.isfinite(values) & (values > 0)
+
+    plt.rcParams.update(
+        {
+            "backend": "Agg",
+            "axes.linewidth": 0.5,
+            "pdf.fonttype": 42,
+            "font.family": "sans-serif",
+            "font.sans-serif": "DejaVu Sans",
+            "figure.facecolor": "white",
+        }
+    )
+    fig, ax = plt.subplots(figsize=(8.5, 8.5), constrained_layout=True)
+    try:
+        point_size = _compute_point_size(coords.shape[0])
+        if np.any(zero_mask):
+            ax.scatter(
+                coords[zero_mask, 0],
+                coords[zero_mask, 1],
+                s=point_size,
+                c="#e5e7eb",
+                alpha=0.9,
+                linewidths=0,
+            )
+        if np.any(expr_mask):
+            expression_cmap = matplotlib.colors.LinearSegmentedColormap.from_list(
+                "expression_grey_red",
+                [
+                    (0.0, "#f3f4f6"),
+                    (0.15, "#fecaca"),
+                    (0.35, "#fca5a5"),
+                    (0.6, "#ef4444"),
+                    (1.0, "#b91c1c"),
+                ],
+            )
+            sc = ax.scatter(
+                coords[expr_mask, 0],
+                coords[expr_mask, 1],
+                s=point_size,
+                c=values[expr_mask],
+                cmap=expression_cmap,
+                alpha=0.9,
+                linewidths=0,
+            )
+            colorbar = fig.colorbar(sc, ax=ax)
+            colorbar.set_label(gene)
+        ax.set_title(f"{gene} expression", fontsize=12)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["bottom"].set_visible(False)
+        ax.spines["left"].set_visible(False)
+        _square_umap_axes(ax, coords, 0.06)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(destination, dpi=300, bbox_inches="tight")
+    finally:
+        plt.close(fig)
+    return str(destination)
 
 
 def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -1067,11 +1349,17 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--restrict-obs-field",
-        help="obs column used to restrict which cells are drawn in the PDF comparison plot.",
+        help="obs column used to restrict which cells are drawn in the PDF exports.",
     )
     parser.add_argument(
         "--restrict-obs-value",
-        help="Specific obs value to match when --restrict-obs-field is supplied.",
+        help="obs value to match when --restrict-obs-field is supplied. Comma- or pipe-delimited values are also accepted.",
+    )
+    parser.add_argument(
+        "--restrict-obs-mode",
+        choices=("include", "exclude"),
+        default="include",
+        help="Whether the supplied obs values are included or excluded from the PDF/expression plots.",
     )
     parser.add_argument(
         "--output-prefix",
@@ -1089,6 +1377,16 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--output-pdf",
         help="Filename or path for the comparison PDF (default: <prefix>-comparison.pdf within --outdir).",
+    )
+    parser.add_argument(
+        "--expression-gene",
+        action="append",
+        default=[],
+        help="Gene to export as a UMAP expression PDF. Repeat to export multiple genes.",
+    )
+    parser.add_argument(
+        "--expression-pdf-dir",
+        help="Directory where gene expression PDFs will be written (default: <prefix>-expression within --outdir).",
     )
     parser.add_argument(
         "--skip-pdf",
@@ -1158,12 +1456,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         custom_color_tsv=args.custom_colors_tsv,
         restrict_obs_field=args.restrict_obs_field,
         restrict_obs_value=args.restrict_obs_value,
+        restrict_obs_mode=args.restrict_obs_mode,
         copy_query=False,
     )
     _log_timing("main.compute_approximate_umap", step_started_at)
 
     step_started_at = time.perf_counter()
-    query_path = Path(args.query)
+    query_path = Path(args.query or args.query_clusters_tsv)
     out_dir = Path(args.outdir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1171,6 +1470,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     prefix = out_dir / prefix_name
 
     output_pdf: Optional[Path] = None
+    expression_pdf_dir: Optional[Path] = None
     if not args.skip_pdf:
         if args.output_pdf:
             output_pdf_candidate = Path(args.output_pdf)
@@ -1182,6 +1482,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         else:
             output_pdf = out_dir / f"{prefix_name}-comparison.pdf"
         output_pdf.parent.mkdir(parents=True, exist_ok=True)
+    if args.expression_gene:
+        if args.expression_pdf_dir:
+            expression_dir_candidate = Path(args.expression_pdf_dir)
+            expression_pdf_dir = (
+                expression_dir_candidate
+                if expression_dir_candidate.is_absolute()
+                else out_dir / expression_dir_candidate
+            )
+        else:
+            expression_pdf_dir = out_dir / f"{prefix_name}-expression"
+        expression_pdf_dir.mkdir(parents=True, exist_ok=True)
     _log_timing("main.prepare_output_paths", step_started_at)
 
     full_command = " ".join(sys.argv)
@@ -1232,12 +1543,34 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             custom_color_map=result.plot_color_map,
             restrict_obs_field=args.restrict_obs_field,
             restrict_obs_value=args.restrict_obs_value,
+            restrict_obs_mode=args.restrict_obs_mode,
         )
         logging.info("Annotated UMAP PDF: %s", annotated_pdf)
         logging.info("Label-free UMAP PDF: %s", plain_pdf)
     else:
         logging.info("Skipping comparison PDF generation (--skip-pdf).")
     _log_timing("main.write_pdfs", step_started_at)
+
+    step_started_at = time.perf_counter()
+    if expression_pdf_dir is not None and args.expression_gene:
+        written_expression = result.write_expression_pdfs(
+            genes=args.expression_gene,
+            output_dir=expression_pdf_dir,
+            query_cluster_key=args.query_cluster_key,
+            umap_key=args.umap_key,
+            restrict_obs_field=args.restrict_obs_field,
+            restrict_obs_value=args.restrict_obs_value,
+            restrict_obs_mode=args.restrict_obs_mode,
+        )
+        for path in written_expression:
+            logging.info("Expression UMAP PDF: %s", path)
+        print(
+            "[info] Wrote expression PDFs for genes: "
+            + ", ".join([_clean_string(gene) for gene in args.expression_gene if _clean_string(gene)])
+        )
+    else:
+        logging.info("Skipping expression PDF generation (no --expression-gene supplied).")
+    _log_timing("main.write_expression_pdfs", step_started_at)
 
     logging.info("Approximate UMAP mapping completed.")
     _log_timing("main.total", main_started_at)

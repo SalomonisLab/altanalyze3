@@ -76,7 +76,7 @@ QC/alignment settings include:
 - `Min cells`
 - `Mito %`
 - `Minimum cosine similarity score`
-- `Identify cell-state marker genes`
+- `% Ambient RNA correction`
 
 When alignment completes:
 
@@ -86,7 +86,7 @@ When alignment completes:
 
 ## Marker analysis
 
-When `Identify cell-state marker genes` is `TRUE`:
+Marker analysis is always run after alignment:
 
 - markerFinder is run on the aligned dataset
 - a marker heatmap PDF and TSV outputs are exported

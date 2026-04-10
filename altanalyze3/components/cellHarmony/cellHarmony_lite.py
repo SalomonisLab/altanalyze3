@@ -451,27 +451,32 @@ def combine_and_align_h5(
             soupx_dir = os.path.join(output_dir, "soupx")
             os.makedirs(soupx_dir, exist_ok=True)
             try:
-                from altanalyze3.components.ambient_rna import soupx_correct
+                from altanalyze3.components.ambient_rna import ambient_subtract
             except ImportError as exc:
                 raise RuntimeError(
-                    "SoupX ambient correction requested (--ambient_correct_cutoff) but the soupx module "
-                    "is unavailable. Install the 'soupx' package to enable this option."
+                    "Ambient RNA correction requested (--ambient_correct_cutoff) but the ambient_subtract module "
+                    "is unavailable."
                 ) from exc
 
-            print(f"[INFO] Running SoupX ambient correction (rho={ambient_correct_cutoff})...")
-            corrected = soupx_correct.process_anndata(
+            library_col = "Library" if "Library" in adata_combined.obs.columns else ("sample" if "sample" in adata_combined.obs.columns else None)
+            if library_col is None:
+                adata_combined.obs["Library"] = "Library_1"
+                library_col = "Library"
+
+            print(f"[INFO] Running ambient RNA correction (rho={ambient_correct_cutoff})...")
+            corrected = ambient_subtract.process_anndata(
                 adata_combined,
                 rho=float(ambient_correct_cutoff),
-                library_col="Library",
+                library_col=library_col,
                 outdir=Path(soupx_dir),
                 write_individual=False,
-                merged_filename="soupx_corrected_merged.h5ad",
+                merged_filename="ambient_corrected_merged.h5ad",
             )
             if corrected is None:
-                raise RuntimeError("SoupX correction did not return a corrected AnnData object.")
+                raise RuntimeError("Ambient RNA correction did not return a corrected AnnData object.")
             adata_combined = corrected
             adata_combined.var_names_make_unique()
-            print(f"[INFO] SoupX correction complete. Corrected adata shape: {adata_combined.shape} (cells x genes)")
+            print(f"[INFO] Ambient RNA correction complete. Corrected adata shape: {adata_combined.shape} (cells x genes)")
 
         adata_combined = _apply_qc_filters(adata_combined)
 

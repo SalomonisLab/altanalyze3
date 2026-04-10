@@ -1401,7 +1401,7 @@ async function handleQcSubmit(evt) {
     min_cells: evt.target.min_cells.value,
     mit_percent: evt.target.mit_percent.value,
     align_cutoff: evt.target.align_cutoff.value,
-    identify_markers: evt.target.identify_markers.value === "true",
+    ambient_percent: evt.target.ambient_percent.value,
   };
   try {
     if (selectedReferenceDiffersFromLoadedJob()) {
