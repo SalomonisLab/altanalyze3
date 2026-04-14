@@ -720,12 +720,26 @@ select:disabled {
 }
 
 #qc-live-plot {
-  min-height: 540px;
+  min-height: 320px;
 }
 
 #qc-live-caption {
   min-height: 36px;
   margin-top: 8px;
+}
+
+#ambient-live-plot {
+  min-height: 180px;
+  margin-top: 10px;
+}
+
+#ambient-live-caption {
+  min-height: 24px;
+  margin-top: 8px;
+}
+
+.ambient-plot-area {
+  flex: 0 0 auto;
 }
 
 .workspace-tabs {

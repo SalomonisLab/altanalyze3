@@ -29,6 +29,7 @@ import pandas as pd
 
 try:
     from approximate_umap import (
+        _build_preview_palette,
         _clean_string,
         _extract_lineage_order,
         _flatten_expr,
@@ -38,6 +39,7 @@ try:
     )
 except ImportError:  # pragma: no cover
     from altanalyze3.components.visualization.approximate_umap import (
+        _build_preview_palette,
         _clean_string,
         _extract_lineage_order,
         _flatten_expr,
@@ -89,6 +91,8 @@ def _parse_list_arg(values: Optional[Sequence[str]]) -> List[str]:
 
 def _plot_gene_groups(ax: matplotlib.axes.Axes, group_payload: List[dict], *, title: str) -> None:
     positions = np.arange(1, len(group_payload) + 1)
+    labels = [entry["label"] for entry in group_payload]
+    palette = _build_preview_palette(labels)
     parts = ax.violinplot(
         [entry["values"] for entry in group_payload],
         positions=positions,
@@ -96,20 +100,26 @@ def _plot_gene_groups(ax: matplotlib.axes.Axes, group_payload: List[dict], *, ti
         showmedians=True,
         showextrema=False,
     )
-    for body in parts["bodies"]:
-        body.set_facecolor("#94a3b8")
-        body.set_edgecolor("#475569")
+    for body, entry in zip(parts["bodies"], group_payload):
+        color = palette.get(entry["label"], "#64748b")
+        body.set_facecolor(color)
+        body.set_edgecolor(color)
         body.set_alpha(0.55)
+        body.set_linewidth(0.7)
+    if "cmedians" in parts:
+        parts["cmedians"].set_color("#0f172a")
+        parts["cmedians"].set_linewidth(0.8)
     for idx, entry in enumerate(group_payload, start=1):
         vals = np.asarray(entry["values"], dtype=float)
         if vals.size == 0:
             continue
+        color = palette.get(entry["label"], "#64748b")
         jitter = np.random.default_rng(0).normal(0, 0.035, size=len(vals))
         ax.scatter(
             np.full(len(vals), idx) + jitter,
             vals,
             s=2,
-            c="#0f172a",
+            c=color,
             alpha=0.25,
             linewidths=0,
             rasterized=False,

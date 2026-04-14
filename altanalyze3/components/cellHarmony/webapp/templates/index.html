@@ -94,8 +94,11 @@
                     <input name="align_cutoff" value="0.4">
                   </label>
                   <label class="field">
-                    <span>% Ambient RNA correction</span>
-                    <input name="ambient_percent" value="0" inputmode="decimal">
+                    <span>Ambient RNA correction</span>
+                    <select name="ambient_correction">
+                      <option value="no" selected>No</option>
+                      <option value="yes">Yes</option>
+                    </select>
                   </label>
                 </div>
                 <button class="primary-btn" type="submit">Save QC and run</button>
@@ -112,6 +115,8 @@
               <div class="panel-head">
                 <h2>QC filter progress</h2>
               </div>
+              <div id="ambient-live-plot" class="plot-area ambient-plot-area"></div>
+              <div class="plot-caption" id="ambient-live-caption">Ambient RNA correction percentages will appear here when correction is performed.</div>
               <div id="qc-live-plot" class="plot-area"></div>
               <div class="plot-caption" id="qc-live-caption">Live counts parsed from alignment log.</div>
             </section>

@@ -63,7 +63,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning, message=".*invalid va
 plt.rcParams['axes.linewidth'] = 0.5
 plt.rcParams['pdf.fonttype'] = 42
 plt.rcParams['svg.fonttype'] = 'none'
-plt.rcParams['font.family'] = 'Arial'
+plt.rcParams['font.family'] = 'sans-serif'
 plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
 plt.rcParams['figure.facecolor'] = 'white'
 
@@ -229,7 +229,10 @@ def _bh_fdr(pvals):
 
 def load_and_merge_covariates(h5ad_path, covariate_tsv, library_col, sample_col, covariate_col):
     """
-    Load an AnnData object and merge external covariate metadata by library/sample.
+    Load an AnnData object and merge external covariate metadata by library or sample.
+    Accepts either:
+      1) library_col, sample_col, covariate_col
+      2) sample_col, covariate_col
     Ensures .obs_names remain string-based after merge (fixes AnnData indexing errors).
     """
     import os, sys, pandas as pd, anndata as ad
@@ -254,24 +257,47 @@ def load_and_merge_covariates(h5ad_path, covariate_tsv, library_col, sample_col,
     cov = pd.read_csv(covariate_tsv, sep="\t")
     _assert_no_multiindex(cov, "covariate table")
 
-    required = [library_col, sample_col, covariate_col]
-    for c in required:
-        if c not in cov.columns:
-            print(f"[ERROR] Covariate file missing required column '{c}'", file=sys.stderr)
-            sys.exit(1)
+    obs = adata.obs.copy()
+    merge_cols = None
 
-    if library_col not in adata.obs.columns:
-        print(f"[ERROR] '{library_col}' not found in adata.obs", file=sys.stderr)
+    has_three_col_format = all(col in cov.columns for col in [library_col, sample_col, covariate_col])
+    has_two_col_format = all(col in cov.columns for col in [sample_col, covariate_col])
+
+    if has_three_col_format:
+        if library_col not in obs.columns:
+            print(f"[ERROR] '{library_col}' not found in adata.obs", file=sys.stderr)
+            sys.exit(1)
+        obs[library_col] = obs[library_col].astype(str)
+        cov[library_col] = cov[library_col].astype(str)
+        merge_cols = [library_col, sample_col, covariate_col]
+        merge_key = library_col
+        print(f"[INFO] Merging covariates using three-column format on '{library_col}'.")
+    elif has_two_col_format:
+        if sample_col not in obs.columns:
+            print(
+                f"[ERROR] Covariate file provides only '{sample_col}' and '{covariate_col}', "
+                f"but '{sample_col}' is not present in adata.obs",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        obs[sample_col] = obs[sample_col].astype(str)
+        cov[sample_col] = cov[sample_col].astype(str)
+        merge_cols = [sample_col, covariate_col]
+        merge_key = sample_col
+        print(f"[INFO] Merging covariates using two-column format on '{sample_col}'.")
+    else:
+        print(
+            f"[ERROR] Covariate file must contain either "
+            f"('{sample_col}', '{covariate_col}') or "
+            f"('{library_col}', '{sample_col}', '{covariate_col}')",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
-    # --- Merge covariates by library and restore original cell index ---
-    obs = adata.obs.copy()
-    obs[library_col] = obs[library_col].astype(str)
-    cov[library_col] = cov[library_col].astype(str)
-
+    # --- Merge covariates and restore original cell index ---
     merged = obs.merge(
-        cov[[library_col, sample_col, covariate_col]].drop_duplicates(),
-        on=library_col,
+        cov[merge_cols].drop_duplicates(),
+        on=merge_key,
         how="left"
     )
     # critical fix: restore cell barcodes as index after merge
@@ -2949,10 +2975,18 @@ def parse_comparisons_arg(comp_str):
 def main():
     ap = argparse.ArgumentParser(description="cellHarmony differential analysis and (optional) pseudobulk generation.")
     ap.add_argument("--h5ad", required=True, help="Input h5ad with aligned annotations")
-    ap.add_argument("--covariates", required=True, help="TSV mapping libraries to samples and covariate")
-    ap.add_argument("--library_col", default="Library", help="obs column for library IDs (default: Library)")
-    ap.add_argument("--sample_col", default="Sample", help="column in covariates for sample IDs (default: Sample)")
-    ap.add_argument("--covariate_col", default="Condition", help="column in covariates for the covariate/condition (default: Condition)")
+    ap.add_argument(
+        "--covariates",
+        required=True,
+        help="TSV containing either [Sample, Condition] or [Library, Sample, Condition]",
+    )
+    ap.add_argument(
+        "--library_col",
+        default="Library",
+        help="obs/covariate column for library IDs when using three-column covariates (default: Library)",
+    )
+    ap.add_argument("--sample_col", default="Sample", help="sample ID column in covariates/adata.obs (default: Sample)")
+    ap.add_argument("--covariate_col", default="Condition", help="condition/covariate column in covariates (default: Condition)")
     ap.add_argument("--population_col", required=True, help="obs column with projected cell populations (matches reference ref_name)")
     ap.add_argument("--comparisons", required=True, help="Semicolon-separated CASE|CONTROL pairs, e.g. 'breast-cancer|wild-type;A|B'")
     ap.add_argument("--method", choices=["wilcoxon", "t-test", "t-test_overestim_var", "logreg"], default="wilcoxon",

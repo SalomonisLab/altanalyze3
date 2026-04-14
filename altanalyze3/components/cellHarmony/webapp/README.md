@@ -4,6 +4,12 @@
 interactive Explore workspace for UMAP and gene-expression review, and supports
 group-based differential analysis in a dedicated Differential workspace.
 
+Full walkthrough video:
+
+```text
+https://vimeo.com/manage/videos/1183088658/01170fe26e
+```
+
 ## Run locally
 
 From the repo root:
@@ -76,7 +82,16 @@ QC/alignment settings include:
 - `Min cells`
 - `Mito %`
 - `Minimum cosine similarity score`
-- `% Ambient RNA correction`
+- `Ambient RNA correction`
+  - `No`
+  - `Yes`
+
+Ambient RNA correction is optional and is applied per uploaded sample/library
+before downstream alignment. Selecting `Yes` enables automatic per-sample
+ambient estimation and subtraction. Users should inspect their data for ambient
+RNA contamination and apply correction when needed. In many standard droplet
+RNA datasets, values near `20%` are a reasonable expectation, while higher
+contamination can occur in some assay types.
 
 When alignment completes:
 

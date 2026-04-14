@@ -463,10 +463,11 @@ def combine_and_align_h5(
                 adata_combined.obs["Library"] = "Library_1"
                 library_col = "Library"
 
-            print(f"[INFO] Running ambient RNA correction (rho={ambient_correct_cutoff})...")
+            ambient_rho = str(ambient_correct_cutoff).strip()
+            print(f"[INFO] Running ambient RNA correction (rho={ambient_rho})...")
             corrected = ambient_subtract.process_anndata(
                 adata_combined,
-                rho=float(ambient_correct_cutoff),
+                rho=ambient_rho,
                 library_col=library_col,
                 outdir=Path(soupx_dir),
                 write_individual=False,
@@ -1244,7 +1245,7 @@ if __name__ == '__main__':
     parser.add_argument('--metacell-random-cells', type=int, default=5, help='Cells per metacell for random aggregation')
     parser.add_argument('--metacell-random-replacement', action='store_true', help='Sample cells with replacement for random metacells')
     parser.add_argument('--metacell-random-state', type=int, default=0, help='Random state for metacell construction')
-    parser.add_argument('--ambient_correct_cutoff', type=float, default=None, help='Apply SoupX ambient RNA correction with the specified contamination fraction (rho).')
+    parser.add_argument('--ambient_correct_cutoff', type=str, default=None, help="Apply ambient RNA correction with the specified contamination fraction (rho) or 'auto'.")
     parser.add_argument('--concat_on_disk', action='store_true', help='Concatenate inputs on disk to reduce peak memory usage')
     parser.add_argument('--concat_batch_size', type=int, default=50, help='Batch size for on-disk concatenation (default: 50)')
     parser.add_argument('--verbose_import', action='store_true', help='Log per-sample import timings during input loading')

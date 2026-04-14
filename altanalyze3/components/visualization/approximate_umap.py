@@ -351,6 +351,7 @@ class ApproximateUMAPResult:
     plot_obs_field: Optional[str] = None
     plot_obs_value: Optional[str] = None
     plot_obs_mode: str = "include"
+    dot_scale: float = 1.0
 
     def write_text_outputs(self, prefix: Union[str, Path]) -> Dict[str, str]:
         prefix = str(prefix)
@@ -391,6 +392,7 @@ class ApproximateUMAPResult:
         restrict_obs_field: Optional[str] = None,
         restrict_obs_value: Optional[str] = None,
         restrict_obs_mode: Optional[str] = None,
+        dot_scale: Optional[float] = None,
     ) -> tuple[str, str]:
         output_path = Path(output_path)
         annotated, plain = _save_comparison_pdf(
@@ -404,6 +406,7 @@ class ApproximateUMAPResult:
             restrict_obs_field=restrict_obs_field or self.plot_obs_field,
             restrict_obs_value=restrict_obs_value or self.plot_obs_value,
             restrict_obs_mode=restrict_obs_mode or self.plot_obs_mode,
+            dot_scale=float(self.dot_scale if dot_scale is None else dot_scale),
             destination=output_path,
         )
         return annotated, plain
@@ -418,26 +421,58 @@ class ApproximateUMAPResult:
         restrict_obs_field: Optional[str] = None,
         restrict_obs_value: Optional[str] = None,
         restrict_obs_mode: Optional[str] = None,
+        dot_scale: Optional[float] = None,
     ) -> List[str]:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         written: List[str] = []
+        resolved_field = restrict_obs_field or self.plot_obs_field
+        resolved_values = restrict_obs_value or self.plot_obs_value
+        resolved_mode = restrict_obs_mode or self.plot_obs_mode
+        split_values = (
+            _parse_obs_values(resolved_values)
+            if resolved_field and resolved_mode == "include"
+            else []
+        )
         for gene in genes:
             gene_text = _clean_string(gene)
             if not gene_text:
                 continue
-            pdf_path = output_dir / f"{_sanitize_filename_component(gene_text)}-expression.pdf"
-            _save_expression_pdf(
-                self.query_adata,
-                gene_text,
-                query_cluster_key=query_cluster_key,
-                umap_key=umap_key,
-                restrict_obs_field=restrict_obs_field or self.plot_obs_field,
-                restrict_obs_value=restrict_obs_value or self.plot_obs_value,
-                restrict_obs_mode=restrict_obs_mode or self.plot_obs_mode,
-                destination=pdf_path,
-            )
-            written.append(str(pdf_path))
+            if len(split_values) > 1:
+                for value_text in split_values:
+                    pdf_path = output_dir / (
+                        f"{_sanitize_filename_component(gene_text)}-"
+                        f"{_sanitize_filename_component(value_text)}-expression.pdf"
+                    )
+                    _save_expression_pdf(
+                        self.query_adata,
+                        gene_text,
+                        query_cluster_key=query_cluster_key,
+                        umap_key=umap_key,
+                        restrict_obs_field=resolved_field,
+                        restrict_obs_value=value_text,
+                        restrict_obs_mode=resolved_mode,
+                        dot_scale=float(self.dot_scale if dot_scale is None else dot_scale),
+                        plot_label=value_text,
+                        destination=pdf_path,
+                    )
+                    written.append(str(pdf_path))
+            else:
+                pdf_path = output_dir / f"{_sanitize_filename_component(gene_text)}-expression.pdf"
+                single_label = split_values[0] if len(split_values) == 1 else None
+                _save_expression_pdf(
+                    self.query_adata,
+                    gene_text,
+                    query_cluster_key=query_cluster_key,
+                    umap_key=umap_key,
+                    restrict_obs_field=resolved_field,
+                    restrict_obs_value=resolved_values,
+                    restrict_obs_mode=resolved_mode,
+                    dot_scale=float(self.dot_scale if dot_scale is None else dot_scale),
+                    plot_label=single_label,
+                    destination=pdf_path,
+                )
+                written.append(str(pdf_path))
         return written
 
 
@@ -455,6 +490,7 @@ def approximate_umap(
     restrict_obs_field: Optional[str] = None,
     restrict_obs_value: Optional[str] = None,
     restrict_obs_mode: str = "include",
+    dot_scale: float = 1.0,
     copy_query: bool = True,
 ) -> ApproximateUMAPResult:
     fn_started_at = time.perf_counter()
@@ -752,6 +788,7 @@ def approximate_umap(
         plot_obs_field=restrict_obs_field,
         plot_obs_value=restrict_obs_value,
         plot_obs_mode=restrict_obs_mode,
+        dot_scale=float(dot_scale),
     )
 
 
@@ -947,6 +984,7 @@ def _save_comparison_pdf(
     restrict_obs_field: Optional[str] = None,
     restrict_obs_value: Optional[str] = None,
     restrict_obs_mode: str = "include",
+    dot_scale: float = 1.0,
     destination: Path,
 ) -> tuple[str, str]:
     reference = _subset_adata_for_plot(
@@ -1021,7 +1059,7 @@ def _save_comparison_pdf(
             "axes.linewidth": 0.5,
             "pdf.fonttype": 42,
             "font.family": "sans-serif",
-            "font.sans-serif": "Arial",
+            "font.sans-serif": "DejaVu Sans",
             "figure.facecolor": "white",
         }
     )
@@ -1034,8 +1072,8 @@ def _save_comparison_pdf(
     def _render_pdf(path: Path, *, annotate: bool) -> None:
         fig, axes = plt.subplots(1, 2, figsize=(10, 5), constrained_layout=True)
         try:
-            _scatter(axes[0], ref_coords, ref_labels, palette, "Reference UMAP", annotate=annotate, use_reference_grey=False)
-            _scatter(axes[1], qry_coords, qry_labels, palette, "Query Approximate UMAP", annotate=annotate, use_reference_grey=False)
+            _scatter(axes[0], ref_coords, ref_labels, palette, "Reference UMAP", annotate=annotate, use_reference_grey=False, dot_scale=dot_scale)
+            _scatter(axes[1], qry_coords, qry_labels, palette, "Query Approximate UMAP", annotate=annotate, use_reference_grey=False, dot_scale=dot_scale)
             fig.savefig(path, dpi=300, bbox_inches="tight")
         finally:
             plt.close(fig)
@@ -1065,9 +1103,10 @@ def _scatter(
     *,
     annotate: bool,
     use_reference_grey: bool = False,
+    dot_scale: float = 1.0,
 ) -> None:
     colors = ["#e5e7eb" if use_reference_grey else palette.get(label, "#999999") for label in labels]
-    point_size = _compute_point_size(coords.shape[0])
+    point_size = _compute_point_size(coords.shape[0], dot_scale=dot_scale)
     axis.scatter(coords[:, 0], coords[:, 1], c=colors, s=point_size, linewidths=0, alpha=0.5 if not use_reference_grey else 0.3)
     axis.set_title(title, fontsize=12)
     axis.spines["top"].set_visible(False)
@@ -1146,6 +1185,16 @@ def _load_custom_color_map(path: Union[str, Path]) -> Dict[str, str]:
     return color_map
 
 
+def _parse_obs_values(obs_value: Optional[Union[str, Sequence[str]]]) -> List[str]:
+    raw_values: list[str]
+    if isinstance(obs_value, (list, tuple, set, np.ndarray, pd.Index)):
+        raw_values = [_clean_string(item) for item in obs_value]
+    else:
+        raw_text = _clean_string(obs_value)
+        raw_values = [value for value in re.split(r"[|,]", raw_text) if _clean_string(value)]
+    return [value for value in raw_values if value]
+
+
 def _subset_adata_for_plot(
     adata: ad.AnnData,
     *,
@@ -1159,13 +1208,7 @@ def _subset_adata_for_plot(
     if obs_field not in adata.obs:
         print(f"[warn] {dataset_label} AnnData missing obs field '{obs_field}'; plotting all cells.")
         return adata
-    raw_values: list[str]
-    if isinstance(obs_value, (list, tuple, set, np.ndarray, pd.Index)):
-        raw_values = [_clean_string(item) for item in obs_value]
-    else:
-        raw_text = _clean_string(obs_value)
-        raw_values = [value for value in re.split(r"[|,]", raw_text) if _clean_string(value)]
-    values = [value for value in raw_values if value]
+    values = _parse_obs_values(obs_value)
     if not values:
         return adata
     series = adata.obs[obs_field].astype(str)
@@ -1185,11 +1228,12 @@ def _subset_adata_for_plot(
     return subset
 
 
-def _compute_point_size(num_points: int) -> float:
+def _compute_point_size(num_points: int, *, dot_scale: float = 1.0) -> float:
     base = 2.0
     scale = (1000.0 / max(num_points, 1)) ** 0.5
     size = base * scale
-    return float(np.clip(size, 0.5, 8.0))
+    dot_scale = max(float(dot_scale), 0.0)
+    return float(np.clip(size, 0.5, 8.0) * dot_scale)
 
 
 def _annotate_clusters(axis: matplotlib.axes.Axes, coords: np.ndarray, labels: pd.Series) -> None:
@@ -1224,6 +1268,8 @@ def _save_expression_pdf(
     restrict_obs_field: Optional[str],
     restrict_obs_value: Optional[Union[str, Sequence[str]]],
     restrict_obs_mode: str,
+    dot_scale: float,
+    plot_label: Optional[str],
     destination: Path,
 ) -> str:
     if gene not in set(query.var_names.astype(str).tolist()):
@@ -1254,7 +1300,7 @@ def _save_expression_pdf(
     )
     fig, ax = plt.subplots(figsize=(8.5, 8.5), constrained_layout=True)
     try:
-        point_size = _compute_point_size(coords.shape[0])
+        point_size = _compute_point_size(coords.shape[0], dot_scale=dot_scale)
         if np.any(zero_mask):
             ax.scatter(
                 coords[zero_mask, 0],
@@ -1286,7 +1332,10 @@ def _save_expression_pdf(
             )
             colorbar = fig.colorbar(sc, ax=ax)
             colorbar.set_label(gene)
-        ax.set_title(f"{gene} expression", fontsize=12)
+        title = f"{gene} expression"
+        if plot_label:
+            title = f"{gene} expression: {plot_label}"
+        ax.set_title(title, fontsize=12)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
         ax.spines["bottom"].set_visible(False)
@@ -1360,6 +1409,12 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         choices=("include", "exclude"),
         default="include",
         help="Whether the supplied obs values are included or excluded from the PDF/expression plots.",
+    )
+    parser.add_argument(
+        "--dot_scale",
+        type=float,
+        default=1.0,
+        help="Multiplier applied to the current auto-computed UMAP point size (default: %(default)s).",
     )
     parser.add_argument(
         "--output-prefix",
@@ -1457,6 +1512,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         restrict_obs_field=args.restrict_obs_field,
         restrict_obs_value=args.restrict_obs_value,
         restrict_obs_mode=args.restrict_obs_mode,
+        dot_scale=args.dot_scale,
         copy_query=False,
     )
     _log_timing("main.compute_approximate_umap", step_started_at)
@@ -1544,6 +1600,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             restrict_obs_field=args.restrict_obs_field,
             restrict_obs_value=args.restrict_obs_value,
             restrict_obs_mode=args.restrict_obs_mode,
+            dot_scale=args.dot_scale,
         )
         logging.info("Annotated UMAP PDF: %s", annotated_pdf)
         logging.info("Label-free UMAP PDF: %s", plain_pdf)
@@ -1561,6 +1618,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             restrict_obs_field=args.restrict_obs_field,
             restrict_obs_value=args.restrict_obs_value,
             restrict_obs_mode=args.restrict_obs_mode,
+            dot_scale=args.dot_scale,
         )
         for path in written_expression:
             logging.info("Expression UMAP PDF: %s", path)

@@ -137,7 +137,7 @@ def update_qc(job_id: str):
         "min_counts": int(payload.get("min_counts", 500)),
         "min_cells": int(payload.get("min_cells", 3)),
         "mit_percent": int(payload.get("mit_percent", 15)),
-        "ambient_percent": float(payload.get("ambient_percent", 0)),
+        "ambient_correction": str(payload.get("ambient_correction", "no")).strip().lower(),
     }
     meta = store.update_job(job_id, qc=qc_payload, message="QC parameters saved.")
     return jsonify({"job_id": job_id, "qc": meta["qc"]})

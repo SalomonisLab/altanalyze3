@@ -4,6 +4,13 @@ This guide describes the current `cellHarmony web` interface after the explorer
 promotion. The app is organized into `Run`, `Explore`, and `Differential`
 tabs.
 
+Full walkthrough video covering upload, QC, ambient correction, plot
+exploration, DEG analysis, and interface interactivity:
+
+```text
+https://vimeo.com/manage/videos/1183088658/01170fe26e
+```
+
 ## What the app does
 
 `cellHarmony web` is used to:
@@ -75,7 +82,17 @@ Available settings:
 - `Min cells`
 - `Mito %`
 - `Minimum cosine similarity score`
-- `% Ambient RNA correction`
+- `Ambient RNA correction`
+  - `No`
+  - `Yes`
+
+`Ambient RNA correction` controls whether automatic per-sample ambient RNA
+estimation and subtraction are run before alignment. Select `No` to skip this
+step or `Yes` to enable automatic ambient correction. Users should review their
+data for ambient RNA contamination and enable correction when appropriate. For
+many standard droplet RNA datasets, ambient correction values near `20%` are a
+reasonable expectation, though higher contamination can occur in some assay
+types.
 
 Then click `Save QC and run`.
 
@@ -86,7 +103,7 @@ What happens during alignment:
 3. data are normalized
 4. cells are aligned to the selected reference
 5. low-alignment cells are excluded using the cosine cutoff
-6. markerFinder and marker network analysis are run
+6. markerFinder and marker network analysis are run by default
 7. approximate UMAP placement is computed
 8. the combined aligned h5ad is written
 
@@ -204,7 +221,7 @@ Notes:
 
 - assignments include appended UMAP coordinates
 - the combined h5ad contains the aligned dataset and approximate UMAP results
-- marker ZIP appears only when marker analysis was enabled and completed
+- marker ZIP appears after the default marker analysis completes
 
 ## Differential tab
 

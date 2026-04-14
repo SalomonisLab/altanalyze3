@@ -457,12 +457,12 @@ def run_cellharmony_pipeline(
             f"min_counts={int(qc.get('min_counts', 500))} "
             f"mit_percent={int(qc.get('mit_percent', 10))} "
             f"align_cutoff={float(qc.get('align_cutoff', 0.1))} "
-            f"ambient_percent={float(qc.get('ambient_percent', 0.0))} "
+            f"ambient_correction={str(qc.get('ambient_correction', 'no'))} "
             "identify_markers=True"
         ),
     )
-    ambient_percent = float(qc.get("ambient_percent", 0.0) or 0.0)
-    ambient_rho = ambient_percent / 100.0 if ambient_percent > 0 else None
+    ambient_correction = str(qc.get("ambient_correction", "no") or "no").strip().lower()
+    ambient_rho = "auto" if ambient_correction == "yes" else None
     _, combined_adata = cellHarmony_lite.combine_and_align_h5(
         h5_files=h5_files,
         h5ad_file=h5ad_file,

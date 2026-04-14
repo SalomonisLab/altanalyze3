@@ -37,7 +37,7 @@ class QCSettings(BaseModel):
     min_cells: int = 0
     mit_percent: int = 15
     align_cutoff: float = 0.4
-    ambient_percent: float = Field(default=0.0, ge=0.0, le=100.0)
+    ambient_correction: str = Field(default="no", pattern="^(no|yes)$")
 
 
 class JobConfigSettings(BaseModel):
@@ -1955,6 +1955,7 @@ def _build_expression_payload(
                 for barcode, pop, val, x, y, keep in zip(obs_names, populations, values.astype(float), umap_x, umap_y, display_mask)
                 if keep and _is_finite_number(val) and _is_finite_number(x) and _is_finite_number(y)
             ]
+            umap_points.sort(key=lambda point: (point["value"], point["population"], point["barcode"]))
 
             violin_data = []
             for pop in sorted(pd.unique(populations)):
@@ -2000,6 +2001,7 @@ def _build_expression_payload(
         for barcode, pop, val, x, y, keep in zip(obs_names, populations, values.astype(float), umap_x, umap_y, display_mask)
         if keep and _is_finite_number(val) and _is_finite_number(x) and _is_finite_number(y)
     ]
+    umap_points.sort(key=lambda point: (point["value"], point["population"], point["barcode"]))
 
     violin_data = []
     for pop in sorted(pd.unique(populations)):

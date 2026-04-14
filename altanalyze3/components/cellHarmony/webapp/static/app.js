@@ -1266,6 +1266,19 @@ function resetWorkspaceData() {
   if (qcLiveCaption) {
     qcLiveCaption.textContent = "Live counts parsed from alignment log.";
   }
+  const ambientLivePlot = document.getElementById("ambient-live-plot");
+  if (ambientLivePlot) {
+    try {
+      Plotly.purge(ambientLivePlot);
+    } catch (_) {
+      // Ignore Plotly cleanup errors when the plot is not initialized.
+    }
+    ambientLivePlot.innerHTML = "";
+  }
+  const ambientLiveCaption = document.getElementById("ambient-live-caption");
+  if (ambientLiveCaption) {
+    ambientLiveCaption.textContent = "Ambient RNA correction percentages will appear here when correction is performed.";
+  }
 
   const sampleContainer = document.getElementById("sample-container");
   sampleContainer.innerHTML = "";
@@ -1401,7 +1414,7 @@ async function handleQcSubmit(evt) {
     min_cells: evt.target.min_cells.value,
     mit_percent: evt.target.mit_percent.value,
     align_cutoff: evt.target.align_cutoff.value,
-    ambient_percent: evt.target.ambient_percent.value,
+    ambient_correction: evt.target.ambient_correction.value,
   };
   try {
     if (selectedReferenceDiffersFromLoadedJob()) {
@@ -1620,6 +1633,7 @@ function applyJobStatus(jobId, data) {
 function updateWorkflowPanels(status) {
   const normalizedStatus = String(status || "").trim().toLowerCase();
   const hasUploadedJob = Boolean(normalizedStatus);
+  const hasStartedQcRun = hasUploadedJob && normalizedStatus !== "uploaded";
   const hasCompletedAlignment = normalizedStatus === "completed";
   const runGrid = document.getElementById("sandbox-run-grid");
   const qcPanel = document.getElementById("qc-panel");
@@ -1631,7 +1645,7 @@ function updateWorkflowPanels(status) {
   const differential = document.getElementById("differential-results-view");
 
   qcPanel.classList.toggle("hidden", !hasUploadedJob);
-  qcLivePanel.classList.toggle("hidden", !hasUploadedJob);
+  qcLivePanel.classList.toggle("hidden", !hasStartedQcRun);
   differentialPanel.classList.toggle("hidden", !hasCompletedAlignment);
   exploreControlsPanel.classList.toggle("hidden", !hasCompletedAlignment);
   previewPanel.classList.toggle("hidden", hasUploadedJob);
@@ -1825,14 +1839,48 @@ function getQcThresholdInput(name) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function extractAmbientCorrectionState(lines) {
+  const rows = [];
+  const seen = new Map();
+  for (const line of lines) {
+    const match = String(line || "").match(/Auto-selected rho for library '(.+?)':\s*([0-9.]+)/i);
+    if (!match) {
+      continue;
+    }
+    const library = String(match[1] || "").trim();
+    const rho = Number(match[2]);
+    if (!library || !Number.isFinite(rho)) {
+      continue;
+    }
+    seen.set(library, Math.max(0, Math.min(1, rho)));
+  }
+  for (const [library, rho] of seen.entries()) {
+    rows.push({ library, rho });
+  }
+  rows.sort((a, b) => b.rho - a.rho || a.library.localeCompare(b.library));
+  return rows;
+}
+
+function clearPlotEmptyState(plot) {
+  if (!plot) {
+    return;
+  }
+  if (plot.querySelector(".empty-state")) {
+    plot.innerHTML = "";
+  }
+}
+
 function renderQcLiveProgress(data) {
   const plot = document.getElementById("qc-live-plot");
   const caption = document.getElementById("qc-live-caption");
+  const ambientPlot = document.getElementById("ambient-live-plot");
+  const ambientCaption = document.getElementById("ambient-live-caption");
   if (!plot || !caption) {
     return;
   }
   const lines = getStatusLogLines(data);
   const state = extractQcThresholdState(lines);
+  const ambientRows = extractAmbientCorrectionState(lines);
   const total = Number.isFinite(state.total) ? state.total : null;
 
   if (!Number.isFinite(total) || total <= 0) {
@@ -1843,6 +1891,7 @@ function renderQcLiveProgress(data) {
     }
     plot.innerHTML = "<div class=\"empty-state\">QC metrics will appear here as filters are applied.</div>";
     caption.textContent = "Live counts parsed from alignment log.";
+    renderAmbientCorrectionProgress(ambientPlot, ambientCaption, ambientRows, data);
     return;
   }
 
@@ -1876,6 +1925,7 @@ function renderQcLiveProgress(data) {
     }
     plot.innerHTML = "<div class=\"empty-state\">QC metrics will appear here as filters are applied.</div>";
     caption.textContent = `Total detected cells: ${total.toLocaleString()}.`;
+    renderAmbientCorrectionProgress(ambientPlot, ambientCaption, ambientRows, data);
     return;
   }
 
@@ -1906,6 +1956,7 @@ function renderQcLiveProgress(data) {
     },
   ];
 
+  clearPlotEmptyState(plot);
   Plotly.react(
     plot,
     traces,
@@ -1914,7 +1965,7 @@ function renderQcLiveProgress(data) {
       paper_bgcolor: "rgba(0,0,0,0)",
       plot_bgcolor: "rgba(255,255,255,0.88)",
       margin: { t: 10, l: marginLeft, r: 16, b: 48 },
-      height: 540,
+      height: 320,
       xaxis: {
         title: { text: "Cells (relative to total detected)" },
         range: [0, total],
@@ -1935,6 +1986,95 @@ function renderQcLiveProgress(data) {
   );
 
   caption.textContent = `Total detected cells: ${total.toLocaleString()}.`;
+  renderAmbientCorrectionProgress(ambientPlot, ambientCaption, ambientRows, data);
+}
+
+function renderAmbientCorrectionProgress(plot, caption, ambientRows, data) {
+  if (!plot || !caption) {
+    return;
+  }
+  const ambientSetting = String((((data || {}).qc || {}).ambient_correction || (((currentJobStatus || {}).qc || {}).ambient_correction || "no"))).trim().toLowerCase();
+  const ambientEnabled = ambientSetting === "yes";
+  plot.style.display = ambientEnabled ? "" : "none";
+  caption.style.display = ambientEnabled ? "" : "none";
+  if (!ambientEnabled) {
+    try {
+      Plotly.purge(plot);
+    } catch (_) {
+      // Ignore cleanup errors when no Plotly instance exists yet.
+    }
+    plot.innerHTML = "";
+    caption.textContent = "";
+    return;
+  }
+  if (!ambientRows.length) {
+    try {
+      Plotly.purge(plot);
+    } catch (_) {
+      // Ignore cleanup errors when no Plotly instance exists yet.
+    }
+    plot.innerHTML = "<div class=\"empty-state\">Ambient RNA correction percentages will appear here when correction is performed.</div>";
+    caption.textContent = "No ambient correction percentages reported yet.";
+    return;
+  }
+
+  const labels = ambientRows.map((row) => row.library);
+  const correctedPct = ambientRows.map((row) => Number((row.rho * 100).toFixed(2)));
+  const remainingPct = correctedPct.map((value) => Math.max(0, 100 - value));
+  const maxLabelLength = labels.reduce((max, value) => Math.max(max, String(value).length), 0);
+  const marginLeft = Math.min(210, Math.max(120, 18 + maxLabelLength * 6));
+
+  clearPlotEmptyState(plot);
+  Plotly.react(
+    plot,
+    [
+      {
+        type: "bar",
+        orientation: "h",
+        y: labels,
+        x: correctedPct,
+        name: "ambient correction",
+        marker: { color: "rgba(239, 68, 68, 0.8)" },
+        hovertemplate: "%{y}<br>Ambient correction: %{x:.1f}%<extra></extra>",
+      },
+      {
+        type: "bar",
+        orientation: "h",
+        y: labels,
+        x: remainingPct,
+        name: "uncorrected",
+        marker: { color: "rgba(148, 163, 184, 0.22)" },
+        hovertemplate: "%{y}<br>Uncorrected remainder: %{x:.1f}%<extra></extra>",
+      },
+    ],
+    {
+      barmode: "stack",
+      paper_bgcolor: "rgba(0,0,0,0)",
+      plot_bgcolor: "rgba(255,255,255,0.88)",
+      margin: { t: 2, l: marginLeft, r: 16, b: 42 },
+      height: Math.max(170, 40 + labels.length * 34),
+      xaxis: {
+        title: { text: "Ambient RNA correction (%)" },
+        range: [0, 100],
+        ticksuffix: "%",
+        showgrid: true,
+        gridcolor: "rgba(148,163,184,0.2)",
+      },
+      yaxis: {
+        autorange: "reversed",
+      },
+      legend: {
+        orientation: "h",
+        x: 0.5,
+        xanchor: "center",
+        y: 1.12,
+        yanchor: "bottom",
+        traceorder: "normal",
+      },
+    },
+    { responsive: true, displayModeBar: false }
+  );
+  caption.textContent = `Per-sample ambient RNA correction selected automatically from the alignment log: ${ambientRows.map((row) => `${row.library} ${Math.round(row.rho * 100)}%`).join(" | ")}.`;
 }
 
 function buildQcCellSummary(data) {
@@ -3443,7 +3583,9 @@ function renderPanelExpression(panelKey, expressionData, mode, dotScale) {
     return;
   }
   const zeroPoints = expressionData.umap.filter((p) => Number(p.value) <= 0);
-  const expressedPoints = expressionData.umap.filter((p) => Number(p.value) > 0);
+  const expressedPoints = expressionData.umap
+    .filter((p) => Number(p.value) > 0)
+    .sort((a, b) => Number(a.value) - Number(b.value));
   const traces = [];
   if (zeroPoints.length) {
     traces.push({
@@ -3463,28 +3605,38 @@ function renderPanelExpression(panelKey, expressionData, mode, dotScale) {
     });
   }
   if (expressedPoints.length) {
-    traces.push({
-      x: expressedPoints.map((p) => p.x),
-      y: expressedPoints.map((p) => p.y),
-      text: expressedPoints.map((p) => `${p.barcode}<br>${p.population}<br>${expressionData.gene}: ${p.value.toFixed(3)}`),
-      mode: "markers",
-      type: "scattergl",
-      marker: {
-        size: 2 * dotScale,
-        color: expressedPoints.map((p) => p.value),
-        colorscale: [
-          [0.0, "#f3f4f6"],
-          [0.15, "#fecaca"],
-          [0.35, "#fca5a5"],
-          [0.6, "#ef4444"],
-          [1.0, "#b91c1c"],
-        ],
-        showscale: true,
-        colorbar: { title: expressionData.gene },
-      },
-      name: expressionData.gene,
-      showlegend: false,
-    });
+    const minValue = Number(expressedPoints[0].value);
+    const maxValue = Number(expressedPoints[expressedPoints.length - 1].value);
+    const colorscale = [
+      [0.0, "#f3f4f6"],
+      [0.15, "#fecaca"],
+      [0.35, "#fca5a5"],
+      [0.6, "#ef4444"],
+      [1.0, "#b91c1c"],
+    ];
+    const binCount = Math.min(12, Math.max(4, Math.ceil(Math.sqrt(expressedPoints.length / 2500))));
+    const step = Math.max(1, Math.ceil(expressedPoints.length / binCount));
+    for (let start = 0; start < expressedPoints.length; start += step) {
+      const bin = expressedPoints.slice(start, Math.min(start + step, expressedPoints.length));
+      traces.push({
+        x: bin.map((p) => p.x),
+        y: bin.map((p) => p.y),
+        text: bin.map((p) => `${p.barcode}<br>${p.population}<br>${expressionData.gene}: ${p.value.toFixed(3)}`),
+        mode: "markers",
+        type: "scattergl",
+        marker: {
+          size: 2 * dotScale,
+          color: bin.map((p) => p.value),
+          colorscale,
+          cmin: minValue,
+          cmax: maxValue,
+          showscale: start + step >= expressedPoints.length,
+          colorbar: start + step >= expressedPoints.length ? { title: expressionData.gene } : undefined,
+        },
+        name: expressionData.gene,
+        showlegend: false,
+      });
+    }
   }
   const expressionLayout = {
     title: expressionData.source === "reference"
