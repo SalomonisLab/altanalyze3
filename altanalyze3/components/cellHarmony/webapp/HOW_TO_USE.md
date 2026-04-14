@@ -7,9 +7,9 @@ tabs.
 Full walkthrough video covering upload, QC, ambient correction, plot
 exploration, DEG analysis, and interface interactivity:
 
-```text
-https://vimeo.com/manage/videos/1183088658/01170fe26e
-```
+[Watch the full cellHarmony-web walkthrough on Vimeo](https://vimeo.com/manage/videos/1183088658/01170fe26e)
+
+[![cellHarmony web walkthrough preview](./docs_assets/cellharmony-web-walkthrough.svg)](https://vimeo.com/manage/videos/1183088658/01170fe26e)
 
 ## What the app does
 

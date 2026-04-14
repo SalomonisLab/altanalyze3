@@ -1,0 +1,53 @@
+<svg width="1280" height="720" viewBox="0 0 1280 720" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1280" y2="720" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#EEF5FF"/>
+      <stop offset="1" stop-color="#F7FBFF"/>
+    </linearGradient>
+    <linearGradient id="pill" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#1D4ED8"/>
+      <stop offset="1" stop-color="#0F766E"/>
+    </linearGradient>
+    <filter id="shadow" x="0" y="0" width="1280" height="720" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#B8C7E6" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+  <rect width="1280" height="720" rx="36" fill="url(#bg)"/>
+  <g filter="url(#shadow)">
+    <rect x="58" y="120" width="1164" height="520" rx="28" fill="white"/>
+  </g>
+  <text x="72" y="74" fill="#2563EB" font-family="DejaVu Sans, Arial, sans-serif" font-size="28" letter-spacing="6">ULTRA-FAST SINGLE-CELL WORKFLOW</text>
+  <text x="72" y="148" fill="#0F172A" font-family="DejaVu Sans, Arial, sans-serif" font-size="44" font-weight="700">cellHarmony web walkthrough</text>
+  <text x="72" y="192" fill="#64748B" font-family="DejaVu Sans, Arial, sans-serif" font-size="24">Upload, QC, ambient correction, Explore tab interaction, DEG analysis, and result navigation.</text>
+
+  <rect x="96" y="244" width="360" height="280" rx="22" fill="#F8FBFF" stroke="#D5E3FF" stroke-width="2"/>
+  <text x="122" y="292" fill="#0F172A" font-family="DejaVu Sans, Arial, sans-serif" font-size="30" font-weight="700">Run</text>
+  <rect x="122" y="326" width="308" height="44" rx="12" fill="#FFFFFF" stroke="#D3DCEB"/>
+  <rect x="122" y="388" width="308" height="44" rx="12" fill="#FFFFFF" stroke="#D3DCEB"/>
+  <rect x="122" y="450" width="308" height="44" rx="18" fill="url(#pill)"/>
+  <text x="226" y="480" fill="white" font-family="DejaVu Sans, Arial, sans-serif" font-size="24" font-weight="700">Save QC and run</text>
+
+  <rect x="488" y="244" width="326" height="280" rx="22" fill="#F8FBFF" stroke="#D5E3FF" stroke-width="2"/>
+  <text x="514" y="292" fill="#0F172A" font-family="DejaVu Sans, Arial, sans-serif" font-size="30" font-weight="700">Explore</text>
+  <circle cx="616" cy="390" r="78" fill="#E8EEF9"/>
+  <circle cx="580" cy="392" r="30" fill="#EF4444" fill-opacity="0.75"/>
+  <circle cx="648" cy="352" r="36" fill="#84CC16" fill-opacity="0.7"/>
+  <circle cx="666" cy="430" r="24" fill="#3B82F6" fill-opacity="0.75"/>
+  <circle cx="603" cy="442" r="20" fill="#F59E0B" fill-opacity="0.75"/>
+
+  <rect x="846" y="244" width="326" height="280" rx="22" fill="#F8FBFF" stroke="#D5E3FF" stroke-width="2"/>
+  <text x="872" y="292" fill="#0F172A" font-family="DejaVu Sans, Arial, sans-serif" font-size="30" font-weight="700">Differential</text>
+  <rect x="892" y="336" width="234" height="134" rx="18" fill="#FFFFFF" stroke="#D3DCEB"/>
+  <path d="M924 442C962 374 988 424 1020 362C1050 304 1084 404 1112 328" stroke="#1D4ED8" stroke-width="4" fill="none"/>
+  <circle cx="924" cy="442" r="7" fill="#1D4ED8"/>
+  <circle cx="962" cy="374" r="7" fill="#1D4ED8"/>
+  <circle cx="988" cy="424" r="7" fill="#1D4ED8"/>
+  <circle cx="1020" cy="362" r="7" fill="#1D4ED8"/>
+  <circle cx="1050" cy="304" r="7" fill="#1D4ED8"/>
+  <circle cx="1084" cy="404" r="7" fill="#1D4ED8"/>
+  <circle cx="1112" cy="328" r="7" fill="#1D4ED8"/>
+
+  <circle cx="1068" cy="588" r="68" fill="#111827"/>
+  <polygon points="1048,552 1048,624 1110,588" fill="white"/>
+  <text x="838" y="600" fill="#0F172A" font-family="DejaVu Sans, Arial, sans-serif" font-size="34" font-weight="700">Watch full video walkthrough</text>
+</svg>
