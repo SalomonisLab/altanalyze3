@@ -8,7 +8,7 @@ Full walkthrough video:
 
 [Watch the full cellHarmony-web walkthrough on Vimeo](https://vimeo.com/manage/videos/1183088658/01170fe26e)
 
-[![cellHarmony web walkthrough preview](./docs_assets/cellharmony-web-walkthrough.svg)](https://vimeo.com/manage/videos/1183088658/01170fe26e)
+[![cellHarmony web walkthrough preview](../../../../docs/cellHarmony-web.png)](https://vimeo.com/manage/videos/1183088658/01170fe26e)
 
 ## Run locally
 
