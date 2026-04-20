@@ -3562,6 +3562,15 @@ function renderPanelExpression(panelKey, expressionData, mode, dotScale) {
       });
       return;
     }
+    const globalMin = Number(expressionData.global_min ?? 0);
+    let globalMax = Number(expressionData.global_max ?? 0);
+    if (!(Number.isFinite(globalMax) && Number.isFinite(globalMin))) {
+      globalMax = 0;
+    }
+    if (!(globalMax > globalMin)) {
+      globalMax = globalMin + 1e-9;
+    }
+    const yPad = Math.max((globalMax - globalMin) * 0.04, 0.05);
     const violinTraces = expressionData.violin.map((entry) => ({
       type: "violin",
       name: entry.population,
@@ -3579,6 +3588,7 @@ function renderPanelExpression(panelKey, expressionData, mode, dotScale) {
       plot_bgcolor: "rgba(255,255,255,0.9)",
       height: 560,
       margin: { t: 36, l: 48, r: 20, b: 120 },
+      yaxis: { title: "Expression", range: [globalMin - yPad, globalMax + yPad] },
     });
     return;
   }
@@ -3605,8 +3615,17 @@ function renderPanelExpression(panelKey, expressionData, mode, dotScale) {
     });
   }
   if (expressedPoints.length) {
-    const minValue = Number(expressedPoints[0].value);
-    const maxValue = Number(expressedPoints[expressedPoints.length - 1].value);
+    let minValue = Number(expressionData.global_min ?? expressedPoints[0].value);
+    let maxValue = Number(expressionData.global_max ?? expressedPoints[expressedPoints.length - 1].value);
+    if (!(Number.isFinite(minValue))) {
+      minValue = Number(expressedPoints[0].value);
+    }
+    if (!(Number.isFinite(maxValue))) {
+      maxValue = Number(expressedPoints[expressedPoints.length - 1].value);
+    }
+    if (!(maxValue > minValue)) {
+      maxValue = minValue + 1e-9;
+    }
     const colorscale = [
       [0.0, "#f3f4f6"],
       [0.15, "#fecaca"],

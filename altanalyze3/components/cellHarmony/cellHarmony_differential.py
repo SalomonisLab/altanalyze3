@@ -2998,6 +2998,11 @@ def main():
     ap.add_argument("--pseudobulk_min_cells", type=int, default=10, help="Minimum cells per pseudobulk group (default: 10)")
     ap.add_argument("--use_rawp", action="store_true", help="Use raw p-values instead of FDR for significance filtering")
     ap.add_argument("--goelite_species", default=None, help="Run GO-Elite with species (e.g. human or mouse)")
+    ap.add_argument(
+        "--grn_species",
+        default=None,
+        help="Species for GRN interaction loading (human or mouse). Defaults to --goelite_species when omitted.",
+    )
     ap.add_argument("--goelite_obo", default=None, help="GO .obo path or URL (optional)")
     ap.add_argument("--goelite_gaf", default=None, help="GOA .gaf path or URL (optional)")
     ap.add_argument("--goelite_cache_dir", default=None, help="Optional GO-Elite cache directory")
@@ -3006,6 +3011,8 @@ def main():
     ap.add_argument("--outdir", default="cellHarmony_DE_out", help="Output directory (default: cellHarmony_DE_out)")
     ap.add_argument("--skip_grn", action="store_true", help="Skip interaction network (GRN) generation")
     args = ap.parse_args()
+    if args.grn_species is None and args.goelite_species is not None:
+        args.grn_species = args.goelite_species
 
     comps = parse_comparisons_arg(args.comparisons)
     if len(comps) == 0:
@@ -3094,7 +3101,7 @@ def main():
         interactions_df = None
         if not args.skip_grn:
             try:
-                interactions_df = NetPerspective.load_interaction_data()
+                interactions_df = NetPerspective.load_interaction_data(species=args.grn_species)
             except Exception as ex:
                 print(f"[WARN] Unable to load interaction data for GRN export: {ex}")
                 args.skip_grn = True

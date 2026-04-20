@@ -89,7 +89,7 @@ class JobStore:
         return deleted
 
     # ------------------------------------------------------------------- public
-    def purge_old_jobs(self, *, max_age_hours: float = 3.0) -> int:
+    def purge_old_jobs(self, *, max_age_hours: float = 8.0) -> int:
         with self._lock:
             return self._purge_old_jobs_unlocked(max_age_hours=max_age_hours)
 
@@ -101,7 +101,7 @@ class JobStore:
         files: List[Dict[str, str]],
     ) -> Dict:
         with self._lock:
-            self._purge_old_jobs_unlocked(max_age_hours=3.0)
+            self._purge_old_jobs_unlocked(max_age_hours=8.0)
             job_id = uuid4().hex
             job_dir = self._job_dir(job_id)
             job_dir.mkdir(parents=True, exist_ok=True)

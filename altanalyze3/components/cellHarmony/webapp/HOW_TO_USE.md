@@ -11,6 +11,14 @@ exploration, DEG analysis, and interface interactivity:
 
 [![cellHarmony web walkthrough preview](../../../../docs/cellHarmony-web.png)](https://vimeo.com/manage/videos/1183088658/01170fe26e)
 
+Additional detailed documentation:
+
+- [cellHarmony technology and workflow details](https://github.com/SalomonisLab/altanalyze3/blob/master/docs/cellHarmony.md)
+- [cellHarmony-differential methods, defaults, and filtering details](https://github.com/SalomonisLab/altanalyze3/blob/master/docs/cellHarmony_differential.md)
+
+These documents include more detail on the underlying technologies used,
+statistical filtering defaults, and implementation-specific behavior.
+
 ## What the app does
 
 `cellHarmony web` is used to:

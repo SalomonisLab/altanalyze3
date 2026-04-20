@@ -721,11 +721,11 @@ def _generate_single_marker_network(cluster, selected, interactions_df, output_p
     }
 
 
-def _export_marker_networks(marker_stats, out_dir, network_top_n=1000, network_jobs=1):
+def _export_marker_networks(marker_stats, out_dir, network_top_n=1000, network_jobs=1, species=None):
     if marker_stats is None or marker_stats.empty:
         return []
     try:
-        interactions_df = NetPerspective.load_interaction_data()
+        interactions_df = NetPerspective.load_interaction_data(species=species)
     except Exception as exc:
         print(f"[WARN] Marker network export skipped: {exc}")
         return []
@@ -810,6 +810,7 @@ def generate_marker_heatmap_from_adata(
     export_networks=False,
     network_top_n=1000,
     network_jobs=1,
+    species=None,
     write_heatmap_tsv=True,
     write_expression_tsv=True,
     write_heatmap_cache=True,
@@ -1143,6 +1144,7 @@ def generate_marker_heatmap_from_adata(
             network_dir,
             network_top_n=network_top_n,
             network_jobs=network_jobs,
+            species=species,
         )
         _log_step_timing(
             "marker_heatmap.export_networks",
@@ -1306,6 +1308,11 @@ def main():
         help="Parallel workers for per-cluster network generation (default 1).",
     )
     parser.add_argument(
+        "--species",
+        default=None,
+        help="Species for GRN interaction loading (human or mouse). Defaults to combined resources when omitted.",
+    )
+    parser.add_argument(
         "--skip-expression-tsv",
         action="store_true",
         help="Skip writing both expression-matrix and fold-heatmap TSV outputs.",
@@ -1424,6 +1431,7 @@ def main():
             export_networks=args.export_networks,
             network_top_n=args.network_top_n,
             network_jobs=args.network_jobs,
+            species=args.species,
             write_heatmap_tsv=not args.skip_expression_tsv,
             write_expression_tsv=not args.skip_expression_tsv,
             write_heatmap_cache=not args.skip_heatmap_cache,

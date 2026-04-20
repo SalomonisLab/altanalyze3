@@ -33,6 +33,8 @@ __all__ = [
     "NetworkGenerationError",
     "sanitize_filename",
     "safe_component",
+    "normalize_interaction_species",
+    "resolve_interaction_paths",
     "load_interaction_data",
     "generate_network_for_genes",
 ]
@@ -53,6 +55,16 @@ INTERACTION_TABLES = [
         "Mm_Ensembl-TF-BioGRID-Pathway.txt",
     ),
 ]
+SPECIES_INTERACTION_TABLES = {
+    "human": [INTERACTION_TABLE],
+    "mouse": [
+        os.path.join(
+            os.path.dirname(__file__),
+            "interactions",
+            "Mm_Ensembl-TF-BioGRID-Pathway.txt",
+        )
+    ],
+}
 
 _INTERACTION_CACHE: Dict[tuple, pd.DataFrame] = {}
 NETWORK_CANVAS_SCALE = 0.5
@@ -105,7 +117,45 @@ def _load_single_interaction_table(path: str) -> pd.DataFrame:
     return df
 
 
-def load_interaction_data(interaction_path: Optional[str] = None) -> pd.DataFrame:
+def normalize_interaction_species(species: Optional[str]) -> Optional[str]:
+    """Normalize a species label to the supported GRN resource key."""
+
+    if species is None:
+        return None
+    value = str(species).strip().lower()
+    if not value:
+        return None
+    if value in {"human", "hs", "homo sapiens", "homo_sapiens"}:
+        return "human"
+    if value in {"mouse", "mm", "mus musculus", "mus_musculus"}:
+        return "mouse"
+    raise ValueError(
+        f"Unsupported GRN species '{species}'. Supported species are human and mouse."
+    )
+
+
+def resolve_interaction_paths(
+    interaction_path: Optional[str] = None,
+    *,
+    species: Optional[str] = None,
+) -> List[str]:
+    """Resolve the interaction file list for the requested species."""
+
+    if interaction_path is not None:
+        if isinstance(interaction_path, (list, tuple, set)):
+            return [str(path) for path in interaction_path]
+        return [str(interaction_path)]
+    normalized_species = normalize_interaction_species(species)
+    if normalized_species is not None:
+        return list(SPECIES_INTERACTION_TABLES[normalized_species])
+    return list(INTERACTION_TABLES)
+
+
+def load_interaction_data(
+    interaction_path: Optional[str] = None,
+    *,
+    species: Optional[str] = None,
+) -> pd.DataFrame:
     """
     Load curated interaction tables used for GRN visualisations.
 
@@ -115,12 +165,7 @@ def load_interaction_data(interaction_path: Optional[str] = None) -> pd.DataFram
     iterable of paths to override this behaviour explicitly.
     """
 
-    if interaction_path is None:
-        paths = INTERACTION_TABLES
-    elif isinstance(interaction_path, (list, tuple, set)):
-        paths = list(interaction_path)
-    else:
-        paths = [interaction_path]
+    paths = resolve_interaction_paths(interaction_path, species=species)
 
     cache_key = tuple(str(p) for p in paths)
     cached = _INTERACTION_CACHE.get(cache_key)

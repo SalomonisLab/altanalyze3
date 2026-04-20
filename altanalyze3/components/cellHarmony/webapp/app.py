@@ -1904,6 +1904,10 @@ def _build_reference_expression_payload(meta: Dict, gene: str) -> Dict:
         for pop, val in sorted(series.items(), key=lambda item: float(item[1]), reverse=True)[:10]
         if _is_finite_number(val)
     ]
+    series_values = pd.to_numeric(series, errors="coerce").to_numpy(dtype=float, copy=False)
+    finite_series = series_values[np.isfinite(series_values)]
+    global_min = float(np.min(finite_series)) if finite_series.size else 0.0
+    global_max = float(np.max(finite_series)) if finite_series.size else 0.0
 
     return {
         "gene": resolved_gene,
@@ -1917,6 +1921,8 @@ def _build_reference_expression_payload(meta: Dict, gene: str) -> Dict:
         "scatter": scatter_data,
         "violin": violin_data,
         "umap": umap_points,
+        "global_min": global_min,
+        "global_max": global_max,
     }
 
 
@@ -1926,6 +1932,13 @@ def _build_expression_payload(
     gene: str,
     display_filters: Optional[List[tuple[str, List[str]]]] = None,
 ) -> Dict:
+    def _expression_global_range(raw_values: np.ndarray) -> tuple[float, float]:
+        finite = np.asarray(raw_values, dtype=float)
+        finite = finite[np.isfinite(finite)]
+        if finite.size == 0:
+            return 0.0, 0.0
+        return float(np.min(finite)), float(np.max(finite))
+
     cache_entry = _get_expression_cache(app, meta)
     adata = cache_entry["adata"]
     populations = cache_entry["populations"]
@@ -1938,6 +1951,7 @@ def _build_expression_payload(
         if len(cache_entry["var_names"]):
             fallback_gene = str(cache_entry["var_names"][0])
             values = _flatten_expr(adata[:, fallback_gene].X)
+            global_min, global_max = _expression_global_range(values)
             scatter_data = [
                 {"population": pop, "value": float(val)}
                 for pop, val in zip(populations, values)
@@ -1980,10 +1994,13 @@ def _build_expression_payload(
                 "scatter": scatter_data,
                 "violin": violin_data,
                 "umap": umap_points,
+                "global_min": global_min,
+                "global_max": global_max,
             }
         return _build_reference_expression_payload(meta, gene)
 
     values = _flatten_expr(adata[:, resolved_gene].X)
+    global_min, global_max = _expression_global_range(values)
     scatter_data = [
         {"population": pop, "value": float(val)}
         for pop, val in zip(populations, values)
@@ -2026,6 +2043,8 @@ def _build_expression_payload(
         "scatter": scatter_data,
         "violin": violin_data,
         "umap": umap_points,
+        "global_min": global_min,
+        "global_max": global_max,
     }
 
 
@@ -2271,6 +2290,10 @@ def _render_expression_pdf(payload: Dict, mode: str) -> io.BytesIO:
     _configure_matplotlib_pdf_style()
     fig, ax = plt.subplots(figsize=(8.5, 8.5))
     gene = payload["gene"]
+    global_min = float(payload.get("global_min", 0.0) or 0.0)
+    global_max = float(payload.get("global_max", 0.0) or 0.0)
+    if global_max <= global_min:
+        global_max = global_min + 1e-9
     if mode == "violin":
         violin_data = payload["violin"]
         positions = np.arange(1, len(violin_data) + 1)
@@ -2293,6 +2316,8 @@ def _render_expression_pdf(payload: Dict, mode: str) -> io.BytesIO:
         ax.set_xticklabels([entry["population"] for entry in violin_data], rotation=45, ha="right")
         ax.set_title(f"{gene} expression (top 10 states by mean)")
         ax.set_ylabel("Expression")
+        pad = max((global_max - global_min) * 0.04, 0.05)
+        ax.set_ylim(global_min - pad, global_max + pad)
     else:
         umap_points = payload["umap"]
         expression_cmap = matplotlib.colors.LinearSegmentedColormap.from_list(
@@ -2311,6 +2336,8 @@ def _render_expression_pdf(payload: Dict, mode: str) -> io.BytesIO:
             s=4,
             c=[p["value"] for p in umap_points],
             cmap=expression_cmap,
+            vmin=global_min,
+            vmax=global_max,
             linewidths=0,
         )
         cbar = fig.colorbar(sc, ax=ax)

@@ -507,6 +507,7 @@ def run_cellharmony_pipeline(
             "[params] markerfinder "
             f"cluster_key={query_cluster_key} top_n=50 cells_per_cluster=100 "
             "marker_method=markerfinder export_networks=True network_top_n=1000 "
+            f"grn_species={meta.get('species')} "
             f"network_jobs={max(1, min(4, os.cpu_count() or 1))} "
             "write_heatmap_tsv=False write_expression_tsv=False write_heatmap_cache=True"
         ),
@@ -524,6 +525,7 @@ def run_cellharmony_pipeline(
         export_networks=True,
         network_top_n=1000,
         network_jobs=max(1, min(4, os.cpu_count() or 1)),
+        species=meta.get("species"),
         write_heatmap_tsv=False,
         write_expression_tsv=False,
         write_heatmap_cache=True,
@@ -999,11 +1001,11 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
     )
     store.append_log(
         job_id,
-        "[params] interaction_networks source=NetPerspective max_genes=None pval_column=fdr_or_pval"
+        f"[params] interaction_networks source=NetPerspective grn_species={meta.get('species')} max_genes=None pval_column=fdr_or_pval"
     )
     networks: List[Dict[str, str]] = []
     try:
-        interactions_df = NetPerspective.load_interaction_data()
+        interactions_df = NetPerspective.load_interaction_data(species=meta.get("species"))
     except Exception as exc:
         interactions_df = None
         print(f"[WARN] Interaction network export skipped: {exc}")
