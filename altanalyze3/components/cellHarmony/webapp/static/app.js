@@ -19,6 +19,10 @@ let loadedGeneSuggestionsJobId = null;
 let loadedDisplayFiltersJobId = null;
 let exploreWarmupJobId = null;
 let exploreWarmupPromise = null;
+let exploreResultsReadyJobId = null;
+let exploreResultsPendingJobId = null;
+let exploreResultsReadyPromise = null;
+let exploreAutoOpenPendingJobId = null;
 let currentDisplayFiltersMeta = null;
 let currentJobStatus = "";
 let previousJobStatus = "";
@@ -76,6 +80,96 @@ function withRootPath(path) {
   }
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
   return `${APP_ROOT_PATH}${normalizedPath}`;
+}
+
+function getResultsJobId() {
+  return String(document.getElementById("results-job-id")?.value || "").trim();
+}
+
+function areExploreResultsReady(jobId = getResultsJobId()) {
+  const normalizedJobId = String(jobId || "").trim();
+  return Boolean(normalizedJobId) && exploreResultsReadyJobId === normalizedJobId;
+}
+
+function resetExploreResultsReadiness(jobId = null) {
+  const normalizedJobId = String(jobId || "").trim();
+  if (!normalizedJobId || exploreResultsReadyJobId === normalizedJobId) {
+    exploreResultsReadyJobId = null;
+  }
+  if (!normalizedJobId || exploreResultsPendingJobId === normalizedJobId) {
+    exploreResultsPendingJobId = null;
+  }
+  if (!normalizedJobId || exploreWarmupJobId === normalizedJobId) {
+    exploreWarmupJobId = null;
+    exploreWarmupPromise = null;
+  }
+  if (!normalizedJobId || exploreAutoOpenPendingJobId === normalizedJobId) {
+    exploreAutoOpenPendingJobId = null;
+  }
+  exploreResultsReadyPromise = null;
+}
+
+async function ensureExploreResultsReady(jobId, statusData = null) {
+  const normalizedJobId = String(jobId || "").trim();
+  if (!normalizedJobId) {
+    return false;
+  }
+  if (areExploreResultsReady(normalizedJobId)) {
+    return true;
+  }
+  if (exploreResultsReadyPromise && exploreResultsPendingJobId === normalizedJobId) {
+    return exploreResultsReadyPromise;
+  }
+
+  exploreResultsPendingJobId = normalizedJobId;
+  exploreResultsReadyJobId = null;
+  updateWorkflowPanels(referenceRerunPending ? "uploaded" : currentJobStatus);
+
+  const readinessPromise = (async () => {
+    await populateDownloadLinks(normalizedJobId, statusData);
+    await loadGeneSuggestions(normalizedJobId);
+    await warmExploreResults(normalizedJobId);
+    if (getResultsJobId() !== normalizedJobId) {
+      return false;
+    }
+    exploreResultsReadyJobId = normalizedJobId;
+    exploreResultsPendingJobId = null;
+    updateWorkflowPanels(referenceRerunPending ? "uploaded" : currentJobStatus);
+    if (!referenceRerunPending && statusData) {
+      document.getElementById("qc-cell-status").textContent = buildQcCellSummary(statusData);
+    }
+    setResultMode(
+      currentDifferentialState && currentDifferentialState.status === "completed"
+        ? "differential"
+        : "baseline"
+    );
+    if (
+      exploreAutoOpenPendingJobId === normalizedJobId &&
+      currentJobStatus === "completed" &&
+      !referenceRerunPending
+    ) {
+      setExplorerTab("explore");
+    } else {
+      syncExplorerWorkspace(activeExplorerTab);
+    }
+    if (exploreAutoOpenPendingJobId === normalizedJobId) {
+      exploreAutoOpenPendingJobId = null;
+    }
+    return true;
+  })().catch((error) => {
+    if (exploreResultsPendingJobId === normalizedJobId) {
+      exploreResultsPendingJobId = null;
+    }
+    updateWorkflowPanels(referenceRerunPending ? "uploaded" : currentJobStatus);
+    throw error;
+  }).finally(() => {
+    if (exploreResultsPendingJobId !== normalizedJobId) {
+      exploreResultsReadyPromise = null;
+    }
+  });
+
+  exploreResultsReadyPromise = readinessPromise;
+  return readinessPromise;
 }
 
 function apiPath(path) {
@@ -1190,8 +1284,7 @@ function resetWorkspaceData() {
   loadedResultsJobId = null;
   loadedGeneSuggestionsJobId = null;
   loadedDisplayFiltersJobId = null;
-  exploreWarmupJobId = null;
-  exploreWarmupPromise = null;
+  resetExploreResultsReadiness();
   currentDisplayFiltersMeta = null;
   previousJobStatus = "";
   currentJobStatus = "";
@@ -1390,6 +1483,7 @@ async function handleJobSubmit(evt) {
     document.getElementById("qc-job-id").value = data.job_id;
     document.getElementById("results-job-id").value = data.job_id;
     loadedResultsJobId = null;
+    resetExploreResultsReadiness();
     setResultMode("baseline");
     updateResetDataButton();
     await loadJobState(data.job_id);
@@ -1441,6 +1535,7 @@ async function handleQcSubmit(evt) {
       };
       currentMarkerAnalysis = null;
       loadedResultsJobId = null;
+      resetExploreResultsReadiness();
       clearGeneSuggestions();
       clearDisplayFilters();
       document.getElementById("download-links").innerHTML = "";
@@ -1465,6 +1560,7 @@ async function handleQcSubmit(evt) {
       throw new Error(data.detail || "Failed to queue job.");
     }
     loadedResultsJobId = null;
+    resetExploreResultsReadiness(jobId);
     setResultMode("baseline");
     startStatusPolling(jobId);
   } catch (err) {
@@ -1511,6 +1607,7 @@ async function handleResultsJobChange() {
     return;
   }
   loadedResultsJobId = null;
+  resetExploreResultsReadiness();
   await loadJobState(jobId);
 }
 
@@ -1592,14 +1689,13 @@ function applyJobStatus(jobId, data) {
     !referenceRerunPending;
 
   if (alignmentJustCompleted) {
-    setExplorerTab("explore");
+    exploreAutoOpenPendingJobId = jobId;
   }
 
   if (data.status === "completed" && !referenceRerunPending) {
     const artifactSignature = JSON.stringify(Object.keys(data.artifacts || {}).sort());
     if (artifactSignature !== lastDownloadArtifactSignature) {
       lastDownloadArtifactSignature = artifactSignature;
-      populateDownloadLinks(jobId, data);
     }
     if (data.default_gene) {
       VISUALIZATION_PANELS.forEach((panelKey) => {
@@ -1613,9 +1709,11 @@ function applyJobStatus(jobId, data) {
         }
       });
     }
-    loadGeneSuggestions(jobId);
-    void warmExploreResults(jobId);
+    void ensureExploreResultsReady(jobId, data).catch((err) => {
+      console.warn(err);
+    });
   } else {
+    resetExploreResultsReadiness(jobId);
     currentMarkerAnalysis = null;
     updateExpressionModeOptions();
     clearDisplayFilters();
@@ -1635,6 +1733,7 @@ function updateWorkflowPanels(status) {
   const hasUploadedJob = Boolean(normalizedStatus);
   const hasStartedQcRun = hasUploadedJob && normalizedStatus !== "uploaded";
   const hasCompletedAlignment = normalizedStatus === "completed";
+  const hasExploreReady = hasCompletedAlignment && areExploreResultsReady();
   const runGrid = document.getElementById("sandbox-run-grid");
   const qcPanel = document.getElementById("qc-panel");
   const qcLivePanel = document.getElementById("qc-live-panel");
@@ -1647,7 +1746,7 @@ function updateWorkflowPanels(status) {
   qcPanel.classList.toggle("hidden", !hasUploadedJob);
   qcLivePanel.classList.toggle("hidden", !hasStartedQcRun);
   differentialPanel.classList.toggle("hidden", !hasCompletedAlignment);
-  exploreControlsPanel.classList.toggle("hidden", !hasCompletedAlignment);
+  exploreControlsPanel.classList.toggle("hidden", !hasExploreReady);
   previewPanel.classList.toggle("hidden", hasUploadedJob);
   if (runGrid) {
     runGrid.classList.toggle("preupload-mode", !hasUploadedJob);
@@ -1657,6 +1756,8 @@ function updateWorkflowPanels(status) {
   if (!hasCompletedAlignment) {
     baseline.classList.add("hidden");
     differential.classList.add("hidden");
+  } else if (!hasExploreReady) {
+    baseline.classList.add("hidden");
   }
 }
 
@@ -2138,6 +2239,9 @@ function buildQcCellSummary(data) {
   }
 
   if (status === "completed") {
+    if (!referenceRerunPending && !areExploreResultsReady()) {
+      return "Alignment completed. Finalizing Explore results and loading the combined h5ad for interactive viewing...";
+    }
     const createdAt = Date.parse(data.created_at || "");
     const updatedAt = Date.parse(data.updated_at || "");
     const exclusionSuffix =
@@ -3180,10 +3284,10 @@ function getPlotDotScale() {
 function setResultMode(mode) {
   const baseline = document.getElementById("baseline-results-view");
   const differential = document.getElementById("differential-results-view");
-  if (currentJobStatus !== "completed") {
+  if (currentJobStatus !== "completed" || !areExploreResultsReady()) {
     baseline.classList.add("hidden");
     differential.classList.add("hidden");
-    setResultsControlsDisabled(false);
+    setResultsControlsDisabled(true);
     return;
   }
   baseline.classList.remove("hidden");
