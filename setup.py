@@ -16,6 +16,7 @@ setup(
     url="https://github.com/SalomonisLab/altanalyze3.git",
     license="Apache-2.0",
     include_package_data=True,
+    package_data={"altanalyze3.components.fastCNV": ["resources/*.tsv"]},
     packages=find_packages(exclude=["docs", "tests", "cwls", "tmp"]),
     install_requires=parse_requirements(),
     scripts=["altanalyze3/bin/altanalyze3"],

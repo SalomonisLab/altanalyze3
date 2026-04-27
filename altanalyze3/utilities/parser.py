@@ -11,6 +11,8 @@ from altanalyze3.components.intron_count.main import count_introns
 from altanalyze3.components.junction_count.main import count_junctions
 from altanalyze3.components.aggregate.main import aggregate
 from altanalyze3.components.gene_model.gene_model_index import build_index
+from altanalyze3.components.fastCNV.main import bundled_gene_coordinates
+from altanalyze3.components.fastCNV.main import run_from_altanalyze_args as run_fastcnv
 from altanalyze3.utilities.io import (
     get_indexed_references,
     is_bam_indexed
@@ -27,7 +29,7 @@ class ArgsParser():
     def __init__(self, args):
         args = args + [""] if len(args) == 0 else args
         self.args, _ = self.get_parser().parse_known_args(args)
-        self.resolve_path(["bam", "ref", "tmp", "output", "juncounts", "intcounts", "index"])
+        self.resolve_path(["bam", "ref", "tmp", "output", "juncounts", "intcounts", "index", "h5ad", "gene_coordinates"])
         self.assert_args()
         self.set_args_as_attributes()
 
@@ -231,6 +233,46 @@ class ArgsParser():
             "--tmp", type=Path, default=Path("/tmp/altanalyze_tmp"),
             help="Temporary directory for intermediate files"
         )
+
+        # fastCNV parameters
+        fastcnv_parser = subparsers.add_parser(
+            "fastcnv",
+            parents=[parent_parser],
+            help="Run first-pass state-aware CNV calls from a cellHarmony h5ad"
+        )
+        fastcnv_parser.set_defaults(func=run_fastcnv)
+        fastcnv_parser.add_argument("--h5ad", required=True, type=str, help="Input cellHarmony h5ad file")
+        fastcnv_parser.add_argument("--gene-coordinates", default=None, type=str, help="Gene coordinate TSV/CSV")
+        fastcnv_parser.add_argument("--species", choices=["human", "mouse"], default=None, help="Use a bundled coordinate resource")
+        fastcnv_parser.add_argument("--state-key", required=True, help="obs column with cellHarmony cell-state labels")
+        fastcnv_parser.add_argument("--sample-key", default=None, help="Optional obs column with sample labels")
+        fastcnv_parser.add_argument("--layer", default="auto", help="'auto', 'X', or a layer name. Auto prefers layers['counts']")
+        fastcnv_parser.add_argument("--input-normalized", action="store_true", help="Use selected matrix values as already log-normalized")
+        fastcnv_parser.add_argument("--window-genes", type=int, default=41, help="Genes per adaptive genome window")
+        fastcnv_parser.add_argument("--stride-genes", type=int, default=7, help="Stride between adaptive genome windows")
+        fastcnv_parser.add_argument("--min-chr-genes", type=int, default=25, help="Minimum genes required to use a chromosome")
+        fastcnv_parser.add_argument("--min-state-cells", type=int, default=30, help="Minimum cells required to call a cell state")
+        fastcnv_parser.add_argument("--anchor-fraction", type=float, default=0.25, help="Lowest-burden state fraction used as WT anchors")
+        fastcnv_parser.add_argument("--min-anchor-cells", type=int, default=20, help="Minimum WT-anchor cells per state")
+        fastcnv_parser.add_argument("--high-threshold", type=float, default=2.6, help="Window score required to seed an interval")
+        fastcnv_parser.add_argument("--low-threshold", type=float, default=1.6, help="Window score used to extend an interval")
+        fastcnv_parser.add_argument("--min-run-windows", type=int, default=3, help="Minimum contiguous windows per CNV interval")
+        fastcnv_parser.add_argument("--min-interval-genes", type=int, default=60, help="Minimum genes per CNV interval")
+        fastcnv_parser.add_argument("--min-mean-score", type=float, default=1.8, help="Minimum mean signed score for interval calls")
+        fastcnv_parser.add_argument("--burden-quantile", type=float, default=0.95, help="Upper quantile used for per-cell CNV burden")
+        fastcnv_parser.add_argument("--cnv-burden-threshold", type=float, default=1.8, help="Minimum cell burden for CNV-positive status")
+        fastcnv_parser.add_argument("--max-clones-per-state", type=int, default=10, help="Maximum NMF clones per cell state")
+        fastcnv_parser.add_argument("--max-global-clones", type=int, default=10, help="Maximum clones after cross-state merging")
+        fastcnv_parser.add_argument("--min-clone-cells", type=int, default=5, help="Minimum cells required for an NMF clone")
+        fastcnv_parser.add_argument("--clone-similarity-threshold", type=float, default=0.88, help="Cosine similarity threshold for cross-state clone merging")
+        fastcnv_parser.add_argument("--clone-consensus-fraction", type=float, default=0.45, help="Minimum clone-cell fraction supporting a consensus interval")
+        fastcnv_parser.add_argument("--nmf-max-iter", type=int, default=300, help="Maximum sparse NMF iterations")
+        fastcnv_parser.add_argument("--skip-clones", action="store_true", help="Only write first-pass cell-level CNV calls")
+        fastcnv_parser.add_argument("--skip-pdf", action="store_true", help="Skip clone-level genome PDF export")
+        fastcnv_parser.add_argument("--write-h5ad", action="store_true", help="Write an h5ad copy with fastCNV obs columns")
+        fastcnv_parser.add_argument("--max-cells-per-state", type=int, default=None, help="Optional cap for fast exploratory runs")
+        fastcnv_parser.add_argument("--random-state", type=int, default=0)
+        self.add_common_arguments(fastcnv_parser)
         return general_parser
 
     def resolve_path(self, selected=None):
@@ -267,6 +309,8 @@ class ArgsParser():
             self.assert_args_for_count_introns()
         elif self.args.func == aggregate:
             self.assert_args_for_aggregate()
+        elif self.args.func == run_fastcnv:
+            self.assert_args_for_fastcnv()
 
         elif self.args.func == build_index:
             self.assert_args_for_index()
@@ -301,6 +345,19 @@ class ArgsParser():
             if self.args.ref is None:
                 logging.error("--ref parameter is required when using with --intcounts")
                 sys.exit(1)
+
+    def assert_args_for_fastcnv(self):
+        if not self.args.h5ad.exists():
+            logging.error(f"h5ad file not found: {self.args.h5ad}")
+            sys.exit(1)
+        if self.args.gene_coordinates is None:
+            if self.args.species is None:
+                logging.error("Either --gene-coordinates or --species is required for fastcnv")
+                sys.exit(1)
+            self.args.gene_coordinates = bundled_gene_coordinates(self.args.species)
+        if not self.args.gene_coordinates.exists():
+            logging.error(f"Gene coordinate file not found: {self.args.gene_coordinates}")
+            sys.exit(1)
 
     def assert_args_for_index(self):
         """

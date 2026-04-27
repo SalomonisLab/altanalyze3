@@ -34,3 +34,6 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["."]
+
+[tool.setuptools.package-data]
+"altanalyze3.components.fastCNV" = ["resources/*.tsv"]

@@ -14,6 +14,7 @@ import pandas as pd
 import scipy.sparse as sp
 
 from altanalyze3.components.cellHarmony import cellHarmony_differential, cellHarmony_lite
+from altanalyze3.components.fastCNV.main import FastCNVParams, bundled_gene_coordinates, run_fastcnv
 from altanalyze3.components.visualization import NetPerspective, approximate_umap as approx_mod, marker_heatmap_h5ad as marker_mod
 
 from .job_manager import JobStore
@@ -33,6 +34,13 @@ def _normalize_h5ad_compression(value: Optional[str]) -> Optional[str]:
     if raw in {"lzf", "gzip"}:
         return raw
     return "lzf"
+
+
+def _env_truthy(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _split_uploads(files: List[Dict[str, str]], uploads_dir: Path) -> Tuple[List[Tuple[str, str]], Optional[str]]:
@@ -614,6 +622,42 @@ def run_cellharmony_pipeline(
         artifacts["umap_pdf_plain"] = Path(plain_pdf)
     if marker_archive_path is not None:
         artifacts["marker_genes_zip"] = marker_archive_path
+
+    fastcnv_analysis: Dict[str, object] = {"enabled": False}
+    if _env_truthy("CELLHARMONY_ENABLE_FASTCNV", False):
+        species_id = str(meta.get("species", "")).strip().lower()
+        if species_id in {"human", "mouse"}:
+            store.update_job(job_id, progress=92, message="Running fastCNV clone analysis.")
+            store.append_log(job_id, "Running fastCNV clone analysis.")
+            fastcnv_dir = outputs_dir / "fastCNV"
+            fastcnv_dir.mkdir(parents=True, exist_ok=True)
+            sample_key = next(
+                (candidate for candidate in ("sample", "Library", "group") if candidate in approx_result.query_adata.obs.columns),
+                None,
+            )
+            fastcnv_outputs = run_fastcnv(
+                FastCNVParams(
+                    h5ad=combined_h5ad_path,
+                    gene_coordinates=bundled_gene_coordinates(species_id),
+                    output_prefix=fastcnv_dir / "fastcnv",
+                    state_key=query_cluster_key,
+                    sample_key=sample_key,
+                    skip_pdf=not _env_truthy("CELLHARMONY_FASTCNV_EXPORT_PDF", True),
+                )
+            )
+            for key, value in fastcnv_outputs.items():
+                artifacts[f"fastcnv_{key}"] = Path(value)
+            fastcnv_analysis = {
+                "enabled": True,
+                "species": species_id,
+                "state_key": query_cluster_key,
+                "sample_key": sample_key,
+                "artifacts": {key: str(value) for key, value in fastcnv_outputs.items()},
+            }
+            store.append_log(job_id, "fastCNV clone analysis complete.")
+        else:
+            store.append_log(job_id, f"Skipping fastCNV: unsupported species '{species_id}'.")
+            fastcnv_analysis = {"enabled": False, "message": f"Unsupported species '{species_id}'."}
     for key, path in artifacts.items():
         store.add_artifact(job_id, key, path)
 
@@ -700,6 +744,7 @@ def run_cellharmony_pipeline(
         reference_clusters_tsv=reference_entry["reference_clusters_tsv"],
         default_gene=default_gene,
         marker_analysis=marker_analysis,
+        fastcnv_analysis=fastcnv_analysis,
         differential_options=differential_options,
         differential=_default_differential_state(differential_enabled, default_population_col, default_sample_field),
         message="Approximate UMAP completed.",
