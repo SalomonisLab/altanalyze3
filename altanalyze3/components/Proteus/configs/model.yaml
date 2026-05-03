@@ -1,0 +1,102 @@
+delta:
+  rna_dim: 512
+  protein_dim: 1280
+  disorder_dim: 64
+  structural_dim: 96
+  delta_hidden_dim: 256
+  delta_out_dim: 256
+  n_heads: 8
+  dropout: 0.1
+
+fusion:
+  common_dim: 256
+  mlp_hidden: 512
+  mlp_layers: 3
+  dropout: 0.15
+  use_cross_modal_attention: true
+  modality_dropout_prob: 0.1
+
+heads:
+  head_hidden_dim: 64          # hidden dim for each binary head MLP
+
+  # --- Original tasks ---
+  global_preservation:
+    type: binary
+    loss_weight: 1.0
+
+  topology_preserved:
+    type: binary
+    loss_weight: 0.8
+    mask_column: is_membrane_pair
+
+  surface_retained:
+    type: binary
+    loss_weight: 0.6
+    mask_column: is_surface_pair
+
+  kinase_competent:
+    type: binary
+    loss_weight: 0.8
+    mask_column: is_kinase_pair
+
+  tf_competent:
+    type: binary
+    loss_weight: 0.8
+    mask_column: is_tf_pair
+
+  disorder_preserved:
+    type: binary
+    loss_weight: 0.6
+
+  # --- New v1.1 tasks ---
+  localization_preserved:
+    type: binary
+    loss_weight: 0.7
+    mask_column: is_localization_pair
+    description: >
+      Subcellular localization is maintained in the alternative isoform.
+      Masked to proteins with known localization (HPA extracellular or
+      UniProt-annotated nuclear/cytoplasmic/secreted).
+
+  tm_insertion_competent:
+    type: binary
+    loss_weight: 1.0
+    mask_column: is_membrane_pair
+    description: >
+      For membrane proteins: the alternative isoform retains sufficient
+      TM helices to insert and fold in the membrane correctly.
+      Specifically: (a) at least 1 TM helix retained, (b) signal anchor
+      or first TM helix in correct N-terminal position, (c) no large
+      hydrophilic insertions within TM helices.
+
+  signaling_competent:
+    type: binary
+    loss_weight: 1.0
+    mask_column: is_signaling_pair
+    description: >
+      For transmembrane signaling receptors (RTKs, GPCRs, cytokine receptors):
+      the alternative isoform retains both the extracellular ligand-binding
+      domain AND the intracellular kinase/signaling domain.
+
+  ppi_interface_preserved:
+    type: binary
+    loss_weight: 0.7
+    mask_column: is_ppi_pair
+    description: >
+      At least one major PPI binding interface is retained in the alternative
+      isoform. Masked to proteins with known PPI binding residues in UniProt
+      (ppi_binding_feature_count > 0) or BioGRID physical partner count > 5.
+
+  deviation_class:
+    type: multiclass
+    n_classes: 8
+    loss_weight: 0.5
+    class_names:
+      0: preserved
+      1: truncation_partial
+      2: truncation_nmd
+      3: topology_loss
+      4: domain_loss
+      5: novel_fusion
+      6: localization_change
+      7: ppi_disrupted

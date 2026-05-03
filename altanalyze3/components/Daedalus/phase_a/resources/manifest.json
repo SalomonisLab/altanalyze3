@@ -1,0 +1,52 @@
+{
+  "resources": [
+    {
+      "name": "hpa_subcellular_location",
+      "url": "https://www.proteinatlas.org/download/tsv/subcellular_location.tsv.zip",
+      "filename": "subcellular_location.tsv.zip",
+      "category": "localization",
+      "enabled_by_default": true,
+      "notes": "Human Protein Atlas subcellular localization labels."
+    },
+    {
+      "name": "clinvar_variant_summary",
+      "url": "https://ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/variant_summary.txt.gz",
+      "filename": "variant_summary.txt.gz",
+      "category": "clinical",
+      "enabled_by_default": true,
+      "notes": "ClinVar variant summary table for splice/pathogenic supervision."
+    },
+    {
+      "name": "mane_grch38_summary",
+      "url": "https://ftp.ncbi.nlm.nih.gov/refseq/MANE/MANE_human/current/MANE.GRCh38.v1.5.summary.txt.gz",
+      "filename": "MANE.GRCh38.v1.5.summary.txt.gz",
+      "category": "reference",
+      "enabled_by_default": true,
+      "notes": "MANE transcript summary for curated human hg38 reference transcript anchors."
+    },
+    {
+      "name": "biogrid_all_latest_tab3",
+      "url": "https://downloads.thebiogrid.org/Download/BioGRID/Latest-Release/BIOGRID-ALL-LATEST.tab3.zip",
+      "filename": "BIOGRID-ALL-LATEST.tab3.zip",
+      "category": "ppi",
+      "enabled_by_default": true,
+      "notes": "BioGRID interaction table for human and mouse gene-level partner counts."
+    },
+    {
+      "name": "interpro_protein2ipr",
+      "url": "https://ftp.ebi.ac.uk/pub/databases/interpro/protein2ipr.dat.gz",
+      "filename": "protein2ipr.dat.gz",
+      "category": "domains",
+      "enabled_by_default": false,
+      "notes": "Large InterPro protein-to-domain mapping file; disabled by default due to size."
+    },
+    {
+      "name": "interpro_entry_list",
+      "url": "https://ftp.ebi.ac.uk/pub/databases/interpro/interpro.xml.gz",
+      "filename": "interpro.xml.gz",
+      "category": "domains",
+      "enabled_by_default": false,
+      "notes": "InterPro entry definitions; disabled by default due to size."
+    }
+  ]
+}

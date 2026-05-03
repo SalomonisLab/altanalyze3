@@ -37,3 +37,4 @@ where = ["."]
 
 [tool.setuptools.package-data]
 "altanalyze3.components.fastCNV" = ["resources/*.tsv"]
+"altanalyze3.components.fastComm" = ["resources/*.tsv", "configs/*.json"]

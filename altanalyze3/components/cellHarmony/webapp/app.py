@@ -30,6 +30,8 @@ from altanalyze3.components.visualization import approximate_umap as approx_mod
 
 from .config import BASE_DIR, load_config
 
+_POOLED_OVERALL_LABEL = "Pooled overall"
+
 
 class QCSettings(BaseModel):
     min_genes: int = 500
@@ -38,6 +40,7 @@ class QCSettings(BaseModel):
     mit_percent: int = 15
     align_cutoff: float = 0.4
     ambient_correction: str = Field(default="no", pattern="^(no|yes)$")
+    impute_modality: Optional[str] = "none"
 
 
 class JobConfigSettings(BaseModel):
@@ -47,6 +50,7 @@ class JobConfigSettings(BaseModel):
 
 
 class DifferentialSettings(BaseModel):
+    modality: Optional[str] = "rna"
     population_col: str
     sample_field: Optional[str] = None
     group1_samples: List[str]
@@ -130,6 +134,109 @@ def _normalize_h5ad_compression(value: Optional[str]) -> Optional[str]:
     if raw in {"lzf", "gzip"}:
         return raw
     return "lzf"
+
+
+_DEFAULT_MODALITY_DEFINITIONS: Dict[str, Dict[str, object]] = {
+    "rna": {
+        "id": "rna",
+        "label": "RNA",
+        "feature_label": "gene",
+        "supports_marker_heatmap": True,
+        "supports_marker_network": True,
+        "supports_differential_network": True,
+        "supports_differential_go": True,
+    },
+    "lipids": {
+        "id": "lipids",
+        "label": "Lipids",
+        "feature_label": "lipid",
+        "supports_marker_heatmap": True,
+        "supports_marker_network": False,
+        "supports_differential_network": False,
+        "supports_differential_go": False,
+    },
+    "adt": {
+        "id": "adt",
+        "label": "ADT (CITE-seq)",
+        "feature_label": "ADT",
+        "supports_marker_heatmap": True,
+        "supports_marker_network": False,
+        "supports_differential_network": False,
+        "supports_differential_go": False,
+    },
+}
+
+
+def _normalize_modality_id(value: object, *, default: str = "rna") -> str:
+    raw = str(value or "").strip().lower()
+    if not raw or raw in {"none", "null", "false", "off"}:
+        return default
+    if raw in {"lipid", "lipids"}:
+        return "lipids"
+    if raw in {"adt", "adts", "cite", "cite-seq", "citeseq"}:
+        return "adt"
+    if raw == "rna":
+        return "rna"
+    return raw
+
+
+def _modalities_state(meta: Dict) -> Dict[str, object]:
+    stored = dict(meta.get("modalities") or {})
+    available_raw = stored.get("available") or []
+    available: List[Dict[str, object]] = []
+    seen: set[str] = set()
+    for entry in available_raw:
+        if not isinstance(entry, dict):
+            continue
+        modality_id = _normalize_modality_id(entry.get("id"), default="")
+        if not modality_id or modality_id in seen:
+            continue
+        base = dict(_DEFAULT_MODALITY_DEFINITIONS.get(modality_id, {"id": modality_id, "label": modality_id.upper(), "feature_label": "feature"}))
+        base.update(entry)
+        base["id"] = modality_id
+        available.append(base)
+        seen.add(modality_id)
+    if "rna" not in seen:
+        available.insert(0, dict(_DEFAULT_MODALITY_DEFINITIONS["rna"]))
+        seen.add("rna")
+    default_modality = _normalize_modality_id(stored.get("default"), default="rna")
+    if default_modality not in seen:
+        default_modality = "rna"
+    return {"default": default_modality, "available": available}
+
+
+def _modality_definition(meta: Dict, modality: object) -> Dict[str, object]:
+    normalized = _normalize_modality_id(modality)
+    for entry in _modalities_state(meta)["available"]:
+        if _normalize_modality_id(entry.get("id"), default="") == normalized:
+            return dict(entry)
+    return dict(_DEFAULT_MODALITY_DEFINITIONS["rna"])
+
+
+def _modality_marker_analysis(meta: Dict, modality: object) -> Dict[str, object]:
+    normalized = _normalize_modality_id(modality)
+    by_modality = meta.get("marker_analysis_by_modality") or {}
+    if isinstance(by_modality, dict):
+        entry = by_modality.get(normalized)
+        if isinstance(entry, dict):
+            return dict(entry)
+    if normalized == "rna":
+        return dict(meta.get("marker_analysis") or {})
+    return {}
+
+
+def _modality_h5ad_path(meta: Dict, modality: object) -> Path:
+    normalized = _normalize_modality_id(modality)
+    if normalized == "rna":
+        raw_path = str(meta.get("artifacts", {}).get("combined_h5ad", "")).strip()
+    else:
+        raw_path = str(((meta.get("modality_artifacts") or {}).get(normalized) or {}).get("h5ad", "")).strip()
+    if not raw_path:
+        raise FileNotFoundError(f"AnnData output unavailable for modality '{normalized}'.")
+    path = Path(raw_path)
+    if not path.exists():
+        raise FileNotFoundError(f"AnnData output unavailable for modality '{normalized}'.")
+    return path
 
 
 def _normalize_gene_token(value: object) -> str:
@@ -720,6 +827,7 @@ def _differential_options(meta: Dict) -> Dict:
     if not isinstance(comparison_types, list) or not comparison_types:
         pseudobulk_allowed = bool(upload_profile.get("single_h5ad") or upload_profile.get("total_files", 0) >= 4)
         comparison_types = ["cells", "pseudobulk"] if pseudobulk_allowed else ["cells"]
+    modalities_state = _modalities_state(meta)
     return {
         "enabled": enabled,
         "sample_names": sample_names,
@@ -728,6 +836,8 @@ def _differential_options(meta: Dict) -> Dict:
         "default_sample_field": default_sample_field,
         "population_columns": population_columns,
         "default_population_col": default_population_col,
+        "modalities": modalities_state["available"],
+        "default_modality": modalities_state["default"],
         "comparison_types": comparison_types,
         "upload_profile": upload_profile,
     }
@@ -737,6 +847,9 @@ def _build_differential_payload(app: FastAPI, job_id: str, meta: Dict, root_path
     options = _differential_options(meta)
     differential = dict(meta.get("differential") or {})
     artifacts = differential.get("artifacts") or {}
+    config = differential.get("config") or {}
+    selected_modality = _normalize_modality_id(config.get("modality") or options.get("default_modality") or "rna")
+    modality_info = _modality_definition(meta, selected_modality)
     result_populations: List[str] = []
     visualization_populations: Dict[str, List[str]] = {"heatmap": [], "volcano": [], "network": [], "go": []}
     if str(differential.get("status") or "") == "completed":
@@ -749,14 +862,16 @@ def _build_differential_payload(app: FastAPI, job_id: str, meta: Dict, root_path
         except Exception:
             visualization_populations["heatmap"] = []
         visualization_populations["volcano"] = result_populations
-        visualization_populations["network"] = list(
-            dict.fromkeys(
-                str(entry.get("population", "")).strip()
-                for entry in differential.get("networks") or []
-                if str(entry.get("population", "")).strip()
+        if bool(modality_info.get("supports_differential_network")):
+            visualization_populations["network"] = list(
+                dict.fromkeys(
+                    str(entry.get("population", "")).strip()
+                    for entry in differential.get("networks") or []
+                    if str(entry.get("population", "")).strip()
+                )
             )
-        )
-        visualization_populations["go"] = _differential_go_populations(app, meta)
+        if bool(modality_info.get("supports_differential_go")):
+            visualization_populations["go"] = _differential_go_populations(app, meta)
     networks = []
     for entry in differential.get("networks") or []:
         network_id = str(entry.get("id", "")).strip()
@@ -773,6 +888,14 @@ def _build_differential_payload(app: FastAPI, job_id: str, meta: Dict, root_path
         )
 
     status = str(differential.get("status") or ("idle" if options["enabled"] else "unavailable"))
+    visualization_modes = [
+        {"value": "heatmap", "label": "Heatmap"},
+        {"value": "volcano", "label": "Volcano"},
+    ]
+    if bool(modality_info.get("supports_differential_network")):
+        visualization_modes.append({"value": "network", "label": "Network"})
+    if bool(modality_info.get("supports_differential_go")):
+        visualization_modes.append({"value": "go", "label": "GO Terms"})
     return {
         **options,
         "status": status,
@@ -782,7 +905,10 @@ def _build_differential_payload(app: FastAPI, job_id: str, meta: Dict, root_path
             if options["enabled"]
             else "Differential gene analyses between biological groups (i.e., disease versus controls) are only enabled when two or more samples (multiple h5 files or a single h5ad) are uploaded for the job."
         ),
-        "config": differential.get("config") or {},
+        "config": {**config, "modality": selected_modality},
+        "selected_modality": selected_modality,
+        "feature_label": str(differential.get("feature_label") or modality_info.get("feature_label") or "gene"),
+        "visualization_modes": visualization_modes,
         "run_id": differential.get("run_id"),
         "case_label": differential.get("case_label"),
         "control_label": differential.get("control_label"),
@@ -947,9 +1073,11 @@ def _differential_gene_h5ad_path(meta: Dict) -> Path:
         raw_path = str(meta.get("differential", {}).get("artifacts", {}).get(key, "")).strip()
         if raw_path and Path(raw_path).exists():
             return Path(raw_path)
-    raw_combined = str(meta.get("artifacts", {}).get("combined_h5ad", "")).strip()
-    if raw_combined and Path(raw_combined).exists():
-        return Path(raw_combined)
+    modality = _normalize_modality_id((meta.get("differential", {}).get("config", {}) or {}).get("modality"), default="rna")
+    try:
+        return _modality_h5ad_path(meta, modality)
+    except FileNotFoundError:
+        pass
     raise FileNotFoundError("Aligned AnnData output is unavailable for differential gene detail.")
 
 
@@ -990,10 +1118,16 @@ def _close_backed_adata(adata: Optional[ad.AnnData]) -> None:
 def _invalidate_expression_cache(app: FastAPI, job_id: str) -> None:
     cache = getattr(app.state, "expression_cache", None)
     if isinstance(cache, dict):
-        cache.pop(str(job_id), None)
+        prefix = f"{str(job_id)}:"
+        for key in list(cache.keys()):
+            if key == str(job_id) or str(key).startswith(prefix):
+                cache.pop(key, None)
     locks = getattr(app.state, "expression_cache_locks", None)
     if isinstance(locks, dict):
-        locks.pop(str(job_id), None)
+        prefix = f"{str(job_id)}:"
+        for key in list(locks.keys()):
+            if key == str(job_id) or str(key).startswith(prefix):
+                locks.pop(key, None)
 
 
 def _invalidate_differential_cache(app: FastAPI, job_id: str) -> None:
@@ -1015,15 +1149,25 @@ def _invalidate_differential_cache(app: FastAPI, job_id: str) -> None:
 def _invalidate_marker_heatmap_cache(app: FastAPI, job_id: str) -> None:
     cache = getattr(app.state, "marker_heatmap_cache", None)
     if isinstance(cache, dict):
+        prefix = f"{str(job_id)}:"
+        for key in list(cache.keys()):
+            if key == str(job_id) or str(key).startswith(prefix):
+                cache.pop(key, None)
+
+
+def _invalidate_fastcomm_cache(app: FastAPI, job_id: str) -> None:
+    cache = getattr(app.state, "fastcomm_cache", None)
+    if isinstance(cache, dict):
         cache.pop(str(job_id), None)
 
 
-def _get_marker_heatmap_cache_entry(app: FastAPI, meta: Dict) -> Dict[str, Any]:
+def _get_marker_heatmap_cache_entry(app: FastAPI, meta: Dict, modality: str = "rna") -> Dict[str, Any]:
     job_id = str(meta.get("job_id") or "").strip()
     if not job_id:
         raise ValueError("Job metadata is missing a job_id.")
 
-    marker_analysis = meta.get("marker_analysis") or {}
+    normalized_modality = _normalize_modality_id(modality)
+    marker_analysis = _modality_marker_analysis(meta, normalized_modality) or {}
     cache_path_text = str(marker_analysis.get("heatmap_cache", "")).strip()
     heatmap_tsv_text = str(marker_analysis.get("heatmap_tsv", "")).strip()
     expression_tsv_text = str(marker_analysis.get("expression_tsv", "")).strip()
@@ -1033,12 +1177,14 @@ def _get_marker_heatmap_cache_entry(app: FastAPI, meta: Dict) -> Dict[str, Any]:
     expression_tsv_path = Path(expression_tsv_text) if expression_tsv_text else None
 
     cache_signature = {
+        "modality": normalized_modality,
         "heatmap_cache": str(cache_path or ""),
         "heatmap_tsv": str(heatmap_tsv_path or ""),
         "expression_tsv": str(expression_tsv_path or ""),
     }
     cache = app.state.marker_heatmap_cache
-    existing = cache.get(job_id)
+    cache_key = f"{job_id}:{normalized_modality}"
+    existing = cache.get(cache_key)
     if existing and existing.get("signature") == cache_signature:
         return existing
 
@@ -1062,6 +1208,7 @@ def _get_marker_heatmap_cache_entry(app: FastAPI, meta: Dict) -> Dict[str, Any]:
                 )
         entry = {
             "signature": cache_signature,
+            "modality": normalized_modality,
             "source": "cache",
             "source_path": cache_path,
             "matrix": matrix,
@@ -1070,7 +1217,7 @@ def _get_marker_heatmap_cache_entry(app: FastAPI, meta: Dict) -> Dict[str, Any]:
             "col_barcodes": col_barcodes,
             "tsv_path": tsv_path,
         }
-        cache[job_id] = entry
+        cache[cache_key] = entry
         return entry
 
     if tsv_path and tsv_path.exists():
@@ -1078,6 +1225,7 @@ def _get_marker_heatmap_cache_entry(app: FastAPI, meta: Dict) -> Dict[str, Any]:
         col_ids = frame.columns.astype(str).to_numpy()
         entry = {
             "signature": cache_signature,
+            "modality": normalized_modality,
             "source": "tsv",
             "source_path": tsv_path,
             "matrix": np.asarray(frame.to_numpy(), dtype=np.float32),
@@ -1089,7 +1237,7 @@ def _get_marker_heatmap_cache_entry(app: FastAPI, meta: Dict) -> Dict[str, Any]:
             ),
             "tsv_path": tsv_path,
         }
-        cache[job_id] = entry
+        cache[cache_key] = entry
         return entry
 
     raise FileNotFoundError("Marker heatmap matrix unavailable.")
@@ -1106,15 +1254,14 @@ def _marker_heatmap_subset_to_tsv(
     return buffer.getvalue()
 
 
-def _get_expression_cache(app: FastAPI, meta: Dict) -> Dict[str, Any]:
+def _get_expression_cache(app: FastAPI, meta: Dict, modality: str = "rna") -> Dict[str, Any]:
     job_id = str(meta.get("job_id") or "").strip()
     if not job_id:
         raise ValueError("Job metadata is missing a job_id.")
 
+    normalized_modality = _normalize_modality_id(modality)
     artifacts = meta.get("artifacts", {})
-    h5ad_path = artifacts.get("combined_h5ad")
-    if not h5ad_path or not Path(h5ad_path).exists():
-        raise FileNotFoundError("Combined AnnData output unavailable for this job.")
+    h5ad_path = _modality_h5ad_path(meta, normalized_modality)
 
     cluster_key = meta.get("cluster_key")
     if not cluster_key:
@@ -1122,23 +1269,26 @@ def _get_expression_cache(app: FastAPI, meta: Dict) -> Dict[str, Any]:
 
     umap_path = artifacts.get("umap_coordinates")
     cache = app.state.expression_cache
-    cache_entry = cache.get(job_id)
+    cache_key = f"{job_id}:{normalized_modality}"
+    cache_entry = cache.get(cache_key)
     if (
         cache_entry
         and cache_entry.get("h5ad_path") == str(h5ad_path)
         and cache_entry.get("umap_path") == str(umap_path or "")
         and cache_entry.get("cluster_key") == str(cluster_key)
+        and cache_entry.get("modality") == normalized_modality
     ):
         return cache_entry
 
-    lock = _get_cache_lock(app, "expression_cache_locks", job_id)
+    lock = _get_cache_lock(app, "expression_cache_locks", cache_key)
     with lock:
-        cache_entry = cache.get(job_id)
+        cache_entry = cache.get(cache_key)
         if (
             cache_entry
             and cache_entry.get("h5ad_path") == str(h5ad_path)
             and cache_entry.get("umap_path") == str(umap_path or "")
             and cache_entry.get("cluster_key") == str(cluster_key)
+            and cache_entry.get("modality") == normalized_modality
         ):
             return cache_entry
 
@@ -1250,6 +1400,7 @@ def _get_expression_cache(app: FastAPI, meta: Dict) -> Dict[str, Any]:
 
         cache_entry = {
             "job_id": job_id,
+            "modality": normalized_modality,
             "h5ad_path": str(h5ad_path),
             "umap_path": str(umap_path or ""),
             "cluster_key": str(cluster_key),
@@ -1270,7 +1421,7 @@ def _get_expression_cache(app: FastAPI, meta: Dict) -> Dict[str, Any]:
                 "show_secondary": bool(upload_profile.get("show_secondary_display_filter", True)),
             },
         }
-        cache[job_id] = cache_entry
+        cache[cache_key] = cache_entry
         return cache_entry
 
 
@@ -1558,8 +1709,8 @@ def _build_differential_network_payload(app: FastAPI, meta: Dict, population: st
     }
 
 
-def _build_marker_network_payload(meta: Dict, population: str) -> Dict:
-    marker_analysis = meta.get("marker_analysis") or {}
+def _build_marker_network_payload(meta: Dict, population: str, modality: str = "rna") -> Dict:
+    marker_analysis = _modality_marker_analysis(meta, modality) or {}
     networks = marker_analysis.get("networks") or []
     entry = next((item for item in networks if str(item.get("population", "")).strip() == str(population).strip()), None)
     if not entry:
@@ -1629,9 +1780,156 @@ def _build_marker_network_payload(meta: Dict, population: str) -> Dict:
     }
 
 
+def _fastcomm_analysis(meta: Dict) -> Dict[str, object]:
+    analysis = meta.get("fastcomm_analysis") or {}
+    if not isinstance(analysis, dict):
+        return {}
+    return dict(analysis)
+
+
+def _fastcomm_scores_path(meta: Dict) -> Path:
+    analysis = _fastcomm_analysis(meta)
+    raw_path = str(analysis.get("scores_tsv") or meta.get("artifacts", {}).get("fastcomm_scores") or "").strip()
+    if not raw_path:
+        raise FileNotFoundError("fastComm scores are unavailable.")
+    path = Path(raw_path)
+    if not path.exists():
+        raise FileNotFoundError("fastComm scores are unavailable.")
+    return path
+
+
+def _fastcomm_scores_table(app: FastAPI, meta: Dict) -> pd.DataFrame:
+    job_id = str(meta.get("job_id") or "").strip()
+    if not job_id:
+        raise ValueError("Job metadata is missing a job_id.")
+    if not hasattr(app.state, "fastcomm_cache"):
+        app.state.fastcomm_cache = {}
+    cache = app.state.fastcomm_cache
+    path = _fastcomm_scores_path(meta)
+    signature = (str(path), path.stat().st_mtime_ns, path.stat().st_size)
+    entry = cache.get(job_id)
+    if isinstance(entry, dict) and entry.get("signature") == signature and isinstance(entry.get("scores"), pd.DataFrame):
+        return entry["scores"]
+    scores = pd.read_csv(path, sep="\t")
+    cache[job_id] = {"signature": signature, "scores": scores}
+    return scores
+
+
+def _fastcomm_populations(app: FastAPI, meta: Dict) -> List[str]:
+    try:
+        scores = _fastcomm_scores_table(app, meta)
+    except Exception:
+        return []
+    values = pd.concat(
+        [
+            scores.get("sender_state", pd.Series(dtype=str)),
+            scores.get("receiver_state", pd.Series(dtype=str)),
+        ],
+        ignore_index=True,
+    )
+    return sorted({str(value).strip() for value in values if str(value).strip()})
+
+
+def _build_fastcomm_payload(app: FastAPI, meta: Dict, population: str, direction: str = "incoming", limit: int = 35) -> Dict:
+    scores = _fastcomm_scores_table(app, meta)
+    required = {"sender_state", "receiver_state", "ligand", "receptor", "fastcomm_score"}
+    missing = required.difference(scores.columns)
+    if missing:
+        raise ValueError(f"fastComm scores missing required columns: {', '.join(sorted(missing))}")
+
+    focus = str(population or "").strip()
+    if not focus:
+        populations = _fastcomm_populations(app, meta)
+        focus = populations[0] if populations else ""
+    if not focus:
+        return {"population": "", "direction": direction, "elements": [], "message": "No fastComm populations are available."}
+
+    direction_key = str(direction or "incoming").strip().lower()
+    if direction_key not in {"incoming", "outgoing"}:
+        direction_key = "incoming"
+
+    if direction_key == "outgoing":
+        subset = scores.loc[scores["sender_state"].astype(str) == focus].copy()
+        other_col = "receiver_state"
+    else:
+        subset = scores.loc[scores["receiver_state"].astype(str) == focus].copy()
+        other_col = "sender_state"
+
+    if subset.empty:
+        return {
+            "population": focus,
+            "direction": direction_key,
+            "elements": [],
+            "message": f"No fastComm {direction_key} interactions were available for {focus}.",
+        }
+
+    subset["fastcomm_score"] = pd.to_numeric(subset["fastcomm_score"], errors="coerce").fillna(0.0)
+    subset = subset.sort_values("fastcomm_score", ascending=False)
+    collapsed = subset.drop_duplicates([other_col, "ligand", "receptor"], keep="first").head(max(1, int(limit)))
+
+    nodes: Dict[str, Dict[str, object]] = {}
+    focus_id = f"state::{focus}"
+    nodes[focus_id] = {"data": {"id": focus_id, "label": focus, "node_type": "focus", "color": "#0f766e"}}
+    edges = []
+    for index, row in enumerate(collapsed.itertuples(index=False)):
+        sender = str(getattr(row, "sender_state")).strip()
+        receiver = str(getattr(row, "receiver_state")).strip()
+        other = str(getattr(row, other_col)).strip()
+        other_id = f"state::{other}"
+        if other_id not in nodes:
+            nodes[other_id] = {"data": {"id": other_id, "label": other, "node_type": "state", "color": "#e0f2fe"}}
+        score = float(getattr(row, "fastcomm_score", 0.0) or 0.0)
+        ligand = str(getattr(row, "ligand", "")).strip()
+        receptor = str(getattr(row, "receptor", "")).strip()
+        response = float(getattr(row, "receiver_response_score", 0.0) or 0.0) if hasattr(row, "receiver_response_score") else 0.0
+        lr_score = float(getattr(row, "lr_expression_score_scaled", 0.0) or 0.0) if hasattr(row, "lr_expression_score_scaled") else 0.0
+        support = str(getattr(row, "response_support_genes", "") or "").strip() if hasattr(row, "response_support_genes") else ""
+        pathway = str(getattr(row, "response_key", "") or getattr(row, "pathway", "") or "").strip()
+        edges.append(
+            {
+                "data": {
+                    "id": f"fc{index}",
+                    "source": f"state::{sender}",
+                    "target": f"state::{receiver}",
+                    "interaction_type": "fastcomm",
+                    "direction": "positive",
+                    "ligand": ligand,
+                    "receptor": receptor,
+                    "pathway": pathway,
+                    "score": score,
+                    "weight": max(1.0, min(8.0, 1.0 + score * 8.0)),
+                    "label": f"{ligand}->{receptor}",
+                    "tooltip": (
+                        f"{sender} -> {receiver}\n"
+                        f"{ligand} -> {receptor}\n"
+                        f"score={score:.3f}; LR={lr_score:.3f}; response={response:.3f}"
+                        + (f"\nresponse genes: {support}" if support else "")
+                    ),
+                    "supporting_response_genes": support,
+                    "receiver_response_score": response,
+                    "lr_expression_score": lr_score,
+                }
+            }
+        )
+
+    return {
+        "population": focus,
+        "direction": direction_key,
+        "state_key": str(_fastcomm_analysis(meta).get("state_key") or meta.get("cluster_key") or ""),
+        "elements": list(nodes.values()) + edges,
+        "summary": {
+            "n_edges": int(subset.shape[0]),
+            "n_displayed_edges": int(len(edges)),
+            "top_score": float(collapsed["fastcomm_score"].max()) if not collapsed.empty else 0.0,
+        },
+    }
+
+
 def _build_differential_gene_detail_payload(app: FastAPI, meta: Dict, population: str, gene: str) -> Dict:
     differential = meta.get("differential", {}) or {}
     config = differential.get("config", {}) or {}
+    modality = _normalize_modality_id(config.get("modality"), default="rna")
+    modality_info = _modality_definition(meta, modality)
     group1_samples = [str(value).strip() for value in config.get("group1_samples", []) if str(value).strip()]
     group2_samples = [str(value).strip() for value in config.get("group2_samples", []) if str(value).strip()]
     sample_field = str(config.get("sample_field", "")).strip()
@@ -1640,7 +1938,7 @@ def _build_differential_gene_detail_payload(app: FastAPI, meta: Dict, population
     population_col = _differential_population_col(meta)
     case_label, control_label = _differential_group_labels(meta)
 
-    expression_cache = _get_expression_cache(app, meta)
+    expression_cache = _get_expression_cache(app, meta, modality=modality)
     adata = expression_cache["adata"]
     resolved_gene = _resolve_gene_name(expression_cache["var_names"], gene)
     if not resolved_gene:
@@ -1664,7 +1962,10 @@ def _build_differential_gene_detail_payload(app: FastAPI, meta: Dict, population
 
     population_values = adata.obs[population_col].astype(str)
     sample_values = adata.obs[sample_col].astype(str)
-    mask = (population_values == population) & sample_values.isin(resolved_group1 + resolved_group2)
+    if str(population).strip() == _POOLED_OVERALL_LABEL:
+        mask = sample_values.isin(resolved_group1 + resolved_group2)
+    else:
+        mask = (population_values == population) & sample_values.isin(resolved_group1 + resolved_group2)
     if int(np.asarray(mask).sum()) == 0:
         raise HTTPException(status_code=404, detail=f"No cells were found for '{population}' in the selected comparison groups.")
 
@@ -1708,6 +2009,8 @@ def _build_differential_gene_detail_payload(app: FastAPI, meta: Dict, population
     return {
         "population": population,
         "gene": resolved_gene,
+        "modality": modality,
+        "feature_label": str(modality_info.get("feature_label") or "gene"),
         "groups": groups,
         "stats": stats_payload,
     }
@@ -1719,6 +2022,11 @@ def _validate_differential_request(meta: Dict, payload: DifferentialSettings) ->
         raise HTTPException(status_code=400, detail="Differential analysis requires two or more uploaded samples.")
     if meta.get("status") != "completed":
         raise HTTPException(status_code=400, detail="Run the cellHarmony analysis before starting differential analysis.")
+
+    modality = _normalize_modality_id(payload.modality or options.get("default_modality") or "rna")
+    modality_options = {_normalize_modality_id(entry.get("id"), default="") for entry in options.get("modalities", []) if isinstance(entry, dict)}
+    if modality_options and modality not in modality_options:
+        raise HTTPException(status_code=400, detail="Selected modality is not available for this job.")
 
     population_options = {entry["value"] for entry in options.get("population_columns", []) if entry.get("value")}
     if population_options and payload.population_col not in population_options:
@@ -1754,6 +2062,7 @@ def _validate_differential_request(meta: Dict, payload: DifferentialSettings) ->
         comparison_type = "cells"
 
     return {
+        "modality": modality,
         "population_col": payload.population_col,
         "sample_field": sample_field,
         "group1_samples": group1_samples,
@@ -1775,9 +2084,10 @@ def _get_differential_artifact(meta: Dict, key: str) -> Path:
 def _build_umap_payload(
     app: FastAPI,
     meta: Dict,
+    modality: str = "rna",
     display_filters: Optional[List[tuple[str, List[str]]]] = None,
 ) -> Dict[str, List[Dict]]:
-    cache_entry = _get_expression_cache(app, meta)
+    cache_entry = _get_expression_cache(app, meta, modality=modality)
     obs_names = cache_entry["obs_names"]
     populations = cache_entry["populations"]
     sample_field = str(cache_entry.get("sample_field") or "").strip()
@@ -1808,7 +2118,7 @@ def _build_umap_payload(
     reference_points = []
     ref_adata = _load_reference_adata(app, meta)
     if ref_adata is not None:
-        ref_cluster_key = meta.get("reference_cluster_key") or cluster_key
+        ref_cluster_key = meta.get("reference_cluster_key") or meta.get("cluster_key")
         coords = ref_adata.obsm["X_umap"]
         labels = ref_adata.obs[ref_cluster_key].astype(str).tolist()
         for barcode, (x, y), population in zip(ref_adata.obs_names, coords, labels):
@@ -1826,9 +2136,7 @@ def _build_umap_payload(
 
 
 def _reference_entry_for_meta(meta: Dict) -> Dict:
-    registry_path = Path(app.state.config["REFERENCE_REGISTRY"]) if "app" in globals() else None
-    if registry_path is None:
-        raise ValueError("Reference registry is unavailable.")
+    registry_path = Path(load_config().get("REFERENCE_REGISTRY"))
     reference_entry = pipeline_mod._lookup_reference(meta["species"], meta["reference"], registry_path)
     pipeline_mod._ensure_reference_fields(reference_entry)
     return reference_entry
@@ -1842,7 +2150,7 @@ def _load_reference_states_table(meta: Dict) -> pd.DataFrame:
     return pd.read_csv(states_path, sep="\t", index_col=0)
 
 
-def _build_reference_expression_payload(meta: Dict, gene: str) -> Dict:
+def _build_reference_expression_payload(app: FastAPI, meta: Dict, gene: str) -> Dict:
     reference_df = _load_reference_states_table(meta)
     resolved_gene = _resolve_gene_name(reference_df.index.astype(str), gene)
     if not resolved_gene:
@@ -1930,6 +2238,7 @@ def _build_expression_payload(
     app: FastAPI,
     meta: Dict,
     gene: str,
+    modality: str = "rna",
     display_filters: Optional[List[tuple[str, List[str]]]] = None,
 ) -> Dict:
     def _expression_global_range(raw_values: np.ndarray) -> tuple[float, float]:
@@ -1939,7 +2248,8 @@ def _build_expression_payload(
             return 0.0, 0.0
         return float(np.min(finite)), float(np.max(finite))
 
-    cache_entry = _get_expression_cache(app, meta)
+    normalized_modality = _normalize_modality_id(modality)
+    cache_entry = _get_expression_cache(app, meta, modality=normalized_modality)
     adata = cache_entry["adata"]
     populations = cache_entry["populations"]
     obs_names = cache_entry["obs_names"]
@@ -1990,6 +2300,7 @@ def _build_expression_payload(
                 "requested_gene": gene,
                 "resolved_gene": fallback_gene,
                 "source": "query",
+                "modality": normalized_modality,
                 "message": None if int(np.asarray(display_mask).sum()) else "No cells match the current Display only filters.",
                 "scatter": scatter_data,
                 "violin": violin_data,
@@ -1997,7 +2308,9 @@ def _build_expression_payload(
                 "global_min": global_min,
                 "global_max": global_max,
             }
-        return _build_reference_expression_payload(meta, gene)
+        if normalized_modality == "rna":
+            return _build_reference_expression_payload(app, meta, gene)
+        raise KeyError(f"Feature '{gene}' not found in the selected modality output.")
 
     values = _flatten_expr(adata[:, resolved_gene].X)
     global_min, global_max = _expression_global_range(values)
@@ -2039,6 +2352,7 @@ def _build_expression_payload(
         "requested_gene": gene,
         "resolved_gene": resolved_gene,
         "source": "query",
+        "modality": normalized_modality,
         "message": None if int(np.asarray(display_mask).sum()) else "No cells match the current Display only filters.",
         "scatter": scatter_data,
         "violin": violin_data,
@@ -2048,14 +2362,19 @@ def _build_expression_payload(
     }
 
 
-def _build_gene_suggestions_payload(app: FastAPI, meta: Dict) -> Dict:
-    cache_entry = _get_expression_cache(app, meta)
+def _build_gene_suggestions_payload(app: FastAPI, meta: Dict, modality: str = "rna") -> Dict:
+    cache_entry = _get_expression_cache(app, meta, modality=modality)
     genes = [str(gene) for gene in cache_entry["var_names"].tolist()]
-    return {"genes": genes}
+    modality_info = _modality_definition(meta, modality)
+    return {
+        "genes": genes,
+        "modality": _normalize_modality_id(modality),
+        "feature_label": str(modality_info.get("feature_label") or "gene"),
+    }
 
 
-def _build_display_filter_payload(app: FastAPI, meta: Dict) -> Dict[str, Any]:
-    cache_entry = _get_expression_cache(app, meta)
+def _build_display_filter_payload(app: FastAPI, meta: Dict, modality: str = "rna") -> Dict[str, Any]:
+    cache_entry = _get_expression_cache(app, meta, modality=modality)
     return dict(cache_entry.get("display_filters_meta") or {})
 
 
@@ -2107,10 +2426,11 @@ def _apply_display_filter_mask(cache_entry: Dict[str, Any], display_filters: Opt
 def _filter_marker_heatmap_matrix(
     app: FastAPI,
     meta: Dict,
+    modality: str,
     display_filters: Optional[List[tuple[str, List[str]]]],
 ) -> tuple[str, int]:
-    cache_entry = _get_expression_cache(app, meta)
-    marker_matrix = _get_marker_heatmap_cache_entry(app, meta)
+    cache_entry = _get_expression_cache(app, meta, modality=modality)
+    marker_matrix = _get_marker_heatmap_cache_entry(app, meta, modality=modality)
     display_mask = _apply_display_filter_mask(cache_entry, display_filters)
     allowed_barcodes = np.asarray(
         [str(barcode) for barcode, keep in zip(cache_entry["obs_names"], display_mask) if bool(keep)],
@@ -2320,16 +2640,26 @@ def _render_expression_pdf(payload: Dict, mode: str) -> io.BytesIO:
         ax.set_ylim(global_min - pad, global_max + pad)
     else:
         umap_points = payload["umap"]
-        expression_cmap = matplotlib.colors.LinearSegmentedColormap.from_list(
-            "expression_grey_red",
-            [
-                (0.0, "#e5e7eb"),
-                (0.15, "#f3f4f6"),
-                (0.35, "#fecaca"),
-                (0.6, "#f87171"),
-                (1.0, "#b91c1c"),
-            ],
-        )
+        if _normalize_modality_id(payload.get("modality"), default="rna") in {"lipids", "adt"}:
+            expression_cmap = matplotlib.colors.LinearSegmentedColormap.from_list(
+                "expression_blue_yellow_red",
+                [
+                    (0.0, "#2563eb"),
+                    (0.5, "#fde047"),
+                    (1.0, "#dc2626"),
+                ],
+            )
+        else:
+            expression_cmap = matplotlib.colors.LinearSegmentedColormap.from_list(
+                "expression_grey_red",
+                [
+                    (0.0, "#e5e7eb"),
+                    (0.15, "#f3f4f6"),
+                    (0.35, "#fecaca"),
+                    (0.6, "#f87171"),
+                    (1.0, "#b91c1c"),
+                ],
+            )
         sc = ax.scatter(
             [p["x"] for p in umap_points],
             [p["y"] for p in umap_points],
@@ -2676,6 +3006,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
     app.state.expression_cache_locks = {}
     app.state.differential_cache = {}
     app.state.marker_heatmap_cache = {}
+    app.state.fastcomm_cache = {}
     app.state.reference_adata_cache = {}
     app.state.reference_adata_cache_locks = {}
     app.state.cache_registry_lock = threading.Lock()
@@ -2756,6 +3087,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         _invalidate_expression_cache(app, job_id)
         _invalidate_differential_cache(app, job_id)
         _invalidate_marker_heatmap_cache(app, job_id)
+        _invalidate_fastcomm_cache(app, job_id)
         uploads_dir = store.uploads_dir(job_id)
         records = []
         for sample, upload in zip(normalized_samples, files):
@@ -2777,6 +3109,16 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
+        meta = store.get_job(job_id)
+        registry_path = Path(app.state.config["REFERENCE_REGISTRY"])
+        reference_entry = pipeline_mod._lookup_reference(meta["species"], meta["reference"], registry_path)
+        supported_modalities = {
+            _normalize_modality_id(value, default="")
+            for value in (reference_entry.get("impute_modalities") or [])
+        }
+        requested_modality = _normalize_modality_id(qc.impute_modality, default="")
+        if requested_modality and requested_modality not in supported_modalities:
+            raise HTTPException(status_code=400, detail="Selected impute modality is not supported for this reference.")
         meta = store.update_job(job_id, qc=qc.model_dump(), message="QC parameters saved.")
         return JSONResponse({"job_id": job_id, "qc": meta["qc"]})
 
@@ -2813,6 +3155,10 @@ def create_app(test_config: dict | None = None) -> FastAPI:
                 message="Reference updated. Configure QC and rerun alignment.",
                 artifacts={},
                 marker_analysis={},
+                marker_analysis_by_modality={},
+                fastcomm_analysis={},
+                modality_artifacts={},
+                modalities={"default": "rna", "available": [dict(_DEFAULT_MODALITY_DEFINITIONS["rna"])]},
                 differential={},
             )
         return JSONResponse(
@@ -2834,7 +3180,16 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         _invalidate_expression_cache(app, job_id)
         _invalidate_differential_cache(app, job_id)
         _invalidate_marker_heatmap_cache(app, job_id)
-        store.update_job(job_id, marker_analysis={})
+        _invalidate_fastcomm_cache(app, job_id)
+        store.update_job(
+            job_id,
+            marker_analysis={},
+            marker_analysis_by_modality={},
+            fastcomm_analysis={},
+            modality_artifacts={},
+            modalities={"default": "rna", "available": [dict(_DEFAULT_MODALITY_DEFINITIONS["rna"])]},
+            differential={},
+        )
         runner.submit(job_id)
         store.append_log(job_id, "Job queued by user request.")
         store.update_job(job_id, message="Job submitted to worker.", status="queued", progress=15)
@@ -2857,6 +3212,12 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         meta["log_tail"] = log_tail
         meta["qc_log_tail"] = log_tail if meta.get("status") == "failed" else _filter_qc_log_lines(log_tail)
         meta["message"] = _derive_live_pipeline_message(meta.get("status"), log_tail, meta.get("message"))
+        if isinstance(meta.get("fastcomm_analysis"), dict) and meta["fastcomm_analysis"].get("enabled"):
+            if not meta["fastcomm_analysis"].get("populations"):
+                meta["fastcomm_analysis"] = {
+                    **meta["fastcomm_analysis"],
+                    "populations": _fastcomm_populations(app, meta),
+                }
         meta["differential_ui"] = _build_differential_payload(app, job_id, meta, root_path=app.state.root_path)
         return JSONResponse(meta, headers={"Cache-Control": "no-store"})
 
@@ -2901,6 +3262,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
     @app.get("/api/jobs/{job_id}/umap")
     async def umap(
         job_id: str,
+        modality: str = Query("rna"),
         filter1_field: Optional[str] = Query(None),
         filter1_values: List[str] = Query([]),
         filter2_field: Optional[str] = Query(None),
@@ -2912,7 +3274,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         meta = store.get_job(job_id)
         display_filters = _display_filter_specs(filter1_field, filter1_values, filter2_field, filter2_values)
         try:
-            return JSONResponse(_build_umap_payload(app, meta, display_filters))
+            return JSONResponse(_build_umap_payload(app, meta, modality=modality, display_filters=display_filters))
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
         except ValueError as exc:
@@ -2922,6 +3284,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
     async def expression(
         job_id: str,
         gene: str = Query(...),
+        modality: str = Query("rna"),
         filter1_field: Optional[str] = Query(None),
         filter1_values: List[str] = Query([]),
         filter2_field: Optional[str] = Query(None),
@@ -2933,7 +3296,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         meta = store.get_job(job_id)
         display_filters = _display_filter_specs(filter1_field, filter1_values, filter2_field, filter2_values)
         try:
-            return JSONResponse(_build_expression_payload(app, meta, gene, display_filters))
+            return JSONResponse(_build_expression_payload(app, meta, gene, modality=modality, display_filters=display_filters))
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
         except KeyError as exc:
@@ -2942,39 +3305,57 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             raise HTTPException(status_code=500, detail=str(exc))
 
     @app.get("/api/jobs/{job_id}/marker/network")
-    async def marker_network(job_id: str, population: str = Query(...)):
+    async def marker_network(job_id: str, population: str = Query(...), modality: str = Query("rna")):
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
         try:
-            return JSONResponse(_build_marker_network_payload(meta, population))
+            return JSONResponse(_build_marker_network_payload(meta, population, modality=modality))
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+
+    @app.get("/api/jobs/{job_id}/fastcomm/network")
+    async def fastcomm_network(
+        job_id: str,
+        population: str = Query(""),
+        direction: str = Query("incoming"),
+        limit: int = Query(35),
+    ):
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        meta = store.get_job(job_id)
+        try:
+            return JSONResponse(_build_fastcomm_payload(app, meta, population, direction=direction, limit=limit))
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
         except ValueError as exc:
             raise HTTPException(status_code=500, detail=str(exc))
 
     @app.get("/api/jobs/{job_id}/genes")
-    async def job_genes(job_id: str):
+    async def job_genes(job_id: str, modality: str = Query("rna")):
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
         try:
-            return JSONResponse(_build_gene_suggestions_payload(app, meta))
+            return JSONResponse(_build_gene_suggestions_payload(app, meta, modality=modality))
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
         except ValueError as exc:
             raise HTTPException(status_code=500, detail=str(exc))
 
     @app.get("/api/jobs/{job_id}/display-filters")
-    async def job_display_filters(job_id: str):
+    async def job_display_filters(job_id: str, modality: str = Query("rna")):
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
         try:
-            return JSONResponse(_build_display_filter_payload(app, meta))
+            return JSONResponse(_build_display_filter_payload(app, meta, modality=modality))
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
         except ValueError as exc:
@@ -2984,6 +3365,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
     async def umap_pdf(
         job_id: str,
         mode: str = Query("relative"),
+        modality: str = Query("rna"),
         filter1_field: Optional[str] = Query(None),
         filter1_values: List[str] = Query([]),
         filter2_field: Optional[str] = Query(None),
@@ -2995,7 +3377,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         meta = store.get_job(job_id)
         display_filters = _display_filter_specs(filter1_field, filter1_values, filter2_field, filter2_values)
         try:
-            payload = _build_umap_payload(app, meta, display_filters)
+            payload = _build_umap_payload(app, meta, modality=modality, display_filters=display_filters)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
         except ValueError as exc:
@@ -3012,6 +3394,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         job_id: str,
         gene: str = Query(...),
         mode: str = Query("umap"),
+        modality: str = Query("rna"),
         filter1_field: Optional[str] = Query(None),
         filter1_values: List[str] = Query([]),
         filter2_field: Optional[str] = Query(None),
@@ -3023,7 +3406,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         meta = store.get_job(job_id)
         display_filters = _display_filter_specs(filter1_field, filter1_values, filter2_field, filter2_values)
         try:
-            payload = _build_expression_payload(app, meta, gene, display_filters)
+            payload = _build_expression_payload(app, meta, gene, modality=modality, display_filters=display_filters)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
         except KeyError as exc:
@@ -3051,6 +3434,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
     async def marker_heatmap_tsv(
         job_id: str,
         request: Request,
+        modality: str = Query("rna"),
         filter1_field: Optional[str] = Query(None),
         filter1_values: List[str] = Query([]),
         filter2_field: Optional[str] = Query(None),
@@ -3062,7 +3446,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         meta = store.get_job(job_id)
         display_filters = _display_filter_specs(filter1_field, filter1_values, filter2_field, filter2_values)
         try:
-            matrix_entry = _get_marker_heatmap_cache_entry(app, meta)
+            matrix_entry = _get_marker_heatmap_cache_entry(app, meta, modality=modality)
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail="Marker heatmap matrix unavailable.")
         origin = str(request.headers.get("origin") or "").strip()
@@ -3085,7 +3469,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         if request_method == "OPTIONS":
             return JSONResponse({"ok": True}, headers=common_headers)
         if display_filters:
-            filtered_tsv, kept_columns = _filter_marker_heatmap_matrix(app, meta, display_filters)
+            filtered_tsv, kept_columns = _filter_marker_heatmap_matrix(app, meta, modality, display_filters)
             store.append_log(
                 job_id,
                 f"[marker-heatmap] filtered matrix generated columns={kept_columns} filters={display_filters}",
@@ -3133,8 +3517,9 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
+        modality = _normalize_modality_id(request.query_params.get("modality"), default="rna")
         try:
-            matrix_entry = _get_marker_heatmap_cache_entry(app, meta)
+            matrix_entry = _get_marker_heatmap_cache_entry(app, meta, modality=modality)
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail="Marker heatmap matrix unavailable.")
         source_path = matrix_entry.get("source_path")
@@ -3157,6 +3542,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
     @app.get("/api/jobs/{job_id}/marker/heatmap.pdf")
     async def marker_heatmap_pdf(
         job_id: str,
+        modality: str = Query("rna"),
         filter1_field: Optional[str] = Query(None),
         filter1_values: List[str] = Query([]),
         filter2_field: Optional[str] = Query(None),
@@ -3168,11 +3554,11 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         meta = store.get_job(job_id)
         display_filters = _display_filter_specs(filter1_field, filter1_values, filter2_field, filter2_values)
         try:
-            matrix_entry = _get_marker_heatmap_cache_entry(app, meta)
+            matrix_entry = _get_marker_heatmap_cache_entry(app, meta, modality=modality)
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail="Marker heatmap matrix unavailable.")
         if display_filters:
-            filtered_tsv, _ = _filter_marker_heatmap_matrix(app, meta, display_filters)
+            filtered_tsv, _ = _filter_marker_heatmap_matrix(app, meta, modality, display_filters)
             frame = pd.read_csv(io.StringIO(filtered_tsv), sep="\t", index_col=0)
         else:
             frame = pd.DataFrame(
@@ -3188,12 +3574,12 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         )
 
     @app.get("/api/jobs/{job_id}/marker/network/pdf")
-    async def marker_network_pdf(job_id: str, population: str = Query(...)):
+    async def marker_network_pdf(job_id: str, population: str = Query(...), modality: str = Query("rna")):
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
-        payload = _build_marker_network_payload(meta, population)
+        payload = _build_marker_network_payload(meta, population, modality=modality)
         pdf = _render_network_pdf(payload, f"{population} marker network")
         safe_population = re.sub(r"[^A-Za-z0-9_.-]+", "_", population).strip("._") or "population"
         return StreamingResponse(

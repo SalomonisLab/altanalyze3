@@ -471,6 +471,7 @@ def combine_and_align_h5(
                 library_col=library_col,
                 outdir=Path(soupx_dir),
                 write_individual=False,
+                write_merged=False,
                 merged_filename="ambient_corrected_merged.h5ad",
             )
             if corrected is None:

@@ -121,6 +121,7 @@ Explore then exposes two additional expression modes:
 
 - `MarkerHeatmap`
 - `MarkerNetwork`
+- `fastComm`
 
 ## Explore workspace
 
@@ -149,8 +150,11 @@ The right viewer supports:
 - `Violin`
 - `MarkerHeatmap` when marker outputs exist
 - `MarkerNetwork` when marker networks exist
+- `fastComm` when receptor-ligand communication analysis completes
 
-The `Marker cell state` dropdown only appears for `MarkerNetwork`.
+The `Marker cell state` dropdown appears for `MarkerNetwork` and `fastComm`.
+For `fastComm`, the selected cell state is treated as the receiver and the
+network shows incoming receptor-ligand evidence from transmitter states.
 
 ### Explore filters
 

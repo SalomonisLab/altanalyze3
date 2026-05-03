@@ -13,13 +13,18 @@ from scipy import sparse
 
 try:
     from sklearn.exceptions import InconsistentVersionWarning
+    from sklearn.utils.validation import check_is_fitted
 except ImportError:  # pragma: no cover
     InconsistentVersionWarning = Warning
+
+    def check_is_fitted(estimator, attributes=None) -> None:
+        if not hasattr(estimator, "n_features_in_"):
+            raise AttributeError("Estimator does not appear to be fitted")
 
 import pickle
 
 
-DEFAULT_BUNDLE_PATH = Path(__file__).with_name("otherelastic_multitask_try.pkl")
+DEFAULT_BUNDLE_PATH = Path(__file__).with_name("newnormelastic_multitask_try.pkl")
 
 
 def _clean_labels(values: Iterable[object]) -> List[str]:
@@ -46,6 +51,28 @@ class PredictionResult:
     summary: Dict[str, object]
 
 
+def _model_output_scaling_mode(metadata: Optional[Dict[str, object]], scaler_y) -> str:
+    scaling_info = (metadata or {}).get("target_scaling")
+    if isinstance(scaling_info, dict):
+        mode = str(scaling_info.get("mode", "")).strip().lower()
+        if mode in {"none", "standard"}:
+            return mode
+    return "standard" if _transformer_is_fitted(scaler_y) else "none"
+
+
+def _transformer_is_fitted(transformer) -> bool:
+    if transformer is None:
+        return False
+    fitted_state_attrs = ("scale_", "mean_", "var_", "n_samples_seen_")
+    if any(hasattr(transformer, attr) for attr in fitted_state_attrs):
+        return True
+    try:
+        check_is_fitted(transformer, attributes=fitted_state_attrs)
+    except Exception:
+        return False
+    return True
+
+
 class Rna2LipidBundle:
     def __init__(
         self,
@@ -56,6 +83,7 @@ class Rna2LipidBundle:
         scaler_y,
         input_genes: Sequence[str],
         output_lipids: Sequence[str],
+        metadata: Optional[Dict[str, object]] = None,
     ) -> None:
         self.bundle_path = Path(bundle_path)
         self.model = model
@@ -63,6 +91,8 @@ class Rna2LipidBundle:
         self.scaler_y = scaler_y
         self.input_genes = tuple(_clean_labels(input_genes))
         self.output_lipids = tuple(_clean_labels(output_lipids))
+        self.metadata = metadata or {}
+        self.target_scaling_mode = _model_output_scaling_mode(self.metadata, scaler_y)
         self._input_gene_to_index = {gene: idx for idx, gene in enumerate(self.input_genes)}
 
     @classmethod
@@ -73,7 +103,7 @@ class Rna2LipidBundle:
             with bundle_path.open("rb") as handle:
                 bundle = pickle.load(handle)
 
-        required = {"model", "scaler_x", "scaler_y", "X_columns", "Y_columns"}
+        required = {"model", "scaler_x", "X_columns", "Y_columns"}
         missing = required.difference(bundle)
         if missing:
             raise ValueError(f"Model bundle is missing required keys: {sorted(missing)}")
@@ -82,20 +112,25 @@ class Rna2LipidBundle:
             bundle_path=bundle_path,
             model=bundle["model"],
             scaler_x=bundle["scaler_x"],
-            scaler_y=bundle["scaler_y"],
+            scaler_y=bundle.get("scaler_y"),
             input_genes=bundle["X_columns"],
             output_lipids=bundle["Y_columns"],
+            metadata=bundle.get("metadata"),
         )
 
     def model_info(self) -> Dict[str, object]:
-        return {
+        info = {
             "bundle_path": str(self.bundle_path),
             "n_input_genes": len(self.input_genes),
             "n_output_lipids": len(self.output_lipids),
             "model_class": type(self.model).__name__,
             "scaler_x_class": type(self.scaler_x).__name__,
-            "scaler_y_class": type(self.scaler_y).__name__,
+            "scaler_y_class": type(self.scaler_y).__name__ if self.scaler_y is not None else None,
+            "target_scaling_mode": self.target_scaling_mode,
         }
+        if self.metadata:
+            info["metadata"] = self.metadata
+        return info
 
     def predict_from_dataframe(self, expression: pd.DataFrame) -> PredictionResult:
         aligned, matched_genes = self._align_dataframe(expression)
@@ -162,6 +197,56 @@ class Rna2LipidBundle:
         else:
             summary["output_rows"] = int(prediction_df.shape[0])
 
+        return PredictionResult(predictions=prediction_df, summary=summary)
+
+    def predict_from_adata(
+        self,
+        adata: ad.AnnData,
+        *,
+        layer: Optional[str] = None,
+        gene_symbol_col: Optional[str] = None,
+        groupby: Optional[str] = None,
+        chunk_size: int = 2048,
+    ) -> PredictionResult:
+        obs_names = _clean_labels(adata.obs_names)
+        if len(set(obs_names)) != len(obs_names):
+            obs_names = _make_unique(obs_names)
+        adata_local = adata.copy()
+        adata_local.obs_names = pd.Index(obs_names)
+
+        if groupby is not None and groupby not in adata_local.obs.columns:
+            raise KeyError(f"Column {groupby!r} was not found in adata.obs")
+
+        gene_labels = self._extract_gene_labels(adata_local, gene_symbol_col=gene_symbol_col)
+        matched_positions = self._matched_model_positions(gene_labels)
+        if not matched_positions:
+            raise ValueError("No model genes were found in the provided AnnData")
+
+        predictions: List[pd.DataFrame] = []
+        for start in range(0, adata_local.n_obs, chunk_size):
+            stop = min(start + chunk_size, adata_local.n_obs)
+            matrix = self._read_matrix_chunk(adata_local, start=start, stop=stop, layer=layer)
+            aligned = self._align_matrix_chunk(matrix, matched_positions)
+            predicted = self._predict_aligned_matrix(aligned)
+            predicted.index = adata_local.obs_names[start:stop]
+            predictions.append(predicted)
+
+        prediction_df = pd.concat(predictions, axis=0)
+        summary = self._build_summary(
+            input_rows=int(adata_local.n_obs),
+            matched_genes=len(matched_positions),
+            input_kind="adata",
+        )
+        summary["layer"] = layer or "X"
+        summary["gene_symbol_source"] = gene_symbol_col or "var_names"
+
+        if groupby is not None:
+            groups = adata_local.obs[groupby].astype(str).str.strip()
+            prediction_df = prediction_df.groupby(groups, dropna=False).mean()
+            prediction_df.index.name = groupby
+            summary["groupby"] = groupby
+
+        summary["output_rows"] = int(prediction_df.shape[0])
         return PredictionResult(predictions=prediction_df, summary=summary)
 
     def _align_dataframe(self, expression: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
@@ -241,7 +326,14 @@ class Rna2LipidBundle:
             aligned_matrix = pd.DataFrame(aligned_matrix, columns=self.input_genes)
         transformed = self.scaler_x.transform(aligned_matrix)
         predicted = self.model.predict(transformed)
-        predicted = self.scaler_y.inverse_transform(predicted)
+        if self.target_scaling_mode == "standard":
+            if self.scaler_y is None or not _transformer_is_fitted(self.scaler_y):
+                raise ValueError(
+                    f"Bundle {self.bundle_path} declares standardized target outputs but scaler_y is unavailable or unfitted."
+                )
+            predicted = self.scaler_y.inverse_transform(predicted)
+        else:
+            predicted = np.asarray(predicted, dtype=float)
         return pd.DataFrame(predicted, columns=self.output_lipids)
 
     def _build_summary(self, *, input_rows: int, matched_genes: int, input_kind: str) -> Dict[str, object]:
@@ -253,6 +345,7 @@ class Rna2LipidBundle:
             "missing_genes": len(self.input_genes) - matched_genes,
             "model_gene_count": len(self.input_genes),
             "output_lipid_count": len(self.output_lipids),
+            "target_scaling_mode": self.target_scaling_mode,
         }
 
 

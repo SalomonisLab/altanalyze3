@@ -1,0 +1,12 @@
+lr: 3.0e-4
+weight_decay: 1.0e-4
+batch_size: 256
+max_epochs: 100
+warmup_steps: 500
+grad_clip: 1.0
+mixed_precision: true
+early_stopping_patience: 10
+early_stopping_metric: "val/global_preservation/auroc"
+checkpoint_every_n_epochs: 5
+freeze_delta_epochs: 5
+seed: 42

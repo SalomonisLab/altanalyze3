@@ -569,7 +569,10 @@ def _plot_heatmap(heatmap_df, output_path, cluster_counts, cluster_order, column
     fig, ax = plt.subplots(figsize=(fixed_width, fixed_height))
     fig.subplots_adjust(left=0.08, right=0.88, top=0.82, bottom=0.08)
 
-    vmin, vmax = -3.0, 3.0
+    contrast = float(os.environ.get("MARKER_HEATMAP_CONTRAST", "1.0"))
+    if contrast <= 0:
+        contrast = 1.0
+    vmin, vmax = -3.0 / contrast, 3.0 / contrast
     norm = TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax)
     im = ax.imshow(
         heatmap_df.values,

@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DaedalusSupervisedBenchmarkRecord",
+  "type": "object",
+  "required": [
+    "task",
+    "species",
+    "gene_name",
+    "reference_transcript_id",
+    "alternative_transcript_id",
+    "benchmark_source",
+    "split"
+  ],
+  "properties": {
+    "task": {
+      "type": "string"
+    },
+    "species": {
+      "type": "string"
+    },
+    "gene_name": {
+      "type": "string"
+    },
+    "gene_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reference_transcript_id": {
+      "type": "string"
+    },
+    "alternative_transcript_id": {
+      "type": "string"
+    },
+    "benchmark_source": {
+      "type": "string"
+    },
+    "cell_context": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "label_binary": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "label_continuous": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "label_class": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "evidence_strength": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "split": {
+      "type": "string"
+    },
+    "notes": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

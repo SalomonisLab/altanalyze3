@@ -1,0 +1,27 @@
+rna:
+  model_id: "quietflamingo/orthrus-large-6-track"
+  embedding_dim: 512
+  cache_dir: "data/interim/rna_embeddings"
+  batch_size: 32
+  max_length: 12288
+  device: "auto"
+
+protein:
+  model_id: "facebook/esm2_t33_650M_UR50D"
+  embedding_dim: 1280
+  cache_dir: "data/interim/protein_embeddings"
+  batch_size: 16
+  max_length: 1024
+  truncation_strategy: "center"
+  device: "auto"
+
+disorder:
+  backend: "auto"
+  cache_dir: "data/interim/disorder_features"
+  raw_feature_dim: 50
+  projected_dim: 64
+
+structural:
+  cache_dir: "data/interim/structural_features"
+  raw_feature_dim: 48
+  projected_dim: 64

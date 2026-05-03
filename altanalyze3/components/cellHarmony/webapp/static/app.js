@@ -15,7 +15,7 @@ let panelPlotData = {
   viz2: null,
 };
 let loadedResultsJobId = null;
-let loadedGeneSuggestionsJobId = null;
+let loadedGeneSuggestionsSignature = "";
 let loadedDisplayFiltersJobId = null;
 let exploreWarmupJobId = null;
 let exploreWarmupPromise = null;
@@ -30,6 +30,9 @@ let currentJobSpecies = "";
 let currentJobReference = "";
 let referenceRerunPending = false;
 let currentMarkerAnalysis = null;
+let currentMarkerAnalysisByModality = { rna: null };
+let currentFastCommAnalysis = null;
+let currentModalitiesState = { default: "rna", available: [{ id: "rna", label: "RNA", feature_label: "gene", example_feature: "MPO" }] };
 let currentDifferentialState = null;
 let currentDifferentialGene = "";
 let currentDifferentialPopulation = "";
@@ -639,43 +642,204 @@ function resetVisualizationSurface(panelKey) {
   plot.style.minHeight = "";
 }
 
-function markerNetworkPopulations() {
-  return ((currentMarkerAnalysis && currentMarkerAnalysis.networks) || [])
+function selectedReferenceConfig() {
+  const species = document.getElementById("species-select")?.value;
+  const reference = document.getElementById("reference-select")?.value;
+  const speciesEntry = (registry.species || []).find((entry) => String(entry.id || "") === String(species || ""));
+  if (!speciesEntry) {
+    return null;
+  }
+  return (speciesEntry.references || []).find((entry) => String(entry.id || "") === String(reference || "")) || null;
+}
+
+function normalizeModalityId(value, fallback = "rna") {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw || raw === "none") {
+    return fallback;
+  }
+  if (raw === "lipid") {
+    return "lipids";
+  }
+  if (raw === "adts" || raw === "cite" || raw === "cite-seq" || raw === "citeseq") {
+    return "adt";
+  }
+  return raw;
+}
+
+function availableModalities() {
+  const raw = ((currentModalitiesState || {}).available || []).filter((entry) => entry && entry.id);
+  if (!raw.length) {
+    return [{ id: "rna", label: "RNA", feature_label: "gene", example_feature: "MPO" }];
+  }
+  return raw;
+}
+
+function modalityDefinition(modalityId) {
+  const normalized = normalizeModalityId(modalityId);
+  let defaultFeatureLabel = "gene";
+  let defaultExample = "MPO";
+  if (normalized === "lipids") {
+    defaultFeatureLabel = "lipid";
+    defaultExample = "PE(O-16:0/22:4)";
+  } else if (normalized === "adt") {
+    defaultFeatureLabel = "ADT";
+    defaultExample = "Hu.CD4";
+  }
+  return availableModalities().find((entry) => normalizeModalityId(entry.id) === normalized)
+    || {
+      id: normalized,
+      label: normalized.toUpperCase(),
+      feature_label: defaultFeatureLabel,
+      example_feature: defaultExample,
+    };
+}
+
+function modalityFeatureLabel(modalityId) {
+  return String(modalityDefinition(modalityId).feature_label || "gene").trim().toLowerCase();
+}
+
+function modalityExampleFeature(modalityId) {
+  const normalized = normalizeModalityId(modalityId);
+  let fallback = "MPO";
+  if (normalized === "lipids") fallback = "PE(O-16:0/22:4)";
+  else if (normalized === "adt") fallback = "CD4";
+  return String(modalityDefinition(modalityId).example_feature || fallback).trim() || fallback;
+}
+
+function preferredFeatureForModality(modalityId, features = []) {
+  const values = (features || [])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  if (!values.length) {
+    return modalityExampleFeature(modalityId);
+  }
+  const example = modalityExampleFeature(modalityId);
+  if (values.includes(example)) {
+    return example;
+  }
+  return values[0];
+}
+
+function updatePanelFeatureInput(panelKey, options = {}) {
+  const input = document.getElementById(panelElementId(panelKey, "gene-query"));
+  const field = document.getElementById(panelElementId(panelKey, "gene-field"));
+  const label = field ? field.querySelector("span") : null;
+  const modality = panelModality(panelKey);
+  const featureLabel = modalityFeatureLabel(modality);
+  const exampleFeature = modalityExampleFeature(modality);
+  if (label) {
+    label.textContent = `Select ${featureLabel}`;
+  }
+  if (input) {
+    input.placeholder = `e.g. ${exampleFeature}`;
+    if (Object.prototype.hasOwnProperty.call(options, "value")) {
+      input.value = String(options.value || "");
+    }
+  }
+}
+
+function panelAvailableModalities() {
+  return availableModalities();
+}
+
+function panelModality(panelKey) {
+  const select = document.getElementById(panelElementId(panelKey, "modality"));
+  if (!select || select.classList.contains("hidden")) {
+    return "rna";
+  }
+  return normalizeModalityId(select.value || "rna");
+}
+
+function panelMarkerAnalysis(panelKey) {
+  const modality = panelModality(panelKey);
+  const byModality = currentMarkerAnalysisByModality || {};
+  return byModality[modality] || (modality === "rna" ? currentMarkerAnalysis : null) || null;
+}
+
+function markerNetworkPopulations(panelKey) {
+  return (((panelMarkerAnalysis(panelKey) || {}).networks) || [])
     .map((entry) => String(entry.population || "").trim())
     .filter((value, index, values) => value && values.indexOf(value) === index);
 }
 
-function markerHeatmapAvailable() {
-  if (!currentMarkerAnalysis || !currentMarkerAnalysis.enabled) {
-    return false;
-  }
-  return Boolean(currentMarkerAnalysis.heatmap_tsv || currentMarkerAnalysis.heatmap_cache);
+function fastCommAvailable() {
+  return Boolean(currentFastCommAnalysis && currentFastCommAnalysis.enabled && currentFastCommAnalysis.status === "completed");
 }
 
-function availableVisualizationModes() {
+function fastCommPopulations() {
+  const summary = currentFastCommAnalysis?.summary || {};
+  const fromSummary = currentFastCommAnalysis?.populations || summary.populations || [];
+  if (Array.isArray(fromSummary) && fromSummary.length) {
+    const seen = new Set();
+    return fromSummary
+      .map((value) => String(value || "").trim())
+      .filter((value) => {
+        if (!value || seen.has(value)) {
+          return false;
+        }
+        seen.add(value);
+        return true;
+      });
+  }
+  return [];
+}
+
+function markerHeatmapAvailable(panelKey) {
+  const markerAnalysis = panelMarkerAnalysis(panelKey);
+  if (!markerAnalysis || !markerAnalysis.enabled) {
+    return false;
+  }
+  return Boolean(markerAnalysis.heatmap_tsv || markerAnalysis.heatmap_cache);
+}
+
+function availableVisualizationModes(panelKey) {
+  const modality = panelModality(panelKey);
+  const modalityInfo = modalityDefinition(modality);
   const modes = [...BASE_VISUALIZATION_MODES];
-  if (markerHeatmapAvailable()) {
+  if (markerHeatmapAvailable(panelKey)) {
     modes.push({ value: "marker_heatmap", label: "MarkerHeatmap" });
   }
-  const networkPopulations = markerNetworkPopulations();
-  if (currentMarkerAnalysis && currentMarkerAnalysis.enabled && networkPopulations.length) {
+  const networkPopulations = markerNetworkPopulations(panelKey);
+  if (modalityInfo.supports_marker_network !== false && panelMarkerAnalysis(panelKey) && networkPopulations.length) {
     modes.push({ value: "marker_network", label: "MarkerNetwork" });
+  }
+  if (modality === "rna" && fastCommAvailable()) {
+    modes.push({ value: "fastcomm_network", label: "fastComm" });
   }
   return modes;
 }
 
 function updateExpressionModeOptions() {
-  const modes = availableVisualizationModes();
-  const networkPopulations = markerNetworkPopulations();
-
   VISUALIZATION_PANELS.forEach((panelKey) => {
+    const modalities = panelAvailableModalities();
     const modeSelect = document.getElementById(panelElementId(panelKey, "mode"));
+    const modalityField = document.getElementById(panelElementId(panelKey, "modality-field"));
+    const modalitySelect = document.getElementById(panelElementId(panelKey, "modality"));
     const markerPopulationField = document.getElementById(panelElementId(panelKey, "marker-population-field"));
     const markerPopulationSelect = document.getElementById(panelElementId(panelKey, "marker-population"));
     const geneField = document.getElementById(panelElementId(panelKey, "gene-field"));
-    if (!modeSelect || !markerPopulationField || !markerPopulationSelect || !geneField) {
+    if (!modeSelect || !markerPopulationField || !markerPopulationSelect || !geneField || !modalityField || !modalitySelect) {
       return;
     }
+    const currentModality = normalizeModalityId(modalitySelect.value || ((currentModalitiesState || {}).default || "rna"));
+    modalitySelect.innerHTML = "";
+    modalities.forEach((entry) => {
+      const option = document.createElement("option");
+      option.value = entry.id;
+      option.textContent = entry.label;
+      if (normalizeModalityId(entry.id) === currentModality) {
+        option.selected = true;
+      }
+      modalitySelect.appendChild(option);
+    });
+    if (!modalitySelect.value && modalities.length) {
+      modalitySelect.value = modalities[0].id;
+    }
+    modalityField.classList.toggle("hidden", modalities.length <= 1);
+
+    const networkPopulations = markerNetworkPopulations(panelKey);
+    const fastcommPopulations = fastCommPopulations();
+    const modes = availableVisualizationModes(panelKey);
     const currentMode = modeSelect.value;
     modeSelect.innerHTML = "";
     modes.forEach((mode) => {
@@ -689,7 +853,8 @@ function updateExpressionModeOptions() {
 
     const currentPopulation = markerPopulationSelect.value;
     markerPopulationSelect.innerHTML = "";
-    networkPopulations.forEach((population) => {
+    const dropdownPopulations = modeSelect.value === "fastcomm_network" ? fastcommPopulations : networkPopulations;
+    dropdownPopulations.forEach((population) => {
       const option = document.createElement("option");
       option.value = population;
       option.textContent = population;
@@ -698,13 +863,18 @@ function updateExpressionModeOptions() {
       }
       markerPopulationSelect.appendChild(option);
     });
-    if (!markerPopulationSelect.value && networkPopulations.length) {
-      markerPopulationSelect.value = networkPopulations[0];
+    if (!markerPopulationSelect.value && dropdownPopulations.length) {
+      markerPopulationSelect.value = dropdownPopulations[0];
     }
 
     const mode = modeSelect.value;
-    const showMarkerPopulation = mode === "marker_network" && networkPopulations.length > 0;
+    const showMarkerPopulation = (mode === "marker_network" && networkPopulations.length > 0) || (mode === "fastcomm_network" && fastcommPopulations.length > 0);
     const showGene = mode === "expression_umap" || mode === "violin";
+    updatePanelFeatureInput(panelKey);
+    const populationLabel = markerPopulationField.querySelector("span");
+    if (populationLabel) {
+      populationLabel.textContent = mode === "fastcomm_network" ? "Marker cell state" : "Marker cell state";
+    }
     markerPopulationField.classList.toggle("hidden", !showMarkerPopulation);
     geneField.classList.toggle("hidden", !showGene);
   });
@@ -717,8 +887,10 @@ function setPanelGeneValue(panelKey, value) {
   }
 }
 
-function buildMarkerHeatmapViewerUrl(jobId) {
-  return withRootPath(`/jobs/${jobId}/marker/heatmap/viewer`);
+function buildMarkerHeatmapViewerUrl(jobId, modality) {
+  const params = new URLSearchParams();
+  params.set("modality", normalizeModalityId(modality));
+  return `${withRootPath(`/jobs/${jobId}/marker/heatmap/viewer`)}?${params.toString()}`;
 }
 
 async function logClientEvent(jobId, message) {
@@ -740,10 +912,11 @@ async function renderMarkerHeatmapViewer(jobId, panelKey) {
   resetVisualizationSurface(panelKey);
   const plot = document.getElementById(panelPlotId(panelKey));
   const params = getDisplayFilterParams(panelKey);
+  params.set("modality", panelModality(panelKey));
   const suffix = params.toString() ? `?${params.toString()}` : "";
   const datasetPath = apiPath(`/jobs/${jobId}/marker/heatmap.tsv${suffix}`);
   const datasetUrl = `${window.location.origin}${datasetPath}`;
-  const viewerPath = `${buildMarkerHeatmapViewerUrl(jobId)}${suffix}`;
+  const viewerPath = `${withRootPath(`/jobs/${jobId}/marker/heatmap/viewer`)}${suffix}`;
   const viewerUrl = `${window.location.origin}${viewerPath}`;
   await logClientEvent(jobId, `MarkerHeatmap requested. dataset_url=${datasetUrl}`);
   await logClientEvent(jobId, `MarkerHeatmap viewer_url=${viewerUrl}`);
@@ -873,6 +1046,129 @@ function renderExpressionNetwork(panelKey, payload) {
     const gene = event?.target?.data("id");
     if (gene) {
       setPanelGeneValue(panelKey, gene);
+    }
+  });
+}
+
+function setNetworkHoverTooltip(panelKey, text, renderedPosition = null) {
+  const plot = document.getElementById(panelPlotId(panelKey));
+  if (!plot) {
+    return;
+  }
+  let tooltip = plot.querySelector(".network-hover-tooltip");
+  if (!tooltip) {
+    tooltip = document.createElement("div");
+    tooltip.className = "network-hover-tooltip";
+    plot.appendChild(tooltip);
+  }
+  const message = String(text || "").trim();
+  if (!message) {
+    tooltip.classList.add("hidden");
+    tooltip.textContent = "";
+    return;
+  }
+  tooltip.textContent = message;
+  tooltip.classList.remove("hidden");
+  if (renderedPosition) {
+    tooltip.style.left = `${Math.min(plot.clientWidth - 260, Math.max(12, renderedPosition.x + 12))}px`;
+    tooltip.style.top = `${Math.min(plot.clientHeight - 120, Math.max(12, renderedPosition.y + 12))}px`;
+  }
+}
+
+function renderFastCommNetwork(panelKey, payload) {
+  resetVisualizationSurface(panelKey);
+  const plot = document.getElementById(panelPlotId(panelKey));
+  const elements = payload.elements || [];
+  if (!elements.length) {
+    renderVisualizationMessage(panelKey, payload.message || `No fastComm interactions were available for ${payload.population}.`, "fastComm");
+    return;
+  }
+  expressionCyByPanel[panelKey] = cytoscape({
+    container: plot,
+    elements,
+    style: [
+      {
+        selector: "node",
+        style: {
+          "background-color": "data(color)",
+          label: "data(label)",
+          color: "#0f172a",
+          "font-size": 12,
+          "text-valign": "center",
+          "text-halign": "center",
+          width: 34,
+          height: 34,
+          "border-width": 1,
+          "border-color": "#94a3b8",
+        },
+      },
+      {
+        selector: "node[node_type = 'focus']",
+        style: {
+          width: 52,
+          height: 52,
+          color: "#ffffff",
+          "font-weight": 700,
+          "border-width": 3,
+          "border-color": "#134e4a",
+        },
+      },
+      {
+        selector: "edge",
+        style: {
+          width: "data(weight)",
+          "line-color": "#0f766e",
+          "target-arrow-color": "#0f766e",
+          "target-arrow-shape": "triangle",
+          "curve-style": "bezier",
+          opacity: 0.65,
+        },
+      },
+      {
+        selector: "edge.hovered",
+        style: {
+          opacity: 1,
+          "line-color": "#f97316",
+          "target-arrow-color": "#f97316",
+          label: "data(label)",
+          color: "#0f172a",
+          "font-size": 10,
+          "text-background-color": "#ffffff",
+          "text-background-opacity": 0.85,
+          "text-background-padding": 3,
+        },
+      },
+      {
+        selector: "node:selected",
+        style: {
+          "border-width": 4,
+          "border-color": "#f97316",
+        },
+      },
+    ],
+    layout: {
+      name: "circle",
+      animate: true,
+      fit: true,
+      padding: 56,
+    },
+  });
+  expressionCyByPanel[panelKey].on("mouseover", "edge", (event) => {
+    event.target.addClass("hovered");
+    setNetworkHoverTooltip(panelKey, event.target.data("tooltip"), event.renderedPosition);
+  });
+  expressionCyByPanel[panelKey].on("mouseout", "edge", (event) => {
+    event.target.removeClass("hovered");
+    setNetworkHoverTooltip(panelKey, "");
+  });
+  expressionCyByPanel[panelKey].on("tap", "edge", (event) => {
+    event.target.addClass("hovered");
+    setNetworkHoverTooltip(panelKey, event.target.data("tooltip"), event.renderedPosition);
+  });
+  expressionCyByPanel[panelKey].on("tap", "node", (event) => {
+    const label = event?.target?.data("label");
+    if (label) {
+      setPanelSummary(panelKey, `${payload.direction === "outgoing" ? "Outgoing" : "Incoming"} fastComm view for ${payload.population}; selected ${label}.`);
     }
   });
 }
@@ -1078,6 +1374,7 @@ function initSpeciesSelect() {
     const selected = registry.species.find((sp) => sp.id === speciesSelect.value);
     referenceSelect.innerHTML = "";
     if (!selected) {
+      updateImputeModalityField();
       return;
     }
     selected.references.forEach((ref) => {
@@ -1091,6 +1388,7 @@ function initSpeciesSelect() {
   });
 
   referenceSelect.addEventListener("change", () => {
+    updateImputeModalityField();
     updateReferenceChangeState();
     loadReferencePreview();
   });
@@ -1098,6 +1396,34 @@ function initSpeciesSelect() {
   if (registry.species.length) {
     speciesSelect.value = registry.species[0].id;
     speciesSelect.dispatchEvent(new Event("change"));
+  }
+}
+
+function updateImputeModalityField() {
+  const field = document.getElementById("qc-impute-modality-field");
+  const select = document.getElementById("qc-impute-modality-select");
+  if (!field || !select) {
+    return;
+  }
+  const reference = selectedReferenceConfig();
+  const supported = Array.from(new Set(((reference && reference.impute_modalities) || []).map((value) => normalizeModalityId(value, "")))).filter(Boolean);
+  field.classList.toggle("hidden", supported.length === 0);
+  if (!supported.length) {
+    select.value = "none";
+    return;
+  }
+  Array.from(select.options).forEach((option) => {
+    if (option.value === "none") {
+      option.hidden = false;
+      option.disabled = false;
+      return;
+    }
+    const enabled = supported.includes(normalizeModalityId(option.value, ""));
+    option.hidden = !enabled;
+    option.disabled = !enabled;
+  });
+  if (!supported.includes(normalizeModalityId(select.value, ""))) {
+    select.value = "none";
   }
 }
 
@@ -1125,6 +1451,8 @@ function updateReferenceChangeState() {
     clearGeneSuggestions();
     clearDisplayFilters();
     resetDifferentialResults();
+    currentMarkerAnalysisByModality = { rna: null };
+    currentFastCommAnalysis = null;
     document.getElementById("qc-cell-status").textContent =
       "Reference changed. Click Save QC and run to realign the uploaded data against the newly selected reference.";
     return;
@@ -1184,6 +1512,19 @@ function hookForms() {
       updateExpressionModeOptions();
       loadVisualizationPanel(panelKey);
     });
+    document.getElementById(panelElementId(panelKey, "modality")).addEventListener("change", () => {
+      const datalist = document.getElementById(`${panelKey}-feature-suggestions`);
+      if (datalist) {
+        datalist.innerHTML = "";
+      }
+      updatePanelFeatureInput(panelKey, { value: "" });
+      loadedGeneSuggestionsSignature = "";
+      updateExpressionModeOptions();
+      void (async () => {
+        await loadGeneSuggestions(getResultsJobId());
+        loadVisualizationPanel(panelKey);
+      })();
+    });
     document.getElementById(panelElementId(panelKey, "gene-query")).addEventListener("change", () => {
       loadVisualizationPanel(panelKey);
     });
@@ -1231,19 +1572,36 @@ function hookForms() {
     if (!currentDifferentialState) {
       return;
     }
-    currentDifferentialState = {
+    const nextState = {
       ...currentDifferentialState,
       config: {
         ...(currentDifferentialState.config || {}),
         population_col: document.getElementById("differential-population").value,
       },
     };
+    currentDifferentialState = markDifferentialConfigDirty(nextState);
+    updateDifferentialUi(currentDifferentialState);
+  });
+  document.getElementById("differential-modality").addEventListener("change", () => {
+    if (!currentDifferentialState) {
+      return;
+    }
+    currentDifferentialState = {
+      ...markDifferentialConfigDirty({
+        ...currentDifferentialState,
+        config: {
+          ...(currentDifferentialState.config || {}),
+          modality: normalizeModalityId(document.getElementById("differential-modality").value || "rna"),
+        },
+      }),
+    };
+    updateDifferentialUi(currentDifferentialState);
   });
   document.getElementById("differential-sample-field").addEventListener("change", () => {
     if (!currentDifferentialState) {
       return;
     }
-    currentDifferentialState = {
+    currentDifferentialState = markDifferentialConfigDirty({
       ...currentDifferentialState,
       config: {
         ...(currentDifferentialState.config || {}),
@@ -1251,7 +1609,7 @@ function hookForms() {
         group1_samples: [],
         group2_samples: [],
       },
-    };
+    });
     updateDifferentialUi(currentDifferentialState);
   });
   document.getElementById("differential-result-population").addEventListener("change", () => {
@@ -1260,6 +1618,17 @@ function hookForms() {
   });
   initToggleMultiSelect(document.getElementById("differential-group1"));
   initToggleMultiSelect(document.getElementById("differential-group2"));
+}
+
+function markDifferentialConfigDirty(state) {
+  if (!state || state.status !== "completed") {
+    return state;
+  }
+  return {
+    ...state,
+    status: "idle",
+    message: "Differential settings changed. Run cellHarmony-differential to analyze the updated configuration.",
+  };
 }
 
 function updateResetDataButton() {
@@ -1282,7 +1651,7 @@ function resetWorkspaceData() {
     viz2: null,
   };
   loadedResultsJobId = null;
-  loadedGeneSuggestionsJobId = null;
+  loadedGeneSuggestionsSignature = "";
   loadedDisplayFiltersJobId = null;
   resetExploreResultsReadiness();
   currentDisplayFiltersMeta = null;
@@ -1292,6 +1661,9 @@ function resetWorkspaceData() {
   currentJobReference = "";
   referenceRerunPending = false;
   currentMarkerAnalysis = null;
+  currentMarkerAnalysisByModality = { rna: null };
+  currentFastCommAnalysis = null;
+  currentModalitiesState = { default: "rna", available: [{ id: "rna", label: "RNA", feature_label: "gene", example_feature: "MPO" }] };
   currentDifferentialState = null;
   currentDifferentialGene = "";
   currentDifferentialPopulation = "";
@@ -1377,6 +1749,7 @@ function resetWorkspaceData() {
   sampleContainer.innerHTML = "";
   sampleCount = 0;
   addSampleRow();
+  updateImputeModalityField();
 
   setExplorerTab("run");
   updateWorkflowPanels(null);
@@ -1509,6 +1882,7 @@ async function handleQcSubmit(evt) {
     mit_percent: evt.target.mit_percent.value,
     align_cutoff: evt.target.align_cutoff.value,
     ambient_correction: evt.target.ambient_correction.value,
+    impute_modality: evt.target.impute_modality ? evt.target.impute_modality.value : "none",
   };
   try {
     if (selectedReferenceDiffersFromLoadedJob()) {
@@ -1534,6 +1908,7 @@ async function handleQcSubmit(evt) {
         viz2: null,
       };
       currentMarkerAnalysis = null;
+      currentFastCommAnalysis = null;
       loadedResultsJobId = null;
       resetExploreResultsReadiness();
       clearGeneSuggestions();
@@ -1576,6 +1951,7 @@ async function handleDifferentialSubmit(evt) {
     return;
   }
   const payload = {
+    modality: document.getElementById("differential-modality").value || "rna",
     population_col: document.getElementById("differential-population").value,
     sample_field: document.getElementById("differential-sample-field").value,
     group1_samples: getMultiSelectValues(document.getElementById("differential-group1")),
@@ -1656,6 +2032,9 @@ function applyJobStatus(jobId, data) {
   currentJobSpecies = String(data.species || currentJobSpecies || "");
   currentJobReference = String(data.reference || currentJobReference || "");
   currentMarkerAnalysis = data.marker_analysis && data.marker_analysis.enabled ? data.marker_analysis : null;
+  currentMarkerAnalysisByModality = data.marker_analysis_by_modality || { rna: currentMarkerAnalysis };
+  currentFastCommAnalysis = data.fastcomm_analysis && data.fastcomm_analysis.enabled ? data.fastcomm_analysis : null;
+  currentModalitiesState = data.modalities || { default: "rna", available: [{ id: "rna", label: "RNA", feature_label: "gene", example_feature: "MPO" }] };
   updateExpressionModeOptions();
   updateWorkflowPanels(referenceRerunPending ? "uploaded" : (data.status || null));
   document.getElementById("job-progress").style.width = `${data.progress || 0}%`;
@@ -1705,7 +2084,10 @@ function applyJobStatus(jobId, data) {
         }
         const input = document.getElementById(panelElementId(panelKey, "gene-query"));
         if (input && !String(input.value || "").trim()) {
-          input.value = data.default_gene;
+          const modality = panelModality(panelKey);
+          input.value = normalizeModalityId(modality) === "rna"
+            ? data.default_gene
+            : preferredFeatureForModality(modality);
         }
       });
     }
@@ -1715,6 +2097,9 @@ function applyJobStatus(jobId, data) {
   } else {
     resetExploreResultsReadiness(jobId);
     currentMarkerAnalysis = null;
+    currentMarkerAnalysisByModality = { rna: null };
+    currentFastCommAnalysis = null;
+    currentModalitiesState = data.modalities || { default: "rna", available: [{ id: "rna", label: "RNA", feature_label: "gene", example_feature: "MPO" }] };
     updateExpressionModeOptions();
     clearDisplayFilters();
   }
@@ -1742,6 +2127,8 @@ function updateWorkflowPanels(status) {
   const previewPanel = document.getElementById("reference-preview-panel");
   const baseline = document.getElementById("baseline-results-view");
   const differential = document.getElementById("differential-results-view");
+  const exploreTabButton = document.querySelector('.workspace-tab-btn[data-tab="explore"]');
+  const differentialTabButton = document.querySelector('.workspace-tab-btn[data-tab="differential"]');
 
   qcPanel.classList.toggle("hidden", !hasUploadedJob);
   qcLivePanel.classList.toggle("hidden", !hasStartedQcRun);
@@ -1752,6 +2139,14 @@ function updateWorkflowPanels(status) {
     runGrid.classList.toggle("preupload-mode", !hasUploadedJob);
     runGrid.classList.toggle("workflow-mode", hasUploadedJob);
   }
+  if (exploreTabButton) {
+    exploreTabButton.classList.toggle("hidden", !hasExploreReady);
+    exploreTabButton.disabled = !hasExploreReady;
+  }
+  if (differentialTabButton) {
+    differentialTabButton.classList.toggle("hidden", !hasCompletedAlignment);
+    differentialTabButton.disabled = !hasCompletedAlignment;
+  }
 
   if (!hasCompletedAlignment) {
     baseline.classList.add("hidden");
@@ -1759,6 +2154,7 @@ function updateWorkflowPanels(status) {
   } else if (!hasExploreReady) {
     baseline.classList.add("hidden");
   }
+  syncExplorerWorkspace(activeExplorerTab);
 }
 
 async function loadReferencePreview() {
@@ -2294,13 +2690,18 @@ async function populateDownloadLinks(jobId, statusData = null) {
     assignments: "Download assignments",
     combined_h5ad: "Download combined_h5ad",
     marker_genes_zip: "Download marker genes ZIP",
+    imputed_lipids_h5ad: "Download imputed_lipids_h5ad",
+    lipid_marker_genes_zip: "Download lipid marker ZIP",
+    imputed_adt_h5ad: "Download imputed_adt_h5ad",
+    adt_marker_genes_zip: "Download ADT marker ZIP",
   };
   Object.keys(artifacts).forEach((key) => {
     if (
       key === "umap_coordinates" ||
       key === "umap_placeholder_expression" ||
       key === "umap_pdf" ||
-      key === "umap_pdf_plain"
+      key === "umap_pdf_plain" ||
+      key === "imputed_lipids_summary_json"
     ) {
       return;
     }
@@ -2326,6 +2727,8 @@ function updateDifferentialUi(state) {
   const resultsView = document.getElementById("differential-results-view");
   const intro = document.getElementById("differential-intro");
   const populationSelect = document.getElementById("differential-population");
+  const modalityField = document.getElementById("differential-modality-field");
+  const modalitySelect = document.getElementById("differential-modality");
   const sampleFieldSelect = document.getElementById("differential-sample-field");
   const group1Select = document.getElementById("differential-group1");
   const group2Select = document.getElementById("differential-group2");
@@ -2336,10 +2739,13 @@ function updateDifferentialUi(state) {
   const message = document.getElementById("differential-message");
   const archiveLink = document.getElementById("differential-archive-link");
   const logLink = document.getElementById("differential-log-link");
+  const vizModeSelect = document.getElementById("differential-viz-mode");
+  const detailTitle = document.getElementById("differential-detail-title");
 
   const enabled = Boolean(state && state.enabled);
   const config = (state && state.config) || {};
   const populationOptions = (state && state.population_columns) || [];
+  const modalityOptions = (state && state.modalities) || [{ id: "rna", label: "RNA", feature_label: "gene" }];
   const sampleFieldOptions = (state && state.sample_fields) || [];
   const sampleValuesMap = (state && state.sample_values) || {};
   const optionHasValue = (options, value) => {
@@ -2348,7 +2754,13 @@ function updateDifferentialUi(state) {
   };
   const differentialRunning = state && (state.status === "queued" || state.status === "processing");
   const currentPopulationValue = populationSelect.value;
+  const currentModalityValue = normalizeModalityId(modalitySelect.value || "rna");
   const currentSampleFieldValue = sampleFieldSelect.value;
+  const selectedModality = (
+    (differentialRunning && modalityOptions.some((entry) => normalizeModalityId(entry.id) === currentModalityValue) && currentModalityValue)
+      || normalizeModalityId(config.modality || (state && state.default_modality) || "rna")
+  );
+  const featureLabel = String(((modalityOptions.find((entry) => normalizeModalityId(entry.id) === selectedModality) || {}).feature_label) || "gene");
   const selectedPopulation = (
     (differentialRunning && optionHasValue(populationOptions, currentPopulationValue) && currentPopulationValue)
       || config.population_col
@@ -2361,6 +2773,8 @@ function updateDifferentialUi(state) {
       || (state && state.default_sample_field)
       || ""
   );
+  populateSingleSelect(modalitySelect, modalityOptions.map((entry) => ({ value: entry.id, label: entry.label })), selectedModality);
+  modalityField.classList.toggle("hidden", modalityOptions.length <= 1);
   populateSingleSelect(sampleFieldSelect, sampleFieldOptions, selectedSampleField);
   const sampleValues = sampleValuesMap[sampleFieldSelect.value] || [];
   const comparisonTypes = (state && state.comparison_types) || ["cells"];
@@ -2384,6 +2798,7 @@ function updateDifferentialUi(state) {
 
   const disableInputs = !enabled || !populationOptions.length || !sampleFieldOptions.length;
   populationSelect.disabled = disableInputs;
+  modalitySelect.disabled = disableInputs || modalityOptions.length <= 1;
   sampleFieldSelect.disabled = disableInputs;
   group1Select.disabled = disableInputs;
   group2Select.disabled = disableInputs;
@@ -2394,6 +2809,7 @@ function updateDifferentialUi(state) {
   document.getElementById("differential-progress-label").textContent = `${progress}%`;
 
   if (!state) {
+    modalityField.classList.add("hidden");
     if (emptyState) {
       emptyState.textContent = "Available after alignment completes for jobs with two or more samples.";
       emptyState.classList.remove("hidden");
@@ -2411,6 +2827,7 @@ function updateDifferentialUi(state) {
   }
 
   if (!showPanel) {
+    modalityField.classList.add("hidden");
     if (emptyState) {
       emptyState.textContent = "Differential gene analyses between biological groups (i.e., disease versus controls) are only enabled when two or more samples (multiple h5 files or a single h5ad) are uploaded for the job.";
       emptyState.classList.remove("hidden");
@@ -2430,14 +2847,33 @@ function updateDifferentialUi(state) {
   }
 
   intro.textContent = enabled
-    ? "Perform cell-state differential expression."
+    ? `Perform cell-state differential ${featureLabel} analysis.`
     : "Differential analysis is only enabled when two or more samples were uploaded for the job.";
+  if (detailTitle) {
+    detailTitle.textContent = featureLabel === "lipid" ? "Lipid Detail" : "Gene Detail";
+  }
 
   let statusMessage = state.message || "";
-  if (state.status === "completed" && !state.go_terms_included) {
+  if (state.status === "completed" && !state.go_terms_included && (state.visualization_modes || []).some((entry) => entry.value === "go")) {
     statusMessage += " GO terms were not available for this run.";
   }
   message.textContent = statusMessage;
+
+  const currentVizMode = vizModeSelect.value;
+  const visualizationModes = (state.visualization_modes || []);
+  vizModeSelect.innerHTML = "";
+  visualizationModes.forEach((entry) => {
+    const option = document.createElement("option");
+    option.value = entry.value;
+    option.textContent = entry.label;
+    if (entry.value === currentVizMode) {
+      option.selected = true;
+    }
+    vizModeSelect.appendChild(option);
+  });
+  if (!vizModeSelect.value && visualizationModes.length) {
+    vizModeSelect.value = visualizationModes[0].value;
+  }
 
   if (state.archive_url) {
     archiveLink.href = state.archive_url;
@@ -2459,7 +2895,7 @@ function updateDifferentialUi(state) {
     } else {
       resetDifferentialResults();
       renderDifferentialEmpty(
-        "Differential analysis completed, but no significant DE genes were available for the selected comparison."
+        `Differential analysis completed, but no significant DE ${featureLabel}s were available for the selected comparison.`
       );
     }
   } else {
@@ -3046,11 +3482,13 @@ function renderDifferentialEmpty(message) {
 
 function resetDifferentialResults() {
   destroyDifferentialNetwork();
+  const vizModes = ((currentDifferentialState && currentDifferentialState.visualization_modes) || []).map((entry) => entry.label);
+  const vizSummary = vizModes.length ? vizModes.join(", ") : "Heatmap, Volcano, Network, or GO terms";
   const plot = document.getElementById("differential-plot-area");
   Plotly.purge(plot);
   plot.classList.add("hidden");
   const empty = document.getElementById("differential-plot-empty");
-  empty.textContent = "Run cellHarmony-differential to explore the integrated heatmap, volcano plot, network, or GO terms.";
+  empty.textContent = `Run cellHarmony-differential to explore ${vizSummary}.`;
   empty.classList.remove("hidden");
   document.getElementById("download-differential-left-btn").classList.add("hidden");
   const populationSelect = document.getElementById("differential-result-population");
@@ -3061,21 +3499,32 @@ function resetDifferentialResults() {
 }
 
 function resetDifferentialGeneDetail() {
+  const featureLabel = String((currentDifferentialState && currentDifferentialState.feature_label) || "gene");
+  const capitalizedFeature = featureLabel.charAt(0).toUpperCase() + featureLabel.slice(1);
   const plot = document.getElementById("differential-gene-plot");
   Plotly.purge(plot);
   plot.classList.add("hidden");
-  document.getElementById("differential-selected-gene").textContent = "Select a gene from the left panel.";
+  document.getElementById("differential-selected-gene").textContent = `Select a ${featureLabel} from the left panel.`;
   document.getElementById("download-differential-gene-btn").classList.add("hidden");
   document.getElementById("download-differential-gene-btn").removeAttribute("href");
   const empty = document.getElementById("differential-gene-empty");
-  empty.textContent = "Select a gene from the heatmap, volcano plot, network, or GO terms to compare expression between groups.";
+  empty.textContent = `Select a ${featureLabel} from the differential view to compare ${featureLabel} values between groups.`;
   empty.classList.remove("hidden");
   document.getElementById("differential-gene-stats").classList.add("hidden");
+  const detailTitle = document.getElementById("differential-detail-title");
+  if (detailTitle) {
+    detailTitle.textContent = `${capitalizedFeature} Detail`;
+  }
 }
 
 function clearGeneSuggestions() {
-  document.getElementById("gene-suggestions").innerHTML = "";
-  loadedGeneSuggestionsJobId = null;
+  VISUALIZATION_PANELS.forEach((panelKey) => {
+    const datalist = document.getElementById(`${panelKey}-feature-suggestions`);
+    if (datalist) {
+      datalist.innerHTML = "";
+    }
+  });
+  loadedGeneSuggestionsSignature = "";
 }
 
 function clearDisplayFilters() {
@@ -3108,23 +3557,50 @@ function clearDisplayFilters() {
 }
 
 async function loadGeneSuggestions(jobId) {
-  if (!jobId || loadedGeneSuggestionsJobId === jobId) {
+  const signature = [
+    String(jobId || "").trim(),
+    ...VISUALIZATION_PANELS.map((panelKey) => `${panelKey}:${panelModality(panelKey)}`),
+  ].join("|");
+  if (!jobId || loadedGeneSuggestionsSignature === signature) {
     return;
   }
   try {
-    const resp = await fetch(apiPath(`/jobs/${jobId}/genes`));
-    const data = await parseApiResponse(resp);
-    if (!resp.ok) {
-      throw new Error(data.detail || "Unable to load gene suggestions.");
+    for (const panelKey of VISUALIZATION_PANELS) {
+      const modality = panelModality(panelKey);
+      const datalist = document.getElementById(`${panelKey}-feature-suggestions`);
+      if (!datalist) {
+        continue;
+      }
+      datalist.innerHTML = "";
+      const resp = await fetch(apiPath(`/jobs/${jobId}/genes?modality=${encodeURIComponent(modality)}`));
+      const data = await parseApiResponse(resp);
+      if (!resp.ok) {
+        throw new Error(data.detail || "Unable to load gene suggestions.");
+      }
+      const seen = new Set();
+      const features = [];
+      (data.genes || []).forEach((gene) => {
+        const value = String(gene || "").trim();
+        if (!value || seen.has(value)) {
+          return;
+        }
+        seen.add(value);
+        features.push(value);
+        const option = document.createElement("option");
+        option.value = value;
+        datalist.appendChild(option);
+      });
+      const input = document.getElementById(panelElementId(panelKey, "gene-query"));
+      if (input) {
+        input.setAttribute("list", `${panelKey}-feature-suggestions`);
+        const currentValue = String(input.value || "").trim();
+        if (!currentValue || !seen.has(currentValue)) {
+          input.value = preferredFeatureForModality(modality, features);
+        }
+      }
+      updatePanelFeatureInput(panelKey);
     }
-    const datalist = document.getElementById("gene-suggestions");
-    datalist.innerHTML = "";
-    (data.genes || []).forEach((gene) => {
-      const option = document.createElement("option");
-      option.value = gene;
-      datalist.appendChild(option);
-    });
-    loadedGeneSuggestionsJobId = jobId;
+    loadedGeneSuggestionsSignature = signature;
   } catch (err) {
     console.warn(err);
   }
@@ -3299,6 +3775,7 @@ function setResultsControlsDisabled(disabled) {
   VISUALIZATION_PANELS.forEach((panelKey) => {
     const controls = [
       document.getElementById(panelElementId(panelKey, "mode")),
+      document.getElementById(panelElementId(panelKey, "modality")),
       document.getElementById(panelElementId(panelKey, "gene-query")),
       document.getElementById(panelElementId(panelKey, "marker-population")),
       document.getElementById(panelElementId(panelKey, "filter1-field")),
@@ -3332,6 +3809,7 @@ function panelModeLabel(mode) {
     violin: "violin",
     marker_heatmap: "marker_heatmap",
     marker_network: "marker_network",
+    fastcomm_network: "fastcomm_network",
   };
   return labels[mode] || "plot";
 }
@@ -3339,12 +3817,14 @@ function panelModeLabel(mode) {
 async function loadVisualizationPanel(panelKey) {
   const jobId = document.getElementById("results-job-id").value.trim();
   const mode = getPanelSelectValue(panelKey, "mode");
+  const modality = panelModality(panelKey);
   if (!jobId || !mode) {
     return;
   }
   try {
     if (isUmapMode(mode)) {
       const params = getDisplayFilterParams(panelKey);
+      params.set("modality", modality);
       const suffix = params.toString() ? `?${params.toString()}` : "";
       const resp = await fetch(apiPath(`/jobs/${jobId}/umap${suffix}`));
       const data = await parseApiResponse(resp);
@@ -3372,12 +3852,32 @@ async function loadVisualizationPanel(panelKey) {
         renderVisualizationPanel(panelKey);
         return;
       }
-      const resp = await fetch(apiPath(`/jobs/${jobId}/marker/network?population=${encodeURIComponent(population)}`));
+      const resp = await fetch(apiPath(`/jobs/${jobId}/marker/network?population=${encodeURIComponent(population)}&modality=${encodeURIComponent(modality)}`));
       const data = await parseApiResponse(resp);
       if (!resp.ok) {
         throw new Error(data.detail || "Marker network unavailable.");
       }
       panelPlotData[panelKey] = { source: "marker_network", payload: data };
+      renderVisualizationPanel(panelKey);
+      return;
+    }
+
+    if (mode === "fastcomm_network") {
+      const population = getPanelSelectValue(panelKey, "marker-population");
+      if (!population) {
+        panelPlotData[panelKey] = {
+          source: "fastcomm_network",
+          payload: { population: "", elements: [], message: "No fastComm cell states are available." },
+        };
+        renderVisualizationPanel(panelKey);
+        return;
+      }
+      const resp = await fetch(apiPath(`/jobs/${jobId}/fastcomm/network?population=${encodeURIComponent(population)}&direction=incoming&limit=40`));
+      const data = await parseApiResponse(resp);
+      if (!resp.ok) {
+        throw new Error(data.detail || "fastComm network unavailable.");
+      }
+      panelPlotData[panelKey] = { source: "fastcomm_network", payload: data };
       renderVisualizationPanel(panelKey);
       return;
     }
@@ -3388,13 +3888,14 @@ async function loadVisualizationPanel(panelKey) {
       if (!gene) {
         panelPlotData[panelKey] = {
           source: "missing_gene",
-          payload: { message: "Select a gene to render this plot.", umap: [], violin: [], gene: "", requested_gene: "" },
+          payload: { message: "Select a molecule to render this plot.", umap: [], violin: [], gene: "", requested_gene: "" },
         };
         renderVisualizationPanel(panelKey);
         return;
       }
       const params = getDisplayFilterParams(panelKey);
       params.set("gene", gene);
+      params.set("modality", modality);
       const resp = await fetch(apiPath(`/jobs/${jobId}/expression?${params.toString()}`));
       const data = await parseApiResponse(resp);
       if (!resp.ok) {
@@ -3730,13 +4231,21 @@ function renderPanelExpression(panelKey, expressionData, mode, dotScale) {
     if (!(maxValue > minValue)) {
       maxValue = minValue + 1e-9;
     }
-    const colorscale = [
-      [0.0, "#f3f4f6"],
-      [0.15, "#fecaca"],
-      [0.35, "#fca5a5"],
-      [0.6, "#ef4444"],
-      [1.0, "#b91c1c"],
-    ];
+    const normalizedModality = normalizeModalityId(expressionData?.modality);
+    const useImputedPalette = normalizedModality === "lipids" || normalizedModality === "adt";
+    const colorscale = useImputedPalette
+      ? [
+          [0.0, "#2563eb"],
+          [0.5, "#fde047"],
+          [1.0, "#dc2626"],
+        ]
+      : [
+          [0.0, "#f3f4f6"],
+          [0.15, "#fecaca"],
+          [0.35, "#fca5a5"],
+          [0.6, "#ef4444"],
+          [1.0, "#b91c1c"],
+        ];
     const binCount = Math.min(12, Math.max(4, Math.ceil(Math.sqrt(expressedPoints.length / 2500))));
     const step = Math.max(1, Math.ceil(expressedPoints.length / binCount));
     for (let start = 0; start < expressedPoints.length; start += step) {
@@ -3803,8 +4312,9 @@ function renderVisualizationPanel(panelKey) {
   }
   if (mode === "marker_heatmap") {
     const jobId = document.getElementById("results-job-id").value.trim();
-    setPanelSummary(panelKey, "Marker heatmap view uses the exported marker analysis matrix.");
-    if (!jobId || !markerHeatmapAvailable()) {
+    const featureLabel = String(modalityDefinition(panelModality(panelKey)).feature_label || "gene");
+    setPanelSummary(panelKey, `Marker heatmap view uses the exported ${featureLabel} marker analysis matrix.`);
+    if (!jobId || !markerHeatmapAvailable(panelKey)) {
       renderVisualizationMessage(panelKey, "Marker heatmap output is unavailable for this job.", "MarkerHeatmap");
       return;
     }
@@ -3821,6 +4331,16 @@ function renderVisualizationPanel(panelKey) {
     renderExpressionNetwork(panelKey, data.payload);
     return;
   }
+  if (mode === "fastcomm_network") {
+    const population = String(data.payload?.population || getPanelSelectValue(panelKey, "marker-population") || "").trim();
+    setPanelSummary(panelKey, population ? `fastComm incoming receptor-ligand view for ${population}.` : "fastComm receptor-ligand view.");
+    if (!(data.payload?.elements || []).length) {
+      renderVisualizationMessage(panelKey, data.payload?.message || "fastComm network unavailable.", population ? `${population} fastComm` : "fastComm");
+      return;
+    }
+    renderFastCommNetwork(panelKey, data.payload);
+    return;
+  }
   if (isUmapMode(mode)) {
     renderPanelUmap(panelKey, data.payload || {}, mode, dotScale);
     return;
@@ -3835,11 +4355,13 @@ async function refreshResults() {
 async function downloadVisualizationImage(panelKey) {
   const jobId = document.getElementById("results-job-id").value.trim();
   const mode = getPanelSelectValue(panelKey, "mode");
+  const modality = panelModality(panelKey);
   if (!jobId || !mode || !panelPlotData[panelKey]) {
     return;
   }
   if (mode === "marker_heatmap") {
     const params = getDisplayFilterParams(panelKey);
+    params.set("modality", modality);
     window.open(apiPath(`/jobs/${jobId}/marker/heatmap.pdf?${params.toString()}`), "_blank");
     return;
   }
@@ -3848,7 +4370,27 @@ async function downloadVisualizationImage(panelKey) {
     if (!population) {
       return;
     }
-    window.open(apiPath(`/jobs/${jobId}/marker/network/pdf?population=${encodeURIComponent(population)}`), "_blank");
+    window.open(apiPath(`/jobs/${jobId}/marker/network/pdf?population=${encodeURIComponent(population)}&modality=${encodeURIComponent(modality)}`), "_blank");
+    return;
+  }
+  if (mode === "fastcomm_network") {
+    const cy = expressionCyByPanel[panelKey];
+    if (!cy) {
+      return;
+    }
+    try {
+      await ensureCytoscapeSvgLoaded();
+      const svg = cy.svg({ scale: 1, full: true });
+      const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = buildPdfFilename([jobId, panelKey, "fastcomm_network"], "svg").replace(/\.pdf$/i, ".svg");
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.warn(err);
+    }
     return;
   }
   try {
@@ -3928,6 +4470,12 @@ function initExplorerSandbox() {
 }
 
 function setExplorerTab(tab) {
+  if (tab === "explore" && !areExploreResultsReady()) {
+    tab = "run";
+  }
+  if (tab === "differential" && currentJobStatus !== "completed") {
+    tab = "run";
+  }
   activeExplorerTab = tab;
   document.querySelectorAll(".workspace-tab-btn").forEach((button) => {
     button.classList.toggle("active", button.dataset.tab === tab);

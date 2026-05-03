@@ -1,0 +1,5 @@
+artifacts/
+cache/
+training_data/
+benchmarks/
+models/

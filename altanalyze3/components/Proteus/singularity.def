@@ -1,0 +1,66 @@
+Bootstrap: docker
+From: pytorch/pytorch:2.1.2-cuda12.1-cudnn8-devel
+
+# Proteus Singularity definition file
+#
+# Build (requires root or --fakeroot):
+#   sudo singularity build proteus.sif singularity.def
+#   singularity build --fakeroot proteus.sif singularity.def
+#
+# Or convert from Docker:
+#   singularity build proteus.sif docker-daemon://proteus:latest
+#
+# Run on SLURM:
+#   singularity exec --nv \
+#       --bind /scratch/$USER:/workspace/data \
+#       proteus.sif \
+#       python /workspace/Proteus/scripts/run_train.py
+
+%labels
+    Author AltAnalyze3
+    Version 1.0
+    Description Proteus isoform function prediction model
+
+%environment
+    export PYTHONPATH="/workspace/Proteus:${PYTHONPATH}"
+    export PATH="/opt/conda/bin:${PATH}"
+
+%files
+    # Copy source into the container at build time
+    . /workspace/Proteus
+
+%post
+    apt-get update && apt-get install -y --no-install-recommends \
+        git build-essential wget \
+        && rm -rf /var/lib/apt/lists/*
+
+    pip install --no-cache-dir --upgrade pip
+
+    # Core dependencies
+    pip install --no-cache-dir \
+        "torch>=2.1.0" \
+        "transformers>=4.36" \
+        einops \
+        numpy \
+        pandas \
+        scipy \
+        scikit-learn \
+        tqdm \
+        pyyaml \
+        wandb \
+        metapredict \
+        biopython \
+        fair-esm
+
+    # mamba-ssm: requires CUDA devel headers to compile
+    pip install --no-cache-dir mamba-ssm --no-build-isolation
+
+    # Install Proteus package
+    pip install --no-cache-dir -e /workspace/Proteus
+
+%runscript
+    exec python "$@"
+
+%test
+    python -c "import proteus; print('Proteus import OK')"
+    python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}')"

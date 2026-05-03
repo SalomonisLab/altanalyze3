@@ -212,7 +212,9 @@ Behavior:
 - `MarkerHeatmap` opens the exported marker matrix in an embedded Morpheus view
 - `MarkerNetwork` shows the exported marker network for one marker-defined cell
   state
-- `Marker cell state` appears only when `MarkerNetwork` is selected
+- `fastComm` shows incoming receptor-ligand communication evidence for one
+  selected receiver state
+- `Marker cell state` appears when `MarkerNetwork` or `fastComm` is selected
 
 The `Download PDF` button exports the current Expression mode. For
 `MarkerHeatmap`, the exported PDF is the saved marker heatmap PDF.

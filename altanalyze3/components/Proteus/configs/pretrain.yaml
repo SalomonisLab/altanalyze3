@@ -1,0 +1,17 @@
+n_synthetic_pairs: 500000
+epochs: 30
+lr: 1.0e-3
+batch_size: 512
+tasks:
+  domain_disrupted:
+    type: binary
+    loss_weight: 1.0
+  nmd_triggered:
+    type: binary
+    loss_weight: 1.0
+  tm_lost:
+    type: binary
+    loss_weight: 1.0
+  disorder_delta:
+    type: regression
+    loss_weight: 1.0

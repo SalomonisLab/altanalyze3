@@ -1,0 +1,40 @@
+{
+  "name": "rna2lipid-canonical-training",
+  "data": {
+    "bulk_rna": "../data/feature_blankreduiction.csv",
+    "celltype_rna": "../data/newrna_cell_clair_filtered_symbol.csv",
+    "bulk_lipids": "../data/Bulk_lipids_cleaned_normalized_median_527.csv",
+    "celltype_lipids": "../data/cell_lipids_cleaned_norm_median_286.csv"
+  },
+  "preprocessing": {
+    "collapse_duplicate_genes": true,
+    "remove_zero_only_genes": true,
+    "drop_rows_with_missing_lipids": true,
+    "x_join_mode": "inner",
+    "y_join_mode": "inner"
+  },
+  "training": {
+    "bundle_output": "../artifacts/rna2lipid_multitask_enet_reproducible.pkl",
+    "report_output_dir": "../artifacts/reports/training",
+    "model": {
+      "target_scaling": "none",
+      "l1_ratio": [0.2, 0.5, 0.8],
+      "alphas": [0.001, 0.00215443469, 0.00464158883, 0.01, 0.0215443469, 0.0464158883, 0.1, 0.215443469, 0.464158883, 1.0],
+      "cv": 3,
+      "max_iter": 30000,
+      "n_jobs": -1
+    }
+  },
+  "evaluation": {
+    "baselines": {
+      "pca_ridge": {
+        "max_components": 16,
+        "ridge_alphas": [0.001, 0.01, 0.1, 1.0, 10.0, 100.0]
+      }
+    },
+    "external_pediatric": {
+      "counts_path": "../data/exp.GSE161382_counts_matrix_CPTT-sample-revised-gene-pediatric.txt",
+      "groups_path": "../data/groups.GSE161382_counts_matrix_CPTT-sample-revised-prediatric.txt"
+    }
+  }
+}

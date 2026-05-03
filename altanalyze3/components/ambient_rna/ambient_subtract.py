@@ -556,6 +556,7 @@ def process_anndata(
     store_raw_layer: bool = True,
     replace_x: bool = True,
     write_individual: bool = True,
+    write_merged: bool = True,
     merged_filename: str = "soupx_corrected_merged.h5ad",
     cluster_col: Optional[str] = None,
     method: str = "subtraction",
@@ -788,9 +789,12 @@ def process_anndata(
         }
     )
 
-    merged_path = outdir / merged_filename
-    report_status("Writing merged corrected dataset to {0}".format(merged_path))
-    working.write_h5ad(merged_path, compression="gzip")
+    if write_merged:
+        merged_path = outdir / merged_filename
+        report_status("Writing merged corrected dataset to {0}".format(merged_path))
+        working.write_h5ad(merged_path, compression="gzip")
+    else:
+        report_status("Skipping merged corrected dataset write; returning corrected AnnData in memory.")
 
     if not summary_table.empty:
         summary_path = outdir / "soupx_summary.tsv"
@@ -810,6 +814,7 @@ def process_h5ad(
     store_raw_layer: bool = True,
     replace_x: bool = True,
     write_individual: bool = True,
+    write_merged: bool = True,
     merged_filename: str = "soupx_corrected_merged.h5ad",
     cluster_col: Optional[str] = None,
     method: str = "subtraction",
@@ -834,6 +839,7 @@ def process_h5ad(
         store_raw_layer=store_raw_layer,
         replace_x=replace_x,
         write_individual=write_individual,
+        write_merged=write_merged,
         merged_filename=merged_filename,
         cluster_col=cluster_col,
         method=method,
@@ -856,6 +862,7 @@ def run_soupx_correction(
     store_raw_layer: bool = True,
     replace_x: bool = True,
     write_individual: bool = True,
+    write_merged: bool = True,
     merged_filename: str = "soupx_corrected_merged.h5ad",
     cluster_col: Optional[str] = None,
     method: str = "subtraction",
@@ -877,6 +884,7 @@ def run_soupx_correction(
         store_raw_layer=store_raw_layer,
         replace_x=replace_x,
         write_individual=write_individual,
+        write_merged=write_merged,
         merged_filename=merged_filename,
         cluster_col=cluster_col,
         method=method,

@@ -1,0 +1,31 @@
+# Exclude large data files from Docker build context
+data/raw/
+data/interim/
+data/processed/
+*.pt
+*.npy
+*.h5
+*.hdf5
+*.fa
+*.fa.gz
+*.fasta
+*.fastq
+*.gz
+*.tsv.gz
+*.csv.gz
+
+# Exclude dev artifacts
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+.git/
+.gitignore
+*.sif
+*.simg
+
+# Logs and outputs
+logs/
+wandb/
+*.log

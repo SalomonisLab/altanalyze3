@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "artifact_policy": {
+    "raw_downloads": "components/fastComm/training_data/raw",
+    "processed_tables": "components/fastComm/training_data/processed",
+    "model_bundles": "components/fastComm/models",
+    "benchmark_outputs": "components/fastComm/benchmarks",
+    "runtime_cache": "components/fastComm/cache",
+    "gitignore_required": true
+  },
+  "sources": [
+    {
+      "source_id": "connectomeDB2025",
+      "kind": "ligand_receptor",
+      "access": "download",
+      "url": "https://connectomedb.org/downloads.html",
+      "citation": "connectomeDB2025, Nucleic Acids Research 2026",
+      "priority": "high",
+      "notes": "Primary-experimental-evidence LR backbone; peptide LR focus."
+    },
+    {
+      "source_id": "omnipath",
+      "kind": "signaling_graph",
+      "access": "api",
+      "url": "https://omnipathdb.org/",
+      "citation": "OmniPath",
+      "priority": "high",
+      "notes": "Signed signaling, TF-target, complexes, intercell annotations."
+    },
+    {
+      "source_id": "cellphonedb_v5",
+      "kind": "ligand_receptor_complexes",
+      "access": "python_package_download",
+      "url": "https://github.com/ventolab/CellphoneDB",
+      "citation": "CellPhoneDB v5, Nature Protocols 2025",
+      "priority": "high",
+      "notes": "Complex-aware LR definitions and curated database releases."
+    },
+    {
+      "source_id": "cellchatdb_v2",
+      "kind": "ligand_receptor_cofactors",
+      "access": "r_package_or_github",
+      "url": "https://github.com/jinworks/CellChat",
+      "citation": "CellChat, Nature Communications 2021",
+      "priority": "high",
+      "notes": "Cofactors, agonists, antagonists, pathway grouping."
+    },
+    {
+      "source_id": "nichenet",
+      "kind": "ligand_target_prior",
+      "access": "zenodo_or_github",
+      "url": "https://github.com/saeyslab/nichenetr",
+      "citation": "NicheNet, Nature Methods 2020",
+      "priority": "high",
+      "notes": "Ligand-target matrix for receiver-response priors."
+    },
+    {
+      "source_id": "cytosig",
+      "kind": "cytokine_response",
+      "access": "mendeley",
+      "url": "https://data.mendeley.com/datasets/4fyw6y3mg4/3",
+      "citation": "CytoSig cytokine response collection",
+      "priority": "high",
+      "notes": "Human cytokine treatment log-fold-change signatures."
+    },
+    {
+      "source_id": "immune_dictionary",
+      "kind": "single_cell_cytokine_response",
+      "access": "paper_portal_or_geo",
+      "url": "https://www.nature.com/articles/s41586-023-06816-9",
+      "citation": "Dictionary of immune responses to cytokines at single-cell resolution, Nature 2024",
+      "priority": "high",
+      "notes": "In vivo single-cell cytokine response signatures."
+    },
+    {
+      "source_id": "cellxgene_census",
+      "kind": "single_cell_reference",
+      "access": "python_api",
+      "url": "https://chanzuckerberg.github.io/cellxgene-census/python-api.html",
+      "citation": "CZ CELLxGENE Census",
+      "priority": "medium",
+      "notes": "Reference expression and background state priors."
+    },
+    {
+      "source_id": "scperturb",
+      "kind": "single_cell_perturbation",
+      "access": "zenodo",
+      "url": "https://www.nature.com/articles/s41592-023-02144-y",
+      "citation": "scPerturb, Nature Methods 2024",
+      "priority": "medium",
+      "notes": "Harmonized single-cell perturbation data."
+    }
+  ]
+}

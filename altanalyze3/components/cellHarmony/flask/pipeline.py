@@ -14,10 +14,47 @@ import pandas as pd
 import scipy.sparse as sp
 
 from altanalyze3.components.cellHarmony import cellHarmony_differential, cellHarmony_lite
+from altanalyze3.components.fastComm.api import FastCommParams, run_fastcomm
+from altanalyze3.components.fastComm.reporting import ExemplarReportParams, write_exemplar_report
 from altanalyze3.components.fastCNV.main import FastCNVParams, bundled_gene_coordinates, run_fastcnv
+from altanalyze3.components.rna2adt.api import load_bundle as load_rna2adt_bundle
+from altanalyze3.components.rna2lipid.api import load_bundle as load_rna2lipid_bundle
 from altanalyze3.components.visualization import NetPerspective, approximate_umap as approx_mod, marker_heatmap_h5ad as marker_mod
 
 from .job_manager import JobStore
+
+
+_MODALITY_DEFINITIONS: Dict[str, Dict[str, object]] = {
+    "rna": {
+        "id": "rna",
+        "label": "RNA",
+        "feature_label": "gene",
+        "supports_marker_heatmap": True,
+        "supports_marker_network": True,
+        "supports_differential_network": True,
+        "supports_differential_go": True,
+    },
+    "lipids": {
+        "id": "lipids",
+        "label": "Lipids",
+        "feature_label": "lipid",
+        "supports_marker_heatmap": True,
+        "supports_marker_network": False,
+        "supports_differential_network": False,
+        "supports_differential_go": False,
+    },
+    "adt": {
+        "id": "adt",
+        "label": "ADT (CITE-seq)",
+        "feature_label": "ADT",
+        "supports_marker_heatmap": True,
+        "supports_marker_network": False,
+        "supports_differential_network": False,
+        "supports_differential_go": False,
+    },
+}
+
+_POOLED_OVERALL_LABEL = "Pooled overall"
 
 
 def _flatten_matrix(x) -> np.ndarray:
@@ -41,6 +78,287 @@ def _env_truthy(name: str, default: bool = False) -> bool:
     if raw is None:
         return default
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_modality_id(value: object, *, default: str = "rna") -> str:
+    raw = str(value or "").strip().lower()
+    if not raw or raw in {"none", "null", "false", "off"}:
+        return default
+    if raw in {"lipid", "lipids"}:
+        return "lipids"
+    if raw in {"adt", "adts", "cite", "cite-seq", "citeseq"}:
+        return "adt"
+    if raw == "rna":
+        return "rna"
+    return raw
+
+
+def _modality_definition(modality_id: object) -> Dict[str, object]:
+    normalized = _normalize_modality_id(modality_id)
+    return dict(_MODALITY_DEFINITIONS.get(normalized, _MODALITY_DEFINITIONS["rna"]))
+
+
+def _reference_impute_modalities(reference_entry: Dict) -> List[str]:
+    values = reference_entry.get("impute_modalities") or []
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for value in values:
+        modality_id = _normalize_modality_id(value, default="")
+        if modality_id and modality_id not in seen and modality_id in _MODALITY_DEFINITIONS:
+            seen.add(modality_id)
+            normalized.append(modality_id)
+    return normalized
+
+
+def _selected_impute_modality(meta: Dict, reference_entry: Dict) -> Optional[str]:
+    requested = _normalize_modality_id((meta.get("qc") or {}).get("impute_modality"), default="")
+    if not requested:
+        return None
+    supported = set(_reference_impute_modalities(reference_entry))
+    return requested if requested in supported else None
+
+
+def _reference_impute_config(reference_entry: Dict, modality: object) -> Dict[str, object]:
+    configs = reference_entry.get("impute_config") or {}
+    if not isinstance(configs, dict):
+        return {}
+    normalized = _normalize_modality_id(modality, default="")
+    if not normalized:
+        return {}
+    entry = configs.get(normalized) or configs.get(str(modality))
+    return dict(entry) if isinstance(entry, dict) else {}
+
+
+def _modalities_payload(selected_modalities: Optional[List[str]] = None) -> Dict[str, object]:
+    ordered = ["rna"]
+    for modality_id in selected_modalities or []:
+        normalized = _normalize_modality_id(modality_id, default="")
+        if normalized and normalized not in ordered and normalized in _MODALITY_DEFINITIONS:
+            ordered.append(normalized)
+    return {
+        "default": "rna",
+        "available": [_modality_definition(modality_id) for modality_id in ordered],
+    }
+
+
+def _normalize_expression_scale(value: object, *, default: str = "") -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return default
+    if raw in {"log1p", "ln", "loge", "natural_log1p"}:
+        return "log1p"
+    if raw in {"log2", "log2p1", "log_2"}:
+        return "log2"
+    if raw in {"linear", "raw", "none"}:
+        return "linear"
+    return raw
+
+
+def _strip_modality_prefix(name: object) -> str:
+    value = str(name or "").strip()
+    if not value:
+        return value
+    match = re.match(r"^[A-Za-z0-9]+[A-Za-z0-9_-]*\.(.+)$", value)
+    if match:
+        return match.group(1)
+    return value
+
+
+def _make_unique_feature_names(values: List[str]) -> List[str]:
+    counts: Dict[str, int] = {}
+    unique: List[str] = []
+    for value in values:
+        if value not in counts:
+            counts[value] = 1
+            unique.append(value)
+        else:
+            suffix = counts[value]
+            unique.append(f"{value}.{suffix}")
+            counts[value] += 1
+    return unique
+
+
+def _resolve_log_base(value: object, *, default: float) -> float:
+    if value is None:
+        return float(default)
+    raw = str(value).strip().lower()
+    if raw in {"", "none", "null"}:
+        return float(default)
+    if raw in {"e", "natural", "ln", "loge"}:
+        return float(np.e)
+    if raw == "2":
+        return 2.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _attach_imputed_expression_metadata(
+    adata: ad.AnnData,
+    prediction_matrix: np.ndarray,
+    *,
+    expression_scale: object,
+    log_base: object = None,
+) -> Dict[str, object]:
+    scale = _normalize_expression_scale(expression_scale, default="")
+    info: Dict[str, object] = {"expression_scale": scale or "unknown"}
+    matrix64 = prediction_matrix.astype(np.float64, copy=False)
+
+    if scale == "log2":
+        linear = np.maximum(np.exp2(matrix64) - 1.0, 0.0)
+        adata.layers["counts"] = linear.astype(np.float32)
+        adata.uns["log1p"] = {"base": 2.0}
+        adata.uns["expression_scale"] = "log2"
+        info["log_base"] = 2.0
+        return info
+
+    if scale == "log1p":
+        base = _resolve_log_base(log_base, default=float(np.e))
+        if np.isclose(base, np.e):
+            linear = np.maximum(np.expm1(matrix64), 0.0)
+        else:
+            linear = np.maximum(np.power(base, matrix64) - 1.0, 0.0)
+        adata.layers["counts"] = linear.astype(np.float32)
+        adata.uns["log1p"] = {"base": float(base)}
+        adata.uns["expression_scale"] = "log1p"
+        info["log_base"] = float(base)
+        return info
+
+    if scale == "linear":
+        adata.layers["counts"] = np.maximum(matrix64, 0.0).astype(np.float32)
+        adata.uns["expression_scale"] = "linear"
+        return info
+
+    return info
+
+
+def _build_imputed_lipid_adata(query_adata: ad.AnnData) -> tuple[ad.AnnData, Dict[str, object]]:
+    bundle = load_rna2lipid_bundle()
+    prediction = bundle.predict_from_adata(query_adata)
+    prediction_df = prediction.predictions.reindex(query_adata.obs_names)
+    prediction_matrix = np.asarray(prediction_df.to_numpy(dtype=np.float32), dtype=np.float32)
+
+    lipid_var_names = pd.Index([str(value) for value in prediction_df.columns], dtype=str)
+    lipid_var = pd.DataFrame(index=lipid_var_names)
+    lipid_var["features"] = lipid_var_names.astype(str)
+    lipid_var["feature_type"] = "lipid"
+
+    lipid_adata = ad.AnnData(
+        X=prediction_matrix,
+        obs=query_adata.obs.copy(),
+        var=lipid_var,
+    )
+    # Keep X on the native prediction scale for display, and provide a
+    # pseudo-linear layer so existing differential code does not interpret
+    # already logged lipid values as raw intensities.
+    scale_info = _attach_imputed_expression_metadata(
+        lipid_adata,
+        prediction_matrix,
+        expression_scale="log2",
+        log_base=2.0,
+    )
+    for key in ("X_umap",):
+        if key in query_adata.obsm:
+            lipid_adata.obsm[key] = np.asarray(query_adata.obsm[key]).copy()
+    if "lineage_order" in getattr(query_adata, "uns", {}):
+        lipid_adata.uns["lineage_order"] = list(query_adata.uns["lineage_order"])
+    lipid_adata.uns["modality"] = "lipids"
+    lipid_adata.uns["feature_label"] = "lipid"
+    summary = dict(prediction.summary)
+    summary.update(scale_info)
+    lipid_adata.uns["prediction_summary"] = summary
+    return lipid_adata, summary
+
+
+def _build_imputed_adt_adata(
+    query_adata: ad.AnnData,
+    reference_entry: Dict[str, object],
+    cluster_obs_col: Optional[str] = None,
+) -> tuple[ad.AnnData, Dict[str, object]]:
+    impute_config = _reference_impute_config(reference_entry, "adt")
+    expression_scale = _normalize_expression_scale(impute_config.get("expression_scale", "log1p"), default="log1p")
+    bundle_path = impute_config.get("bundle_path")
+    bundle = load_rna2adt_bundle(bundle_path) if bundle_path else load_rna2adt_bundle()
+    if cluster_obs_col is not None and cluster_obs_col in query_adata.obs.columns:
+        prediction = bundle.predict_from_adata(query_adata, cluster_obs_col=cluster_obs_col)
+    else:
+        prediction = bundle.predict_from_adata(query_adata)
+    prediction_df = prediction.predictions.reindex(query_adata.obs_names)
+    prediction_matrix = np.asarray(prediction_df.to_numpy(dtype=np.float32), dtype=np.float32)
+    clipped_negative_values = 0
+    if expression_scale in {"log1p", "linear"}:
+        clipped_negative_values = int(np.count_nonzero(prediction_matrix < 0))
+        if clipped_negative_values:
+            prediction_matrix = np.maximum(prediction_matrix, 0.0)
+
+    adt_var_names = pd.Index(
+        _make_unique_feature_names([_strip_modality_prefix(value) for value in prediction_df.columns]),
+        dtype=str,
+    )
+    adt_var = pd.DataFrame(index=adt_var_names)
+    adt_var["features"] = adt_var_names.astype(str)
+    adt_var["raw_feature_name"] = pd.Index([str(value) for value in prediction_df.columns], dtype=str)
+    adt_var["feature_type"] = "ADT"
+
+    adt_adata = ad.AnnData(
+        X=prediction_matrix,
+        obs=query_adata.obs.copy(),
+        var=adt_var,
+    )
+    # Keep X on the native ADT prediction scale and attach a pseudo-linear
+    # layer only when the reference declares how these values are encoded.
+    scale_info = _attach_imputed_expression_metadata(
+        adt_adata,
+        prediction_matrix,
+        expression_scale=expression_scale,
+        log_base=impute_config.get("log_base", "e"),
+    )
+    for key in ("X_umap",):
+        if key in query_adata.obsm:
+            adt_adata.obsm[key] = np.asarray(query_adata.obsm[key]).copy()
+    if "lineage_order" in getattr(query_adata, "uns", {}):
+        adt_adata.uns["lineage_order"] = list(query_adata.uns["lineage_order"])
+    adt_adata.uns["modality"] = "adt"
+    adt_adata.uns["feature_label"] = "ADT"
+    summary = dict(prediction.summary)
+    summary.update(scale_info)
+    summary["clipped_negative_values"] = clipped_negative_values
+    adt_adata.uns["prediction_summary"] = summary
+    return adt_adata, summary
+
+
+def _modality_h5ad_path(meta: Dict, modality: str) -> Path:
+    normalized = _normalize_modality_id(modality)
+    if normalized == "rna":
+        raw_path = str(meta.get("artifacts", {}).get("combined_h5ad", "")).strip()
+    else:
+        raw_path = str(((meta.get("modality_artifacts") or {}).get(normalized) or {}).get("h5ad", "")).strip()
+    if not raw_path:
+        raise FileNotFoundError(f"No AnnData artifact is available for modality '{normalized}'.")
+    path = Path(raw_path)
+    if not path.exists():
+        raise FileNotFoundError(f"No AnnData artifact is available for modality '{normalized}'.")
+    return path
+
+
+def _differential_runtime_params(modality: str, comparison_type: str) -> Dict[str, object]:
+    normalized = _normalize_modality_id(modality)
+    if normalized in ("lipids", "adt"):
+        return {
+            "method": "wilcoxon",
+            "alpha": 0.05,
+            "fc_thresh": 1.0,
+            "min_cells_per_group": 10 if comparison_type == "cells" else 1,
+            "use_rawp": bool(comparison_type == "pseudobulk"),
+        }
+    return {
+        "method": "wilcoxon",
+        "alpha": 0.05,
+        "fc_thresh": 1.2,
+        "min_cells_per_group": 1 if comparison_type == "pseudobulk" else 20,
+        "use_rawp": bool(comparison_type == "pseudobulk"),
+    }
 
 
 def _split_uploads(files: List[Dict[str, str]], uploads_dir: Path) -> Tuple[List[Tuple[str, str]], Optional[str]]:
@@ -88,6 +406,21 @@ def _lookup_reference(species: str, reference_id: str, registry_path: Path) -> D
                     path = Path(value)
                     if not path.is_absolute():
                         resolved[key] = str((base_dir / path).resolve())
+                impute_config = resolved.get("impute_config")
+                if isinstance(impute_config, dict):
+                    normalized_config: Dict[str, Dict[str, object]] = {}
+                    for modality_key, config in impute_config.items():
+                        modality_id = _normalize_modality_id(modality_key, default="")
+                        if not modality_id or not isinstance(config, dict):
+                            continue
+                        config_resolved = dict(config)
+                        bundle_value = config_resolved.get("bundle_path")
+                        if bundle_value:
+                            bundle_path = Path(str(bundle_value))
+                            if not bundle_path.is_absolute():
+                                config_resolved["bundle_path"] = str((base_dir / bundle_path).resolve())
+                        normalized_config[modality_id] = config_resolved
+                    resolved["impute_config"] = normalized_config
                 return resolved
     raise ValueError(f"Reference '{reference_id}' for species '{species}' not found in registry.")
 
@@ -322,7 +655,12 @@ def _upload_profile(meta: Dict) -> Dict[str, object]:
     }
 
 
-def _default_differential_state(enabled: bool, default_population_col: Optional[str], default_sample_field: Optional[str]) -> Dict[str, object]:
+def _default_differential_state(
+    enabled: bool,
+    default_population_col: Optional[str],
+    default_sample_field: Optional[str],
+    default_modality: str = "rna",
+) -> Dict[str, object]:
     if enabled:
         message = "Select a cell-state field and numerator/denominator sample groups to run cellHarmony-differential."
     else:
@@ -337,6 +675,7 @@ def _default_differential_state(enabled: bool, default_population_col: Optional[
         "go_terms_included": False,
         "default_population_col": default_population_col,
         "default_sample_field": default_sample_field,
+        "default_modality": _normalize_modality_id(default_modality),
     }
 
 
@@ -450,6 +789,7 @@ def run_cellharmony_pipeline(
 
     h5_files, h5ad_file = _split_uploads(meta["files"], uploads_dir)
     qc = meta.get("qc", {})
+    selected_impute_modality = _selected_impute_modality(meta, reference_entry)
 
     store.append_log(job_id, "Running cellHarmony_lite pipeline.")
     store.append_log(
@@ -466,6 +806,7 @@ def run_cellharmony_pipeline(
             f"mit_percent={int(qc.get('mit_percent', 10))} "
             f"align_cutoff={float(qc.get('align_cutoff', 0.1))} "
             f"ambient_correction={str(qc.get('ambient_correction', 'no'))} "
+            f"impute_modality={selected_impute_modality or 'none'} "
             "identify_markers=True"
         ),
     )
@@ -503,6 +844,7 @@ def run_cellharmony_pipeline(
 
     marker_archive_path: Optional[Path] = None
     marker_analysis: Dict[str, object] = {}
+    marker_analysis_by_modality: Dict[str, Dict[str, object]] = {}
     store.update_job(
         job_id,
         progress=72,
@@ -560,6 +902,7 @@ def run_cellharmony_pipeline(
         marker_analysis["heatmap_cache"] = str(marker_outputs["heatmap_cache"])
     if marker_outputs.get("heatmap_column_tsv"):
         marker_analysis["expression_tsv"] = str(marker_outputs["heatmap_column_tsv"])
+    marker_analysis_by_modality["rna"] = dict(marker_analysis)
     store.append_log(job_id, "Cell-state marker gene export complete.")
 
     store.update_job(job_id, progress=82, message="Running approximate UMAP placement.")
@@ -591,6 +934,143 @@ def run_cellharmony_pipeline(
         num_reference_cells=1,
         copy_query=False,
     )
+    modality_artifacts: Dict[str, Dict[str, str]] = {
+        "rna": {
+            "h5ad": str(combined_h5ad_path),
+        }
+    }
+    modalities_payload = _modalities_payload([selected_impute_modality] if selected_impute_modality else [])
+
+    if selected_impute_modality == "lipids":
+        store.update_job(job_id, progress=88, message="Imputing lipid profiles from aligned RNA.")
+        store.append_log(job_id, "Running rna2lipid lipid imputation.")
+        store.append_log(job_id, "[params] rna2lipid bundle=default input=aligned_query_adata modality=lipids")
+        lipid_adata, lipid_summary = _build_imputed_lipid_adata(approx_result.query_adata)
+        lipid_h5ad_path = outputs_dir / "combined_with_umap_and_markers_lipids.h5ad"
+        approx_result.query_adata.obsm["X_lipids"] = np.asarray(lipid_adata.X, dtype=np.float32)
+        approx_result.query_adata.uns["lipid_feature_names"] = lipid_adata.var_names.astype(str).tolist()
+        approx_result.query_adata.uns["imputed_modalities"] = {
+            "lipids": {
+                "obsm_key": "X_lipids",
+                "feature_names_key": "lipid_feature_names",
+                "summary": lipid_summary,
+            }
+        }
+        approx_mod.ensure_h5ad_compat_for_write(lipid_adata)
+        lipid_adata.write(lipid_h5ad_path, compression=resolved_h5ad_compression)
+        modality_artifacts["lipids"] = {
+            "h5ad": str(lipid_h5ad_path),
+        }
+
+        lipid_marker_dir = outputs_dir / "marker_heatmap_lipids"
+        lipid_marker_dir.mkdir(parents=True, exist_ok=True)
+        lipid_marker_outputs = marker_mod.generate_marker_heatmap_from_adata(
+            lipid_adata,
+            cluster_key=query_cluster_key,
+            out=str(lipid_marker_dir / "cell_state_lipid_marker_heatmap.pdf"),
+            top_n=5,
+            marker_method="markerfinder",
+            cells_per_cluster=100,
+            seed=0,
+            export_networks=False,
+            network_top_n=0,
+            network_jobs=1,
+            species=meta.get("species"),
+            write_heatmap_tsv=False,
+            write_expression_tsv=False,
+            write_heatmap_cache=True,
+        )
+        lipid_marker_archive_path = outputs_dir / "cell_state_lipid_markers.zip"
+        _write_selected_zip(lipid_marker_dir, lipid_marker_archive_path, suffixes=(".pdf", ".tsv", ".png", ".npz"))
+        lipid_marker_analysis = {
+            "enabled": True,
+            "cluster_key": query_cluster_key,
+            "heatmap_pdf": str(lipid_marker_outputs["pdf"]),
+            "centroids_tsv": str(lipid_marker_outputs["centroids_tsv"]),
+            "markers_tsv": str(lipid_marker_outputs["markers_tsv"]),
+            "archive": str(lipid_marker_archive_path),
+            "networks": [],
+            "modality": "lipids",
+        }
+        if lipid_marker_outputs.get("heatmap_tsv"):
+            lipid_marker_analysis["heatmap_tsv"] = str(lipid_marker_outputs["heatmap_tsv"])
+        if lipid_marker_outputs.get("heatmap_cache"):
+            lipid_marker_analysis["heatmap_cache"] = str(lipid_marker_outputs["heatmap_cache"])
+        if lipid_marker_outputs.get("heatmap_column_tsv"):
+            lipid_marker_analysis["expression_tsv"] = str(lipid_marker_outputs["heatmap_column_tsv"])
+        marker_analysis_by_modality["lipids"] = lipid_marker_analysis
+        store.append_log(job_id, "rna2lipid lipid imputation complete.")
+
+    if selected_impute_modality == "adt":
+        store.update_job(job_id, progress=88, message="Imputing ADT (CITE-seq) values from aligned RNA.")
+        store.append_log(job_id, "Running rna2adt ADT imputation.")
+        adt_impute_config = _reference_impute_config(reference_entry, "adt")
+        adt_bundle_desc = adt_impute_config.get("bundle_path") or "default"
+        adt_scale_desc = _normalize_expression_scale(adt_impute_config.get("expression_scale"), default="default")
+        store.append_log(
+            job_id,
+            f"[params] rna2adt bundle={adt_bundle_desc} input=aligned_query_adata modality=adt expression_scale={adt_scale_desc}",
+        )
+        adt_adata, adt_summary = _build_imputed_adt_adata(
+            approx_result.query_adata,
+            reference_entry,
+            cluster_obs_col=query_cluster_key,
+        )
+        adt_h5ad_path = outputs_dir / "combined_with_umap_and_markers_adt.h5ad"
+        approx_result.query_adata.obsm["X_adt"] = np.asarray(adt_adata.X, dtype=np.float32)
+        approx_result.query_adata.uns["adt_feature_names"] = adt_adata.var_names.astype(str).tolist()
+        approx_result.query_adata.uns["imputed_modalities"] = {
+            "adt": {
+                "obsm_key": "X_adt",
+                "feature_names_key": "adt_feature_names",
+                "summary": adt_summary,
+            }
+        }
+        approx_mod.ensure_h5ad_compat_for_write(adt_adata)
+        adt_adata.write(adt_h5ad_path, compression=resolved_h5ad_compression)
+        modality_artifacts["adt"] = {
+            "h5ad": str(adt_h5ad_path),
+        }
+
+        adt_marker_dir = outputs_dir / "marker_heatmap_adt"
+        adt_marker_dir.mkdir(parents=True, exist_ok=True)
+        adt_marker_outputs = marker_mod.generate_marker_heatmap_from_adata(
+            adt_adata,
+            cluster_key=query_cluster_key,
+            out=str(adt_marker_dir / "cell_state_adt_marker_heatmap.pdf"),
+            top_n=5,
+            marker_method="markerfinder",
+            cells_per_cluster=100,
+            seed=0,
+            export_networks=False,
+            network_top_n=0,
+            network_jobs=1,
+            species=meta.get("species"),
+            write_heatmap_tsv=False,
+            write_expression_tsv=False,
+            write_heatmap_cache=True,
+        )
+        adt_marker_archive_path = outputs_dir / "cell_state_adt_markers.zip"
+        _write_selected_zip(adt_marker_dir, adt_marker_archive_path, suffixes=(".pdf", ".tsv", ".png", ".npz"))
+        adt_marker_analysis = {
+            "enabled": True,
+            "cluster_key": query_cluster_key,
+            "heatmap_pdf": str(adt_marker_outputs["pdf"]),
+            "centroids_tsv": str(adt_marker_outputs["centroids_tsv"]),
+            "markers_tsv": str(adt_marker_outputs["markers_tsv"]),
+            "archive": str(adt_marker_archive_path),
+            "networks": [],
+            "modality": "adt",
+        }
+        if adt_marker_outputs.get("heatmap_tsv"):
+            adt_marker_analysis["heatmap_tsv"] = str(adt_marker_outputs["heatmap_tsv"])
+        if adt_marker_outputs.get("heatmap_cache"):
+            adt_marker_analysis["heatmap_cache"] = str(adt_marker_outputs["heatmap_cache"])
+        if adt_marker_outputs.get("heatmap_column_tsv"):
+            adt_marker_analysis["expression_tsv"] = str(adt_marker_outputs["heatmap_column_tsv"])
+        marker_analysis_by_modality["adt"] = adt_marker_analysis
+        store.append_log(job_id, "rna2adt ADT imputation complete.")
+
     approx_mod.ensure_h5ad_compat_for_write(approx_result.query_adata)
     approx_result.query_adata.write(combined_h5ad_path, compression=resolved_h5ad_compression)
 
@@ -622,8 +1102,88 @@ def run_cellharmony_pipeline(
         artifacts["umap_pdf_plain"] = Path(plain_pdf)
     if marker_archive_path is not None:
         artifacts["marker_genes_zip"] = marker_archive_path
+    if "lipids" in modality_artifacts:
+        lipid_h5ad_value = modality_artifacts["lipids"].get("h5ad")
+        if lipid_h5ad_value:
+            artifacts["imputed_lipids_h5ad"] = Path(lipid_h5ad_value)
+        lipid_archive = marker_analysis_by_modality.get("lipids", {}).get("archive")
+        if lipid_archive:
+            artifacts["lipid_marker_genes_zip"] = Path(str(lipid_archive))
+    if "adt" in modality_artifacts:
+        adt_h5ad_value = modality_artifacts["adt"].get("h5ad")
+        if adt_h5ad_value:
+            artifacts["imputed_adt_h5ad"] = Path(adt_h5ad_value)
+        adt_archive = marker_analysis_by_modality.get("adt", {}).get("archive")
+        if adt_archive:
+            artifacts["adt_marker_genes_zip"] = Path(str(adt_archive))
 
     fastcnv_analysis: Dict[str, object] = {"enabled": False}
+    fastcomm_analysis: Dict[str, object] = {"enabled": False}
+    try:
+        store.update_job(job_id, progress=90, message="Running fastComm receptor-ligand communication analysis.")
+        store.append_log(job_id, "Running fastComm receptor-ligand communication analysis.")
+        fastcomm_dir = outputs_dir / "fastComm"
+        fastcomm_dir.mkdir(parents=True, exist_ok=True)
+        fastcomm_scores_path = fastcomm_dir / "fastcomm_scores.tsv"
+        fastcomm_pairs_path = fastcomm_dir / "state_pair_summary.tsv"
+        fastcomm_state_expression_path = fastcomm_dir / "state_expression.tsv"
+        fastcomm_result = run_fastcomm(
+            FastCommParams(
+                h5ad=combined_h5ad_path,
+                output=fastcomm_scores_path,
+                state_pair_output=fastcomm_pairs_path,
+                state_expression_output=fastcomm_state_expression_path,
+                state_key=query_cluster_key,
+                min_cells=5,
+                include_self_edges=False,
+            )
+        )
+        fastcomm_exemplar_path = fastcomm_dir / "exemplar_interactions.tsv"
+        fastcomm_exemplar_md_path = fastcomm_dir / "exemplar_interactions.md"
+        write_exemplar_report(
+            ExemplarReportParams(
+                scores=fastcomm_scores_path,
+                output_tsv=fastcomm_exemplar_path,
+                output_md=fastcomm_exemplar_md_path,
+                top_n=50,
+                min_score=0.25,
+            )
+        )
+        artifacts["fastcomm_scores"] = fastcomm_scores_path
+        artifacts["fastcomm_state_pairs"] = fastcomm_pairs_path
+        artifacts["fastcomm_state_expression"] = fastcomm_state_expression_path
+        artifacts["fastcomm_exemplars"] = fastcomm_exemplar_path
+        artifacts["fastcomm_exemplar_report"] = fastcomm_exemplar_md_path
+        fastcomm_analysis = {
+            "enabled": True,
+            "status": "completed",
+            "state_key": query_cluster_key,
+            "populations": [str(value) for value in fastcomm_result.state_sizes.index.tolist()],
+            "scores_tsv": str(fastcomm_scores_path),
+            "state_pair_tsv": str(fastcomm_pairs_path),
+            "state_expression_tsv": str(fastcomm_state_expression_path),
+            "exemplar_tsv": str(fastcomm_exemplar_path),
+            "exemplar_md": str(fastcomm_exemplar_md_path),
+            "summary": fastcomm_result.summary,
+        }
+        store.append_log(
+            job_id,
+            (
+                "fastComm analysis complete: "
+                f"states={fastcomm_result.summary.get('n_states')} "
+                f"edges={fastcomm_result.summary.get('n_scored_edges')} "
+                f"genes={fastcomm_result.summary.get('n_loaded_genes')}"
+            ),
+        )
+    except Exception as exc:
+        fastcomm_analysis = {
+            "enabled": False,
+            "status": "failed",
+            "message": f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__,
+            "state_key": query_cluster_key,
+        }
+        store.append_log(job_id, f"fastComm analysis skipped: {fastcomm_analysis['message']}")
+
     if _env_truthy("CELLHARMONY_ENABLE_FASTCNV", False):
         species_id = str(meta.get("species", "")).strip().lower()
         if species_id in {"human", "mouse"}:
@@ -732,6 +1292,8 @@ def run_cellharmony_pipeline(
         "default_sample_field": default_sample_field,
         "population_columns": population_columns,
         "default_population_col": default_population_col,
+        "modalities": modalities_payload["available"],
+        "default_modality": modalities_payload["default"],
         "comparison_types": ["cells", "pseudobulk"] if pseudobulk_allowed else ["cells"],
         "upload_profile": upload_profile,
     }
@@ -744,9 +1306,19 @@ def run_cellharmony_pipeline(
         reference_clusters_tsv=reference_entry["reference_clusters_tsv"],
         default_gene=default_gene,
         marker_analysis=marker_analysis,
+        marker_analysis_by_modality=marker_analysis_by_modality,
+        fastcomm_analysis=fastcomm_analysis,
         fastcnv_analysis=fastcnv_analysis,
+        modalities=modalities_payload,
+        modality_artifacts=modality_artifacts,
+        selected_impute_modality=selected_impute_modality,
         differential_options=differential_options,
-        differential=_default_differential_state(differential_enabled, default_population_col, default_sample_field),
+        differential=_default_differential_state(
+            differential_enabled,
+            default_population_col,
+            default_sample_field,
+            default_modality=modalities_payload["default"],
+        ),
         message="Approximate UMAP completed.",
     )
     store.append_log(job_id, "cellHarmony-lite pipeline finished.")
@@ -762,6 +1334,8 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
     group2_samples = [str(sample).strip() for sample in config.get("group2_samples", []) if str(sample).strip()]
     population_col = str(config.get("population_col", "")).strip()
     sample_field = str(config.get("sample_field", "")).strip()
+    modality = _normalize_modality_id(config.get("modality"), default="rna")
+    modality_info = _modality_definition(modality)
     comparison_type = str(config.get("comparison_type", "cells") or "cells").strip().lower()
 
     if not population_col:
@@ -772,12 +1346,7 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
     if overlap:
         raise ValueError(f"Samples cannot appear in both groups: {', '.join(overlap)}")
 
-    combined_h5ad_value = str(meta.get("artifacts", {}).get("combined_h5ad", "")).strip()
-    if not combined_h5ad_value:
-        raise FileNotFoundError("Combined AnnData output unavailable for differential analysis.")
-    combined_h5ad = Path(combined_h5ad_value)
-    if not combined_h5ad.exists():
-        raise FileNotFoundError("Combined AnnData output unavailable for differential analysis.")
+    combined_h5ad = _modality_h5ad_path(meta, modality)
 
     comparison_tag = _comparison_tag(group1_samples, group2_samples)
     run_id = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
@@ -808,6 +1377,7 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
         job_id,
         (
             "[params] differential "
+            f"modality={modality} "
             f"population_col={population_col} "
             f"sample_field={sample_field or '<auto>'} "
             f"comparison_type={comparison_type} "
@@ -862,6 +1432,7 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
     sample_values = adata.obs[sample_col].astype(str)
     adata.obs[web_group_col] = np.where(sample_values.isin(resolved_group1), case_label, control_label)
     make_pseudobulk = comparison_type == "pseudobulk"
+    de_params = _differential_runtime_params(modality, comparison_type)
 
     if make_pseudobulk:
         pseudobulk_dir = run_root / "pseudobulk"
@@ -902,9 +1473,9 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
             "[params] differential_expression "
             f"population_col={population_col} covariate_col={web_group_col} "
             f"case_label={case_label} control_label={control_label} "
-            f"method=wilcoxon alpha=0.05 fc_thresh=1.2 "
-            f"min_cells_per_group={1 if make_pseudobulk else 20} "
-            f"use_rawp={bool(make_pseudobulk)}"
+            f"method={de_params['method']} alpha={de_params['alpha']} fc_thresh={de_params['fc_thresh']} "
+            f"min_cells_per_group={de_params['min_cells_per_group']} "
+            f"use_rawp={de_params['use_rawp']}"
         ),
     )
     de_store = cellHarmony_differential.run_de_for_comparisons(
@@ -913,11 +1484,11 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
         covariate_col=web_group_col,
         case_label=case_label,
         control_label=control_label,
-        method="wilcoxon",
-        alpha=0.05,
-        fc_thresh=1.2,
-        min_cells_per_group=1 if make_pseudobulk else 20,
-        use_rawp=bool(make_pseudobulk),
+        method=str(de_params["method"]),
+        alpha=float(de_params["alpha"]),
+        fc_thresh=float(de_params["fc_thresh"]),
+        min_cells_per_group=int(de_params["min_cells_per_group"]),
+        use_rawp=bool(de_params["use_rawp"]),
         progress_callback=None,
     )
     pop_order = cellHarmony_differential._extract_lineage_order(adata, population_col)
@@ -942,51 +1513,59 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
     _update_differential_state(
         store,
         job_id,
-        message="Building GO-enriched cellHarmony heatmap.",
+        message=(
+            "Building GO-enriched cellHarmony heatmap."
+            if bool(modality_info.get("supports_differential_go"))
+            else "Building cellHarmony heatmap."
+        ),
         progress=60,
     )
-    store.append_log(
-        job_id,
-        (
-            "[params] enrichment_heatmap "
-            f"population_col={population_col} heatmap_fc_thresh=1.2 "
-            f"go_species={meta.get('species')} comparison_tag={comparison_tag}"
-        ),
-    )
-    background_genes = adata.var_names.astype(str)
-    if "gene_symbols" in adata.var.columns:
-        background_genes = adata.var["gene_symbols"].astype(str)
-    elif "features" in adata.var.columns:
-        background_genes = adata.var["features"].astype(str)
+    goelite_payload = None
+    if bool(modality_info.get("supports_differential_go")):
+        store.append_log(
+            job_id,
+            (
+                "[params] enrichment_heatmap "
+                f"population_col={population_col} heatmap_fc_thresh=1.2 "
+                f"go_species={meta.get('species')} comparison_tag={comparison_tag}"
+            ),
+        )
+        background_genes = adata.var_names.astype(str)
+        if "gene_symbols" in adata.var.columns:
+            background_genes = adata.var["gene_symbols"].astype(str)
+        elif "features" in adata.var.columns:
+            background_genes = adata.var["features"].astype(str)
 
-    goelite_payload = cellHarmony_differential.run_goelite_for_clusters(
-        de_store=de_store,
-        background_genes=background_genes,
-        outdir=str(goelite_dir),
-        comparison_tag=comparison_tag,
-        species=meta.get("species"),
-    )
-    if goelite_payload and goelite_payload.get("runner") and goelite_payload.get("prepared"):
-        cellHarmony_differential.run_goelite_for_clusters_directional(
+        goelite_payload = cellHarmony_differential.run_goelite_for_clusters(
             de_store=de_store,
             background_genes=background_genes,
-            outdir=str(goelite_dir / "up-regulated"),
-            comparison_tag=f"{comparison_tag}_up",
+            outdir=str(goelite_dir),
+            comparison_tag=comparison_tag,
             species=meta.get("species"),
-            direction="up",
-            runner=goelite_payload["runner"],
-            prepared=goelite_payload["prepared"],
         )
-        cellHarmony_differential.run_goelite_for_clusters_directional(
-            de_store=de_store,
-            background_genes=background_genes,
-            outdir=str(goelite_dir / "down-regulated"),
-            comparison_tag=f"{comparison_tag}_down",
-            species=meta.get("species"),
-            direction="down",
-            runner=goelite_payload["runner"],
-            prepared=goelite_payload["prepared"],
-        )
+        if goelite_payload and goelite_payload.get("runner") and goelite_payload.get("prepared"):
+            cellHarmony_differential.run_goelite_for_clusters_directional(
+                de_store=de_store,
+                background_genes=background_genes,
+                outdir=str(goelite_dir / "up-regulated"),
+                comparison_tag=f"{comparison_tag}_up",
+                species=meta.get("species"),
+                direction="up",
+                runner=goelite_payload["runner"],
+                prepared=goelite_payload["prepared"],
+            )
+            cellHarmony_differential.run_goelite_for_clusters_directional(
+                de_store=de_store,
+                background_genes=background_genes,
+                outdir=str(goelite_dir / "down-regulated"),
+                comparison_tag=f"{comparison_tag}_down",
+                species=meta.get("species"),
+                direction="down",
+                runner=goelite_payload["runner"],
+                prepared=goelite_payload["prepared"],
+            )
+    else:
+        store.append_log(job_id, f"Skipping GO term enrichment for modality '{modality}'.")
     show_go_terms = bool(goelite_payload and goelite_payload.get("results") is not None and not goelite_payload["results"].empty)
 
     heatmap_pdf_name = f"heatmap_{comparison_tag}_by_{population_col}.pdf"
@@ -1011,6 +1590,32 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
     assigned_deg = de_store.get("assigned_groups", pd.DataFrame())
     pooled_deg = de_store.get("pooled_overall")
     coreg_deg = de_store.get("coreg_pooled")
+    if detailed_deg is not None and detailed_deg.empty and pooled_deg is not None and not pooled_deg.empty:
+        pooled_detail = pooled_deg.reset_index().rename(columns={"index": "gene"}).copy()
+        pooled_detail["gene"] = pooled_detail["gene"].astype(str)
+        pooled_detail["population"] = _POOLED_OVERALL_LABEL
+        pooled_detail["case_label"] = case_label
+        pooled_detail["control_label"] = control_label
+        pooled_detail["n_case"] = int((adata.obs[web_group_col].astype(str) == case_label).sum())
+        pooled_detail["n_control"] = int((adata.obs[web_group_col].astype(str) == control_label).sum())
+        for column in ("pval", "case_mean_expr", "control_mean_expr"):
+            if column not in pooled_detail.columns:
+                pooled_detail[column] = np.nan
+        detailed_deg = pooled_detail
+        de_store["detailed_deg"] = detailed_deg
+        summary_deg = pd.DataFrame(
+            [
+                {
+                    "population": _POOLED_OVERALL_LABEL,
+                    "n_case": int(pooled_detail["n_case"].iloc[0]),
+                    "n_control": int(pooled_detail["n_control"].iloc[0]),
+                    "num_DEG": int(pd.to_numeric(pooled_detail.get("fdr"), errors="coerce").lt(float(de_params["alpha"])).sum()),
+                    "tested_genes": int(len(pooled_detail)),
+                }
+            ]
+        )
+        de_store["summary_per_population"] = summary_deg
+        store.append_log(job_id, "No cell-state-specific DE features passed filtering; exposing pooled overall differential results.")
 
     deg_artifacts: Dict[str, Path] = {}
     named_tables = {
@@ -1041,19 +1646,27 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
     _update_differential_state(
         store,
         job_id,
-        message="Rendering interaction networks for aligned cell states.",
+        message=(
+            "Rendering interaction networks for aligned cell states."
+            if bool(modality_info.get("supports_differential_network"))
+            else "Finalizing differential outputs."
+        ),
         progress=80,
     )
-    store.append_log(
-        job_id,
-        f"[params] interaction_networks source=NetPerspective grn_species={meta.get('species')} max_genes=None pval_column=fdr_or_pval"
-    )
     networks: List[Dict[str, str]] = []
-    try:
-        interactions_df = NetPerspective.load_interaction_data(species=meta.get("species"))
-    except Exception as exc:
-        interactions_df = None
-        print(f"[WARN] Interaction network export skipped: {exc}")
+    interactions_df = None
+    if bool(modality_info.get("supports_differential_network")):
+        store.append_log(
+            job_id,
+            f"[params] interaction_networks source=NetPerspective grn_species={meta.get('species')} max_genes=None pval_column=fdr_or_pval"
+        )
+        try:
+            interactions_df = NetPerspective.load_interaction_data(species=meta.get("species"))
+        except Exception as exc:
+            interactions_df = None
+            print(f"[WARN] Interaction network export skipped: {exc}")
+    else:
+        store.append_log(job_id, f"Skipping interaction network export for modality '{modality}'.")
 
     if interactions_df is not None and detailed_deg is not None and not detailed_deg.empty:
         used_ids: set[str] = set()
@@ -1102,6 +1715,8 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
 
     manifest = {
         "run_id": run_id,
+        "modality": modality,
+        "feature_label": modality_info.get("feature_label"),
         "population_col": population_col,
         "case_label": case_label,
         "control_label": control_label,
@@ -1146,6 +1761,7 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
         case_label=case_label,
         control_label=control_label,
         config={
+            "modality": modality,
             "population_col": population_col,
             "sample_field": sample_col,
             "group1_samples": group1_samples,
@@ -1155,6 +1771,7 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
         artifacts={key: str(path) for key, path in differential_artifacts.items()},
         networks=networks,
         go_terms_included=show_go_terms,
+        feature_label=str(modality_info.get("feature_label") or "gene"),
         message="cellHarmony-differential finished.",
         progress=95,
     )
@@ -1163,4 +1780,5 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
         "networks": networks,
         "run_id": run_id,
         "go_terms_included": show_go_terms,
+        "modality": modality,
     }
