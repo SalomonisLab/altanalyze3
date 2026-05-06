@@ -174,6 +174,7 @@ class FastParams:
     sex_chrom_log2_unit: float = 0.040
     sex_detection_threshold_pct: float = 5.0
     control_sample_key: Optional[str] = None
+    max_cells_per_state: int = 0
     sex_chrom_het_loss: float = -0.6
     sex_chrom_hom_loss: float = -1.5
     sex_chrom_het_gain: float = 0.4
@@ -913,6 +914,27 @@ def run_fast(params: FastParams) -> Dict[str, Path]:
     )
     male_query_mask = (query_cell_sex == "male")
 
+    # Per-cell chrY-marker positivity. A cell expressing >=1 UMI on any chrY-Y-only
+    # marker gene cannot have biologically lost chrY — the residual transcripts
+    # would be impossible without an intact chromosome. We use this to gate
+    # chrY-loss interval emission downstream: chrY scores for chrY-marker-positive
+    # cells are NaN'd so the interval caller can never emit a chrY-loss interval
+    # for them, regardless of how the autosomal scoring or windowing behaves.
+    _chry_present = [g for g in CHRY_Y_ONLY_MARKERS if g in query.var_names]
+    if _chry_present:
+        _chry_X = query[:, _chry_present].X
+        if sp.issparse(_chry_X):
+            _chry_X = _chry_X.tocsr()
+            chry_marker_pos_query = np.asarray((_chry_X > 0).sum(axis=1)).ravel() > 0
+        else:
+            chry_marker_pos_query = (np.asarray(_chry_X) > 0).sum(axis=1) > 0
+        LOGGER.info(
+            "Per-cell chrY-marker positivity gate: %d / %d query cells express >=1 chrY-Y-only marker (gated from chrY-loss calls).",
+            int(chry_marker_pos_query.sum()), query.n_obs,
+        )
+    else:
+        chry_marker_pos_query = np.zeros(query.n_obs, dtype=bool)
+
     if params.control_sample_key and params.control_sample_key in control.obs.columns:
         control_sample_labels = control.obs[params.control_sample_key].astype(str).to_numpy()
     else:
@@ -1039,6 +1061,10 @@ def run_fast(params: FastParams) -> Dict[str, Path]:
                     # Female (and unknown-sex) query cells: chrY signal is biologically zero,
                     # any "loss" call would be spurious. Mark NaN so they're skipped downstream.
                     scores_chr[~male_query_mask] = np.nan
+                if chry_active and chry_marker_pos_query.any():
+                    # Cells expressing chrY-Y-only markers cannot have biologically lost chrY.
+                    # Mark NaN so the interval caller cannot emit a chrY-loss for them.
+                    scores_chr[chry_marker_pos_query] = np.nan
             for state in eligible_states:
                 rows = state_index_map[state]
                 all_scores[rows[:, None], np.arange(chr_slice.start, chr_slice.stop)[None, :]] = scores_chr[rows]
@@ -1065,6 +1091,12 @@ def run_fast(params: FastParams) -> Dict[str, Path]:
                         state_male_mask = male_query_mask[rows]
                         if not state_male_mask.all():
                             state_scores[~state_male_mask] = np.nan
+                        # Biological gate: cells expressing chrY-Y-only markers cannot
+                        # have biologically lost chrY — NaN their chrY scores so the
+                        # interval caller cannot emit a chrY-loss for them.
+                        state_chry_pos = chry_marker_pos_query[rows]
+                        if state_chry_pos.any():
+                            state_scores[state_chry_pos] = np.nan
                 else:
                     baseline = np.nanmedian(control_expr_full[control_rows], axis=0).astype(np.float32)
                     state_residual = query_expr[rows] - baseline[None, :]
@@ -1658,6 +1690,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                    help="Optional obs column on the control h5ad identifying donor/sample. "
                         "Used by automatic sex detection to call each control sample male/female. "
                         "If absent, the entire control is treated as a single sample.")
+    p.add_argument("--max-cells-per-state", type=int, default=0,
+                   help="Per-sample cap on cells per --state-key group. 0 disables (use all cells). "
+                        "Down-sampling to e.g. 500 keeps memory bounded on large samples without "
+                        "loss of information for CNV detection: per-state median baselines are stable "
+                        "with ~50-100 cells, and clone discovery operates on the same down-sampled set. "
+                        "Only applied within --per-sample mode; the full sample is preserved on disk.")
     p.add_argument("--sex-detection-threshold", type=float, default=SEX_DETECTION_CHRY_PCT_DEFAULT,
                    help="Percent of cells in a sample with >=1 chrY-Y-only marker UMI required "
                         "to call the sample male. Default 5%% reliably separates female samples "
@@ -1736,6 +1774,7 @@ def params_from_args(args: argparse.Namespace) -> FastParams:
         sex_chroms=tuple(c.strip() for c in str(args.sex_chroms).split(",") if c.strip()),
         sex_detection_threshold_pct=float(args.sex_detection_threshold),
         control_sample_key=args.control_sample_key,
+        max_cells_per_state=int(args.max_cells_per_state),
     )
 
 
@@ -1754,15 +1793,25 @@ def _run_per_sample(args: argparse.Namespace, base_params: FastParams) -> Dict[s
     """
     if not base_params.sample_key:
         raise ValueError("--per-sample requires --sample-key")
-    LOGGER.info("Reading combined query h5ad to enumerate samples: %s", base_params.h5ad)
-    full = ad.read_h5ad(base_params.h5ad)
+    LOGGER.info("Opening combined query h5ad in backed mode: %s", base_params.h5ad)
+    # Use backed='r' so we don't load the full matrix into RAM just to enumerate samples
+    # and slice — for 100k+ cell cohorts the dense load OOMs the kernel.
+    full = ad.read_h5ad(base_params.h5ad, backed="r")
     if base_params.sample_key not in full.obs.columns:
         raise ValueError(
             f"--sample-key '{base_params.sample_key}' not in query.obs columns: {list(full.obs.columns)}"
         )
     sample_values = full.obs[base_params.sample_key].astype(str)
-    samples = [s for s in pd.unique(sample_values) if s and s.lower() not in ("nan", "none")]
-    LOGGER.info("Discovered %d samples: %s", len(samples), samples)
+    raw_samples = [s for s in pd.unique(sample_values) if s and s.lower() not in ("nan", "none")]
+    # Order samples small -> large so memory pressure (per-sample slicing + fastCNV scoring)
+    # peaks at the end. If the largest sample OOMs, all smaller ones still complete.
+    sample_counts = {s: int((sample_values.values == s).sum()) for s in raw_samples}
+    samples = sorted(raw_samples, key=lambda s: sample_counts[s])
+    LOGGER.info(
+        "Discovered %d samples (ordered small->large): %s",
+        len(samples),
+        [(s, sample_counts[s]) for s in samples],
+    )
 
     parent_dir = base_params.output_prefix.parent
     parent_dir.mkdir(parents=True, exist_ok=True)
@@ -1777,14 +1826,45 @@ def _run_per_sample(args: argparse.Namespace, base_params: FastParams) -> Dict[s
         sample_prefix = sample_dir / file_stem
         sample_h5ad = sample_prefix.with_suffix(".input.h5ad")
 
-        sub = full[sample_values.values == sample].copy()
+        # Materialize only this sample's slice into memory before writing to disk.
+        sample_mask = sample_values.values == sample
+        n_cells_sample = int(sample_mask.sum())
+        # Optionally downsample to N cells per (sample, state_key) group. Median-baseline
+        # estimation only needs ~50-100 cells per state to be stable; clone-discovery NMF
+        # works fine on the same downsampled set. Keeps memory bounded on huge samples
+        # without changing call quality.
+        if base_params.max_cells_per_state and base_params.max_cells_per_state > 0:
+            sample_global_indices = np.flatnonzero(sample_mask)
+            sample_states = full.obs.iloc[sample_global_indices][base_params.state_key].astype(str).to_numpy()
+            rng = np.random.default_rng(int(base_params.random_state))
+            keep_global: List[int] = []
+            for state in pd.unique(sample_states):
+                local_idx = np.flatnonzero(sample_states == state)
+                if local_idx.size > base_params.max_cells_per_state:
+                    chosen = rng.choice(local_idx, size=base_params.max_cells_per_state, replace=False)
+                else:
+                    chosen = local_idx
+                keep_global.extend(int(sample_global_indices[i]) for i in chosen)
+            global_indices = np.sort(np.asarray(keep_global, dtype=np.int64))
+            n_kept = int(global_indices.size)
+            LOGGER.info(
+                "[%s] downsampling to %d cells/state -> %d / %d cells retained",
+                sample, base_params.max_cells_per_state, n_kept, n_cells_sample,
+            )
+            keep_mask = np.zeros(full.n_obs, dtype=bool)
+            keep_mask[global_indices] = True
+            sub = full[keep_mask].to_memory()
+        else:
+            LOGGER.info("[%s] slicing %d cells from backed h5ad...", sample, n_cells_sample)
+            sub = full[sample_mask].to_memory()
         LOGGER.info("[%s] %d cells -> %s/", sample, sub.n_obs, sample_dir)
         if sub.n_obs < max(base_params.min_clone_cells, base_params.min_state_cells):
             LOGGER.warning(
                 "[%s] only %d cells (< min-state-cells=%d); writing inputs but expect mostly empty outputs.",
                 sample, sub.n_obs, base_params.min_state_cells,
             )
-        sub.write_h5ad(sample_h5ad)
+        sub.write_h5ad(sample_h5ad, compression="gzip")
+        del sub  # free per-sample slice memory before run_fast loads it back
 
         sample_params = replace(
             base_params,
@@ -1799,6 +1879,7 @@ def _run_per_sample(args: argparse.Namespace, base_params: FastParams) -> Dict[s
         for k, v in outs.items():
             aggregated_outputs[f"{sample}/{k}"] = v
 
+    full.file.close()
     return aggregated_outputs
 
 

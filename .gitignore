@@ -100,3 +100,8 @@ tmp/
 # Anything intentionally tracked should be renamed without the tmp_ prefix.
 tmp_*
 **/tmp_*
+
+# Per-edit working backups created automatically by Claude. Each edit produces
+# a timestamped copy under .edit-archive/<YYYYMMDD>/<HHMMSS>__<filename> with a
+# matching log entry in .edit-archive/edits.log. Not tracked.
+.edit-archive/

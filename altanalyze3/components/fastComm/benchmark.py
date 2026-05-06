@@ -159,6 +159,7 @@ def run_benchmark(params: FastCommBenchmarkParams) -> Dict[str, object]:
     full_scores.to_csv(params.output_dir / "full_scores.tsv", sep="\t", index=False)
 
     split_rows: List[Dict[str, object]] = []
+    split_score_frames: List[pd.DataFrame] = []
     if params.split_key not in metadata.columns:
         raise KeyError(f"Split column {params.split_key!r} was not found in h5ad obs")
 
@@ -186,6 +187,10 @@ def run_benchmark(params: FastCommBenchmarkParams) -> Dict[str, object]:
             )
             continue
         split_scores.to_csv(params.output_dir / f"split_{split_name}_scores.tsv", sep="\t", index=False)
+        if not split_scores.empty:
+            split_frame = split_scores.copy()
+            split_frame.insert(0, "split", str(split_name))
+            split_score_frames.append(split_frame)
         row = {"split": split_name, "status": "ok"}
         row.update(split_summary)
         row.update(_compare_to_full(full_scores, split_scores, top_n=params.top_n_stability))
@@ -193,10 +198,16 @@ def run_benchmark(params: FastCommBenchmarkParams) -> Dict[str, object]:
 
     split_summary_df = pd.DataFrame(split_rows)
     split_summary_df.to_csv(params.output_dir / "split_stability.tsv", sep="\t", index=False)
+    split_scores_long_path = params.output_dir / "split_scores_long.tsv"
+    if split_score_frames:
+        pd.concat(split_score_frames, ignore_index=True).to_csv(split_scores_long_path, sep="\t", index=False)
+    else:
+        pd.DataFrame(columns=["split"]).to_csv(split_scores_long_path, sep="\t", index=False)
 
     summary = {
         "h5ad": str(params.h5ad),
         "output_dir": str(params.output_dir),
+        "split_scores_long_tsv": str(split_scores_long_path),
         "state_key": params.state_key,
         "split_key": params.split_key,
         "top_n_stability": int(params.top_n_stability),

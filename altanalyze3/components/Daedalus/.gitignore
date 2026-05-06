@@ -1,0 +1,30 @@
+# Archived legacy material (gencode pipeline, proxy tasks, biochem benchmarks,
+# intermediate kfold/stacking rounds, superseded benchmark/data files).
+# Reproduce-from-raw is supported via the data_ingest/ scripts; the archives
+# are kept locally for reference but not version-controlled.
+archive/*.tar.gz
+
+# Large derived artifacts (regenerable from data_ingest/ scripts)
+data_ingest/data/raw/
+data_ingest/data/interim/*.parquet
+data_ingest/data/interim/uniprot_features.tsv
+data_ingest/data/interim/uniprot_entries.tsv
+data_ingest/data/interim/uniprot_isoform_*.tsv
+data_ingest/data/interim/uniprot_isoform_*.parquet
+data_ingest/data/interim/uniprot_canonical_*.parquet
+data_ingest/data/interim/uniprot_canonical_pm_evidence.tsv
+data_ingest/data/interim/uniprot_localization_classifier.pt
+data_ingest/data/interim/tm_negatives/*.tsv
+data_ingest/data/interim/tm_negatives/*.json
+data_ingest/data/interim/tm_negatives/*.txt
+
+benchmark/data/uniprot_isoform_benchmark_instances.parquet
+benchmark/data/uniprot_isoform_benchmark_instances.tsv
+
+training/checkpoints/kfold_classical/*.tsv
+training/checkpoints/kfold_classical/*.json
+training/checkpoints/kfold_residual_mlp/*.tsv
+training/checkpoints/kfold_residual_mlp/*.json
+training/checkpoints/stacking/*.tsv
+training/checkpoints/stacking/*.json
+training/checkpoints/ensemble_consensus.tsv

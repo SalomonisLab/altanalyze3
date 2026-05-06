@@ -164,6 +164,15 @@ _DEFAULT_MODALITY_DEFINITIONS: Dict[str, Dict[str, object]] = {
         "supports_differential_network": False,
         "supports_differential_go": False,
     },
+    "cell_communication": {
+        "id": "cell_communication",
+        "label": "Cell communication",
+        "feature_label": "ligand-receptor interaction",
+        "supports_marker_heatmap": False,
+        "supports_marker_network": False,
+        "supports_differential_network": False,
+        "supports_differential_go": False,
+    },
 }
 
 
@@ -175,6 +184,8 @@ def _normalize_modality_id(value: object, *, default: str = "rna") -> str:
         return "lipids"
     if raw in {"adt", "adts", "cite", "cite-seq", "citeseq"}:
         return "adt"
+    if raw in {"cell_communication", "cell communication", "communication", "fastcomm", "fastcomm_network"}:
+        return "cell_communication"
     if raw == "rna":
         return "rna"
     return raw
@@ -756,6 +767,15 @@ def _derive_live_pipeline_message(status: object, log_lines: List[str], fallback
     if normalized_status != "processing":
       return str(fallback or "")
     stage_markers = (
+        "Running fastComm receptor-ligand communication analysis.",
+        "fastComm analysis complete:",
+        "Running rna2adt ADT imputation.",
+        "rna2adt ADT imputation complete.",
+        "Running rna2lipid lipid imputation.",
+        "rna2lipid lipid imputation complete.",
+        "Ambient RNA correction",
+        "ambient RNA correction",
+        "ambient correction",
         "Running approximate UMAP placement.",
         "Exporting NetPerspective marker networks.",
         "Identifying cell-state marker genes.",
@@ -828,6 +848,11 @@ def _differential_options(meta: Dict) -> Dict:
         pseudobulk_allowed = bool(upload_profile.get("single_h5ad") or upload_profile.get("total_files", 0) >= 4)
         comparison_types = ["cells", "pseudobulk"] if pseudobulk_allowed else ["cells"]
     modalities_state = _modalities_state(meta)
+    modalities_available = list(modalities_state["available"])
+    fastcomm_analysis = meta.get("fastcomm_analysis") or {}
+    if isinstance(fastcomm_analysis, dict) and fastcomm_analysis.get("enabled"):
+        if not any(_normalize_modality_id(entry.get("id"), default="") == "cell_communication" for entry in modalities_available):
+            modalities_available.append(dict(_DEFAULT_MODALITY_DEFINITIONS["cell_communication"]))
     return {
         "enabled": enabled,
         "sample_names": sample_names,
@@ -836,7 +861,7 @@ def _differential_options(meta: Dict) -> Dict:
         "default_sample_field": default_sample_field,
         "population_columns": population_columns,
         "default_population_col": default_population_col,
-        "modalities": modalities_state["available"],
+        "modalities": modalities_available,
         "default_modality": modalities_state["default"],
         "comparison_types": comparison_types,
         "upload_profile": upload_profile,
@@ -851,7 +876,7 @@ def _build_differential_payload(app: FastAPI, job_id: str, meta: Dict, root_path
     selected_modality = _normalize_modality_id(config.get("modality") or options.get("default_modality") or "rna")
     modality_info = _modality_definition(meta, selected_modality)
     result_populations: List[str] = []
-    visualization_populations: Dict[str, List[str]] = {"heatmap": [], "volcano": [], "network": [], "go": []}
+    visualization_populations: Dict[str, List[str]] = {"heatmap": [], "volcano": [], "network": [], "go": [], "table": []}
     if str(differential.get("status") or "") == "completed":
         try:
             result_populations = _differential_result_populations(app, meta)
@@ -862,7 +887,10 @@ def _build_differential_payload(app: FastAPI, job_id: str, meta: Dict, root_path
         except Exception:
             visualization_populations["heatmap"] = []
         visualization_populations["volcano"] = result_populations
-        if bool(modality_info.get("supports_differential_network")):
+        if selected_modality == "cell_communication":
+            visualization_populations["network"] = result_populations
+            visualization_populations["table"] = result_populations
+        if selected_modality != "cell_communication" and bool(modality_info.get("supports_differential_network")):
             visualization_populations["network"] = list(
                 dict.fromkeys(
                     str(entry.get("population", "")).strip()
@@ -888,14 +916,21 @@ def _build_differential_payload(app: FastAPI, job_id: str, meta: Dict, root_path
         )
 
     status = str(differential.get("status") or ("idle" if options["enabled"] else "unavailable"))
-    visualization_modes = [
-        {"value": "heatmap", "label": "Heatmap"},
-        {"value": "volcano", "label": "Volcano"},
-    ]
-    if bool(modality_info.get("supports_differential_network")):
-        visualization_modes.append({"value": "network", "label": "Network"})
-    if bool(modality_info.get("supports_differential_go")):
-        visualization_modes.append({"value": "go", "label": "GO Terms"})
+    if selected_modality == "cell_communication":
+        visualization_modes = [
+            {"value": "volcano", "label": "Score delta"},
+            {"value": "network", "label": "Cell-state network"},
+            {"value": "table", "label": "Top interaction table"},
+        ]
+    else:
+        visualization_modes = [
+            {"value": "heatmap", "label": "Heatmap"},
+            {"value": "volcano", "label": "Volcano"},
+        ]
+        if bool(modality_info.get("supports_differential_network")):
+            visualization_modes.append({"value": "network", "label": "Network"})
+        if bool(modality_info.get("supports_differential_go")):
+            visualization_modes.append({"value": "go", "label": "GO Terms"})
     return {
         **options,
         "status": status,
@@ -1627,7 +1662,214 @@ def _build_differential_go_payload(app: FastAPI, meta: Dict, population: str) ->
     return {"population": population, "terms": terms, "default_gene": default_gene}
 
 
+def _communication_focus_positions(states: List[str], focus: str) -> Dict[str, Dict[str, float]]:
+    ordered_states = [str(state).strip() for state in states if str(state).strip()]
+    if not ordered_states:
+        return {}
+    focus_state = str(focus).strip()
+    if focus_state and focus_state in ordered_states:
+        ordered_states = [focus_state] + [state for state in ordered_states if state != focus_state]
+    if len(ordered_states) == 1:
+        return {ordered_states[0]: {"x": 0.0, "y": 0.0}}
+    positions: Dict[str, Dict[str, float]] = {}
+    if focus_state and focus_state in ordered_states:
+        positions[focus_state] = {"x": 0.0, "y": 0.0}
+        ring_states = [state for state in ordered_states if state != focus_state]
+    else:
+        ring_states = ordered_states
+    if not ring_states:
+        return positions
+    radius = 260.0
+    for index, state in enumerate(ring_states):
+        angle = (2.0 * np.pi * float(index)) / float(max(len(ring_states), 1))
+        positions[state] = {
+            "x": float(np.cos(angle) * radius),
+            "y": float(np.sin(angle) * radius),
+        }
+    return positions
+
+
+def _build_differential_cell_communication_network_payload(app: FastAPI, meta: Dict, population: str) -> Dict:
+    detailed = _get_differential_detail_table(app, meta).copy()
+    detailed["population"] = detailed["population"].astype(str)
+    subset = detailed.loc[detailed["population"] == population].copy()
+    if subset.empty:
+        return {"population": population, "network_type": "cell_communication_diff", "elements": [], "default_gene": None}
+
+    for column in ("delta_score", "case_mean_score", "control_mean_score", "fdr", "pval", "lr_expression_score", "receiver_response_score"):
+        subset[column] = pd.to_numeric(subset.get(column), errors="coerce")
+    subset["abs_delta_score"] = pd.to_numeric(subset.get("abs_delta_score"), errors="coerce").fillna(subset["delta_score"].abs())
+    subset = subset.sort_values(["abs_delta_score", "fdr", "pval"], ascending=[False, True, True]).reset_index(drop=True)
+
+    pair_rows: List[Dict[str, object]] = []
+    for (sender, receiver), pair_df in subset.groupby(["sender_state", "receiver_state"], sort=False):
+        ranked = pair_df.sort_values(["abs_delta_score", "fdr", "pval"], ascending=[False, True, True]).reset_index(drop=True)
+        top_rows = ranked.head(8)
+        top_interactions = []
+        tooltip_lines = [
+            f"{sender} -> {receiver}",
+            f"{ranked.shape[0]} differential ligand-receptor interaction(s)",
+        ]
+        for interaction in top_rows.itertuples(index=False):
+            interaction_gene = str(getattr(interaction, "gene", "") or "").strip()
+            interaction_label = str(getattr(interaction, "interaction", "") or "").strip()
+            ligand_symbol = str(getattr(interaction, "ligand", "") or "").strip()
+            receptor_symbol = str(getattr(interaction, "receptor", "") or "").strip()
+            delta_score = float(getattr(interaction, "delta_score", 0.0) or 0.0)
+            case_mean = float(getattr(interaction, "case_mean_score", 0.0) or 0.0)
+            control_mean = float(getattr(interaction, "control_mean_score", 0.0) or 0.0)
+            lr_score = float(getattr(interaction, "lr_expression_score", 0.0) or 0.0)
+            response_score = float(getattr(interaction, "receiver_response_score", 0.0) or 0.0)
+            top_interactions.append(
+                {
+                    "gene": interaction_gene,
+                    "interaction": interaction_label,
+                    "ligand": ligand_symbol,
+                    "receptor": receptor_symbol,
+                    "delta_score": delta_score,
+                    "case_mean_score": case_mean,
+                    "control_mean_score": control_mean,
+                    "lr_expression_score": lr_score,
+                    "receiver_response_score": response_score,
+                    "fdr": float(getattr(interaction, "fdr", np.nan)) if _is_finite_number(getattr(interaction, "fdr", np.nan)) else None,
+                    "response_support_genes": str(getattr(interaction, "response_support_genes", "") or ""),
+                }
+            )
+            tooltip_lines.append(
+                f"{interaction_label}: "
+                f"delta={delta_score:.3f}; case={case_mean:.3f}; control={control_mean:.3f}; "
+                f"LR={lr_score:.3f}; response={response_score:.3f}"
+            )
+        total_delta = float(ranked["delta_score"].sum())
+        pair_rows.append(
+            {
+                "sender": str(sender).strip(),
+                "receiver": str(receiver).strip(),
+                "top_score": float(ranked["abs_delta_score"].max()),
+                "total_score": abs(total_delta),
+                "signed_delta": total_delta,
+                "case_mean_score": float(ranked["case_mean_score"].sum()),
+                "control_mean_score": float(ranked["control_mean_score"].sum()),
+                "n_interactions": int(ranked.shape[0]),
+                "top_interactions": top_interactions,
+                "tooltip": "\n".join(tooltip_lines),
+            }
+        )
+
+    pair_rows = _annotate_fastcomm_pair_visual_weights(pair_rows)
+    states = sorted({str(population).strip(), *subset["sender_state"].astype(str).tolist(), *subset["receiver_state"].astype(str).tolist()})
+    positions = _communication_focus_positions(states, population)
+    nodes: Dict[str, Dict[str, object]] = {}
+    for state in states:
+        node_id = f"state::{state}"
+        is_focus = state == str(population).strip()
+        nodes[node_id] = {
+            "data": {
+                "id": node_id,
+                "label": state,
+                "node_type": "focus" if is_focus else "state",
+                "color": "#0f766e" if is_focus else "#e0f2fe",
+                "node_score": 1.0 if is_focus else 0.0,
+            },
+            "position": positions.get(state, {"x": 0.0, "y": 0.0}),
+        }
+
+    edges: List[Dict[str, object]] = []
+    for index, pair in enumerate(pair_rows):
+        top_interactions = list(pair.get("top_interactions") or [])
+        top_interaction = top_interactions[0] if top_interactions else {}
+        signed_delta = float(pair.get("signed_delta", 0.0) or 0.0)
+        edge_color = "#dc2626" if signed_delta > 0 else ("#2563eb" if signed_delta < 0 else "#64748b")
+        label = str(top_interaction.get("interaction", "") or f"{int(pair.get('n_interactions', 0) or 0)} LR")
+        edges.append(
+            {
+                "data": {
+                    "id": f"ccd{index}",
+                    "source": f"state::{str(pair.get('sender', '')).strip()}",
+                    "target": f"state::{str(pair.get('receiver', '')).strip()}",
+                    "interaction_type": "cell_communication_diff",
+                    "direction": "positive" if signed_delta >= 0 else "negative",
+                    "score": float(pair.get("top_score", 0.0) or 0.0),
+                    "delta_score": signed_delta,
+                    "abs_delta_score": float(pair.get("total_score", 0.0) or 0.0),
+                    "case_mean_score": float(pair.get("case_mean_score", 0.0) or 0.0),
+                    "control_mean_score": float(pair.get("control_mean_score", 0.0) or 0.0),
+                    "n_interactions": int(pair.get("n_interactions", 0) or 0),
+                    "weight": float(pair.get("weight", 2.0) or 2.0),
+                    "edge_opacity": float(pair.get("edge_opacity", 0.65) or 0.65),
+                    "edge_color": edge_color,
+                    "label": label,
+                    "gene": str(top_interaction.get("gene", "") or ""),
+                    "tooltip": (
+                        str(pair.get("tooltip", ""))
+                        + f"\nSummed delta={signed_delta:.3f}; visual weight={float(pair.get('weight', 2.0) or 2.0):.1f}"
+                    ),
+                    "top_interactions": top_interactions,
+                }
+            }
+        )
+
+    default_gene = str(subset.iloc[0].get("gene", "") or "").strip() or None
+    return {
+        "population": population,
+        "network_type": "cell_communication_diff",
+        "elements": list(nodes.values()) + edges,
+        "default_gene": default_gene,
+    }
+
+
+def _build_differential_cell_communication_table_payload(app: FastAPI, meta: Dict, population: str, limit: int = 40) -> Dict:
+    detailed = _get_differential_detail_table(app, meta).copy()
+    detailed["population"] = detailed["population"].astype(str)
+    subset = detailed.loc[detailed["population"] == population].copy()
+    if subset.empty:
+        return {"population": population, "columns": [], "rows": [], "default_gene": None}
+    for column in ("delta_score", "case_mean_score", "control_mean_score", "log2fc", "fdr", "pval", "lr_expression_score", "receiver_response_score"):
+        subset[column] = pd.to_numeric(subset.get(column), errors="coerce")
+    subset["abs_delta_score"] = pd.to_numeric(subset.get("abs_delta_score"), errors="coerce").fillna(subset["delta_score"].abs())
+    subset = subset.sort_values(["fdr", "abs_delta_score", "max_sample_score"], ascending=[True, False, False]).head(max(1, int(limit))).copy()
+    columns = [
+        "sender_state",
+        "receiver_state",
+        "ligand",
+        "receptor",
+        "delta_score",
+        "case_mean_score",
+        "control_mean_score",
+        "log2fc",
+        "fdr",
+        "pval",
+        "lr_expression_score",
+        "receiver_response_score",
+        "response_support_genes",
+    ]
+    available_columns = [column for column in columns if column in subset.columns]
+    rows = []
+    for record in subset.where(pd.notnull(subset), None).to_dict("records"):
+        cleaned = {}
+        for key, value in record.items():
+            if isinstance(value, (np.floating, float)):
+                cleaned[key] = float(value) if _is_finite_number(value) else None
+            elif isinstance(value, (np.integer, int)):
+                cleaned[key] = int(value)
+            else:
+                cleaned[key] = value
+        rows.append(cleaned)
+    default_gene = str(subset.iloc[0].get("gene", "") or "").strip() or None
+    return {
+        "population": population,
+        "plot_type": "cell_communication_diff_table",
+        "columns": available_columns,
+        "rows": rows,
+        "default_gene": default_gene,
+    }
+
+
 def _build_differential_network_payload(app: FastAPI, meta: Dict, population: str, root_path: str = "") -> Dict:
+    modality = _normalize_modality_id((meta.get("differential", {}) or {}).get("config", {}).get("modality"), default="rna")
+    if modality == "cell_communication":
+        return _build_differential_cell_communication_network_payload(app, meta, population)
+
     entry = _differential_network_entry(meta, population)
     if not entry:
         return {"population": population, "elements": [], "default_gene": None}
@@ -1815,6 +2057,134 @@ def _fastcomm_scores_table(app: FastAPI, meta: Dict) -> pd.DataFrame:
     return scores
 
 
+def _fastcomm_split_scores_path(meta: Dict) -> Optional[Path]:
+    analysis = _fastcomm_analysis(meta)
+    per_sample = analysis.get("per_sample") or {}
+    raw_path = str(per_sample.get("split_scores_long_tsv") or "").strip() if isinstance(per_sample, dict) else ""
+    if not raw_path and isinstance(per_sample, dict):
+        output_dir = str(per_sample.get("output_dir") or "").strip()
+        if output_dir:
+            raw_path = str(Path(output_dir) / "split_scores_long.tsv")
+    if not raw_path:
+        scores_path = str(analysis.get("scores_tsv") or "").strip()
+        if scores_path:
+            raw_path = str(Path(scores_path).parent / "per_sample" / "split_scores_long.tsv")
+    if not raw_path:
+        return None
+    path = Path(raw_path)
+    return path if path.exists() else None
+
+
+def _fastcomm_split_scores_table(app: FastAPI, meta: Dict) -> pd.DataFrame:
+    job_id = str(meta.get("job_id") or "").strip()
+    path = _fastcomm_split_scores_path(meta)
+    if path is None:
+        raise FileNotFoundError("Per-sample fastComm scores are unavailable.")
+    if not hasattr(app.state, "fastcomm_cache"):
+        app.state.fastcomm_cache = {}
+    cache = app.state.fastcomm_cache
+    signature = (str(path), path.stat().st_mtime_ns, path.stat().st_size)
+    cache_key = f"{job_id}:split_scores"
+    entry = cache.get(cache_key)
+    if isinstance(entry, dict) and entry.get("signature") == signature and isinstance(entry.get("scores"), pd.DataFrame):
+        return entry["scores"]
+    scores = pd.read_csv(path, sep="\t")
+    cache[cache_key] = {"signature": signature, "scores": scores}
+    return scores
+
+
+def _prepare_fastcomm_scores(scores: pd.DataFrame) -> pd.DataFrame:
+    required = {"sender_state", "receiver_state", "ligand", "receptor", "fastcomm_score"}
+    missing = required.difference(scores.columns)
+    if missing:
+        raise ValueError(f"fastComm scores missing required columns: {', '.join(sorted(missing))}")
+    frame = scores.copy()
+    for column in ("sender_state", "receiver_state", "ligand", "receptor"):
+        frame[column] = frame[column].astype(str)
+    for column in ("fastcomm_score", "receiver_response_score", "lr_expression_score_scaled", "lr_expression_score"):
+        if column in frame.columns:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(0.0)
+    if "lr_expression_score_scaled" not in frame.columns and "lr_expression_score" in frame.columns:
+        frame["lr_expression_score_scaled"] = frame["lr_expression_score"]
+    if "receiver_response_score" not in frame.columns:
+        frame["receiver_response_score"] = 0.0
+    if "lr_expression_score_scaled" not in frame.columns:
+        frame["lr_expression_score_scaled"] = 0.0
+    return frame
+
+
+def _fastcomm_filter_focus(scores: pd.DataFrame, focus: str, direction: str) -> pd.DataFrame:
+    direction_key = str(direction or "incoming").strip().lower()
+    if direction_key == "outgoing":
+        return scores.loc[scores["sender_state"].astype(str) == focus].copy()
+    return scores.loc[scores["receiver_state"].astype(str) == focus].copy()
+
+
+def _first_nonempty_value(values: pd.Series) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _fastcomm_selected_splits(
+    app: FastAPI,
+    meta: Dict,
+    display_filters: Optional[List[tuple[str, List[str]]]],
+) -> Optional[List[str]]:
+    if not display_filters:
+        return None
+    sample_key = str((_fastcomm_analysis(meta).get("sample_key") or "")).strip()
+    if not sample_key:
+        return None
+    cache_entry = _get_expression_cache(app, meta, modality="rna")
+    display_mask = _apply_display_filter_mask(cache_entry, display_filters)
+    if not np.any(display_mask):
+        raise HTTPException(status_code=404, detail="No cells match the current display filters for cell communication.")
+    sample_values = (cache_entry.get("obs_filter_values") or {}).get(sample_key)
+    if sample_values is None:
+        adata = cache_entry.get("adata")
+        if adata is not None and sample_key in adata.obs.columns:
+            sample_values = (
+                adata.obs[sample_key]
+                .astype(str)
+                .str.strip()
+                .replace({"nan": "", "None": ""})
+                .to_numpy(dtype=str)
+            )
+    if sample_values is None:
+        return None
+    selected = [
+        value
+        for value in pd.Index(np.asarray(sample_values, dtype=str)[display_mask]).unique().tolist()
+        if str(value).strip()
+    ]
+    return sorted(dict.fromkeys(str(value).strip() for value in selected if str(value).strip()))
+
+
+def _aggregate_fastcomm_scores(scores: pd.DataFrame) -> pd.DataFrame:
+    if scores.empty:
+        return scores.copy()
+    group_cols = ["sender_state", "receiver_state", "ligand", "receptor"]
+    frame = scores.copy()
+    frame["response_key"] = frame.get("response_key", pd.Series("", index=frame.index)).astype(str)
+    frame["response_support_genes"] = frame.get("response_support_genes", pd.Series("", index=frame.index)).astype(str)
+    aggregations = {
+        "fastcomm_score": "mean",
+        "receiver_response_score": "mean",
+        "lr_expression_score_scaled": "mean",
+        "response_key": _first_nonempty_value,
+        "response_support_genes": _first_nonempty_value,
+    }
+    if "empirical_percentile" in frame.columns:
+        aggregations["empirical_percentile"] = "mean"
+    if "empirical_rank" in frame.columns:
+        aggregations["empirical_rank"] = "mean"
+    aggregated = frame.groupby(group_cols, as_index=False).agg(aggregations)
+    return aggregated.sort_values("fastcomm_score", ascending=False).reset_index(drop=True)
+
+
 def _fastcomm_populations(app: FastAPI, meta: Dict) -> List[str]:
     try:
         scores = _fastcomm_scores_table(app, meta)
@@ -1830,12 +2200,143 @@ def _fastcomm_populations(app: FastAPI, meta: Dict) -> List[str]:
     return sorted({str(value).strip() for value in values if str(value).strip()})
 
 
+def _fastcomm_interaction_payload(interaction: pd.Series) -> Dict[str, object]:
+    return {
+        "sender_state": str(interaction.get("sender_state", "")).strip(),
+        "receiver_state": str(interaction.get("receiver_state", "")).strip(),
+        "ligand": str(interaction.get("ligand", "")).strip(),
+        "receptor": str(interaction.get("receptor", "")).strip(),
+        "score": float(interaction.get("fastcomm_score", 0.0) or 0.0),
+        "receiver_response_score": float(interaction.get("receiver_response_score", 0.0) or 0.0),
+        "lr_expression_score": float(interaction.get("lr_expression_score_scaled", 0.0) or 0.0),
+        "pathway": str(interaction.get("response_key", "") or interaction.get("pathway", "") or "").strip(),
+        "supporting_response_genes": str(interaction.get("response_support_genes", "") or "").strip(),
+    }
+
+
+def _fastcomm_pair_records(scores: pd.DataFrame, *, limit: int = 35) -> List[Dict[str, object]]:
+    if scores.empty:
+        return []
+    frame = scores.sort_values("fastcomm_score", ascending=False)
+    records: List[Dict[str, object]] = []
+    for (sender, receiver), pair_df in frame.groupby(["sender_state", "receiver_state"], sort=False):
+        ranked = pair_df.sort_values("fastcomm_score", ascending=False)
+        top_interactions = [_fastcomm_interaction_payload(interaction) for _, interaction in ranked.head(8).iterrows()]
+        tooltip_lines = [
+            f"{sender} -> {receiver}",
+            f"{ranked.shape[0]} significant ligand-receptor interaction(s)",
+        ]
+        for item in top_interactions:
+            tooltip_lines.append(
+                f"{item['ligand']}->{item['receptor']}: "
+                f"score={item['score']:.3f}; LR={item['lr_expression_score']:.3f}; response={item['receiver_response_score']:.3f}"
+            )
+        records.append(
+            {
+                "sender": str(sender).strip(),
+                "receiver": str(receiver).strip(),
+                "top_score": float(ranked["fastcomm_score"].max()),
+                "total_score": float(ranked["fastcomm_score"].sum()),
+                "n_interactions": int(ranked.shape[0]),
+                "top_interactions": top_interactions,
+                "tooltip": "\n".join(tooltip_lines),
+            }
+        )
+    return sorted(records, key=lambda item: float(item["total_score"]), reverse=True)[: max(1, int(limit))]
+
+
+def _annotate_fastcomm_pair_visual_weights(pair_rows: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    if not pair_rows:
+        return []
+    totals = [float(row.get("total_score", 0.0) or 0.0) for row in pair_rows]
+    min_total = min(totals)
+    max_total = max(totals)
+    denom = max_total - min_total
+    count = len(pair_rows)
+    weighted_rows: List[Dict[str, object]] = []
+    for index, row in enumerate(pair_rows):
+        total_score = float(row.get("total_score", 0.0) or 0.0)
+        score_norm = ((total_score - min_total) / denom) if denom > 1e-12 else 0.0
+        rank_norm = 1.0 if count <= 1 else 1.0 - (index / float(count - 1))
+        visual_norm = score_norm if denom > 1e-12 else rank_norm
+        if denom > 1e-12:
+            visual_norm = 0.8 * score_norm + 0.2 * rank_norm
+        weight = 2.0 + 12.0 * visual_norm
+        edge_opacity = 0.3 + 0.65 * visual_norm
+        weighted_rows.append(
+            {
+                **row,
+                "visual_norm": float(visual_norm),
+                "weight": float(weight),
+                "edge_opacity": float(edge_opacity),
+            }
+        )
+    return weighted_rows
+
+
+def _build_fastcomm_network_elements(pair_rows: List[Dict[str, object]], *, focus: str = "") -> List[Dict[str, object]]:
+    pair_rows = _annotate_fastcomm_pair_visual_weights(pair_rows)
+    nodes: Dict[str, Dict[str, object]] = {}
+    if focus:
+        focus_id = f"state::{focus}"
+        nodes[focus_id] = {"data": {"id": focus_id, "label": focus, "node_type": "focus", "color": "#0f766e"}}
+    edges: List[Dict[str, object]] = []
+    for index, pair in enumerate(pair_rows):
+        sender = str(pair["sender"]).strip()
+        receiver = str(pair["receiver"]).strip()
+        for state in (sender, receiver):
+            node_id = f"state::{state}"
+            if node_id not in nodes:
+                nodes[node_id] = {
+                    "data": {
+                        "id": node_id,
+                        "label": state,
+                        "node_type": "state",
+                        "color": "#e0f2fe",
+                    }
+                }
+        if focus and f"state::{focus}" in nodes:
+            nodes[f"state::{focus}"]["data"]["node_type"] = "focus"
+            nodes[f"state::{focus}"]["data"]["color"] = "#0f766e"
+        top_interactions = list(pair.get("top_interactions") or [])
+        top_interaction = top_interactions[0] if top_interactions else {}
+        ligand = str(top_interaction.get("ligand", "")).strip()
+        receptor = str(top_interaction.get("receptor", "")).strip()
+        total_score = float(pair.get("total_score", 0.0) or 0.0)
+        edges.append(
+            {
+                "data": {
+                    "id": f"fc{index}",
+                    "source": f"state::{sender}",
+                    "target": f"state::{receiver}",
+                    "interaction_type": "fastcomm",
+                    "direction": "positive",
+                    "ligand": ligand,
+                    "receptor": receptor,
+                    "pathway": str(top_interaction.get("pathway", "")).strip(),
+                    "score": float(pair.get("top_score", 0.0) or 0.0),
+                    "total_score": total_score,
+                    "n_interactions": int(pair.get("n_interactions", 0) or 0),
+                    "weight": float(pair.get("weight", 2.0) or 2.0),
+                    "edge_opacity": float(pair.get("edge_opacity", 0.65) or 0.65),
+                    "visual_norm": float(pair.get("visual_norm", 0.0) or 0.0),
+                    "label": f"{ligand}->{receptor}" if ligand and receptor else f"{pair.get('n_interactions', 0)} LR",
+                    "tooltip": (
+                        str(pair.get("tooltip", ""))
+                        + f"\nTotal pair score={total_score:.3f}; visual weight={float(pair.get('weight', 2.0) or 2.0):.1f}"
+                    ),
+                    "top_interactions": top_interactions,
+                    "supporting_response_genes": str(top_interaction.get("supporting_response_genes", "") or ""),
+                    "receiver_response_score": float(top_interaction.get("receiver_response_score", 0.0) or 0.0),
+                    "lr_expression_score": float(top_interaction.get("lr_expression_score", 0.0) or 0.0),
+                }
+            }
+        )
+    return list(nodes.values()) + edges
+
+
 def _build_fastcomm_payload(app: FastAPI, meta: Dict, population: str, direction: str = "incoming", limit: int = 35) -> Dict:
-    scores = _fastcomm_scores_table(app, meta)
-    required = {"sender_state", "receiver_state", "ligand", "receptor", "fastcomm_score"}
-    missing = required.difference(scores.columns)
-    if missing:
-        raise ValueError(f"fastComm scores missing required columns: {', '.join(sorted(missing))}")
+    scores = _prepare_fastcomm_scores(_fastcomm_scores_table(app, meta))
 
     focus = str(population or "").strip()
     if not focus:
@@ -1848,12 +2349,7 @@ def _build_fastcomm_payload(app: FastAPI, meta: Dict, population: str, direction
     if direction_key not in {"incoming", "outgoing"}:
         direction_key = "incoming"
 
-    if direction_key == "outgoing":
-        subset = scores.loc[scores["sender_state"].astype(str) == focus].copy()
-        other_col = "receiver_state"
-    else:
-        subset = scores.loc[scores["receiver_state"].astype(str) == focus].copy()
-        other_col = "sender_state"
+    subset = _fastcomm_filter_focus(scores, focus, direction_key)
 
     if subset.empty:
         return {
@@ -1863,69 +2359,393 @@ def _build_fastcomm_payload(app: FastAPI, meta: Dict, population: str, direction
             "message": f"No fastComm {direction_key} interactions were available for {focus}.",
         }
 
-    subset["fastcomm_score"] = pd.to_numeric(subset["fastcomm_score"], errors="coerce").fillna(0.0)
-    subset = subset.sort_values("fastcomm_score", ascending=False)
-    collapsed = subset.drop_duplicates([other_col, "ligand", "receptor"], keep="first").head(max(1, int(limit)))
-
-    nodes: Dict[str, Dict[str, object]] = {}
-    focus_id = f"state::{focus}"
-    nodes[focus_id] = {"data": {"id": focus_id, "label": focus, "node_type": "focus", "color": "#0f766e"}}
-    edges = []
-    for index, row in enumerate(collapsed.itertuples(index=False)):
-        sender = str(getattr(row, "sender_state")).strip()
-        receiver = str(getattr(row, "receiver_state")).strip()
-        other = str(getattr(row, other_col)).strip()
-        other_id = f"state::{other}"
-        if other_id not in nodes:
-            nodes[other_id] = {"data": {"id": other_id, "label": other, "node_type": "state", "color": "#e0f2fe"}}
-        score = float(getattr(row, "fastcomm_score", 0.0) or 0.0)
-        ligand = str(getattr(row, "ligand", "")).strip()
-        receptor = str(getattr(row, "receptor", "")).strip()
-        response = float(getattr(row, "receiver_response_score", 0.0) or 0.0) if hasattr(row, "receiver_response_score") else 0.0
-        lr_score = float(getattr(row, "lr_expression_score_scaled", 0.0) or 0.0) if hasattr(row, "lr_expression_score_scaled") else 0.0
-        support = str(getattr(row, "response_support_genes", "") or "").strip() if hasattr(row, "response_support_genes") else ""
-        pathway = str(getattr(row, "response_key", "") or getattr(row, "pathway", "") or "").strip()
-        edges.append(
-            {
-                "data": {
-                    "id": f"fc{index}",
-                    "source": f"state::{sender}",
-                    "target": f"state::{receiver}",
-                    "interaction_type": "fastcomm",
-                    "direction": "positive",
-                    "ligand": ligand,
-                    "receptor": receptor,
-                    "pathway": pathway,
-                    "score": score,
-                    "weight": max(1.0, min(8.0, 1.0 + score * 8.0)),
-                    "label": f"{ligand}->{receptor}",
-                    "tooltip": (
-                        f"{sender} -> {receiver}\n"
-                        f"{ligand} -> {receptor}\n"
-                        f"score={score:.3f}; LR={lr_score:.3f}; response={response:.3f}"
-                        + (f"\nresponse genes: {support}" if support else "")
-                    ),
-                    "supporting_response_genes": support,
-                    "receiver_response_score": response,
-                    "lr_expression_score": lr_score,
-                }
-            }
-        )
+    pair_rows = _fastcomm_pair_records(subset, limit=limit)
+    elements = _build_fastcomm_network_elements(pair_rows, focus=focus)
 
     return {
         "population": focus,
         "direction": direction_key,
+        "plot_type": "focused_outgoing" if direction_key == "outgoing" else "focused_incoming",
         "state_key": str(_fastcomm_analysis(meta).get("state_key") or meta.get("cluster_key") or ""),
-        "elements": list(nodes.values()) + edges,
+        "elements": elements,
         "summary": {
             "n_edges": int(subset.shape[0]),
-            "n_displayed_edges": int(len(edges)),
-            "top_score": float(collapsed["fastcomm_score"].max()) if not collapsed.empty else 0.0,
+            "n_displayed_edges": int(sum(1 for item in elements if "source" in item.get("data", {}))),
+            "top_score": max((float(item["top_score"]) for item in pair_rows), default=0.0),
         },
     }
 
 
-def _build_differential_gene_detail_payload(app: FastAPI, meta: Dict, population: str, gene: str) -> Dict:
+def _build_fastcomm_focus_payload_from_scores(
+    scores: pd.DataFrame,
+    *,
+    meta: Dict,
+    population: str,
+    direction: str = "incoming",
+    limit: int = 35,
+    selected_splits: Optional[List[str]] = None,
+) -> Dict:
+    focus = str(population or "").strip()
+    if not focus:
+        values = pd.concat(
+            [
+                scores.get("sender_state", pd.Series(dtype=str)),
+                scores.get("receiver_state", pd.Series(dtype=str)),
+            ],
+            ignore_index=True,
+        )
+        populations = sorted({str(value).strip() for value in values if str(value).strip()})
+        focus = populations[0] if populations else ""
+    if not focus:
+        return {"population": "", "direction": direction, "elements": [], "message": "No fastComm populations are available."}
+
+    direction_key = str(direction or "incoming").strip().lower()
+    if direction_key not in {"incoming", "outgoing"}:
+        direction_key = "incoming"
+    subset = _fastcomm_filter_focus(scores, focus, direction_key)
+    if subset.empty:
+        return {
+            "population": focus,
+            "direction": direction_key,
+            "plot_type": "focused_outgoing" if direction_key == "outgoing" else "focused_incoming",
+            "elements": [],
+            "message": f"No fastComm {direction_key} interactions were available for {focus}.",
+            "selected_splits": selected_splits or [],
+        }
+    pair_rows = _fastcomm_pair_records(subset, limit=limit)
+    elements = _build_fastcomm_network_elements(pair_rows, focus=focus)
+    return {
+        "population": focus,
+        "direction": direction_key,
+        "plot_type": "focused_outgoing" if direction_key == "outgoing" else "focused_incoming",
+        "state_key": str(_fastcomm_analysis(meta).get("state_key") or meta.get("cluster_key") or ""),
+        "selected_splits": selected_splits or [],
+        "elements": elements,
+        "summary": {
+            "n_edges": int(subset.shape[0]),
+            "n_displayed_edges": int(sum(1 for item in elements if "source" in item.get("data", {}))),
+            "top_score": max((float(item["top_score"]) for item in pair_rows), default=0.0),
+        },
+    }
+
+
+def _build_fastcomm_plot_payload(
+    app: FastAPI,
+    meta: Dict,
+    population: str,
+    plot_type: str = "focused_incoming",
+    limit: int = 60,
+    display_filters: Optional[List[tuple[str, List[str]]]] = None,
+) -> Dict:
+    scores = _prepare_fastcomm_scores(_fastcomm_scores_table(app, meta))
+    selected_splits = _fastcomm_selected_splits(app, meta, display_filters)
+    if selected_splits:
+        split_scores = _prepare_fastcomm_scores(_fastcomm_split_scores_table(app, meta))
+        if "split" not in split_scores.columns:
+            raise ValueError("Per-sample fastComm scores missing required column: split")
+        split_scores["split"] = split_scores["split"].astype(str)
+        filtered_split_scores = split_scores.loc[split_scores["split"].isin(selected_splits)].copy()
+        if filtered_split_scores.empty:
+            raise HTTPException(status_code=404, detail="No per-sample cell-communication scores match the current display filters.")
+        scores = _aggregate_fastcomm_scores(filtered_split_scores)
+    plot_key = str(plot_type or "focused_incoming").strip().lower()
+    aliases = {
+        "incoming": "focused_incoming",
+        "outgoing": "focused_outgoing",
+        "network": "cell_state_network",
+        "global_network": "cell_state_network",
+        "heatmap": "state_heatmap",
+        "dotplot": "lr_dotplot",
+        "table": "top_table",
+        "sample": "per_sample",
+    }
+    plot_key = aliases.get(plot_key, plot_key)
+    if plot_key not in {
+        "focused_incoming",
+        "focused_outgoing",
+        "cell_state_network",
+        "lr_dotplot",
+        "state_heatmap",
+        "top_table",
+        "per_sample",
+    }:
+        plot_key = "focused_incoming"
+
+    focus = str(population or "").strip()
+    if not focus:
+        populations = _fastcomm_populations(app, meta)
+        focus = populations[0] if populations else ""
+
+    if plot_key in {"focused_incoming", "focused_outgoing"}:
+        direction = "outgoing" if plot_key == "focused_outgoing" else "incoming"
+        return _build_fastcomm_focus_payload_from_scores(
+            scores,
+            meta=meta,
+            population=focus,
+            direction=direction,
+            limit=min(limit, 60),
+            selected_splits=selected_splits,
+        )
+
+    if plot_key == "cell_state_network":
+        pair_rows = _fastcomm_pair_records(scores, limit=limit)
+        elements = _build_fastcomm_network_elements(pair_rows)
+        return {
+            "plot_type": plot_key,
+            "population": focus,
+            "direction": "global",
+            "state_key": str(_fastcomm_analysis(meta).get("state_key") or meta.get("cluster_key") or ""),
+            "elements": elements,
+            "selected_splits": selected_splits or [],
+            "summary": {
+                "n_edges": int(scores.shape[0]),
+                "n_displayed_edges": int(sum(1 for item in elements if "source" in item.get("data", {}))),
+                "top_score": max((float(item["top_score"]) for item in pair_rows), default=0.0),
+            },
+        }
+
+    if plot_key == "state_heatmap":
+        grouped = (
+            scores.groupby(["sender_state", "receiver_state"], as_index=False)
+            .agg(total_score=("fastcomm_score", "sum"), max_score=("fastcomm_score", "max"), n_interactions=("fastcomm_score", "size"))
+            .sort_values("total_score", ascending=False)
+        )
+        senders = sorted(grouped["sender_state"].astype(str).unique().tolist())
+        receivers = sorted(grouped["receiver_state"].astype(str).unique().tolist())
+        matrix = grouped.pivot_table(index="sender_state", columns="receiver_state", values="total_score", aggfunc="sum", fill_value=0.0)
+        matrix = matrix.reindex(index=senders, columns=receivers, fill_value=0.0)
+        hover = grouped.set_index(["sender_state", "receiver_state"]).to_dict("index")
+        text = []
+        for sender in senders:
+            row_text = []
+            for receiver in receivers:
+                item = hover.get((sender, receiver), {})
+                row_text.append(
+                    f"{sender} -> {receiver}<br>"
+                    f"total score={float(item.get('total_score', 0.0) or 0.0):.3f}<br>"
+                    f"max score={float(item.get('max_score', 0.0) or 0.0):.3f}<br>"
+                    f"interactions={int(item.get('n_interactions', 0) or 0)}"
+                )
+            text.append(row_text)
+        return {
+            "plot_type": plot_key,
+            "population": focus,
+            "selected_splits": selected_splits or [],
+            "senders": senders,
+            "receivers": receivers,
+            "z": matrix.to_numpy(dtype=float).tolist(),
+            "text": text,
+            "summary": {"n_edges": int(scores.shape[0]), "n_state_pairs": int(grouped.shape[0])},
+        }
+
+    direction = "outgoing" if plot_key == "focused_outgoing" else "incoming"
+    focused = _fastcomm_filter_focus(scores, focus, direction) if focus else scores.copy()
+    if focused.empty:
+        return {
+            "plot_type": plot_key,
+            "population": focus,
+            "direction": direction,
+            "rows": [],
+            "points": [],
+            "message": f"No fastComm interactions were available for {focus}.",
+        }
+    focused = focused.sort_values("fastcomm_score", ascending=False)
+
+    if plot_key == "lr_dotplot":
+        other_col = "receiver_state" if direction == "outgoing" else "sender_state"
+        top = focused.head(max(1, int(limit))).copy()
+        points = []
+        for _, row in top.iterrows():
+            interaction = f"{row['ligand']}->{row['receptor']}"
+            other = str(row.get(other_col, "")).strip()
+            points.append(
+                {
+                    "x": other,
+                    "y": interaction,
+                    "score": float(row.get("fastcomm_score", 0.0) or 0.0),
+                    "receiver_response_score": float(row.get("receiver_response_score", 0.0) or 0.0),
+                    "lr_expression_score": float(row.get("lr_expression_score_scaled", 0.0) or 0.0),
+                    "sender_state": str(row.get("sender_state", "")).strip(),
+                    "receiver_state": str(row.get("receiver_state", "")).strip(),
+                    "supporting_response_genes": str(row.get("response_support_genes", "") or ""),
+                }
+            )
+        return {
+            "plot_type": plot_key,
+            "population": focus,
+            "direction": direction,
+            "selected_splits": selected_splits or [],
+            "points": points,
+            "summary": {"n_edges": int(focused.shape[0]), "n_displayed": int(len(points))},
+        }
+
+    if plot_key == "top_table":
+        columns = [
+            "sender_state",
+            "receiver_state",
+            "ligand",
+            "receptor",
+            "fastcomm_score",
+            "lr_expression_score_scaled",
+            "receiver_response_score",
+            "response_key",
+            "response_support_genes",
+            "empirical_percentile",
+            "empirical_rank",
+        ]
+        table_source = _fastcomm_filter_focus(scores, focus, "incoming") if focus else scores.copy()
+        if table_source.empty:
+            table_source = scores.copy()
+        table_source = table_source.sort_values("fastcomm_score", ascending=False)
+        available_columns = [column for column in columns if column in table_source.columns]
+        table = table_source.loc[:, available_columns].head(max(1, int(limit))).copy()
+        return {
+            "plot_type": plot_key,
+            "population": focus,
+            "direction": "incoming",
+            "selected_splits": selected_splits or [],
+            "columns": available_columns,
+            "rows": table.to_dict("records"),
+            "summary": {"n_edges": int(table_source.shape[0]), "n_displayed": int(table.shape[0])},
+        }
+
+    if plot_key == "per_sample":
+        split_scores = _prepare_fastcomm_scores(_fastcomm_split_scores_table(app, meta))
+        if "split" not in split_scores.columns:
+            raise ValueError("Per-sample fastComm scores missing required column: split")
+        split_scores["split"] = split_scores["split"].astype(str)
+        if selected_splits:
+            split_scores = split_scores.loc[split_scores["split"].isin(selected_splits)].copy()
+            if split_scores.empty:
+                raise HTTPException(status_code=404, detail="No per-sample cell-communication scores match the current display filters.")
+        split_focused = _fastcomm_filter_focus(split_scores, focus, direction) if focus else split_scores.copy()
+        other_col = "receiver_state" if direction == "outgoing" else "sender_state"
+        grouped = (
+            split_focused.groupby(["split", other_col], as_index=False)
+            .agg(total_score=("fastcomm_score", "sum"), max_score=("fastcomm_score", "max"), n_interactions=("fastcomm_score", "size"))
+            .sort_values("total_score", ascending=False)
+        )
+        top_states = (
+            grouped.groupby(other_col, as_index=False)["total_score"].sum().sort_values("total_score", ascending=False).head(12)[other_col].astype(str).tolist()
+        )
+        grouped = grouped.loc[grouped[other_col].astype(str).isin(top_states)].copy()
+        rows = [
+            {
+                "sample": str(row.split),
+                "state": str(getattr(row, other_col)),
+                "total_score": float(row.total_score),
+                "max_score": float(row.max_score),
+                "n_interactions": int(row.n_interactions),
+            }
+            for row in grouped.itertuples(index=False)
+        ]
+        return {
+            "plot_type": plot_key,
+            "population": focus,
+            "direction": direction,
+            "sample_key": str((_fastcomm_analysis(meta).get("sample_key") or "sample")),
+            "selected_splits": selected_splits or [],
+            "rows": rows,
+            "summary": {"n_rows": int(len(rows)), "n_samples": int(grouped["split"].nunique()) if not grouped.empty else 0},
+        }
+
+    return _build_fastcomm_payload(app, meta, focus, direction="incoming", limit=min(limit, 60))
+
+
+def _build_cell_communication_feature_expression(
+    *,
+    app: FastAPI,
+    meta: Dict,
+    feature_symbol: str,
+    feature_role: str,
+    sender_state: str,
+    receiver_state: str,
+    case_label: str,
+    control_label: str,
+    group1_samples: List[str],
+    group2_samples: List[str],
+    sample_field: str,
+    population_col: str,
+) -> Optional[Dict]:
+    expression_cache = _get_expression_cache(app, meta, modality="rna")
+    adata = expression_cache["adata"]
+    resolved_gene = _resolve_gene_name(expression_cache["var_names"], feature_symbol)
+    if not resolved_gene:
+        raise KeyError(f"Gene '{feature_symbol}' not found in the aligned AnnData output.")
+    if population_col not in adata.obs.columns:
+        raise ValueError(f"'{population_col}' is not present in the aligned AnnData observations.")
+
+    if sample_field and sample_field in adata.obs.columns:
+        sample_col = sample_field
+        available_values = set(adata.obs[sample_col].astype(str))
+        missing = sorted((set(group1_samples) | set(group2_samples)) - available_values)
+        if missing:
+            raise ValueError(
+                f"Selected group values were not found in obs['{sample_col}']: {', '.join(missing)}"
+            )
+        resolved_group1 = list(group1_samples)
+        resolved_group2 = list(group2_samples)
+    else:
+        sample_col, resolved_samples = pipeline_mod._resolve_samples_for_adata(
+            adata, meta, group1_samples + group2_samples
+        )
+        resolved_group1 = [resolved_samples[sample] for sample in group1_samples]
+        resolved_group2 = [resolved_samples[sample] for sample in group2_samples]
+
+    population_values = adata.obs[population_col].astype(str)
+    sample_values = adata.obs[sample_col].astype(str)
+
+    role = (feature_role or "").strip().lower()
+    if role == "ligand":
+        target_state = sender_state
+    elif role == "receptor":
+        target_state = receiver_state
+    else:
+        target_state = receiver_state or sender_state
+
+    target_state = str(target_state or "").strip()
+    if not target_state:
+        return None
+
+    mask = (population_values == target_state) & sample_values.isin(resolved_group1 + resolved_group2)
+    if int(np.asarray(mask).sum()) == 0:
+        return None
+
+    subset = adata[mask.to_numpy(), resolved_gene]
+    values = _flatten_expr(subset.X).astype(float)
+    subset_samples = sample_values.loc[mask].astype(str)
+    group_labels = np.where(subset_samples.isin(resolved_group1), case_label, control_label)
+
+    groups = []
+    for label in (case_label, control_label):
+        group_values = values[group_labels == label]
+        finite_values = group_values[np.isfinite(group_values)]
+        groups.append(
+            {
+                "label": label,
+                "values": [float(value) for value in finite_values],
+                "n_cells": int(len(finite_values)),
+                "mean": float(np.mean(finite_values)) if len(finite_values) else 0.0,
+            }
+        )
+
+    return {
+        "gene": resolved_gene,
+        "feature_symbol": resolved_gene,
+        "feature_role": role,
+        "feature_state": target_state,
+        "view_kind": "feature_expression",
+        "groups": groups,
+    }
+
+
+def _build_differential_gene_detail_payload(
+    app: FastAPI,
+    meta: Dict,
+    population: str,
+    gene: str,
+    feature: Optional[str] = None,
+) -> Dict:
     differential = meta.get("differential", {}) or {}
     config = differential.get("config", {}) or {}
     modality = _normalize_modality_id(config.get("modality"), default="rna")
@@ -1937,6 +2757,106 @@ def _build_differential_gene_detail_payload(app: FastAPI, meta: Dict, population
         raise ValueError("Differential comparison groups are not configured.")
     population_col = _differential_population_col(meta)
     case_label, control_label = _differential_group_labels(meta)
+
+    if modality == "cell_communication":
+        detailed = _get_differential_detail_table(app, meta)
+        population_rows = detailed.loc[detailed["population"] == population].copy()
+        if population_rows.empty:
+            raise KeyError(f"No differential interactions were found for '{population}'.")
+        stats = population_rows.loc[population_rows["gene"] == gene].copy()
+        if stats.empty:
+            population_rows["abs_delta_score"] = pd.to_numeric(
+                population_rows.get("abs_delta_score"), errors="coerce"
+            ).fillna(pd.to_numeric(population_rows.get("delta_score"), errors="coerce").abs())
+            stats = population_rows.sort_values(
+                ["abs_delta_score", "fdr", "pval"], ascending=[False, True, True]
+            ).head(1).copy()
+        row = stats.sort_values(["fdr", "pval"], ascending=[True, True]).iloc[0]
+        ligand_symbol = str(row.get("ligand", "") or "").strip()
+        receptor_symbol = str(row.get("receptor", "") or "").strip()
+        sender_state = str(row.get("sender_state", "") or "").strip()
+        receiver_state = str(row.get("receiver_state", "") or "").strip() or population
+
+        feature_request = str(feature or "").strip()
+        feature_role = ""
+        feature_symbol = ""
+        if feature_request:
+            if feature_request.lower() == ligand_symbol.lower() and ligand_symbol:
+                feature_role = "ligand"
+                feature_symbol = ligand_symbol
+            elif feature_request.lower() == receptor_symbol.lower() and receptor_symbol:
+                feature_role = "receptor"
+                feature_symbol = receptor_symbol
+            else:
+                feature_symbol = feature_request
+
+        per_cell_payload = None
+        if feature_symbol:
+            try:
+                per_cell_payload = _build_cell_communication_feature_expression(
+                    app=app,
+                    meta=meta,
+                    feature_symbol=feature_symbol,
+                    feature_role=feature_role,
+                    sender_state=sender_state,
+                    receiver_state=receiver_state,
+                    case_label=case_label,
+                    control_label=control_label,
+                    group1_samples=group1_samples,
+                    group2_samples=group2_samples,
+                    sample_field=sample_field,
+                    population_col=population_col,
+                )
+            except KeyError:
+                per_cell_payload = None
+            except (FileNotFoundError, ValueError):
+                per_cell_payload = None
+
+        if per_cell_payload is not None:
+            per_cell_payload["population"] = population
+            per_cell_payload["interaction"] = str(row.get("interaction") or gene)
+            per_cell_payload["interaction_key"] = gene
+            per_cell_payload["ligand"] = ligand_symbol
+            per_cell_payload["receptor"] = receptor_symbol
+            per_cell_payload["sender_state"] = sender_state
+            per_cell_payload["receiver_state"] = receiver_state
+            per_cell_payload["modality"] = modality
+            per_cell_payload["feature_label"] = "expression"
+            per_cell_payload["stats"] = {
+                "p_value": float(row["pval"]) if _is_finite_number(row.get("pval")) else None,
+                "fdr": float(row["fdr"]) if _is_finite_number(row.get("fdr")) else None,
+                "log2fc": float(row["log2fc"]) if _is_finite_number(row.get("log2fc")) else None,
+                "n_case": int(row.get("n_case", 0) or 0),
+                "n_control": int(row.get("n_control", 0) or 0),
+            }
+            return per_cell_payload
+
+        case_mean = float(row.get("case_mean_score", 0.0) or 0.0)
+        control_mean = float(row.get("control_mean_score", 0.0) or 0.0)
+        return {
+            "population": population,
+            "gene": str(row.get("interaction") or gene),
+            "interaction": str(row.get("interaction") or gene),
+            "interaction_key": gene,
+            "ligand": ligand_symbol,
+            "receptor": receptor_symbol,
+            "sender_state": sender_state,
+            "receiver_state": receiver_state,
+            "modality": modality,
+            "feature_label": str(modality_info.get("feature_label") or "ligand-receptor interaction"),
+            "view_kind": "interaction_summary",
+            "groups": [
+                {"label": case_label, "values": [case_mean], "n_cells": int(row.get("n_case", 0) or 0), "mean": case_mean},
+                {"label": control_label, "values": [control_mean], "n_cells": int(row.get("n_control", 0) or 0), "mean": control_mean},
+            ],
+            "stats": {
+                "p_value": float(row["pval"]) if _is_finite_number(row.get("pval")) else None,
+                "fdr": float(row["fdr"]) if _is_finite_number(row.get("fdr")) else None,
+                "log2fc": float(row["log2fc"]) if _is_finite_number(row.get("log2fc")) else None,
+                "n_case": int(row.get("n_case", 0) or 0),
+                "n_control": int(row.get("n_control", 0) or 0),
+            },
+        }
 
     expression_cache = _get_expression_cache(app, meta, modality=modality)
     adata = expression_cache["adata"]
@@ -2865,6 +3785,7 @@ def _render_network_pdf(payload: Dict, title: str) -> io.BytesIO:
     _configure_matplotlib_pdf_style()
     elements = payload.get("elements", []) or []
     node_map: Dict[str, Dict[str, Any]] = {}
+    preset_positions: Dict[str, tuple[float, float]] = {}
     edges: List[Dict[str, Any]] = []
     for element in elements:
         data = element.get("data") or {}
@@ -2876,6 +3797,11 @@ def _render_network_pdf(payload: Dict, title: str) -> io.BytesIO:
         node_id = str(data.get("id", "")).strip()
         if node_id:
             node_map[node_id] = data
+            position = element.get("position") or {}
+            x = position.get("x")
+            y = position.get("y")
+            if _is_finite_number(x) and _is_finite_number(y):
+                preset_positions[node_id] = (float(x), float(y))
     if not node_map:
         raise HTTPException(status_code=404, detail="No interaction network was available.")
 
@@ -2889,7 +3815,7 @@ def _render_network_pdf(payload: Dict, title: str) -> io.BytesIO:
             reverse=True,
         )
     ]
-    positions = _network_positions(ordered_nodes)
+    positions = preset_positions if len(preset_positions) == len(node_map) else _network_positions(ordered_nodes)
     fig, ax = plt.subplots(figsize=(8.2, 7.4))
     for edge in edges:
         source = str(edge.get("source", "")).strip()
@@ -2897,11 +3823,13 @@ def _render_network_pdf(payload: Dict, title: str) -> io.BytesIO:
         if source not in positions or target not in positions:
             continue
         interaction_type = str(edge.get("interaction_type", "")).lower()
-        color = "#9ca3af"
+        color = str(edge.get("edge_color", "")).strip() or "#9ca3af"
         if "transcription" in interaction_type:
             color = "#ef4444"
         elif "tbar" in interaction_type:
             color = "#60a5fa"
+        elif interaction_type == "cell_communication_diff" and str(edge.get("edge_color", "")).strip():
+            color = str(edge.get("edge_color", "")).strip()
         start = positions[source]
         end = positions[target]
         ax.annotate(
@@ -2911,10 +3839,10 @@ def _render_network_pdf(payload: Dict, title: str) -> io.BytesIO:
             arrowprops={
                 "arrowstyle": "-|>",
                 "color": color,
-                "linewidth": 1.0,
+                "linewidth": max(1.0, float(edge.get("weight", 3.0) or 3.0) / 3.2),
                 "shrinkA": 14,
                 "shrinkB": 14,
-                "alpha": 0.8,
+                "alpha": min(1.0, max(0.2, float(edge.get("edge_opacity", 0.8) or 0.8))),
             },
         )
 
@@ -2922,8 +3850,9 @@ def _render_network_pdf(payload: Dict, title: str) -> io.BytesIO:
         data = node_map[node_id]
         x, y = positions[node_id]
         log2fc = float(data.get("log2fc", 0.0) or 0.0)
-        color = "#fca5a5" if log2fc >= 0 else "#7dd3fc"
-        ax.scatter([x], [y], s=320, c=[color], edgecolors="white", linewidths=1.0, zorder=3)
+        color = str(data.get("color", "")).strip() or ("#fca5a5" if log2fc >= 0 else "#7dd3fc")
+        node_size = 460 if str(data.get("node_type", "")).strip() == "focus" else 320
+        ax.scatter([x], [y], s=node_size, c=[color], edgecolors="white", linewidths=1.0, zorder=3)
         ax.text(x, y, str(data.get("label") or node_id), ha="center", va="center", fontsize=9, zorder=4)
 
     coords = np.asarray(list(positions.values()), dtype=float)
@@ -3335,6 +4264,40 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=500, detail=str(exc))
 
+    @app.get("/api/jobs/{job_id}/fastcomm/plot")
+    async def fastcomm_plot(
+        job_id: str,
+        population: str = Query(""),
+        plot_type: str = Query("focused_incoming"),
+        limit: int = Query(60),
+        filter1_field: str = Query(""),
+        filter1_values: List[str] = Query(default=[]),
+        filter2_field: str = Query(""),
+        filter2_values: List[str] = Query(default=[]),
+    ):
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        meta = store.get_job(job_id)
+        try:
+            display_filters = _display_filter_specs(filter1_field, filter1_values, filter2_field, filter2_values)
+            return JSONResponse(
+                _build_fastcomm_plot_payload(
+                    app,
+                    meta,
+                    population,
+                    plot_type=plot_type,
+                    limit=limit,
+                    display_filters=display_filters,
+                )
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+
     @app.get("/api/jobs/{job_id}/genes")
     async def job_genes(job_id: str, modality: str = Query("rna")):
         store, _ = _job_resources(app)
@@ -3716,21 +4679,42 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         meta = store.get_job(job_id)
         return JSONResponse(_build_differential_network_payload(app, meta, population, root_path=app.state.root_path))
 
-    @app.get("/api/jobs/{job_id}/differential/interactive/gene")
-    async def differential_gene_data(job_id: str, population: str = Query(...), gene: str = Query(...)):
+    @app.get("/api/jobs/{job_id}/differential/interactive/table")
+    async def differential_table_data(job_id: str, population: str = Query(...)):
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
-        return JSONResponse(_build_differential_gene_detail_payload(app, meta, population, gene))
+        modality = _normalize_modality_id((meta.get("differential", {}) or {}).get("config", {}).get("modality"), default="rna")
+        if modality != "cell_communication":
+            raise HTTPException(status_code=404, detail="Differential interaction table is only available for Cell communication.")
+        return JSONResponse(_build_differential_cell_communication_table_payload(app, meta, population))
+
+    @app.get("/api/jobs/{job_id}/differential/interactive/gene")
+    async def differential_gene_data(
+        job_id: str,
+        population: str = Query(...),
+        gene: str = Query(...),
+        feature: Optional[str] = Query(None),
+    ):
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        meta = store.get_job(job_id)
+        return JSONResponse(_build_differential_gene_detail_payload(app, meta, population, gene, feature=feature))
 
     @app.get("/api/jobs/{job_id}/differential/interactive/gene/pdf")
-    async def differential_gene_pdf(job_id: str, population: str = Query(...), gene: str = Query(...)):
+    async def differential_gene_pdf(
+        job_id: str,
+        population: str = Query(...),
+        gene: str = Query(...),
+        feature: Optional[str] = Query(None),
+    ):
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
-        payload = _build_differential_gene_detail_payload(app, meta, population, gene)
+        payload = _build_differential_gene_detail_payload(app, meta, population, gene, feature=feature)
         pdf = _render_differential_gene_pdf(payload)
         safe_gene = re.sub(r"[^A-Za-z0-9_.-]+", "_", gene).strip("._") or "gene"
         safe_population = re.sub(r"[^A-Za-z0-9_.-]+", "_", population).strip("._") or "population"

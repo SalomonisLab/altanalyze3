@@ -11,10 +11,12 @@ from typing import Dict, List, Optional, Tuple
 import anndata as ad
 import numpy as np
 import pandas as pd
+from scipy import stats
 import scipy.sparse as sp
 
 from altanalyze3.components.cellHarmony import cellHarmony_differential, cellHarmony_lite
 from altanalyze3.components.fastComm.api import FastCommParams, run_fastcomm
+from altanalyze3.components.fastComm.benchmark import FastCommBenchmarkParams, run_benchmark as run_fastcomm_benchmark
 from altanalyze3.components.fastComm.reporting import ExemplarReportParams, write_exemplar_report
 from altanalyze3.components.fastCNV.main import FastCNVParams, bundled_gene_coordinates, run_fastcnv
 from altanalyze3.components.rna2adt.api import load_bundle as load_rna2adt_bundle
@@ -52,6 +54,15 @@ _MODALITY_DEFINITIONS: Dict[str, Dict[str, object]] = {
         "supports_differential_network": False,
         "supports_differential_go": False,
     },
+    "cell_communication": {
+        "id": "cell_communication",
+        "label": "Cell communication",
+        "feature_label": "ligand-receptor interaction",
+        "supports_marker_heatmap": False,
+        "supports_marker_network": False,
+        "supports_differential_network": False,
+        "supports_differential_go": False,
+    },
 }
 
 _POOLED_OVERALL_LABEL = "Pooled overall"
@@ -80,6 +91,16 @@ def _env_truthy(name: str, default: bool = False) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _close_backed_adata(adata: Optional[ad.AnnData]) -> None:
+    if adata is None:
+        return
+    try:
+        if getattr(adata, "isbacked", False):
+            adata.file.close()
+    except Exception:
+        pass
+
+
 def _normalize_modality_id(value: object, *, default: str = "rna") -> str:
     raw = str(value or "").strip().lower()
     if not raw or raw in {"none", "null", "false", "off"}:
@@ -88,6 +109,8 @@ def _normalize_modality_id(value: object, *, default: str = "rna") -> str:
         return "lipids"
     if raw in {"adt", "adts", "cite", "cite-seq", "citeseq"}:
         return "adt"
+    if raw in {"cell_communication", "cell communication", "communication", "fastcomm", "fastcomm_network"}:
+        return "cell_communication"
     if raw == "rna":
         return "rna"
     return raw
@@ -701,6 +724,87 @@ def _comparison_tag(group1_samples: List[str], group2_samples: List[str]) -> str
     return f"{lhs}_vs_{rhs}"
 
 
+def _bh_fdr(pvalues: List[float]) -> List[float]:
+    if not pvalues:
+        return []
+    arr = np.asarray([1.0 if not np.isfinite(value) else max(0.0, min(1.0, float(value))) for value in pvalues], dtype=float)
+    order = np.argsort(arr)
+    ranked = arr[order]
+    adjusted = ranked * float(len(ranked)) / np.arange(1, len(ranked) + 1, dtype=float)
+    adjusted = np.minimum.accumulate(adjusted[::-1])[::-1]
+    out = np.empty_like(adjusted)
+    out[order] = np.clip(adjusted, 0.0, 1.0)
+    return out.tolist()
+
+
+def _fastcomm_split_scores_long_path(meta: Dict) -> Path:
+    analysis = meta.get("fastcomm_analysis") or {}
+    per_sample = analysis.get("per_sample") or {}
+    raw_path = str(per_sample.get("split_scores_long_tsv") or "").strip()
+    if not raw_path:
+        output_dir = str(per_sample.get("output_dir") or "").strip()
+        if output_dir:
+            raw_path = str(Path(output_dir) / "split_scores_long.tsv")
+    if not raw_path:
+        scores_path = str(analysis.get("scores_tsv") or "").strip()
+        if scores_path:
+            raw_path = str(Path(scores_path).parent / "per_sample" / "split_scores_long.tsv")
+    if not raw_path:
+        raise ValueError("Per-sample fastComm scores are unavailable for cell-communication differential analysis.")
+    path = Path(raw_path)
+    if not path.exists():
+        raise ValueError(f"Per-sample fastComm scores were not found: {path}")
+    return path
+
+
+def _resolve_fastcomm_group_splits(
+    meta: Dict,
+    *,
+    sample_field: str,
+    sample_key: str,
+    group_values: List[str],
+) -> List[str]:
+    selected_values = [str(value).strip() for value in group_values if str(value).strip()]
+    if not selected_values:
+        return []
+    if sample_field == sample_key or not sample_field:
+        return list(dict.fromkeys(selected_values))
+
+    combined_h5ad_path = Path(str(meta.get("artifacts", {}).get("combined_h5ad", "")).strip())
+    if not combined_h5ad_path.exists():
+        raise ValueError("Combined AnnData is unavailable for resolving cell-communication comparison groups.")
+
+    adata = ad.read_h5ad(combined_h5ad_path, backed="r")
+    try:
+        if sample_field not in adata.obs.columns:
+            raise ValueError(f"Selected group field obs['{sample_field}'] is not present in the aligned AnnData.")
+        if sample_key not in adata.obs.columns:
+            raise ValueError(f"Cell-communication scoring key obs['{sample_key}'] is not present in the aligned AnnData.")
+        group_series = adata.obs[sample_field].astype(str).str.strip()
+        split_series = adata.obs[sample_key].astype(str).str.strip()
+        resolved: List[str] = []
+        missing: List[str] = []
+        for group_value in selected_values:
+            mask = group_series == group_value
+            if int(np.asarray(mask).sum()) == 0:
+                missing.append(group_value)
+                continue
+            splits = [value for value in pd.Index(split_series.loc[mask]).unique().tolist() if str(value).strip()]
+            if not splits:
+                missing.append(group_value)
+                continue
+            resolved.extend(str(value).strip() for value in splits if str(value).strip())
+    finally:
+        _close_backed_adata(adata)
+
+    if missing:
+        raise ValueError(
+            f"Selected group values were not found in obs['{sample_field}'] with usable obs['{sample_key}'] mappings: "
+            + ", ".join(missing)
+        )
+    return list(dict.fromkeys(resolved))
+
+
 def _write_zip_archive(source_dir: Path, archive_path: Path) -> Path:
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as handle:
@@ -758,6 +862,227 @@ def _write_selected_zip(source_dir: Path, archive_path: Path, *, suffixes: tuple
                 continue
             handle.write(file_path, arcname=str(file_path.relative_to(source_dir)))
     return archive_path
+
+
+def _run_cell_communication_differential(
+    *,
+    job_id: str,
+    store: JobStore,
+    meta: Dict,
+    run_root: Path,
+    deg_dir: Path,
+    comparison_tag: str,
+    case_label: str,
+    control_label: str,
+    group1_samples: List[str],
+    group2_samples: List[str],
+    sample_field: str,
+    population_col: str,
+    comparison_type: str,
+) -> Dict[str, object]:
+    analysis = meta.get("fastcomm_analysis") or {}
+    sample_key = str(analysis.get("sample_key") or "").strip()
+    if not sample_key:
+        raise ValueError("Cell-communication differential analysis requires per-sample fastComm scoring.")
+    resolved_group1_splits = _resolve_fastcomm_group_splits(
+        meta,
+        sample_field=sample_field or sample_key,
+        sample_key=sample_key,
+        group_values=group1_samples,
+    )
+    resolved_group2_splits = _resolve_fastcomm_group_splits(
+        meta,
+        sample_field=sample_field or sample_key,
+        sample_key=sample_key,
+        group_values=group2_samples,
+    )
+    split_overlap = sorted(set(resolved_group1_splits) & set(resolved_group2_splits))
+    if split_overlap:
+        raise ValueError(
+            "Selected comparison groups resolve to overlapping cell-communication samples: "
+            + ", ".join(split_overlap)
+        )
+    comparison_mode = (
+        "replicate_group_contrast"
+        if min(len(resolved_group1_splits), len(resolved_group2_splits)) >= 2
+        else "single_sample_direct_contrast"
+    )
+    store.append_log(
+        job_id,
+        (
+            "[params] cell_communication_groups "
+            f"sample_field={sample_field or sample_key} sample_key={sample_key} "
+            f"resolved_group1={resolved_group1_splits} resolved_group2={resolved_group2_splits} "
+            f"comparison_mode={comparison_mode}"
+        ),
+    )
+
+    _update_differential_state(store, job_id, message="Comparing per-sample ligand-receptor communication scores.", progress=35)
+    split_path = _fastcomm_split_scores_long_path(meta)
+    scores = pd.read_csv(split_path, sep="\t")
+    required = {"split", "sender_state", "receiver_state", "ligand", "receptor", "fastcomm_score"}
+    missing = required.difference(scores.columns)
+    if missing:
+        raise ValueError(f"Per-sample fastComm scores missing required columns: {', '.join(sorted(missing))}")
+    if scores.empty:
+        raise ValueError("Per-sample fastComm score table is empty.")
+
+    scores = scores.copy()
+    scores["split"] = scores["split"].astype(str)
+    wanted_splits = list(dict.fromkeys(resolved_group1_splits + resolved_group2_splits))
+    missing_splits = sorted(set(wanted_splits) - set(scores["split"].astype(str)))
+    if missing_splits:
+        raise ValueError("Selected groups include sample values without per-sample fastComm scores: " + ", ".join(missing_splits))
+
+    key_cols = ["sender_state", "receiver_state", "ligand", "receptor"]
+    for column in key_cols:
+        scores[column] = scores[column].astype(str)
+    scores["fastcomm_score"] = pd.to_numeric(scores["fastcomm_score"], errors="coerce").fillna(0.0)
+    scores["interaction_id"] = scores[key_cols].agg("|".join, axis=1)
+    score_matrix = scores.pivot_table(index="interaction_id", columns="split", values="fastcomm_score", aggfunc="max", fill_value=0.0)
+    for split in wanted_splits:
+        if split not in score_matrix.columns:
+            score_matrix[split] = 0.0
+
+    annotation = scores.sort_values("fastcomm_score", ascending=False).drop_duplicates("interaction_id", keep="first").set_index("interaction_id")
+    rows: List[Dict[str, object]] = []
+    pvalues: List[float] = []
+    for interaction_id, values in score_matrix.iterrows():
+        case_values = pd.to_numeric(values[resolved_group1_splits], errors="coerce").fillna(0.0).astype(float).to_numpy()
+        control_values = pd.to_numeric(values[resolved_group2_splits], errors="coerce").fillna(0.0).astype(float).to_numpy()
+        case_mean = float(np.mean(case_values)) if case_values.size else 0.0
+        control_mean = float(np.mean(control_values)) if control_values.size else 0.0
+        delta = case_mean - control_mean
+        if comparison_mode == "replicate_group_contrast" and np.unique(np.concatenate([case_values, control_values])).size > 1:
+            try:
+                pval = float(stats.mannwhitneyu(case_values, control_values, alternative="two-sided").pvalue)
+            except Exception:
+                pval = 1.0
+        else:
+            pval = 1.0
+        pvalues.append(pval)
+        ann = annotation.loc[interaction_id]
+        sender = str(ann["sender_state"])
+        receiver = str(ann["receiver_state"])
+        ligand = str(ann["ligand"])
+        receptor = str(ann["receptor"])
+        response_score = pd.to_numeric(pd.Series([ann.get("receiver_response_score", np.nan)]), errors="coerce").iloc[0]
+        lr_score = pd.to_numeric(pd.Series([ann.get("lr_expression_score_scaled", np.nan)]), errors="coerce").iloc[0]
+        rows.append(
+            {
+                "population": receiver,
+                "sender_state": sender,
+                "receiver_state": receiver,
+                "ligand": ligand,
+                "receptor": receptor,
+                "gene": f"{sender}->{receiver}:{ligand}->{receptor}",
+                "interaction": f"{ligand}->{receptor}",
+                "case_label": case_label,
+                "control_label": control_label,
+                "case_mean_score": case_mean,
+                "control_mean_score": control_mean,
+                "delta_score": delta,
+                "log2fc": float(np.log2((case_mean + 1e-4) / (control_mean + 1e-4))),
+                "pval": pval,
+                "comparison_mode": comparison_mode,
+                "n_case": int(case_values.size),
+                "n_control": int(control_values.size),
+                "max_sample_score": float(np.max(np.concatenate([case_values, control_values]))) if case_values.size or control_values.size else 0.0,
+                "receiver_response_score": float(response_score) if np.isfinite(response_score) else np.nan,
+                "lr_expression_score": float(lr_score) if np.isfinite(lr_score) else np.nan,
+                "response_support_genes": str(ann.get("response_support_genes", "") or ""),
+            }
+        )
+
+    detailed = pd.DataFrame(rows)
+    detailed["abs_delta_score"] = detailed["delta_score"].abs()
+    if comparison_mode == "single_sample_direct_contrast":
+        detailed["pval"] = (
+            detailed["abs_delta_score"].rank(method="first", ascending=False) / max(float(detailed.shape[0]), 1.0)
+        )
+    detailed["fdr"] = _bh_fdr(pd.to_numeric(detailed["pval"], errors="coerce").fillna(1.0).tolist())
+    detailed = detailed.sort_values(["fdr", "abs_delta_score", "max_sample_score"], ascending=[True, False, False]).reset_index(drop=True)
+
+    comparison_path = deg_dir / f"cell_communication_comparison_{comparison_tag}.tsv"
+    detail_path = deg_dir / f"DEG_detailed_cell_communication_{comparison_tag}.tsv"
+    summary_path = deg_dir / f"DEG_summary_cell_communication_{comparison_tag}.tsv"
+    detailed.to_csv(comparison_path, sep="\t", index=False)
+    detailed.to_csv(detail_path, sep="\t", index=False)
+    summary = (
+        detailed.assign(significant=(detailed["fdr"] <= 0.10) & (detailed["abs_delta_score"] >= 0.05))
+        .groupby("population", as_index=False)
+        .agg(num_DEG=("significant", "sum"), tested_genes=("gene", "count"), max_abs_delta_score=("abs_delta_score", "max"))
+    )
+    summary.to_csv(summary_path, sep="\t", index=False)
+
+    manifest = {
+        "run_id": run_root.name,
+        "modality": "cell_communication",
+        "feature_label": "ligand-receptor interaction",
+        "population_col": population_col,
+        "sample_field": sample_field or sample_key,
+        "sample_key": sample_key,
+        "case_label": case_label,
+        "control_label": control_label,
+        "group1_samples": group1_samples,
+        "group2_samples": group2_samples,
+        "resolved_group1_splits": resolved_group1_splits,
+        "resolved_group2_splits": resolved_group2_splits,
+        "comparison_type": comparison_type,
+        "comparison_mode": comparison_mode,
+        "score": (
+            "direct delta of single-sample fastComm scores; pval/fdr are empirical effect-rank priorities, not replicate-based inference"
+            if comparison_mode == "single_sample_direct_contrast"
+            else "delta of per-sample fastComm score; positive values are higher in the numerator group"
+        ),
+        "n_interactions": int(detailed.shape[0]),
+    }
+    manifest_path = run_root / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    archive_path = run_root.parent / f"{run_root.name}.zip"
+    _write_zip_archive(run_root, archive_path)
+
+    artifacts: Dict[str, Path] = {
+        "archive": archive_path,
+        "manifest": manifest_path,
+        "cell_communication_comparison": comparison_path,
+        detail_path.stem: detail_path,
+        summary_path.stem: summary_path,
+    }
+    _update_differential_state(
+        store,
+        job_id,
+        run_id=run_root.name,
+        comparison_tag=comparison_tag,
+        case_label=case_label,
+        control_label=control_label,
+        config={
+            "modality": "cell_communication",
+            "population_col": population_col,
+            "sample_field": sample_field or sample_key,
+            "group1_samples": group1_samples,
+            "group2_samples": group2_samples,
+            "comparison_type": comparison_type,
+        },
+        artifacts={key: str(path) for key, path in artifacts.items()},
+        networks=[],
+        go_terms_included=False,
+        feature_label="ligand-receptor interaction",
+        message=(
+            "Cell-communication single-sample contrast finished."
+            if comparison_mode == "single_sample_direct_contrast"
+            else "Cell-communication differential comparison finished."
+        ),
+        progress=95,
+    )
+    store.append_log(job_id, f"Cell-communication differential complete: interactions={detailed.shape[0]} output={comparison_path}")
+    return {
+        "artifacts": artifacts,
+        "networks": [],
+        "run_id": run_root.name,
+        "go_terms_included": False,
+        "modality": "cell_communication",
+    }
 
 
 def run_cellharmony_pipeline(
@@ -1138,32 +1463,58 @@ def run_cellharmony_pipeline(
                 include_self_edges=False,
             )
         )
-        fastcomm_exemplar_path = fastcomm_dir / "exemplar_interactions.tsv"
-        fastcomm_exemplar_md_path = fastcomm_dir / "exemplar_interactions.md"
+        fastcomm_significant_path = fastcomm_dir / "significant_interactions.tsv"
+        fastcomm_significant_md_path = fastcomm_dir / "significant_interactions.md"
         write_exemplar_report(
             ExemplarReportParams(
                 scores=fastcomm_scores_path,
-                output_tsv=fastcomm_exemplar_path,
-                output_md=fastcomm_exemplar_md_path,
-                top_n=50,
+                output_tsv=fastcomm_significant_path,
+                output_md=fastcomm_significant_md_path,
+                top_n=100000,
                 min_score=0.25,
+                one_per_state_pair=False,
+                title="Cell communication significant interactions",
             )
         )
+        fastcomm_sample_key = next(
+            (candidate for candidate in ("sample", "Library", "group", "Donor") if candidate in approx_result.query_adata.obs.columns),
+            None,
+        )
+        fastcomm_split_summary: Dict[str, object] = {}
+        if fastcomm_sample_key:
+            fastcomm_split_dir = fastcomm_dir / "per_sample"
+            fastcomm_split_summary = run_fastcomm_benchmark(
+                FastCommBenchmarkParams(
+                    h5ad=combined_h5ad_path,
+                    output_dir=fastcomm_split_dir,
+                    state_key=query_cluster_key,
+                    split_key=fastcomm_sample_key,
+                    min_cells=5,
+                    include_self_edges=False,
+                )
+            )
+        fastcomm_archive_path = outputs_dir / "cell_communication_fastcomm.zip"
+        _write_selected_zip(fastcomm_dir, fastcomm_archive_path, suffixes=(".tsv", ".json", ".md"))
         artifacts["fastcomm_scores"] = fastcomm_scores_path
         artifacts["fastcomm_state_pairs"] = fastcomm_pairs_path
         artifacts["fastcomm_state_expression"] = fastcomm_state_expression_path
-        artifacts["fastcomm_exemplars"] = fastcomm_exemplar_path
-        artifacts["fastcomm_exemplar_report"] = fastcomm_exemplar_md_path
+        artifacts["fastcomm_significant_interactions"] = fastcomm_significant_path
+        artifacts["fastcomm_significant_report"] = fastcomm_significant_md_path
+        artifacts["fastcomm_archive"] = fastcomm_archive_path
         fastcomm_analysis = {
             "enabled": True,
             "status": "completed",
             "state_key": query_cluster_key,
+            "sample_key": fastcomm_sample_key,
             "populations": [str(value) for value in fastcomm_result.state_sizes.index.tolist()],
             "scores_tsv": str(fastcomm_scores_path),
             "state_pair_tsv": str(fastcomm_pairs_path),
             "state_expression_tsv": str(fastcomm_state_expression_path),
-            "exemplar_tsv": str(fastcomm_exemplar_path),
-            "exemplar_md": str(fastcomm_exemplar_md_path),
+            "significant_tsv": str(fastcomm_significant_path),
+            "significant_md": str(fastcomm_significant_md_path),
+            "significance_threshold": 0.25,
+            "archive": str(fastcomm_archive_path),
+            "per_sample": fastcomm_split_summary,
             "summary": fastcomm_result.summary,
         }
         store.append_log(
@@ -1284,6 +1635,9 @@ def run_cellharmony_pipeline(
     max_group_values = max((len(values) for values in sample_values.values()), default=0)
     pseudobulk_allowed = bool(upload_profile.get("single_h5ad") or upload_profile.get("total_files", 0) >= 4)
     differential_enabled = bool(upload_profile["differential_eligible"])
+    differential_modalities = list(modalities_payload["available"])
+    if fastcomm_analysis.get("enabled"):
+        differential_modalities.append(dict(_MODALITY_DEFINITIONS["cell_communication"]))
     differential_options = {
         "enabled": differential_enabled,
         "sample_names": sample_names,
@@ -1292,7 +1646,7 @@ def run_cellharmony_pipeline(
         "default_sample_field": default_sample_field,
         "population_columns": population_columns,
         "default_population_col": default_population_col,
-        "modalities": modalities_payload["available"],
+        "modalities": differential_modalities,
         "default_modality": modalities_payload["default"],
         "comparison_types": ["cells", "pseudobulk"] if pseudobulk_allowed else ["cells"],
         "upload_profile": upload_profile,
@@ -1346,7 +1700,7 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
     if overlap:
         raise ValueError(f"Samples cannot appear in both groups: {', '.join(overlap)}")
 
-    combined_h5ad = _modality_h5ad_path(meta, modality)
+    combined_h5ad = None if modality == "cell_communication" else _modality_h5ad_path(meta, modality)
 
     comparison_tag = _comparison_tag(group1_samples, group2_samples)
     run_id = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
@@ -1384,6 +1738,23 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
             f"group1={group1_samples} group2={group2_samples}"
         ),
     )
+
+    if modality == "cell_communication":
+        return _run_cell_communication_differential(
+            job_id=job_id,
+            store=store,
+            meta=meta,
+            run_root=run_root,
+            deg_dir=deg_dir,
+            comparison_tag=comparison_tag,
+            case_label=case_label,
+            control_label=control_label,
+            group1_samples=group1_samples,
+            group2_samples=group2_samples,
+            sample_field=sample_field,
+            population_col=population_col,
+            comparison_type=comparison_type,
+        )
 
     adata = ad.read_h5ad(combined_h5ad)
     if population_col not in adata.obs.columns:

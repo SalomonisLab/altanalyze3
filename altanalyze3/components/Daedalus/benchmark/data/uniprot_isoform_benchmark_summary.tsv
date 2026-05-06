@@ -1,0 +1,7 @@
+split	benchmark_group	label_state	n_rows
+test	tm_retained_non_surface_true_negative	negative	18
+test	uniprot_tm_positive	positive	255
+train	tm_retained_non_surface_true_negative	negative	150
+train	uniprot_tm_positive	positive	2385
+val	tm_retained_non_surface_true_negative	negative	15
+val	uniprot_tm_positive	positive	199

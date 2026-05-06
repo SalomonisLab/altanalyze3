@@ -36,6 +36,8 @@ let currentModalitiesState = { default: "rna", available: [{ id: "rna", label: "
 let currentDifferentialState = null;
 let currentDifferentialGene = "";
 let currentDifferentialPopulation = "";
+let currentDifferentialInteraction = null;
+let currentDifferentialFeatureRole = "ligand";
 let differentialCy = null;
 let expressionCyByPanel = {
   viz1: null,
@@ -663,6 +665,9 @@ function normalizeModalityId(value, fallback = "rna") {
   if (raw === "adts" || raw === "cite" || raw === "cite-seq" || raw === "citeseq") {
     return "adt";
   }
+  if (raw === "cell communication" || raw === "communication" || raw === "fastcomm" || raw === "fastcomm_network") {
+    return "cell_communication";
+  }
   return raw;
 }
 
@@ -743,11 +748,39 @@ function panelAvailableModalities() {
 }
 
 function panelModality(panelKey) {
+  const mode = getPanelSelectValue(panelKey, "mode");
+  if (mode === "fastcomm_network") {
+    return "rna";
+  }
   const select = document.getElementById(panelElementId(panelKey, "modality"));
   if (!select || select.classList.contains("hidden")) {
     return "rna";
   }
   return normalizeModalityId(select.value || "rna");
+}
+
+function panelCommunicationDirection(panelKey) {
+  const value = String(document.getElementById(panelElementId(panelKey, "modality"))?.value || "incoming").trim().toLowerCase();
+  return value === "outgoing" ? "outgoing" : "incoming";
+}
+
+const FASTCOMM_PLOT_OPTIONS = [
+  { id: "focused_incoming", label: "Focused incoming" },
+  { id: "focused_outgoing", label: "Focused outgoing" },
+  { id: "cell_state_network", label: "Cell-state network" },
+  { id: "lr_dotplot", label: "Ligand-receptor dot plot" },
+  { id: "state_heatmap", label: "Cell-state heatmap" },
+  { id: "top_table", label: "Top interactions table" },
+  { id: "per_sample", label: "Per-sample comparison" },
+];
+
+function panelCommunicationPlotType(panelKey) {
+  const value = String(document.getElementById(panelElementId(panelKey, "modality"))?.value || "focused_incoming").trim().toLowerCase();
+  return FASTCOMM_PLOT_OPTIONS.some((entry) => entry.id === value) ? value : "focused_incoming";
+}
+
+function fastCommPlotNeedsPopulation(plotType) {
+  return !["cell_state_network", "state_heatmap"].includes(String(plotType || "").trim().toLowerCase());
 }
 
 function panelMarkerAnalysis(panelKey) {
@@ -804,7 +837,7 @@ function availableVisualizationModes(panelKey) {
     modes.push({ value: "marker_network", label: "MarkerNetwork" });
   }
   if (modality === "rna" && fastCommAvailable()) {
-    modes.push({ value: "fastcomm_network", label: "fastComm" });
+    modes.push({ value: "fastcomm_network", label: "Cell communication" });
   }
   return modes;
 }
@@ -821,22 +854,7 @@ function updateExpressionModeOptions() {
     if (!modeSelect || !markerPopulationField || !markerPopulationSelect || !geneField || !modalityField || !modalitySelect) {
       return;
     }
-    const currentModality = normalizeModalityId(modalitySelect.value || ((currentModalitiesState || {}).default || "rna"));
-    modalitySelect.innerHTML = "";
-    modalities.forEach((entry) => {
-      const option = document.createElement("option");
-      option.value = entry.id;
-      option.textContent = entry.label;
-      if (normalizeModalityId(entry.id) === currentModality) {
-        option.selected = true;
-      }
-      modalitySelect.appendChild(option);
-    });
-    if (!modalitySelect.value && modalities.length) {
-      modalitySelect.value = modalities[0].id;
-    }
-    modalityField.classList.toggle("hidden", modalities.length <= 1);
-
+    const previousModalityValue = modalitySelect.value;
     const networkPopulations = markerNetworkPopulations(panelKey);
     const fastcommPopulations = fastCommPopulations();
     const modes = availableVisualizationModes(panelKey);
@@ -850,9 +868,50 @@ function updateExpressionModeOptions() {
     });
     const defaultMode = VISUALIZATION_DEFAULT_MODE[panelKey] || "cluster";
     modeSelect.value = modes.some((mode) => mode.value === currentMode) ? currentMode : defaultMode;
+    const mode = modeSelect.value;
+
+    const modalityLabel = modalityField.querySelector("span");
+    modalitySelect.innerHTML = "";
+    if (mode === "fastcomm_network") {
+      FASTCOMM_PLOT_OPTIONS.forEach((entry) => {
+        const option = document.createElement("option");
+        option.value = entry.id;
+        option.textContent = entry.label;
+        if (entry.id === previousModalityValue || (!previousModalityValue && entry.id === "focused_incoming")) {
+          option.selected = true;
+        }
+        modalitySelect.appendChild(option);
+      });
+      if (!FASTCOMM_PLOT_OPTIONS.some((entry) => entry.id === modalitySelect.value)) {
+        modalitySelect.value = "focused_incoming";
+      }
+      if (modalityLabel) {
+        modalityLabel.textContent = "Plot type";
+      }
+      modalityField.classList.remove("hidden");
+    } else {
+      const currentModality = normalizeModalityId(modalitySelect.value || ((currentModalitiesState || {}).default || "rna"));
+      modalities.forEach((entry) => {
+        const option = document.createElement("option");
+        option.value = entry.id;
+        option.textContent = entry.label;
+        if (normalizeModalityId(entry.id) === currentModality) {
+          option.selected = true;
+        }
+        modalitySelect.appendChild(option);
+      });
+      if (!modalitySelect.value && modalities.length) {
+        modalitySelect.value = modalities[0].id;
+      }
+      if (modalityLabel) {
+        modalityLabel.textContent = "Modality";
+      }
+      modalityField.classList.toggle("hidden", modalities.length <= 1);
+    }
 
     const currentPopulation = markerPopulationSelect.value;
     markerPopulationSelect.innerHTML = "";
+    const fastcommPlotType = panelCommunicationPlotType(panelKey);
     const dropdownPopulations = modeSelect.value === "fastcomm_network" ? fastcommPopulations : networkPopulations;
     dropdownPopulations.forEach((population) => {
       const option = document.createElement("option");
@@ -867,8 +926,9 @@ function updateExpressionModeOptions() {
       markerPopulationSelect.value = dropdownPopulations[0];
     }
 
-    const mode = modeSelect.value;
-    const showMarkerPopulation = (mode === "marker_network" && networkPopulations.length > 0) || (mode === "fastcomm_network" && fastcommPopulations.length > 0);
+    const showMarkerPopulation =
+      (mode === "marker_network" && networkPopulations.length > 0)
+      || (mode === "fastcomm_network" && fastcommPopulations.length > 0 && fastCommPlotNeedsPopulation(fastcommPlotType));
     const showGene = mode === "expression_umap" || mode === "violin";
     updatePanelFeatureInput(panelKey);
     const populationLabel = markerPopulationField.querySelector("span");
@@ -1121,7 +1181,7 @@ function renderFastCommNetwork(panelKey, payload) {
           "target-arrow-color": "#0f766e",
           "target-arrow-shape": "triangle",
           "curve-style": "bezier",
-          opacity: 0.65,
+          opacity: "data(edge_opacity)",
         },
       },
       {
@@ -1168,9 +1228,180 @@ function renderFastCommNetwork(panelKey, payload) {
   expressionCyByPanel[panelKey].on("tap", "node", (event) => {
     const label = event?.target?.data("label");
     if (label) {
-      setPanelSummary(panelKey, `${payload.direction === "outgoing" ? "Outgoing" : "Incoming"} fastComm view for ${payload.population}; selected ${label}.`);
+      const directionLabel = payload.direction === "global" ? "Global" : (payload.direction === "outgoing" ? "Outgoing" : "Incoming");
+      setPanelSummary(panelKey, `${directionLabel} cell communication view${payload.population ? ` for ${payload.population}` : ""}; selected ${label}.`);
     }
   });
+}
+
+function renderFastCommHeatmap(panelKey, payload) {
+  resetVisualizationSurface(panelKey);
+  const senders = payload.senders || [];
+  const receivers = payload.receivers || [];
+  if (!senders.length || !receivers.length) {
+    renderVisualizationMessage(panelKey, payload.message || "No cell-state communication matrix is available.", "Cell communication heatmap");
+    return;
+  }
+  Plotly.newPlot(panelPlotId(panelKey), [{
+    type: "heatmap",
+    x: receivers,
+    y: senders,
+    z: payload.z || [],
+    text: payload.text || [],
+    hovertemplate: "%{text}<extra></extra>",
+    colorscale: [
+      [0, "#eff6ff"],
+      [0.4, "#38bdf8"],
+      [0.75, "#0f766e"],
+      [1, "#7c2d12"],
+    ],
+    colorbar: { title: "Summed score" },
+  }], {
+    title: "Cell-state communication strength",
+    paper_bgcolor: "rgba(0,0,0,0)",
+    plot_bgcolor: "rgba(255,255,255,0.94)",
+    height: Math.max(520, senders.length * 18 + 130),
+    margin: { t: 48, l: 150, r: 28, b: 150 },
+    xaxis: { title: "Receiver state", automargin: true },
+    yaxis: { title: "Sender state", automargin: true },
+  }, { responsive: true });
+}
+
+function renderFastCommDotPlot(panelKey, payload) {
+  resetVisualizationSurface(panelKey);
+  const points = payload.points || [];
+  if (!points.length) {
+    renderVisualizationMessage(panelKey, payload.message || "No ligand-receptor points are available.", "Ligand-receptor dot plot");
+    return;
+  }
+  const maxScore = Math.max(...points.map((point) => Number(point.score) || 0), 1e-9);
+  Plotly.newPlot(panelPlotId(panelKey), [{
+    type: "scatter",
+    mode: "markers",
+    x: points.map((point) => point.x),
+    y: points.map((point) => point.y),
+    text: points.map((point) => (
+      `${point.sender_state} -> ${point.receiver_state}<br>` +
+      `${point.y}<br>` +
+      `score=${Number(point.score || 0).toFixed(3)}<br>` +
+      `LR=${Number(point.lr_expression_score || 0).toFixed(3)}; response=${Number(point.receiver_response_score || 0).toFixed(3)}`
+    )),
+    marker: {
+      size: points.map((point) => 8 + 26 * Math.sqrt((Number(point.score) || 0) / maxScore)),
+      color: points.map((point) => Number(point.receiver_response_score) || 0),
+      colorscale: [
+        [0, "#dbeafe"],
+        [0.45, "#14b8a6"],
+        [1, "#f97316"],
+      ],
+      showscale: true,
+      colorbar: { title: "Response score" },
+      line: { color: "#0f172a", width: 0.5 },
+      opacity: 0.82,
+    },
+    hovertemplate: "%{text}<extra></extra>",
+  }], {
+    title: `${payload.direction === "outgoing" ? "Outgoing" : "Incoming"} ligand-receptor evidence for ${payload.population}`,
+    paper_bgcolor: "rgba(0,0,0,0)",
+    plot_bgcolor: "rgba(255,255,255,0.94)",
+    height: Math.max(520, Math.min(980, points.length * 18 + 140)),
+    margin: { t: 48, l: 170, r: 40, b: 130 },
+    xaxis: { title: payload.direction === "outgoing" ? "Receiver state" : "Sender state", automargin: true },
+    yaxis: { title: "Ligand -> receptor", automargin: true },
+  }, { responsive: true });
+}
+
+function renderFastCommTable(panelKey, payload) {
+  resetVisualizationSurface(panelKey);
+  const rows = payload.rows || [];
+  const columns = payload.columns || [];
+  if (!rows.length || !columns.length) {
+    renderVisualizationMessage(panelKey, payload.message || "No significant interactions are available.", "Top interactions");
+    return;
+  }
+  const labels = columns.map((column) => column
+    .replace("fastcomm_score", "score")
+    .replace("lr_expression_score_scaled", "LR expression")
+    .replace("receiver_response_score", "response")
+    .replaceAll("_", " "));
+  const values = columns.map((column) => rows.map((row) => {
+    const value = row[column];
+    return Number.isFinite(Number(value)) && String(value).trim() !== "" ? Number(value).toFixed(3) : String(value ?? "");
+  }));
+  Plotly.newPlot(panelPlotId(panelKey), [{
+    type: "table",
+    header: {
+      values: labels,
+      align: "left",
+      fill: { color: "#0f766e" },
+      font: { color: "white", size: 11 },
+    },
+    cells: {
+      values,
+      align: "left",
+      fill: { color: rows.map((_, index) => (index % 2 ? "#f8fafc" : "#ffffff")) },
+      font: { color: "#0f172a", size: 10 },
+      height: 24,
+    },
+  }], {
+    title: payload.direction === "global" ? "Top significant cell-communication interactions" : `Top significant interactions for ${payload.population}`,
+    paper_bgcolor: "rgba(0,0,0,0)",
+    height: Math.max(520, Math.min(900, rows.length * 26 + 110)),
+    margin: { t: 46, l: 12, r: 12, b: 12 },
+  }, { responsive: true });
+}
+
+function renderFastCommPerSample(panelKey, payload) {
+  resetVisualizationSurface(panelKey);
+  const rows = payload.rows || [];
+  if (!rows.length) {
+    renderVisualizationMessage(panelKey, payload.message || "Per-sample communication scores are unavailable.", "Per-sample communication");
+    return;
+  }
+  const states = [...new Set(rows.map((row) => row.state))];
+  const traces = states.map((state) => {
+    const stateRows = rows.filter((row) => row.state === state);
+    return {
+      type: "bar",
+      name: state,
+      x: stateRows.map((row) => row.sample),
+      y: stateRows.map((row) => row.total_score),
+      text: stateRows.map((row) => `${state}<br>${row.sample}<br>total=${Number(row.total_score || 0).toFixed(3)}<br>interactions=${row.n_interactions}`),
+      hovertemplate: "%{text}<extra></extra>",
+    };
+  });
+  Plotly.newPlot(panelPlotId(panelKey), traces, {
+    title: `${payload.direction === "outgoing" ? "Outgoing" : "Incoming"} per-sample communication for ${payload.population}`,
+    paper_bgcolor: "rgba(0,0,0,0)",
+    plot_bgcolor: "rgba(255,255,255,0.94)",
+    height: 560,
+    margin: { t: 48, l: 64, r: 24, b: 120 },
+    barmode: "group",
+    xaxis: { title: payload.sample_key || "sample", automargin: true },
+    yaxis: { title: "Summed communication score" },
+    legend: { orientation: "h", y: -0.26 },
+  }, { responsive: true });
+}
+
+function renderFastCommPlot(panelKey, payload) {
+  const plotType = payload.plot_type || panelCommunicationPlotType(panelKey);
+  if (plotType === "state_heatmap") {
+    renderFastCommHeatmap(panelKey, payload);
+    return;
+  }
+  if (plotType === "lr_dotplot") {
+    renderFastCommDotPlot(panelKey, payload);
+    return;
+  }
+  if (plotType === "top_table") {
+    renderFastCommTable(panelKey, payload);
+    return;
+  }
+  if (plotType === "per_sample") {
+    renderFastCommPerSample(panelKey, payload);
+    return;
+  }
+  renderFastCommNetwork(panelKey, payload);
 }
 
 function finiteExtent(values, fallbackMin = 0, fallbackMax = 1) {
@@ -1480,12 +1711,12 @@ function addSampleRow() {
   const row = document.createElement("div");
   row.className = "sample-row";
   row.innerHTML = `
-    <label class="field">
-      <span>Sample name</span>
+    <label class="field sample-inline-field">
+      <span class="sample-inline-label">Sample name</span>
       <input type="text" class="sample-name" placeholder="e.g. Sample_${sampleCount + 1}" required>
     </label>
-    <label class="field">
-      <span>H5/H5AD file</span>
+    <label class="field sample-inline-field">
+      <span class="sample-inline-label">H5/H5AD file</span>
       <input type="file" class="sample-file" accept=".h5,.h5ad" required>
     </label>
     <div class="sample-actions">
@@ -1614,10 +1845,12 @@ function hookForms() {
   });
   document.getElementById("differential-result-population").addEventListener("change", () => {
     currentDifferentialGene = "";
+    currentDifferentialInteraction = null;
     loadDifferentialVisualization();
   });
   initToggleMultiSelect(document.getElementById("differential-group1"));
   initToggleMultiSelect(document.getElementById("differential-group2"));
+  attachDifferentialLrToggleHandlers();
 }
 
 function markDifferentialConfigDirty(state) {
@@ -2589,6 +2822,15 @@ function buildQcCellSummary(data) {
   }
 
   const stageMarkers = [
+    "Running fastComm receptor-ligand communication analysis.",
+    "fastComm analysis complete:",
+    "Running rna2adt ADT imputation.",
+    "rna2adt ADT imputation complete.",
+    "Running rna2lipid lipid imputation.",
+    "rna2lipid lipid imputation complete.",
+    "Ambient RNA correction",
+    "ambient RNA correction",
+    "ambient correction",
     "Running approximate UMAP placement.",
     "Exporting NetPerspective marker networks.",
     "Identifying cell-state marker genes.",
@@ -2609,15 +2851,6 @@ function buildQcCellSummary(data) {
         return "Normalizing expression values...";
       }
     }
-    if (progress >= 82) {
-      return "Running approximate UMAP placement.";
-    }
-    if (progress >= 78) {
-      return "Exporting NetPerspective marker networks.";
-    }
-    if (progress >= 72) {
-      return "Identifying the top 50 unique markers for 100 cells per cell state.";
-    }
     if (message) {
       const genericMessages = new Set([
         "Preparing inputs…",
@@ -2627,6 +2860,15 @@ function buildQcCellSummary(data) {
       if (!genericMessages.has(message)) {
         return message;
       }
+    }
+    if (progress >= 82) {
+      return "Running approximate UMAP placement.";
+    }
+    if (progress >= 78) {
+      return "Exporting NetPerspective marker networks.";
+    }
+    if (progress >= 72) {
+      return "Identifying the top 50 unique markers for 100 cells per cell state.";
     }
   }
 
@@ -2694,6 +2936,7 @@ async function populateDownloadLinks(jobId, statusData = null) {
     lipid_marker_genes_zip: "Download lipid marker ZIP",
     imputed_adt_h5ad: "Download imputed_adt_h5ad",
     adt_marker_genes_zip: "Download ADT marker ZIP",
+    fastcomm_archive: "Download cell communication ZIP",
   };
   Object.keys(artifacts).forEach((key) => {
     if (
@@ -2701,7 +2944,8 @@ async function populateDownloadLinks(jobId, statusData = null) {
       key === "umap_placeholder_expression" ||
       key === "umap_pdf" ||
       key === "umap_pdf_plain" ||
-      key === "imputed_lipids_summary_json"
+      key === "imputed_lipids_summary_json" ||
+      (key.startsWith("fastcomm_") && key !== "fastcomm_archive")
     ) {
       return;
     }
@@ -3025,14 +3269,52 @@ async function loadDifferentialVisualization() {
     } else if (mode === "network") {
       payload = await fetchDifferentialJson(apiPath(`/jobs/${jobId}/differential/interactive/network?population=${encodeURIComponent(population)}`));
       renderDifferentialNetwork(payload);
+    } else if (mode === "table") {
+      payload = await fetchDifferentialJson(apiPath(`/jobs/${jobId}/differential/interactive/table?population=${encodeURIComponent(population)}`));
+      renderDifferentialCommunicationTable(payload);
     } else if (mode === "go") {
       payload = await fetchDifferentialJson(apiPath(`/jobs/${jobId}/differential/interactive/go?population=${encodeURIComponent(population)}`));
       renderDifferentialGo(payload);
     }
-    const nextGene = currentDifferentialGene || (payload && payload.default_gene) || "";
+    const payloadDefaultGene = (payload && payload.default_gene) || "";
+    const isCellCommunicationMode = mode === "network" || mode === "table";
+    let staleGene = "";
+    if (isCellCommunicationMode && currentDifferentialGene) {
+      const receiverPart = currentDifferentialGene.split(":")[0].split("->").slice(-1)[0] || "";
+      if (receiverPart && receiverPart !== population) {
+        staleGene = currentDifferentialGene;
+      }
+    }
+    const nextGene = (staleGene ? "" : currentDifferentialGene) || payloadDefaultGene || "";
     if (nextGene) {
       currentDifferentialGene = nextGene;
-      await loadDifferentialGeneDetail(nextGene, population);
+      let defaultFeature = "";
+      if (isCellCommunicationMode) {
+        if (mode === "table" && Array.isArray(payload && payload.rows) && payload.rows.length) {
+          const targetRow = payload.rows.find((row) => String(row.gene || "") === nextGene) || payload.rows[0];
+          const ligand = targetRow && targetRow.ligand ? String(targetRow.ligand) : "";
+          const receptor = targetRow && targetRow.receptor ? String(targetRow.receptor) : "";
+          const role = currentDifferentialFeatureRole === "receptor" && receptor ? "receptor" : "ligand";
+          defaultFeature = role === "ligand" ? (ligand || receptor) : (receptor || ligand);
+          currentDifferentialFeatureRole = role;
+        } else if (mode === "network" && Array.isArray(payload && payload.elements)) {
+          for (const element of payload.elements) {
+            const data = element && element.data ? element.data : null;
+            if (!data || !data.source) continue;
+            const tops = data.top_interactions || [];
+            const match = tops.find((entry) => String(entry.gene || "") === nextGene);
+            if (match) {
+              const ligand = String(match.ligand || "");
+              const receptor = String(match.receptor || "");
+              const role = currentDifferentialFeatureRole === "receptor" && receptor ? "receptor" : "ligand";
+              defaultFeature = role === "ligand" ? (ligand || receptor) : (receptor || ligand);
+              currentDifferentialFeatureRole = role;
+              break;
+            }
+          }
+        }
+      }
+      await loadDifferentialGeneDetail(nextGene, population, defaultFeature ? { feature: defaultFeature } : undefined);
     } else {
       resetDifferentialGeneDetail();
     }
@@ -3267,12 +3549,13 @@ function renderDifferentialGo(payload) {
 }
 
 function renderDifferentialNetwork(payload) {
+  if (payload && payload.network_type === "cell_communication_diff") {
+    renderDifferentialCommunicationNetwork(payload);
+    return;
+  }
   const plot = document.getElementById("differential-plot-area");
   Plotly.purge(plot);
-  if (differentialCy) {
-    differentialCy.destroy();
-    differentialCy = null;
-  }
+  destroyDifferentialNetwork();
   const elements = (payload.elements || []).map((element) => {
     if (!element.data || !element.data.id || element.data.source) {
       return element;
@@ -3347,17 +3630,235 @@ function renderDifferentialNetwork(payload) {
   });
 }
 
-async function loadDifferentialGeneDetail(gene, population) {
+function setDifferentialNetworkHoverTooltip(text, renderedPosition = null) {
+  const plot = document.getElementById("differential-plot-area");
+  if (!plot) {
+    return;
+  }
+  let tooltip = plot.querySelector(".network-hover-tooltip");
+  if (!tooltip) {
+    tooltip = document.createElement("div");
+    tooltip.className = "network-hover-tooltip";
+    plot.appendChild(tooltip);
+  }
+  const message = String(text || "").trim();
+  if (!message) {
+    tooltip.classList.add("hidden");
+    tooltip.textContent = "";
+    return;
+  }
+  tooltip.textContent = message;
+  tooltip.classList.remove("hidden");
+  if (renderedPosition) {
+    tooltip.style.left = `${Math.min(plot.clientWidth - 260, Math.max(12, renderedPosition.x + 12))}px`;
+    tooltip.style.top = `${Math.min(plot.clientHeight - 120, Math.max(12, renderedPosition.y + 12))}px`;
+  }
+}
+
+function renderDifferentialCommunicationNetwork(payload) {
+  const plot = document.getElementById("differential-plot-area");
+  Plotly.purge(plot);
+  destroyDifferentialNetwork();
+  const elements = payload.elements || [];
+  if (!elements.length) {
+    renderDifferentialEmpty(`No differential cell-state network was available for ${payload.population}.`);
+    return;
+  }
+  const usePresetLayout = elements.some((element) => element && !element.data?.source && element.position);
+  plot.classList.remove("hidden");
+  document.getElementById("differential-plot-empty").classList.add("hidden");
+  differentialCy = cytoscape({
+    container: plot,
+    elements,
+    style: [
+      {
+        selector: "node",
+        style: {
+          "background-color": "data(color)",
+          label: "data(label)",
+          color: "#0f172a",
+          "font-size": 12,
+          "text-valign": "center",
+          "text-halign": "center",
+          width: 34,
+          height: 34,
+          "border-width": 1,
+          "border-color": "#94a3b8",
+        },
+      },
+      {
+        selector: "node[node_type = 'focus']",
+        style: {
+          width: 54,
+          height: 54,
+          color: "#ffffff",
+          "font-weight": 700,
+          "border-width": 3,
+          "border-color": "#134e4a",
+        },
+      },
+      {
+        selector: "edge",
+        style: {
+          width: "data(weight)",
+          "line-color": "data(edge_color)",
+          "target-arrow-color": "data(edge_color)",
+          "target-arrow-shape": "triangle",
+          "curve-style": "bezier",
+          opacity: "data(edge_opacity)",
+        },
+      },
+      {
+        selector: "edge.hovered",
+        style: {
+          opacity: 1,
+          label: "data(label)",
+          color: "#0f172a",
+          "font-size": 10,
+          "text-background-color": "#ffffff",
+          "text-background-opacity": 0.88,
+          "text-background-padding": 3,
+        },
+      },
+      {
+        selector: "node:selected",
+        style: {
+          "border-width": 4,
+          "border-color": "#f97316",
+        },
+      },
+    ],
+    layout: usePresetLayout
+      ? {
+        name: "preset",
+        fit: true,
+        padding: 56,
+      }
+      : {
+        name: "circle",
+        animate: true,
+        fit: true,
+        padding: 56,
+      },
+  });
+  differentialCy.on("mouseover", "edge", (event) => {
+    event.target.addClass("hovered");
+    setDifferentialNetworkHoverTooltip(event.target.data("tooltip"), event.renderedPosition);
+  });
+  differentialCy.on("mouseout", "edge", (event) => {
+    event.target.removeClass("hovered");
+    setDifferentialNetworkHoverTooltip("");
+  });
+  differentialCy.on("tap", "edge", (event) => {
+    const gene = event?.target?.data("gene");
+    event.target.addClass("hovered");
+    setDifferentialNetworkHoverTooltip(event.target.data("tooltip"), event.renderedPosition);
+    if (!gene) {
+      return;
+    }
+    currentDifferentialGene = gene;
+    const topInteractions = event.target.data("top_interactions") || [];
+    const top = topInteractions.find((entry) => String(entry.gene || "") === String(gene)) || topInteractions[0] || {};
+    const ligand = String(top.ligand || "").trim();
+    const receptor = String(top.receptor || "").trim();
+    const role = currentDifferentialFeatureRole === "receptor" && receptor ? "receptor" : "ligand";
+    const featureSymbol = role === "ligand" ? (ligand || receptor) : (receptor || ligand);
+    currentDifferentialFeatureRole = role;
+    loadDifferentialGeneDetail(gene, payload.population, featureSymbol ? { feature: featureSymbol } : undefined);
+  });
+}
+
+function renderDifferentialCommunicationTable(payload) {
+  destroyDifferentialNetwork();
+  const plot = document.getElementById("differential-plot-area");
+  const rows = payload.rows || [];
+  const columns = payload.columns || [];
+  if (!rows.length || !columns.length) {
+    renderDifferentialEmpty(`No differential interaction table was available for ${payload.population}.`);
+    return;
+  }
+  const labels = columns.map((column) => column
+    .replace("delta_score", "delta score")
+    .replace("case_mean_score", "case mean")
+    .replace("control_mean_score", "control mean")
+    .replace("lr_expression_score", "LR expression")
+    .replace("receiver_response_score", "response")
+    .replaceAll("_", " "));
+  const values = columns.map((column) => rows.map((row) => {
+    const value = row[column];
+    return Number.isFinite(Number(value)) && String(value).trim() !== "" ? Number(value).toFixed(3) : String(value ?? "");
+  }));
+  plot.classList.remove("hidden");
+  document.getElementById("differential-plot-empty").classList.add("hidden");
+  Plotly.newPlot(plot, [{
+    type: "table",
+    header: {
+      values: labels,
+      align: "left",
+      fill: { color: "#0f766e" },
+      font: { color: "white", size: 11 },
+    },
+    cells: {
+      values,
+      align: "left",
+      fill: { color: rows.map((_, index) => (index % 2 ? "#f8fafc" : "#ffffff")) },
+      font: { color: "#0f172a", size: 10 },
+      height: 24,
+    },
+  }], {
+    title: `Top differential cell-communication interactions for ${payload.population}`,
+    paper_bgcolor: "rgba(0,0,0,0)",
+    height: Math.max(520, Math.min(920, rows.length * 26 + 110)),
+    margin: { t: 46, l: 12, r: 12, b: 12 },
+  }, { responsive: true });
+  plot.on("plotly_click", (event) => {
+    const pointNumber = event?.points?.[0]?.pointNumber;
+    const rowIndex = Array.isArray(pointNumber) ? Number(pointNumber[0]) : Number(pointNumber);
+    const row = Number.isInteger(rowIndex) ? rows[rowIndex] : null;
+    const gene = row && row.gene ? String(row.gene) : "";
+    if (!gene) {
+      return;
+    }
+    currentDifferentialGene = gene;
+    const ligand = row && row.ligand ? String(row.ligand) : "";
+    const receptor = row && row.receptor ? String(row.receptor) : "";
+    const role = currentDifferentialFeatureRole === "receptor" && receptor ? "receptor" : "ligand";
+    const featureSymbol = role === "ligand" ? (ligand || receptor) : (receptor || ligand);
+    currentDifferentialFeatureRole = role;
+    loadDifferentialGeneDetail(gene, payload.population, featureSymbol ? { feature: featureSymbol } : undefined);
+  });
+}
+
+async function loadDifferentialGeneDetail(gene, population, options) {
   const jobId = document.getElementById("results-job-id").value.trim();
   if (!gene || !population || !jobId) {
     resetDifferentialGeneDetail();
     return;
   }
+  const opts = options || {};
+  let url = apiPath(`/jobs/${jobId}/differential/interactive/gene?population=${encodeURIComponent(population)}&gene=${encodeURIComponent(gene)}`);
+  if (opts.feature) {
+    url += `&feature=${encodeURIComponent(opts.feature)}`;
+  }
   try {
-    const payload = await fetchDifferentialJson(
-      apiPath(`/jobs/${jobId}/differential/interactive/gene?population=${encodeURIComponent(population)}&gene=${encodeURIComponent(gene)}`)
-    );
+    const payload = await fetchDifferentialJson(url);
     currentDifferentialPopulation = payload.population || population;
+    if (payload.interaction_key || payload.ligand || payload.receptor) {
+      currentDifferentialInteraction = {
+        population: payload.population || population,
+        interaction_key: payload.interaction_key || gene,
+        interaction: payload.interaction || payload.gene,
+        ligand: payload.ligand || "",
+        receptor: payload.receptor || "",
+        sender_state: payload.sender_state || "",
+        receiver_state: payload.receiver_state || payload.population || population,
+      };
+      if (payload.feature_role === "ligand" || payload.feature_role === "receptor") {
+        currentDifferentialFeatureRole = payload.feature_role;
+      }
+    } else {
+      currentDifferentialInteraction = null;
+    }
     renderDifferentialGeneDetail(payload);
   } catch (err) {
     resetDifferentialGeneDetail();
@@ -3372,7 +3873,16 @@ function renderDifferentialGeneDetail(payload) {
   const empty = document.getElementById("differential-gene-empty");
   const stats = document.getElementById("differential-gene-stats");
   const downloadButton = document.getElementById("download-differential-gene-btn");
-  document.getElementById("differential-selected-gene").textContent = `${payload.gene} in ${payload.population}`;
+  const isCommunication = normalizeModalityId(payload.modality) === "cell_communication";
+  const isFeatureExpression = payload.view_kind === "feature_expression";
+  const yTitle = isFeatureExpression
+    ? "Normalized expression"
+    : (isCommunication ? "fastComm communication score" : "Normalized expression");
+  const headerLabel = isFeatureExpression
+    ? `${payload.gene} (${payload.feature_role || "feature"}) in ${payload.feature_state || payload.population}`
+    : `${payload.gene} in ${payload.population}`;
+  document.getElementById("differential-selected-gene").textContent = headerLabel;
+  updateDifferentialLrToggle(payload);
   plot.classList.remove("hidden");
   empty.classList.add("hidden");
   downloadButton.href = "#";
@@ -3395,18 +3905,21 @@ function renderDifferentialGeneDetail(payload) {
     },
     box: { visible: true },
     meanline: { visible: true },
-    hovertemplate: `${group.label}<br>expr=%{y:.3f}<extra></extra>`,
+    hovertemplate: `${group.label}<br>${isFeatureExpression ? "expr" : (isCommunication ? "score" : "expr")}=%{y:.3f}<extra></extra>`,
   }));
+  const titleSubject = isFeatureExpression
+    ? `${payload.gene} in ${payload.feature_state || payload.population}`
+    : payload.gene;
   Plotly.newPlot(
     plot,
     traces,
     {
-      title: `Normalized expression: ${payload.gene}`,
+      title: `${yTitle}: ${titleSubject}`,
       paper_bgcolor: "rgba(0,0,0,0)",
       plot_bgcolor: "rgba(255,255,255,0.94)",
       margin: { t: 52, l: 50, r: 18, b: 48 },
       height: 420,
-      yaxis: { title: "Normalized expression" },
+      yaxis: { title: yTitle },
       xaxis: { automargin: true },
       showlegend: false,
     },
@@ -3432,6 +3945,63 @@ function renderDifferentialGeneDetail(payload) {
       </div>
     </div>
   `;
+}
+
+function updateDifferentialLrToggle(payload) {
+  const toggle = document.getElementById("differential-lr-toggle");
+  if (!toggle) {
+    return;
+  }
+  const ligand = String((payload && payload.ligand) || "").trim();
+  const receptor = String((payload && payload.receptor) || "").trim();
+  if (!ligand && !receptor) {
+    toggle.classList.add("hidden");
+    return;
+  }
+  toggle.classList.remove("hidden");
+  const buttons = toggle.querySelectorAll(".lr-toggle-btn");
+  const activeRole = payload && payload.feature_role
+    ? payload.feature_role
+    : currentDifferentialFeatureRole;
+  buttons.forEach((btn) => {
+    const role = btn.getAttribute("data-lr-role");
+    const symbol = role === "ligand" ? ligand : receptor;
+    if (!symbol) {
+      btn.classList.add("hidden");
+      btn.disabled = true;
+      btn.textContent = role === "ligand" ? "Ligand" : "Receptor";
+    } else {
+      btn.classList.remove("hidden");
+      btn.disabled = false;
+      btn.textContent = `${role === "ligand" ? "Ligand" : "Receptor"}: ${symbol}`;
+    }
+    btn.classList.toggle("active", role === activeRole);
+  });
+}
+
+function attachDifferentialLrToggleHandlers() {
+  const toggle = document.getElementById("differential-lr-toggle");
+  if (!toggle || toggle.dataset.bound === "true") {
+    return;
+  }
+  toggle.dataset.bound = "true";
+  toggle.addEventListener("click", (event) => {
+    const btn = event.target.closest(".lr-toggle-btn");
+    if (!btn || btn.disabled) {
+      return;
+    }
+    const role = btn.getAttribute("data-lr-role");
+    if (!role || !currentDifferentialInteraction) {
+      return;
+    }
+    const ctx = currentDifferentialInteraction;
+    const featureSymbol = role === "ligand" ? ctx.ligand : ctx.receptor;
+    if (!featureSymbol) {
+      return;
+    }
+    currentDifferentialFeatureRole = role;
+    loadDifferentialGeneDetail(ctx.interaction_key, ctx.population, { feature: featureSymbol });
+  });
 }
 
 function formatDifferentialStat(value) {
@@ -3468,6 +4038,7 @@ function destroyDifferentialNetwork() {
     differentialCy.destroy();
     differentialCy = null;
   }
+  setDifferentialNetworkHoverTooltip("");
 }
 
 function renderDifferentialEmpty(message) {
@@ -3515,6 +4086,11 @@ function resetDifferentialGeneDetail() {
   if (detailTitle) {
     detailTitle.textContent = `${capitalizedFeature} Detail`;
   }
+  const lrToggle = document.getElementById("differential-lr-toggle");
+  if (lrToggle) {
+    lrToggle.classList.add("hidden");
+  }
+  currentDifferentialInteraction = null;
 }
 
 function clearGeneSuggestions() {
@@ -3863,8 +4439,9 @@ async function loadVisualizationPanel(panelKey) {
     }
 
     if (mode === "fastcomm_network") {
-      const population = getPanelSelectValue(panelKey, "marker-population");
-      if (!population) {
+      const plotType = panelCommunicationPlotType(panelKey);
+      const population = fastCommPlotNeedsPopulation(plotType) ? getPanelSelectValue(panelKey, "marker-population") : "";
+      if (fastCommPlotNeedsPopulation(plotType) && !population) {
         panelPlotData[panelKey] = {
           source: "fastcomm_network",
           payload: { population: "", elements: [], message: "No fastComm cell states are available." },
@@ -3872,7 +4449,11 @@ async function loadVisualizationPanel(panelKey) {
         renderVisualizationPanel(panelKey);
         return;
       }
-      const resp = await fetch(apiPath(`/jobs/${jobId}/fastcomm/network?population=${encodeURIComponent(population)}&direction=incoming&limit=40`));
+      const params = getDisplayFilterParams(panelKey);
+      params.set("population", population);
+      params.set("plot_type", plotType);
+      params.set("limit", "60");
+      const resp = await fetch(apiPath(`/jobs/${jobId}/fastcomm/plot?${params.toString()}`));
       const data = await parseApiResponse(resp);
       if (!resp.ok) {
         throw new Error(data.detail || "fastComm network unavailable.");
@@ -4333,12 +4914,18 @@ function renderVisualizationPanel(panelKey) {
   }
   if (mode === "fastcomm_network") {
     const population = String(data.payload?.population || getPanelSelectValue(panelKey, "marker-population") || "").trim();
-    setPanelSummary(panelKey, population ? `fastComm incoming receptor-ligand view for ${population}.` : "fastComm receptor-ligand view.");
-    if (!(data.payload?.elements || []).length) {
-      renderVisualizationMessage(panelKey, data.payload?.message || "fastComm network unavailable.", population ? `${population} fastComm` : "fastComm");
+    const plotType = data.payload?.plot_type || panelCommunicationPlotType(panelKey);
+    const plotLabel = (FASTCOMM_PLOT_OPTIONS.find((entry) => entry.id === plotType) || {}).label || "Cell communication";
+    setPanelSummary(panelKey, population ? `${plotLabel} for ${population}.` : plotLabel);
+    const hasNetwork = (data.payload?.elements || []).length > 0;
+    const hasRows = (data.payload?.rows || []).length > 0;
+    const hasPoints = (data.payload?.points || []).length > 0;
+    const hasHeatmap = (data.payload?.z || []).length > 0;
+    if (!hasNetwork && !hasRows && !hasPoints && !hasHeatmap) {
+      renderVisualizationMessage(panelKey, data.payload?.message || "Cell communication plot unavailable.", population ? `${population} cell communication` : "Cell communication");
       return;
     }
-    renderFastCommNetwork(panelKey, data.payload);
+    renderFastCommPlot(panelKey, data.payload);
     return;
   }
   if (isUmapMode(mode)) {
@@ -4375,22 +4962,27 @@ async function downloadVisualizationImage(panelKey) {
   }
   if (mode === "fastcomm_network") {
     const cy = expressionCyByPanel[panelKey];
-    if (!cy) {
+    const plotType = panelCommunicationPlotType(panelKey);
+    if (cy) {
+      try {
+        await ensureCytoscapeSvgLoaded();
+        const svg = cy.svg({ scale: 1, full: true });
+        const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = buildPdfFilename([jobId, panelKey, plotType], "svg").replace(/\.pdf$/i, ".svg");
+        link.click();
+        URL.revokeObjectURL(url);
+      } catch (err) {
+        console.warn(err);
+      }
       return;
     }
-    try {
-      await ensureCytoscapeSvgLoaded();
-      const svg = cy.svg({ scale: 1, full: true });
-      const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = buildPdfFilename([jobId, panelKey, "fastcomm_network"], "svg").replace(/\.pdf$/i, ".svg");
-      link.click();
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      console.warn(err);
-    }
+    await exportPlotlyElementToVectorPdf(
+      panelPlotId(panelKey),
+      buildPdfFilename([jobId, panelKey, plotType], plotType),
+    );
     return;
   }
   try {
@@ -4415,6 +5007,22 @@ async function downloadDifferentialLeftPdf() {
   const population = document.getElementById("differential-result-population").value;
   if (!population) {
     return;
+  }
+  if (mode === "table") {
+    const plot = document.getElementById("differential-plot-area");
+    if (plot && plot.data && plot.layout) {
+      try {
+        await exportPlotlyElementToVectorPdf(
+          plot,
+          buildPdfFilename([jobId, population, "differential_interaction_table"], "differential_interaction_table"),
+        );
+        return;
+      } catch (error) {
+        console.error(error);
+        showDownloadError(error);
+        return;
+      }
+    }
   }
   if (mode === "network") {
     window.open(
@@ -4448,12 +5056,17 @@ async function downloadDifferentialGenePdf() {
       return;
     }
   }
-  window.open(
-    apiPath(
-      `/jobs/${jobId}/differential/interactive/gene/pdf?population=${encodeURIComponent(currentDifferentialPopulation)}&gene=${encodeURIComponent(currentDifferentialGene)}`
-    ),
-    "_blank",
-  );
+  let pdfUrl = `/jobs/${jobId}/differential/interactive/gene/pdf?population=${encodeURIComponent(currentDifferentialPopulation)}&gene=${encodeURIComponent(currentDifferentialGene)}`;
+  if (currentDifferentialInteraction) {
+    const role = currentDifferentialFeatureRole;
+    const featureSymbol = role === "receptor"
+      ? currentDifferentialInteraction.receptor
+      : currentDifferentialInteraction.ligand;
+    if (featureSymbol) {
+      pdfUrl += `&feature=${encodeURIComponent(featureSymbol)}`;
+    }
+  }
+  window.open(apiPath(pdfUrl), "_blank");
 }
 
 let activeExplorerTab = "run";

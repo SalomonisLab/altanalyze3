@@ -282,11 +282,35 @@ select:disabled {
 }
 
 .sample-row {
-  padding: 12px;
+  padding: 12px 14px;
   border-radius: 14px;
   border: 1px dashed rgba(29, 78, 216, 0.28);
   background: rgba(255, 255, 255, 0.7);
   margin-bottom: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.sample-inline-field {
+  display: grid;
+  grid-template-columns: 128px minmax(0, 1fr);
+  align-items: center;
+  column-gap: 12px;
+  row-gap: 0;
+  margin-bottom: 0;
+}
+
+.sample-inline-label {
+  margin: 0;
+  white-space: nowrap;
+}
+
+.sample-inline-field input {
+  min-width: 0;
+}
+
+.sample-inline-field input[type="file"] {
+  padding: 8px 12px;
 }
 
 .sample-field {
@@ -537,6 +561,38 @@ select:disabled {
   text-align: right;
 }
 
+.lr-toggle {
+  display: inline-flex;
+  border: 1px solid rgba(15, 118, 110, 0.35);
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.85);
+}
+
+.lr-toggle-btn {
+  padding: 4px 12px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #0f766e;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.lr-toggle-btn + .lr-toggle-btn {
+  border-left: 1px solid rgba(15, 118, 110, 0.35);
+}
+
+.lr-toggle-btn:hover {
+  background: rgba(15, 118, 110, 0.12);
+}
+
+.lr-toggle-btn.active {
+  background: #0f766e;
+  color: #fff;
+}
+
 .gene-detail-shell {
   min-height: 420px;
   max-height: 560px;
@@ -641,6 +697,11 @@ select:disabled {
 
   .gene-stat-grid {
     grid-template-columns: 1fr;
+  }
+
+  .sample-inline-field {
+    grid-template-columns: 1fr;
+    row-gap: 6px;
   }
 }
 
