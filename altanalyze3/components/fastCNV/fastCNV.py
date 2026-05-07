@@ -175,6 +175,7 @@ class FastParams:
     sex_detection_threshold_pct: float = 5.0
     control_sample_key: Optional[str] = None
     max_cells_per_state: int = 0
+    gate_chry_by_marker_expression: bool = True
     sex_chrom_het_loss: float = -0.6
     sex_chrom_hom_loss: float = -1.5
     sex_chrom_het_gain: float = 0.4
@@ -914,25 +915,31 @@ def run_fast(params: FastParams) -> Dict[str, Path]:
     )
     male_query_mask = (query_cell_sex == "male")
 
-    # Per-cell chrY-marker positivity. A cell expressing >=1 UMI on any chrY-Y-only
-    # marker gene cannot have biologically lost chrY — the residual transcripts
-    # would be impossible without an intact chromosome. We use this to gate
-    # chrY-loss interval emission downstream: chrY scores for chrY-marker-positive
-    # cells are NaN'd so the interval caller can never emit a chrY-loss interval
-    # for them, regardless of how the autosomal scoring or windowing behaves.
-    _chry_present = [g for g in CHRY_Y_ONLY_MARKERS if g in query.var_names]
-    if _chry_present:
-        _chry_X = query[:, _chry_present].X
-        if sp.issparse(_chry_X):
-            _chry_X = _chry_X.tocsr()
-            chry_marker_pos_query = np.asarray((_chry_X > 0).sum(axis=1)).ravel() > 0
+    # LOY-specific heuristic (controlled by --gate-chry-by-marker-expression, default True):
+    # A cell expressing >=1 UMI on any chrY-Y-only marker gene cannot have biologically
+    # lost chrY — the residual transcripts would be impossible without an intact
+    # chromosome. We use this to gate chrY-loss interval emission downstream: chrY
+    # scores for chrY-marker-positive cells are NaN'd so the interval caller can never
+    # emit a chrY-loss interval for them, regardless of how the autosomal scoring or
+    # windowing behaves. This is biologically motivated but specific to LOY; can be
+    # disabled with --no-gate-chry-by-marker-expression to evaluate scoring purity.
+    if params.gate_chry_by_marker_expression:
+        _chry_present = [g for g in CHRY_Y_ONLY_MARKERS if g in query.var_names]
+        if _chry_present:
+            _chry_X = query[:, _chry_present].X
+            if sp.issparse(_chry_X):
+                _chry_X = _chry_X.tocsr()
+                chry_marker_pos_query = np.asarray((_chry_X > 0).sum(axis=1)).ravel() > 0
+            else:
+                chry_marker_pos_query = (np.asarray(_chry_X) > 0).sum(axis=1) > 0
+            LOGGER.info(
+                "chrY-marker positivity gate ON: %d / %d query cells express >=1 chrY-Y-only marker (gated from chrY-loss calls).",
+                int(chry_marker_pos_query.sum()), query.n_obs,
+            )
         else:
-            chry_marker_pos_query = (np.asarray(_chry_X) > 0).sum(axis=1) > 0
-        LOGGER.info(
-            "Per-cell chrY-marker positivity gate: %d / %d query cells express >=1 chrY-Y-only marker (gated from chrY-loss calls).",
-            int(chry_marker_pos_query.sum()), query.n_obs,
-        )
+            chry_marker_pos_query = np.zeros(query.n_obs, dtype=bool)
     else:
+        LOGGER.info("chrY-marker positivity gate DISABLED (--no-gate-chry-by-marker-expression).")
         chry_marker_pos_query = np.zeros(query.n_obs, dtype=bool)
 
     if params.control_sample_key and params.control_sample_key in control.obs.columns:
@@ -1696,6 +1703,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         "loss of information for CNV detection: per-state median baselines are stable "
                         "with ~50-100 cells, and clone discovery operates on the same down-sampled set. "
                         "Only applied within --per-sample mode; the full sample is preserved on disk.")
+    p.add_argument("--gate-chry-by-marker-expression", dest="gate_chry_by_marker_expression",
+                   action="store_true", default=True,
+                   help="LOY-specific heuristic (default ON): NaN chrY scores for any query cell "
+                        "expressing >=1 UMI on any chrY-Y-only marker (RPS4Y1, DDX3Y, EIF1AY, KDM5D, "
+                        "UTY, USP9Y, NLGN4Y, TMSB4Y, PRKY, ZFY, TSPY1, BCORP1, PRY, TBL1Y, TXLNGY, "
+                        "AMELY). Such cells cannot have biologically lost chrY, so the interval "
+                        "caller is prevented from emitting a chrY-loss for them.")
+    p.add_argument("--no-gate-chry-by-marker-expression", dest="gate_chry_by_marker_expression",
+                   action="store_false",
+                   help="Disable the chrY-marker-expression gate (use to evaluate scoring without "
+                        "the LOY-specific heuristic).")
     p.add_argument("--sex-detection-threshold", type=float, default=SEX_DETECTION_CHRY_PCT_DEFAULT,
                    help="Percent of cells in a sample with >=1 chrY-Y-only marker UMI required "
                         "to call the sample male. Default 5%% reliably separates female samples "
@@ -1775,6 +1793,7 @@ def params_from_args(args: argparse.Namespace) -> FastParams:
         sex_detection_threshold_pct=float(args.sex_detection_threshold),
         control_sample_key=args.control_sample_key,
         max_cells_per_state=int(args.max_cells_per_state),
+        gate_chry_by_marker_expression=bool(args.gate_chry_by_marker_expression),
     )
 
 
