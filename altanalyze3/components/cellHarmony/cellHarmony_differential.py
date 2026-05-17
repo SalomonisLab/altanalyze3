@@ -50,6 +50,7 @@ sys.path.insert(1, os.path.join(sys.path[0], '..'))
 from altanalyze3.components.visualization import NetPerspective
 from altanalyze3.components.goelite.resources import prepare_species_resources
 from altanalyze3.components.goelite.runner import GOEliteRunner, EnrichmentSettings
+from altanalyze3.components.goelite.plotting import write_goelite_scatter_pdf
 
 import matplotlib
 matplotlib.use("Agg")
@@ -2189,8 +2190,6 @@ def run_goelite_for_clusters(de_store,
         query_upper = set(query_map.keys())
 
         for res in results:
-            if not res.selected:
-                continue
             term_genes = prepared.term_genes.get(res.term_id, set())
             overlap_upper = query_upper & term_genes
             overlap_genes = sorted(
@@ -2242,6 +2241,10 @@ def run_goelite_for_clusters(de_store,
     out_df.sort_values(["population", "fdr", "p_value"], inplace=True)
     out_df.to_csv(out_path, sep="\t", index=False)
     print(f"[INFO] GO-Elite results written to: {out_path}")
+    pdf_path = os.path.join(outdir, f"GOElite_{safe_tag}.pdf")
+    written_pdf = write_goelite_scatter_pdf(out_df, pdf_path, title_prefix="GO-Elite")
+    if written_pdf is not None:
+        print(f"[INFO] GO-Elite PDF written to: {written_pdf}")
     payload["results"] = out_df
     return payload
 
@@ -2393,8 +2396,6 @@ def run_goelite_for_clusters_directional(de_store,
         query_upper = set(query_map.keys())
 
         for res in results:
-            if not res.selected:
-                continue
             term_genes = prepared.term_genes.get(res.term_id, set())
             overlap_upper = query_upper & term_genes
             overlap_genes = sorted(
@@ -2445,6 +2446,10 @@ def run_goelite_for_clusters_directional(de_store,
     out_df.sort_values(["population", "fdr", "p_value"], inplace=True)
     out_df.to_csv(out_path, sep="\t", index=False)
     print(f"[INFO] GO-Elite {direction}-regulated results written to: {out_path}")
+    pdf_path = os.path.join(outdir, f"GOElite_{safe_tag}.pdf")
+    written_pdf = write_goelite_scatter_pdf(out_df, pdf_path, title_prefix=f"GO-Elite {direction}")
+    if written_pdf is not None:
+        print(f"[INFO] GO-Elite {direction}-regulated PDF written to: {written_pdf}")
     return out_df
 
 # ------------------------- Step 6: differentials h5ad ---------------------- #

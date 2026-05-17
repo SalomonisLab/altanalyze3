@@ -890,7 +890,7 @@ function updateExpressionModeOptions() {
       }
       modalityField.classList.remove("hidden");
     } else {
-      const currentModality = normalizeModalityId(modalitySelect.value || ((currentModalitiesState || {}).default || "rna"));
+      const currentModality = normalizeModalityId(previousModalityValue || ((currentModalitiesState || {}).default || "rna"));
       modalities.forEach((entry) => {
         const option = document.createElement("option");
         option.value = entry.id;
@@ -3474,35 +3474,89 @@ function renderDifferentialGo(payload) {
     renderDifferentialEmpty(`No GO term enrichment was available for ${payload.population}.`);
     return;
   }
-  const ordered = [...terms]
-    .map((term) => {
-      const overlapGenes = term.overlap_genes || [];
-      const selectedGene = overlapGenes.includes(currentDifferentialGene)
-        ? currentDifferentialGene
-        : (term.selected_gene || overlapGenes[0] || null);
-      return {
-        ...term,
-        selected_gene: selectedGene,
-      };
-    })
-    .reverse();
-  const yKeys = ordered.map((term, index) => `${term.term_name}__${term.direction || "unknown"}__${index}`);
+  const ordered = [...terms].map((term) => {
+    const overlapGenes = term.overlap_genes || [];
+    const selectedGene = overlapGenes.includes(currentDifferentialGene)
+      ? currentDifferentialGene
+      : (term.selected_gene || overlapGenes[0] || null);
+    return {
+      ...term,
+      selected_gene: selectedGene,
+      z_score: Number(term.z_score),
+      fdr_plot: Number(term.fdr_plot || term.fdr || term.p_value),
+      p_value: Number(term.p_value),
+      fdr: Number(term.fdr),
+    };
+  }).filter((term) => Number.isFinite(term.z_score) && Number.isFinite(term.fdr_plot) && term.fdr_plot > 0);
+  if (!ordered.length) {
+    renderDifferentialEmpty(`No GO term enrichment was available for ${payload.population}.`);
+    return;
+  }
+  const significant = ordered.filter((term) => Boolean(term.is_selected_positive_sig));
+  const background = ordered.filter((term) => !term.is_selected_positive_sig);
+  const labels = payload.labels || [];
+  const annotationOffsets = [
+    { ax: 56, ay: -54 },
+    { ax: 68, ay: -18 },
+    { ax: 74, ay: 16 },
+    { ax: 80, ay: 48 },
+    { ax: 92, ay: 82 },
+  ];
   plot.classList.remove("hidden");
   document.getElementById("differential-plot-empty").classList.add("hidden");
   Plotly.newPlot(
     plot,
     [
       {
-        x: ordered.map((term) => term.score),
-        y: yKeys,
-        type: "bar",
-        orientation: "h",
-        customdata: ordered.map((term) => [term.selected_gene, term.direction, (term.overlap_genes || []).join(", "), term.overlap_genes || []]),
+        x: background.map((term) => term.z_score),
+        y: background.map((term) => term.fdr_plot),
+        type: "scattergl",
+        mode: "markers",
+        name: "Other terms",
+        customdata: background.map((term) => [
+          term.selected_gene,
+          term.direction,
+          (term.overlap_genes || []).join(", "),
+          term.overlap_genes || [],
+          term.term_name,
+          term.z_score,
+          term.p_value,
+          term.fdr,
+        ]),
         marker: {
-          color: ordered.map((term) => (term.direction === "up" ? "#dc2626" : "#2563eb")),
+          color: "#d1d5db",
+          size: 11,
+          opacity: 0.95,
         },
         hovertemplate: (
-          "%{y}<br>-log10(FDR)=%{x:.3f}"
+          "%{customdata[4]}<br>Z-score=%{x:.3f}<br>FDR=%{y:.3e}<br>Fisher p=%{customdata[6]:.3e}"
+          + "<br>Selected gene: %{customdata[0]}"
+          + "<br>GO genes: %{customdata[2]}<extra></extra>"
+        ),
+      },
+      {
+        x: significant.map((term) => term.z_score),
+        y: significant.map((term) => term.fdr_plot),
+        type: "scattergl",
+        mode: "markers",
+        name: "GO-Elite selected terms",
+        customdata: significant.map((term) => [
+          term.selected_gene,
+          term.direction,
+          (term.overlap_genes || []).join(", "),
+          term.overlap_genes || [],
+          term.term_name,
+          term.z_score,
+          term.p_value,
+          term.fdr,
+        ]),
+        marker: {
+          color: "#1f19c7",
+          size: 11,
+          opacity: 0.98,
+        },
+        hovertemplate: (
+          "%{customdata[4]}<br>Z-score=%{x:.3f}<br>FDR=%{y:.3e}<br>Fisher p=%{customdata[6]:.3e}"
           + "<br>Selected gene: %{customdata[0]}"
           + "<br>GO genes: %{customdata[2]}<extra></extra>"
         ),
@@ -3512,15 +3566,46 @@ function renderDifferentialGo(payload) {
       title: `GO terms: ${payload.population}`,
       paper_bgcolor: "rgba(0,0,0,0)",
       plot_bgcolor: "rgba(255,255,255,0.94)",
-      margin: { t: 56, l: 260, r: 20, b: 56 },
-      height: Math.max(540, ordered.length * 34 + 120),
-      xaxis: { title: "-log10(FDR)" },
-      yaxis: {
-        automargin: true,
-        tickmode: "array",
-        tickvals: yKeys,
-        ticktext: ordered.map((term) => term.term_name),
+      margin: { t: 56, l: 86, r: 280, b: 72 },
+      height: 720,
+      xaxis: {
+        title: "Z-Score",
+        zeroline: false,
+        range: [
+          Math.min(-10, Math.floor(Math.min(...ordered.map((term) => term.z_score)) - 0.5)),
+          Math.max(20, Math.ceil(Math.max(...ordered.map((term) => term.z_score)) + 2.5)),
+        ],
       },
+      yaxis: {
+        title: "Fishers FDR p",
+        type: "log",
+        autorange: true,
+      },
+      showlegend: false,
+      annotations: labels.map((label, index) => {
+        const offset = annotationOffsets[Math.min(index, annotationOffsets.length - 1)];
+        return {
+          x: Number(label.z_score),
+          y: Number(label.fdr_plot),
+          xref: "x",
+          yref: "y",
+          text: label.term_name,
+          showarrow: true,
+          arrowhead: 0,
+          arrowsize: 1,
+          arrowwidth: 1.1,
+          arrowcolor: label.label_color || "#111827",
+          ax: offset.ax,
+          ay: offset.ay,
+          font: {
+            size: 12,
+            color: label.label_color || "#111827",
+          },
+          bgcolor: "rgba(255,255,255,0)",
+          xanchor: "left",
+          yanchor: "middle",
+        };
+      }),
     },
     { responsive: true }
   );

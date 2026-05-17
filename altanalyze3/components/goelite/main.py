@@ -15,9 +15,19 @@ import pandas as pd
 
 import logging
 
-from .parser import ParsedGO, build_tree_with_annotations
-from .resources import AVAILABLE_SPECIES, prepare_species_resources
-from .runner import EnrichmentSettings, GOEliteRunner
+if __package__ in (None, ""):
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    from altanalyze3.components.goelite.parser import ParsedGO, build_tree_with_annotations
+    from altanalyze3.components.goelite.resources import AVAILABLE_SPECIES, prepare_species_resources
+    from altanalyze3.components.goelite.runner import EnrichmentSettings, GOEliteRunner
+    from altanalyze3.components.goelite.plotting import write_goelite_scatter_pdf
+else:
+    from .parser import ParsedGO, build_tree_with_annotations
+    from .resources import AVAILABLE_SPECIES, prepare_species_resources
+    from .runner import EnrichmentSettings, GOEliteRunner
+    from .plotting import write_goelite_scatter_pdf
 
 
 def _read_gene_list(path: str) -> List[str]:
@@ -46,6 +56,7 @@ def main(argv: List[str] | None = None) -> int:
     ap.add_argument("--max-fdr", type=float, default=0.1)
     ap.add_argument("--min-overlap", type=int, default=2)
     ap.add_argument("--delta-z", type=float, default=0.5)
+    ap.add_argument("--top-label-count", type=int, default=4, help="Number of top enriched terms to label in the PDF.")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO)
@@ -90,10 +101,18 @@ def main(argv: List[str] | None = None) -> int:
     if not results:
         logger.warning("No enriched GO terms detected.")
         return 0
+    prepared_genes = runner.prepare_background(background_genes)
+
+    query_map = {}
+    for gene in query_genes:
+        key = str(gene).upper()
+        if key and key not in query_map:
+            query_map[key] = str(gene)
 
     records = [
         {
             "term_id": res.term_id,
+            "term_name": (runner.go_tree.get(res.term_id).name if runner.go_tree.get(res.term_id) is not None else ""),
             "z_score": res.z_score,
             "p_value": res.p_value,
             "fdr": res.fdr,
@@ -102,6 +121,13 @@ def main(argv: List[str] | None = None) -> int:
             "background_total": res.background,
             "selected": res.selected,
             "blocked_by": res.blocked_by,
+            "overlap_genes": ",".join(
+                sorted(
+                    query_map[key]
+                    for key in prepared_genes.term_genes.get(res.term_id, set()) & set(query_map.keys())
+                    if key in query_map
+                )
+            ),
         }
         for res in results
     ]
@@ -110,6 +136,16 @@ def main(argv: List[str] | None = None) -> int:
     tsv_path = os.path.join(args.outdir, "goelite_results.tsv")
     df.to_csv(tsv_path, sep="\t", index=False)
     logger.info("Wrote results table: %s", tsv_path)
+
+    pdf_path = os.path.join(args.outdir, "goelite_results.pdf")
+    written_pdf = write_goelite_scatter_pdf(
+        df,
+        pdf_path,
+        title_prefix="GO-Elite",
+        top_label_count=args.top_label_count,
+    )
+    if written_pdf is not None:
+        logger.info("Wrote results PDF: %s", written_pdf)
 
     json_path = os.path.join(args.outdir, "goelite_results.json")
     with open(json_path, "w", encoding="utf-8") as handle:

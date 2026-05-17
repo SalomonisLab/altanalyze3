@@ -31,6 +31,23 @@ from altanalyze3.components.visualization import approximate_umap as approx_mod
 from .config import BASE_DIR, load_config
 
 _POOLED_OVERALL_LABEL = "Pooled overall"
+_GO_ELITE_HIGHLIGHT_KEYWORDS = (
+    "cell cycle",
+    "mitotic",
+    "splicing",
+    "mrna processing",
+    "proliferation",
+    "cytokine",
+    "death",
+    "chromatin",
+    "lipid",
+    "circadian",
+    "tp53",
+    "wnt",
+    "tgf",
+    "tnf",
+    "granule",
+)
 
 
 class QCSettings(BaseModel):
@@ -1641,8 +1658,14 @@ def _build_differential_go_payload(app: FastAPI, meta: Dict, population: str) ->
 
     subset["fdr"] = pd.to_numeric(subset.get("fdr"), errors="coerce")
     subset["p_value"] = pd.to_numeric(subset.get("p_value"), errors="coerce")
-    subset["score"] = -np.log10(subset["fdr"].fillna(subset["p_value"]).clip(lower=1e-300))
-    subset = subset.sort_values(["fdr", "p_value", "term_name"], ascending=[True, True, True]).head(15)
+    subset["z_score"] = pd.to_numeric(subset.get("z_score"), errors="coerce")
+    subset["fdr_plot"] = subset["fdr"].fillna(subset["p_value"]).clip(lower=1e-300, upper=1.0)
+    subset["score"] = -np.log10(subset["fdr_plot"])
+    subset["is_positive_sig"] = (
+        subset["fdr_plot"].le(0.05)
+        & subset["z_score"].gt(2.0)
+    )
+    subset = subset.sort_values(["fdr_plot", "p_value", "z_score", "term_name"], ascending=[True, True, False, True]).reset_index(drop=True)
     terms = []
     for row in subset.itertuples():
         overlap_genes = [gene.strip() for gene in str(getattr(row, "overlap_genes", "")).split(",") if gene.strip()]
@@ -1653,13 +1676,72 @@ def _build_differential_go_payload(app: FastAPI, meta: Dict, population: str) ->
                 "direction": str(getattr(row, "direction", "unknown")),
                 "fdr": float(row.fdr) if _is_finite_number(row.fdr) else None,
                 "p_value": float(row.p_value) if _is_finite_number(row.p_value) else None,
+                "z_score": float(row.z_score) if _is_finite_number(row.z_score) else None,
                 "score": float(row.score) if _is_finite_number(row.score) else None,
+                "fdr_plot": float(row.fdr_plot) if _is_finite_number(row.fdr_plot) else None,
+                "selected": bool(getattr(row, "selected", False)),
+                "is_positive_sig": bool(getattr(row, "is_positive_sig", False)),
+                "is_selected_positive_sig": bool(getattr(row, "selected", False) and getattr(row, "is_positive_sig", False)),
                 "overlap_genes": overlap_genes,
                 "selected_gene": overlap_genes[0] if overlap_genes else None,
             }
         )
+    positive_sig = [term for term in terms if term.get("is_selected_positive_sig")]
+    positive_sig.sort(key=lambda term: (
+        float(term.get("fdr_plot", 1.0) or 1.0),
+        float(term.get("p_value", 1.0) or 1.0),
+        -float(term.get("z_score", 0.0) or 0.0),
+        str(term.get("term_name", "")),
+    ))
+    top_labels = positive_sig[:4]
+    used_names = {str(term.get("term_name", "")).strip().lower() for term in top_labels}
+    keyword_term = None
+    for term in positive_sig[4:]:
+        term_name_lc = str(term.get("term_name", "")).strip().lower()
+        if term_name_lc in used_names:
+            continue
+        if any(keyword in term_name_lc for keyword in _GO_ELITE_HIGHLIGHT_KEYWORDS):
+            keyword_term = term
+            break
+    if keyword_term is None:
+        for term in terms:
+            term_name_lc = str(term.get("term_name", "")).strip().lower()
+            if term_name_lc in used_names:
+                continue
+            if float(term.get("z_score", 0.0) or 0.0) <= 0.0:
+                continue
+            if any(keyword in term_name_lc for keyword in _GO_ELITE_HIGHLIGHT_KEYWORDS):
+                keyword_term = term
+                break
+    labels = []
+    for index, term in enumerate(top_labels):
+        labels.append(
+            {
+                "term_name": str(term.get("term_name", "")),
+                "z_score": float(term.get("z_score", 0.0) or 0.0),
+                "fdr_plot": float(term.get("fdr_plot", 1.0) or 1.0),
+                "selected_gene": term.get("selected_gene"),
+                "overlap_genes": term.get("overlap_genes") or [],
+                "label_color": "#111827",
+                "label_rank": index,
+                "label_role": "top",
+            }
+        )
+    if keyword_term is not None:
+        labels.append(
+            {
+                "term_name": str(keyword_term.get("term_name", "")),
+                "z_score": float(keyword_term.get("z_score", 0.0) or 0.0),
+                "fdr_plot": float(keyword_term.get("fdr_plot", 1.0) or 1.0),
+                "selected_gene": keyword_term.get("selected_gene"),
+                "overlap_genes": keyword_term.get("overlap_genes") or [],
+                "label_color": "#4f6ef7",
+                "label_rank": len(labels),
+                "label_role": "keyword",
+            }
+        )
     default_gene = next((term["selected_gene"] for term in terms if term["selected_gene"]), None)
-    return {"population": population, "terms": terms, "default_gene": default_gene}
+    return {"population": population, "terms": terms, "labels": labels, "default_gene": default_gene}
 
 
 def _communication_focus_positions(states: List[str], focus: str) -> Dict[str, Dict[str, float]]:
@@ -3734,19 +3816,84 @@ def _render_differential_go_pdf(payload: Dict) -> io.BytesIO:
     if not terms:
         raise HTTPException(status_code=404, detail="No differential GO terms were available.")
 
-    ordered = list(reversed(terms))
-    scores = [float(term.get("score", 0.0) or 0.0) for term in ordered]
-    labels = [str(term.get("term_name", "")) for term in ordered]
-    colors = ["#dc2626" if str(term.get("direction", "")).lower() == "up" else "#2563eb" for term in ordered]
+    positive_terms = []
+    background_terms = []
+    x_values = []
+    y_values = []
+    for term in terms:
+        z_score = float(term.get("z_score", np.nan) or np.nan)
+        fdr_plot = float(term.get("fdr_plot", np.nan) or np.nan)
+        if not (_is_finite_number(z_score) and _is_finite_number(fdr_plot) and fdr_plot > 0):
+            continue
+        x_values.append(z_score)
+        y_values.append(fdr_plot)
+        (positive_terms if bool(term.get("is_selected_positive_sig")) else background_terms).append((z_score, fdr_plot, term))
+    if not x_values or not y_values:
+        raise HTTPException(status_code=404, detail="No differential GO terms were available.")
 
-    fig_height = max(5.5, min(18.0, len(ordered) * 0.42 + 1.6))
-    fig, ax = plt.subplots(figsize=(9.0, fig_height))
-    positions = np.arange(len(ordered), dtype=float)
-    ax.barh(positions, scores, color=colors, edgecolor="none", height=0.78)
-    ax.set_yticks(positions)
-    ax.set_yticklabels(labels, fontsize=9)
-    ax.set_xlabel("-log10(FDR)")
+    fig, ax = plt.subplots(figsize=(9.2, 7.8))
+    if background_terms:
+        ax.scatter(
+            [entry[0] for entry in background_terms],
+            [entry[1] for entry in background_terms],
+            s=42,
+            c="#d1d5db",
+            alpha=0.95,
+            linewidths=0,
+            zorder=2,
+        )
+    if positive_terms:
+        ax.scatter(
+            [entry[0] for entry in positive_terms],
+            [entry[1] for entry in positive_terms],
+            s=48,
+            c="#1f19c7",
+            alpha=0.98,
+            linewidths=0,
+            zorder=3,
+        )
+
+    labels = payload.get("labels", []) or []
+    annotation_offsets = [(-6, 38), (-2, 10), (2, -10), (6, -34), (18, -60)]
+    for index, label in enumerate(labels):
+        z_score = float(label.get("z_score", np.nan) or np.nan)
+        fdr_plot = float(label.get("fdr_plot", np.nan) or np.nan)
+        if not (_is_finite_number(z_score) and _is_finite_number(fdr_plot) and fdr_plot > 0):
+            continue
+        dx, dy = annotation_offsets[min(index, len(annotation_offsets) - 1)]
+        ax.annotate(
+            str(label.get("term_name", "")),
+            xy=(z_score, fdr_plot),
+            xytext=(dx, dy),
+            textcoords="offset points",
+            ha="left",
+            va="center",
+            fontsize=9,
+            color=str(label.get("label_color", "#111827")),
+            arrowprops={
+                "arrowstyle": "-",
+                "color": str(label.get("label_color", "#111827")),
+                "linewidth": 1.0,
+                "alpha": 0.9,
+                "shrinkA": 0,
+                "shrinkB": 0,
+            },
+            zorder=4,
+        )
+
+    x_min = min(-10.0, float(np.floor(min(x_values) - 0.5)))
+    x_max = max(20.0, float(np.ceil(max(x_values) + 2.5)))
+    y_min = max(min(y_values) * 0.5, 1e-300)
+    ax.set_yscale("log")
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_min, 1.0)
+    ax.set_xlabel("Z-Score")
+    ax.set_ylabel("Fishers FDR p")
     ax.set_title(f"GO terms: {payload.get('population', '')}")
+    ax.axvline(0.0, color="#111827", linewidth=1.2, alpha=0.95, zorder=1)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.grid(False)
     fig.tight_layout()
 
     buf = io.BytesIO()

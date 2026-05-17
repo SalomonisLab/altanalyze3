@@ -16,6 +16,7 @@ from .resources import (
     prepare_species_resources,
     resolve_cache_dir,
 )
+from .plotting import write_goelite_scatter_pdf
 
 __all__ = [
     "GOEliteRunner",
@@ -32,4 +33,5 @@ __all__ = [
     "resolve_cache_dir",
     "DEFAULT_CACHE_ENV",
     "AVAILABLE_SPECIES",
+    "write_goelite_scatter_pdf",
 ]

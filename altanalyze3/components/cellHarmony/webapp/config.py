@@ -31,7 +31,7 @@ def _env_h5ad_compression(name: str, default: str = "lzf") -> str:
 
 def load_config(overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     cfg: Dict[str, Any] = {
-        "APP_TITLE": "cellHarmony web",
+        "APP_TITLE": "scALABLE",
         "MAX_CONTENT_LENGTH": 1024 * 1024 * 1024,
         "ROOT_PATH": os.getenv("CELLHARMONY_ROOT_PATH", "").strip(),
         "JOB_STORAGE": os.getenv("CELLHARMONY_JOB_STORAGE", str(DEFAULT_JOB_STORAGE)),
