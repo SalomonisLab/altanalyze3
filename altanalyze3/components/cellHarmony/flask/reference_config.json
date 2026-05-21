@@ -21,7 +21,7 @@
               "log_base": "e"
             }
           },
-          "soupx_options": [
+          "ambient_options": [
             "default",
             "immune"
           ]
@@ -36,7 +36,7 @@
           "impute_modalities": [
             "lipids"
           ],
-          "soupx_options": [
+          "ambient_options": [
             "default"
           ]
         },
@@ -50,7 +50,7 @@
           "impute_modalities": [
             "lipids"
           ],
-          "soupx_options": [
+          "ambient_options": [
             "default"
           ]
         },
@@ -64,7 +64,7 @@
           "impute_modalities": [
             "lipids"
           ],
-          "soupx_options": [
+          "ambient_options": [
             "default"
           ]
         },
@@ -78,7 +78,7 @@
           "impute_modalities": [
             "lipids"
           ],
-          "soupx_options": [
+          "ambient_options": [
             "default"
           ]
         }
@@ -105,7 +105,7 @@
               "log_base": "e"
             }
           },
-          "soupx_options": [
+          "ambient_options": [
             "default"
           ]
         },
@@ -116,7 +116,7 @@
           "reference_clusters_tsv": "references/Mouse/Lung/CellRef/Mm-CellRef_clusters.tsv",
           "reference_coords_tsv": "references/Mouse/Lung/CellRef/Mm-CellRef_umap.tsv",
           "cluster_key": "celltype_level3",
-          "soupx_options": [
+          "ambient_options": [
             "default"
           ]
         },
@@ -127,7 +127,7 @@
           "reference_clusters_tsv": "references/Mouse/Lung/Adult-Lung-Airway/Mm-LungMAP-Adult-Lung-Airway_clusters.tsv",
           "reference_coords_tsv": "references/Mouse/Lung/Adult-Lung-Airway/Mm-LungMAP-Adult-Lung-Airway_umap.tsv",
           "cluster_key": "Population",
-          "soupx_options": [
+          "ambient_options": [
             "default"
           ]
         },
@@ -138,7 +138,7 @@
           "reference_clusters_tsv": "references/Mouse/Lung/Flu/Lung-Influenza_clusters.tsv",
           "reference_coords_tsv": "references/Mouse/Lung/Flu/Lung-Influenza_umap.tsv",
           "cluster_key": "Population",
-          "soupx_options": [
+          "ambient_options": [
             "default"
           ]
         }

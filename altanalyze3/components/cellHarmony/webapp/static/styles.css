@@ -58,6 +58,15 @@ body {
   color: #2563eb;
 }
 
+.eyebrow-subtitle {
+  margin-left: 0.7rem;
+  text-transform: none;
+  letter-spacing: 0.08em;
+  font-size: 0.62rem;
+  color: #64748b;
+  white-space: nowrap;
+}
+
 .hero h1 {
   margin: 0;
   font-size: 2.4rem;

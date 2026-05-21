@@ -11,7 +11,7 @@
           "reference_clusters_tsv": "references/Human/BoneMarrow/Zhang-2024/Hs-MarrowAtlas-L3M_reference_clusters.tsv",
           "reference_coords_tsv": "references/Human/BoneMarrow/Zhang-2024/Hs-MarrowAtlas-L3M_reference_umap.tsv",
           "cluster_key": "Population",
-          "soupx_options": [
+          "ambient_options": [
             "default",
             "immune"
           ]
@@ -23,7 +23,7 @@
           "reference_clusters_tsv": "references/Human/Lung/CellRef/Hs-CellRef_clusters.tsv",
           "reference_coords_tsv": "references/Human/Lung/CellRef/Hs-CellRef_umap.tsv",
           "cluster_key": "celltype_level3",
-          "soupx_options": [
+          "ambient_options": [
             "default"
           ]
         },
@@ -34,7 +34,7 @@
           "reference_clusters_tsv": "references/Human/Lung/HLCA/Hs-Lung-HLCA_clusters.tsv",
           "reference_coords_tsv": "references/Human/Lung/HLCA/Hs-Lung-HLCA_umap.tsv",
           "cluster_key": "HLCA",
-          "soupx_options": [
+          "ambient_options": [
             "default"
           ]
         },
@@ -45,7 +45,7 @@
           "reference_clusters_tsv": "references/Human/Lung/Natri-2024/Hs-Lung-IPF-Natri_clusters.tsv",
           "reference_coords_tsv": "references/Human/Lung/Natri-2024/Hs-Lung-IPF-Natri_umap.tsv",
           "cluster_key": "TGEN-IPF",
-          "soupx_options": [
+          "ambient_options": [
             "default"
           ]
         },
@@ -56,7 +56,7 @@
           "reference_clusters_tsv": "references/Human/Lung/BPD-Sun/Hs-BPD_Sun_clusters.tsv",
           "reference_coords_tsv": "references/Human/Lung/BPD-Sun/Hs-BPD_Sun_umap.tsv",
           "cluster_key": "cell type",
-          "soupx_options": [
+          "ambient_options": [
             "default"
           ]
         }
@@ -73,7 +73,7 @@
           "reference_clusters_tsv": "references/Mouse/BoneMarrow/Ferchen-2025/Mm-MarrowAtlas-L4_reference_clusters.tsv",
           "reference_coords_tsv": "references/Mouse/BoneMarrow/Ferchen-2025/Mm-MarrowAtlas-L4_reference_umap.tsv",
           "cluster_key": "Population",
-          "soupx_options": [
+          "ambient_options": [
             "default"
           ]
         },
@@ -84,7 +84,7 @@
           "reference_clusters_tsv": "references/Mouse/BoneMarrow/Colom-Diaz_2026/Mm-Marrow-Spleen-Atlas-L3_clusters.tsv",
           "reference_coords_tsv": "references/Mouse/BoneMarrow/Colom-Diaz_2026/Mm-Marrow-Spleen-Atlas-L3_umap.tsv",
           "cluster_key": "Population",
-          "soupx_options": [
+          "ambient_options": [
             "default"
           ]
         },
@@ -95,7 +95,7 @@
           "reference_clusters_tsv": "references/Mouse/Lung/CellRef/Mm-CellRef_clusters.tsv",
           "reference_coords_tsv": "references/Mouse/Lung/CellRef/Mm-CellRef_umap.tsv",
           "cluster_key": "celltype_level3",
-          "soupx_options": [
+          "ambient_options": [
             "default"
           ]
         },
@@ -106,7 +106,7 @@
           "reference_clusters_tsv": "references/Mouse/Lung/Adult-Lung-Airway/Mm-LungMAP-Adult-Lung-Airway_clusters.tsv",
           "reference_coords_tsv": "references/Mouse/Lung/Adult-Lung-Airway/Mm-LungMAP-Adult-Lung-Airway_umap.tsv",
           "cluster_key": "Population",
-          "soupx_options": [
+          "ambient_options": [
             "default"
           ]
         },
@@ -117,7 +117,7 @@
           "reference_clusters_tsv": "references/Mouse/Lung/Flu/Lung-Influenza_clusters.tsv",
           "reference_coords_tsv": "references/Mouse/Lung/Flu/Lung-Influenza_umap.tsv",
           "cluster_key": "Population",
-          "soupx_options": [
+          "ambient_options": [
             "default"
           ]
         }

@@ -4,7 +4,7 @@
   "label": "COPD_combined_with_umap_and_markers reference",
   "reference_clusters_tsv": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/flask/references/Human/Lung/Natri-2024/COPD_combined_with_umap_and_markers_reference_clusters.tsv",
   "reference_coords_tsv": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/flask/references/Human/Lung/Natri-2024/COPD_combined_with_umap_and_markers_reference_umap.tsv",
-  "soupx_options": [
+  "ambient_options": [
     "default"
   ],
   "states_tsv": "/path/to/cellHarmony_reference_states.tsv"

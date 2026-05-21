@@ -4,7 +4,7 @@
   "label": "updated reference",
   "reference_clusters_tsv": "/Users/saljh8/Dropbox/Collaborations/Grimes/r8/4-3-206/updated_reference_clusters.tsv",
   "reference_coords_tsv": "/Users/saljh8/Dropbox/Collaborations/Grimes/r8/4-3-206/updated_reference_umap.tsv",
-  "soupx_options": [
+  "ambient_options": [
     "default"
   ],
   "states_tsv": "/path/to/cellHarmony_reference_states.tsv"

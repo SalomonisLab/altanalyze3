@@ -63,7 +63,7 @@ class QCSettings(BaseModel):
 class JobConfigSettings(BaseModel):
     species: str
     reference: str
-    soupx_option: Optional[str] = None
+    ambient_option: Optional[str] = None
 
 
 class DifferentialSettings(BaseModel):
@@ -4139,6 +4139,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
     async def create_job(
         species: str = Form(...),
         reference: str = Form(...),
+        ambient_option: str | None = Form(None),
         soupx_option: str | None = Form(None),
         sample_names: List[str] = Form(...),
         files: List[UploadFile] = File(...),
@@ -4158,7 +4159,8 @@ def create_app(test_config: dict | None = None) -> FastAPI:
                 raise HTTPException(status_code=400, detail=f"Duplicate sample name '{clean_name}' detected.")
             normalized_samples.append(clean_name)
 
-        metadata = store.create_job(species, reference, soupx_option, files=[])
+        effective_ambient_option = ambient_option if ambient_option is not None else soupx_option
+        metadata = store.create_job(species, reference, effective_ambient_option, files=[])
         job_id = metadata["job_id"]
         _invalidate_expression_cache(app, job_id)
         _invalidate_differential_cache(app, job_id)
@@ -4209,11 +4211,11 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         pipeline_mod._ensure_reference_fields(reference_entry)
 
         meta = store.get_job(job_id)
-        requested_soupx = config.soupx_option if config.soupx_option is not None else meta.get("soupx_option")
+        requested_ambient = config.ambient_option if config.ambient_option is not None else meta.get("ambient_option", meta.get("soupx_option"))
         changed = (
             str(meta.get("species") or "") != config.species
             or str(meta.get("reference") or "") != config.reference
-            or str(meta.get("soupx_option") or "") != str(requested_soupx or "")
+            or str(meta.get("ambient_option", meta.get("soupx_option")) or "") != str(requested_ambient or "")
         )
         if changed:
             _invalidate_expression_cache(app, job_id)
@@ -4225,7 +4227,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
                 job_id,
                 species=config.species,
                 reference=config.reference,
-                soupx_option=requested_soupx,
+                ambient_option=requested_ambient,
                 status="uploaded",
                 progress=0,
                 message="Reference updated. Configure QC and rerun alignment.",
@@ -4243,7 +4245,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
                 "status": meta.get("status"),
                 "species": meta.get("species"),
                 "reference": meta.get("reference"),
-                "soupx_option": meta.get("soupx_option"),
+                "ambient_option": meta.get("ambient_option", meta.get("soupx_option")),
                 "changed": changed,
             }
         )

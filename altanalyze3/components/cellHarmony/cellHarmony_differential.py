@@ -30,7 +30,7 @@ import argparse
 import datetime
 import collections
 from collections import Counter
-from typing import List
+from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import anndata as ad
@@ -311,6 +311,169 @@ def load_and_merge_covariates(h5ad_path, covariate_tsv, library_col, sample_col,
 
     adata.obs = merged
     return adata
+
+
+def load_h5ad_for_perturb_screen(h5ad_path):
+    """Load AnnData without external covariate merging for perturbation screens."""
+    if not os.path.exists(h5ad_path):
+        print(f"[ERROR] Input h5ad not found: {h5ad_path}", file=sys.stderr)
+        sys.exit(1)
+    adata = ad.read_h5ad(h5ad_path)
+    if isinstance(adata.obs.index, pd.RangeIndex) or adata.obs.index.dtype != object:
+        adata.obs.index = adata.obs.index.map(str)
+    if adata.obs.shape[0] and not isinstance(adata.obs.index[0], str):
+        adata.obs.index = adata.obs.index.astype(str)
+    adata.obs_names = pd.Index(adata.obs.index, dtype=object)
+    return adata
+
+
+def _collapse_gene_identifiers(var_df):
+    if "gene_symbols" in var_df.columns:
+        return var_df["gene_symbols"].astype(str)
+    if "features" in var_df.columns:
+        return var_df["features"].astype(str)
+    return pd.Index(var_df.index.astype(str))
+
+
+def compute_bootstrapped_perturb_metacells(
+    adata,
+    population_col,
+    perturb_target_col,
+    min_cells_per_group,
+    cells_per_metacell=10,
+    metacell_replicates=50,
+    random_state=0,
+    outdir=None,
+):
+    """
+    Create bootstrapped perturbation metacells for each (cell type, perturb target) pair.
+
+    Each replicate samples `cells_per_metacell` cells with replacement and sums counts.
+    Eligible groups are determined by the original single-cell count per tuple, using
+    `min_cells_per_group` before metacell creation.
+    """
+    if population_col not in adata.obs.columns:
+        raise ValueError(f"'{population_col}' not found in adata.obs")
+    if perturb_target_col not in adata.obs.columns:
+        raise ValueError(f"'{perturb_target_col}' not found in adata.obs")
+
+    use_counts = "counts" in adata.layers
+    if use_counts:
+        print("[INFO] Using adata.layers['counts'] for perturbation metacell bootstrapping.")
+        matrix = adata.layers["counts"]
+    else:
+        print("[WARN] No counts layer found; using adata.X for perturbation metacell bootstrapping.")
+        matrix = adata.X
+    matrix = _ensure_numeric_matrix(matrix)
+
+    obs = adata.obs[[population_col, perturb_target_col]].astype(str).copy()
+    obs["tuple_key"] = obs[population_col] + "|" + obs[perturb_target_col]
+    tuple_counts = obs["tuple_key"].value_counts()
+    eligible_keys = tuple_counts[tuple_counts >= int(min_cells_per_group)].index.tolist()
+    print(
+        "[INFO] Eligible perturbation groups: {} (min_cells_per_group={})".format(
+            len(eligible_keys), int(min_cells_per_group)
+        )
+    )
+
+    if len(eligible_keys) == 0:
+        raise ValueError("No perturbation groups passed the original-cell threshold for bootstrapped metacell generation.")
+
+    rng = np.random.default_rng(int(random_state))
+    log_rows = []
+    linear_rows = []
+    metacell_obs = []
+    summary_rows = []
+
+    for tuple_key in eligible_keys:
+        pop_name, perturb_name = tuple_key.split("|", 1)
+        cell_idx = np.flatnonzero(obs["tuple_key"].values == tuple_key)
+        n_source_cells = int(cell_idx.size)
+        if n_source_cells < int(min_cells_per_group):
+            continue
+
+        summary_rows.append(
+            {
+                population_col: str(pop_name),
+                perturb_target_col: str(perturb_name),
+                "source_cell_count": n_source_cells,
+                "eligible": True,
+                "boot_cells_per_metacell": int(cells_per_metacell),
+                "boot_replicates": int(metacell_replicates),
+            }
+        )
+
+        for replicate_idx in range(int(metacell_replicates)):
+            chosen = rng.choice(cell_idx, size=int(cells_per_metacell), replace=True)
+            if sps.issparse(matrix):
+                summed = np.asarray(matrix[chosen].sum(axis=0)).ravel()
+            else:
+                summed = np.asarray(matrix[chosen]).sum(axis=0)
+
+            total = float(np.sum(summed))
+            if total <= 0.0:
+                cptt = np.zeros_like(summed, dtype=float)
+            else:
+                cptt = (summed / total) * 1.0e4
+            log_cptt = np.log2(cptt + 1.0)
+
+            metacell_id = f"{NetPerspective.safe_component(pop_name)}__{NetPerspective.safe_component(perturb_name)}__boot{replicate_idx + 1:03d}"
+            log_rows.append(log_cptt)
+            linear_rows.append(cptt)
+            metacell_obs.append(
+                {
+                    "GroupID": metacell_id,
+                    population_col: str(pop_name),
+                    "Population": str(pop_name),
+                    perturb_target_col: str(perturb_name),
+                    "Sample": f"{perturb_name}__boot{replicate_idx + 1:03d}",
+                    "bootstrap_replicate": int(replicate_idx + 1),
+                    "source_cell_count": n_source_cells,
+                    "boot_cells_per_metacell": int(cells_per_metacell),
+                }
+            )
+
+    if len(log_rows) == 0:
+        raise ValueError("No perturbation metacells were generated after filtering.")
+
+    log_matrix = np.vstack(log_rows)
+    linear_matrix = np.vstack(linear_rows)
+    pb_obs = pd.DataFrame(metacell_obs).set_index("GroupID")
+
+    var = adata.var.copy()
+    collapsed_ids = _collapse_gene_identifiers(var)
+    var = var.copy()
+    var.index = pd.Index(collapsed_ids.astype(str), dtype=object)
+
+    pb_adata = ad.AnnData(X=log_matrix, obs=pb_obs, var=var)
+    pb_adata.layers["counts"] = np.asarray(linear_matrix, dtype=float)
+    pb_adata.uns["pseudobulk_method"] = "pseudobulk_perturb_bootstrap"
+    pb_adata.uns["perturb_screen"] = {
+        "enabled": True,
+        "perturb_target_col": str(perturb_target_col),
+        "population_col": str(population_col),
+        "min_cells_per_group": int(min_cells_per_group),
+        "cells_per_metacell": int(cells_per_metacell),
+        "metacell_replicates": int(metacell_replicates),
+        "random_state": int(random_state),
+    }
+    pb_adata.uns["log1p"] = {"base": 2.0}
+    lineage_order = _extract_lineage_order(adata, population_col)
+    if lineage_order is not None:
+        pb_adata.uns["lineage_order"] = lineage_order
+
+    summary_df = pd.DataFrame(summary_rows)
+    if outdir:
+        os.makedirs(outdir, exist_ok=True)
+        summary_path = os.path.join(outdir, f"perturb_bootstrap_summary_by_{population_col}_and_{perturb_target_col}.tsv")
+        h5ad_path = os.path.join(outdir, f"perturb_bootstrap_metacells_by_{population_col}_and_{perturb_target_col}.h5ad")
+        summary_df.to_csv(summary_path, sep="\t", index=False)
+        pb_adata.write(h5ad_path)
+        print(f"[INFO] Wrote perturbation metacell summary: {summary_path}")
+        print(f"[INFO] Wrote perturbation metacell h5ad: {h5ad_path}")
+        return pb_adata, summary_df, h5ad_path
+
+    return pb_adata, summary_df, None
 
 # --------- Step 3: pseudobulk per (population × sample) (optional) -------- #
 def compute_pseudobulk_per_population(adata, population_col, sample_col, covariate_col, min_cells, outdir):
@@ -2820,8 +2983,8 @@ def _assign_integrated_groups(per_pop, population_order, alpha, fc_thresh, use_r
         if all_pos or all_neg:
             rows.append([gene, "global", key_p, key_fc, "overall"])
         else:
-            pattern_label = _pattern_to_label(pattern, population_order)
-            rows.append([gene, "co-regulated", key_p, key_fc, pattern_label])
+            first_pop, first_p, first_fc = sig_entries[0]
+            rows.append([gene, "local", first_p, first_fc, first_pop])
 
     return pd.DataFrame(rows, columns=["gene", "group", "key_p", "key_log2fc", "population_or_pattern"])
 
@@ -2957,6 +3120,573 @@ def _build_multi_comparison_de_store(comp_results, population_col, alpha, fc_thr
     }
     return de_store
 
+
+def _unique_labels(values):
+    seen = {}
+    resolved = []
+    for raw in values:
+        label = str(raw)
+        count = seen.get(label, 0)
+        if count == 0:
+            resolved.append(label)
+        else:
+            resolved.append(f"{label}__{count + 1}")
+        seen[label] = count + 1
+    return resolved
+
+
+def _build_perturb_celltype_de_store(
+    comp_results,
+    cell_type,
+    perturb_target_col,
+    alpha,
+    fc_thresh,
+    use_rawp,
+):
+    per_pop = {}
+    detailed_tables = []
+    summary_tables = []
+    fold_blocks = []
+    target_labels = []
+    control_labels = []
+
+    raw_labels = [str(comp["case_label"]) for comp in comp_results]
+    resolved_labels = _unique_labels(raw_labels)
+
+    # de_store keys/columns are HDF5-sanitized ("/" -> "|") but row values in
+    # summary_per_population are not. Try the raw label first, fall back to the
+    # sanitized form so labels like "AT1/AT2" still resolve.
+    raw_cell = str(cell_type)
+    sanitized_cell = raw_cell.replace("/", "|")
+    candidate_keys = [raw_cell] if raw_cell == sanitized_cell else [raw_cell, sanitized_cell]
+
+    def _lookup_pop_df(mapping):
+        if not isinstance(mapping, dict):
+            return None
+        for key in candidate_keys:
+            df = mapping.get(key)
+            if df is not None:
+                return df
+        return None
+
+    def _row_match(series):
+        s = series.astype(str)
+        mask = s == raw_cell
+        if sanitized_cell != raw_cell:
+            mask = mask | (s == sanitized_cell)
+        return mask
+
+    for comp, target_label in zip(comp_results, resolved_labels):
+        store = comp["de_store"]
+        per_population_deg = store.get("per_population_deg", {})
+        source_df = _lookup_pop_df(per_population_deg)
+        if source_df is None or source_df.empty:
+            continue
+
+        per_pop[target_label] = source_df.copy()
+        target_labels.append(target_label)
+        control_labels.append(str(comp["control_label"]))
+
+        det = store.get("detailed_deg")
+        if det is not None and not det.empty:
+            det2 = det.loc[_row_match(det["population"])].copy()
+            if not det2.empty:
+                det2["population"] = target_label
+                det2["comparison_tag"] = comp["tag"]
+                det2["perturb_target"] = target_label
+                detailed_tables.append(det2)
+
+        summ = store.get("summary_per_population")
+        if summ is not None and not summ.empty:
+            summ2 = summ.loc[_row_match(summ["population"])].copy()
+            if not summ2.empty:
+                summ2["population"] = target_label
+                summ2["comparison_tag"] = comp["tag"]
+                summary_tables.append(summ2)
+
+        fold = store.get("fold_matrix")
+        if isinstance(fold, pd.DataFrame):
+            fold_key = next((k for k in candidate_keys if k in fold.columns), None)
+            if fold_key is not None:
+                fold_blocks.append(fold.loc[:, [fold_key]].rename(columns={fold_key: target_label}))
+
+    if not per_pop:
+        return None
+
+    if fold_blocks:
+        fold_matrix = pd.concat(fold_blocks, axis=1, join="outer")
+    else:
+        fold_matrix = pd.DataFrame({label: df["log2fc"] for label, df in per_pop.items() if "log2fc" in df.columns})
+    if not fold_matrix.empty:
+        fold_matrix.index = fold_matrix.index.astype(str)
+        fold_matrix = fold_matrix.reindex(columns=target_labels)
+
+    if detailed_tables:
+        detailed = pd.concat(detailed_tables, axis=0, ignore_index=True)
+    else:
+        detailed = pd.DataFrame(
+            columns=[
+                "gene",
+                "population",
+                "log2fc",
+                "fdr",
+                "pval",
+                "case_label",
+                "control_label",
+                "n_case",
+                "n_control",
+                "case_mean_expr",
+                "control_mean_expr",
+            ]
+        )
+
+    if summary_tables:
+        summary = pd.concat(summary_tables, axis=0, ignore_index=True)
+    else:
+        summary = pd.DataFrame(columns=["population", "n_case", "n_control", "num_DEG", "tested_genes"])
+
+    include_genes = set()
+    if not detailed.empty and "gene" in detailed.columns:
+        include_genes = set(detailed["gene"].astype(str))
+    else:
+        for df in per_pop.values():
+            include_genes.update(df.index.astype(str))
+
+    assigned = _assign_integrated_groups(per_pop, target_labels, alpha, fc_thresh, use_rawp, include_genes)
+    unique_controls = _unique_preserve_order(control_labels)
+
+    return {
+        "summary_per_population": summary,
+        "detailed_deg": detailed,
+        "assigned_groups": assigned,
+        "population_order": target_labels,
+        "fold_matrix": fold_matrix,
+        "per_population_deg": per_pop,
+        "alpha": float(alpha),
+        "fc_thresh": float(fc_thresh),
+        "use_rawp": bool(use_rawp),
+        "case_label": "Perturbation",
+        "control_label": unique_controls[0] if len(unique_controls) == 1 else ",".join(unique_controls),
+        "comparison_label": f"{cell_type} perturbation screen",
+        "lineage_order": target_labels,
+        "perturb_screen": True,
+        "perturb_target_col": str(perturb_target_col),
+        "cell_type": str(cell_type),
+    }
+
+
+def build_perturb_screen_heatmaps(
+    comp_results,
+    outdir,
+    perturb_target_col,
+    alpha,
+    fc_thresh,
+    use_rawp,
+    goelite_species=None,
+    background_genes=None,
+    obo_path=None,
+    gaf_path=None,
+    cache_dir=None,
+    download_dir=None,
+    min_term_size=5,
+    max_term_size=2000,
+):
+    os.makedirs(outdir, exist_ok=True)
+
+    cell_types = []
+    for comp in comp_results:
+        summary = comp["de_store"].get("summary_per_population")
+        if summary is None or summary.empty:
+            continue
+        cell_types.extend(summary["population"].astype(str).tolist())
+    cell_types = _unique_preserve_order(cell_types)
+
+    outputs = []
+    for cell_type in cell_types:
+        cell_store = _build_perturb_celltype_de_store(
+            comp_results=comp_results,
+            cell_type=cell_type,
+            perturb_target_col=perturb_target_col,
+            alpha=alpha,
+            fc_thresh=fc_thresh,
+            use_rawp=use_rawp,
+        )
+        if cell_store is None:
+            continue
+
+        safe_cell = NetPerspective.safe_component(cell_type)
+        heat_png = f"heatmap_{safe_cell}_by_{NetPerspective.safe_component(perturb_target_col)}.pdf"
+        heat_tsv = f"heatmap_{safe_cell}_by_{NetPerspective.safe_component(perturb_target_col)}.tsv"
+
+        goelite_payload = None
+        if goelite_species:
+            goelite_dir = os.path.join(outdir, "..", "GeneSetEnrichment", safe_cell)
+            os.makedirs(goelite_dir, exist_ok=True)
+            goelite_payload = run_goelite_for_clusters(
+                de_store=cell_store,
+                background_genes=background_genes,
+                outdir=goelite_dir,
+                comparison_tag=f"{safe_cell}_perturb",
+                species=goelite_species,
+                obo_path=obo_path,
+                gaf_path=gaf_path,
+                cache_dir=cache_dir,
+                download_dir=download_dir,
+                min_term_size=min_term_size,
+                max_term_size=max_term_size,
+            )
+
+        build_fixed_order_heatmap(
+            cell_store,
+            outdir,
+            perturb_target_col,
+            float(fc_thresh),
+            heatmap_png=heat_png,
+            heatmap_tsv=heat_tsv,
+            goelite_payload=goelite_payload,
+            show_go_terms=bool(goelite_payload),
+        )
+
+        outputs.append({"cell_type": str(cell_type), "heatmap_pdf": os.path.join(outdir, heat_png), "heatmap_tsv": os.path.join(outdir, heat_tsv)})
+
+    return outputs
+
+
+def build_combined_perturb_heatmap(
+    comp_results,
+    outdir,
+    perturb_target_col,
+    alpha,
+    fc_thresh,
+    use_rawp,
+    lineage_order=None,
+    heatmap_basename=None,
+    goelite_species=None,
+    background_genes=None,
+    obo_path=None,
+    gaf_path=None,
+    cache_dir=None,
+    download_dir=None,
+    min_term_size=5,
+    max_term_size=2000,
+):
+    """Build a single heatmap aggregating all (target × cell-type) DE columns.
+
+    Columns are ordered first by target (comp_results input order) then by
+    cell type (lineage_order if provided, otherwise insertion order).
+    Row grouping reuses _assign_integrated_groups on the combined per_pop dict.
+    """
+    if not comp_results:
+        return None
+
+    os.makedirs(outdir, exist_ok=True)
+
+    raw_targets = [str(comp["case_label"]) for comp in comp_results]
+    target_labels = _unique_labels(raw_targets)
+
+    per_pop = {}
+    fold_blocks = []
+    detailed_tables = []
+    summary_tables = []
+    column_order = []
+    cell_type_order_seen = []
+    control_labels = []
+
+    if lineage_order:
+        lineage_clean = [str(p).replace("/", "|") for p in lineage_order]
+    else:
+        lineage_clean = []
+
+    for comp, target_label in zip(comp_results, target_labels):
+        store = comp["de_store"]
+        control_labels.append(str(comp["control_label"]))
+
+        per_population_deg = store.get("per_population_deg", {}) or {}
+        cell_types_in_store = list(per_population_deg.keys())
+        if lineage_clean:
+            ordered = [p for p in lineage_clean if p in cell_types_in_store]
+            ordered.extend([p for p in cell_types_in_store if p not in ordered])
+        else:
+            ordered = cell_types_in_store
+
+        fold = store.get("fold_matrix")
+        det = store.get("detailed_deg")
+        summ = store.get("summary_per_population")
+
+        for cell_type in ordered:
+            source_df = per_population_deg.get(cell_type)
+            if source_df is None or source_df.empty:
+                continue
+
+            combined_key = f"{target_label}__{cell_type}"
+            per_pop[combined_key] = source_df.copy()
+            column_order.append(combined_key)
+            if cell_type not in cell_type_order_seen:
+                cell_type_order_seen.append(cell_type)
+
+            if isinstance(fold, pd.DataFrame) and cell_type in fold.columns:
+                block = fold.loc[:, [cell_type]].rename(columns={cell_type: combined_key})
+                fold_blocks.append(block)
+
+            if det is not None and not det.empty:
+                pop_series = det["population"].astype(str)
+                mask = (pop_series == cell_type) | (pop_series == cell_type.replace("|", "/"))
+                det2 = det.loc[mask].copy()
+                if not det2.empty:
+                    det2["population"] = combined_key
+                    det2["comparison_tag"] = comp["tag"]
+                    det2["perturb_target"] = target_label
+                    detailed_tables.append(det2)
+
+            if summ is not None and not summ.empty:
+                pop_series = summ["population"].astype(str)
+                mask = (pop_series == cell_type) | (pop_series == cell_type.replace("|", "/"))
+                summ2 = summ.loc[mask].copy()
+                if not summ2.empty:
+                    summ2["population"] = combined_key
+                    summ2["comparison_tag"] = comp["tag"]
+                    summary_tables.append(summ2)
+
+    if not per_pop:
+        print("[WARN] Combined perturb heatmap: no per-population DE data found; skipping.")
+        return None
+
+    if fold_blocks:
+        fold_matrix = pd.concat(fold_blocks, axis=1, join="outer")
+    else:
+        fold_matrix = pd.DataFrame(
+            {key: df["log2fc"] for key, df in per_pop.items() if "log2fc" in df.columns}
+        )
+    if not fold_matrix.empty:
+        fold_matrix.index = fold_matrix.index.astype(str)
+        fold_matrix = fold_matrix.reindex(columns=column_order)
+
+    if detailed_tables:
+        detailed = pd.concat(detailed_tables, axis=0, ignore_index=True)
+    else:
+        detailed = pd.DataFrame(
+            columns=[
+                "gene", "population", "log2fc", "fdr", "pval",
+                "case_label", "control_label", "n_case", "n_control",
+                "case_mean_expr", "control_mean_expr",
+            ]
+        )
+
+    if summary_tables:
+        summary = pd.concat(summary_tables, axis=0, ignore_index=True)
+    else:
+        summary = pd.DataFrame(columns=["population", "n_case", "n_control", "num_DEG", "tested_genes"])
+
+    include_genes = set()
+    if not detailed.empty and "gene" in detailed.columns:
+        include_genes = set(detailed["gene"].astype(str))
+    if not include_genes:
+        for df in per_pop.values():
+            include_genes.update(df.index.astype(str))
+
+    assigned = _assign_integrated_groups(per_pop, column_order, alpha, fc_thresh, use_rawp, include_genes)
+    unique_controls = _unique_preserve_order(control_labels)
+
+    combined_store = {
+        "summary_per_population": summary,
+        "detailed_deg": detailed,
+        "assigned_groups": assigned,
+        "population_order": column_order,
+        "fold_matrix": fold_matrix,
+        "per_population_deg": per_pop,
+        "alpha": float(alpha),
+        "fc_thresh": float(fc_thresh),
+        "use_rawp": bool(use_rawp),
+        "case_label": "Perturbation",
+        "control_label": unique_controls[0] if len(unique_controls) == 1 else ",".join(unique_controls),
+        "comparison_label": "All perturbations × cell types",
+        "lineage_order": column_order,
+        "perturb_screen": True,
+        "perturb_target_col": str(perturb_target_col),
+    }
+
+    base = heatmap_basename or f"heatmap_combined_by_{NetPerspective.safe_component(perturb_target_col)}_and_celltype"
+    heat_png = f"{base}.pdf"
+    heat_tsv = f"{base}.tsv"
+
+    goelite_payload = None
+    if goelite_species:
+        goelite_dir = os.path.join(outdir, "..", "GeneSetEnrichment", "combined")
+        os.makedirs(goelite_dir, exist_ok=True)
+        goelite_payload = run_goelite_for_clusters(
+            de_store=combined_store,
+            background_genes=background_genes,
+            outdir=goelite_dir,
+            comparison_tag="combined_perturb",
+            species=goelite_species,
+            obo_path=obo_path,
+            gaf_path=gaf_path,
+            cache_dir=cache_dir,
+            download_dir=download_dir,
+            min_term_size=min_term_size,
+            max_term_size=max_term_size,
+        )
+
+    build_fixed_order_heatmap(
+        combined_store,
+        outdir,
+        f"{perturb_target_col}__celltype",
+        float(fc_thresh),
+        heatmap_png=heat_png,
+        heatmap_tsv=heat_tsv,
+        goelite_payload=goelite_payload,
+        show_go_terms=bool(goelite_payload),
+    )
+
+    return {
+        "heatmap_pdf": os.path.join(outdir, heat_png),
+        "heatmap_tsv": os.path.join(outdir, heat_tsv),
+        "n_columns": len(column_order),
+        "n_rows": len(assigned),
+    }
+
+
+def _write_perturb_target_frequency_plots(
+    source_adata,
+    population_col,
+    perturb_target_col,
+    targets,
+    outdir,
+    pop_order=None,
+    comparison_label="Perturb screen",
+    comparison_prefix="Perturb-Comparison",
+):
+    """Per cell state, show what % of cells come from each perturbation target.
+
+    Each cell state's bars sum to 100%. Restricted to ``targets`` (the union
+    of numerator + denominator perturbations across all comparisons).
+    """
+    if source_adata is None:
+        print("[WARN] Skipping perturb-target frequency plots: no source adata.")
+        return {}
+    if not targets:
+        print("[WARN] Skipping perturb-target frequency plots: no targets provided.")
+        return {}
+    if perturb_target_col not in source_adata.obs.columns:
+        print(f"[WARN] '{perturb_target_col}' not in obs; skipping perturb-target frequency plots.")
+        return {}
+    if population_col not in source_adata.obs.columns:
+        print(f"[WARN] '{population_col}' not in obs; skipping perturb-target frequency plots.")
+        return {}
+
+    target_list = [str(t) for t in targets]
+    obs = source_adata.obs.loc[
+        source_adata.obs[perturb_target_col].astype(str).isin(target_list),
+        [population_col, perturb_target_col],
+    ].dropna()
+
+    if obs.empty:
+        print("[WARN] No cells match the requested targets for frequency plot.")
+        return {}
+
+    obs[population_col] = obs[population_col].astype(str)
+    obs[perturb_target_col] = obs[perturb_target_col].astype(str)
+
+    unique_pops = list(obs[population_col].unique())
+    if pop_order:
+        freq_order = [p for p in pop_order if p in unique_pops]
+        freq_order.extend([p for p in unique_pops if p not in freq_order])
+    else:
+        freq_order = sorted(unique_pops)
+
+    counts = (
+        obs.groupby([population_col, perturb_target_col])
+        .size()
+        .unstack(fill_value=0)
+    )
+    for t in target_list:
+        if t not in counts.columns:
+            counts[t] = 0
+    counts = counts.reindex(freq_order).fillna(0)
+    counts = counts.loc[counts.sum(axis=1) > 0]
+    if counts.empty:
+        print("[WARN] All populations have zero cells for the requested targets.")
+        return {}
+    counts = counts.loc[:, [t for t in target_list if t in counts.columns]]
+
+    row_totals = counts.sum(axis=1).replace(0, np.nan)
+    pct_by_pop = counts.div(row_totals, axis=0).fillna(0) * 100.0
+
+    os.makedirs(outdir, exist_ok=True)
+    comp_component = NetPerspective.safe_component(comparison_prefix)
+    pop_component = NetPerspective.safe_component(population_col)
+    target_component = NetPerspective.safe_component(perturb_target_col)
+
+    stacked_pdf = os.path.join(outdir, f"{comp_component}_target_stacked_{pop_component}.pdf")
+    stacked_png = os.path.join(outdir, f"{comp_component}_target_stacked_{pop_component}.png")
+    freq_tsv = os.path.join(outdir, f"{comp_component}_target_frequencies_{pop_component}.tsv")
+
+    cmap = plt.get_cmap("tab20")
+    colors = [cmap(i % cmap.N) for i in range(len(pct_by_pop.columns))]
+
+    fig, ax = plt.subplots(figsize=(8, max(2.0, 0.4 * len(pct_by_pop) + 2)))
+    pct_by_pop.plot(
+        kind="barh",
+        stacked=True,
+        ax=ax,
+        color=colors,
+        width=0.8,
+        edgecolor="black",
+        linewidth=0.2,
+    )
+    ax.set_xlabel(f"Percent of cells per {population_col}")
+    ax.set_ylabel(population_col)
+    ax.set_title(f"{perturb_target_col} composition per {population_col}: {comparison_label}", fontsize=12)
+
+    row_total_counts = counts.sum(axis=1).reindex(pct_by_pop.index)
+    label_x = 100.0 + max(1.5, ax.get_xlim()[1] * 0.015)
+    for y_idx, pop_name in enumerate(pct_by_pop.index):
+        total = int(row_total_counts.get(pop_name, 0))
+        ax.text(
+            label_x,
+            y_idx,
+            f"n={total}",
+            va="center",
+            ha="left",
+            fontsize=8,
+            color="black",
+            clip_on=False,
+        )
+    ax.set_xlim(0, label_x + max(8.0, label_x * 0.12))
+
+    ax.legend(
+        title=perturb_target_col,
+        bbox_to_anchor=(1.18, 1),
+        loc="upper left",
+        borderaxespad=0.0,
+        frameon=False,
+        fontsize=8,
+        title_fontsize=9,
+    )
+    plt.tight_layout(rect=[0, 0, 0.80, 1])
+    fig.savefig(stacked_pdf, bbox_inches="tight")
+    fig.savefig(stacked_png, bbox_inches="tight", dpi=200)
+    plt.close(fig)
+    print(f"[INFO] Wrote perturb-target frequency chart: {stacked_pdf}")
+
+    counts_long = counts.reset_index().melt(
+        id_vars=population_col, var_name=perturb_target_col, value_name="cell_count"
+    )
+    pct_long = pct_by_pop.reset_index().melt(
+        id_vars=population_col, var_name=perturb_target_col, value_name="percent_of_population"
+    )
+    freq_table = counts_long.merge(pct_long, on=[population_col, perturb_target_col], how="left")
+    freq_table.sort_values(by=[population_col, perturb_target_col], inplace=True)
+    freq_table.to_csv(freq_tsv, sep="\t", index=False, float_format="%.4f")
+    print(f"[INFO] Wrote perturb-target frequency table: {freq_tsv}")
+
+    return {
+        "stacked_pdf": stacked_pdf,
+        "freq_tsv": freq_tsv,
+        "n_targets": len(counts.columns),
+        "n_populations": len(counts.index),
+    }
+
 # --------------------------------- CLI ------------------------------------ #
 
 def parse_comparisons_arg(comp_str):
@@ -2982,7 +3712,7 @@ def main():
     ap.add_argument("--h5ad", required=True, help="Input h5ad with aligned annotations")
     ap.add_argument(
         "--covariates",
-        required=True,
+        required=False,
         help="TSV containing either [Sample, Condition] or [Library, Sample, Condition]",
     )
     ap.add_argument(
@@ -2995,12 +3725,17 @@ def main():
     ap.add_argument("--population_col", required=True, help="obs column with projected cell populations (matches reference ref_name)")
     ap.add_argument("--comparisons", required=True, help="Semicolon-separated CASE|CONTROL pairs, e.g. 'breast-cancer|wild-type;A|B'")
     ap.add_argument("--method", choices=["wilcoxon", "t-test", "t-test_overestim_var", "logreg"], default="wilcoxon",
-                    help="Scanpy rank_genes_groups method (default: wilcoxon)")
+                    help="Scanpy rank_genes_groups method for single-cell mode. Pseudobulk/perturb-screen mode uses the moderated t-test branch.")
     ap.add_argument("--alpha", type=float, default=0.05, help="FDR threshold (default: 0.05)")
     ap.add_argument("--fc", type=float, default=1.2, help="Fold-change threshold (absolute, default: 1.2)")
     ap.add_argument("--min_cells_per_group", type=int, default=20, help="Minimum cells per group per population (default: 20; auto-relaxed to 4 if total<200)")
     ap.add_argument("--make_pseudobulk", action="store_true", help="If set, compute pseudobulks per (population×sample)")
     ap.add_argument("--pseudobulk_min_cells", type=int, default=10, help="Minimum cells per pseudobulk group (default: 10)")
+    ap.add_argument("--perturb_screen", action="store_true", help="Run perturbation-screen mode with bootstrapped metacells per (cell type × perturb target).")
+    ap.add_argument("--perturb_target", default=None, help="obs column specifying the perturbation target / guide / feature for perturb-screen mode.")
+    ap.add_argument("--perturb_cells_per_metacell", type=int, default=10, help="Number of cells sampled with replacement for each perturbation metacell (default: 10)")
+    ap.add_argument("--perturb_metacell_replicates", type=int, default=50, help="Number of bootstrapped metacells per (cell type × perturb target) tuple (default: 50)")
+    ap.add_argument("--perturb_random_seed", type=int, default=0, help="Random seed for perturbation metacell bootstrapping (default: 0)")
     ap.add_argument("--use_rawp", action="store_true", help="Use raw p-values instead of FDR for significance filtering")
     ap.add_argument("--goelite_species", default=None, help="Run GO-Elite with species (e.g. human or mouse)")
     ap.add_argument(
@@ -3018,6 +3753,18 @@ def main():
     args = ap.parse_args()
     if args.grn_species is None and args.goelite_species is not None:
         args.grn_species = args.goelite_species
+
+    if args.perturb_screen and not args.perturb_target:
+        print("[ERROR] --perturb_target is required when --perturb_screen is set.", file=sys.stderr)
+        sys.exit(1)
+    if not args.perturb_screen and not args.covariates:
+        print("[ERROR] --covariates is required unless --perturb_screen is set.", file=sys.stderr)
+        sys.exit(1)
+    if args.perturb_screen and args.make_pseudobulk:
+        print("[INFO] Ignoring --make_pseudobulk because perturb-screen mode creates perturbation metacells automatically.")
+    if args.perturb_screen and not args.skip_grn:
+        print("[INFO] Disabling GRN export for perturb-screen mode.")
+        args.skip_grn = True
 
     comps = parse_comparisons_arg(args.comparisons)
     if len(comps) == 0:
@@ -3112,11 +3859,40 @@ def main():
                 args.skip_grn = True
 
         # Step 1: load + merge covariates
-        print("[INFO] Loading h5ad and merging covariates...")
-        adata = load_and_merge_covariates(args.h5ad, args.covariates, args.library_col, args.sample_col, args.covariate_col)
+        if args.perturb_screen:
+            print("[INFO] Loading perturbation AnnData without external covariate merging...")
+            adata = load_h5ad_for_perturb_screen(args.h5ad)
+            if args.population_col not in adata.obs.columns:
+                raise ValueError(f"'{args.population_col}' not found in adata.obs")
+            if args.perturb_target not in adata.obs.columns:
+                raise ValueError(f"'{args.perturb_target}' not found in adata.obs")
+            print(
+                "[INFO] Building bootstrapped perturbation metacells per ({} × {}).".format(
+                    args.population_col, args.perturb_target
+                )
+            )
+            source_adata = adata
+            adata, _, _ = compute_bootstrapped_perturb_metacells(
+                adata,
+                population_col=args.population_col,
+                perturb_target_col=args.perturb_target,
+                min_cells_per_group=int(args.min_cells_per_group),
+                cells_per_metacell=int(args.perturb_cells_per_metacell),
+                metacell_replicates=int(args.perturb_metacell_replicates),
+                random_state=int(args.perturb_random_seed),
+                outdir=pseudobulk_dir,
+            )
+            de_covariate_col = args.perturb_target
+            per_comparison_min_cells = 2
+        else:
+            print("[INFO] Loading h5ad and merging covariates...")
+            adata = load_and_merge_covariates(args.h5ad, args.covariates, args.library_col, args.sample_col, args.covariate_col)
+            source_adata = None
+            de_covariate_col = args.covariate_col
+            per_comparison_min_cells = int(args.min_cells_per_group)
 
-        # Optional Step 3: pseudobulk
-        if args.make_pseudobulk:
+        # Optional Step 3: standard pseudobulk
+        if (not args.perturb_screen) and args.make_pseudobulk:
             print("[INFO] Computing pseudobulks per ({} × {}).".format(args.population_col, args.sample_col))
             _, pb_h5ad = compute_pseudobulk_per_population(
                 adata,
@@ -3179,13 +3955,13 @@ def main():
             de_store = run_de_for_comparisons(
                 adata=adata,
                 population_col=args.population_col,
-                covariate_col=args.covariate_col,
+                covariate_col=de_covariate_col,
                 case_label=case_label,
                 control_label=control_label,
                 method=args.method,
                 alpha=float(args.alpha),
                 fc_thresh=float(args.fc),
-                min_cells_per_group=int(args.min_cells_per_group),
+                min_cells_per_group=int(per_comparison_min_cells),
                 use_rawp=args.use_rawp,
                 progress_callback=progress_callback
             )
@@ -3208,21 +3984,22 @@ def main():
                     print("[WARN] 'lineage_order' not found in h5ad; using alphabetical order.")
 
             # ----------------------------- Cell frequency plots ----------------------------- #
-            case_name = str(case_label)
-            control_name = str(control_label)
-            _write_cell_frequency_plots(
-                adata=adata,
-                population_col=args.population_col,
-                covariate_col=args.covariate_col,
-                conditions=[control_name, case_name],
-                outdir=cellfreq_dir,
-                comparison_label=f"{case_name} vs {control_name}",
-                comparison_prefix=tag,
-                pop_order=pop_order,
-            )
+            if not args.perturb_screen:
+                case_name = str(case_label)
+                control_name = str(control_label)
+                _write_cell_frequency_plots(
+                    adata=adata,
+                    population_col=args.population_col,
+                    covariate_col=de_covariate_col,
+                    conditions=[control_name, case_name],
+                    outdir=cellfreq_dir,
+                    comparison_label=f"{case_name} vs {control_name}",
+                    comparison_prefix=tag,
+                    pop_order=pop_order,
+                )
 
             goelite_payload = None
-            if args.goelite_species:
+            if args.goelite_species and not args.perturb_screen:
                 goelite_subdir = goelite_dir
                 print(f"[INFO] GO-Elite: starting for {tag} (output: {goelite_subdir})")
                 goelite_payload = run_goelite_for_clusters(
@@ -3414,7 +4191,70 @@ def main():
                 }
             )
 
-        if len(comp_results) > 1:
+        if args.perturb_screen:
+            perturb_root = os.path.join(base_outdir, "Perturb-Comparison")
+            perturb_heatmap_dir = os.path.join(perturb_root, "heatmaps")
+            os.makedirs(perturb_root, exist_ok=True)
+            os.makedirs(perturb_heatmap_dir, exist_ok=True)
+            perturb_outputs = build_perturb_screen_heatmaps(
+                comp_results=comp_results,
+                outdir=perturb_heatmap_dir,
+                perturb_target_col=args.perturb_target,
+                alpha=float(args.alpha),
+                fc_thresh=float(args.fc),
+                use_rawp=args.use_rawp,
+                goelite_species=args.goelite_species,
+                background_genes=background_genes,
+                obo_path=args.goelite_obo,
+                gaf_path=args.goelite_gaf,
+                cache_dir=args.goelite_cache_dir,
+                download_dir=goelite_download_dir,
+                min_term_size=args.goelite_min_term_size,
+                max_term_size=args.goelite_max_term_size,
+            )
+            print(f"[INFO] Wrote {len(perturb_outputs)} perturbation heatmap set(s) to {perturb_heatmap_dir}")
+
+            combined_out = build_combined_perturb_heatmap(
+                comp_results=comp_results,
+                outdir=perturb_heatmap_dir,
+                perturb_target_col=args.perturb_target,
+                alpha=float(args.alpha),
+                fc_thresh=float(args.fc),
+                use_rawp=args.use_rawp,
+                lineage_order=base_pop_order,
+                goelite_species=args.goelite_species,
+                background_genes=background_genes,
+                obo_path=args.goelite_obo,
+                gaf_path=args.goelite_gaf,
+                cache_dir=args.goelite_cache_dir,
+                download_dir=goelite_download_dir,
+                min_term_size=args.goelite_min_term_size,
+                max_term_size=args.goelite_max_term_size,
+            )
+            if combined_out:
+                print(
+                    f"[INFO] Wrote combined perturbation heatmap "
+                    f"({combined_out['n_rows']} genes × {combined_out['n_columns']} target×celltype columns): "
+                    f"{combined_out['heatmap_pdf']}"
+                )
+
+            perturb_cellfreq_dir = os.path.join(perturb_root, "cell-frequency")
+            os.makedirs(perturb_cellfreq_dir, exist_ok=True)
+            comparison_targets = _unique_preserve_order(
+                [str(case_label) for case_label, _ in comps]
+                + [str(control_label) for _, control_label in comps]
+            )
+            _write_perturb_target_frequency_plots(
+                source_adata=source_adata,
+                population_col=args.population_col,
+                perturb_target_col=args.perturb_target,
+                targets=comparison_targets,
+                outdir=perturb_cellfreq_dir,
+                pop_order=base_pop_order,
+                comparison_label=f"{args.perturb_target} composition",
+                comparison_prefix="Perturb-Comparison",
+            )
+        elif len(comp_results) > 1:
             multi_root = os.path.join(base_outdir, "Multi-Comparison")
             multi_heatmap_dir = os.path.join(multi_root, "heatmaps")
             multi_deg_dir = os.path.join(multi_root, "DEGs")
@@ -3435,7 +4275,7 @@ def main():
             _write_cell_frequency_plots(
                 adata=adata,
                 population_col=args.population_col,
-                covariate_col=args.covariate_col,
+                covariate_col=de_covariate_col,
                 conditions=all_conditions,
                 outdir=multi_cellfreq_dir,
                 comparison_label="Multi-Comparison",

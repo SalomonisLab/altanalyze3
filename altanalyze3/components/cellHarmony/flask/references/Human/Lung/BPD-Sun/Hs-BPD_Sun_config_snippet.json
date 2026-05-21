@@ -4,7 +4,7 @@
   "label": "BPD-adata_combined_annotated_czi reference",
   "reference_clusters_tsv": "/Users/saljh8/Dropbox/LungMAP/LungMAP.net/Datasets/ShinyCell/BPD/BPD/BPD-adata_combined_annotated_czi_reference_clusters.tsv",
   "reference_coords_tsv": "/Users/saljh8/Dropbox/LungMAP/LungMAP.net/Datasets/ShinyCell/BPD/BPD/BPD-adata_combined_annotated_czi_reference_umap.tsv",
-  "soupx_options": [
+  "ambient_options": [
     "default"
   ],
   "states_tsv": "/path/to/cellHarmony_reference_states.tsv"

@@ -95,7 +95,8 @@ def safe_component(value: str, fallback: str = "value") -> str:
 
     if value is None:
         return fallback
-    cleaned = re.sub(r"[^A-Za-z0-9._\-]", "_", str(value)).strip("._-")
+    text = str(value).replace("/", "-")
+    cleaned = re.sub(r"[^A-Za-z0-9._\-]", "_", text).strip("._-")
     return cleaned or fallback
 
 

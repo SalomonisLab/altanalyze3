@@ -97,7 +97,7 @@ class JobStore:
         self,
         species: str,
         reference: str,
-        soupx_option: Optional[str],
+        ambient_option: Optional[str],
         files: List[Dict[str, str]],
     ) -> Dict:
         with self._lock:
@@ -112,7 +112,7 @@ class JobStore:
                 "job_id": job_id,
                 "species": species,
                 "reference": reference,
-                "soupx_option": soupx_option,
+                "ambient_option": ambient_option,
                 "files": files,
                 "status": "uploaded",
                 "message": "Files uploaded, awaiting QC.",

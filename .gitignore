@@ -68,8 +68,6 @@ altanalyze3/components/*/artifacts/
 # rna2adt: trained bundle bytes (~190 KB to ~55 MB each, many variants) are
 # regenerable from training scripts. Track adt_rna_map.py / build_whitelist.py
 # / configs/*.tsv; ignore the .pkl bundles and per-ADT metrics TSVs.
-altanalyze3/components/rna2adt/*.pkl
-altanalyze3/components/rna2adt/mouse/*.pkl
 altanalyze3/components/rna2adt/mouse/rna2adt_mm_per_adt_metrics.tsv
 
 # rna2lipid: same pattern (large pickled bundles regenerable from training).

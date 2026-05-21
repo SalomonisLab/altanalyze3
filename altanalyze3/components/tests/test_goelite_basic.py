@@ -5,8 +5,10 @@ Basic GO-Elite tests to verify prioritisation and enrichment logic.
 from __future__ import annotations
 
 from pathlib import Path
+import pandas as pd
 
 from altanalyze3.components.goelite.prio import PrioritizationSettings, prioritize_terms
+from altanalyze3.components.goelite.plotting import _prepare_goelite_plot_frame, write_goelite_scatter_pdf
 from altanalyze3.components.goelite.runner import EnrichmentSettings, GOEliteRunner
 from altanalyze3.components.goelite.structures import EnrichmentResult, GOTermNode, GOTree
 from altanalyze3.components.goelite.parser import ParsedGO
@@ -143,3 +145,49 @@ def test_resource_cache_roundtrip(tmp_path):
 
     loaded = load_cached_resources("human", cache_dir=str(cache_dir), version="testrun")
     assert loaded.term_to_genes["GO:0000002"] == {"GENEA"}
+
+
+def test_goelite_pdf_output_written(tmp_path):
+    frame = pd.DataFrame(
+        [
+            {"population": "Splicing", "term_id": "GO:1", "term_name": "mRNA splicing", "p_value": 1e-8, "fdr": 1e-7, "z_score": 12.0, "selected": True},
+            {"population": "Splicing", "term_id": "GO:2", "term_name": "RNA processing", "p_value": 2e-7, "fdr": 3e-6, "z_score": 8.0, "selected": False},
+            {"population": "Splicing", "term_id": "GO:3", "term_name": "cell cycle checkpoint", "p_value": 5e-5, "fdr": 7e-4, "z_score": 5.0, "selected": True},
+            {"population": "Splicing", "term_id": "GO:4", "term_name": "chromatin organization", "p_value": 1e-3, "fdr": 1e-2, "z_score": 3.0, "selected": False},
+        ]
+    )
+    out_path = tmp_path / "goelite_results.pdf"
+    written = write_goelite_scatter_pdf(frame, out_path)
+    assert written == out_path
+    assert out_path.exists()
+    assert out_path.stat().st_size > 0
+
+
+def test_goelite_pdf_output_written_with_custom_top_label_count(tmp_path):
+    frame = pd.DataFrame(
+        [
+            {"population": "Splicing", "term_id": "GO:1", "term_name": "mRNA splicing", "p_value": 1e-8, "fdr": 1e-7, "z_score": 12.0, "selected": True},
+            {"population": "Splicing", "term_id": "GO:2", "term_name": "RNA processing", "p_value": 2e-7, "fdr": 3e-6, "z_score": 8.0, "selected": True},
+            {"population": "Splicing", "term_id": "GO:3", "term_name": "cell cycle checkpoint", "p_value": 5e-5, "fdr": 7e-4, "z_score": 5.0, "selected": True},
+            {"population": "Splicing", "term_id": "GO:4", "term_name": "chromatin organization", "p_value": 1e-3, "fdr": 1e-2, "z_score": 3.0, "selected": True},
+            {"population": "Splicing", "term_id": "GO:5", "term_name": "mitotic spindle", "p_value": 3e-6, "fdr": 5e-5, "z_score": 6.0, "selected": True},
+        ]
+    )
+    out_path = tmp_path / "goelite_results_custom_labels.pdf"
+    written = write_goelite_scatter_pdf(frame, out_path, top_label_count=2)
+    assert written == out_path
+    assert out_path.exists()
+    assert out_path.stat().st_size > 0
+
+
+def test_goelite_plot_frame_hides_significant_pruned_terms_from_background():
+    frame = pd.DataFrame(
+        [
+            {"population": "Splicing", "term_id": "GO:1", "term_name": "selected sig", "p_value": 1e-8, "fdr": 1e-7, "z_score": 12.0, "selected": True},
+            {"population": "Splicing", "term_id": "GO:2", "term_name": "pruned sig", "p_value": 2e-7, "fdr": 3e-6, "z_score": 8.0, "selected": False},
+            {"population": "Splicing", "term_id": "GO:3", "term_name": "nonsig", "p_value": 0.2, "fdr": 0.2, "z_score": 1.0, "selected": False},
+        ]
+    )
+    prepared = _prepare_goelite_plot_frame(frame)
+    assert prepared["is_selected_positive_sig"].tolist() == [True, False, False]
+    assert prepared["is_positive_sig"].tolist() == [True, True, False]

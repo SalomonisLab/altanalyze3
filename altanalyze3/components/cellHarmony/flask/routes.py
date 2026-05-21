@@ -86,7 +86,8 @@ def create_job():
     store, _ = _job_resources()
     species = request.form.get("species")
     reference = request.form.get("reference")
-    soupx_option = request.form.get("soupx_option")
+    ambient_option = request.form.get("ambient_option")
+    legacy_soupx_option = request.form.get("soupx_option")
 
     if not species or not reference:
         return jsonify({"error": "Species and reference are required."}), 400
@@ -107,7 +108,12 @@ def create_job():
             return jsonify({"error": f"Duplicate sample name '{name}' detected."}), 400
         normalized_samples.append(name)
 
-    metadata = store.create_job(species, reference, soupx_option, files=[])
+    metadata = store.create_job(
+        species,
+        reference,
+        ambient_option if ambient_option is not None else legacy_soupx_option,
+        files=[],
+    )
     job_id = metadata["job_id"]
     uploads_dir = store.uploads_dir(job_id)
 

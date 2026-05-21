@@ -448,8 +448,8 @@ def combine_and_align_h5(
         print(f"adata shape: {adata_combined.shape} (cells x genes)")
 
         if ambient_correct_cutoff is not None:
-            soupx_dir = os.path.join(output_dir, "soupx")
-            os.makedirs(soupx_dir, exist_ok=True)
+            ambient_dir = os.path.join(output_dir, "ambient")
+            os.makedirs(ambient_dir, exist_ok=True)
             try:
                 from altanalyze3.components.ambient_rna import ambient_subtract
             except ImportError as exc:
@@ -469,7 +469,7 @@ def combine_and_align_h5(
                 adata_combined,
                 rho=ambient_rho,
                 library_col=library_col,
-                outdir=Path(soupx_dir),
+                outdir=Path(ambient_dir),
                 write_individual=False,
                 write_merged=False,
                 merged_filename="ambient_corrected_merged.h5ad",
