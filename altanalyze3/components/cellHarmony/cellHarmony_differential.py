@@ -3546,6 +3546,259 @@ def build_combined_perturb_heatmap(
     }
 
 
+def build_perturb_correlation_heatmap(
+    comp_results,
+    outdir,
+    perturb_target_col,
+    alpha,
+    fc_thresh,
+    use_rawp,
+    lineage_order=None,
+    heatmap_basename=None,
+):
+    """Pairwise Pearson correlation across (target × celltype) columns.
+
+    Columns/rows of the heatmap are the same set of ``target__celltype``
+    perturbation conditions used by the combined log2FC heatmap, restricted to
+    the union of DEGs from each per-comparison assigned_groups table. Average
+    linkage on (1 - r) correlation distance is used for clustering on both
+    axes; row colors annotate target and cell type.
+    """
+    if not comp_results:
+        return None
+
+    os.makedirs(outdir, exist_ok=True)
+
+    raw_targets = [str(comp["case_label"]) for comp in comp_results]
+    target_labels = _unique_labels(raw_targets)
+
+    fold_blocks = []
+    column_meta = []
+    deg_union = set()
+
+    if lineage_order:
+        lineage_clean = [str(p).replace("/", "|") for p in lineage_order]
+    else:
+        lineage_clean = []
+
+    for comp, target_label in zip(comp_results, target_labels):
+        store = comp["de_store"]
+        per_population_deg = store.get("per_population_deg", {}) or {}
+        fold = store.get("fold_matrix")
+        assigned = store.get("assigned_groups")
+
+        if assigned is not None and not assigned.empty and "gene" in assigned.columns:
+            deg_union.update(assigned["gene"].astype(str).tolist())
+
+        cell_types_in_store = list(per_population_deg.keys())
+        if lineage_clean:
+            ordered = [p for p in lineage_clean if p in cell_types_in_store]
+            ordered.extend([p for p in cell_types_in_store if p not in ordered])
+        else:
+            ordered = cell_types_in_store
+
+        for cell_type in ordered:
+            source_df = per_population_deg.get(cell_type)
+            if source_df is None or source_df.empty:
+                continue
+            if not isinstance(fold, pd.DataFrame) or cell_type not in fold.columns:
+                continue
+
+            combined_key = f"{target_label}__{cell_type}"
+            block = fold.loc[:, [cell_type]].rename(columns={cell_type: combined_key})
+            fold_blocks.append(block)
+            column_meta.append(
+                {
+                    "column": combined_key,
+                    "target": target_label,
+                    "cell_type": cell_type,
+                }
+            )
+
+    if not fold_blocks:
+        print("[WARN] Perturb correlation heatmap: no fold-change blocks found; skipping.")
+        return None
+    if not deg_union:
+        print("[WARN] Perturb correlation heatmap: no DEGs across comparisons; skipping.")
+        return None
+
+    fold_matrix = pd.concat(fold_blocks, axis=1, join="outer").astype(float)
+    fold_matrix.index = fold_matrix.index.astype(str)
+    available = sorted(deg_union & set(fold_matrix.index))
+    if not available:
+        print("[WARN] Perturb correlation heatmap: DEG union absent from fold matrix; skipping.")
+        return None
+    fold_matrix = fold_matrix.loc[available].fillna(0.0)
+
+    if fold_matrix.shape[1] < 2:
+        print(f"[WARN] Perturb correlation heatmap: only {fold_matrix.shape[1]} column(s); need >=2.")
+        return None
+
+    corr = fold_matrix.corr(method="pearson").fillna(0.0)
+
+    try:
+        from scipy.cluster.hierarchy import linkage, leaves_list, dendrogram
+        from scipy.spatial.distance import squareform
+    except ImportError as exc:
+        print(f"[WARN] scipy.cluster unavailable ({exc}); skipping correlation heatmap.")
+        return None
+
+    dist = 1.0 - corr.values
+    np.fill_diagonal(dist, 0.0)
+    dist = np.clip(dist, 0.0, 2.0)
+    dist = (dist + dist.T) / 2.0
+    condensed = squareform(dist, checks=False)
+    link = linkage(condensed, method="average")
+    order = leaves_list(link)
+    ordered_cols = [corr.columns[i] for i in order]
+
+    corr_ordered = corr.loc[ordered_cols, ordered_cols]
+
+    meta_df = pd.DataFrame(column_meta).set_index("column").loc[ordered_cols]
+    targets_in_order = _unique_preserve_order(meta_df["target"].tolist())
+    celltypes_in_order = _unique_preserve_order(meta_df["cell_type"].tolist())
+    if lineage_clean:
+        celltypes_in_order = [c for c in lineage_clean if c in celltypes_in_order] + [
+            c for c in celltypes_in_order if c not in lineage_clean
+        ]
+
+    target_cmap = plt.get_cmap("tab20")
+    cell_cmap = plt.get_cmap("Set3")
+    target_colors = {t: target_cmap(i % target_cmap.N) for i, t in enumerate(targets_in_order)}
+    cell_colors = {c: cell_cmap(i % cell_cmap.N) for i, c in enumerate(celltypes_in_order)}
+
+    n = len(ordered_cols)
+    side = max(6.0, 0.20 * n + 4.0)
+
+    fig = plt.figure(figsize=(side + 3.5, side + 1.5))
+    gs = fig.add_gridspec(
+        2, 4,
+        width_ratios=[1.2, 0.18, 0.18, side],
+        height_ratios=[0.18 + 0.18, side],
+        wspace=0.04,
+        hspace=0.04,
+    )
+
+    ax_dendro_top = fig.add_subplot(gs[0, 3])
+    dendrogram(link, ax=ax_dendro_top, no_labels=True, color_threshold=0)
+    ax_dendro_top.set_xticks([])
+    ax_dendro_top.set_yticks([])
+    for spine in ax_dendro_top.spines.values():
+        spine.set_visible(False)
+
+    ax_dendro_left = fig.add_subplot(gs[1, 0])
+    dendrogram(link, ax=ax_dendro_left, orientation="left", no_labels=True, color_threshold=0)
+    ax_dendro_left.set_xticks([])
+    ax_dendro_left.set_yticks([])
+    for spine in ax_dendro_left.spines.values():
+        spine.set_visible(False)
+
+    ax_target = fig.add_subplot(gs[1, 1])
+    ax_cell = fig.add_subplot(gs[1, 2])
+    ax_heat = fig.add_subplot(gs[1, 3])
+
+    target_strip = np.array([[*target_colors[t]] for t in meta_df["target"].tolist()]).reshape(-1, 1, 4)
+    cell_strip = np.array([[*cell_colors[c]] for c in meta_df["cell_type"].tolist()]).reshape(-1, 1, 4)
+
+    ax_target.imshow(target_strip, aspect="auto", interpolation="nearest", origin="upper")
+    ax_target.set_xticks([])
+    ax_target.set_yticks([])
+    ax_target.set_xlabel("target", fontsize=11, rotation=90, labelpad=4)
+
+    ax_cell.imshow(cell_strip, aspect="auto", interpolation="nearest", origin="upper")
+    ax_cell.set_xticks([])
+    ax_cell.set_yticks([])
+    ax_cell.set_xlabel("cell type", fontsize=11, rotation=90, labelpad=4)
+
+    vmax = float(np.nanmax(np.abs(corr_ordered.values))) if n > 0 else 1.0
+    vmax = min(1.0, max(vmax, 0.2))
+    im = ax_heat.imshow(
+        corr_ordered.values,
+        aspect="auto",
+        cmap="RdBu_r",
+        vmin=-vmax,
+        vmax=vmax,
+        interpolation="nearest",
+        origin="upper",
+    )
+
+    tick_font = max(7, min(13, 320 / max(n, 1)))
+    ax_heat.set_xticks(np.arange(n))
+    ax_heat.set_xticklabels(ordered_cols, rotation=90, fontsize=tick_font)
+    ax_heat.xaxis.tick_top()
+    ax_heat.xaxis.set_label_position("top")
+    ax_heat.set_yticks(np.arange(n))
+    ax_heat.set_yticklabels(ordered_cols, fontsize=tick_font)
+    ax_heat.yaxis.tick_right()
+    ax_heat.yaxis.set_label_position("right")
+    ax_heat.tick_params(axis="x", which="both", length=2, pad=4, bottom=False, labelbottom=False, top=True, labeltop=True)
+    ax_heat.tick_params(axis="y", which="both", length=2, pad=4, left=False, labelleft=False, right=True, labelright=True)
+    ax_heat.set_title(
+        f"Pairwise Pearson correlation: log2FC across {fold_matrix.shape[0]} DEGs × {n} {perturb_target_col}×celltype conditions",
+        fontsize=13,
+        pad=18,
+    )
+
+    cax = fig.add_axes([0.30, 0.04, 0.40, 0.020])
+    cbar = fig.colorbar(im, cax=cax, orientation="horizontal")
+    cbar.set_label("Pearson r", fontsize=12)
+    cbar.ax.tick_params(labelsize=10)
+
+    legend_handles = []
+    for t in targets_in_order:
+        legend_handles.append(plt.Line2D([0], [0], marker="s", color="white", markerfacecolor=target_colors[t], markersize=12, label=f"{t}"))
+    target_legend = ax_heat.legend(
+        handles=legend_handles,
+        title="target",
+        bbox_to_anchor=(1.22, 1.0),
+        loc="upper left",
+        frameon=False,
+        fontsize=11,
+        title_fontsize=12,
+    )
+    ax_heat.add_artist(target_legend)
+
+    cell_handles = [
+        plt.Line2D([0], [0], marker="s", color="white", markerfacecolor=cell_colors[c], markersize=12, label=f"{c}")
+        for c in celltypes_in_order
+    ]
+    ax_heat.legend(
+        handles=cell_handles,
+        title="cell type",
+        bbox_to_anchor=(1.22, 0.55),
+        loc="upper left",
+        frameon=False,
+        fontsize=11,
+        title_fontsize=12,
+    )
+
+    base = heatmap_basename or f"perturb_correlation_by_{NetPerspective.safe_component(perturb_target_col)}_and_celltype"
+    out_pdf = os.path.join(outdir, f"{base}.pdf")
+    out_png = os.path.join(outdir, f"{base}.png")
+    out_svg = os.path.join(outdir, f"{base}.svg")
+    out_tsv = os.path.join(outdir, f"{base}.tsv")
+    meta_tsv = os.path.join(outdir, f"{base}_annotations.tsv")
+
+    plt.savefig(out_pdf, bbox_inches="tight")
+    plt.savefig(out_png, bbox_inches="tight", dpi=200)
+    plt.savefig(out_svg, bbox_inches="tight")
+    plt.close(fig)
+    corr_ordered.to_csv(out_tsv, sep="\t", float_format="%.5f")
+    meta_df.reset_index().to_csv(meta_tsv, sep="\t", index=False)
+
+    print(
+        f"[INFO] Wrote perturb correlation heatmap "
+        f"({fold_matrix.shape[0]} DEGs × {n} conditions): {out_pdf}"
+    )
+    return {
+        "heatmap_pdf": out_pdf,
+        "heatmap_tsv": out_tsv,
+        "annotations_tsv": meta_tsv,
+        "n_conditions": n,
+        "n_genes": int(fold_matrix.shape[0]),
+    }
+
+
 def _write_perturb_target_frequency_plots(
     source_adata,
     population_col,
@@ -3762,9 +4015,6 @@ def main():
         sys.exit(1)
     if args.perturb_screen and args.make_pseudobulk:
         print("[INFO] Ignoring --make_pseudobulk because perturb-screen mode creates perturbation metacells automatically.")
-    if args.perturb_screen and not args.skip_grn:
-        print("[INFO] Disabling GRN export for perturb-screen mode.")
-        args.skip_grn = True
 
     comps = parse_comparisons_arg(args.comparisons)
     if len(comps) == 0:
@@ -4237,6 +4487,16 @@ def main():
                     f"({combined_out['n_rows']} genes × {combined_out['n_columns']} target×celltype columns): "
                     f"{combined_out['heatmap_pdf']}"
                 )
+
+            build_perturb_correlation_heatmap(
+                comp_results=comp_results,
+                outdir=perturb_heatmap_dir,
+                perturb_target_col=args.perturb_target,
+                alpha=float(args.alpha),
+                fc_thresh=float(args.fc),
+                use_rawp=args.use_rawp,
+                lineage_order=base_pop_order,
+            )
 
             perturb_cellfreq_dir = os.path.join(perturb_root, "cell-frequency")
             os.makedirs(perturb_cellfreq_dir, exist_ok=True)
