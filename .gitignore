@@ -47,6 +47,7 @@ cromwell-executions
 cromwell-workflow-logs
 _codex_archive/
 .codex_archive/
+.claude/
 
 # IDE
 .vscode
