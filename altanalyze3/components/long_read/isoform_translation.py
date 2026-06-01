@@ -1,4 +1,5 @@
 import re, sys, os
+import gzip
 import warnings
 from Bio import BiopythonWarning
 warnings.simplefilter('ignore', BiopythonWarning)
@@ -9,12 +10,16 @@ from tqdm import tqdm
 import pandas as pd
 from collections import defaultdict
 
+def _open_text(path):
+    """Open a GFF/GTF for text reading, transparently handling gzip (.gz)."""
+    return gzip.open(path, 'rt') if str(path).endswith('.gz') else open(path)
+
 def normalize_chromosome_name(chromosome):
     return chromosome.replace('chr', '')
 
 def parse_gff(gff_file):
     transcripts = {}
-    with open(gff_file) as file:
+    with _open_text(gff_file) as file:
         lines = file.readlines()
         for line in tqdm(lines, desc="Parsing GFF"):
             if line.startswith("#"):
@@ -169,7 +174,7 @@ def parse_transcript_associations(file_path):
 def get_reference_first_exons(ref_gff_file):
     ref_first_exons = {}
     transcript_cds = {}
-    with open(ref_gff_file) as file:
+    with _open_text(ref_gff_file) as file:
         for line in tqdm(file, desc="Parsing Reference GFF"):
             if line.startswith("#"):
                 continue
