@@ -88,6 +88,18 @@ def build_parser() -> argparse.ArgumentParser:
     build_response.add_argument("--min-abs-score", type=float, default=0.0, help="Zero scores below this absolute value.")
     build_response.add_argument("--no-l2-normalize", action="store_true", help="Do not L2-normalize each signature.")
 
+    upstream = subparsers.add_parser(
+        "build-upstream-resources",
+        help="Build larger fastComm LR/response resources directly from CellChatDB and NicheNet v2.",
+    )
+    upstream.add_argument("--species", choices=["human", "mouse"], required=True, help="Species bundle to build.")
+    upstream.add_argument("--output-dir", type=Path, help="Processed bundle output directory.")
+    upstream.add_argument("--raw-dir", type=Path, help="Raw download cache directory.")
+    upstream.add_argument("--top-targets-per-signature", type=int, default=250, help="Keep top ligand/pathway target genes per signature.")
+    upstream.add_argument("--min-target-weight", type=float, default=0.001, help="Drop NicheNet target weights below this value.")
+    upstream.add_argument("--skip-nichenet-lr-network", action="store_true", help="Use CellChatDB only for LR definitions.")
+    upstream.add_argument("--overwrite", action="store_true", help="Re-download and rebuild even if cached files exist.")
+
     exemplar = subparsers.add_parser("exemplar-report", help="Summarize top scored interactions for inspection.")
     exemplar.add_argument("--scores", type=Path, required=True, help="fastComm scores TSV.")
     exemplar.add_argument("--output-tsv", type=Path, required=True, help="Output exemplar TSV.")
@@ -178,6 +190,23 @@ def main() -> int:
                 top_genes=args.top_genes,
                 min_abs_score=args.min_abs_score,
                 l2_normalize=not args.no_l2_normalize,
+            )
+        )
+        print(json.dumps(manifest, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "build-upstream-resources":
+        from .upstream_resources import UpstreamResourceBuildParams, build_upstream_resources
+
+        manifest = build_upstream_resources(
+            UpstreamResourceBuildParams(
+                species=args.species,
+                output_dir=args.output_dir,
+                raw_dir=args.raw_dir,
+                top_targets_per_signature=args.top_targets_per_signature,
+                min_target_weight=args.min_target_weight,
+                include_nichenet_lr_network=not args.skip_nichenet_lr_network,
+                overwrite=args.overwrite,
             )
         )
         print(json.dumps(manifest, indent=2, sort_keys=True))
