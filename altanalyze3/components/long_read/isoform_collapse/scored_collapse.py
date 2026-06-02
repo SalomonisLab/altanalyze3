@@ -221,6 +221,108 @@ def collapse_gene(struct_reads: Dict[str, int], tok: Dict[str, tuple],
     return res
 
 
+def _candidate_parents_for_child(ci, structs, tok, postings, rep_indices, rep_set):
+    """All representatives (in rep_set) that the child ci is a perfect contiguous subsequence of."""
+    clen = len(tok[structs[ci]])
+    cand = set(_candidate_supersequences(ci, structs, tok, postings, clen))
+    parents = []
+    for pi in rep_indices:
+        if pi in cand and pi in rep_set and is_contiguous_subsequence(tok[structs[ci]], tok[structs[pi]]):
+            parents.append(pi)
+    return parents
+
+
+def collapse_gene_em(struct_reads: Dict[str, int], tok: Dict[str, tuple],
+                     min_reads: int = DEFAULT_MIN_READS, enst: Dict[str, str] = None,
+                     n_iter: int = 50, tol: float = 1e-4):
+    """EM variant of collapse_gene (OPTIONAL alternative to winner-takes-all).
+
+    Same representative SET and the same long-bin / containment rules as ``collapse_gene`` -- the
+    ONLY difference is how an ambiguous child substring's reads are distributed among the
+    representatives that contain it. Winner-takes-all gives all of a child's reads to its single
+    highest-score parent; here we soft-assign fractionally, proportional to the parents' current read
+    abundance, iterating to convergence (an RSEM-style EM):
+
+        E-step: child c's reads split across its compatible parents p in proportion to abundance(p).
+        M-step: abundance(p) = own_reads(p) + sum over children of their fraction assigned to p.
+
+    Per your spec, if A=200, B=100, C=50 reads all contain a child's substring, the child's reads go
+    mostly to A, less to B, least to C (200:100:50), and the proportions are refined as abundances
+    update. A child compatible with exactly one parent contributes all its reads to that parent
+    (identical to WTA). Efficient: parents-per-child are precomputed once; each iteration is O(edges).
+
+    Returns the same dict as collapse_gene, PLUS ``em_reads`` = {rep_structure: EM-estimated reads}.
+    The catalog/quantification can use ``em_reads`` in place of the hard ``exemplar_total`` when the
+    EM option is selected. The hard ``assignment`` (argmax parent) is still returned so the partition
+    invariants and the h5ad re-key remain well-defined.
+    """
+    # Reuse the WTA collapse to get the rep set, bins, scores, ENST handling, and the hard assignment.
+    res = collapse_gene(struct_reads, tok, min_reads=min_reads, enst=enst)
+    structs = res['structs']
+    reps = list(set(res['long_reps']) | set(res['other_reps']))
+    if not structs:
+        res['em_reads'] = {}
+        return res
+
+    idx = {s: i for i, s in enumerate(structs)}
+    rep_set = {idx[s] for s in reps}
+    rep_indices = list(rep_set)
+    postings = _build_token_postings(structs, tok)
+
+    own = {i: float(struct_reads.get(structs[i], 0)) for i in range(len(structs))}
+
+    # children = non-rep structures; precompute each child's compatible parents (rep indices).
+    child_parents = {}
+    for s in structs:
+        ci = idx[s]
+        if ci in rep_set:
+            continue
+        parents = _candidate_parents_for_child(ci, structs, tok, postings, rep_indices, rep_set)
+        if not parents:
+            # WTA leaves these as their own reps too; collapse_gene already made them reps if childless.
+            continue
+        child_parents[ci] = parents
+
+    # initialise rep abundance with own reads (ENST floor reads are 0, fine).
+    abund = {pi: own[pi] for pi in rep_set}
+    for _ in range(max(1, n_iter)):
+        new = {pi: own[pi] for pi in rep_set}
+        for ci, parents in child_parents.items():
+            w = own[ci]
+            if w <= 0:
+                continue
+            denom = sum(abund[pi] for pi in parents)
+            if denom <= 0:
+                # all parents currently zero -> split evenly (rare; happens iter 0 if parents have 0 own)
+                share = w / len(parents)
+                for pi in parents:
+                    new[pi] += share
+            else:
+                for pi in parents:
+                    new[pi] += w * (abund[pi] / denom)
+        # convergence on total movement
+        delta = sum(abs(new[pi] - abund[pi]) for pi in rep_set)
+        abund = new
+        if delta < tol:
+            break
+
+    res['em_reads'] = {structs[pi]: abund[pi] for pi in rep_set}
+
+    # Final soft assignment weights: child_structure -> {parent_structure: fraction}, from the
+    # converged parent abundances. Used to propagate a child's molecules FRACTIONALLY to parents in
+    # the per-cell re-key (the per-cell analogue of em_reads). A rep maps to itself with weight 1.
+    em_weights = {}
+    for ci, parents in child_parents.items():
+        denom = sum(abund[pi] for pi in parents)
+        if denom <= 0:
+            frac = {structs[pi]: 1.0 / len(parents) for pi in parents}
+        else:
+            frac = {structs[pi]: abund[pi] / denom for pi in parents}
+        em_weights[structs[ci]] = frac
+    res['em_weights'] = em_weights
+    return res
+
+
 def _check_invariants(res, struct_reads, tok):
     structs = res['structs']
     reps = set(res['long_reps']) | set(res['other_reps'])

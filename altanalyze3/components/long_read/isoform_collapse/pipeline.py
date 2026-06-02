@@ -22,7 +22,7 @@ import resource
 import time
 
 from ..isoform_collapse_utils import structure_tokens_for_containment
-from .scored_collapse import collapse_gene
+from .scored_collapse import collapse_gene, collapse_gene_em
 
 DEFAULT_REF = '/Users/saljh8/Documents/GitHub/altanalyze/AltDatabase/EnsMart100/ensembl/Hs/Hs_Ensembl_exon.txt'
 
@@ -101,7 +101,13 @@ def _collapse_chrom(args):
     across samples reproduces exactly the per-read structure counts the previously-validated pooled
     collapse fed to ``collapse_gene`` -- so the result is identical, but memory is bounded by distinct
     structures (Tier 1 already reduced reads->structures per sample)."""
-    chrom, genes, sample_paths, enst_cache = args
+    # collapse_method: 'wta' (default winner-takes-all) or 'em' (soft EM read allocation). The 5-tuple
+    # form carries the method; the 4-tuple form (older callers) defaults to 'wta'.
+    if len(args) == 5:
+        chrom, genes, sample_paths, enst_cache, collapse_method = args
+    else:
+        chrom, genes, sample_paths, enst_cache = args
+        collapse_method = 'wta'
     gset = set(genes)
     gene_struct = collections.defaultdict(collections.Counter)
     gene_mol = collections.defaultdict(dict)
@@ -135,7 +141,10 @@ def _collapse_chrom(args):
         enst = gene_enst.get(g)
         all_structs = list(sr) + ([s for s in enst if s not in sr] if enst else [])
         tok = {s: tuple(structure_tokens_for_containment(s, g)) for s in all_structs}
-        res = collapse_gene(sr, tok, min_reads=1, enst=enst)
+        if collapse_method == 'em':
+            res = collapse_gene_em(sr, tok, min_reads=1, enst=enst)
+        else:
+            res = collapse_gene(sr, tok, min_reads=1, enst=enst)
         enst_ids = res.get('enst', {})
         reps = set(res['long_reps']) | set(res['other_reps'])
         final = {s: s for s in reps}
@@ -144,29 +153,52 @@ def _collapse_chrom(args):
         incoming = collections.defaultdict(list)
         for c, par in res['assignment'].items():
             incoming[par].append(c)
-        rep_total = {r: sr.get(r, 0) + sum(sr.get(s, 0) for s in incoming.get(r, [])) for r in reps}
+        # HARD total = own reads + reads of children hard-assigned to it (the winner-takes-all count).
+        # This is the SHARED catalog-membership criterion: the kept isoform SET is decided from the
+        # hard totals identically for WTA and EM, so both methods yield the SAME isoform set; EM only
+        # redistributes reads WITHIN that fixed set (it must not add/remove isoforms). EM additionally
+        # reports its soft abundance (em_reads) for the catalog's reported read count.
+        hard_total = {r: sr.get(r, 0) + sum(sr.get(s, 0) for s in incoming.get(r, [])) for r in reps}
+        if collapse_method == 'em':
+            em_reads = res.get('em_reads', {})
+            rep_total = {r: em_reads.get(r, sr.get(r, 0)) for r in reps}
+        else:
+            rep_total = hard_total
         long_rep_set = set(res['long_reps'])
 
         # exemplar id: ENST if the representative is a reference transcript, else its molecule id.
         def exid(r):
             return enst_ids[r] if r in enst_ids else gene_mol[g][r]
 
-        out[g] = dict(
+        entry = dict(
             struct2exemplar={s: exid(final[s]) for s in final},
             exemplar_blocks={exid(r): res['blocks'][r] for r in reps},
             exemplar_total={exid(r): rep_total[r] for r in reps},
+            exemplar_hardtotal={exid(r): hard_total[r] for r in reps},
             exemplar_bin={exid(r): ('long' if r in long_rep_set else 'other') for r in reps},
             exemplar_orig={exid(r): sr.get(r, 0) for r in reps},
             exemplar_sample={exid(r): ('ENSEMBL' if r in enst_ids
                                        else gene_mol_sample[g].get(gene_mol[g].get(r))) for r in reps},
             exemplar_known={exid(r): (r in enst_ids) for r in reps},
         )
+        # EM: carry the STRUCTURE-keyed soft map forward unchanged (child_structure -> {parent_structure:
+        # weight}). It is NOT converted to ids here -- structure is the canonical, cross-sample-consistent
+        # key (the same key stage3 uses), so the molecule->final re-link stays correct across all samples.
+        # ids are resolved only at the final re-key, exactly like the hard struct2exemplar path.
+        if collapse_method == 'em':
+            entry['struct2struct_soft'] = res.get('em_weights', {})
+        out[g] = entry
     return chrom, out, _self_peak_mb()
 
 
 def stage1_collapse(sample_ta_paths, nproc=8, ref=DEFAULT_REF, enst_cache=None, tier1_dir=None,
-                    log=print):
+                    collapse_method='wta', log=print):
     """Two-tier cross-sample collapse.
+
+    collapse_method: 'wta' (default winner-takes-all -- each ambiguous substring's reads go to its
+      single highest-score long-bin parent) or 'em' (soft EM -- each substring's reads split across
+      compatible parents in proportion to their abundance). Same representative set either way; only
+      the per-isoform read totals differ.
 
     TIER 1 (per sample, in series): reduce each sample's molecule-level transcript_associations.txt
       to its distinct structures + read counts + representative molecule id (collapse_sample). Bounded
@@ -203,7 +235,7 @@ def stage1_collapse(sample_ta_paths, nproc=8, ref=DEFAULT_REF, enst_cache=None, 
     for g in sgenes:
         chrom_genes[gc.get(g, 'unplaced')].append(g)
     parts = sorted(chrom_genes.items(), key=lambda kv: -len(kv[1]))
-    args = [(chrom, genes, sample_exemplars, enst_cache) for chrom, genes in parts]
+    args = [(chrom, genes, sample_exemplars, enst_cache, collapse_method) for chrom, genes in parts]
     t = time.time()
     results = _run_parallel_or_serial(args, nproc)
     dt = time.time() - t
@@ -217,12 +249,15 @@ def stage1_collapse(sample_ta_paths, nproc=8, ref=DEFAULT_REF, enst_cache=None, 
 
 
 # ------------------------------------------------------------------ STAGE 2 --
-def stage2_outliers(gene_results, min_total=3):
+def stage2_outliers(gene_results, min_total=3, return_soft=False):
     """Cross-sample outlier removal: keep final isoforms with total reads >= min_total.
     Default min_total=3 removes isoforms with <=2 total reads across all samples (keeps >=3).
-    Returns (catalog rows, kept_struct2exemplar)."""
+    Returns (catalog rows, kept_struct2exemplar) -- or, with return_soft=True, additionally a
+    structure-keyed EM soft map kept_soft (gene -> {child_structure: {parent_structure: weight}})
+    restricted to kept parents and renormalized (only populated for EM gene_results)."""
     catalog = []
     kept = {}
+    kept_soft = {}
     for g, r in gene_results.items():
         # Keep rule:
         #  - known (ENST) isoform: kept at ANY positive read count (a known transcript an observed
@@ -231,12 +266,33 @@ def stage2_outliers(gene_results, min_total=3):
         #    so it is NOT an observed isoform and must NOT appear anywhere (catalog/h5ad/GFF).
         #  - novel isoform: kept at the cross-sample min_total threshold.
         known_map = r.get('exemplar_known', {})
-        kept_ex = {ex for ex, tot in r['exemplar_total'].items()
+        # Catalog membership uses the HARD (winner-takes-all) totals so WTA and EM keep the SAME
+        # isoform set. EM only redistributes reads within that set; it must not change which isoforms
+        # exist. (Falls back to exemplar_total when hardtotal absent, e.g. older results.)
+        decide = r.get('exemplar_hardtotal', r['exemplar_total'])
+        kept_ex = {ex for ex, tot in decide.items()
                    if (known_map.get(ex) and tot > 0) or (not known_map.get(ex) and tot >= min_total)}
-        kept[g] = {s: ex for s, ex in r['struct2exemplar'].items() if ex in kept_ex}
+        s2e = r['struct2exemplar']
+        kept[g] = {s: ex for s, ex in s2e.items() if ex in kept_ex}
         for ex in kept_ex:
             catalog.append((g, ex, r['exemplar_blocks'][ex], r['exemplar_total'][ex],
                             r['exemplar_bin'][ex], known_map.get(ex, False)))
+        # EM structure-keyed soft map, filtered to kept structures & kept parents, renormalized.
+        soft = r.get('struct2struct_soft')
+        if soft:
+            kept_structs = set(kept[g])
+            gs = {}
+            for child_struct, pw in soft.items():
+                if child_struct not in kept_structs:
+                    continue
+                fw = {ps: w for ps, w in pw.items() if ps in kept_structs}
+                tot = sum(fw.values())
+                if tot > 0:
+                    gs[child_struct] = {ps: w / tot for ps, w in fw.items()}
+            if gs:
+                kept_soft[g] = gs
+    if return_soft:
+        return catalog, kept, kept_soft
     return catalog, kept
 
 
@@ -387,50 +443,79 @@ def stage_protein(gene_results, kept_struct2exemplar, sample_gff_paths, outdir,
 
 # ------------------------------------------------------------------ STAGE 3 --
 def stage3_rekey_h5ad(sample, h5ad_path, ta_path, kept_struct2exemplar, outdir,
-                      barcode_clusters=None):
+                      barcode_clusters=None, kept_soft=None):
     """Re-key one sample's per-read h5ad to final isoform ids via sparse grouping matrix.
     Memory-optimized: builds var->final only for surviving molecules (no full molecule->struct map).
 
-    barcode_clusters: optional mapping (dict or pandas Series) cell_barcode -> cluster. When given,
-      the output is restricted to annotated barcodes and ``obs['cluster']`` is attached, so the
-      downstream pseudo_cluster_counts / PSI (which group by ``obs['cluster']``) work directly on the
-      final clean isoform set. Barcodes are matched on the h5ad's own convention (carrying ``-1``).
+    The re-link is STRUCTURE-based (the canonical, cross-sample-consistent key): each molecule maps to
+    its structure, and the structure maps to the final isoform id. This catches every sample's
+    molecules for a shared structure, regardless of which sample 'won' the id at Tier 2.
+
+    kept_soft: optional EM structure-keyed soft map (gene -> {child_structure: {parent_structure:
+      weight}}). When given, a molecule of a child structure is split FRACTIONALLY across the parent
+      structures' final ids (the EM per-cell analogue of em_reads); without it (WTA) each molecule
+      maps to its single final id (weight 1).
+
+    barcode_clusters: optional mapping cell_barcode -> cluster; restricts to annotated cells and
+      attaches obs['cluster'] for downstream pseudobulk / PSI.
     Returns (out_path, n_final, raw_reads, final_reads, peak_rss_mb, elapsed_s)."""
     import numpy as np
     import scipy.sparse as sp
     import anndata as ad
     import pandas as pd
     t = time.time()
-    # flatten kept map to (gene,structure) -> "gene:exemplar".  Final isoform ids are namespaced
-    # by gene so the output is directly consumable by the existing pseudo_cluster_counts /
-    # compute_differentials (which do var_name.split(":")[0] to recover the gene for ratios).
+    # (gene,structure) -> "gene:exemplar". Final isoform ids are gene-namespaced so the output is
+    # directly consumable by pseudo_cluster_counts / compute_differentials (var.split(":")[0] = gene).
     s2e = {}
     for g, m in kept_struct2exemplar.items():
         for struct, ex in m.items():
             s2e[(g, struct)] = f"{g}:{ex}"
+    # EM: (gene,child_structure) -> {final_id: weight}, resolving parent structures to their exemplar ids.
+    s2soft = {}
+    if kept_soft:
+        for g, gm in kept_soft.items():
+            for child_struct, pw in gm.items():
+                fw = {}
+                for parent_struct, w in pw.items():
+                    fid = s2e.get((g, parent_struct))
+                    if fid is not None:
+                        fw[fid] = fw.get(fid, 0.0) + w
+                if fw:
+                    s2soft[(g, child_struct)] = fw
+
+    # molecule var ('gene:mol') -> {final_id: weight}
     var2final = {}
     with open(ta_path) as f:
         for line in f:
             p = line.rstrip("\n").split("\t")
             if len(p) < 5:
                 continue
-            ex = s2e.get((p[0], p[2]))
-            if ex is not None:
-                var2final[f"{p[0]}:{p[3]}"] = ex
-    del s2e
+            key = (p[0], p[2])
+            if s2soft and key in s2soft:
+                var2final[f"{p[0]}:{p[3]}"] = s2soft[key]
+            else:
+                ex = s2e.get(key)
+                if ex is not None:
+                    var2final[f"{p[0]}:{p[3]}"] = {ex: 1.0}
+    del s2e, s2soft
     a = ad.read_h5ad(h5ad_path)
-    final_ids = sorted(set(var2final.values()))
+    final_ids = sorted({fid for wm in var2final.values() for fid in wm})
     fidx = {f: j for j, f in enumerate(final_ids)}
     rows = []
     cols = []
+    data = []
     for i, v in enumerate(a.var_names):
-        ex = var2final.get(v)
-        if ex is not None:
-            rows.append(i)
-            cols.append(fidx[ex])
-    G = sp.coo_matrix((np.ones(len(rows), np.int64), (rows, cols)),
-                      shape=(a.shape[1], len(final_ids))).tocsr()
-    Xf = (a.X.astype(np.int64)) @ G
+        wm = var2final.get(v)
+        if wm:
+            for fid, w in wm.items():
+                rows.append(i)
+                cols.append(fidx[fid])
+                data.append(w)
+    # integer (weight all 1) for WTA -> int matrix; fractional for EM -> float matrix.
+    is_frac = bool(kept_soft)
+    G = sp.coo_matrix((np.asarray(data, dtype=(np.float64 if is_frac else np.int64)),
+                       (rows, cols)), shape=(a.shape[1], len(final_ids))).tocsr()
+    Xf = (a.X.astype(np.float64 if is_frac else np.int64)) @ G
     obs = a.obs.copy()
 
     # Attach cluster annotations (cellHarmony) and restrict to annotated barcodes, so the final
@@ -464,7 +549,7 @@ def stage3_rekey_h5ad(sample, h5ad_path, ta_path, kept_struct2exemplar, outdir,
 # ------------------------------------------------------------------ DRIVER ---
 def run_pipeline(samples, outdir, nproc=8, min_total=3, ref=DEFAULT_REF, write_h5ad=True,
                  genome_fasta=None, ref_gff=None, enst_cache=None, barcode_clusters=None,
-                 log=print):
+                 collapse_method='wta', log=print):
     """End-to-end. samples: list of (name, h5ad_path, transcript_associations_path[, raw_gff_path]).
     If genome_fasta is given AND samples include a raw_gff_path, protein prediction is run
     (final-isoform records -> existing gff_translate -> protein_summary.txt + *sequences.fasta).
@@ -476,11 +561,12 @@ def run_pipeline(samples, outdir, nproc=8, min_total=3, ref=DEFAULT_REF, write_h
     sample_ta = [(s[0], s[2]) for s in samples]
     sample_gff_paths = {s[0]: s[3] for s in samples if len(s) > 3}
     gene_results, t1, max_rss, nparts = stage1_collapse(sample_ta, nproc=nproc, ref=ref,
-                                                        enst_cache=enst_cache)
+                                                        enst_cache=enst_cache,
+                                                        collapse_method=collapse_method)
     n_final = sum(len(r['exemplar_total']) for r in gene_results.values())
     log(f"[stage1] genes={len(gene_results):,} final={n_final:,} {t1:.1f}s maxRSS={max_rss:.0f}MB parts={nparts}")
 
-    catalog, kept = stage2_outliers(gene_results, min_total=min_total)
+    catalog, kept, kept_soft = stage2_outliers(gene_results, min_total=min_total, return_soft=True)
     n_known = sum(1 for row in catalog if len(row) > 5 and row[5])
     log(f"[stage2] catalog={len(catalog):,} (dropped {n_final-len(catalog):,} outliers, "
         f"min_total={min_total}); known(ENST)={n_known:,} novel={len(catalog)-n_known:,}")
@@ -514,7 +600,8 @@ def run_pipeline(samples, outdir, nproc=8, min_total=3, ref=DEFAULT_REF, write_h
         for s in samples:
             name, h5, ta = s[0], s[1], s[2]
             bc = (barcode_clusters or {}).get(name)
-            r = stage3_rekey_h5ad(name, h5, ta, kept, outdir=None, barcode_clusters=bc)
+            r = stage3_rekey_h5ad(name, h5, ta, kept, outdir=None, barcode_clusters=bc,
+                                  kept_soft=(kept_soft if collapse_method == 'em' else None))
             raw_reads, final_reads = r[2], r[3]
             kept_frac = final_reads / raw_reads if raw_reads else 0.0
             log(f"[stage3:{name}] -> {r[1]:,} final isoforms, reads {raw_reads:,}->{final_reads:,} "

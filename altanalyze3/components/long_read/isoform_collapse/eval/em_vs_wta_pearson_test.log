@@ -1,0 +1,18 @@
+[tier1:WM34_CD34] 35,076,442 reads -> 1,759,513 distinct structures (18,361 genes) 43.8s
+[stage1] tier1+tier2 total 69.3s (tier2 24.6s)
+[tier1:WM34_CD34] 35,076,442 reads -> 1,759,513 distinct structures (18,361 genes) 49.5s
+[stage1] tier1+tier2 total 117.6s (tier2 67.1s)
+
+===== PEARSON (paired n=7432) =====
+  WTA mean=0.6321 median=0.6553 | EM mean=0.6442 median=0.6765
+  WTA better: 2091  EM better: 5105  tie: 236
+  Wilcoxon signed-rank (EM-WTA) p=5.847e-236
+  paired t-test (EM-WTA) p=9.320e-55  mean diff(EM-WTA)=+0.0121
+
+===== SPEARMAN (paired n=7432) =====
+  WTA mean=0.6066 median=0.6258 | EM mean=0.6069 median=0.6152
+  WTA better: 3793  EM better: 3400  tie: 239
+  Wilcoxon signed-rank (EM-WTA) p=6.300e-04
+  paired t-test (EM-WTA) p=8.539e-01  mean diff(EM-WTA)=+0.0003
+
+PEARSON_TEST_DONE
