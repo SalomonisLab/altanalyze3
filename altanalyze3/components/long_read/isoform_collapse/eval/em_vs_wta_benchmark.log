@@ -1,0 +1,19 @@
+=== WTA ===
+[tier1:WM34_CD34] 35,076,442 reads -> 1,759,513 distinct structures (18,361 genes) 34.8s
+[stage1] tier1+tier2 total 61.2s (tier2 25.5s)
+[wta] catalog=274,141 isoforms=274,141 reads 35,076,443->34,051,703 (97.1%) -> /Users/saljh8/Dropbox/Revio/test/Isoform-Workflow-BAM/WM34/WM34_CD34-isoform-wta.h5ad
+=== EM ===
+[tier1:WM34_CD34] 35,076,442 reads -> 1,759,513 distinct structures (18,361 genes) 48.7s
+[stage1] tier1+tier2 total 116.9s (tier2 67.3s)
+[em] catalog=274,141 isoforms=274,141 reads 35,076,443->34,051,703 (97.1%) -> /Users/saljh8/Dropbox/Revio/test/Isoform-Workflow-BAM/WM34/WM34_CD34-isoform-em.h5ad
+[validate] WTA & EM share the SAME isoform set: 274,141 isoforms
+junctions >= 200 reads: 70,360
+[wta] isoforms scored: 10670  mean=0.5874  median=0.6004
+[em] isoforms scored: 10318  mean=0.6284  median=0.6417
+
+=== PAIRED (n=7432 shared isoforms) ===
+  mean   WTA=0.6066  EM=0.6069
+  median WTA=0.6258  EM=0.6152
+  EM better: 3400   WTA better: 3793   tie: 239
+  Wilcoxon paired p=6.300e-04
+BENCHMARK_DONE

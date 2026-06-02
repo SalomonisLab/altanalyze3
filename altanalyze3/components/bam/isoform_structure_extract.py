@@ -66,6 +66,57 @@ def _set_pysam_verbosity():
         pass
 
 
+def _ensure_bam_index(bam_path):
+    """Make sure a coordinate index (.bai/.csi) exists for ``bam_path``; build it if missing.
+
+    Per-chromosome ``fetch`` requires an index, so this is called once before any worker reads the
+    BAM. Indexing requires a coordinate-sorted BAM; if the BAM is not coordinate-sorted we sort it
+    to a sibling ``*.sorted.bam`` and index that, returning the path actually usable for fetch. The
+    common case (already indexed) returns immediately.
+    """
+    bam_path = str(bam_path)
+    for idx in (bam_path + '.bai', bam_path + '.csi',
+                bam_path[:-4] + '.bai' if bam_path.endswith('.bam') else bam_path + '.bai'):
+        if os.path.exists(idx):
+            return bam_path
+
+    # Determine sort order from the header without reading records.
+    try:
+        with pysam.AlignmentFile(bam_path, 'rb', check_sq=False) as bam:
+            sort_order = bam.header.to_dict().get('HD', {}).get('SO', '')
+    except Exception as exc:
+        raise ValueError(f"Unable to read BAM header for {bam_path}: {exc}") from exc
+
+    if sort_order == 'coordinate':
+        print(f"[bam] no index for {os.path.basename(bam_path)}; building .bai ...")
+        try:
+            pysam.index(bam_path)
+            return bam_path
+        except Exception as exc:
+            # Index build failed despite a coordinate header (e.g. truncated/stale .bai, read-only
+            # dir). Fall through to the sort+index path, which writes a fresh sibling copy.
+            print(f"[bam] indexing failed ({type(exc).__name__}: {exc}); "
+                  f"falling back to sort+index")
+
+    # Not coordinate-sorted (or index build failed): sort then index. Idempotent -- reuse a prior
+    # sorted+indexed copy when present.
+    sorted_path = bam_path[:-4] + '.sorted.bam' if bam_path.endswith('.bam') else bam_path + '.sorted.bam'
+    if os.path.exists(sorted_path) and os.path.exists(sorted_path + '.bai'):
+        return sorted_path
+    try:
+        print(f"[bam] {os.path.basename(bam_path)} requires a sorted+indexed copy "
+              f"(SO='{sort_order or 'unknown'}'); sorting -> {os.path.basename(sorted_path)} ...")
+        pysam.sort('-o', sorted_path, bam_path)
+        pysam.index(sorted_path)
+        return sorted_path
+    except Exception as exc:
+        raise ValueError(
+            f"Could not produce a usable coordinate index for {bam_path}. The BAM may be corrupt or "
+            f"the output directory may not be writable. Underlying error: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+
+
 def _ensure_exon_model(exon_file):
     global _EXON_MODEL_PATH
     exon_path = os.path.abspath(exon_file)
@@ -310,13 +361,22 @@ def has_known_splice_site(chrom, strand, exons, exon_coordinates):
 
 
 def resolve_barcode(read, barcode_tags):
+    """Return the cell barcode from the first present tag, normalized to the standard single-cell
+    convention with a ``-1`` lane suffix (e.g. ``AAACACCTGTTAGTGC-1``).
+
+    Appending ``-1`` at extraction makes the suffix canonical at every downstream step (junction /
+    isoform matrices, pseudobulk, comparisons) and keeps the barcodes compatible with cell
+    annotations produced outside this workflow and with the reverse-complement code path. Barcodes
+    that already carry a ``-<lane>`` suffix are left as-is.
+    """
     for tag in barcode_tags:
         try:
             value = read.get_tag(tag)
         except KeyError:
             continue
         if value:
-            return value
+            value = str(value)
+            return value if '-' in value else f"{value}-1"
     return None
 
 
@@ -799,6 +859,8 @@ def parallel_extract_isoform_structures(bam_path, exon_file, output_prefix, min_
     if barcode_tags is None:
         barcode_tags = ['CB', 'CR', 'BC', 'BX']
     _set_pysam_verbosity()
+    # Per-chromosome fetch needs a coordinate index; build one (or a sorted+indexed copy) if missing.
+    bam_path = _ensure_bam_index(bam_path)
     bam = pysam.AlignmentFile(bam_path, 'rb')
     chromosomes = [ref for ref in bam.references if len(ref) < 6]
     bam.close()

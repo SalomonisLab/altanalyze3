@@ -495,7 +495,7 @@ if __name__ == '__main__':
     transcript_assoc_file = 'gff-output/transcript_associations.txt'
     gene_symbol_file = '/Users/saljh8/Documents/GitHub/altanalyze/AltDatabase/EnsMart91/ensembl/Hs/Hs_Ensembl-annotations.txt'
     junction_coords_file = 'junction_combined_pseudo_cluster_counts-filtered.txt'
-    protein_summary_file = 'protein_summary.txt'
+    protein_summary_file = 'gff-output/protein_summary.txt'
     stats_folder = 'dPSI-covariate-events'
 
     annotate(gene_symbol_file,transcript_assoc_file,junction_coords_file,protein_summary_file,stats_folder,dataType='junction')

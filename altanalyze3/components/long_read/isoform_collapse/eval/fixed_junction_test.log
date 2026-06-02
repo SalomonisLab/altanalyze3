@@ -1,0 +1,8 @@
+[tier1:WM34_CD34] 35,076,442 reads -> 1,759,513 distinct structures (18,361 genes) 32.5s
+[stage1] tier1+tier2 total 57.9s (tier2 24.4s)
+[tier1:WM34_CD34] 35,076,442 reads -> 1,759,513 distinct structures (18,361 genes) 25.7s
+[stage1] tier1+tier2 total 93.6s (tier2 66.9s)
+n isoforms (same junction both methods) = 9,251
+  Pearson mean: WTA=0.4635  EM=0.4428   diff(EM-WTA)=-0.0207
+  paired t-test p = 3.954e-31
+FIXED_DONE

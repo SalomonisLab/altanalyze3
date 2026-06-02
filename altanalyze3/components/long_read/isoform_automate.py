@@ -111,6 +111,20 @@ def _format_rss_status():
     return " ".join(parts)
 
 
+def _resolve_isoform_nproc():
+    """Worker count for the cross-sample isoform collapse: honor common cluster env vars, else
+    leave 1-2 cores free. The collapse handles serial fallback internally if multiprocessing fails."""
+    try:
+        cpu_total = multiprocessing.cpu_count()
+    except Exception:
+        cpu_total = 4
+    for var in ('ISOFORM_MAX_PROCESSES', 'SLURM_CPUS_PER_TASK', 'LSB_DJOB_NUMPROC', 'PBS_NP', 'NSLOTS'):
+        val = os.environ.get(var)
+        if val and val.isdigit() and int(val) > 0:
+            return max(1, min(int(val), cpu_total))
+    return max(1, min(cpu_total - 1, 8))
+
+
 def _trim_memory():
     gc.collect()
     if sys.platform.startswith('linux'):
@@ -325,87 +339,54 @@ def export_junction_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict):
         _trim_memory()
 
 def export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, reference_gff, genome_fasta, deleteGFF=False):
-    """Processes samples, concatenates if necessary, and writes h5ad files."""
+    """Cross-sample isoform consolidation + per-sample isoform h5ad + protein prediction.
+
+    Uses the memory/compute-optimized ``isoform_collapse`` pipeline instead of the legacy combined
+    ``gff_process.consolidateLongReadGFFs`` run (which held every read from every sample in RAM and
+    is replaced here). The collapse:
+      - pools each sample's per-sample ``transcript_associations.txt`` (written by the junction step
+        via single-GFF consolidate) and collapses to one canonical isoform set across all samples,
+        injecting the GENCODE/Ensembl reference transcripts (annotated separately, once),
+      - re-keys each sample's molecule-level h5ad onto the final isoforms -> ``<library>-isoform.h5ad``
+        (the file the downstream pseudobulk/PSI steps consume), and
+      - generates isoform protein/transcript sequences from the final exemplars via ``gff_translate``.
+    No combined GFF of all samples is produced; only the minimal records needed for translation.
+    """
+    from .isoform_collapse import pipeline as collapse
+    from .isoform_collapse import reference as collapse_ref
 
     current_dir = os.getcwd()
-    gff_output = "/gff-output/"
-    query_gff_file = current_dir+gff_output+"combined.gff"
-    transcript_associations_path = current_dir+gff_output+"transcript_associations.txt"
-    isoform_associations_path = current_dir+gff_output+"isoform_links.txt"
+    out_dir = os.path.join(current_dir, 'gff-output')
+    os.makedirs(out_dir, exist_ok=True)
+    catalog_path = os.path.join(out_dir, 'FINAL_isoform_catalog.tsv')
 
-    if os.path.exists(isoform_associations_path) and deleteGFF == False:
-        pass
+    # samples: (library, molecule_h5ad, per-sample transcript_associations.txt, raw_gff)
+    samples = []
+    for uid, libs in sample_dict.items():
+        for s in libs:
+            ta = os.path.join(os.path.dirname(s['gff']), 'gff-output', 'transcript_associations.txt')
+            samples.append((s['library'], s['matrix'], ta, s['gff']))
+
+    if os.path.exists(catalog_path) and deleteGFF == False:
+        print(f"Isoform catalog exists, skipping collapse: {catalog_path}")
     else:
-        # Create a combined GFF
-        gff_files = [reference_gff]
-        for uid, samples in sample_dict.items():
-            for s in samples:
-                gff_files.append(s['gff'])
-
-        gff_output_dir = gff_process.consolidateLongReadGFFs(gff_files, ensembl_exon_dir, mode='Ensembl')
-        
-        # Export isoform translations
-        cds_records, transcript_records, protein_records = isot.gff_translate(query_gff_file,genome_fasta,reference_gff,transcript_associations_path)
-        with open("protein_sequences.fasta", "w") as protein_file:
-            SeqIO.write(protein_records, protein_file, "fasta")
-        with open("transcript_sequences.fasta", "w") as cds_file:
-            SeqIO.write(transcript_records, cds_file, "fasta")
-        with open("orf_sequences.fasta", "w") as cds_file:
-            SeqIO.write(cds_records, cds_file, "fasta")
-            
-    # Export individual library/sample isoform h5ad
-    for uid, samples in sample_dict.items():
-        num_samples = len(samples)
-        print(f'Processing {num_samples} libraries for sample: {uid}')
-        
-        adata_list = []
-        for s in samples:
-            adata = export_isoform_matrix(
-                s['matrix'], s['gff_name'], s['library'],
-                isoform_associations_path, s['reverse'], barcode_sample_dict)
-            # Resolve the index conflict issue:
-            if adata.obs.index.name in adata.obs.columns:
-                print(f"Conflict found in {s['library']}: index name '{adata.obs.index.name}' is also a column.")
-                adata.obs.rename_axis('barcode', inplace=True)  # Rename index to 'barcode' to avoid conflict
-            adata.obs_names_make_unique()
-            adata_list.append(adata)
-            
-            # Check the overlaping labels
-            from collections import Counter
-            labels = [s['library'] for s in samples]
-            label_counts = Counter(labels)
-            duplicates = {label: count for label, count in label_counts.items() if count > 1}
-            if duplicates:
-                print("Duplicated labels found:")
-                for label, count in duplicates.items():
-                    print(f"{label}: {count} occurrences")
-            else:
-                #print("No duplicated labels found.")
-                pass
-
-        """The below code combines h5ads. Instead of combining counts (see alternative code below)
-        the same cell barcode is referenced twice with a sample-level suffix for the barcode ID. 
-        Combined reads are the union not intersection."""
-        sum_reads_per_cell = False
-
-        if num_samples > 1:
-            if sum_reads_per_cell:
-                # Combine without changing cell names
-                combined = ad.concat(adata_list, axis=0, join='outer', index_unique=None)
-                # Group by cell barcode and sum counts
-                print("Summing counts across identical barcodes...")
-                counts_df = combined.to_df()
-                summed_counts = counts_df.groupby(combined.obs_names).sum()
-                # Create new AnnData with summed counts
-                new_obs = combined.obs.groupby(combined.obs_names).first()
-                new_adata = ad.AnnData(X=csr_matrix(summed_counts.values), obs=new_obs, var=combined.var.loc[summed_counts.columns])
-                print(f"Saving merged and summed AnnData for {uid}")
-                new_adata.write_h5ad(f'{uid}_isoform.h5ad')
-            else:
-                # Combine without the 'keys' parameter to avoid duplicate label issues
-                combined_adata = ad.concat(adata_list, axis=0, join='outer', label="sample")
-                combined_adata.obs_names_make_unique()
-                combined_adata.write_h5ad(f'{uid}_isoform.h5ad')
+        # Annotate the GENCODE/Ensembl reference ONCE (run separately through gff_process), cache the
+        # ENST structures so the collapse can inject reference transcripts in the shared token space.
+        enst_cache = os.path.join(out_dir, 'ENST_reference_structures.tsv')
+        collapse_ref.annotate_reference(reference_gff, ensembl_exon_dir,
+                                        cache_path=enst_cache, force=deleteGFF)
+        nproc = _resolve_isoform_nproc()
+        collapse.run_pipeline(
+            samples, outdir=out_dir, nproc=nproc, min_total=3,
+            write_h5ad=True, genome_fasta=genome_fasta, ref_gff=reference_gff,
+            enst_cache=enst_cache, barcode_clusters=barcode_sample_dict,
+        )
+        # The collapse's stage3 already wrote each "<library>-isoform.h5ad" (keyed on the final clean
+        # isoform set) next to the sample, plus protein_summary.txt / *sequences.fasta from the final
+        # exemplars. The downstream pseudobulk/PSI steps read those per-sample files directly, so no
+        # separate combined-isoform-matrix re-keying is needed here.
+        print("[isoform] cross-sample collapse complete; per-sample -isoform.h5ad written from the "
+              "final clean isoform catalog.")
 
 def get_valid_h5ad(sample_dict, dataType):
     sample_files = []   # list of unique h5ad paths (full paths)
@@ -595,20 +576,16 @@ def export_pseudo_counts(metadata_file,barcode_cluster_dirs,dataType='junction',
         iso.export_and_filter_pseudobulk_chunks(pseudo_ratios, pseudo_ratios[:-4]+'-filtered.txt', cluster_order, min_group_size=min_group_size)
         iso.export_and_filter_pseudobulk_chunks(pseudo_tpm, pseudo_tpm[:-4]+'-filtered.txt', cluster_order, min_group_size=min_group_size)
 
-def pre_process_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_dir):
+def pre_process_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_dir, min_count_filter=True):
     # Perform junction quantification across samples
     sample_dict = import_metadata(metadata_file)
     barcode_sample_dict = iso.import_barcode_clusters(barcode_cluster_dirs)
     export_junction_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict)
     export_pseudo_counts(metadata_file,barcode_cluster_dirs,'junction')
 
-def combine_processed_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_dir, gencode_gff, genome_fasta, min_count_filter = True):
-    sample_dict, min_group_size = import_metadata(metadata_file, return_size = True)
-    barcode_sample_dict = iso.import_barcode_clusters(barcode_cluster_dirs)
-
-    # Perform isoform quantification across samples
-    export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, gencode_gff, genome_fasta)
-    export_pseudo_counts(metadata_file,barcode_cluster_dirs,'isoform',compute_tpm=True)
+    # Splicing (PSI) is derived purely from the junction pseudobulk just produced -- it has NO
+    # dependency on the isoform collapse, so it runs here (step 5) rather than being gated behind the
+    # much slower isoform integration (step 6).
     junction_coords_file = 'junction_combined_pseudo_cluster_counts-filtered.txt'
     outdir = 'psi_combined_pseudo_cluster_counts.txt'
     if min_count_filter:
@@ -616,6 +593,15 @@ def combine_processed_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_
     junction_coords_file = export_sorted(junction_coords_file, 0) ### Sort the expression file
     #psi.main(junction_path=junction_coords_file, query_gene=None, outdir=outdir, use_multiprocessing=False, mp_context=mp_context, num_cores=num_cores)
     run_psi_analysis(junction_coords_file, outdir)
+
+def combine_processed_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_dir, gencode_gff, genome_fasta, min_count_filter = True):
+    sample_dict, min_group_size = import_metadata(metadata_file, return_size = True)
+    barcode_sample_dict = iso.import_barcode_clusters(barcode_cluster_dirs)
+
+    # Perform isoform quantification across samples (cross-sample collapse + per-sample clean
+    # -isoform.h5ad + protein). Splicing/PSI already ran in pre_process_samples (step 5).
+    export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, gencode_gff, genome_fasta)
+    export_pseudo_counts(metadata_file,barcode_cluster_dirs,'isoform',compute_tpm=True)
 
 # Wrap in a function to avoid event loop conflicts
 def run_psi_analysis(junction_path, outdir):

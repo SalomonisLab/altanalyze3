@@ -21,11 +21,11 @@ def _resolve_uid(raw_uid, uid_to_group, data_type):
                 return trimmed
     return raw_uid
 
-def compare_one_cluster_to_many(condition,cluster_order,groups_file,psi_matrix,junction_coords_file,gene_symbol_file,dataType='junction'):
+def compare_one_cluster_to_many(condition,cluster_order,groups_file,psi_matrix,junction_coords_file,gene_symbol_file,dataType='junction',method='mwu'):
     # Restrict by a specific condition (e.g., aged, young)
     print(f'Performing differential {dataType} analysis for every cluster within a single condition...')
     transcript_assoc_file = 'gff-output/transcript_associations.txt'
-    protein_summary_file = 'protein_summary.txt'
+    protein_summary_file = 'gff-output/protein_summary.txt'
     if dataType == 'junction':
         stats_folder = 'dPSI-cluster-events/'
     if dataType == 'isoform':
@@ -57,15 +57,15 @@ def compare_one_cluster_to_many(condition,cluster_order,groups_file,psi_matrix,j
         # Proceed with analysis if both groups have samples
         if not current_cluster_samples.empty and not other_samples.empty:
             print(f"Performing analysis for cluster: {cluster}")
-            run_metadataAnalysis(cluster,psi_matrix,cluster,'Others',filtered_groups_file,stats_folder,filter_condition=condition)
+            run_metadataAnalysis(cluster,psi_matrix,cluster,'Others',filtered_groups_file,stats_folder,filter_condition=condition,method=method)
 
     print ('Annotating the test results by gene, isoform and protein...')
     ji.annotate(gene_symbol_file,transcript_assoc_file,junction_coords_file,protein_summary_file,stats_folder,dataType=dataType)
 
-def compare_two_groups_per_cluster(condition1,condition2,cluster_order,groups_file,psi_matrix,junction_coords_file,gene_symbol_file,dataType='junction'):
+def compare_two_groups_per_cluster(condition1,condition2,cluster_order,groups_file,psi_matrix,junction_coords_file,gene_symbol_file,dataType='junction',method='mwu'):
     print (f'Performing differential {dataType} analysis between two user supplied conditions...')
     transcript_assoc_file = 'gff-output/transcript_associations.txt'
-    protein_summary_file = 'protein_summary.txt'
+    protein_summary_file = 'gff-output/protein_summary.txt'
     if dataType == 'junction':
         stats_folder = 'dPSI-covariate-events/'
     if dataType == 'isoform':
@@ -85,14 +85,14 @@ def compare_two_groups_per_cluster(condition1,condition2,cluster_order,groups_fi
         print(f"[{cluster}] grp counts:", filtered_groups_file["grp"].value_counts().to_dict())
         """
 
-        try: run_metadataAnalysis(cluster,psi_matrix,condition1,condition2,filtered_groups_file,stats_folder)
+        try: run_metadataAnalysis(cluster,psi_matrix,condition1,condition2,filtered_groups_file,stats_folder,method=method)
         except:
             print (f'Statistical analysis failed for {condition1} vs. {condition2} for {cluster}')
             
     print ('Annotating the test results by gene, isoform and protein...')
     ji.annotate(gene_symbol_file,transcript_assoc_file,junction_coords_file,protein_summary_file,stats_folder,dataType=dataType)
 
-def run_metadataAnalysis(cluster,psi_matrix,condition1,condition2,filtered_groups_file,stats_folder,filter_condition=False):
+def run_metadataAnalysis(cluster,psi_matrix,condition1,condition2,filtered_groups_file,stats_folder,filter_condition=False,method='mwu'):
     matching_uids = filtered_groups_file.index.intersection(psi_matrix.columns)
     # Subset the PSI matrix to only include the matching sample columns
     subset_psi_matrix = psi_matrix[matching_uids]
@@ -107,7 +107,12 @@ def run_metadataAnalysis(cluster,psi_matrix,condition1,condition2,filtered_group
     if subset_psi_matrix.shape[1] == 0:
         print(f"[WARN] Skipping {cluster}: no matching PSI columns")
         return
-    diff_stats = ma.mwuCompute(subset_psi_matrix, filtered_groups_file, grpvar='grp', min_group_size=2)
+    # Two interchangeable two-group tests (same stats-file schema): the default Mann-Whitney rank test,
+    # or the limma-like empirical-Bayes moderated t-test used for pseudobulks in cellHarmony-differential.
+    if str(method).lower() == 'limma':
+        diff_stats = ma.limmaCompute(subset_psi_matrix, filtered_groups_file, grpvar='grp', min_group_size=2)
+    else:
+        diff_stats = ma.mwuCompute(subset_psi_matrix, filtered_groups_file, grpvar='grp', min_group_size=2)
 
     if filter_condition == False:
         stats_file = f'{stats_folder}/{condition1}-{condition2}-{cluster}_stats.txt'
@@ -116,7 +121,10 @@ def run_metadataAnalysis(cluster,psi_matrix,condition1,condition2,filtered_group
     os.makedirs(os.path.dirname(stats_file), exist_ok=True)    
     diff_stats.to_csv(stats_file, sep='\t', index=True)
 
-def compute_differentials(sample_dict,conditions,cluster_order,gene_symbol_file,analyses=['junction','isoform','isoform-ratio']):
+def compute_differentials(sample_dict,conditions,cluster_order,gene_symbol_file,analyses=['junction','isoform','isoform-ratio'],method='mwu'):
+    """method: 'mwu' (default, Mann-Whitney rank test) or 'limma' (empirical-Bayes moderated t-test,
+    as used for pseudobulks in cellHarmony-differential). The stats-file schema is identical either
+    way, so all downstream annotation is unchanged."""
     analyzed_intial_conditions = []
     for pair in conditions:
         (condition1,condition2) = pair
@@ -148,8 +156,8 @@ def compute_differentials(sample_dict,conditions,cluster_order,gene_symbol_file,
 
             # Compute Differential Splicing between groups and cell types
             if condition1 not in analyzed_intial_conditions:
-                compare_one_cluster_to_many(condition1,cluster_order,groups_file,psi_matrix,junction_coords_file,gene_symbol_file,dataType='junction')
-            compare_two_groups_per_cluster(condition1,condition2,cluster_order,groups_file,psi_matrix,junction_coords_file,gene_symbol_file,dataType='junction')
+                compare_one_cluster_to_many(condition1,cluster_order,groups_file,psi_matrix,junction_coords_file,gene_symbol_file,dataType='junction',method=method)
+            compare_two_groups_per_cluster(condition1,condition2,cluster_order,groups_file,psi_matrix,junction_coords_file,gene_symbol_file,dataType='junction',method=method)
 
         if 'isoform' in analyses:
             # Compute Differential Isoform abundance between groups and cell types
@@ -162,8 +170,8 @@ def compute_differentials(sample_dict,conditions,cluster_order,gene_symbol_file,
                 'uid': isoform_matrix.columns
             }).set_index('uid')
             if condition1 not in analyzed_intial_conditions:
-                compare_one_cluster_to_many(condition1,cluster_order,groups_file,log2_iso_matrix,None,gene_symbol_file,dataType='isoform')
-            compare_two_groups_per_cluster(condition1,condition2,cluster_order,groups_file,log2_iso_matrix,None,gene_symbol_file,dataType='isoform')
+                compare_one_cluster_to_many(condition1,cluster_order,groups_file,log2_iso_matrix,None,gene_symbol_file,dataType='isoform',method=method)
+            compare_two_groups_per_cluster(condition1,condition2,cluster_order,groups_file,log2_iso_matrix,None,gene_symbol_file,dataType='isoform',method=method)
 
         if 'isoform-ratio' in analyses:
             isoform_dir = 'isoform_combined_pseudo_cluster_ratio-filtered.txt'
@@ -174,6 +182,6 @@ def compute_differentials(sample_dict,conditions,cluster_order,gene_symbol_file,
                 'uid': isoform_matrix.columns
             }).set_index('uid')
             if condition1 not in analyzed_intial_conditions:
-                compare_one_cluster_to_many(condition1,cluster_order,groups_file,isoform_matrix,None,gene_symbol_file,dataType='isoform-ratio')
-            compare_two_groups_per_cluster(condition1,condition2,cluster_order,groups_file,isoform_matrix,None,gene_symbol_file,dataType='isoform-ratio')
+                compare_one_cluster_to_many(condition1,cluster_order,groups_file,isoform_matrix,None,gene_symbol_file,dataType='isoform-ratio',method=method)
+            compare_two_groups_per_cluster(condition1,condition2,cluster_order,groups_file,isoform_matrix,None,gene_symbol_file,dataType='isoform-ratio',method=method)
             analyzed_intial_conditions.append(condition1)
