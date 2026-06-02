@@ -203,4 +203,90 @@ def mwuCompute(dataf, grpdf, *args, grpvar='grp' ,min_group_size=6 ):
 
     return( result)
 
+
+def limmaCompute(dataf, grpdf, *args, grpvar='grp', min_group_size=2, shrink_factor=0.2):
+    """limma-like moderated two-group test -- a drop-in alternative to mwuCompute.
+
+    Same I/O contract as mwuCompute (so downstream annotation/filtering is unchanged):
+      dataf : features (index) x samples (columns) matrix; NaN allowed.
+      grpdf : sample (index) -> group (column ``grpvar``); exactly two groups.
+    Returns the SAME column schema as mwuCompute -- group Ns, medians, means,
+    DiffMeans, and ``mwuStat`` / ``mwuSign`` / ``mwuPval`` / ``mwuAdjPval`` -- but the statistic and
+    p-value come from the empirical-Bayes MODERATED t-test used in cellHarmony-differential for
+    pseudobulks (``cellHarmony_differential._moderated_t_test``): pooled variance shrunk toward its
+    median (eBayes), moderated t, t-distribution p-values, BH-FDR over tested events. ``mwuStat`` then
+    holds the moderated t-statistic; ``mwuSign`` = sign of (group1 mean - group2 mean).
+
+    This makes the parametric pseudobulk test selectable wherever the MWU rank test was used, with no
+    change to the consumers of the stats file.
+    """
+    import pandas as pd
+    import numpy as np
+    import scipy.stats as scs
+    import statsmodels.stats.multitest as smm
+
+    groups = dataf.T.groupby(grpdf[grpvar])
+    grpLevels = sorted(grpdf[grpvar].value_counts().index.tolist())
+    if len(grpLevels) < 2:
+        raise ValueError(f"limmaCompute needs exactly two groups; got {grpLevels}")
+    g1Level, g2Level = grpLevels[0], grpLevels[1]
+    g1 = groups.get_group(g1Level)   # samples x features
+    g2 = groups.get_group(g2Level)
+
+    diffGrpMeans = g1.mean() - g2.mean()
+    result = pd.DataFrame(
+        {
+            ('N_' + str(g1Level)): g1.count(),
+            ('N_' + str(g2Level)): g2.count(),
+            ('Median_' + str(g1Level)): g1.median(),
+            ('Median_' + str(g2Level)): g2.median(),
+            ('Mean_' + str(g1Level)): g1.mean(),
+            ('Mean_' + str(g2Level)): g2.mean(),
+            ('DiffMeans_' + str(g1Level) + '_m_' + str(g2Level)): diffGrpMeans,
+            'mwuStat': np.nan, 'mwuSign': np.nan, 'mwuPval': np.nan, 'mwuAdjPval': np.nan,
+        },
+        index=dataf.index)
+
+    # events with enough non-missing samples in BOTH groups
+    eventsToRun = ((g1.count() >= min_group_size) & (g2.count() >= min_group_size)).values
+    if eventsToRun.sum() == 0:
+        print(f"limma moderated t-test not conducted: no events meet min group size {min_group_size}.")
+        return result
+
+    X1 = g1.to_numpy(dtype=float)   # samples1 x features
+    X2 = g2.to_numpy(dtype=float)   # samples2 x features
+    n1 = np.sum(~np.isnan(X1), axis=0).astype(float)
+    n2 = np.sum(~np.isnan(X2), axis=0).astype(float)
+    mean1 = np.nanmean(X1, axis=0)
+    mean2 = np.nanmean(X2, axis=0)
+    # ddof=1 variance, NaN-aware
+    var1 = np.nanvar(X1, axis=0, ddof=1)
+    var2 = np.nanvar(X2, axis=0, ddof=1)
+    s2 = (var1 + var2) / 2.0
+
+    # empirical Bayes shrinkage of the variance toward its median (limma-like)
+    s2_prior = np.nanmedian(s2[eventsToRun])
+    s2_shrunk = (1 - shrink_factor) * s2 + shrink_factor * s2_prior
+    with np.errstate(invalid='ignore', divide='ignore'):
+        se = np.sqrt(s2_shrunk / np.maximum(n1, 1) + s2_shrunk / np.maximum(n2, 1))
+    se = np.maximum(se, 1e-12)
+    diff = mean1 - mean2
+    with np.errstate(invalid='ignore', divide='ignore'):
+        tvals = diff / se
+    df = np.maximum(n1 + n2 - 2, 1)
+    pvals = 2 * scs.t.sf(np.abs(tvals), df=df)
+
+    run = eventsToRun & np.isfinite(pvals)
+    result.loc[run, 'mwuStat'] = tvals[run]            # moderated t-statistic
+    result.loc[run, 'mwuPval'] = pvals[run]
+    result['mwuSign'] = np.select([diff < 0, diff == 0, diff > 0], [-1, 0, 1], default=np.nan)
+
+    # BH-FDR over the tested events only
+    eventsForFDR = run & (~np.isnan(result['mwuPval'].to_numpy()))
+    if eventsForFDR.sum() > 0:
+        fdr = smm.fdrcorrection(result.loc[eventsForFDR, 'mwuPval'].to_numpy(),
+                                method='indep', is_sorted=False)[1]
+        result.loc[eventsForFDR, 'mwuAdjPval'] = fdr
+    return result
+
 #  End of file

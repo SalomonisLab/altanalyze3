@@ -4850,6 +4850,11 @@ def plot_isoform_structures(isoforms, transcript_structures, exon_lookup, gene_m
     # Scale figure height to the total stack height for consistent spacing.
     fig_height = max(1.5, total_height * 0.35)
     fig_width = max(10.0, total_width / 3000.0)
+    # Clamp height so savefig(bbox_inches='tight') never exceeds the AGG renderer's
+    # 65500-px ceiling (height_in * dpi). dpi is 300 at save time; leave margin for padding.
+    _MAX_FIG_HEIGHT_IN = 65000.0 / 300.0
+    if fig_height > _MAX_FIG_HEIGHT_IN:
+        fig_height = _MAX_FIG_HEIGHT_IN
     t_render = time.time()
     if ax is None:
         fig, ax = plt.subplots(figsize=(fig_width, fig_height))
@@ -5404,14 +5409,18 @@ def main():
                     os.path.join(out_dir, f"{basename}_{gene}_isoform_structures.pdf"),
                     bool(isoform_filter_clauses),
                 )
-            if os.path.isdir(input_path) or input_path.endswith('.mtx') or input_path.endswith('.mtx.gz'):
+            # Per-sample output: derive a basename-prefixed filename whenever there are
+            # multiple input samples (or dir/mtx inputs), so each sample writes its own PDF
+            # instead of every sample overwriting a single --out path.
+            if (len(args.h5ad) > 1 or os.path.isdir(input_path)
+                    or input_path.endswith('.mtx') or input_path.endswith('.mtx.gz')):
                 out_dir = args.out
                 if args.out.endswith('.pdf'):
                     out_dir = os.path.dirname(args.out) or "."
                 os.makedirs(out_dir, exist_ok=True)
                 basename = _infer_basename(input_path)
                 return _append_custom_suffix(
-                    os.path.join(out_dir, f"{basename}_isoform_structures.pdf"),
+                    os.path.join(out_dir, f"{basename}_{gene}_isoform_structures.pdf"),
                     bool(isoform_filter_clauses),
                 )
             return _append_custom_suffix(args.out, bool(isoform_filter_clauses))
@@ -5673,8 +5682,7 @@ def main():
                         filter_junction_bias=args.filter_junction_bias,
                         filter_profile_hard_split=args.filter_profile_hard_split,
                         subsequence_anchor_hard_fail=args.subsequence_anchor_hard_fail,
-                        subsequence_middle_gate=args.subsequence_middle_gate,
-                        max_isoforms_tie_seed=args.max_isoforms_tie_seed
+                        subsequence_middle_gate=args.subsequence_middle_gate
                     )
                     if args.cluster_isoforms:
                         isoform_colors = assign_cluster_colors(grouped_structures, plt.get_cmap(DEFAULT_COLORMAP).colors)

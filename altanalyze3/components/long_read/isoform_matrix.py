@@ -163,7 +163,13 @@ def mtx_to_adata(int_folder, gene_is_index, feature, feature_col, barcode, barco
 
 
 def h5ad_to_adata(h5ad_path, rev=False):
-    """Import isoform h5ad files and match mtx_to_adata conventions."""
+    """Import isoform h5ad files and match mtx_to_adata conventions.
+
+    Cell barcodes carry the standard ``-1`` lane suffix (added at BAM extraction by
+    ``resolve_barcode``; see isoform_structure_extract.py). ``ensure_barcode_suffix`` keeps that
+    convention for any input that lacks it, so barcodes stay consistent with the cellHarmony /
+    external annotations and the reverse-complement path.
+    """
     adata = read_h5ad(h5ad_path)
     def ensure_barcode_suffix(barcode):
         return barcode if '-' in barcode else f"{barcode}-1"
@@ -229,14 +235,31 @@ def append_sample_name(adata, sample_name):
     adata.obs_names = adata.obs_names.astype(str) + "_" + sample_name
     return adata
 
+def _read_barcode_cluster_file(path, col_names):
+    """Read a barcode->cluster TSV, using ONLY the first two columns.
+
+    Tolerates files with extra trailing columns (e.g. an alignment score in column 3, as written by
+    cellHarmony-lite's ``cellHarmony_lite_assignments.txt``) and an optional header row. The first
+    two columns are interpreted as (barcode-or-barcode.sample, cluster); anything after is ignored.
+    """
+    df = pd.read_csv(path, sep='\t', header=None, dtype=str)
+    df = df.iloc[:, :2]
+    df.columns = col_names
+    # Drop a header row if the file carries one (e.g. "CellBarcode<tab>...").
+    first = str(df.iloc[0, 0]) if len(df) else ''
+    if first.lower() in ('cellbarcode', 'barcode', 'barcode_cluster'):
+        df = df.iloc[1:].reset_index(drop=True)
+    return df
+
+
 def import_barcode_clusters(barcode_cluster_dir):
     """Import cell barcode to cluster associations and extract/key by sample name."""
     if not isinstance(barcode_cluster_dir, list):
         barcode_cluster_dir = [barcode_cluster_dir]
     barcode_sample_dict_final = defaultdict(list)
-    
+
     for dir in barcode_cluster_dir:
-        df = pd.read_csv(dir, sep='\t', header=None, names=['barcode_cluster', 'cluster'])
+        df = _read_barcode_cluster_file(dir, ['barcode_cluster', 'cluster'])
         df[['barcode', 'sample_name']] = df['barcode_cluster'].str.split('.', expand=True)
         for sample, group in df.groupby('sample_name'):
             barcode_sample_dict_final[sample] = group.set_index('barcode')['cluster']
@@ -254,7 +277,7 @@ def return_cluster_order(barcode_cluster_dir):
     barcode_sample_dict_final = defaultdict(list)
 
     for file_path in barcode_cluster_dir:
-        df = pd.read_csv(file_path, sep='\t', header=None, names=['barcode', 'cluster'])
+        df = _read_barcode_cluster_file(file_path, ['barcode', 'cluster'])
         unique_clusters = []
         for cluster in df['cluster']:
             if cluster not in unique_clusters:
