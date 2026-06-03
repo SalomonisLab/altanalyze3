@@ -24,7 +24,14 @@ import time
 from ..isoform_collapse_utils import structure_tokens_for_containment
 from .scored_collapse import collapse_gene, collapse_gene_em
 
-DEFAULT_REF = '/Users/saljh8/Documents/GitHub/altanalyze/AltDatabase/EnsMart100/ensembl/Hs/Hs_Ensembl_exon.txt'
+# Default gene->chrom reference = the gzipped exon annotation BUNDLED in the program directory
+# (components/long_read/resources/), resolved relative to this package so it works on any machine
+# without an external --exon_annot. load_gene_chrom() opens it gz-aware. Human default; pass
+# --exon_annot for mouse/custom. (Was a hardcoded developer macOS path that existed nowhere else.)
+DEFAULT_REF = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),  # components/long_read/
+    "resources", "Hs_Ensembl_exon.txt.gz",
+)
 
 
 def _self_peak_mb():
@@ -32,8 +39,20 @@ def _self_peak_mb():
 
 
 def load_gene_chrom(ref):
+    # ``ref`` is the Ensembl exon annotation (gene->chrom). Callers should pass the resolved
+    # --exon_annot path; only fall back to DEFAULT_REF if nothing was supplied. Fail loudly with a
+    # clear, actionable message rather than a bare FileNotFoundError deep in the collapse.
+    ref = str(ref) if ref else DEFAULT_REF
+    if not os.path.exists(ref):
+        raise FileNotFoundError(
+            f"Exon annotation (gene->chrom reference) not found: {ref}. Pass a valid --exon_annot "
+            f"(e.g. Hs_Ensembl_exon.txt), or ensure the bundled "
+            f"components/long_read/resources/Hs_Ensembl_exon.txt.gz ships with the package."
+        )
+    import gzip
+    opener = (lambda p: gzip.open(p, 'rt')) if ref.endswith('.gz') else open
     gc = {}
-    with open(ref) as f:
+    with opener(ref) as f:
         next(f)
         for line in f:
             t = line.rstrip("\n").split("\t")
@@ -463,6 +482,12 @@ def stage3_rekey_h5ad(sample, h5ad_path, ta_path, kept_struct2exemplar, outdir,
     import scipy.sparse as sp
     import anndata as ad
     import pandas as pd
+    # Coerce path-like args to str: callers may pass pathlib.Path (e.g. argparse-resolved or
+    # extraction-returned), but the string ops below (ta_path.endswith, basename().split('.h5ad'))
+    # require plain strings.
+    h5ad_path = str(h5ad_path); ta_path = str(ta_path)
+    if outdir is not None:
+        outdir = str(outdir)
     t = time.time()
     # (gene,structure) -> "gene:exemplar". Final isoform ids are gene-namespaced so the output is
     # directly consumable by pseudo_cluster_counts / compute_differentials (var.split(":")[0] = gene).
@@ -586,6 +611,23 @@ def run_pipeline(samples, outdir, nproc=8, min_total=3, ref=DEFAULT_REF, write_h
                 o.write(f"{g}\t{struct}\t{ex}\n")
     log(f"[stage2] wrote {catpath} and {mappath}")
 
+    # Persist the EM soft-weight map so a SEPARATE per-sample re-key job (4-phase cluster mode) can
+    # reproduce the fractional EM allocation -- otherwise these weights live only in this process and
+    # are lost when the collapse job ends, leaving EM impossible to re-key downstream. WTA needs only
+    # FINAL_structure_to_exemplar.tsv (already written); EM additionally needs this. Mirrors the
+    # in-memory kept_soft structure exactly: gene -> {child_structure: {parent_structure: weight}}.
+    # Empty for WTA (no soft map) -- the file is still written (header only) so its presence/absence is
+    # unambiguous and the loader is uniform.
+    softpath = os.path.join(outdir, "FINAL_structure_to_exemplar_soft.tsv")
+    with open(softpath, 'w') as o:
+        o.write("gene\tchild_structure\tparent_structure\tweight\n")
+        for g, gm in (kept_soft or {}).items():
+            for child_struct, pw in gm.items():
+                for parent_struct, w in pw.items():
+                    o.write(f"{g}\t{child_struct}\t{parent_struct}\t{w:.10g}\n")
+    if kept_soft:
+        log(f"[stage2] wrote EM soft map {softpath} ({sum(len(v) for v in kept_soft.values()):,} child structures)")
+
     # PROTEIN PREDICTION: combined.gff for final isoforms -> existing gff_translate -> protein_summary.txt
     protein = None
     if genome_fasta and sample_gff_paths:
@@ -629,3 +671,78 @@ def run_pipeline(samples, outdir, nproc=8, min_total=3, ref=DEFAULT_REF, write_h
                 f"(remainder = <{min_total}-read outliers + unannotated cells)")
     return dict(gene_results=gene_results, catalog=catalog, kept=kept, protein=protein,
                 stage1=(t1, max_rss, nparts), h5ad=h5ad_results)
+
+
+# ---------------------------------------------------------------------------
+# 4-PHASE CLUSTER SUPPORT: build the catalog once (P3), then re-key each sample
+# in a SEPARATE job (P4) by loading the persisted maps from disk. This is the
+# memory-efficient split -- nothing from the collapse process needs to stay
+# resident; the structure->final-id map (WTA) and the EM soft-weight map are
+# read back from the two FINAL_structure_to_exemplar*.tsv files.
+# ---------------------------------------------------------------------------
+
+def load_struct2exemplar(outdir):
+    """Load FINAL_structure_to_exemplar.tsv -> kept {gene: {structure: final_id}} (the WTA map)."""
+    path = os.path.join(outdir, "FINAL_structure_to_exemplar.tsv")
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Collapse catalog map missing: {path}. Run the collapse (P3) first.")
+    kept = {}
+    with open(path) as f:
+        next(f, None)  # header
+        for line in f:
+            p = line.rstrip("\n").split("\t")
+            if len(p) < 3:
+                continue
+            kept.setdefault(p[0], {})[p[1]] = p[2]
+    return kept
+
+
+def load_struct2exemplar_soft(outdir):
+    """Load FINAL_structure_to_exemplar_soft.tsv -> kept_soft
+    {gene: {child_structure: {parent_structure: weight}}}. Returns None if the file is absent or has
+    no rows (i.e. a WTA collapse), so callers fall back to the hard WTA map automatically."""
+    path = os.path.join(outdir, "FINAL_structure_to_exemplar_soft.tsv")
+    if not os.path.exists(path):
+        return None
+    kept_soft = {}
+    with open(path) as f:
+        next(f, None)  # header
+        for line in f:
+            p = line.rstrip("\n").split("\t")
+            if len(p) < 4:
+                continue
+            g, child, parent, w = p[0], p[1], p[2], p[3]
+            kept_soft.setdefault(g, {}).setdefault(child, {})[parent] = float(w)
+    return kept_soft or None
+
+
+def rekey_one_sample(name, h5ad_path, ta_path, outdir, barcode_clusters=None,
+                     collapse_method='wta', write_dir=None, log=print):
+    """P4 per-sample entry: re-key ONE sample's molecule h5ad onto the final catalog, loading the
+    structure->final-id map (and EM soft weights) from disk -- no dependency on the collapse process's
+    memory. Writes <h5ad_path stem>-isoform.h5ad next to the sample (stage3's default).
+
+    collapse_method: 'wta' uses only the hard map; 'em' additionally loads the persisted soft weights
+    and splits each molecule fractionally (identical to the in-process EM re-key). If 'em' is asked
+    but no soft map exists on disk, it falls back to WTA (and warns) rather than failing."""
+    outdir = str(outdir); h5ad_path = str(h5ad_path); ta_path = str(ta_path)
+    if write_dir is not None:
+        write_dir = str(write_dir)
+    kept = load_struct2exemplar(outdir)
+    kept_soft = None
+    if collapse_method == 'em':
+        kept_soft = load_struct2exemplar_soft(outdir)
+        if kept_soft is None:
+            log(f"[rekey:{name}] WARNING: --collapse_method em but no EM soft map on disk "
+                f"({outdir}/FINAL_structure_to_exemplar_soft.tsv); falling back to WTA re-key.")
+    r = stage3_rekey_h5ad(name, h5ad_path, ta_path, kept, outdir=write_dir,
+                          barcode_clusters=barcode_clusters, kept_soft=kept_soft)
+    raw_reads, final_reads = r[2], r[3]
+    kept_frac = final_reads / raw_reads if raw_reads else 0.0
+    log(f"[rekey:{name}] -> {r[1]:,} final isoforms, reads {raw_reads:,}->{final_reads:,} "
+        f"({100*kept_frac:.0f}%), {r[5]:.1f}s peakRSS={r[4]:.0f}MB")
+    if final_reads > raw_reads:
+        log(f"[rekey:{name}] *** VALIDATION FAIL: final reads ({final_reads:,}) exceed raw ({raw_reads:,}).")
+    elif raw_reads > 0 and kept_frac < 0.5:
+        log(f"[rekey:{name}] *** VALIDATION WARNING: only {100*kept_frac:.1f}% of reads mapped.")
+    return (name,) + r

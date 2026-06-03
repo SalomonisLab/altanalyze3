@@ -8,10 +8,23 @@ import pkg_resources
 
 def get_version():
     """
-    Returns current version of the package if it's installed
+    Returns current version of the package if it's installed.
+
+    Must NOT hard-fail on dependency mismatches. ``pkg_resources.require()`` resolves and enforces
+    EVERY pinned dependency in the package metadata, so a single version skew (e.g. an installed
+    tqdm newer than the pinned ``tqdm==4.62.3``) raises ``VersionConflict`` and crashes the whole CLI
+    at startup -- even though the version string itself is trivially available. Look up just the
+    distribution version, and fall back gracefully if anything goes wrong.
     """
-    pkg = pkg_resources.require("altanalyze3")
-    return pkg[0].version if pkg else "unknown version"
+    try:
+        return pkg_resources.get_distribution("altanalyze3").version
+    except Exception:
+        try:
+            # Last resort: importlib.metadata (py3.8+), independent of pkg_resources.
+            from importlib.metadata import version as _il_version
+            return _il_version("altanalyze3")
+        except Exception:
+            return "unknown version"
 
 
 def get_tmp_suffix(length=None):

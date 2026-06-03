@@ -236,12 +236,29 @@ def run_sclr(args):
     else:
         logging.info("sclr: no cluster labeling requested (supply at integration time).")
 
+    # Step 3 (P1): per-sample junction quantification + junction pseudobulk + Tier-1 collapse inputs.
+    # Everything here is per-sample (no other sample needed), so it belongs in this parallel job --
+    # the combine (P2) then only concatenates. Needs this sample's barcode->cluster labels.
+    barcode_cluster_dirs = _discover_barcode_cluster_dirs(args.metadata, getattr(args, "cell_annot", None))
+    import altanalyze3.components.long_read.isoform_matrix as iso
+    barcode_sample_dict = iso.import_barcode_clusters(barcode_cluster_dirs)
+    for uid, libs in sample_dict.items():
+        isoa.export_sample_junctions(libs, exon_annot, barcode_sample_dict, uid=uid)
+    logging.info("sclr: per-sample junction h5ad + pseudobulk written.")
+
     logging.info("sclr: phase-1 complete for %s",
                  args.sample if getattr(args, "sample", None) else "all samples")
 
 
 def run_sclr_junctions(args):
-    """Phase 2: cluster order + junction aggregation + PSI + differential splicing."""
+    """Phase 2 (one job, cross-sample): combine the per-sample junction pseudobulks built in P1 ->
+    filter -> PSI. No per-sample work (that was P1).
+
+    NOTE: splice DIFFERENTIALS are NOT run here. Their annotation step
+    (junction_isoform.annotate) loads gff-output/protein_summary.txt + transcript_associations.txt,
+    which are produced by P3 (sclr-isoforms, the translation/collapse job). P2 only depends on P1, so
+    protein_summary.txt does not exist yet when P2 runs. Splice + isoform differentials therefore both
+    run in the post-P3 combine job (sclr-diff)."""
     import altanalyze3.components.long_read.isoform_automate as isoa
     import altanalyze3.components.long_read.isoform_matrix as iso
 
@@ -254,12 +271,14 @@ def run_sclr_junctions(args):
 
     barcode_cluster_dirs = _discover_barcode_cluster_dirs(args.metadata, getattr(args, "cell_annot", None))
     iso.return_cluster_order(barcode_cluster_dirs)  # validates/orders clusters across samples
-    isoa.pre_process_samples(str(args.metadata), barcode_cluster_dirs, exon_annot)
-    logging.info("sclr-junctions: junction aggregation + PSI complete.")
+    isoa.combine_junctions(str(args.metadata), barcode_cluster_dirs, exon_annot)
+    logging.info("sclr-junctions: junction combine + PSI complete (differentials run in sclr-diff, post-P3).")
 
 
 def run_sclr_isoforms(args):
-    """Phase 3: two-tier isoform collapse + per-sample isoform h5ads + protein."""
+    """Phase 3 (one job, cross-sample): isoform COLLAPSE catalog + translation/FASTA only. The heavy
+    per-sample re-key is P4 (sclr-isoquant). Persists the catalog + structure->exemplar (+EM soft)
+    maps so P4 can re-key from disk."""
     import altanalyze3.components.long_read.isoform_automate as isoa
 
     species = args.species
@@ -269,20 +288,68 @@ def run_sclr_isoforms(args):
     sample_dict = isoa.import_metadata(str(args.metadata), include_hashed_samples=True)
     _assert_phase1_complete(sample_dict)
 
-    barcode_cluster_dirs = _discover_barcode_cluster_dirs(args.metadata, getattr(args, "cell_annot", None))
     collapse_method = getattr(args, "collapse_method", "wta")
-    # Running sclr-isoforms always (re)builds the collapse: added/removed samples or a different
-    # collapse method (WTA vs EM) must regenerate the catalog rather than reuse a stale one.
-    isoa.combine_processed_samples(
-        str(args.metadata), barcode_cluster_dirs, exon_annot,
-        str(args.ref_gff), str(args.genome_fasta),
+    isoa.build_isoform_catalog(
+        str(args.metadata), exon_annot, str(args.ref_gff), str(args.genome_fasta),
         collapse_method=collapse_method, force_recollapse=True,
     )
-    logging.info("sclr-isoforms: isoform collapse (%s) + h5ads complete.", collapse_method)
+    logging.info("sclr-isoforms: collapse catalog (%s) + translation/FASTA complete (re-key is P4).",
+                 collapse_method)
+
+
+def run_sclr_isoquant(args):
+    """Phase 4 (per sample, parallel): re-key each sample's molecules onto the P3 catalog + build the
+    per-sample isoform pseudobulk. Loads the catalog maps from disk (no dependency on P3 memory).
+    With --sample, processes one uid; without, loops all. The final isoform-differential combine is a
+    separate one-job call (sclr-diff)."""
+    import altanalyze3.components.long_read.isoform_automate as isoa
+    import altanalyze3.components.long_read.isoform_matrix as iso
+
+    species = args.species
+    work_dir = _cellharmony_outdir(args.metadata)
+    gff_output_dir = os.path.join(os.path.dirname(os.path.abspath(str(args.metadata))) or os.getcwd(),
+                                  "gff-output")
+    if not os.path.exists(os.path.join(gff_output_dir, "FINAL_structure_to_exemplar.tsv")):
+        raise FileNotFoundError(
+            f"Collapse catalog not found in {gff_output_dir}. Run `altanalyze3 sclr-isoforms` (P3) first."
+        )
+
+    sample_dict = isoa.import_metadata(str(args.metadata), include_hashed_samples=True)
+    if getattr(args, "sample", None):
+        sample_dict = _subset_metadata_to_sample(sample_dict, args.sample)
+
+    barcode_cluster_dirs = _discover_barcode_cluster_dirs(args.metadata, getattr(args, "cell_annot", None))
+    barcode_sample_dict = iso.import_barcode_clusters(barcode_cluster_dirs)
+    collapse_method = getattr(args, "collapse_method", "wta")
+    for uid, libs in sample_dict.items():
+        isoa.export_sample_isoform(libs, gff_output_dir, barcode_sample_dict, uid=uid,
+                                   collapse_method=collapse_method, compute_tpm=True)
+    logging.info("sclr-isoquant: per-sample isoform re-key + pseudobulk (%s) complete for %s.",
+                 collapse_method, args.sample if getattr(args, "sample", None) else "all samples")
+
+
+def _parse_conditions(value):
+    """Parse '--conditions groupA,groupB' (semicolon-separate multiple) -> [(a,b), ...]. None/'' -> []."""
+    conditions = []
+    if not value:
+        return conditions
+    for pair in str(value).split(";"):
+        a, _, b = pair.partition(",")
+        if a and b:
+            conditions.append((a.strip(), b.strip()))
+    return conditions
 
 
 def run_sclr_diff(args):
-    """Phase 4: differential isoform / junction analysis between the metadata's groups."""
+    """Phase 4 combine (post-P3): run differential analysis. Pass --analyses junction, isoform, or
+    both (default). For isoform analyses it first concatenates the per-sample isoform pseudobulks
+    (built by sclr-isoquant) into the combined isoform matrix; the junction (splice) analysis reuses
+    the PSI matrix produced in P2.
+
+    All differentials run HERE (P4, post-P3) rather than in P2 because their annotation
+    (junction_isoform.annotate) requires gff-output/protein_summary.txt + transcript_associations.txt,
+    which are P3 (sclr-isoforms) products. P2 is gated only on P1, so those files don't exist yet when
+    P2 runs."""
     import altanalyze3.components.long_read.isoform_automate as isoa
     import altanalyze3.components.long_read.isoform_matrix as iso
     import altanalyze3.components.long_read.comparisons as comp
@@ -295,18 +362,30 @@ def run_sclr_diff(args):
     barcode_cluster_dirs = _discover_barcode_cluster_dirs(args.metadata, getattr(args, "cell_annot", None))
     cluster_order = iso.return_cluster_order(barcode_cluster_dirs)
 
-    # conditions: "groupA,groupB" pairs (semicolon-separated) matching the metadata 'groups' column.
-    conditions = []
-    for pair in str(args.conditions).split(";"):
-        a, _, b = pair.partition(",")
-        if a and b:
-            conditions.append((a.strip(), b.strip()))
+    conditions = _parse_conditions(getattr(args, "conditions", None))
     if not conditions:
         raise ValueError("--conditions must be like 'young,AML-NPM1' (semicolon-separate multiple).")
+    analyses = [a.strip() for a in str(getattr(args, "analyses", "junction,isoform")).split(",") if a.strip()]
+    if not analyses:
+        raise ValueError("--analyses must include at least one of: junction, isoform, isoform-ratio.")
+    wants_isoform = any(a.startswith('isoform') for a in analyses)
 
-    analyses = [a.strip() for a in str(args.analyses).split(",") if a.strip()]
+    # Guard: differential annotation needs P3 outputs. Fail loudly with a clear message rather than
+    # the cryptic FileNotFoundError on 'gff-output/protein_summary.txt' deep in annotate().
+    protein_summary = os.path.join('gff-output', 'protein_summary.txt')
+    if not os.path.exists(protein_summary):
+        raise FileNotFoundError(
+            f"{protein_summary} not found -- run `altanalyze3 sclr-isoforms` (P3, translation) before "
+            f"sclr-diff. Differential annotation depends on the P3 protein summary."
+        )
+
+    # Combine the per-sample isoform pseudobulks (built per-sample in P4 sclr-isoquant) -- only when an
+    # isoform analysis is requested. Junction-only diffs reuse the P2 PSI matrix and need no combine.
+    if wants_isoform:
+        isoa.combine_isoforms(str(args.metadata), barcode_cluster_dirs)
+
     comp.compute_differentials(
         sample_dict, conditions, cluster_order, gene_symbol,
-        analyses=analyses, method=args.method,
+        analyses=analyses, method=getattr(args, "method", "mwu"),
     )
-    logging.info("sclr-diff: differentials complete for %s", conditions)
+    logging.info("sclr-diff: %s differentials complete for %s", analyses, conditions)

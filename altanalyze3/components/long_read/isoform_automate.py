@@ -197,6 +197,8 @@ def import_metadata(metadata_file, return_size = False, include_hashed_samples =
                 from ..bam import isoform_structure_extract as bam_extract
                 print(f"Extracting isoform reads from bam:\n {bam_path}") 
                 gff_path, matrix_path, stats, n, o = bam_extract.parallel_extract_isoform_structures(bam_path, reference_model, output_dir, barcode_tags=['CB'])
+                # Extraction returns pathlib.Path; downstream string ops (gff.split) need str.
+                gff_path = str(gff_path); matrix_path = str(matrix_path)
                 del stats, n, o
                 _trim_memory()
             else:
@@ -287,6 +289,9 @@ def export_junction_matrix(matrix, gff, library, reverse, ensembl_exon_dir, barc
 
     print(f"Pre-extract status: {_format_rss_status()}")
 
+    # Coerce paths to str: callers may pass pathlib.Path (e.g. argparse-resolved args), but the
+    # downstream string ops (gff.split('.g'), matrix_dir_to_adata) require plain strings.
+    gff = str(gff); matrix = str(matrix); ensembl_exon_dir = str(ensembl_exon_dir)
     regenerate_junction_h5ad = False
     h5ad_output_path = Path(f"{gff.split('.g')[0]}-junction.h5ad")
     if h5ad_output_path.exists() and regenerate_junction_h5ad == False:
@@ -339,7 +344,7 @@ def export_junction_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict):
         _trim_memory()
 
 def export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, reference_gff, genome_fasta,
-                        deleteGFF=False, collapse_method='wta', force_recollapse=False):
+                        deleteGFF=False, collapse_method='wta', force_recollapse=False, write_h5ad=True):
     """Cross-sample isoform consolidation + per-sample isoform h5ad + protein prediction.
 
     Uses the memory/compute-optimized ``isoform_collapse`` pipeline instead of the legacy combined
@@ -381,9 +386,16 @@ def export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, refe
         collapse_ref.annotate_reference(reference_gff, ensembl_exon_dir,
                                         cache_path=enst_cache, force=deleteGFF)
         nproc = _resolve_isoform_nproc()
+        # write_h5ad=False (4-phase P3) builds the catalog + protein/FASTA only and SKIPS the heavy
+        # per-sample stage3 re-key -- that is fanned out to P4 (export_sample_isoform) which reloads
+        # the persisted maps. write_h5ad=True (single-process) does everything in one pass.
         collapse.run_pipeline(
             samples, outdir=out_dir, nproc=nproc, min_total=3,
-            write_h5ad=True, genome_fasta=genome_fasta, ref_gff=reference_gff,
+            # Use the exon annotation passed in (cluster: --exon_annot) as the collapse gene->chrom
+            # reference. Without this, run_pipeline falls back to its hardcoded DEFAULT_REF (a local
+            # macOS path) and load_gene_chrom() FileNotFoundErrors anywhere else.
+            ref=str(ensembl_exon_dir),
+            write_h5ad=write_h5ad, genome_fasta=genome_fasta, ref_gff=reference_gff,
             enst_cache=enst_cache, barcode_clusters=barcode_sample_dict,
             collapse_method=collapse_method,
         )
@@ -560,27 +572,124 @@ def deconvolute_libraries_by_hashed_index(sample_dict,sample_h5ads,dataType):
     """
     return update_sample_files
 
-def export_pseudo_counts(metadata_file,barcode_cluster_dirs,dataType='junction',compute_tpm=False):
+def export_pseudo_counts(metadata_file,barcode_cluster_dirs,dataType='junction',compute_tpm=False,only_import_existing=False,fused_filter=None):
+    # only_import_existing=True: per-sample pseudobulks already built (4-phase cluster mode); this call
+    # only concatenates + filters across samples. Default False = single-process path (build inline).
+    #
+    # fused_filter: write the '-filtered.txt' counts DIRECTLY from the in-memory combined memmap and
+    # SKIP materializing the dense unfiltered '<dataType>_combined_pseudo_cluster_counts.txt' (the
+    # multi-GB / cluster-121GB throwaway that nothing reads except the old filter pass) AND skip the
+    # subsequent full pd.read_csv re-read. Filtered output is byte-identical. Default: ON for the
+    # junction path (the 121GB bottleneck), OFF for isoform (which filters counts/tpm/ratio with
+    # independent masks -- left on the legacy two-step path for now). The TPM/ratio filtered files for
+    # isoform are still produced by the legacy chunked filter below, so PSI/diff inputs are unchanged.
     sample_dict, min_group_size = import_metadata(metadata_file, return_size = True, include_hashed_samples = True)
     cluster_order = iso.return_cluster_order(barcode_cluster_dirs)
+    if fused_filter is None:
+        fused_filter = (dataType == 'junction')
     # Memory efficient combine and pseudobulk of many h5ad files
     pseudo_counts = dataType+'_combined_pseudo_cluster_counts.txt'
     pseudo_tpm = dataType+'_combined_pseudo_cluster_tpm.txt'
     pseudo_ratios = dataType+'_combined_pseudo_cluster_ratio.txt'
-    
+
     # Deconvolute multi-sample libraries (hashed) - if present
     sample_files,sample_h5ads,uids = get_valid_h5ad(sample_dict,dataType)
     print (sample_files)
     sample_files = deconvolute_libraries_by_hashed_index(sample_dict,sample_h5ads,dataType)
     print (sample_files)
 
-    iso.concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files,collection_name=dataType,compute_tpm=compute_tpm)
+    iso.concatenate_h5ad_and_compute_pseudobulks_optimized(
+        sample_files, collection_name=dataType, compute_tpm=compute_tpm,
+        only_import_existing=only_import_existing,
+        fused_filter=fused_filter, cluster_order=cluster_order, min_group_size=min_group_size,
+    )
 
-    # Organize and filter
-    iso.export_and_filter_pseudobulk_chunks(pseudo_counts, pseudo_counts[:-4]+'-filtered.txt', cluster_order, min_group_size=min_group_size)
+    # Organize and filter. With fused_filter the counts '-filtered.txt' was already written directly
+    # from the memmap (no dense unfiltered file to re-read); otherwise run the legacy chunked filter.
+    if not fused_filter:
+        iso.export_and_filter_pseudobulk_chunks(pseudo_counts, pseudo_counts[:-4]+'-filtered.txt', cluster_order, min_group_size=min_group_size)
     if dataType == 'isoform':
         iso.export_and_filter_pseudobulk_chunks(pseudo_ratios, pseudo_ratios[:-4]+'-filtered.txt', cluster_order, min_group_size=min_group_size)
         iso.export_and_filter_pseudobulk_chunks(pseudo_tpm, pseudo_tpm[:-4]+'-filtered.txt', cluster_order, min_group_size=min_group_size)
+
+# ---------------------------------------------------------------------------
+# PER-SAMPLE building blocks (4-phase cluster mode). Each operates on ONE uid in
+# isolation -- no other sample needed -- so they can be fanned out as independent
+# bsub jobs. The single-process driver calls the SAME functions in a loop, so the
+# logic/outputs are identical either way.
+# ---------------------------------------------------------------------------
+
+def _pseudobulk_one_h5ad(h5ad_path, dataType, compute_tpm):
+    """Compute the per-sample pseudobulk <prefix>.txt (+_tpm/_ratio for isoform) for ONE sample h5ad,
+    using the exact same routine the cross-sample concat uses (so outputs are byte-identical whether
+    built here per-sample or inline during concat)."""
+    h5ad_path = str(h5ad_path)
+    prefix = h5ad_path[:-5] if h5ad_path.endswith('.h5ad') else h5ad_path
+    adata = ad.read_h5ad(h5ad_path)
+    adata.obs.index = adata.obs.index.astype(str)
+    adata.obs_names_make_unique()
+    iso.pseudo_cluster_counts_optimized(prefix, adata, cell_threshold=0, count_threshold=0,
+                                        compute_tpm=compute_tpm, tpm_threshold=1, status=False)
+    del adata
+    _trim_memory()
+    return f"{prefix}.txt"
+
+
+def export_sample_junctions(sample_entry_list, ensembl_exon_dir, barcode_sample_dict, uid=None):
+    """P1 per-sample: build the junction h5ad(s) AND per-sample junction pseudobulk for ONE uid.
+    sample_entry_list = sample_dict[uid] (one or more library rows; multi-BAM uids are concatenated
+    to <uid>-junction.h5ad, mirroring export_junction_h5ad). Writes <prefix>-junction.txt pseudobulk
+    for each resulting junction h5ad so the P2 combine can skip straight to concat."""
+    num_samples = len(sample_entry_list)
+    adata_list = [
+        export_junction_matrix(s['matrix'], s['gff'], s['library'], s['reverse'],
+                               ensembl_exon_dir, barcode_sample_dict,
+                               return_adata=(num_samples > 1))
+        for s in sample_entry_list
+    ]
+    # Determine the on-disk junction h5ad(s) to pseudobulk (per get_valid_h5ad's discovery rules).
+    if num_samples > 1:
+        combined = ad.concat(adata_list, axis=0, join='outer') if len(adata_list) > 1 else adata_list[0]
+        uid_h5ad = f'{uid}-junction.h5ad'
+        combined.write_h5ad(uid_h5ad, compression='gzip')
+        del combined, adata_list
+        _trim_memory()
+        _pseudobulk_one_h5ad(uid_h5ad, 'junction', compute_tpm=False)
+    else:
+        del adata_list
+        # single-library uid: export_junction_matrix wrote <gff_stem>-junction.h5ad next to the gff
+        s = sample_entry_list[0]
+        per = f"{str(s['gff']).split('.g')[0]}-junction.h5ad"
+        _pseudobulk_one_h5ad(per, 'junction', compute_tpm=False)
+
+
+def export_sample_isoform(sample_entry_list, gff_output_dir, barcode_sample_dict, uid=None,
+                          collapse_method='wta', compute_tpm=True):
+    """P4 per-sample: re-key ONE uid's molecule h5ad onto the FINAL collapse catalog (loaded from disk
+    in gff_output_dir) and build its per-sample isoform pseudobulk. Independent of the collapse
+    process memory -- reads FINAL_structure_to_exemplar(.tsv/_soft.tsv). Handles multi-BAM uid by
+    re-keying each library h5ad then (if >1) concatenating to <uid>-isoform.h5ad."""
+    from .isoform_collapse import pipeline as collapse
+    out_h5ads = []
+    for s in sample_entry_list:
+        gff = str(s['gff']); matrix = str(s['matrix'])
+        ta = os.path.join(os.path.dirname(gff), 'gff-output', 'transcript_associations.txt')
+        bc = barcode_sample_dict.get(s['library'])
+        collapse.rekey_one_sample(s['library'], matrix, ta, str(gff_output_dir),
+                                  barcode_clusters=bc, collapse_method=collapse_method,
+                                  write_dir=None)  # writes <matrix_stem>-isoform.h5ad next to sample
+        out_h5ads.append(f"{matrix[:-5] if matrix.endswith('.h5ad') else matrix}-isoform.h5ad")
+    if len(sample_entry_list) > 1:
+        adatas = [ad.read_h5ad(p) for p in out_h5ads]
+        combined = ad.concat(adatas, axis=0, join='outer')
+        uid_h5ad = f'{uid}-isoform.h5ad'
+        combined.write_h5ad(uid_h5ad, compression='gzip')
+        del adatas, combined
+        _trim_memory()
+        _pseudobulk_one_h5ad(uid_h5ad, 'isoform', compute_tpm=compute_tpm)
+    else:
+        _pseudobulk_one_h5ad(out_h5ads[0], 'isoform', compute_tpm=compute_tpm)
+
 
 def pre_process_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_dir, min_count_filter=True):
     # Perform junction quantification across samples
@@ -613,6 +722,55 @@ def combine_processed_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_
     export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, gencode_gff, genome_fasta,
                         collapse_method=collapse_method, force_recollapse=force_recollapse)
     export_pseudo_counts(metadata_file,barcode_cluster_dirs,'isoform',compute_tpm=True)
+
+
+# ---------------------------------------------------------------------------
+# 4-PHASE COMBINE / CATALOG entry points (cross-sample, run as single jobs).
+# Each assumes the per-sample work (export_sample_junctions / export_sample_isoform)
+# already produced the per-sample pseudobulks, so they only concatenate/filter.
+# ---------------------------------------------------------------------------
+
+def combine_junctions(metadata_file, barcode_cluster_dirs, ensembl_exon_dir, min_count_filter=True,
+                      force=False):
+    """P2: combine the per-sample junction pseudobulks (already built in P1) -> filter -> PSI.
+    (Splice differentials are NOT run here -- they need P3's protein_summary; see run_sclr_diff.)
+    No per-sample work.
+
+    Idempotent resume: if the final PSI output already exists, the (very expensive: hours) junction
+    combine + filter + sort + PSI are SKIPPED. This lets a crashed/re-submitted P2 pick up after PSI
+    instead of recomputing it. Pass force=True to rebuild."""
+    psi_out = 'psi_combined_pseudo_cluster_counts.txt'
+    if (not force) and os.path.exists(psi_out) and os.path.getsize(psi_out) > 0:
+        print(f"[combine_junctions] PSI already present ({psi_out}); skipping junction combine + PSI. "
+              f"Pass force=True to rebuild.")
+        return
+    export_pseudo_counts(metadata_file, barcode_cluster_dirs, 'junction', only_import_existing=True)
+    junction_coords_file = 'junction_combined_pseudo_cluster_counts-filtered.txt'
+    if min_count_filter:
+        junction_coords_file = _filter_pseudobulk_min_counts(
+            junction_coords_file, junction_coords_file[:-4] + '-10-counts.txt', min_read=10)
+    junction_coords_file = export_sorted(junction_coords_file, 0)
+    run_psi_analysis(junction_coords_file, psi_out)
+
+
+def build_isoform_catalog(metadata_file, ensembl_exon_dir, gencode_gff, genome_fasta,
+                          collapse_method='wta', force_recollapse=True):
+    """P3: cross-sample isoform COLLAPSE (catalog) + translation/FASTA only. Skips the per-sample
+    stage3 re-key (that is P4, export_sample_isoform). Persists FINAL_isoform_catalog.tsv,
+    FINAL_structure_to_exemplar.tsv and (EM) FINAL_structure_to_exemplar_soft.tsv so P4 can re-key
+    from disk."""
+    sample_dict = import_metadata(metadata_file)
+    export_isoform_h5ad(sample_dict, ensembl_exon_dir, None, gencode_gff, genome_fasta,
+                        collapse_method=collapse_method, force_recollapse=force_recollapse,
+                        write_h5ad=False)
+
+
+def combine_isoforms(metadata_file, barcode_cluster_dirs):
+    """P4-combine: concatenate the per-sample isoform pseudobulks (already built by P4
+    export_sample_isoform) into the combined isoform matrix. No per-sample work."""
+    export_pseudo_counts(metadata_file, barcode_cluster_dirs, 'isoform', compute_tpm=True,
+                         only_import_existing=True)
+
 
 # Wrap in a function to avoid event loop conflicts
 def run_psi_analysis(junction_path, outdir):

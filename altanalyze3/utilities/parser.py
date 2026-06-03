@@ -17,6 +17,7 @@ from altanalyze3.components.long_read.cli import (
     run_sclr,
     run_sclr_junctions,
     run_sclr_isoforms,
+    run_sclr_isoquant,
     run_sclr_diff,
 )
 from altanalyze3.utilities.io import (
@@ -305,17 +306,20 @@ class ArgsParser():
         sclr_parser.add_argument("--cell_annot", default=None, type=str, help="Use existing barcode->cluster annotations (cellHarmony format) instead of aligning. Mutually exclusive with --cellHarmony_ref.")
         self.add_common_arguments(sclr_parser)
 
-        # Phase 2 (integration): junction aggregation + PSI + differential splicing
+        # Phase 2 (integration, 1 job): combine per-sample junction pseudobulks + PSI + splice diff
         sclr_junc_parser = subparsers.add_parser(
             "sclr-junctions",
             parents=[parent_parser],
-            help="Long-read integration: junction aggregation + PSI + differential splicing"
+            help="Long-read P2 (1 job): combine junction pseudobulks + PSI + splicing differentials"
         )
         sclr_junc_parser.set_defaults(func=run_sclr_junctions)
         sclr_junc_parser.add_argument("--metadata", required=True, type=str, help="Metadata file (same one used for sclr)")
         sclr_junc_parser.add_argument("--species", default="human", choices=["human", "mouse"], help="Default: human")
         sclr_junc_parser.add_argument("--exon_annot", default=None, type=str, help="Exon annotation file. Default: bundled gzipped <species> Ensembl exon file")
         sclr_junc_parser.add_argument("--cell_annot", default=None, type=str, help="Optional explicit barcode->cluster file/dir (else discovered from the sclr cellHarmony outputs)")
+        sclr_junc_parser.add_argument("--conditions", default=None, type=str, help="Optional group pairs for SPLICE differentials, e.g. 'young,aged' (semicolon-separate multiple). Omit to skip splice diff.")
+        sclr_junc_parser.add_argument("--method", default="mwu", choices=["mwu", "limma"], help="Splice differential test: mwu (default) or limma")
+        sclr_junc_parser.add_argument("--gene_symbol", default=None, type=str, help="Ensembl-id -> symbol table. Default: bundled gzipped <species> annotations")
         self.add_common_arguments(sclr_junc_parser)
 
         # Phase 3 (integration): isoform collapse + per-sample isoform h5ads + protein
@@ -334,7 +338,21 @@ class ArgsParser():
         sclr_iso_parser.add_argument("--cell_annot", default=None, type=str, help="Optional explicit barcode->cluster file/dir (else discovered from the sclr cellHarmony outputs)")
         self.add_common_arguments(sclr_iso_parser)
 
-        # Phase 4 (integration): differential isoform / junction analysis
+        # Phase 4 (per-sample, parallel): isoform re-key + per-sample isoform pseudobulk vs P3 catalog
+        sclr_isoquant_parser = subparsers.add_parser(
+            "sclr-isoquant",
+            parents=[parent_parser],
+            help="Long-read P4 (per sample): isoform re-key + pseudobulk against the collapse catalog; parallelizable"
+        )
+        sclr_isoquant_parser.set_defaults(func=run_sclr_isoquant)
+        sclr_isoquant_parser.add_argument("--metadata", required=True, type=str, help="Metadata file (same one used for sclr)")
+        sclr_isoquant_parser.add_argument("--sample", default=None, type=str, help="Process ONE uid. Omit to loop over all uids.")
+        sclr_isoquant_parser.add_argument("--collapse_method", default="wta", choices=["wta", "em"], help="Must match the method used for sclr-isoforms (P3). wta (default) or em.")
+        sclr_isoquant_parser.add_argument("--species", default="human", choices=["human", "mouse"], help="Default: human")
+        sclr_isoquant_parser.add_argument("--cell_annot", default=None, type=str, help="Optional explicit barcode->cluster file/dir (else discovered from the sclr cellHarmony outputs)")
+        self.add_common_arguments(sclr_isoquant_parser)
+
+        # Phase 4 combine (1 job): combine per-sample isoform pseudobulks + isoform differentials
         sclr_diff_parser = subparsers.add_parser(
             "sclr-diff",
             parents=[parent_parser],

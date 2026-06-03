@@ -40,19 +40,30 @@ CELLHARMONY_REF=""
 # Isoform collapse method: wta (winner-takes-all, default) or em.
 COLLAPSE_METHOD="wta"
 # Differential comparisons: "groupA,groupB" pairs (groups from the metadata 'groups' column),
-# semicolon-separated for multiple. Leave empty to skip phase 4.
+# semicolon-separated for multiple. Leave empty to skip differentials.
 CONDITIONS="young,aged"
 ANALYSES="junction,isoform"
 DIFF_METHOD="limma"                     # mwu | limma
 
-PYTHON_MODULE="python3/3.11.3"          # `module load` target on the cluster
+# ---- RESOURCES ----
+# Per-sample (P1 + P4) jobs: keep RAM high, FEW cores so MANY jobs run at once. PHASE1_CORES feeds
+# BOTH the LSF `-n` and the extraction `--cpus` so the worker pool matches the reservation.
+PHASE1_CORES=2
+PHASE1_MEM=128000                       # MB per per-sample job
+INT_MEM=128000                          # MB per cross-sample integration job (P2/P3/diff)
+
+# ---- PYTHON ENV ----
+# Set MODULE_LOAD to whatever makes `python3 -m altanalyze3` import cleanly on YOUR cluster nodes.
+# (On the dev cluster: python3/3.10.7 with conda neutralized -- see the per-site notes. Edit to match.)
+PYTHON_MODULE="python3/3.10.7"
+MODULE_LOAD="module purge; module load ${PYTHON_MODULE}; unset PYTHONPATH PYTHONHOME"
 
 # ---- DIRECTORIES ----
 ROOT=$PWD
 LOG_DIR="${ROOT}/logs"
 mkdir -p "$LOG_DIR"
 
-# Invocation: no install, run the package from source.
+# Invocation: no install, run the package from source (modules loaded per-job via MODULE_LOAD).
 AA3="env PYTHONPATH=${ALTANALYZE3_SRC} python3 -m altanalyze3"
 
 # ---- VALIDATION ----
@@ -122,17 +133,17 @@ DEP=""
 for SAMPLE_UID in $(awk -F'\t' 'NR>1 && $1!="" {gsub(/\r/,"",$1); print $1}' "$METADATA" | sort -u); do
     JOB_ID=$((JOB_ID+1))
     JNAME="sclr_${SAMPLE_UID}"
-    bsub -W 24:00 -n 12 -M 64000 \
+    bsub -W 24:00 -n ${PHASE1_CORES} -M ${PHASE1_MEM} \
          -R "span[hosts=1]" \
          -J "$JNAME" \
          -o "${LOG_DIR}/${SAMPLE_UID}.phase1.out" \
          -e "${LOG_DIR}/${SAMPLE_UID}.phase1.err" \
-         "module load ${PYTHON_MODULE}; \
+         "${MODULE_LOAD}; \
           ${AA3} sclr \
             --metadata \"$METADATA\" --sample \"$SAMPLE_UID\" \
             --ref_gff \"$GENCODE_GFF\" --species \"$SPECIES\" \
             ${CLUSTER_OPT} \
-            ${EXON_OPT} ${GENE_OPT} --cpus 12"
+            ${EXON_OPT} ${GENE_OPT} --cpus ${PHASE1_CORES}"
     if [[ -z "$DEP" ]]; then DEP="done($JNAME)"; else DEP="$DEP && done($JNAME)"; fi
 done
 echo "Submitted $JOB_ID per-sample (phase 1) jobs."
@@ -145,36 +156,59 @@ if [[ "$JOB_ID" -eq 0 || -z "$DEP" ]]; then
 fi
 
 # =====================================================================
-# PHASE 2-4: integration jobs, each gated on the previous finishing.
-# Phase 2 waits for ALL phase-1 jobs (the -w dependency below). For a MANUAL
-# two-phase run, delete the `-w "..."` flags and submit these after the
-# sclr_* jobs clear.
+# PHASE 2 + PHASE 3: two cross-sample jobs, BOTH gated only on all of Phase 1
+# (they are independent of each other, so they run concurrently).
+#   P2 sclr-junctions : combine junction pseudobulks + PSI + SPLICE differentials
+#   P3 sclr-isoforms  : isoform COLLAPSE catalog + translation/FASTA (no per-sample re-key)
 # =====================================================================
-bsub -W 24:00 -n 16 -M 196000 -R "span[hosts=1]" \
+bsub -W 24:00 -n 16 -M ${INT_MEM} -R "span[hosts=1]" \
      -J sclr_junctions -w "$DEP" \
      -o "${LOG_DIR}/phase2_junctions.out" -e "${LOG_DIR}/phase2_junctions.err" \
-     "module load ${PYTHON_MODULE}; \
-      ${AA3} sclr-junctions --metadata \"$METADATA\" --species \"$SPECIES\" ${EXON_OPT} ${INT_CLUSTER_OPT}"
+     "${MODULE_LOAD}; \
+      ${AA3} sclr-junctions --metadata \"$METADATA\" --species \"$SPECIES\" \
+        --conditions \"$CONDITIONS\" --method \"$DIFF_METHOD\" \
+        ${EXON_OPT} ${GENE_OPT} ${INT_CLUSTER_OPT}"
 
-bsub -W 24:00 -n 16 -M 196000 -R "span[hosts=1]" \
-     -J sclr_isoforms -w "done(sclr_junctions)" \
+bsub -W 24:00 -n 16 -M ${INT_MEM} -R "span[hosts=1]" \
+     -J sclr_isoforms -w "$DEP" \
      -o "${LOG_DIR}/phase3_isoforms.out" -e "${LOG_DIR}/phase3_isoforms.err" \
-     "module load ${PYTHON_MODULE}; \
+     "${MODULE_LOAD}; \
       ${AA3} sclr-isoforms --metadata \"$METADATA\" --ref_gff \"$GENCODE_GFF\" \
         --genome_fasta \"$GENOME_FASTA\" --collapse_method \"$COLLAPSE_METHOD\" \
         --species \"$SPECIES\" ${EXON_OPT} ${INT_CLUSTER_OPT}"
 
+# =====================================================================
+# PHASE 4: per-sample isoform re-key + isoform pseudobulk (parallel, 1 job/uid),
+# gated on the collapse catalog (P3). This is the heavy per-sample step (~19GB/sample)
+# fanned out instead of run serially. Each job loads the catalog maps from disk.
+# =====================================================================
+DEP4=""
+for SAMPLE_UID in $(awk -F'\t' 'NR>1 && $1!="" {gsub(/\r/,"",$1); print $1}' "$METADATA" | sort -u); do
+    JNAME4="isoq_${SAMPLE_UID}"
+    bsub -W 24:00 -n ${PHASE1_CORES} -M ${PHASE1_MEM} -R "span[hosts=1]" \
+         -J "$JNAME4" -w "done(sclr_isoforms)" \
+         -o "${LOG_DIR}/${SAMPLE_UID}.phase4.out" -e "${LOG_DIR}/${SAMPLE_UID}.phase4.err" \
+         "${MODULE_LOAD}; \
+          ${AA3} sclr-isoquant --metadata \"$METADATA\" --sample \"$SAMPLE_UID\" \
+            --collapse_method \"$COLLAPSE_METHOD\" --species \"$SPECIES\" ${INT_CLUSTER_OPT}"
+    if [[ -z "$DEP4" ]]; then DEP4="done($JNAME4)"; else DEP4="$DEP4 && done($JNAME4)"; fi
+done
+
+# =====================================================================
+# PHASE 4 combine (1 job): combine per-sample isoform pseudobulks + ISOFORM differentials,
+# gated on ALL Phase-4 per-sample jobs.
+# =====================================================================
 if [[ -n "$CONDITIONS" ]]; then
-    bsub -W 12:00 -n 8 -M 128000 -R "span[hosts=1]" \
-         -J sclr_diff -w "done(sclr_isoforms)" \
+    bsub -W 12:00 -n 8 -M ${INT_MEM} -R "span[hosts=1]" \
+         -J sclr_diff -w "$DEP4" \
          -o "${LOG_DIR}/phase4_diff.out" -e "${LOG_DIR}/phase4_diff.err" \
-         "module load ${PYTHON_MODULE}; \
+         "${MODULE_LOAD}; \
           ${AA3} sclr-diff --metadata \"$METADATA\" --conditions \"$CONDITIONS\" \
             --analyses \"$ANALYSES\" --method \"$DIFF_METHOD\" --species \"$SPECIES\" ${GENE_OPT} ${INT_CLUSTER_OPT}"
 fi
 
-echo "Submitted integration chain (phase 2 -> 3 -> 4)."
-echo "Phase 1 runs in parallel; phases 2-4 start automatically as each dependency completes."
+echo "Submitted: P1 ($JOB_ID jobs) -> [P2 + P3] -> P4 ($JOB_ID jobs) -> isoform diff."
+echo "P1 and P4 are per-sample parallel; P2/P3 run concurrently after P1; diff runs after P4."
 
 # NOTE: per-sample reverse-complement is NOT a command-line flag -- the 'reverse' (TRUE/FALSE)
 # column of the metadata is read per row and applied at junction/isoform matrix build, so it is

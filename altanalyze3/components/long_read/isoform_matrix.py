@@ -781,6 +781,12 @@ def _fill_memmap_from_files(file_info, feature_to_row, total_cols, path_key, dty
     data_mm.flush()
     return data_mm
 
+def _format_value(v):
+    """Match the legacy to_csv/writerow float formatting EXACTLY so optimized output is byte-identical
+    to the prior dense-write path. numpy float32 -> Python float -> str gives e.g. '0.0', '8.0'."""
+    return repr(float(v))
+
+
 def _write_memmap_tsv(memmap_data, features, columns, output_file, row_chunk=10000):
     with open(output_file, 'w', newline='') as handle:
         writer = csv.writer(handle, delimiter='\t')
@@ -795,9 +801,83 @@ def _write_memmap_tsv(memmap_data, features, columns, output_file, row_chunk=100
             ]
             writer.writerows(rows)
 
-def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_name='junction', compute_tpm=False, tpm_threshold=1):
-    
-    only_import_existing = False
+
+def _column_reorder_indices(columns, cell_type_order):
+    """Reproduce export_and_filter_pseudobulk_chunks' column reordering: group columns by the
+    cell-type prefix (text before the first '.') in the order given by cell_type_order. Columns whose
+    cell type is not in the order are dropped (same as the legacy code, which only emits reordered
+    columns). Returns the list of column indices in output order."""
+    if not cell_type_order:
+        return list(range(len(columns)))
+    idx = []
+    for ct in cell_type_order:
+        pref = ct + '.'
+        for i, col in enumerate(columns):
+            if col.startswith(pref):
+                idx.append(i)
+    return idx
+
+
+def write_filtered_pseudobulk_from_memmap(memmap_data, features, columns, output_file,
+                                          cell_type_order=None, min_group_size=3, row_chunk=200000):
+    """SINGLE-PASS replacement for: _write_memmap_tsv(<full dense .txt>) followed by
+    export_and_filter_pseudobulk_chunks(<re-read that .txt>). Filters + reorders + writes the
+    '-filtered.txt' directly from the in-memory counts memmap, so the multi-GB (cluster: 121GB) dense
+    UNFILTERED .txt is never materialized and never re-read.
+
+    Filter rule is IDENTICAL to export_and_filter_pseudobulk_chunks: keep a feature if ANY cell type
+    has >= min_group_size columns with value > 0.1. Column reorder is IDENTICAL (group by cell-type
+    prefix per cell_type_order). Output bytes match the legacy filtered file.
+    """
+    cols = np.asarray(columns)
+    cell_types = np.array([c.split('.')[0] for c in columns])
+    unique_cts = np.unique(cell_types)
+    # boolean column-masks per cell type (over the FULL column set, pre-reorder -- matches legacy,
+    # which computes the mask on original columns then reorders only the emitted columns).
+    ct_colmask = {ct: (cell_types == ct) for ct in unique_cts}
+
+    out_idx = _column_reorder_indices(columns, cell_type_order)
+    out_cols = [columns[i] for i in out_idx]
+
+    n = len(features)
+    written = 0
+    with open(output_file, 'w', newline='') as handle:
+        writer = csv.writer(handle, delimiter='\t')
+        writer.writerow(["Feature"] + out_cols)
+        for start in range(0, n, row_chunk):
+            end = min(start + row_chunk, n)
+            block = np.asarray(memmap_data[start:end])            # (rows, total_cols) float32
+            # per-cell-type count of columns exceeding 0.1, then row keep-mask
+            keep = np.zeros(block.shape[0], dtype=bool)
+            gtr = block > 0.1
+            for ct in unique_cts:
+                cnt = gtr[:, ct_colmask[ct]].sum(axis=1)
+                keep |= (cnt >= min_group_size)
+            if not keep.any():
+                continue
+            kept_block = block[keep][:, out_idx]                  # reorder columns to output order
+            kept_feats = [features[start + i] for i in np.nonzero(keep)[0]]
+            rows = [
+                [feat] + [_format_value(v) for v in kept_block[r]]
+                for r, feat in enumerate(kept_feats)
+            ]
+            writer.writerows(rows)
+            written += len(rows)
+    return written
+
+def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_name='junction', compute_tpm=False, tpm_threshold=1, only_import_existing=False,
+                                                       fused_filter=False, cluster_order=None, min_group_size=3):
+    # only_import_existing=True: the per-sample pseudobulk <sample>.txt files were already produced
+    # (e.g. by the per-sample parallel jobs in 4-phase cluster mode) -- skip recomputing them and go
+    # straight to the cross-sample concat. Default False keeps the single-process path identical
+    # (compute each sample's pseudobulk inline, then concat).
+    #
+    # fused_filter=True (P2/P4 optimization): write the '-filtered.txt' DIRECTLY from the in-memory
+    # counts/tpm/ratio memmaps and DO NOT materialize the dense unfiltered '_counts.txt' (the multi-GB
+    # / cluster-121GB throwaway that nothing reads except the old filter pass). Eliminates the dense
+    # full-matrix serialize AND the subsequent full pd.read_csv re-read. Output bytes of the filtered
+    # files are identical to the legacy two-step path. The UNFILTERED file is only written when
+    # fused_filter=False (single-process driver default -> behaviour unchanged).
 
     if only_import_existing:
         for sample_file in sample_files:
@@ -877,7 +957,15 @@ def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_
     _memtrace("after_fill_counts_memmap")
 
     combined_pseudo_file = f'{collection_name}_combined_pseudo_cluster_counts.txt'
-    _write_memmap_tsv(counts_mm, features, column_names, combined_pseudo_file)
+    if fused_filter:
+        # Write the FILTERED counts directly from the in-memory memmap; never materialize the dense
+        # unfiltered .txt (nothing reads it except the old filter pass we are replacing).
+        write_filtered_pseudobulk_from_memmap(
+            counts_mm, features, column_names, combined_pseudo_file[:-4] + '-filtered.txt',
+            cell_type_order=cluster_order, min_group_size=min_group_size,
+        )
+    else:
+        _write_memmap_tsv(counts_mm, features, column_names, combined_pseudo_file)
     _memtrace("after_write_combined_pseudo")
 
     del counts_mm
