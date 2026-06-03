@@ -338,7 +338,8 @@ def export_junction_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict):
         del adata_list
         _trim_memory()
 
-def export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, reference_gff, genome_fasta, deleteGFF=False):
+def export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, reference_gff, genome_fasta,
+                        deleteGFF=False, collapse_method='wta', force_recollapse=False):
     """Cross-sample isoform consolidation + per-sample isoform h5ad + protein prediction.
 
     Uses the memory/compute-optimized ``isoform_collapse`` pipeline instead of the legacy combined
@@ -367,7 +368,11 @@ def export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, refe
             ta = os.path.join(os.path.dirname(s['gff']), 'gff-output', 'transcript_associations.txt')
             samples.append((s['library'], s['matrix'], ta, s['gff']))
 
-    if os.path.exists(catalog_path) and deleteGFF == False:
+    # Running the isoform step means (re)building the collapse: samples may have been added/removed
+    # or the collapse method (WTA vs EM) may differ, so an existing catalog must NOT silently
+    # short-circuit it. The skip is only honored when explicitly NOT forcing a re-collapse (e.g. a
+    # resumed run that deliberately reuses the prior catalog).
+    if os.path.exists(catalog_path) and deleteGFF == False and not force_recollapse:
         print(f"Isoform catalog exists, skipping collapse: {catalog_path}")
     else:
         # Annotate the GENCODE/Ensembl reference ONCE (run separately through gff_process), cache the
@@ -380,6 +385,7 @@ def export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, refe
             samples, outdir=out_dir, nproc=nproc, min_total=3,
             write_h5ad=True, genome_fasta=genome_fasta, ref_gff=reference_gff,
             enst_cache=enst_cache, barcode_clusters=barcode_sample_dict,
+            collapse_method=collapse_method,
         )
         # The collapse's stage3 already wrote each "<library>-isoform.h5ad" (keyed on the final clean
         # isoform set) next to the sample, plus protein_summary.txt / *sequences.fasta from the final
@@ -594,13 +600,18 @@ def pre_process_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_dir, m
     #psi.main(junction_path=junction_coords_file, query_gene=None, outdir=outdir, use_multiprocessing=False, mp_context=mp_context, num_cores=num_cores)
     run_psi_analysis(junction_coords_file, outdir)
 
-def combine_processed_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_dir, gencode_gff, genome_fasta, min_count_filter = True):
+def combine_processed_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_dir, gencode_gff, genome_fasta,
+                              min_count_filter = True, collapse_method='wta', force_recollapse=True):
     sample_dict, min_group_size = import_metadata(metadata_file, return_size = True)
     barcode_sample_dict = iso.import_barcode_clusters(barcode_cluster_dirs)
 
     # Perform isoform quantification across samples (cross-sample collapse + per-sample clean
     # -isoform.h5ad + protein). Splicing/PSI already ran in pre_process_samples (step 5).
-    export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, gencode_gff, genome_fasta)
+    # Running this step (re)builds the collapse by default (force_recollapse=True): the sample set
+    # or the collapse method (WTA vs EM) may have changed, so the catalog is regenerated rather than
+    # reused. collapse_method selects winner-takes-all ('wta', default) vs EM ('em').
+    export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, gencode_gff, genome_fasta,
+                        collapse_method=collapse_method, force_recollapse=force_recollapse)
     export_pseudo_counts(metadata_file,barcode_cluster_dirs,'isoform',compute_tpm=True)
 
 # Wrap in a function to avoid event loop conflicts

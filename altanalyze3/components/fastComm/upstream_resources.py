@@ -5,7 +5,7 @@ import json
 import shutil
 from pathlib import Path
 import re
-from typing import Any, Dict, Iterable, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional
 from urllib.request import urlopen
 
 import pandas as pd
@@ -15,6 +15,7 @@ from .training import prune_response_matrix
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
+GENERATED_BUNDLE_ROOT = PACKAGE_DIR / "training_data" / "processed" / "upstream"
 
 CELLCHAT_URLS = {
     "human": "https://raw.githubusercontent.com/jinworks/CellChat/main/data/CellChatDB.human.rda",
@@ -43,10 +44,21 @@ class UpstreamResourceBuildParams:
     overwrite: bool = False
 
 
+def bundle_paths_for_species(species: str, root: Optional[Path] = None) -> Dict[str, Path]:
+    species_key = species.strip().lower()
+    bundle_root = (root or GENERATED_BUNDLE_ROOT) / f"cellchat_nichenet_{species_key}"
+    return {
+        "bundle_root": bundle_root,
+        "lr_table": bundle_root / "ligand_receptor.tsv",
+        "response_matrix": bundle_root / "response_signatures.tsv",
+        "manifest": bundle_root / "manifest.json",
+    }
+
+
 def _import_rdata():
     try:
         import rdata  # type: ignore
-    except ImportError as exc:  # pragma: no cover - exercised only outside dev env
+    except ImportError as exc:  # pragma: no cover
         raise ImportError(
             "Building fastComm upstream resources requires the optional 'rdata' package. "
             "Install it with `pip install rdata`."
@@ -89,18 +101,14 @@ def _normalize_symbol_text(value: object) -> str:
 def _complex_lookup(complex_table: pd.DataFrame) -> Dict[str, str]:
     mapping: Dict[str, str] = {}
     for complex_name, row in complex_table.iterrows():
-        parts = [_clean_text(value) for value in row.tolist()]
-        members = [part for part in parts if part]
+        members = [_clean_text(value) for value in row.tolist()]
+        members = [member for member in members if member]
         if members:
             mapping[str(complex_name).strip()] = "+".join(members)
     return mapping
 
 
-def _resolve_part(
-    alias: object,
-    symbol_text: object,
-    complex_map: Mapping[str, str],
-) -> str:
+def _resolve_part(alias: object, symbol_text: object, complex_map: Mapping[str, str]) -> str:
     normalized_symbol = _normalize_symbol_text(symbol_text)
     if normalized_symbol:
         return normalized_symbol
@@ -113,6 +121,11 @@ def _resolve_part(
 def _as_dataframe(value: Any) -> pd.DataFrame:
     if isinstance(value, pd.DataFrame):
         out = value.copy()
+    elif hasattr(value, "dims") and hasattr(value, "coords") and getattr(value, "ndim", None) == 2:
+        dim0, dim1 = value.dims
+        index = [str(item) for item in value.coords[dim0].to_numpy().tolist()]
+        columns = [str(item) for item in value.coords[dim1].to_numpy().tolist()]
+        out = pd.DataFrame(value.to_numpy(), index=index, columns=columns)
     else:
         out = pd.DataFrame(value)
     out.index = out.index.map(str)
@@ -149,8 +162,7 @@ def build_cellchat_lr_table(cellchat_db: Mapping[str, Any]) -> pd.DataFrame:
             }
         )
     out = pd.DataFrame(rows)
-    out = out.drop_duplicates(subset=["ligand", "receptor", "pathway"], keep="first").reset_index(drop=True)
-    return out
+    return out.drop_duplicates(subset=["ligand", "receptor", "pathway"], keep="first").reset_index(drop=True)
 
 
 def build_nichenet_lr_table(lr_network: pd.DataFrame) -> pd.DataFrame:
@@ -161,7 +173,6 @@ def build_nichenet_lr_table(lr_network: pd.DataFrame) -> pd.DataFrame:
         receptor = _normalize_symbol_text(row.get("to", ""))
         if not ligand or not receptor:
             continue
-        database = _clean_text(row.get("database", ""))
         rows.append(
             {
                 "ligand": ligand,
@@ -170,30 +181,22 @@ def build_nichenet_lr_table(lr_network: pd.DataFrame) -> pd.DataFrame:
                 "evidence_weight": 0.9,
                 "interaction_class": "nichenet_prior",
                 "source": "NicheNet",
-                "source_detail": database,
+                "source_detail": _clean_text(row.get("database", "")),
                 "evidence": _clean_text(row.get("source", "")),
             }
         )
     return pd.DataFrame(rows).drop_duplicates(subset=["ligand", "receptor"], keep="first").reset_index(drop=True)
 
 
-def merge_ligand_receptor_tables(
-    cellchat_lr: pd.DataFrame,
-    nichenet_lr: Optional[pd.DataFrame] = None,
-) -> pd.DataFrame:
+def merge_ligand_receptor_tables(cellchat_lr: pd.DataFrame, nichenet_lr: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     out = cellchat_lr.copy()
     if nichenet_lr is None or nichenet_lr.empty:
         return out.reset_index(drop=True)
-
-    dedup = out.groupby(["ligand", "receptor"], sort=False)["source"].agg(lambda values: ",".join(sorted(set(values))))
-    existing_pairs = set(dedup.index.tolist())
-    novel = nichenet_lr.loc[
-        ~nichenet_lr[["ligand", "receptor"]].apply(tuple, axis=1).isin(existing_pairs)
-    ].copy()
+    existing_pairs = set(out[["ligand", "receptor"]].apply(tuple, axis=1).tolist())
+    novel = nichenet_lr.loc[~nichenet_lr[["ligand", "receptor"]].apply(tuple, axis=1).isin(existing_pairs)].copy()
     if novel.empty:
         return out.reset_index(drop=True)
-    merged = pd.concat([out, novel], ignore_index=True, sort=False)
-    return merged.reset_index(drop=True)
+    return pd.concat([out, novel], ignore_index=True, sort=False).reset_index(drop=True)
 
 
 def build_nichenet_response_matrix(
@@ -204,9 +207,6 @@ def build_nichenet_response_matrix(
     min_target_weight: float = 0.001,
 ) -> pd.DataFrame:
     matrix = _as_dataframe(ligand_target_matrix).apply(pd.to_numeric, errors="coerce").fillna(0.0)
-    matrix.index = matrix.index.map(str)
-    matrix.columns = matrix.columns.map(str)
-
     ligands = pd.Index(sorted(set(lr_table["ligand"].astype(str))))
     matched_ligands = [ligand for ligand in ligands if ligand in matrix.columns]
     if not matched_ligands:
@@ -221,7 +221,6 @@ def build_nichenet_response_matrix(
         if top_targets_per_signature > 0:
             series = series.sort_values(ascending=False).head(top_targets_per_signature)
         ligand_rows[ligand] = series
-
     if not ligand_rows:
         raise ValueError("NicheNet ligand-target matrix did not yield any signatures after filtering")
 
@@ -249,21 +248,20 @@ def build_nichenet_response_matrix(
     response = pd.DataFrame(0.0, index=list(all_rows), columns=all_genes)
     for signature, series in all_rows.items():
         response.loc[signature, series.index] = series.to_numpy(dtype=float)
-    response = prune_response_matrix(
+    return prune_response_matrix(
         response,
         top_genes=top_targets_per_signature,
         min_abs_score=min_target_weight,
         l2_normalize=True,
     )
-    return response
 
 
 def _bundle_paths(params: UpstreamResourceBuildParams) -> Dict[str, Path]:
     created = ensure_artifact_dirs(keys=["raw_downloads", "processed_tables"])
     raw_root = params.raw_dir or created["raw_downloads"] / "upstream"
-    processed_root = params.output_dir or created["processed_tables"] / "upstream" / f"cellchat_nichenet_{params.species}"
-    processed_root.mkdir(parents=True, exist_ok=True)
+    processed_root = params.output_dir or bundle_paths_for_species(params.species)["bundle_root"]
     raw_root.mkdir(parents=True, exist_ok=True)
+    processed_root.mkdir(parents=True, exist_ok=True)
     return {
         "raw_root": raw_root,
         "processed_root": processed_root,
@@ -279,9 +277,7 @@ def _download_inputs(params: UpstreamResourceBuildParams, raw_root: Path) -> Dic
         "cellchat": raw_root / f"CellChatDB.{species}.rda",
         "nichenet_lr": raw_root / f"lr_network_{species}_21122021.rds",
         "nichenet_targets": raw_root / (
-            "ligand_target_matrix_nsga2r_final.rds"
-            if species == "human"
-            else "ligand_target_matrix_nsga2r_final_mouse.rds"
+            "ligand_target_matrix_nsga2r_final.rds" if species == "human" else "ligand_target_matrix_nsga2r_final_mouse.rds"
         ),
     }
     _download_file(CELLCHAT_URLS[species], paths["cellchat"], overwrite=params.overwrite)

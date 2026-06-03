@@ -5,8 +5,8 @@ import json
 from pathlib import Path
 
 PACKAGE_DIR = Path(__file__).resolve().parent
-DEFAULT_LR_TABLE = PACKAGE_DIR / "resources" / "seed_ligand_receptor.tsv"
-DEFAULT_RESPONSE_MATRIX = PACKAGE_DIR / "resources" / "seed_response_signatures.tsv"
+DEFAULT_LR_TABLE = PACKAGE_DIR / "resources" / "__auto__ligand_receptor.tsv"
+DEFAULT_RESPONSE_MATRIX = PACKAGE_DIR / "resources" / "__auto__response_signatures.tsv"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -21,12 +21,17 @@ def build_parser() -> argparse.ArgumentParser:
     input_group.add_argument("--expression", type=Path, help="Cell-by-gene CSV/TSV expression matrix.")
     score.add_argument("--metadata", type=Path, help="Cell metadata CSV/TSV. Required with --expression.")
     score.add_argument("--output", type=Path, required=True, help="Output TSV for scored interactions.")
-    score.add_argument("--lr-table", type=Path, default=DEFAULT_LR_TABLE, help="Ligand-receptor TSV/CSV.")
+    score.add_argument(
+        "--lr-table",
+        type=Path,
+        default=DEFAULT_LR_TABLE,
+        help="Ligand-receptor TSV/CSV. Defaults to the built upstream bundle for the inferred/provided species.",
+    )
     score.add_argument(
         "--response-matrix",
         type=Path,
         default=DEFAULT_RESPONSE_MATRIX,
-        help="Response matrix, rows are LR/ligand/pathway keys. Defaults to the seed prototype signatures.",
+        help="Response matrix, rows are LR/ligand/pathway keys. Defaults to the built upstream bundle for the inferred/provided species when available.",
     )
     score.add_argument("--no-response", action="store_true", help="Disable receiver-response scoring.")
     score.add_argument("--state-pair-output", type=Path, help="Optional state-pair summary TSV.")
@@ -34,6 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     score.add_argument("--state-key", default="cell_state", help="Metadata/obs column defining cell states.")
     score.add_argument("--layer", help="AnnData layer to use instead of X.")
     score.add_argument("--gene-symbol-col", help="AnnData var column containing gene symbols.")
+    score.add_argument("--species", choices=["human", "mouse"], help="Optional species hint used to resolve built upstream bundles.")
     score.add_argument("--min-cells", type=int, default=1, help="Minimum cells per state.")
     score.add_argument("--min-ligand-expr", type=float, default=0.01, help="Minimum sender ligand expression.")
     score.add_argument("--min-receptor-expr", type=float, default=0.01, help="Minimum receiver receptor expression.")
@@ -56,16 +62,22 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--output-dir", type=Path, required=True, help="Directory for benchmark outputs.")
     benchmark.add_argument("--state-key", default="cell_state", help="Metadata/obs column defining cell states.")
     benchmark.add_argument("--split-key", default="Donor", help="Metadata/obs column used for split stability.")
-    benchmark.add_argument("--lr-table", type=Path, default=DEFAULT_LR_TABLE, help="Ligand-receptor TSV/CSV.")
+    benchmark.add_argument(
+        "--lr-table",
+        type=Path,
+        default=DEFAULT_LR_TABLE,
+        help="Ligand-receptor TSV/CSV. Defaults to the built upstream bundle for the inferred/provided species.",
+    )
     benchmark.add_argument(
         "--response-matrix",
         type=Path,
         default=DEFAULT_RESPONSE_MATRIX,
-        help="Response matrix used for receiver-response scoring.",
+        help="Response matrix used for receiver-response scoring. Defaults to the built upstream bundle for the inferred/provided species when available.",
     )
     benchmark.add_argument("--no-response", action="store_true", help="Disable receiver-response scoring.")
     benchmark.add_argument("--layer", help="AnnData layer to use instead of X.")
     benchmark.add_argument("--gene-symbol-col", help="AnnData var column containing gene symbols.")
+    benchmark.add_argument("--species", choices=["human", "mouse"], help="Optional species hint used to resolve built upstream bundles.")
     benchmark.add_argument("--min-cells", type=int, default=20, help="Minimum cells per state.")
     benchmark.add_argument("--min-ligand-expr", type=float, default=0.01, help="Minimum sender ligand expression.")
     benchmark.add_argument("--min-receptor-expr", type=float, default=0.01, help="Minimum receiver receptor expression.")
@@ -136,6 +148,7 @@ def main() -> int:
                 state_key=args.state_key,
                 layer=args.layer,
                 gene_symbol_col=args.gene_symbol_col,
+                species=args.species,
                 min_cells=args.min_cells,
                 min_ligand_expr=args.min_ligand_expr,
                 min_receptor_expr=args.min_receptor_expr,
@@ -164,6 +177,7 @@ def main() -> int:
                 response_matrix=None if args.no_response else args.response_matrix,
                 layer=args.layer,
                 gene_symbol_col=args.gene_symbol_col,
+                species=args.species,
                 min_cells=args.min_cells,
                 min_ligand_expr=args.min_ligand_expr,
                 min_receptor_expr=args.min_receptor_expr,

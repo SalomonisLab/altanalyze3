@@ -13,6 +13,12 @@ from altanalyze3.components.aggregate.main import aggregate
 from altanalyze3.components.gene_model.gene_model_index import build_index
 from altanalyze3.components.fastCNV.main import bundled_gene_coordinates
 from altanalyze3.components.fastCNV.main import run_from_altanalyze_args as run_fastcnv
+from altanalyze3.components.long_read.cli import (
+    run_sclr,
+    run_sclr_junctions,
+    run_sclr_isoforms,
+    run_sclr_diff,
+)
 from altanalyze3.utilities.io import (
     get_indexed_references,
     is_bam_indexed
@@ -29,7 +35,8 @@ class ArgsParser():
     def __init__(self, args):
         args = args + [""] if len(args) == 0 else args
         self.args, _ = self.get_parser().parse_known_args(args)
-        self.resolve_path(["bam", "ref", "tmp", "output", "juncounts", "intcounts", "index", "h5ad", "gene_coordinates"])
+        self.resolve_path(["bam", "ref", "tmp", "output", "juncounts", "intcounts", "index", "h5ad", "gene_coordinates",
+                           "metadata", "ref_gff", "exon_annot", "gene_symbol", "cell_annot", "genome_fasta"])
         self.assert_args()
         self.set_args_as_attributes()
 
@@ -273,6 +280,76 @@ class ArgsParser():
         fastcnv_parser.add_argument("--max-cells-per-state", type=int, default=None, help="Optional cap for fast exploratory runs")
         fastcnv_parser.add_argument("--random-state", type=int, default=0)
         self.add_common_arguments(fastcnv_parser)
+
+        # ---------------------------------------------------------------------
+        # Long-read single-cell workflow (sclr): an ALTERNATIVE, parallelizable
+        # way to run the same analyses as the driver scripts. One per-sample
+        # command (sclr) plus three integration commands. See
+        # components/long_read/PARALLEL_CLUSTER_DESIGN.md.
+        # ---------------------------------------------------------------------
+
+        # Phase 1 (per sample): BAM -> junction h5ad (+ optional cellHarmony labels)
+        sclr_parser = subparsers.add_parser(
+            "sclr",
+            parents=[parent_parser],
+            help="Long-read single-cell per-sample processing (BAM -> junction h5ad); parallelizable"
+        )
+        sclr_parser.set_defaults(func=run_sclr)
+        sclr_parser.add_argument("--metadata", required=True, type=str, help="Tab-delimited metadata file (uid, bam, library, reverse, groups)")
+        sclr_parser.add_argument("--sample", default=None, type=str, help="Process ONE uid. Omit to loop serially over all uids in the metadata.")
+        sclr_parser.add_argument("--ref_gff", required=True, type=str, help="GENCODE/Ensembl reference GFF/GTF (processed via gff_process)")
+        sclr_parser.add_argument("--species", default="human", choices=["human", "mouse"], help="Selects bundled annotation defaults and the cellHarmony reference species. Default: human")
+        sclr_parser.add_argument("--exon_annot", default=None, type=str, help="Exon annotation file. Default: bundled gzipped <species> Ensembl exon file")
+        sclr_parser.add_argument("--gene_symbol", default=None, type=str, help="Ensembl-id -> symbol table. Default: bundled gzipped <species> annotations")
+        sclr_parser.add_argument("--cellHarmony_ref", default=None, type=str, help="Align to this reference: a cellHarmony registry id (e.g. hs_bm_reference) or a centroid .txt path. Mutually exclusive with --cell_annot.")
+        sclr_parser.add_argument("--cell_annot", default=None, type=str, help="Use existing barcode->cluster annotations (cellHarmony format) instead of aligning. Mutually exclusive with --cellHarmony_ref.")
+        self.add_common_arguments(sclr_parser)
+
+        # Phase 2 (integration): junction aggregation + PSI + differential splicing
+        sclr_junc_parser = subparsers.add_parser(
+            "sclr-junctions",
+            parents=[parent_parser],
+            help="Long-read integration: junction aggregation + PSI + differential splicing"
+        )
+        sclr_junc_parser.set_defaults(func=run_sclr_junctions)
+        sclr_junc_parser.add_argument("--metadata", required=True, type=str, help="Metadata file (same one used for sclr)")
+        sclr_junc_parser.add_argument("--species", default="human", choices=["human", "mouse"], help="Default: human")
+        sclr_junc_parser.add_argument("--exon_annot", default=None, type=str, help="Exon annotation file. Default: bundled gzipped <species> Ensembl exon file")
+        sclr_junc_parser.add_argument("--cell_annot", default=None, type=str, help="Optional explicit barcode->cluster file/dir (else discovered from the sclr cellHarmony outputs)")
+        self.add_common_arguments(sclr_junc_parser)
+
+        # Phase 3 (integration): isoform collapse + per-sample isoform h5ads + protein
+        sclr_iso_parser = subparsers.add_parser(
+            "sclr-isoforms",
+            parents=[parent_parser],
+            help="Long-read integration: two-tier isoform collapse + isoform h5ads + protein"
+        )
+        sclr_iso_parser.set_defaults(func=run_sclr_isoforms)
+        sclr_iso_parser.add_argument("--metadata", required=True, type=str, help="Metadata file (same one used for sclr)")
+        sclr_iso_parser.add_argument("--ref_gff", required=True, type=str, help="GENCODE/Ensembl reference GFF/GTF")
+        sclr_iso_parser.add_argument("--genome_fasta", required=True, type=str, help="Genome FASTA for protein sequence prediction")
+        sclr_iso_parser.add_argument("--collapse_method", default="wta", choices=["wta", "em"], help="Isoform read collapse: wta (winner-takes-all, default) or em (fractional EM allocation)")
+        sclr_iso_parser.add_argument("--species", default="human", choices=["human", "mouse"], help="Default: human")
+        sclr_iso_parser.add_argument("--exon_annot", default=None, type=str, help="Exon annotation file. Default: bundled gzipped <species> Ensembl exon file")
+        sclr_iso_parser.add_argument("--cell_annot", default=None, type=str, help="Optional explicit barcode->cluster file/dir (else discovered from the sclr cellHarmony outputs)")
+        self.add_common_arguments(sclr_iso_parser)
+
+        # Phase 4 (integration): differential isoform / junction analysis
+        sclr_diff_parser = subparsers.add_parser(
+            "sclr-diff",
+            parents=[parent_parser],
+            help="Long-read integration: differential isoform/junction analysis between groups"
+        )
+        sclr_diff_parser.set_defaults(func=run_sclr_diff)
+        sclr_diff_parser.add_argument("--metadata", required=True, type=str, help="Metadata file (same one used for sclr)")
+        sclr_diff_parser.add_argument("--conditions", required=True, type=str, help="Group pairs from the metadata 'groups' column, e.g. 'young,AML-NPM1' (semicolon-separate multiple)")
+        sclr_diff_parser.add_argument("--analyses", default="junction,isoform", type=str, help="Comma-separated subset of junction,isoform,isoform-ratio. Default: junction,isoform")
+        sclr_diff_parser.add_argument("--method", default="mwu", choices=["mwu", "limma"], help="Differential test: mwu (Mann-Whitney, default) or limma (eBayes moderated t)")
+        sclr_diff_parser.add_argument("--species", default="human", choices=["human", "mouse"], help="Default: human")
+        sclr_diff_parser.add_argument("--gene_symbol", default=None, type=str, help="Ensembl-id -> symbol table. Default: bundled gzipped <species> annotations")
+        sclr_diff_parser.add_argument("--cell_annot", default=None, type=str, help="Optional explicit barcode->cluster file/dir (else discovered from the sclr cellHarmony outputs)")
+        self.add_common_arguments(sclr_diff_parser)
+
         return general_parser
 
     def resolve_path(self, selected=None):

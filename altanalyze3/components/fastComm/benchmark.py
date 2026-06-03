@@ -8,7 +8,14 @@ from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from .api import DEFAULT_LR_TABLE, DEFAULT_RESPONSE_MATRIX, FastCommParams, _expression_from_h5ad, _required_genes
+from .api import (
+    DEFAULT_LR_TABLE,
+    DEFAULT_RESPONSE_MATRIX,
+    FastCommParams,
+    _expression_from_h5ad,
+    _required_genes,
+    _resolve_default_resource_paths,
+)
 from .scoring import (
     add_receiver_response_scores,
     finalize_scores,
@@ -29,6 +36,7 @@ class FastCommBenchmarkParams:
     response_matrix: Optional[Path] = DEFAULT_RESPONSE_MATRIX
     layer: Optional[str] = None
     gene_symbol_col: Optional[str] = None
+    species: Optional[str] = None
     min_cells: int = 20
     min_ligand_expr: float = 0.01
     min_receptor_expr: float = 0.01
@@ -133,18 +141,29 @@ def _compare_to_full(full_scores: pd.DataFrame, split_scores: pd.DataFrame, *, t
 
 def run_benchmark(params: FastCommBenchmarkParams) -> Dict[str, object]:
     params.output_dir.mkdir(parents=True, exist_ok=True)
-    lr_table = pd.read_csv(params.lr_table, sep=None, engine="python")
-    response_matrix = load_response_matrix(str(params.response_matrix)) if params.response_matrix else None
-    required_genes = _required_genes(lr_table, response_matrix)
-    expression, metadata, gene_diagnostics = _expression_from_h5ad(
+    resolved_lr_table, resolved_response_path, inferred_species = _resolve_default_resource_paths(
         FastCommParams(
             h5ad=params.h5ad,
             lr_table=params.lr_table,
             response_matrix=params.response_matrix,
+            layer=params.layer,
+            gene_symbol_col=params.gene_symbol_col,
+            species=params.species,
+        )
+    )
+    lr_table = pd.read_csv(resolved_lr_table, sep=None, engine="python")
+    response_matrix = load_response_matrix(str(resolved_response_path)) if resolved_response_path else None
+    required_genes = _required_genes(lr_table, response_matrix)
+    expression, metadata, gene_diagnostics = _expression_from_h5ad(
+        FastCommParams(
+            h5ad=params.h5ad,
+            lr_table=resolved_lr_table,
+            response_matrix=resolved_response_path,
             output=params.output_dir / "_unused.tsv",
             state_key=params.state_key,
             layer=params.layer,
             gene_symbol_col=params.gene_symbol_col,
+            species=inferred_species,
         ),
         required_genes=required_genes,
     )
@@ -210,6 +229,9 @@ def run_benchmark(params: FastCommBenchmarkParams) -> Dict[str, object]:
         "split_scores_long_tsv": str(split_scores_long_path),
         "state_key": params.state_key,
         "split_key": params.split_key,
+        "species": inferred_species,
+        "lr_table": str(resolved_lr_table),
+        "response_matrix": str(resolved_response_path) if resolved_response_path else None,
         "top_n_stability": int(params.top_n_stability),
         "full": full_summary,
         "n_splits": int(split_summary_df.shape[0]),

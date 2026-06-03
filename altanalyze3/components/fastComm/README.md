@@ -17,9 +17,11 @@ This first scaffold includes:
 - a source registry for autonomous collection targets
 - ignored working directories for downloaded data, trained bundles, caches, and benchmarks
 
-The bundled `resources/seed_ligand_receptor.tsv` is only a tiny smoke-test
-resource. Production use should build a versioned LR table from connectomeDB,
-CellPhoneDB, CellChatDB, LIANA/OmniPath, ICELLNET, and CellTalkDB.
+No toy ligand-receptor or response seed tables are bundled anymore, because
+they were too small and too misleading relative to the actual intended
+CellChat/NicheNet-backed workflow. Production use is expected to rely on
+explicit user-supplied resources or on the built upstream bundle derived from
+the official CellChatDB GitHub release and NicheNet v2 Zenodo bundle.
 
 ## Ignored Artifact Layout
 
@@ -38,6 +40,47 @@ The source registry lives at:
 Prototype evaluation notes and benchmark commands are tracked in:
 
 `components/fastComm/EVALUATION.md`
+
+## Build Upstream Resources
+
+Build a larger human or mouse fastComm bundle directly from the latest
+CellChatDB and NicheNet v2 resources:
+
+```bash
+python -m altanalyze3.components.fastComm.cli build-upstream-resources \
+  --species human \
+  --top-targets-per-signature 200
+```
+
+This writes ignored outputs under:
+
+- `components/fastComm/training_data/processed/upstream/cellchat_nichenet_human/`
+- `components/fastComm/training_data/processed/upstream/cellchat_nichenet_mouse/`
+
+Each bundle contains:
+
+- `ligand_receptor.tsv`
+- `response_signatures.tsv`
+- `manifest.json`
+
+The human test build currently materializes:
+
+- `7340` ligand-receptor interactions
+- `290` non-empty CellChat pathway groups
+- `1368` ligand/pathway response signatures
+- `12966` response genes after NicheNet pruning
+
+The mouse test build currently materializes:
+
+- `8091` ligand-receptor interactions
+- `1528` ligand/pathway response signatures
+- `11312` response genes after NicheNet pruning
+
+These generated resources are intentionally not committed to git.
+
+If these upstream bundles exist, ordinary `fastComm score` and
+`benchmark-h5ad` runs now prefer them automatically when species can be
+inferred from gene symbols or supplied explicitly with `--species human|mouse`.
 
 ## Score Command
 
@@ -79,7 +122,7 @@ negative values indicate expected repression.
 `fastComm` matches required LR/response genes case-insensitively and renames
 matched input columns to the canonical symbols used by the LR and response
 tables. This allows mouse title-case symbols such as `Cxcl12`, `Cxcr4`,
-`Tgfb1`, and `Tgfbr1` to work with the bundled canonical seed resources.
+`Tgfb1`, and `Tgfbr1` to work with the built canonical human or mouse bundles.
 
 The run summary reports:
 

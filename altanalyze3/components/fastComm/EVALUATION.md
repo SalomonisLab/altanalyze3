@@ -1,6 +1,6 @@
 # fastComm Evaluation
 
-This document records the current prototype evaluation commands, observed
+This document records historical prototype evaluation commands, observed
 runtime, and benchmark interpretation for `fastComm`.
 
 ## Current Prototype Dataset
@@ -18,7 +18,7 @@ Observed input shape:
 ```
 
 The prototype loads only genes required for ligand-receptor and receiver
-response scoring. For the current seed LR/response resources, this was `74`
+response scoring. In the early narrow-resource prototype, this was `74`
 genes.
 
 ## Level 2 Scoring Run
@@ -32,10 +32,10 @@ PYTHONPATH=.. /opt/homebrew/opt/python@3.11/bin/python3.11 \
   --state-key 'Level 2' \
   --min-cells 30 \
   --exclude-self-edges \
-  --output components/fastComm/artifacts/prototype_male_level2/fastcomm_scores.tsv \
-  --state-pair-output components/fastComm/artifacts/prototype_male_level2/state_pair_summary.tsv \
-  --state-expression-output components/fastComm/artifacts/prototype_male_level2/state_expression.tsv \
-  --summary-json components/fastComm/artifacts/prototype_male_level2/summary.json
+  --output /tmp/fastcomm_level2/fastcomm_scores.tsv \
+  --state-pair-output /tmp/fastcomm_level2/state_pair_summary.tsv \
+  --state-expression-output /tmp/fastcomm_level2/state_expression.tsv \
+  --summary-json /tmp/fastcomm_level2/summary.json
 ```
 
 Observed summary:
@@ -62,10 +62,10 @@ Command:
 ```bash
 PYTHONPATH=.. /opt/homebrew/opt/python@3.11/bin/python3.11 \
   -m altanalyze3.components.fastComm.cli exemplar-report \
-  --scores components/fastComm/artifacts/prototype_male_level2/fastcomm_scores.tsv \
-  --output-tsv components/fastComm/artifacts/prototype_male_level2/exemplar_interactions.tsv \
-  --output-md components/fastComm/artifacts/prototype_male_level2/exemplar_interactions.md \
-  --split-stability components/fastComm/benchmarks/prototype_male_level2_donor/split_stability.tsv \
+  --scores /tmp/fastcomm_level2/fastcomm_scores.tsv \
+  --output-tsv /tmp/fastcomm_level2/exemplar_interactions.tsv \
+  --output-md /tmp/fastcomm_level2/exemplar_interactions.md \
+  --split-stability /tmp/fastcomm_level2_donor/split_stability.tsv \
   --top-n 20 \
   --min-score 0.25 \
   --title 'fastComm Exemplar Interactions: Human Marrow Male Subset Level 2'
@@ -91,8 +91,8 @@ Interpretation:
   against perturbation or spatial benchmarks.
 - `pathway_or_factor` and `supporting_response_genes` come from the active
   receiver-response matrix.
-- Current factors are seed prototype signatures, not yet learned from CytoSig,
-  NicheNet, Immune Dictionary, or perturbation atlases.
+- Current factors in this historical narrow-resource benchmark were not yet
+  learned from CytoSig, NicheNet, Immune Dictionary, or perturbation atlases.
 
 ## Donor Split Stability Benchmark
 
@@ -105,7 +105,7 @@ PYTHONPATH=.. /opt/homebrew/opt/python@3.11/bin/python3.11 \
   --state-key 'Level 2' \
   --split-key Donor \
   --min-cells 30 \
-  --output-dir components/fastComm/benchmarks/prototype_male_level2_donor
+  --output-dir /tmp/fastcomm_level2_donor
 ```
 
 Observed stability:
@@ -135,9 +135,9 @@ PYTHONPATH=.. /opt/homebrew/opt/python@3.11/bin/python3.11 \
   --min-cells 40 \
   --exclude-self-edges \
   --top-n 5000 \
-  --output components/fastComm/artifacts/prototype_male_l3m/fastcomm_top5000.tsv \
-  --state-pair-output components/fastComm/artifacts/prototype_male_l3m/state_pair_summary.tsv \
-  --summary-json components/fastComm/artifacts/prototype_male_l3m/summary.json
+  --output /tmp/fastcomm_l3m/fastcomm_top5000.tsv \
+  --state-pair-output /tmp/fastcomm_l3m/state_pair_summary.tsv \
+  --summary-json /tmp/fastcomm_l3m/summary.json
 ```
 
 Observed summary:
@@ -159,7 +159,7 @@ prototype_probability: 0.671
 
 ## Required Next Benchmarks
 
-The current evaluation is a prototype smoke/stability benchmark. Before
+The current evaluation is a historical smoke/stability benchmark. Before
 claiming calibrated biological probability, `fastComm` needs:
 
 - perturbation recovery: rank true ligand/cytokine in receiver response data
@@ -172,13 +172,13 @@ claiming calibrated biological probability, `fastComm` needs:
 ## Test Command
 
 ```bash
-PYTHONPATH=.. pytest -q components/tests/test_fastcomm_basic.py
+PYTHONPATH=. .venv/bin/pytest -q altanalyze3/components/tests/test_fastcomm_basic.py
 ```
 
-Current result:
+Current result at last update:
 
 ```text
-6 passed
+9 passed
 ```
 
 ## Mouse Compatibility Check

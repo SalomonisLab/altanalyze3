@@ -14,6 +14,12 @@ from altanalyze3.components.fastComm.upstream_resources import (
     build_nichenet_response_matrix,
     merge_ligand_receptor_tables,
 )
+from altanalyze3.components.fastComm.upstream_resources import (
+    build_cellchat_lr_table,
+    build_nichenet_lr_table,
+    build_nichenet_response_matrix,
+    merge_ligand_receptor_tables,
+)
 
 
 def test_fastcomm_prioritizes_response_supported_edge(tmp_path: Path):
@@ -297,6 +303,143 @@ def test_fastcomm_exemplar_report(tmp_path: Path):
     assert manifest["n_exemplars"] == 1
     assert output_tsv.exists()
     assert "TGFB1" in output_md.read_text(encoding="utf-8")
+
+
+def test_fastcomm_builds_lr_table_from_cellchat_and_nichenet():
+    cellchat_db = {
+        "interaction": pd.DataFrame(
+            {
+                "interaction_name": ["TGFB1_TGFBR1_TGFBR2", "CXCL12_CXCR4"],
+                "pathway_name": ["TGFb", "CXCL"],
+                "ligand": ["TGFB1", "CXCL12"],
+                "receptor": ["TGFbR1_R2", "CXCR4"],
+                "annotation": ["Secreted Signaling", "Secreted Signaling"],
+                "evidence": ["KEGG: hsa04350", "PMID:123"],
+                "ligand.symbol": ["TGFB1", "CXCL12"],
+                "receptor.symbol": ["TGFBR1, TGFBR2", "CXCR4"],
+                "agonist": ["", ""],
+                "antagonist": ["", ""],
+                "co_A_receptor": ["", ""],
+                "co_I_receptor": ["", ""],
+                "version": ["CellChatDB v2", "CellChatDB v2"],
+            }
+        ),
+        "complex": pd.DataFrame(
+            {"subunit_1": ["TGFBR1"], "subunit_2": ["TGFBR2"]},
+            index=["TGFbR1_R2"],
+        ),
+    }
+    nichenet_lr = pd.DataFrame(
+        {
+            "from": ["CXCL12", "FLT3LG"],
+            "to": ["CXCR4", "FLT3"],
+            "database": ["omnipath", "omnipath"],
+            "source": ["omnipath", "omnipath"],
+        }
+    )
+
+    cellchat_lr = build_cellchat_lr_table(cellchat_db)
+    nichenet_only = build_nichenet_lr_table(nichenet_lr)
+    merged = merge_ligand_receptor_tables(cellchat_lr, nichenet_only)
+    observed_pairs = set(merged[["ligand", "receptor"]].apply(tuple, axis=1))
+
+    assert ("TGFB1", "TGFBR1+TGFBR2") in observed_pairs
+    assert ("CXCL12", "CXCR4") in observed_pairs
+    assert ("FLT3LG", "FLT3") in observed_pairs
+    assert merged.loc[merged["ligand"].eq("FLT3LG"), "source"].iloc[0] == "NicheNet"
+
+
+def test_fastcomm_builds_nichenet_response_matrix_with_pathway_rows():
+    lr_table = pd.DataFrame(
+        {
+            "ligand": ["TGFB1", "TGFB2", "CXCL12"],
+            "receptor": ["TGFBR1+TGFBR2", "TGFBR1+TGFBR2", "CXCR4"],
+            "pathway": ["TGFb", "TGFb", "CXCL"],
+            "evidence_weight": [1.0, 1.0, 1.0],
+            "interaction_class": ["secreted", "secreted", "secreted"],
+        }
+    )
+    ligand_target = pd.DataFrame(
+        {
+            "TGFB1": [0.9, 0.8, 0.05],
+            "TGFB2": [0.7, 0.6, 0.04],
+            "CXCL12": [0.2, 0.1, 0.95],
+        },
+        index=["SERPINE1", "SMAD7", "CXCL10"],
+    )
+
+    response = build_nichenet_response_matrix(
+        lr_table,
+        ligand_target,
+        top_targets_per_signature=2,
+        min_target_weight=0.1,
+    )
+
+    assert "TGFB1" in response.index
+    assert "CXCL12" in response.index
+    assert "TGFb" in response.index
+    assert "CXCL" in response.index
+    assert "CXCL10" in response.columns
+    assert np.isclose(np.sqrt((response.loc["TGFB1"] ** 2).sum()), 1.0)
+
+
+def test_fastcomm_auto_uses_built_mouse_bundle(tmp_path: Path, monkeypatch):
+    cells = [f"cell{i:03d}" for i in range(8)]
+    genes = ["Tgfb1", "Tgfbr1", "Tgfbr2", "Serpine1", "Smad7"]
+    X = np.zeros((len(cells), len(genes)), dtype=np.float32)
+    gene_to_idx = {gene: idx for idx, gene in enumerate(genes)}
+    X[:4, gene_to_idx["Tgfb1"]] = 5.0
+    X[4:, gene_to_idx["Tgfbr1"]] = 4.0
+    X[4:, gene_to_idx["Tgfbr2"]] = 4.0
+    X[4:, gene_to_idx["Serpine1"]] = 3.0
+    X[4:, gene_to_idx["Smad7"]] = 3.0
+
+    adata = ad.AnnData(
+        X=X,
+        obs=pd.DataFrame({"cell_state": ["sender"] * 4 + ["receiver"] * 4}, index=cells),
+        var=pd.DataFrame(index=genes),
+    )
+    h5ad_path = tmp_path / "mouse_auto.h5ad"
+    adata.write_h5ad(h5ad_path)
+
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    lr_path = bundle_dir / "ligand_receptor.tsv"
+    response_path = bundle_dir / "response_signatures.tsv"
+    manifest_path = bundle_dir / "manifest.json"
+    pd.DataFrame(
+        {
+            "ligand": ["TGFB1"],
+            "receptor": ["TGFBR1+TGFBR2"],
+            "pathway": ["TGFb"],
+            "evidence_weight": [1.0],
+            "interaction_class": ["secreted"],
+        }
+    ).to_csv(lr_path, sep="\t", index=False)
+    pd.DataFrame({"SERPINE1": [1.0], "SMAD7": [1.0]}, index=["TGFB1"]).to_csv(response_path, sep="\t")
+    manifest_path.write_text("{}\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "altanalyze3.components.fastComm.api.bundle_paths_for_species",
+        lambda species: {
+            "bundle_root": bundle_dir,
+            "lr_table": lr_path,
+            "response_matrix": response_path,
+            "manifest": manifest_path,
+        },
+    )
+
+    result = run_fastcomm(
+        FastCommParams(
+            h5ad=h5ad_path,
+            output=tmp_path / "scores.tsv",
+            include_self_edges=False,
+        )
+    )
+
+    assert result.summary["species"] == "mouse"
+    assert result.summary["lr_table"] == str(lr_path)
+    assert result.scores.iloc[0]["ligand"] == "TGFB1"
 
 
 def test_fastcomm_builds_lr_table_from_cellchat_and_nichenet():

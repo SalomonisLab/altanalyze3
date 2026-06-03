@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Dict, Optional, Sequence
 
 import numpy as np
@@ -19,11 +20,12 @@ from .scoring import (
     split_complex,
     to_dense_frame,
 )
+from .upstream_resources import bundle_paths_for_species
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
-DEFAULT_LR_TABLE = PACKAGE_DIR / "resources" / "seed_ligand_receptor.tsv"
-DEFAULT_RESPONSE_MATRIX = PACKAGE_DIR / "resources" / "seed_response_signatures.tsv"
+DEFAULT_LR_TABLE = PACKAGE_DIR / "resources" / "__auto__ligand_receptor.tsv"
+DEFAULT_RESPONSE_MATRIX = PACKAGE_DIR / "resources" / "__auto__response_signatures.tsv"
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,7 @@ class FastCommParams:
     state_key: str = "cell_state"
     layer: Optional[str] = None
     gene_symbol_col: Optional[str] = None
+    species: Optional[str] = None
     min_cells: int = 1
     min_ligand_expr: float = 0.01
     min_receptor_expr: float = 0.01
@@ -58,6 +61,91 @@ class FastCommResult:
 
 def _read_table(path: Path) -> pd.DataFrame:
     return pd.read_csv(path, sep=None, engine="python", index_col=0)
+
+
+def _looks_human_symbol(gene: str) -> bool:
+    letters = re.sub(r"[^A-Za-z]", "", gene)
+    return bool(letters) and letters.isupper()
+
+
+def _looks_mouse_symbol(gene: str) -> bool:
+    letters = re.sub(r"[^A-Za-z]", "", gene)
+    return len(letters) >= 2 and letters[0].isupper() and letters[1:].islower()
+
+
+def infer_species_from_gene_symbols(genes: Sequence[str]) -> Optional[str]:
+    human = 0
+    mouse = 0
+    examined = 0
+    for gene in genes[:500]:
+        gene = str(gene).strip()
+        if _looks_human_symbol(gene):
+            human += 1
+            examined += 1
+        elif _looks_mouse_symbol(gene):
+            mouse += 1
+            examined += 1
+    if human and human == examined:
+        return "human"
+    if mouse and mouse == examined:
+        return "mouse"
+    if human >= 10 and human >= mouse * 2:
+        return "human"
+    if mouse >= 10 and mouse >= human * 2:
+        return "mouse"
+    return None
+
+
+def _peek_input_genes(params: FastCommParams) -> list[str]:
+    if params.h5ad is not None:
+        try:
+            import anndata as ad
+        except ImportError:
+            return []
+        adata = ad.read_h5ad(params.h5ad, backed="r")
+        try:
+            if params.gene_symbol_col and params.gene_symbol_col in adata.var.columns:
+                genes = adata.var[params.gene_symbol_col].astype(str).tolist()
+            else:
+                genes = adata.var_names.astype(str).tolist()
+        finally:
+            adata.file.close()
+        return genes
+    if params.expression is not None:
+        header = pd.read_csv(params.expression, sep=None, engine="python", nrows=0, index_col=0)
+        return [str(column) for column in header.columns]
+    return []
+
+
+def _resolve_default_resource_paths(params: FastCommParams) -> tuple[Path, Optional[Path], Optional[str]]:
+    using_default_lr = params.lr_table == DEFAULT_LR_TABLE
+    using_default_response = params.response_matrix == DEFAULT_RESPONSE_MATRIX
+    if not using_default_lr and not using_default_response:
+        return params.lr_table, params.response_matrix, params.species
+
+    species = (params.species or "").strip().lower() or infer_species_from_gene_symbols(_peek_input_genes(params))
+    if species not in {"human", "mouse"}:
+        if using_default_lr:
+            raise ValueError(
+                "No default fastComm ligand-receptor resource is bundled. "
+                "Run `fastComm build-upstream-resources --species human|mouse` or supply --lr-table explicitly."
+            )
+        return params.lr_table, None if using_default_response else params.response_matrix, species or None
+
+    bundle = bundle_paths_for_species(species)
+    if using_default_lr:
+        if not bundle["lr_table"].exists():
+            raise ValueError(
+                f"No built fastComm ligand-receptor bundle was found for species={species!r}. "
+                "Run `fastComm build-upstream-resources` first or supply --lr-table explicitly."
+            )
+        lr_table = bundle["lr_table"]
+    else:
+        lr_table = params.lr_table
+    response_matrix = bundle["response_matrix"] if using_default_response and bundle["response_matrix"].exists() else params.response_matrix
+    if using_default_response and response_matrix == DEFAULT_RESPONSE_MATRIX:
+        response_matrix = None
+    return lr_table, response_matrix, species
 
 
 def _materialize_matrix(matrix) -> np.ndarray:
@@ -256,8 +344,9 @@ def summarize_state_pairs(scores: pd.DataFrame) -> pd.DataFrame:
 
 
 def run_fastcomm(params: FastCommParams) -> FastCommResult:
-    lr_table = pd.read_csv(params.lr_table, sep=None, engine="python")
-    response_matrix = load_response_matrix(str(params.response_matrix)) if params.response_matrix else None
+    resolved_lr_table, resolved_response_path, inferred_species = _resolve_default_resource_paths(params)
+    lr_table = pd.read_csv(resolved_lr_table, sep=None, engine="python")
+    response_matrix = load_response_matrix(str(resolved_response_path)) if resolved_response_path else None
     required_genes = _required_genes(lr_table, response_matrix)
     expression, metadata, gene_diagnostics = _load_inputs(params, required_genes=required_genes)
     state = make_state_pseudobulk(
@@ -304,7 +393,9 @@ def run_fastcomm(params: FastCommParams) -> FastCommResult:
         "min_receptor_expr": float(params.min_receptor_expr),
         "min_lr_expression_score": float(params.min_lr_expression_score),
         "state_key": params.state_key,
-        "response_matrix": str(params.response_matrix) if params.response_matrix else None,
+        "species": inferred_species,
+        "lr_table": str(resolved_lr_table),
+        "response_matrix": str(resolved_response_path) if resolved_response_path else None,
         "state_pair_output": str(params.state_pair_output) if params.state_pair_output else None,
         "state_expression_output": str(params.state_expression_output) if params.state_expression_output else None,
     }
