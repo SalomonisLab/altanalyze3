@@ -76,9 +76,13 @@ def filter_and_summarize_differentials(directory_path):
             
             n_col1, n_col2 = count_columns[0], count_columns[1]
 
+            # P-value column is 'mwuPval' (Mann-Whitney) or 'ebayesPval' (limma/eBayes) depending on
+            # the differential method. Accept whichever is present.
+            pval_col = 'mwuPval' if 'mwuPval' in data.columns else 'ebayesPval'
+
             # Filter significant splicing events based on conditions
             filtered_data = data[
-                (data['mwuPval'] < 0.05) &
+                (data[pval_col] < 0.05) &
                 (data['DiffMeans'].abs() > 0.1) &
                 (data[n_col1] > 2) &
                 (data[n_col2] > 2)

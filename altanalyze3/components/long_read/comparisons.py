@@ -6,6 +6,26 @@ from ..annotation import junction_isoform as ji
 from ..oncosplice import metadataAnalysis as ma
 import numpy as np
 
+def _load_psi_matrix():
+    """Load the combined PSI matrix (events x cluster-sample) for the differentials.
+
+    Prefers the compact h5ad (obs=cluster-sample, var=events, X=PSI incl. NaN) written by
+    run_psi_analysis, reconstructing the same events x cluster-sample DataFrame a pd.read_csv of the
+    TSV would yield (X.T). Falls back to the new .txt name, then the legacy '_counts.txt'. The h5ad
+    has been validated value/NaN/order-identical to the TSV."""
+    h5ad_path = 'psi_combined_pseudo_cluster.h5ad'
+    txt_path = 'psi_combined_pseudo_cluster.txt'
+    legacy_txt = 'psi_combined_pseudo_cluster_counts.txt'
+    if os.path.exists(h5ad_path):
+        import anndata as ad
+        a = ad.read_h5ad(h5ad_path)
+        X = a.X.toarray() if hasattr(a.X, 'toarray') else np.asarray(a.X)
+        # obs = cluster-sample (rows of X), var = events (cols) -> events x cluster-sample = X.T
+        return pd.DataFrame(X.T, index=list(a.var_names), columns=list(a.obs_names))
+    src = txt_path if os.path.exists(txt_path) else legacy_txt
+    return pd.read_csv(src, sep='\t', index_col=0)
+
+
 def _resolve_uid(raw_uid, uid_to_group, data_type):
     if raw_uid in uid_to_group:
         return raw_uid
@@ -32,6 +52,17 @@ def compare_one_cluster_to_many(condition,cluster_order,groups_file,psi_matrix,j
         stats_folder = 'diff-cluster-isoform/'
     if dataType == 'isoform-ratio':
         stats_folder = 'diff-cluster-ratio/'
+
+    # Guard: 'grp' must be string for the .str accessor. If cluster annotation failed upstream the
+    # column can be all-NaN (float dtype) -> '.str' raises a cryptic AttributeError. Coerce to str and,
+    # if no row carries a real group label, skip this comparison loudly instead of crashing.
+    groups_file = groups_file.copy()
+    groups_file['grp'] = groups_file['grp'].astype(str)
+    if not (groups_file['grp'].str.endswith(condition)).any():
+        print(f"[WARN] no samples with group '{condition}' in {dataType} groups (grp all "
+              f"'{groups_file['grp'].iloc[0] if len(groups_file) else 'NA'}'?). Skipping "
+              f"{dataType} cluster differentials -- check cluster annotation / barcode matching.")
+        return
 
     for cluster in cluster_order:
         # Filter samples for the current cluster
@@ -72,7 +103,16 @@ def compare_two_groups_per_cluster(condition1,condition2,cluster_order,groups_fi
         stats_folder = 'diff-covariate-isoform/'
     if dataType == 'isoform-ratio':
         stats_folder = 'diff-covariate-ratio/'
-    
+
+    # Guard: coerce 'grp' to str (all-NaN float column breaks the .str accessor) and skip loudly if
+    # neither requested condition is present (e.g. cluster annotation failed -> grp all 'nan').
+    groups_file = groups_file.copy()
+    groups_file['grp'] = groups_file['grp'].astype(str)
+    if not (groups_file['grp'].str.endswith((condition1, condition2))).any():
+        print(f"[WARN] neither group '{condition1}' nor '{condition2}' present in {dataType} groups; "
+              f"skipping {dataType} covariate differentials -- check cluster annotation / barcodes.")
+        return
+
     print ('test',stats_folder)
     for cluster in cluster_order:
         filtered_groups_file = groups_file[
@@ -111,6 +151,12 @@ def run_metadataAnalysis(cluster,psi_matrix,condition1,condition2,filtered_group
     # or the limma-like empirical-Bayes moderated t-test used for pseudobulks in cellHarmony-differential.
     if str(method).lower() == 'limma':
         diff_stats = ma.limmaCompute(subset_psi_matrix, filtered_groups_file, grpvar='grp', min_group_size=2)
+        # limmaCompute returns the eBayes moderated-t results under the mwu* column names (for a uniform
+        # downstream schema). Rename the column TITLES to ebayes* so the output reflects the actual test
+        # (empirical-Bayes), not Mann-Whitney. Downstream annotation accepts either name.
+        diff_stats = diff_stats.rename(columns={
+            'mwuStat': 'ebayesStat', 'mwuSign': 'ebayesSign',
+            'mwuPval': 'ebayesPval', 'mwuAdjPval': 'ebayesAdjPval'})
     else:
         diff_stats = ma.mwuCompute(subset_psi_matrix, filtered_groups_file, grpvar='grp', min_group_size=2)
 
@@ -131,10 +177,12 @@ def compute_differentials(sample_dict,conditions,cluster_order,gene_symbol_file,
         print (f'Analyzing {condition2} vs. {condition1} ')
 
         if 'junction' in analyses:
-            psi_dir = 'psi_combined_pseudo_cluster_counts.txt'
             junction_coords_file = 'junction_combined_pseudo_cluster_counts-filtered.txt'
 
-            psi_matrix = pd.read_csv(psi_dir, sep='\t', index_col=0)
+            # PSI is now written as BOTH psi_combined_pseudo_cluster.txt and .h5ad (run_psi_analysis).
+            # Prefer the compact .h5ad (4-5x smaller, validated value/NaN/order-identical to the txt),
+            # falling back to the new .txt name and then the legacy '_counts.txt' for old runs.
+            psi_matrix = _load_psi_matrix()
             print ('PSI matrix imported')
 
             # Extract 'groups' for each UID from the sample_dict

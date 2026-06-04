@@ -74,6 +74,14 @@ def load_junction_coordinates(file_input):
 
     return coord_dict
 
+def _strip_version(x):
+    """Drop a trailing Ensembl version (ENSG/ENST/ENSP.<digits>). Leaves non-Ensembl ids untouched."""
+    s = str(x)
+    if (s.startswith("ENSG") or s.startswith("ENST") or s.startswith("ENSP")) and "." in s:
+        return s.split(".", 1)[0]
+    return s
+
+
 # 4. Load protein summary into a dictionary {isoform: (length, NMD status)}
 def load_protein_summary(file_path):
     protein_dict = {}
@@ -92,7 +100,14 @@ def load_protein_summary(file_path):
                 length = int(length)
             except:
                 continue
-            protein_dict[(gene_id, isoform)] = (length, nmd_status, longest_length)
+            val = (length, nmd_status, longest_length)
+            protein_dict[(gene_id, isoform)] = val
+            # Also index by VERSION-STRIPPED gene+isoform so the diff's version-stripped ENST/gene ids
+            # (e.g. 'ENSG00000000419'/'ENST00000371588') match the summary's versioned keys
+            # ('ENSG00000000419.14'/'ENST00000371588.10'). Without this every ENST lookup misses -> 0.
+            g0 = _strip_version(gene_id); i0 = _strip_version(isoform)
+            if (g0, i0) != (gene_id, isoform):
+                protein_dict.setdefault((g0, i0), val)
 
     return protein_dict
 
@@ -102,7 +117,7 @@ def get_longest_isoform(gene,isoforms,protein_dict):
     longest_exons = 'N/A'
     best_rank = None
     for (isoform,exons) in isoforms:
-        length, nmd_status, _ = protein_dict.get((gene,isoform), (0, None, None))
+        length, nmd_status, _ = _pd_lookup(gene, isoform, protein_dict)
         # Prefer non-NMD transcripts when available, then maximize protein length.
         is_nmd = _is_potential_nmd_status(nmd_status)
         rank = (is_nmd, -int(length), str(isoform))
@@ -118,8 +133,38 @@ def _is_ensembl_isoform(isoform_id):
     return str(isoform_id).startswith("ENST")
 
 
+def _pd_lookup(gene, isoform_id, protein_dict):
+    """Tolerant protein_summary lookup -> (length, nmd_status, longest) or (0, None, None).
+
+    The diff's isoform ids do NOT key 1:1 against protein_summary.txt:
+      * novel molecule ids carry a '.<sample>' suffix in the diff (e.g. '11243818.AML-14_CITE_GEX')
+        but are bare ('11243818') in the summary;
+      * ENST/gene ids are version-stripped in the diff ('ENST00000371588','ENSG00000000419') but
+        VERSIONED in the summary ('ENST00000371588.10','ENSG00000000419.14').
+    Without normalization every lookup misses -> protein length reported as 0 for all events.
+    Try, in order: exact; molecule '.<sample>' stripped; version-stripped gene+isoform (both sides).
+    """
+    g = str(gene); iso = str(isoform_id)
+    # 1. exact
+    v = protein_dict.get((g, iso))
+    if v is not None:
+        return v
+    # 2. strip a trailing '.<sample>' from a NON-ENST molecule id (ENST keeps its '.version')
+    if "." in iso and not iso.startswith("ENST"):
+        bare = iso.split(".", 1)[0]
+        v = protein_dict.get((g, bare)) or protein_dict.get((_strip_version(g), bare))
+        if v is not None:
+            return v
+    # 3. version-stripped gene + isoform on both sides (handled by the version-stripped index built
+    #    in load_protein_summary, so a single .get suffices here)
+    v = protein_dict.get((_strip_version(g), _strip_version(iso)))
+    if v is not None:
+        return v
+    return (0, None, None)
+
+
 def _get_protein_length(gene, isoform_id, protein_dict):
-    length, _, _ = protein_dict.get((gene, isoform_id), (0, None, None))
+    length, _, _ = _pd_lookup(gene, isoform_id, protein_dict)
     try:
         return int(length)
     except Exception:
@@ -137,7 +182,7 @@ def _is_potential_nmd_status(nmd_status):
 
 
 def _is_potential_nmd(gene, isoform_id, protein_dict):
-    _, nmd_status, _ = protein_dict.get((gene, isoform_id), (0, None, None))
+    _, nmd_status, _ = _pd_lookup(gene, isoform_id, protein_dict)
     return _is_potential_nmd_status(nmd_status)
 
 
@@ -320,7 +365,8 @@ def annotate_junction_stats_file(file_path, transcript_dict, gene_symbol_dict, c
 
     for index, row in stats_df.iterrows():
         feature = row['Feature']
-        mwuSign = row['mwuSign']
+        # Accept either the Mann-Whitney ('mwuSign') or eBayes/limma ('ebayesSign') sign column.
+        mwuSign = row['mwuSign'] if 'mwuSign' in row.index else row.get('ebayesSign', 0)
 
         if feature in event_isoform_db:
             # Do not re-generate prior produced associations from other stat files
@@ -423,9 +469,8 @@ def annotate_iso_stats_file(file_path, transcript_dict, gene_symbol_dict, protei
 
         # Get isoforms and select the longest one for each junction
         junctions = transcript_dict[gene_id][isoform]
-        try:
-            prot_len, nmd_status, longest = protein_dict[gene_id,isoform]
-        except:
+        prot_len, nmd_status, longest = _pd_lookup(gene_id, isoform, protein_dict)
+        if nmd_status is None:
             prot_len, nmd_status, longest = 0, 'NMD', 'UNK'
 
         # Add new annotated row
@@ -445,7 +490,7 @@ def annotate_iso_stats_file(file_path, transcript_dict, gene_symbol_dict, protei
     final_df.to_csv(output_file, sep='\t', index=False)
 
 # 7. Annotate all stats files in the folder
-def annotate_all_stats_files(stats_folder, transcript_dict, gene_symbol_dict, coord_dict, protein_dict, dataType='junction'):
+def annotate_all_stats_files(stats_folder, transcript_dict, gene_symbol_dict, coord_dict, protein_dict, dataType='junction', freshness_refs=None):
     global event_isoform_db
     event_isoform_db={}
     output_folder = stats_folder
@@ -453,13 +498,16 @@ def annotate_all_stats_files(stats_folder, transcript_dict, gene_symbol_dict, co
     # Get a list of all .txt files excluding '-annotated.txt' files
     stats_files = [f for f in glob.glob(f"{stats_folder}/*.txt") if f.endswith("stats.txt")]
 
-    # Use tqdm to show progress over the stats files
+    # ALWAYS regenerate the -annotated.txt when stats are (re-)run. Re-running the differential means
+    # the stats and/or the annotation inputs (protein_summary.txt, transcript_associations.txt, or a
+    # code fix) may have changed, so a stale annotated file must never be kept. The old behaviour
+    # ("if the annotated file exists, skip it") was legacy leftover that silently preserved wrong
+    # annotations (e.g. the protein-length fix wouldn't take effect on a re-run). freshness_refs is
+    # retained for signature compatibility but no longer gates regeneration.
     for stats_file in tqdm(stats_files, desc="Annotating Stats Files"):
-        # Check if the annotated version already exists
         annotated_file = os.path.join(output_folder, os.path.basename(stats_file).replace('.txt', '-annotated.txt'))
         if os.path.exists(annotated_file):
-            print(f"Skipping {stats_file}, already annotated.")
-            continue  # Skip this file
+            print(f"Re-annotating {stats_file} (regenerating annotated file).")
 
         if dataType == 'junction':
             annotate_junction_stats_file(stats_file, transcript_dict, gene_symbol_dict, coord_dict, protein_dict, output_folder)
@@ -487,8 +535,11 @@ def annotate(gene_symbol_file,transcript_assoc_file,junction_coords_file,protein
     gene_symbol_dict = load_gene_symbols(gene_symbol_file)
     protein_dict = load_protein_summary(protein_summary_file)
 
-    # Annotate all stats files
-    annotate_all_stats_files(stats_folder, transcript_dict, gene_symbol_dict, coord_dict, protein_dict,dataType=dataType)
+    # Annotate all stats files. Pass the content-determining inputs so an annotated file that
+    # predates a corrected protein_summary / transcript_associations is regenerated, not skipped.
+    freshness_refs = [p for p in (protein_summary_file, transcript_assoc_file) if p]
+    annotate_all_stats_files(stats_folder, transcript_dict, gene_symbol_dict, coord_dict, protein_dict,
+                             dataType=dataType, freshness_refs=freshness_refs)
 
 if __name__ == '__main__':
     # File paths

@@ -338,32 +338,84 @@ def stage_protein(gene_results, kept_struct2exemplar, sample_gff_paths, outdir,
     # that sample's read GFF, transcript_id = bare molecule). A KNOWN exemplar is an ENST (version
     # stripped); its genomic records live in the reference GFF (transcript_id = ENST.version). We copy
     # both into combined.gff so gff_translate produces proteins for known AND novel isoforms.
-    keep_mol_to_ex = collections.defaultdict(dict)  # sample -> {bare_molecule_id: exemplar_id}
-    keep_enst = set()                               # version-stripped ENST exemplar ids (known)
+    # For each kept NOVEL exemplar we record (sample, bare_molecule_id, (gene, structure), exemplar_id).
+    # The genomic coordinates are retrieved by an indexed point lookup on each sample's
+    # structure_coords.sqlite (written by gff_process at the structure-formation stage) keyed by
+    # (gene, structure) -- avoiding a full re-scan of the source GFFs. If a sample's store is absent
+    # (older run), we fall back to scanning that sample's read GFF by transcript_id.
+    keep_mol_to_ex = collections.defaultdict(dict)        # sample -> {bare_molecule_id: exemplar_id}
+    keep_struct_by_sample = collections.defaultdict(list)  # sample -> [(gene, structure, exemplar_id)]
+    keep_enst = set()                                      # version-stripped ENST exemplar ids (known)
     for g, r in gene_results.items():
         kept_ex = set(kept_struct2exemplar.get(g, {}).values())
         known_map = r.get('exemplar_known', {})
+        s2e = r.get('struct2exemplar', {})
+        ex2struct = {}
+        for s, e in s2e.items():
+            ex2struct.setdefault(e, s)                     # exemplar -> its own (representative) structure
         for ex in r['exemplar_total']:
             if ex not in kept_ex:
                 continue
             if known_map.get(ex):
-                keep_enst.add(ex)                   # ENST id (already version stripped)
+                keep_enst.add(ex)                          # ENST id (already version stripped)
                 continue
             sample = r['exemplar_sample'].get(ex)
             if not sample or sample == 'ENSEMBL':
                 continue
             mol = ex[:-(len(sample) + 1)] if ex.endswith('.' + sample) else ex
             keep_mol_to_ex[sample][mol] = ex
+            struct = ex2struct.get(ex)
+            if struct is not None:
+                # stamp the BARE molecule id as transcript_id -- byte-identical to the source GFF /
+                # golden combined.gff (which carry transcript_id "<molecule>", not "<molecule>.<sample>").
+                keep_struct_by_sample[sample].append((g, struct, mol))
 
-    combined = os.path.join(gff_dir, 'combined.gff')
+    combined_gz = os.path.join(gff_dir, 'combined.gff.gz')
     written = 0
     n_novel = sum(len(m) for m in keep_mol_to_ex.values())
-    with open(combined, 'w') as out:
-        # 2a. novel exemplars: copy genomic records from each sample's read GFF.
+    n_from_store = 0
+    n_from_scan = 0
+    try:
+        from ...bam import coord_store
+    except Exception:
+        try:
+            from bam import coord_store
+        except Exception:
+            coord_store = None
+
+    with gzip.open(combined_gz, 'wt') as out:
+        # 2a. novel exemplars: emit genomic records grouped by sample (each sample's structures are
+        # already chromosome-local in its store; we group output per chromosome within a sample).
         for sample, keep in keep_mol_to_ex.items():
             path = sample_gff_paths.get(sample)
+            store_path = None
+            if path:
+                # structure_coords.sqlite lives next to the sample's gff-output/transcript_associations.txt
+                cand = os.path.join(os.path.dirname(path), 'gff-output', 'structure_coords.sqlite')
+                if os.path.exists(cand):
+                    store_path = cand
+            conn = coord_store.open_reader(store_path) if (coord_store and store_path) else None
+
+            if conn is not None:
+                # FAST PATH: indexed (gene, structure) lookups; stamp exemplar id as transcript_id.
+                pairs = [(g, s) for (g, s, _mol) in keep_struct_by_sample.get(sample, [])]
+                mol_by_pair = {(g, s): mol for (g, s, mol) in keep_struct_by_sample.get(sample, [])}
+                # collect blocks then emit grouped by chromosome (genes group naturally per chrom)
+                by_chrom = collections.defaultdict(list)
+                for g, s, chrom, block in coord_store.fetch_structures(
+                        conn, pairs, transcript_id_for=lambda gg, ss: mol_by_pair[(gg, ss)]):
+                    by_chrom[chrom].append(block)
+                conn.close()
+                for chrom in sorted(by_chrom):
+                    for block in by_chrom[chrom]:
+                        out.write(block)
+                        written += block.count('\n')
+                        n_from_store += 1
+                continue
+
+            # FALLBACK: scan the sample's read GFF by transcript_id (no store available).
             if not path or not os.path.exists(path):
-                log(f"[protein] WARN: no raw GFF for sample {sample}; its exemplars skipped")
+                log(f"[protein] WARN: no raw GFF or coord store for sample {sample}; its exemplars skipped")
                 continue
             opener = gzip.open if path.endswith('.gz') else open
             with opener(path, 'rt') as fh:
@@ -385,6 +437,7 @@ def stage_protein(gene_results, kept_struct2exemplar, sample_gff_paths, outdir,
                     if tid in keep:
                         out.write(line)
                         written += 1
+                        n_from_scan += 1
 
         # 2b. known (ENST) exemplars: copy genomic records from the reference GFF, matching on the
         # version-stripped transcript_id (reference is "ENST.version", exemplar is "ENST").
@@ -415,8 +468,9 @@ def stage_protein(gene_results, kept_struct2exemplar, sample_gff_paths, outdir,
                         out.write(line.replace(tid, tid_bare, 1))
                         written += 1
                         n_enst_records += 1
-    log(f"[protein] wrote {combined} ({written:,} genomic records: {n_novel:,} novel exemplars + "
-        f"{len(keep_enst):,} known ENST [{n_enst_records:,} ref records])")
+    log(f"[protein] wrote {combined_gz} ({n_novel:,} novel exemplars "
+        f"[{n_from_store:,} via coord store, {n_from_scan:,} via GFF scan] + "
+        f"{len(keep_enst):,} known ENST [{n_enst_records:,} ref records]; {written:,} lines)")
 
     # 3. transcript_associations for final isoforms (gene, strand, structure, exemplar, source)
     ta = os.path.join(gff_dir, 'transcript_associations.txt')
@@ -442,7 +496,7 @@ def stage_protein(gene_results, kept_struct2exemplar, sample_gff_paths, outdir,
     cwd = os.getcwd()
     try:
         os.chdir(outdir)
-        cds, transcripts, proteins = isot.gff_translate(combined, genome_fasta, ref_gff, ta)
+        cds, transcripts, proteins = isot.gff_translate(combined_gz, genome_fasta, ref_gff, ta)
         try:
             from Bio import SeqIO
             with open('protein_sequences.fasta', 'w') as f:
@@ -457,7 +511,7 @@ def stage_protein(gene_results, kept_struct2exemplar, sample_gff_paths, outdir,
         os.chdir(cwd)
     log(f"[protein] gff_translate done -> {os.path.join(outdir, 'protein_summary.txt')} "
         f"({len(proteins)} proteins)")
-    return combined, ta
+    return combined_gz, ta
 
 
 # ------------------------------------------------------------------ STAGE 3 --
@@ -550,14 +604,47 @@ def stage3_rekey_h5ad(sample, h5ad_path, ta_path, kept_struct2exemplar, outdir,
         if not isinstance(cl, pd.Series):
             cl = pd.Series(cl)
         cl.index = cl.index.astype(str)
-        obs['cluster'] = obs.index.astype(str).map(cl)
-        keep = obs['cluster'].notna().to_numpy()
-        if keep.sum() == 0:
-            print(f"[stage3:{sample}] WARN: 0/{len(obs)} barcodes matched cluster annotations; "
-                  f"writing all cells without cluster restriction")
-        else:
-            Xf = Xf.tocsr()[keep]
-            obs = obs.iloc[keep].copy()
+        bc_index = obs.index.astype(str)
+        mapped = bc_index.map(cl)
+        n_fwd = int(pd.notna(mapped).sum())
+        # Long-read cell barcodes are often the REVERSE COMPLEMENT of the (standard-orientation)
+        # cellHarmony annotations (metadata reverse=TRUE). The junction path applies this via
+        # reverse_complement_seq; the isoform re-key must do the same or EVERY barcode misses ->
+        # obs['cluster'] all-NaN -> pseudobulk columns become 'nan.<sample>' and the cluster-group
+        # filter drops all data columns. Auto-detect: if the forward orientation matches nothing (or
+        # far fewer), retry with reverse-complemented barcodes and keep whichever matches more.
+        if n_fwd < len(obs):
+            from ..isoform_matrix import reverse_complement_seq
+            def _rc(b):
+                try:
+                    return reverse_complement_seq(b)
+                except Exception:
+                    return b
+            rc_index = pd.Index([_rc(b) for b in bc_index])
+            mapped_rc = rc_index.map(cl)
+            n_rev = int(pd.notna(mapped_rc).sum())
+            if n_rev > n_fwd:
+                print(f"[stage3:{sample}] barcodes are reverse-complemented vs annotations: "
+                      f"{n_rev}/{len(obs)} match revcomp (vs {n_fwd}/{len(obs)} forward); using revcomp.")
+                mapped = mapped_rc
+        obs['cluster'] = mapped.to_numpy() if hasattr(mapped, 'to_numpy') else mapped
+        # Cells WITHOUT a cluster assignment (no matching barcode in the annotation) must be EXCLUDED
+        # downstream -- never carried as 'nan'. Always restrict to annotated cells. If NONE match, fail
+        # loudly rather than silently emitting unannotated cells (the old behaviour wrote all cells
+        # without restriction, which leaked nan-cluster cells into the pseudobulk).
+        keep = pd.notna(obs['cluster']).to_numpy()
+        n_keep = int(keep.sum())
+        if n_keep == 0:
+            raise ValueError(
+                f"[stage3:{sample}] 0/{len(obs)} barcodes matched cluster annotations (tried forward "
+                f"AND reverse-complement). Refusing to write unannotated cells. Check that the "
+                f"--cell_annot sample name matches the library '{sample}' and that its barcodes "
+                f"overlap this sample's h5ad.")
+        if n_keep < len(obs):
+            print(f"[stage3:{sample}] excluding {len(obs) - n_keep}/{len(obs)} cells with no cluster "
+                  f"assignment (no matching barcode); keeping {n_keep} annotated cells.")
+        Xf = Xf.tocsr()[keep]
+        obs = obs.iloc[keep].copy()
 
     out = ad.AnnData(X=Xf.tocsr(), obs=obs, var=pd.DataFrame(index=final_ids))
     base = os.path.basename(h5ad_path).split('.h5ad')[0]
@@ -669,6 +756,31 @@ def run_pipeline(samples, outdir, nproc=8, min_total=3, ref=DEFAULT_REF, write_h
             log(f"[validate] read conservation: {tot_final:,}/{tot_raw:,} "
                 f"({100*tot_final/tot_raw:.1f}%) of molecule reads retained in final isoform h5ads "
                 f"(remainder = <{min_total}-read outliers + unannotated cells)")
+    # ---- workflow summary tables + bar charts (summary/ folder) ----
+    # All numbers come from the live collapse results above + per-sample artifacts on disk.
+    try:
+        from ..summary_report import write_summary
+        # per-sample junction h5ad sits next to each sample's molecule h5ad as "<stem>-junction.h5ad";
+        # reads come from each sample's transcript_associations.txt (already used for collapse).
+        jh5, tap = {}, {}
+        for s in samples:
+            name, h5, ta = s[0], str(s[1]), s[2]
+            stem = h5[:-len('.h5ad')] if h5.endswith('.h5ad') else h5
+            cand = stem + '-junction.h5ad'
+            if os.path.exists(cand):
+                jh5[name] = cand
+            if ta and os.path.exists(str(ta)):
+                tap[name] = str(ta)
+        psum = os.path.join(outdir, 'protein_summary.txt')   # outdir is gff-output/
+        # Write the summary/ folder at the RUN-DIR level (sibling of gff-output) for discoverability.
+        summary_root = os.path.dirname(os.path.abspath(outdir)) or outdir
+        write_summary(summary_root, collapse_method=collapse_method, min_total=min_total,
+                      n_structures=n_final, catalog=catalog, h5ad_results=h5ad_results,
+                      sample_junction_h5ads=jh5, sample_ta_paths=tap,
+                      protein_summary_path=psum, log=log)
+    except Exception as e:
+        log(f"[summary] table generation skipped ({type(e).__name__}: {e})")
+
     return dict(gene_results=gene_results, catalog=catalog, kept=kept, protein=protein,
                 stage1=(t1, max_rss, nparts), h5ad=h5ad_results)
 

@@ -326,18 +326,159 @@ def _read_isoform_counts_cache_metadata(cache_path):
     return payload
 
 
+def _shared_var_names_path(cache_path):
+    """One var_names file PER SAMPLE h5ad, shared by all its per-cell-type caches. The per-cell-type
+    cache path is '<h5ad>.isoform_counts.<hash>'; strip the '.<hash>' to get the per-h5ad stem so
+    every cell type of the same h5ad reuses ONE var_names array (it is identical across them, and for
+    35M-isoform samples that array is ~140MB -- storing it 58x was the bulk of the bloat)."""
+    base = cache_path
+    marker = ".isoform_counts."
+    i = base.find(marker)
+    if i >= 0:
+        stem = base[:i + len(marker) - 1]  # '<h5ad>.isoform_counts'
+        return stem + ".SHARED.var_names.npy"
+    return cache_path + ".var_names.npy"
+
+
+def _counts_cache_files(cache_path):
+    """Return (counts_file, var_names_source) for whichever format exists for this cache: the SPARSE
+    '.counts.npz' (var_names read from the h5ad, or a legacy shared file), else the legacy dense
+    '.counts.npy' + per-cache '.var_names.npy'. Returns (None, None) if neither is present. Used by all
+    existence/staleness gates so both formats are recognized uniformly."""
+    sparse = cache_path + ".counts.npz"
+    if os.path.exists(sparse):
+        # var_names comes from the h5ad now; a legacy shared file may also exist. Either way the
+        # cache is usable as long as the h5ad (or shared file) is resolvable.
+        var_src = _h5ad_path_from_cache_path(cache_path)
+        if var_src is None:
+            vs = _shared_var_names_path(cache_path)
+            var_src = vs if os.path.exists(vs) else None
+        return sparse, var_src
+    dense = cache_path + ".counts.npy"
+    var_dense = cache_path + ".var_names.npy"
+    if os.path.exists(dense) and os.path.exists(var_dense):
+        return dense, var_dense
+    return None, None
+
+
+def _counts_cache_ready(cache_path, source_paths):
+    """True if a (sparse OR dense) counts cache exists for this cache_path and is not stale."""
+    cf, _ = _counts_cache_files(cache_path)
+    return cf is not None and not _is_index_stale(cf, source_paths)
+
+
+def _h5ad_path_from_cache_path(cache_path):
+    """Recover the sample h5ad path from a counts cache path. The cache path is
+    '<index_dir>/<h5ad_basename>.isoform_counts.<hash>', and the index dir is
+    '<h5ad_dir>/gene_indexes_v2', so the h5ad is '<h5ad_dir>/<h5ad_basename>'."""
+    d = os.path.dirname(cache_path)
+    base = os.path.basename(cache_path)
+    i = base.find(".isoform_counts.")
+    if i < 0:
+        return None
+    h5ad_basename = base[:i]
+    # index dir name is INDEX_DIR_NAME; the h5ad lives in its parent
+    h5ad_dir = os.path.dirname(d) if os.path.basename(d) == INDEX_DIR_NAME else d
+    cand = os.path.join(h5ad_dir, h5ad_basename)
+    return cand if os.path.exists(cand) else None
+
+
+_VAR_NAMES_MEM_CACHE = {}
+
+
+def _var_names_sidecar_path(h5ad_path):
+    """Path to the precomputed var_names sidecar (.var_names.npy) next to the h5ad."""
+    return h5ad_path + ".var_names.npy"
+
+
+def _read_var_names_from_h5(h5ad_path):
+    """Read var_names directly out of the h5ad var index (no matrix load). For very large h5ads
+    (35M isoforms) this is a ~10s HDF5 read of the variable-length string array -- callers should
+    prefer the memoized/sidecar wrapper _var_names_from_h5ad."""
+    import h5py
+    with h5py.File(h5ad_path, "r", locking=False) as f:
+        for p in ("var/_index", "var/index"):
+            if p in f:
+                return np.asarray(f[p][:])
+        g = f["var"]
+        return np.asarray(g[g.attrs.get("_index", "_index")][:])
+
+
+def _build_var_names_sidecar(h5ad_path):
+    """Write the var_names sidecar (.var_names.npy) so future processes skip the ~10s HDF5 read.
+
+    Stored as a contiguous fixed-width bytes ('S') array, NOT an object array: object arrays pickle on
+    save/load (10s+ for 35M rows) while 'S' is a raw memcpy (~0.1s load). Idempotent: skips if an
+    up-to-date sidecar already exists. Called by precompute."""
+    side = _var_names_sidecar_path(h5ad_path)
+    try:
+        if os.path.exists(side) and os.path.getmtime(side) >= os.path.getmtime(h5ad_path):
+            return side
+        names = _read_var_names_from_h5(h5ad_path)
+        if names is None:
+            return None
+        fixed = np.asarray(names, dtype='S')  # bytes fixed-width; var index entries are ascii ids
+        tmp = side + ".tmp.npy"               # np.save force-appends .npy; name tmp accordingly
+        np.save(tmp, fixed, allow_pickle=False)
+        os.replace(tmp, side)
+        return side
+    except Exception as exc:
+        print(f"[warn] could not build var_names sidecar for {h5ad_path}: {exc}")
+        return None
+
+
+def _var_names_from_h5ad(h5ad_path):
+    """Return var_names (the isoform id vector) for an h5ad WITHOUT loading the matrix.
+
+    The cache does NOT store var_names (it IS adata.var_names), so disk stays near-zero and the h5ad
+    stays the source of truth. Three-tier fast path so we never pay the ~10s HDF5 read more than once:
+      1. in-process memo keyed by (realpath, mtime, size) -- free on repeat queries in a session;
+      2. a precomputed .var_names.npy sidecar (written by precompute) -- free across processes;
+      3. fall back to reading the h5ad var index directly (and memoize the result)."""
+    try:
+        st = os.stat(h5ad_path)
+        key = (os.path.realpath(h5ad_path), st.st_mtime, st.st_size)
+    except Exception:
+        key = None
+    if key is not None and key in _VAR_NAMES_MEM_CACHE:
+        return _VAR_NAMES_MEM_CACHE[key]
+    out = None
+    side = _var_names_sidecar_path(h5ad_path)
+    try:
+        if os.path.exists(side) and os.path.getmtime(side) >= os.path.getmtime(h5ad_path):
+            loaded = np.load(side, allow_pickle=False)
+            # sidecar is fixed-width bytes ('S'); restore the object-of-bytes form the h5ad read yields
+            out = loaded.astype(object) if loaded.dtype.kind == 'S' else loaded
+    except Exception as exc:
+        print(f"[warn] could not read var_names sidecar {side}: {exc}")
+        out = None
+    if out is None:
+        try:
+            out = _read_var_names_from_h5(h5ad_path)
+        except Exception as exc:
+            print(f"[warn] could not read var_names from {h5ad_path}: {exc}")
+            return None
+    if key is not None and out is not None:
+        _VAR_NAMES_MEM_CACHE[key] = out
+    return out
+
+
 def _save_isoform_counts_cache_arrays(cache_path, counts, var_names):
+    """Write the per-cell-type cache SPARSE (nonzero index+value+length). var_names is NOT stored --
+    it is adata.var_names, read from the sample h5ad on load (near-zero extra disk, no info lost). For
+    a 35M-isoform sample the names array is ~840MB; storing it per sample (or per cell type) was the
+    dominant cost. The IN-MEMORY payload stays DENSE so every consumer (compose '+=', counts[gene_idx]
+    slice, np.max) is unchanged."""
     counts_arr = np.asarray(counts, dtype=np.float32)
-    names = np.asarray(var_names, dtype=str)
-    max_len = max((len(name) for name in names), default=1)
-    names_bytes = np.asarray(names, dtype=f"S{max_len}")
-    counts_path = cache_path + ".counts.npy"
-    var_path = cache_path + ".var_names.npy"
-    np.save(counts_path, counts_arr)
-    np.save(var_path, names_bytes)
+    # sparse counts: only nonzero entries + the full length to reconstruct the dense vector on load
+    nz = np.flatnonzero(counts_arr)
+    np.savez(cache_path + ".counts.npz",
+             idx=nz.astype(np.int64), val=counts_arr[nz],
+             n=np.int64(counts_arr.shape[0]))
+    # In-memory payload: counts dense; var_names from the just-built call (avoids an h5ad re-read here).
     _H5AD_COUNTS_CACHE[cache_path] = {
         "counts": counts_arr,
-        "var_names": names_bytes,
+        "var_names": np.asarray(var_names),
     }
 
 
@@ -408,11 +549,12 @@ def _try_compose_isoform_counts_cache(h5ad_path, cache_path, groupby, group_valu
     entries = []
     for meta_path in meta_files:
         candidate_cache_path = meta_path[:-10]  # strip ".meta.json"
-        counts_path = candidate_cache_path + ".counts.npy"
-        var_path = candidate_cache_path + ".var_names.npy"
-        if not (os.path.exists(counts_path) and os.path.exists(var_path)):
+        # Accept BOTH the sparse (.counts.npz + shared var_names) and legacy dense (.counts.npy)
+        # formats so composition discovers either.
+        counts_file, _var_file = _counts_cache_files(candidate_cache_path)
+        if counts_file is None:
             continue
-        if _is_index_stale(counts_path, source_paths):
+        if _is_index_stale(counts_file, source_paths):
             continue
         meta = _read_isoform_counts_cache_metadata(candidate_cache_path)
         if not meta:
@@ -471,7 +613,19 @@ def _try_compose_isoform_counts_cache(h5ad_path, cache_path, groupby, group_valu
         return base, base_names
 
     subset_sets = [states for states in state_to_paths.keys() if states.issubset(requested_states)]
-    cover = _find_disjoint_cover(requested_states, subset_sets)
+    # A sample may legitimately have ZERO cells of some requested cell type (its one-pass precompute
+    # skips empty cell types, so no atomic exists for them). Those states contribute a zero vector,
+    # not a composition failure. Cover only the states this sample actually has an atomic for; the
+    # missing states are simply absent (=0). If the sample has NO atomics among the requested states
+    # at all, there is nothing to compose and we fall through (the sample contributes nothing).
+    available_states = frozenset().union(*subset_sets) if subset_sets else frozenset()
+    coverable = requested_states & available_states
+    if coverable and coverable != requested_states:
+        print(
+            f"[index] compose: {os.path.basename(h5ad_path)} missing atomics for "
+            f"{sorted(requested_states - coverable)} (0 cells); composing from {sorted(coverable)}"
+        )
+    cover = _find_disjoint_cover(coverable, subset_sets) if coverable else None
     if cover:
         cover_paths = [state_to_paths[frozenset(states)] for states in cover]
         composed = compose_sum(cover_paths)
@@ -528,6 +682,34 @@ def _load_isoform_counts_cache(cache_path):
     cached = _H5AD_COUNTS_CACHE.get(cache_path)
     if cached is not None:
         return cached
+    # SPARSE format (preferred): '<cache>.counts.npz' (idx/val/n). var_names is NOT stored -- it is
+    # read from the sample h5ad (adata.var_names), the source of truth, so disk stays near-zero.
+    # Reconstruct the DENSE counts vector on load so all consumers are unchanged.
+    sparse_path = cache_path + ".counts.npz"
+    if os.path.exists(sparse_path):
+        try:
+            z = np.load(sparse_path)
+            n = int(z["n"]); idx = z["idx"]; val = z["val"]
+            counts = np.zeros(n, dtype=np.float32)
+            counts[idx] = val
+            # var_names: prefer the h5ad; fall back to a legacy shared var_names file if present.
+            names = None
+            h5 = _h5ad_path_from_cache_path(cache_path)
+            if h5 is not None:
+                names = _var_names_from_h5ad(h5)
+            if names is None:
+                var_shared = _shared_var_names_path(cache_path)
+                if os.path.exists(var_shared):
+                    names = np.load(var_shared, mmap_mode='r')
+            if names is None:
+                print(f"[warn] sparse cache {sparse_path}: cannot resolve var_names (no h5ad, no shared file)")
+                return None
+            payload = {"counts": counts, "var_names": names}
+        except (ValueError, OSError, KeyError) as exc:
+            print(f"[warn] Failed to load sparse isoform counts cache: {sparse_path} ({exc})")
+            return None
+        _H5AD_COUNTS_CACHE[cache_path] = payload
+        return payload
     counts_path = cache_path + ".counts.npy"
     var_path = cache_path + ".var_names.npy"
     if os.path.exists(counts_path) and os.path.exists(var_path):
@@ -618,14 +800,12 @@ def _load_or_build_counts_cache(h5ad_path, adata, mask, groupby, group_values,
     cache_path = _h5ad_counts_cache_path(
         h5ad_path, groupby, group_values, groupby_rev, groupby_sample
     )
-    counts_path = cache_path + ".counts.npy"
-    var_path = cache_path + ".var_names.npy"
     legacy_path = cache_path + ".npz"
     source_paths = [h5ad_path]
     if groupby and (groupby.endswith('.tsv') or groupby.endswith('.txt')):
         source_paths.append(groupby)
-    if (os.path.exists(counts_path) and os.path.exists(var_path)
-            and not _is_index_stale(counts_path, source_paths)):
+    # Accept sparse (.counts.npz) OR dense (.counts.npy) for the exact-match hit.
+    if _counts_cache_ready(cache_path, source_paths):
         print(f"[index] Using isoform counts cache: {cache_path}")
         cached = _load_isoform_counts_cache(cache_path)
         if cached is not None:
@@ -1959,7 +2139,19 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
             row_idx = None
             if counts_cache is None:
                 adata = ad.read_h5ad(h5ad_path, backed='r')
-                mask = _load_barcode_mask(adata, barcode_series, cell_states, reverse_complement=groupby_rev)
+                eff_rev = groupby_rev
+                mask = _load_barcode_mask(adata, barcode_series, cell_states, reverse_complement=eff_rev)
+                # Per-sample orientation auto-detect: long-read h5ads are revcomp vs the annotation,
+                # short-read are forward. If the requested orientation matches nothing, try the other
+                # one before giving up -- otherwise a forward-oriented sample (or vice versa) that was
+                # not precomputed is silently dropped from the combined plot (undercounting isoforms).
+                if (mask is None or int(mask.sum()) == 0) and barcode_series is not None and cell_states:
+                    alt = _load_barcode_mask(adata, barcode_series, cell_states, reverse_complement=not eff_rev)
+                    if alt is not None and int(alt.sum()) > 0:
+                        print(f"[auto][debug] {sample_name} orientation auto-flip "
+                              f"groupby_rev {eff_rev}->{not eff_rev} (matched {int(alt.sum())} cells)")
+                        eff_rev = not eff_rev
+                        mask = alt
                 if mask is not None:
                     mask_sum = int(mask.sum())
                     print(f"[auto][debug] {sample_name} mask_sum={mask_sum} obs={len(mask)}")
@@ -5443,7 +5635,7 @@ def main():
             cache_sources = [path]
             if groupby_is_file:
                 cache_sources.append(args.groupby)
-            cache_ready = use_counts_cache and not _is_index_stale(cache_path + ".counts.npy", cache_sources)
+            cache_ready = use_counts_cache and _counts_cache_ready(cache_path, cache_sources)
             try:
                 if not cache_ready:
                     t_index = time.time()
@@ -5585,7 +5777,7 @@ def main():
                 cache_sources = [path]
                 if groupby_is_file:
                     cache_sources.append(args.groupby)
-                cache_ready = use_counts_cache and not _is_index_stale(cache_path + ".counts.npy", cache_sources)
+                cache_ready = use_counts_cache and _counts_cache_ready(cache_path, cache_sources)
                 try:
                     if not cache_ready:
                         t_index = time.time()

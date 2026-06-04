@@ -842,7 +842,10 @@ def write_filtered_pseudobulk_from_memmap(memmap_data, features, columns, output
     n = len(features)
     written = 0
     with open(output_file, 'w', newline='') as handle:
-        writer = csv.writer(handle, delimiter='\t')
+        # lineterminator='\n' to match pandas to_csv (the legacy filter path used to_csv); csv.writer
+        # defaults to '\r\n' which would make the file byte-DIFFER from the legacy filtered output for
+        # no semantic reason. Keep it '\n' so optimized output is byte-identical.
+        writer = csv.writer(handle, delimiter='\t', lineterminator='\n')
         writer.writerow(["Feature"] + out_cols)
         for start in range(0, n, row_chunk):
             end = min(start + row_chunk, n)
@@ -864,6 +867,60 @@ def write_filtered_pseudobulk_from_memmap(memmap_data, features, columns, output
             writer.writerows(rows)
             written += len(rows)
     return written
+
+
+def _keep_mask_from_memmap(memmap_data, columns, cell_type_order, min_group_size, row_chunk=200000):
+    """Compute the filtered-feature keep-mask + output column index list, identical to the text filter
+    (keep feature if ANY cell type has >= min_group_size columns > 0.1)."""
+    cell_types = np.array([c.split('.')[0] for c in columns])
+    unique_cts = np.unique(cell_types)
+    ct_colmask = {ct: (cell_types == ct) for ct in unique_cts}
+    out_idx = _column_reorder_indices(columns, cell_type_order)
+    n = memmap_data.shape[0]
+    keep = np.zeros(n, dtype=bool)
+    for s in range(0, n, row_chunk):
+        e = min(s + row_chunk, n)
+        gtr = np.asarray(memmap_data[s:e]) > 0.1
+        k = np.zeros(e - s, dtype=bool)
+        for ct in unique_cts:
+            k |= (gtr[:, ct_colmask[ct]].sum(axis=1) >= min_group_size)
+        keep[s:e] = k
+    return keep, out_idx
+
+
+def write_pseudobulk_h5ad_from_memmap(memmap_data, features, columns, full_path, filtered_path=None,
+                                      cell_type_order=None, min_group_size=3, row_chunk=200000):
+    """Write the combined pseudobulk as SPARSE h5ad (var=features/junctions carrying coords in the
+    name, obs=cluster-sample columns, X=CSR counts). Writes the FULL (unfiltered, source of truth)
+    h5ad to full_path; if filtered_path is given, also writes the filtered+cluster-reordered h5ad.
+    Streams the memmap into CSR in row chunks so peak memory is bounded (never densifies the whole
+    matrix). gzip-compressed. Validated counts-identical (Pearson r=1) to the dense .txt path.
+    """
+    import anndata as ad
+    from scipy import sparse
+    n = memmap_data.shape[0]
+    # build CSR (obs x var) by stacking per-chunk sparse blocks -> bounded peak memory
+    blocks = []
+    for s in range(0, n, row_chunk):
+        e = min(s + row_chunk, n)
+        blocks.append(sparse.csr_matrix(np.asarray(memmap_data[s:e])))   # (chunk_features x cols)
+    Xvar = sparse.vstack(blocks).tocsr() if len(blocks) > 1 else blocks[0]   # (var x obs)
+    del blocks
+    X = Xvar.T.tocsr()                                                       # (obs x var)
+    del Xvar
+    obs = pd.DataFrame(index=pd.Index(list(columns), name='cluster_sample'))
+    var = pd.DataFrame(index=pd.Index(list(features), name='feature'))
+    full = ad.AnnData(X=X, obs=obs, var=var)
+    full.write_h5ad(full_path, compression='gzip')
+
+    if filtered_path is not None:
+        keep, out_idx = _keep_mask_from_memmap(memmap_data, columns, cell_type_order, min_group_size,
+                                               row_chunk=row_chunk)
+        filt = full[out_idx, :][:, keep].copy()   # reorder obs to cluster_order, subset kept features
+        filt.write_h5ad(filtered_path, compression='gzip')
+        del filt
+    del full, X
+    return
 
 def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_name='junction', compute_tpm=False, tpm_threshold=1, only_import_existing=False,
                                                        fused_filter=False, cluster_order=None, min_group_size=3):
@@ -899,9 +956,14 @@ def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_
         _memtrace(f"sample_start {sample_label}")
 
         if only_import_existing:
-            pseudo_pdf_file = just_return_dense_count_files(sample_prefix, compute_tpm=False)
+            # Pass the SAME compute_tpm through: with compute_tpm=True this returns the
+            # (counts, tpm, ratio) triple to unpack; with False it returns just the counts path.
+            # (Previously called with compute_tpm=False then unpacked as a triple -> ValueError.)
+            res = just_return_dense_count_files(sample_prefix, compute_tpm=compute_tpm)
             if compute_tpm:
-                pseudo_pdf_file, tpm_file, isoform_ratio_file = pseudo_pdf_file
+                pseudo_pdf_file, tpm_file, isoform_ratio_file = res
+            else:
+                pseudo_pdf_file = res
         else:
             # Load the data
             adata = ad.read_h5ad(sample_file)
@@ -957,14 +1019,27 @@ def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_
     _memtrace("after_fill_counts_memmap")
 
     combined_pseudo_file = f'{collection_name}_combined_pseudo_cluster_counts.txt'
+    # Always write the combined COUNTS pseudobulk as SPARSE h5ad (full + filtered), for BOTH the
+    # junction and isoform collections -- names mirror the .txt convention
+    # (<dataType>_combined_pseudo_cluster_counts.h5ad / -filtered.h5ad). This is the compact,
+    # fast-to-build source of truth the differentials/viewer consume.
+    h5ad_full = f'{collection_name}_combined_pseudo_cluster_counts.h5ad'
+    h5ad_filt = f'{collection_name}_combined_pseudo_cluster_counts-filtered.h5ad'
+    write_pseudobulk_h5ad_from_memmap(
+        counts_mm, features, column_names, h5ad_full, filtered_path=h5ad_filt,
+        cell_type_order=cluster_order, min_group_size=min_group_size,
+    )
     if fused_filter:
-        # Write the FILTERED counts directly from the in-memory memmap; never materialize the dense
-        # unfiltered .txt (nothing reads it except the old filter pass we are replacing).
+        # Junction path: also write the filtered .txt directly from the memmap (PSI/diff text-consumers
+        # + the gene-sort chain use it), and SKIP the dense multi-GB (cluster: 121GB) unfiltered .txt.
         write_filtered_pseudobulk_from_memmap(
             counts_mm, features, column_names, combined_pseudo_file[:-4] + '-filtered.txt',
             cell_type_order=cluster_order, min_group_size=min_group_size,
         )
     else:
+        # Isoform path: keep the dense unfiltered counts .txt -- the legacy chunked filter
+        # (export_and_filter_pseudobulk_chunks in export_pseudo_counts) re-reads it to build the
+        # counts/tpm/ratio '-filtered.txt' with their independent masks. (h5ad written above too.)
         _write_memmap_tsv(counts_mm, features, column_names, combined_pseudo_file)
     _memtrace("after_write_combined_pseudo")
 

@@ -690,6 +690,19 @@ def export_sample_isoform(sample_entry_list, gff_output_dir, barcode_sample_dict
     else:
         _pseudobulk_one_h5ad(out_h5ads[0], 'isoform', compute_tpm=compute_tpm)
 
+    # ISV INDEX: pre-build the isoform_structure_viewer per-cell-type atomic counts caches for THIS
+    # sample's MOLECULE h5ad (the matrix the viewer renders from), so later viewer queries -- any gene,
+    # any combination of cell types across groups/conditions -- COMPOSE from these caches instantly
+    # with NO re-indexing. Built incrementally as each sample is processed. Best-effort: a failure here
+    # must not break the isoform quantification (the viewer would just rebuild on first query).
+    try:
+        from ..visualization import precompute_viewer_index as _isv_index
+        _isv_samples = {s['library']: [{'matrix': str(s['matrix']), 'groups': s.get('groups'),
+                                        'library': s['library']}] for s in sample_entry_list}
+        _isv_index.precompute(_isv_samples, barcode_sample_dict)
+    except Exception as _e:
+        print(f"[isv-index] precompute skipped ({type(_e).__name__}: {_e}); viewer will build on first query")
+
 
 def pre_process_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_dir, min_count_filter=True):
     # Perform junction quantification across samples
@@ -702,7 +715,7 @@ def pre_process_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_dir, m
     # dependency on the isoform collapse, so it runs here (step 5) rather than being gated behind the
     # much slower isoform integration (step 6).
     junction_coords_file = 'junction_combined_pseudo_cluster_counts-filtered.txt'
-    outdir = 'psi_combined_pseudo_cluster_counts.txt'
+    outdir = 'psi_combined_pseudo_cluster.txt'   # dual output: .txt + .h5ad (no '_counts' in name)
     if min_count_filter:
         junction_coords_file = _filter_pseudobulk_min_counts(junction_coords_file, junction_coords_file[:-4]+'-10-counts.txt', min_read=10)  # MIN_COUNT_FILTER
     junction_coords_file = export_sorted(junction_coords_file, 0) ### Sort the expression file
@@ -739,10 +752,24 @@ def combine_junctions(metadata_file, barcode_cluster_dirs, ensembl_exon_dir, min
     Idempotent resume: if the final PSI output already exists, the (very expensive: hours) junction
     combine + filter + sort + PSI are SKIPPED. This lets a crashed/re-submitted P2 pick up after PSI
     instead of recomputing it. Pass force=True to rebuild."""
-    psi_out = 'psi_combined_pseudo_cluster_counts.txt'
-    if (not force) and os.path.exists(psi_out) and os.path.getsize(psi_out) > 0:
-        print(f"[combine_junctions] PSI already present ({psi_out}); skipping junction combine + PSI. "
+    psi_out = 'psi_combined_pseudo_cluster.txt'   # dual output: .txt + .h5ad (no '_counts' in name)
+    # Idempotent resume: skip the (hours-long) junction combine + PSI if PSI already exists. Accept
+    # EITHER the new name or the legacy 'psi_combined_pseudo_cluster_counts.txt' so a P2 resumed on a
+    # run that predates the rename still short-circuits instead of recomputing PSI from scratch.
+    legacy_psi = 'psi_combined_pseudo_cluster_counts.txt'
+    existing_psi = next((p for p in (psi_out, legacy_psi)
+                         if os.path.exists(p) and os.path.getsize(p) > 0), None)
+    if (not force) and existing_psi is not None:
+        print(f"[combine_junctions] PSI already present ({existing_psi}); skipping junction combine + PSI. "
               f"Pass force=True to rebuild.")
+        # Self-heal: a pre-rename run has the .txt but no .h5ad. Backfill the compact h5ad (cheap)
+        # so the differentials' h5ad-preferred read works without recomputing PSI.
+        h5ad_sib = existing_psi[:-4] + '.h5ad'
+        if not os.path.exists(h5ad_sib):
+            try:
+                _write_psi_h5ad(existing_psi)
+            except Exception as e:
+                print(f"[combine_junctions] PSI h5ad backfill skipped ({type(e).__name__}: {e})")
         return
     export_pseudo_counts(metadata_file, barcode_cluster_dirs, 'junction', only_import_existing=True)
     junction_coords_file = 'junction_combined_pseudo_cluster_counts-filtered.txt'
@@ -773,9 +800,38 @@ def combine_isoforms(metadata_file, barcode_cluster_dirs):
 
 
 # Wrap in a function to avoid event loop conflicts
-def run_psi_analysis(junction_path, outdir):
+def run_psi_analysis(junction_path, outdir, write_h5ad=True):
+    """Run PSI and write BOTH the TSV (``outdir``) and a sibling .h5ad (same basename, .h5ad) so
+    downstream differentials can load the compact h5ad. The .h5ad mirrors the pseudobulk convention:
+    var = PSI events (index carries the event id), obs = cluster-sample columns, X = PSI values.
+    PSI can be NaN (undefined ratio); X is stored dense float32 so NaNs are preserved faithfully
+    (PSI matrices are events x clusters -- modest, and gzip-compressed in the h5ad). The TSV remains
+    the source of truth; the h5ad is a faithful re-serialization."""
     # Use asyncio.run to ensure event loop is properly created
     asyncio.run(psi.main(junction_path=junction_path, query_gene=None, outdir=outdir))
+    if not write_h5ad:
+        return
+    try:
+        _write_psi_h5ad(outdir)
+    except Exception as e:
+        print(f"[psi] h5ad export skipped ({type(e).__name__}: {e}); TSV written normally")
+
+
+def _write_psi_h5ad(psi_txt_path):
+    """Read the just-written PSI TSV and write a sibling .h5ad (var=events, obs=cluster-sample,
+    X=CSR PSI). PSI values can be NaN (undefined); anndata X must be numeric -- we preserve NaNs by
+    storing a dense float32 X when the matrix is small, else a CSR with NaN kept via masked storage.
+    To stay simple and faithful, we store dense float32 (PSI matrices are events x clusters, modest)."""
+    import anndata as ad
+    h5ad_path = psi_txt_path[:-4] + '.h5ad' if psi_txt_path.endswith('.txt') else psi_txt_path + '.h5ad'
+    df = pd.read_csv(psi_txt_path, sep='\t', index_col=0)
+    # events x cluster-sample -> AnnData wants obs(cluster-sample) x var(events) = df.T
+    X = df.T.to_numpy(dtype=np.float32)
+    a = ad.AnnData(X=X,
+                   obs=pd.DataFrame(index=pd.Index(df.columns, name='cluster_sample')),
+                   var=pd.DataFrame(index=pd.Index(df.index, name='event')))
+    a.write_h5ad(h5ad_path, compression='gzip')
+    print(f"[psi] wrote {h5ad_path}  ({a.n_vars:,} events x {a.n_obs:,} cluster-samples)")
 
 
 def combine_h5ad_files(sample_h5ads, output_file='combined.h5ad'):

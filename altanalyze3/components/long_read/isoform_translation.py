@@ -35,6 +35,15 @@ def parse_gff(gff_file):
                 if match:
                     transcript_id = match.group(1)
                     gene_id = gene_match.group(1) if gene_match else ""
+                    # Strip Ensembl version suffixes (ENST00000xxxxx.N / ENSG00000xxxxx.N) at the
+                    # SOURCE so protein_summary.txt and the FASTA record ids carry version-less ids --
+                    # the form the downstream differential annotation keys on. The reference (GENCODE)
+                    # GFF supplies versioned ids; observed/novel molecule ids are unversioned. Verified
+                    # safe: 0 collisions when stripping versions across the real protein summary.
+                    if (transcript_id.startswith("ENST") or transcript_id.startswith("ENSG")) and "." in transcript_id:
+                        transcript_id = transcript_id.split(".", 1)[0]
+                    if (gene_id.startswith("ENSG") or gene_id.startswith("ENST")) and "." in gene_id:
+                        gene_id = gene_id.split(".", 1)[0]
                     if transcript_id not in transcripts:
                         transcripts[transcript_id] = {"exons": [], "gene_id": gene_id}
                     normalized_chr = normalize_chromosome_name(parts[0])

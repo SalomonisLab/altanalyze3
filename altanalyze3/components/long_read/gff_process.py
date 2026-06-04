@@ -10,6 +10,16 @@ import pandas as pd
 import collections
 import gzip
 
+# Indexed isoform-structure -> genomic-coords store, written here (the sample-level stage where the
+# structure string is first formed) so the collapse pipeline can build combined.gff.gz by point
+# lookup instead of re-scanning every source GFF. On by default; set ISOFORM_STRUCT_COORDS=0 to skip.
+try:
+    sys.path.insert(1, os.path.join(os.path.dirname(__file__), '..'))
+    from bam import coord_store as _coord_store
+except Exception:
+    _coord_store = None
+_STRUCT_COORDS = os.environ.get('ISOFORM_STRUCT_COORDS', '1') not in ('0', 'false', 'False', '')
+
 novelGene = 0
 novelGeneLoci = [1,1]
 additional_junctions={}
@@ -749,6 +759,19 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse", gene
     eor = open(transcript_associations_raw, 'w')
     _memtrace("after_open_transcript_associations")
 
+    # Unique isoform-structure -> genomic-coords store, written alongside this sample's TA. Keyed by
+    # (gene, structure); deduped automatically (one row per distinct structure). Collapse later reads
+    # it to emit combined.gff.gz by point lookup instead of re-scanning the source GFFs. Only built
+    # for the per-sample (single-GFF) pass -- the multi-file consolidate writes combined.gff itself.
+    struct_writer = None
+    if _STRUCT_COORDS and _coord_store is not None and not collapse_isoforms:
+        try:
+            struct_db_path = os.path.join(combined_dir, 'structure_coords.sqlite')
+            struct_writer = _coord_store.StructCoordWriter(struct_db_path)
+        except Exception as _e:
+            print(f"[struct-coords] disabled (could not open store): {_e}")
+            struct_writer = None
+
     def getJunctions(exons):
         splice_junctions = []
         if len(exons) == 1:
@@ -777,10 +800,14 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse", gene
         filtered_exonIDs_str = "|".join(exonIDs)
         return filtered_exonIDs_str,exonIDs
 
-    def process_isoform(chr, strand, info, exons, file):
+    def process_isoform(chr, strand, info, exons, file, source='bam'):
         if gene_id is not None and gene_id not in info:
             return
         transcript_id = info.split(';')[ti].split(td)[1]
+
+        # Snapshot the genomic exon tuples in SOURCE ORDER before exonAnnotate (which reverses/swaps
+        # them in place for '-' strand). These are the coordinates combined.gff must reproduce.
+        exons_genomic = list(exons)
 
         # exonIDs_simple requries further checking as justification for its structure is inconsistent with exonIDs
         gene, exonIDs, exonIDs_simple, genes = exonAnnotate(chr, exons, strand, transcript_id)
@@ -813,6 +840,13 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse", gene
             except:
                     gene_db[gene] = [junction_key]
             strand_db[gene] = strand
+            # Persist the unique (gene, structure) -> genomic exon tuples (source order, source col2)
+            # so collapse can emit combined.gff.gz by point lookup. Deduped by the composite PK.
+            if struct_writer is not None and exons_genomic:
+                try:
+                    struct_writer.add(gene, junction_key, chr, strand, source, exons_genomic)
+                except Exception:
+                    pass
 
     gff_organization={}
     for file in files:
@@ -832,8 +866,8 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse", gene
                     continue
                 data = line.strip()
                 t = data.split('\t')
-                try: chr, null, type, pos1, pos2, null, strand, null, info = t
-                except: 
+                try: chr, src_col, type, pos1, pos2, null, strand, null, info = t
+                except:
                     #print (info)
                     continue
                 pos1 = int(pos1)
@@ -856,23 +890,29 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse", gene
                     #print(file,type,chr,pos1,pos2,info);sys.exit()
                     if type == 'transcript':
                         isoforms += 1
-                        chr, strand, info = gene_info
-                        process_isoform(chr, strand, info, exons, file)
+                        chr, strand, info, src_iso = gene_info
+                        process_isoform(chr, strand, info, exons, file, source=src_iso)
                         exons = []
                     elif type != 'transcript' and type != 'exon':
                         pass
                     else:
                         exons.append((pos1, pos2))
-                        gene_info = chr, strand, info
+                        gene_info = chr, strand, info, src_col
         # for the last isoform in the file
-        chr, strand, info = gene_info
-        try: 
-            process_isoform(chr, strand, info, exons, file)
+        chr, strand, info, src_iso = gene_info
+        try:
+            process_isoform(chr, strand, info, exons, file, source=src_iso)
         except:
             continue
         print(file, '...', isoforms, 'isoforms')
 
     eo.close()
+    if struct_writer is not None:
+        try:
+            struct_writer.close()
+            print(f"[struct-coords] wrote {struct_db_path}")
+        except Exception as _e:
+            print(f"[struct-coords] close failed: {_e}")
     print(len(junction_db), 'unique isoforms')
 
     def sort_isoforms_with_ENST_first(junction_db):

@@ -165,12 +165,27 @@ def collapse_gene(struct_reads: Dict[str, int], tok: Dict[str, tuple],
     others = [i for i in range(len(structs)) if i not in consumed]
     other_assign: Dict[int, int] = {}
     other_reps: List[int] = []
-    # process by score desc; a struct is a rep unless it's a substring of a higher-score other rep
+    # Process by score desc; a struct is a rep UNLESS it is a contiguous subsequence (substring) of an
+    # already-chosen higher-score other rep -- in which case it is a CHILD of that rep, not a new rep.
+    # (Previously the substring check was missing and `claimed` was never populated, so EVERY other-bin
+    # struct became its own rep and nothing folded -- e.g. HOPX 'E6.8|E6.9|E6.11|E8.1' stayed separate
+    # despite being a contiguous subsequence of several longer structures.)
     other_ranked = sorted(others, key=lambda i: (-score[i], -len(tok[structs[i]]), structs[i]))
     claimed = set()
     other_rep_set: set = set()
     for i in other_ranked:
         if i in claimed:
+            continue
+        # is i a contiguous subsequence of an existing (higher-score) rep? if so it is NOT a rep.
+        ti = tok[structs[i]]
+        is_child = False
+        for r in other_reps:
+            tr = tok[structs[r]]
+            if len(ti) < len(tr) and is_contiguous_subsequence(ti, tr):
+                is_child = True
+                break
+        if is_child:
+            claimed.add(i)
             continue
         other_reps.append(i)
         other_rep_set.add(i)
