@@ -2070,7 +2070,14 @@ def plot_isoform_structures_by_conditions(sample_dict, conditions, cell_states, 
             value = sample_entry.get(key)
             if value:
                 return str(value)
-        return _infer_sample_name(h5ad_path)
+        # Basename fallback: strip the '-isoform' suffix that export_sample_isoform appends to the
+        # molecule h5ad, so the inferred name matches the barcode-annotation key (and the sample name
+        # precompute keyed the counts caches by). Without this, a render call that omits 'library' and
+        # points at '<stem>-isoform.h5ad' would infer '<stem>-isoform' and miss the precomputed caches.
+        name = _infer_sample_name(h5ad_path)
+        if name.endswith('-isoform'):
+            name = name[: -len('-isoform')]
+        return name
 
     for uid, samples in sample_dict.items():
         for sample in samples:

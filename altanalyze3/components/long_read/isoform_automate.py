@@ -690,16 +690,51 @@ def export_sample_isoform(sample_entry_list, gff_output_dir, barcode_sample_dict
     else:
         _pseudobulk_one_h5ad(out_h5ads[0], 'isoform', compute_tpm=compute_tpm)
 
-    # ISV INDEX: pre-build the isoform_structure_viewer per-cell-type atomic counts caches for THIS
-    # sample's MOLECULE h5ad (the matrix the viewer renders from), so later viewer queries -- any gene,
-    # any combination of cell types across groups/conditions -- COMPOSE from these caches instantly
-    # with NO re-indexing. Built incrementally as each sample is processed. Best-effort: a failure here
-    # must not break the isoform quantification (the viewer would just rebuild on first query).
+
+def _isoform_molecule_h5ad(matrix_or_uid):
+    """The MOLECULE isoform h5ad the viewer renders from, derived from a library matrix path (the
+    convention written by export_sample_isoform: '<matrix_stem>-isoform.h5ad')."""
+    m = str(matrix_or_uid)
+    stem = m[:-5] if m.endswith('.h5ad') else m
+    return f"{stem}-isoform.h5ad"
+
+
+def precompute_isoform_viewer_index(metadata_file, barcode_cluster_dirs):
+    """Pre-build the isoform_structure_viewer indexes (per-cell-type atomic counts caches +
+    transcripts.db + gene_index + var_names sidecar) for EVERY sample's MOLECULE isoform h5ad, so
+    later viewer queries -- any gene, any combination of cell types across groups/conditions --
+    COMPOSE from these caches instantly with NO re-indexing.
+
+    Runs as the FINAL step of the workflow (after sclr-diff / limma differentials) so it happens once,
+    over the complete set of re-keyed molecule h5ads, rather than incrementally during per-sample
+    re-key. Best-effort: a failure here must not fail the differential workflow (the viewer would just
+    build on first query). Idempotent -- skips any sample whose indexes are already current."""
     try:
         from ..visualization import precompute_viewer_index as _isv_index
-        _isv_samples = {s['library']: [{'matrix': str(s['matrix']), 'groups': s.get('groups'),
-                                        'library': s['library']}] for s in sample_entry_list}
-        _isv_index.precompute(_isv_samples, barcode_sample_dict)
+    except Exception as _e:
+        print(f"[isv-index] precompute unavailable ({type(_e).__name__}: {_e}); viewer will build on first query")
+        return
+    try:
+        sample_dict = import_metadata(str(metadata_file), include_hashed_samples=True)
+        barcode_sample_dict = iso.import_barcode_clusters(barcode_cluster_dirs)
+        isv_samples = {}
+        for uid, libs in sample_dict.items():
+            for s in libs:
+                lib = s.get('library') or uid
+                mol = _isoform_molecule_h5ad(s.get('matrix'))
+                if not os.path.exists(mol):
+                    # multi-BAM uid concatenates to '<uid>-isoform.h5ad' instead of per-library
+                    alt = _isoform_molecule_h5ad(uid)
+                    if os.path.exists(alt):
+                        mol = alt
+                    else:
+                        print(f"[isv-index] {lib}: molecule h5ad not found ({mol}); skipping")
+                        continue
+                isv_samples[lib] = [{'matrix': str(mol), 'groups': s.get('groups'), 'library': lib}]
+        if not isv_samples:
+            print("[isv-index] no molecule isoform h5ads found; nothing to pre-build")
+            return
+        _isv_index.precompute(isv_samples, barcode_sample_dict)
     except Exception as _e:
         print(f"[isv-index] precompute skipped ({type(_e).__name__}: {_e}); viewer will build on first query")
 

@@ -36,11 +36,19 @@ from . import isoform_structure_view as isv
 
 
 def _sample_name(sample, h5ad_path):
-    try:
-        return isv.infer_sample_name(sample, h5ad_path)
-    except Exception:
-        base = os.path.basename(str(h5ad_path))
-        return base.split(".h5ad")[0]
+    # Prefer an explicit library/gff_name field (this is the sample key used by
+    # barcode_sample_dict). Fall back to the h5ad basename, stripping the '-isoform' suffix that
+    # export_sample_isoform appends to the molecule h5ad ('<stem>-isoform.h5ad') so the inferred
+    # name still matches the barcode annotation key '<stem>'.
+    for key in ("library", "gff_name"):
+        val = sample.get(key) if isinstance(sample, dict) else None
+        if val:
+            return str(val)
+    base = os.path.basename(str(h5ad_path))
+    name = base.split(".h5ad")[0]
+    if name.endswith("-isoform"):
+        name = name[: -len("-isoform")]
+    return name
 
 
 def _detect_orientation(adata, barcode_series, cell_types, probe=8):

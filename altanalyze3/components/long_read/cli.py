@@ -389,3 +389,9 @@ def run_sclr_diff(args):
         analyses=analyses, method=getattr(args, "method", "mwu"),
     )
     logging.info("sclr-diff: %s differentials complete for %s", analyses, conditions)
+
+    # ISV INDEX (final step, AFTER differentials): pre-build the isoform_structure_viewer indexes for
+    # every sample's molecule h5ad so later viewer queries compose instantly with no re-indexing.
+    # Best-effort + idempotent; cannot fail the differential workflow.
+    isoa.precompute_isoform_viewer_index(str(args.metadata), barcode_cluster_dirs)
+    logging.info("sclr-diff: ISV viewer index pre-build complete.")
