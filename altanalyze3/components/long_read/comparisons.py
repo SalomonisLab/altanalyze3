@@ -6,6 +6,39 @@ from ..annotation import junction_isoform as ji
 from ..oncosplice import metadataAnalysis as ma
 import numpy as np
 
+def _reset_stats_folder(stats_folder):
+    """Archive any prior per-cluster stats/annotated files in stats_folder before a fresh diff run.
+
+    Per-cluster stats are written ONLY for clusters that have events this run (run_metadataAnalysis
+    returns early on no-event clusters without writing). So a re-run leaves STALE *_stats.txt from a
+    prior run in place, and annotate() then reads them -- surfacing features (e.g. uncollapsed molecule
+    ids) that no longer exist in the current catalog/matrix, which both corrupts the annotated output
+    and can KeyError the whole run. Archiving (not deleting) the prior files to '<folder>/_prior_run/'
+    guarantees annotation sees ONLY this run's fresh outputs while losing nothing. One file at a time."""
+    if not os.path.isdir(stats_folder):
+        return
+    import glob, shutil
+    prior = [f for f in glob.glob(os.path.join(stats_folder, '*.txt'))
+             if f.endswith('stats.txt') or f.endswith('-annotated.txt')]
+    if not prior:
+        return
+    archive = os.path.join(stats_folder, '_prior_run')
+    os.makedirs(archive, exist_ok=True)
+    moved = 0
+    for f in prior:
+        dest = os.path.join(archive, os.path.basename(f))
+        try:
+            if os.path.exists(dest):
+                os.replace(f, dest)  # overwrite the same-named prior archive (one file)
+            else:
+                shutil.move(f, dest)
+            moved += 1
+        except Exception as exc:
+            print(f"[reset] could not archive stale stats file {f}: {exc}")
+    if moved:
+        print(f"[reset] archived {moved} stale stats/annotated file(s) from {stats_folder} -> {archive}")
+
+
 def _load_psi_matrix():
     """Load the combined PSI matrix (events x cluster-sample) for the differentials.
 
@@ -52,6 +85,7 @@ def compare_one_cluster_to_many(condition,cluster_order,groups_file,psi_matrix,j
         stats_folder = 'diff-cluster-isoform/'
     if dataType == 'isoform-ratio':
         stats_folder = 'diff-cluster-ratio/'
+    _reset_stats_folder(stats_folder)  # archive stale per-cluster stats so annotate sees only this run
 
     # Guard: 'grp' must be string for the .str accessor. If cluster annotation failed upstream the
     # column can be all-NaN (float dtype) -> '.str' raises a cryptic AttributeError. Coerce to str and,
@@ -103,6 +137,7 @@ def compare_two_groups_per_cluster(condition1,condition2,cluster_order,groups_fi
         stats_folder = 'diff-covariate-isoform/'
     if dataType == 'isoform-ratio':
         stats_folder = 'diff-covariate-ratio/'
+    _reset_stats_folder(stats_folder)  # archive stale per-cluster stats so annotate sees only this run
 
     # Guard: coerce 'grp' to str (all-NaN float column breaks the .str accessor) and skip loudly if
     # neither requested condition is present (e.g. cluster annotation failed -> grp all 'nan').

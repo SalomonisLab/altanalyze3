@@ -163,6 +163,36 @@ def _pd_lookup(gene, isoform_id, protein_dict):
     return (0, None, None)
 
 
+def _td_lookup(gene, isoform_id, transcript_dict, default='N/A'):
+    """Tolerant transcript_dict lookup for an isoform's junction/exon string -> value or `default`.
+
+    Mirrors _pd_lookup: the diff's isoform ids do NOT key 1:1 against transcript_associations.txt.
+    A novel molecule id carries a '.<sample>' suffix in the diff (e.g.
+    '1059174.WF40_ND21-251_HSC_3k') but is bare ('1059174') in the associations; ENST/gene ids may be
+    version-stripped on one side. Try, in order: exact; molecule '.<sample>' stripped; version-stripped
+    gene+isoform. A genuine miss returns `default` rather than raising a KeyError that aborts the whole
+    annotation run (a single unresolved isoform must not kill all cell-type stats files)."""
+    by_gene = transcript_dict.get(gene)
+    if by_gene is None:
+        by_gene = transcript_dict.get(_strip_version(gene))
+    if by_gene is None:
+        return default
+    iso = str(isoform_id)
+    # 1. exact
+    if iso in by_gene:
+        return by_gene[iso]
+    # 2. strip a trailing '.<sample>' from a NON-ENST molecule id
+    if "." in iso and not iso.startswith("ENST"):
+        bare = iso.split(".", 1)[0]
+        if bare in by_gene:
+            return by_gene[bare]
+    # 3. version-stripped isoform
+    iso0 = _strip_version(iso)
+    if iso0 in by_gene:
+        return by_gene[iso0]
+    return default
+
+
 def _get_protein_length(gene, isoform_id, protein_dict):
     length, _, _ = _pd_lookup(gene, isoform_id, protein_dict)
     try:
@@ -467,8 +497,10 @@ def annotate_iso_stats_file(file_path, transcript_dict, gene_symbol_dict, protei
         gene_id, isoform = feature.split(':')  # Extract gene ID
         gene_symbol = gene_symbol_dict.get(gene_id, 'N/A')
 
-        # Get isoforms and select the longest one for each junction
-        junctions = transcript_dict[gene_id][isoform]
+        # Get isoforms and select the longest one for each junction. Tolerant lookup: a novel molecule
+        # id may carry a '.<sample>' suffix (or a version) that does not key 1:1 against the
+        # associations -- resolve it rather than KeyError-ing out of the whole annotation run.
+        junctions = _td_lookup(gene_id, isoform, transcript_dict, default='N/A')
         prot_len, nmd_status, longest = _pd_lookup(gene_id, isoform, protein_dict)
         if nmd_status is None:
             prot_len, nmd_status, longest = 0, 'NMD', 'UNK'
