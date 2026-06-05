@@ -1029,17 +1029,16 @@ def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_
         counts_mm, features, column_names, h5ad_full, filtered_path=h5ad_filt,
         cell_type_order=cluster_order, min_group_size=min_group_size,
     )
-    if fused_filter:
-        # Junction path: also write the filtered .txt directly from the memmap (PSI/diff text-consumers
-        # + the gene-sort chain use it), and SKIP the dense multi-GB (cluster: 121GB) unfiltered .txt.
-        write_filtered_pseudobulk_from_memmap(
-            counts_mm, features, column_names, combined_pseudo_file[:-4] + '-filtered.txt',
-            cell_type_order=cluster_order, min_group_size=min_group_size,
-        )
-    # ISOFORM path: NO dense .txt at all. The combined pseudobulks are now h5ad-only -- counts (full +
-    # filtered) written above, and tpm/ratio (full + filtered) written below. The differentials read
-    # the filtered h5ad directly (comparisons.py), so the legacy dense counts/tpm/ratio .txt and the
-    # chunked filter-from-txt pass are gone (they were the multi-GB throwaway nothing reads).
+    # NO dense .txt for EITHER collection. The combined pseudobulk is h5ad-only:
+    #   * counts full + filtered h5ad written above (write_pseudobulk_h5ad_from_memmap),
+    #   * isoform tpm/ratio full + filtered h5ad written below.
+    # JUNCTION: PSI reads the counts-filtered h5ad directly (psi_single gene-sorts in memory + applies
+    #   the min-count filter), and junction-diff annotation reads coords from the same h5ad
+    #   (load_junction_coordinates). Validated PSI value- and sample-order-identical to the legacy text
+    #   path (PSI_validation_OLD/NEW.tsv; 50 genes / 197 events, max abs diff 0.0).
+    # ISOFORM: the differentials read the tpm/ratio filtered h5ad (comparisons._load_isoform_filtered_matrix).
+    # So no junction/isoform '-filtered.txt' (or the dense unfiltered counts.txt, or the 121GB throwaway)
+    # is written or read anywhere.
     _memtrace("after_write_combined_pseudo")
 
     del counts_mm

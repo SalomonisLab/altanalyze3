@@ -151,16 +151,62 @@ def calculate_psi_per_gene(count, outdir, write_header=True, result_batch=None):
         result_batch.append(df)
 
 
-async def main(junction_path=None, query_gene=None, outdir=None):
+def _iter_junction_rows_from_h5ad(h5ad_path, min_read=None):
+    """Yield (header, row_iter, n) from a junction pseudobulk h5ad, matching EXACTLY what the text
+    parser consumed. The h5ad has obs = cluster-sample columns (the SAMPLE ORDER, preserved verbatim),
+    var = junction feature ids in 'uid=chrom:start-end' form, X = counts (obs x var).
+
+    Two invariants that make PSI output byte-identical to the legacy text path:
+      1. MIN-COUNT FILTER: if min_read is given, drop any feature with NO sample value > (min_read-1),
+         identical to _filter_pseudobulk_min_counts (the '-10-counts.txt' step the text path ran).
+      2. GENE-SORTED event list: PSI batches per gene (all junctions for one gene must arrive
+         consecutively), so order features by gene (uid.split(':')[0]) with a STABLE sort that
+         preserves the original var order within each gene -- mirroring the gene-grouped, sorted text
+         input. Sample/column order = h5ad obs_names order, UNCHANGED (never reordered).
+    Emits (feature_id, counts_vector_in_obs_order) per surviving feature."""
+    import anndata as ad
+    a = ad.read_h5ad(h5ad_path)
+    sample_columns = list(a.obs_names)            # SAMPLE ORDER -- preserved exactly, no reordering
+    features = list(a.var_names)
+    X = a.X.toarray() if hasattr(a.X, 'toarray') else np.asarray(a.X)   # (obs x var)
+    X = np.asarray(X, dtype=float)
+    keep_idx = np.arange(X.shape[1])
+    if min_read is not None:
+        # keep feature if ANY sample > (min_read - 1) -- identical to _filter_pseudobulk_min_counts
+        colmax = np.nanmax(X, axis=0)
+        keep_idx = np.where(colmax > (min_read - 1))[0]
+    kept_features = [features[i] for i in keep_idx]
+    genes = [f.split(':', 1)[0] for f in kept_features]
+    order = np.argsort(np.array(genes), kind='stable')   # stable gene-sort, original order within gene
+    header = ['Feature'] + sample_columns
+
+    def _rows():
+        for k in order:
+            vi = keep_idx[k]
+            yield kept_features[k], X[:, vi]    # counts across samples in obs order
+    return header, _rows(), len(kept_features)
+
+
+async def main(junction_path=None, query_gene=None, outdir=None, min_read=None):
     import time
     start_time = time.time()
 
-    # Extract the header before initializing the output file
-    with open(junction_path, 'r') as f:
-        header = ['uid']+next(f).strip().split('\t')  # Read and split header from input file
+    # INPUT: a junction h5ad (preferred -- gene-sorted in-memory, sample order preserved) OR the legacy
+    # text pseudobulk. h5ad path is detected by extension; rows are emitted in the SAME format the text
+    # parser produced so all downstream PSI math is byte-identical. min_read (if set) applies the same
+    # min-count filter the text path ran (_filter_pseudobulk_min_counts) so the event set matches.
+    is_h5ad = isinstance(junction_path, str) and junction_path.endswith('.h5ad')
 
-    # Initialize output file with header
-    initialize_output_file(outdir, header[1:])  # Call the function here
+    if is_h5ad:
+        header, row_source, total_lines = _iter_junction_rows_from_h5ad(junction_path, min_read=min_read)
+    else:
+        # Extract the header before initializing the output file
+        with open(junction_path, 'r') as f:
+            header = next(f).strip().split('\t')  # Read and split header from input file
+        total_lines = sum(1 for line in open(junction_path))  # Count lines for progress bar
+
+    # Initialize output file with header (header[1:] = sample columns, in input order)
+    initialize_output_file(outdir, header[1:])
 
     col_uid = []
     col_gene = []
@@ -174,18 +220,34 @@ async def main(junction_path=None, query_gene=None, outdir=None):
     write_header = True
     result_batch = []
 
-    total_lines = sum(1 for line in open(junction_path))  # Count lines for progress bar
-    with tqdm(total=total_lines, desc="Processing junctions") as pbar:
+    def _parse_feature(feat):
+        """feat = 'uid=chrom:start-end' -> (uid, chrom, start, end, strand, gene). Identical to the
+        text parser's per-row coordinate extraction."""
+        uid, coords = feat.split('=')
+        chrom, coords = coords.split(':')
+        start, end = coords.split('-')
+        strand = '+' if start < end else '-'
+        gene = uid.split(':')[0]
+        return uid, chrom, start, end, strand, gene
+
+    def _text_rows():
         with open(junction_path, 'r') as f:
-            header = next(f).strip().split('\t')
+            next(f)  # skip header (already captured)
             for line in f:
+                parts = line.strip().split('\t')
+                yield parts[0], parts[1:]
+
+    # Unified row stream: (feature_id, values_list) -- from h5ad (gene-sorted) or text (file order).
+    if is_h5ad:
+        unified = row_source                # yields (feature_id, np.ndarray of counts)
+    else:
+        unified = _text_rows()              # yields (feature_id, list[str] counts)
+
+    with tqdm(total=total_lines, desc="Processing junctions") as pbar:
+        if True:
+            for feat, raw_vals in unified:
                 pbar.update(1)  # Update progress bar
-                row = line.strip().split('\t')
-                uid, coords = row[0].split('=')
-                chrom, coords = coords.split(':')
-                start, end = coords.split('-')
-                strand = '+' if start < end else '-'
-                gene = uid.split(':')[0]
+                uid, chrom, start, end, strand, gene = _parse_feature(feat)
 
                 # If processing a specific gene, skip others
                 if query_gene and gene != query_gene:
@@ -215,7 +277,12 @@ async def main(junction_path=None, query_gene=None, outdir=None):
                 col_start.append(start)
                 col_end.append(end)
                 col_strand.append(strand)
-                data.append([float(x) if x.replace('.', '', 1).isdigit() else np.nan for x in row[1:]])
+                # raw_vals: np.ndarray (h5ad) or list[str] (text). Coerce to the SAME float/NaN vector
+                # the text path produced -- text used: float(x) if numeric-looking else NaN.
+                if is_h5ad:
+                    data.append([float(v) for v in raw_vals])
+                else:
+                    data.append([float(x) if x.replace('.', '', 1).isdigit() else np.nan for x in raw_vals])
 
         if data:
             count = pd.DataFrame(data, columns=header[1:])

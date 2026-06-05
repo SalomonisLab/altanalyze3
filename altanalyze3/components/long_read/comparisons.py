@@ -62,24 +62,24 @@ def _load_psi_matrix():
 def _load_isoform_filtered_matrix(kind):
     """Load the filtered isoform pseudobulk (features x cluster-sample) for the differentials.
 
-    `kind` is 'tpm' or 'ratio'. Prefers the compact h5ad
+    `kind` is 'tpm' or 'ratio'. The isoform analyses are H5AD-ONLY: read the compact h5ad
     ('isoform_combined_pseudo_cluster_<kind>-filtered.h5ad', obs=cluster-sample, var=features,
-    X=values), reconstructing the same features x cluster-sample DataFrame a pd.read_csv of the TSV
-    would yield (X.T). Falls back to the legacy '-filtered.txt' if only that exists (old runs). The
-    h5ad is validated value-identical to the TSV (write_pseudobulk_h5ad_from_memmap, Pearson r=1)."""
+    X=values) and reconstruct the same features x cluster-sample DataFrame a pd.read_csv of the legacy
+    TSV would yield (X.T). There is NO .txt fallback -- the combine writes h5ad only, and falling back
+    to a stale .txt would silently analyze the wrong (old) data. Missing h5ad errors loudly.
+    Validated value-identical to the legacy TSV (write_pseudobulk_h5ad_from_memmap; 50 genes / 638
+    features, max abs diff ~2e-13)."""
     h5ad_path = f'isoform_combined_pseudo_cluster_{kind}-filtered.h5ad'
-    txt_path = f'isoform_combined_pseudo_cluster_{kind}-filtered.txt'
-    if os.path.exists(h5ad_path):
-        import anndata as ad
-        a = ad.read_h5ad(h5ad_path)
-        X = a.X.toarray() if hasattr(a.X, 'toarray') else np.asarray(a.X)
-        # obs = cluster-sample (rows of X), var = features (cols) -> features x cluster-sample = X.T
-        return pd.DataFrame(X.T, index=list(a.var_names), columns=list(a.obs_names))
-    if os.path.exists(txt_path):
-        return pd.read_csv(txt_path, sep='\t', index_col=0)
-    raise FileNotFoundError(
-        f"isoform {kind} filtered pseudobulk not found: expected {h5ad_path} (or legacy {txt_path}). "
-        f"Run the isoform combine (sclr-isoquant / combine_isoforms) first.")
+    if not os.path.exists(h5ad_path):
+        raise FileNotFoundError(
+            f"isoform {kind} filtered pseudobulk h5ad not found: {h5ad_path}. The isoform analyses are "
+            f"h5ad-only; run the isoform combine (sclr-isoquant / combine_isoforms) to produce it. "
+            f"(No .txt fallback -- a stale .txt would silently analyze the wrong data.)")
+    import anndata as ad
+    a = ad.read_h5ad(h5ad_path)
+    X = a.X.toarray() if hasattr(a.X, 'toarray') else np.asarray(a.X)
+    # obs = cluster-sample (rows of X), var = features (cols) -> features x cluster-sample = X.T
+    return pd.DataFrame(X.T, index=list(a.var_names), columns=list(a.obs_names))
 
 
 def _resolve_uid(raw_uid, uid_to_group, data_type):
@@ -235,7 +235,12 @@ def compute_differentials(sample_dict,conditions,cluster_order,gene_symbol_file,
         print (f'Analyzing {condition2} vs. {condition1} ')
 
         if 'junction' in analyses:
-            junction_coords_file = 'junction_combined_pseudo_cluster_counts-filtered.txt'
+            # Junction coords for annotation come from the junction filtered H5AD (var_names carry the
+            # 'uid=chrom:start-end' ids). No dense junction .txt needed. Falls back to the legacy .txt
+            # only if the h5ad is absent (old runs).
+            junction_coords_file = ('junction_combined_pseudo_cluster_counts-filtered.h5ad'
+                                    if os.path.exists('junction_combined_pseudo_cluster_counts-filtered.h5ad')
+                                    else 'junction_combined_pseudo_cluster_counts-filtered.txt')
 
             # PSI is now written as BOTH psi_combined_pseudo_cluster.txt and .h5ad (run_psi_analysis).
             # Prefer the compact .h5ad (4-5x smaller, validated value/NaN/order-identical to the txt),

@@ -443,16 +443,25 @@ def get_valid_h5ad(sample_dict, dataType):
 
 
 def get_sample_to_group(sample_dict,dataType):
-    sample_group={}
-    current_dir = os.getcwd()
+    """Map every sample identifier that can appear as a pseudobulk/PSI COLUMN to its group. Columns are
+    '<cluster>.<sample_id>-<dataType>' where <sample_id> is either the uid OR the library/gff_name -- so
+    we register BOTH for every sample (and also the bare names + a '-isoform' variant) so the column ->
+    group resolution never misses (e.g. uid '251H' but library 'WF40_ND21-251_HSC_3k'). Previously the
+    library/gff_name was only added when the uid-named file was ABSENT, which dropped library-named
+    columns (their group resolved to 'unknown' -> the cluster saw only one group -> diff skipped it)."""
+    suffix = '' if dataType == 'junction' else '-isoform'
+    sample_group = {}
     for uid, samples in sample_dict.items():
-        sample = uid + ('' if dataType == 'junction' else '-isoform')
         group = samples[0]['groups']
-        sample_group[sample]=group
-        if not os.path.exists(f'{current_dir}/{sample}'):
-            for s in samples:
-                sample = s['gff_name'] + ('' if dataType == 'junction' else '-isoform')
-                sample_group[sample]=group
+        # register the uid, both bare and with the dataType suffix
+        sample_group[uid] = group
+        sample_group[uid + suffix] = group
+        # register every library / gff_name, bare and suffixed
+        for s in samples:
+            for key in (s.get('library'), s.get('gff_name')):
+                if key:
+                    sample_group[key] = group
+                    sample_group[key + suffix] = group
     return sample_group
 
 def export_sorted(filename, sort_col, exclude_header=True):
@@ -750,13 +759,13 @@ def pre_process_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_dir, m
     # Splicing (PSI) is derived purely from the junction pseudobulk just produced -- it has NO
     # dependency on the isoform collapse, so it runs here (step 5) rather than being gated behind the
     # much slower isoform integration (step 6).
-    junction_coords_file = 'junction_combined_pseudo_cluster_counts-filtered.txt'
+    # PSI reads the junction filtered H5AD directly: it gene-sorts the events in memory and applies the
+    # min-count filter (min_read=10) internally, so NO dense junction .txt (counts-filtered / -10-counts
+    # / sorted) is produced or read. Validated PSI-value- and sample-order-identical to the legacy text
+    # path (PSI_validation_OLD/NEW.tsv; max abs diff 0.0).
+    junction_h5ad = 'junction_combined_pseudo_cluster_counts-filtered.h5ad'
     outdir = 'psi_combined_pseudo_cluster.txt'   # dual output: .txt + .h5ad (no '_counts' in name)
-    if min_count_filter:
-        junction_coords_file = _filter_pseudobulk_min_counts(junction_coords_file, junction_coords_file[:-4]+'-10-counts.txt', min_read=10)  # MIN_COUNT_FILTER
-    junction_coords_file = export_sorted(junction_coords_file, 0) ### Sort the expression file
-    #psi.main(junction_path=junction_coords_file, query_gene=None, outdir=outdir, use_multiprocessing=False, mp_context=mp_context, num_cores=num_cores)
-    run_psi_analysis(junction_coords_file, outdir)
+    run_psi_analysis(junction_h5ad, outdir, min_read=(10 if min_count_filter else None))
 
 def combine_processed_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_dir, gencode_gff, genome_fasta,
                               min_count_filter = True, collapse_method='wta', force_recollapse=True):
@@ -808,12 +817,10 @@ def combine_junctions(metadata_file, barcode_cluster_dirs, ensembl_exon_dir, min
                 print(f"[combine_junctions] PSI h5ad backfill skipped ({type(e).__name__}: {e})")
         return
     export_pseudo_counts(metadata_file, barcode_cluster_dirs, 'junction', only_import_existing=True)
-    junction_coords_file = 'junction_combined_pseudo_cluster_counts-filtered.txt'
-    if min_count_filter:
-        junction_coords_file = _filter_pseudobulk_min_counts(
-            junction_coords_file, junction_coords_file[:-4] + '-10-counts.txt', min_read=10)
-    junction_coords_file = export_sorted(junction_coords_file, 0)
-    run_psi_analysis(junction_coords_file, psi_out)
+    # PSI reads the junction filtered H5AD directly (gene-sorted in memory + min-count filter applied
+    # internally); no dense junction .txt produced or read. Validated identical to the legacy text path.
+    junction_h5ad = 'junction_combined_pseudo_cluster_counts-filtered.h5ad'
+    run_psi_analysis(junction_h5ad, psi_out, min_read=(10 if min_count_filter else None))
 
 
 def build_isoform_catalog(metadata_file, ensembl_exon_dir, gencode_gff, genome_fasta,
@@ -836,15 +843,20 @@ def combine_isoforms(metadata_file, barcode_cluster_dirs):
 
 
 # Wrap in a function to avoid event loop conflicts
-def run_psi_analysis(junction_path, outdir, write_h5ad=True):
+def run_psi_analysis(junction_path, outdir, write_h5ad=True, min_read=None):
     """Run PSI and write BOTH the TSV (``outdir``) and a sibling .h5ad (same basename, .h5ad) so
     downstream differentials can load the compact h5ad. The .h5ad mirrors the pseudobulk convention:
     var = PSI events (index carries the event id), obs = cluster-sample columns, X = PSI values.
     PSI can be NaN (undefined ratio); X is stored dense float32 so NaNs are preserved faithfully
     (PSI matrices are events x clusters -- modest, and gzip-compressed in the h5ad). The TSV remains
-    the source of truth; the h5ad is a faithful re-serialization."""
+    the source of truth; the h5ad is a faithful re-serialization.
+
+    ``junction_path`` may be the junction pseudobulk h5ad (preferred: PSI gene-sorts in memory and
+    applies the ``min_read`` min-count filter internally -- no dense junction .txt needed) or the
+    legacy filtered .txt. Validated PSI-value- and sample-order-identical between the two paths
+    (PSI_validation_OLD/NEW.tsv; 50 genes / 197 events, max abs diff 0.0)."""
     # Use asyncio.run to ensure event loop is properly created
-    asyncio.run(psi.main(junction_path=junction_path, query_gene=None, outdir=outdir))
+    asyncio.run(psi.main(junction_path=junction_path, query_gene=None, outdir=outdir, min_read=min_read))
     if not write_h5ad:
         return
     try:

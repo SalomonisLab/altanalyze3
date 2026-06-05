@@ -50,6 +50,20 @@ def load_gene_symbols(file_path):
 def load_junction_coordinates(file_input):
     coord_dict = {}
 
+    # h5ad input: the junction feature ids (var_names) ARE 'uid=chrom:start-end', the same strings the
+    # text path parsed from each line's first column. Build the identical coord_dict from var_names so
+    # no junction .txt is needed for annotation.
+    if isinstance(file_input, str) and file_input.endswith('.h5ad'):
+        import anndata as ad
+        a = ad.read_h5ad(file_input)
+        for feature in a.var_names:
+            try:
+                junction_id, coords = feature.split('=')
+                coord_dict[junction_id] = coords
+            except ValueError:
+                continue
+        return coord_dict
+
     if isinstance(file_input, str):
         with open(file_input, 'r') as f:
             total_lines = sum(1 for _ in f)  # Count total lines for tqdm
@@ -390,6 +404,12 @@ def get_prioritized_isoform_pair(gene, isoforms1, isoforms2, protein_dict, top_k
 # 6. Annotate a stats file
 def annotate_junction_stats_file(file_path, transcript_dict, gene_symbol_dict, coord_dict, protein_dict, output_folder):
     stats_df = pd.read_csv(file_path, sep='\t')
+    # The junction stats file writes the feature id as the (unnamed) FIRST column, so pandas names it
+    # 'Unnamed: 0' and there is no literal 'Feature' column. Normalize: if 'Feature' is absent, rename
+    # the first column to 'Feature' so the row lookup below works for both the junction stats layout
+    # (unnamed index) and any file that already has a named 'Feature' column.
+    if 'Feature' not in stats_df.columns and len(stats_df.columns) > 0:
+        stats_df = stats_df.rename(columns={stats_df.columns[0]: 'Feature'})
 
     annotations = []  # Store annotated rows
 
@@ -488,6 +508,11 @@ def annotate_junction_stats_file(file_path, transcript_dict, gene_symbol_dict, c
 # 6. Annotate a stats file
 def annotate_iso_stats_file(file_path, transcript_dict, gene_symbol_dict, protein_dict, output_folder):
     stats_df = pd.read_csv(file_path, sep='\t')
+    # Isoform stats files write the feature id as the (unnamed) FIRST column -> pandas names it
+    # 'Unnamed: 0' and there is no literal 'Feature' column. Normalize: if 'Feature' is absent, rename
+    # the first column to 'Feature' (same fix as annotate_junction_stats_file).
+    if 'Feature' not in stats_df.columns and len(stats_df.columns) > 0:
+        stats_df = stats_df.rename(columns={stats_df.columns[0]: 'Feature'})
 
     annotations = []  # Store annotated rows
 
@@ -537,6 +562,11 @@ def annotate_all_stats_files(stats_folder, transcript_dict, gene_symbol_dict, co
     # annotations (e.g. the protein-length fix wouldn't take effect on a re-run). freshness_refs is
     # retained for signature compatibility but no longer gates regeneration.
     for stats_file in tqdm(stats_files, desc="Annotating Stats Files"):
+        # The file list is globbed once; skip any entry that vanished since (e.g. archived by a
+        # concurrent/prior _reset_stats_folder) rather than crashing the whole annotation pass.
+        if not os.path.exists(stats_file):
+            print(f"[annotate] skipping missing stats file: {stats_file}")
+            continue
         annotated_file = os.path.join(output_folder, os.path.basename(stats_file).replace('.txt', '-annotated.txt'))
         if os.path.exists(annotated_file):
             print(f"Re-annotating {stats_file} (regenerating annotated file).")
