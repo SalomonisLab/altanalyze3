@@ -38,6 +38,24 @@ class IsoformQuery(BaseModel):
     include_introns: bool = True
 
 
+class MoleculeQuery(BaseModel):
+    gene: str
+    scope: str = "combined"               # 'combined' (pool the selection) or 'sample' (one library)
+    sample: Optional[str] = None          # required when scope == 'sample'
+    samples: Optional[List[str]] = None
+    groups: Optional[List[str]] = None
+    cell_types: Optional[List[str]] = None
+    min_count: int = 1
+    max_isoforms: int = 400
+
+
+class ReadsQuery(BaseModel):
+    gene: str
+    cell_types: Optional[List[str]] = None   # cell-state selection (panels' columns); None == all
+    conditions: Optional[List[str]] = None   # covariates -> one panel each; None == all groups
+    max_isoforms: int = 300                  # per-condition molecule cap (engine default)
+
+
 def create_app(ctx: da.RunContext) -> FastAPI:
     app = FastAPI(title="AltAnalyze3 ISV Viewer", version="1.0")
     app.state.ctx = ctx
@@ -103,6 +121,43 @@ def create_app(ctx: da.RunContext) -> FastAPI:
             include_introns=q.include_introns,
         )
         if len(cache) > 256:   # bound memory
+            cache.clear()
+        cache[sig] = res
+        return res
+
+    @app.post("/api/molecules")
+    def molecules(q: MoleculeQuery):
+        g = ctx.resolve_gene(q.gene)
+        if not g:
+            raise HTTPException(404, f"gene not found in this run: {q.gene}")
+        sig = "mol:" + json.dumps({**q.dict(), "gene": g}, sort_keys=True, default=str)
+        cache = app.state.query_cache
+        if sig in cache:
+            return cache[sig]
+        res = da.query_molecules(
+            ctx, g, scope=q.scope, sample=q.sample, samples=q.samples, groups=q.groups,
+            cell_types=q.cell_types, min_count=q.min_count, max_isoforms=q.max_isoforms,
+        )
+        if len(cache) > 256:
+            cache.clear()
+        cache[sig] = res
+        return res
+
+    @app.post("/api/reads")
+    def reads(q: ReadsQuery):
+        """Read-level (molecule) view: per-covariate panels of individual molecules from the engine's
+        own *_isoform_ids.tsv output. First call for a (gene, selection) may take ~10-30s (the engine
+        builds counts caches); subsequent calls are served from the on-disk + in-process cache."""
+        g = ctx.resolve_gene(q.gene)
+        if not g:
+            raise HTTPException(404, f"gene not found in this run: {q.gene}")
+        sig = "reads:" + json.dumps({**q.dict(), "gene": g}, sort_keys=True, default=str)
+        cache = app.state.query_cache
+        if sig in cache:
+            return cache[sig]
+        res = da.query_reads(ctx, g, cell_types=q.cell_types, conditions=q.conditions,
+                             max_isoforms=q.max_isoforms)
+        if len(cache) > 256:
             cache.clear()
         cache[sig] = res
         return res

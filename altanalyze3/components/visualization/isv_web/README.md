@@ -5,11 +5,39 @@ A self-contained web app over the AltAnalyze3 isoform structure viewer engine
 Independent of the cellHarmony web app.
 
 ## What it does
-- Select **samples**, **groups** (covariate), and **cell types**; combine columns **by group or by cell type**.
-- Search **genes** (symbol or ENSG), **restrict by junctions**, and adjust **clustering thresholds** live.
-- Interactive **D3/SVG isoform tracks** with an expression heat strip per column.
-- **Mouseover** shows exon-region id + genomic coords, and (per isoform) **protein length + NMD**.
-- **Right-click** an isoform → export its **protein sequence** (FASTA), or export all isoforms in its cluster.
+Two tabs over one shared, IGV-style genomic track renderer (D3/SVG): a **genomic coordinate ruler** +
+**reference gene-model track** sit above the isoform structures, with **mouse-wheel zoom / drag-pan**
+on the track area (hover + right-click preserved).
+
+**Tab 1 — Cell type × covariate** (the primary view): cell-type-specific expression **heatmap columns
+grouped into covariate blocks** with a labeled block + separator per covariate
+(e.g. `HSC-1 HSC-2 MPP-1 │ HSC-1 HSC-2 MPP-1`, left block = covariate 1, right = covariate 2). Each row
+is an isoform: heat strip on the left, genomic structure on the right. Cyan→yellow heat ramp,
+row-normalized per isoform by default. Clustering thresholds live under **Advanced**.
+
+**Tab 2 — Molecule view (read-level)**: the true ISV pileup. One **stacked read-pileup panel per
+covariate** (e.g. `young`, `AML-NPM1`), each row = **one individual molecule** drawn at its exact
+genomic structure (`tokens_raw`), colored by shared cluster, row height ∝ read count, with the gene
+model + genomic axis at the bottom — the interactive analogue of the ISV PDF. This is produced by the
+**engine itself**: the app drives `plot_isoform_structures_by_conditions` and parses the per-condition
+`*_isoform_ids.tsv` it writes, so the molecules/clusters match the ISV output exactly (validated: HOPX
+`young`+`HSC-1+HSC-2+MPP-1` → 300 molecules).
+
+Both tabs:
+- **Mouseover** shows exon-region id + genomic coords (and protein length on isoform exons); the row
+  tooltip adds **protein length + NMD + read counts** (molecule id + sample + cluster in the read view).
+- **Right-click** an isoform/molecule → export its **protein** or **mRNA** sequence (FASTA), all
+  proteins in its cluster (heatmap tab), or all visible proteins.
+- Search **genes** (symbol or ENSG); the column order follows your cell-type selection order.
+- **Deep links / shareable URLs**: `?gene=HOPX&tab=molecule&cells=HSC-1,HSC-2,MPP-1&groups=young,AML-NPM1`
+  auto-renders on load.
+
+### Performance (read-level view)
+First render of a new (gene × cell-states) selection drives the engine and may take **~10–30 s** (it
+builds the per-sample isoform counts caches under each sample's `gene_indexes_v2/`). The result is
+persisted to `<run_dir>/_isv_web_cache/reads/` **and** memoized in-process, so repeat views (including
+after a restart) are near-instant. For uniformly fast first renders, pre-build the atomic per-cell-type
+caches once with `precompute_viewer_index.precompute(sample_dict, barcode_sample_dict)`.
 
 ## Run
 ```bash
@@ -45,14 +73,23 @@ Protein length/NMD come from `protein_summary.txt` (indexed at startup); protein
 | cell types | `cellHarmony/*/_barcode_clusters.txt` (`obs['cluster']`) |
 | genes | per-sample `var_names` sidecars + `Hs_Ensembl-annotations.txt` |
 | isoform structures | `transcript_associations.txt` (read directly; known + novel) |
-| exon coords (mouseover) | `Hs_Ensembl_exon.txt` (`exon_lookup`) |
-| expression | `isoform_combined_pseudo_cluster_counts.h5ad` (column slice + sum) |
+| reference track + exon coords | `Hs_Ensembl_exon.txt` (`gene_segments` for the IGV ref track + ruler; `exon_lookup` for per-isoform segments / mouseover) |
+| expression / read counts (heatmap) | `isoform_combined_pseudo_cluster_counts.h5ad` (column slice + sum) |
+| individual molecules (read-level) | engine `plot_isoform_structures_by_conditions` over the per-sample `<library>.h5ad` + per-sample `gff-output/transcript_associations.txt`; parsed from its `*_isoform_ids.tsv` (cached in `_isv_web_cache/reads/`) |
 | protein length / NMD | `gff-output/protein_summary.txt` |
-| protein sequence (export) | `gff-output/protein_sequences.fasta` |
+| protein / mRNA sequence (export) | `gff-output/protein_sequences.fasta`, `transcript_sequences.fasta` |
+
+## API
+- `POST /api/isoforms` — heatmap tab: clustered isoforms + per-(cell-type×covariate) expression + `gene_model`.
+- `POST /api/reads` — read-level molecule tab: per-covariate panels of individual molecules
+  (`{gene, cell_types, conditions, max_isoforms}`) parsed from the engine's `*_isoform_ids.tsv`.
+- `POST /api/molecules` — (legacy) pseudobulk molecule rollup; superseded by `/api/reads`.
+- `GET  /api/isoform/{id}/protein|mrna`, `POST /api/proteins` — FASTA export (single / batch).
+- `GET  /api/catalog`, `/api/genes`, `/api/junctions` — menus + autocomplete.
 
 ## Files
-- `data_api.py` — data layer (RunContext + query); wraps the engine, no drawing.
-- `server.py` — FastAPI endpoints.
+- `data_api.py` — data layer (RunContext + `query_isoforms` heatmap / `query_reads` read-level / `gene_model_track`); wraps the engine.
+- `server.py` — FastAPI endpoints (responses memoized per signature).
 - `run.py` — CLI launcher.
-- `templates/index.html`, `static/app.js`, `static/styles.css` — frontend.
+- `templates/index.html`, `static/app.js`, `static/styles.css` — frontend (two tabs + shared IGV-style renderer).
 - `_tests/` — engine-vs-API parity + speed + e2e smoke.

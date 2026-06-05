@@ -13,8 +13,22 @@ Reused engine functions (do NOT reimplement):
 """
 from __future__ import annotations
 
+import contextlib
+import csv
+import glob
+import hashlib
+import io
 import os
 import threading
+
+# The engine draws via matplotlib.pyplot. The read-level view invokes it from a FastAPI worker thread;
+# on macOS the default GUI backend tries to create an NSWindow off the main thread and HARD-CRASHES the
+# process ("NSWindow drag regions should only be invalidated on the Main Thread!"). Force the headless
+# Agg backend BEFORE isoform_structure_view imports pyplot.
+os.environ.setdefault("MPLBACKEND", "Agg")
+import matplotlib  # noqa: E402
+matplotlib.use("Agg", force=True)
+
 from collections import defaultdict
 from functools import lru_cache
 
@@ -22,6 +36,23 @@ import numpy as np
 
 from .. import isoform_structure_view as isv
 from ...annotation.junction_isoform import load_gene_symbols
+
+
+# The engine re-reads + decompresses each sample's whole-matrix isoform-counts cache (the .counts.npz,
+# whose var_names can be ~tens of millions of entries) from disk on EVERY gene -- so re-rendering a new
+# gene re-pays a ~10s load per large sample. Memoize the loaded cache in-process by path so the second+
+# gene in a browsing session reuses the in-memory arrays (cache files are content-stable per selection).
+if not getattr(isv, "_isv_web_cache_memoized", False):
+    _orig_load_counts_cache = isv._load_isoform_counts_cache
+
+    # maxsize ~ one cell-state selection's worth of samples; each entry is a whole-matrix cache (can be
+    # ~1-2 GB for the largest samples), so keep this small to bound RAM.
+    @lru_cache(maxsize=4)
+    def _memoized_counts_cache(cache_path):
+        return _orig_load_counts_cache(cache_path)
+
+    isv._load_isoform_counts_cache = lambda cache_path: _memoized_counts_cache(cache_path)
+    isv._isv_web_cache_memoized = True
 
 
 # --------------------------------------------------------------------------- run context
@@ -48,6 +79,7 @@ class RunContext:
 
         # gene model / transcripts
         self.exon_lookup = {}          # (gene, exon_id) -> {chrom, strand, start, end, type}
+        self.gene_segments = {}        # gene -> [exon-region segments] (for the reference track + ruler)
         self.transcripts_db = None     # path to transcripts.db (fast per-gene token lookup) or None
         self.transcript_assoc_path = None
 
@@ -72,6 +104,13 @@ class RunContext:
         self._gene_to_vars = {}        # ENSG -> [var indices] (per-gene isoform columns)
         self._col_meta = []            # per obs row: {"col": name, "sample": library, "cell_type": ct}
 
+        # read-level (molecule) view: drives the ENGINE's plot_isoform_structures_by_conditions to emit
+        # per-molecule rows (the *_isoform_ids.tsv it writes) for exact parity with the ISV PDF output.
+        self.viewer_sample_dict = {}   # library -> [{matrix: <plain sample h5ad>, groups, library}]
+        self.barcode_sample_dict = {}  # library -> Series(barcode -> cell_type)  (== barcode_series)
+        self.reads_cache_root = os.path.join(self.run_dir, "_isv_web_cache", "reads")
+        self._reads_lock = threading.Lock()
+
     # -- loaders -----------------------------------------------------------
 
     def load_all(self):
@@ -82,7 +121,28 @@ class RunContext:
         self._index_genes_from_var_names()
         self._index_protein_summary()
         self._index_protein_fasta()
+        self._build_viewer_inputs()
         return self
+
+    def _build_viewer_inputs(self):
+        """Assemble the sample_dict + barcode_sample_dict the engine's by-conditions renderer expects
+        for the read-level (molecule) view. matrix = the plain '<library>.h5ad' molecule matrix (the
+        same file the ISV CLI/bench feed it). barcode_sample_dict reuses the per-library cluster
+        Series we already loaded."""
+        self.barcode_sample_dict = dict(self.barcode_series)
+        for lib, meta in self.samples.items():
+            h5 = _find_plain_sample_h5ad(self.run_dir, lib) or meta.get("h5ad")
+            if not h5:
+                continue
+            entry = {"matrix": h5, "groups": meta.get("group", "ungrouped"), "library": lib}
+            # Point structure lookup DIRECTLY at the per-sample transcripts.db. Otherwise the engine's
+            # path resolver prefers the multi-GB 'transcript_associations_raw.txt' and SCANS it per gene
+            # (3-12s/sample, and fruitlessly for genes with no reads). The .db has the novel molecules
+            # too and answers per gene in ~0.01s.
+            db = os.path.join(os.path.dirname(h5), "gff-output", "gene_indexes_v2", "transcripts.db")
+            if os.path.exists(db):
+                entry["transcript_associations"] = db
+            self.viewer_sample_dict[lib] = [entry]
 
     def _load_metadata_and_clusters(self):
         from ...long_read.isoform_automate import import_metadata
@@ -168,7 +228,9 @@ class RunContext:
         # exon_lookup: full gene model loaded once (coords for every exon region). It's a flat TSV
         # read; do it at startup so per-query mouseover coords are in-memory.
         if self.gene_model_path and os.path.exists(self.gene_model_path):
-            _, self.exon_lookup = isv.read_gene_model(self.gene_model_path)
+            # gene_segments (gene -> [exon-region dicts]) feeds the IGV reference track + ruler;
+            # exon_lookup (per (gene,exon_id)) feeds per-isoform segment building / mouseover coords.
+            self.gene_segments, self.exon_lookup = isv.read_gene_model(self.gene_model_path)
 
     def _load_gene_symbols(self):
         if self.gene_symbol_path and os.path.exists(self.gene_symbol_path):
@@ -357,7 +419,276 @@ def query_isoforms(ctx: RunContext, gene, samples, groups, cell_types, combine_b
         "columns": columns,
         "isoforms": out_isoforms,
         "cluster_count": len(grouped),
+        "gene_model": gene_model_track(ctx, gene),
     }
+
+
+def gene_model_track(ctx: RunContext, gene):
+    """Reference gene-model track for the IGV-style axis: ordered exon-region blocks (genomic coords),
+    chrom, strand, and the overall exonic extent. Built from the per-gene exon segments loaded once at
+    startup (O(exons in gene)). Returns {gene, chrom, strand, extent:[lo,hi], blocks:[...]} or a stub."""
+    gene = ctx.resolve_gene(gene) or gene
+    segs = ctx.gene_segments.get(gene, []) if ctx.gene_segments else []
+    blocks, lo, hi, chrom, strand = [], None, None, None, None
+    for s in segs:
+        a, b = int(s["start"]), int(s["end"])
+        if a > b:
+            a, b = b, a
+        chrom = chrom or s.get("chrom")
+        strand = strand or s.get("strand")
+        is_exon = str(s.get("type", "E")).upper().startswith("E")
+        if is_exon:
+            lo = a if lo is None else min(lo, a)
+            hi = b if hi is None else max(hi, b)
+            blocks.append({"exon_id": s.get("exon_id"), "start": a, "end": b, "type": "E"})
+    blocks.sort(key=lambda d: d["start"])
+    return {
+        "gene": gene, "chrom": chrom, "strand": strand,
+        "extent": [lo, hi] if lo is not None else None, "blocks": blocks,
+    }
+
+
+def query_molecules(ctx: RunContext, gene, scope="combined", sample=None, samples=None,
+                    groups=None, cell_types=None, min_count=1, max_isoforms=400):
+    """Molecule/structure view (the original ISV layout): per-isoform genomic structures ranked by
+    read count, for a single `sample` (scope='sample') or pooled across the selection
+    (scope='combined'). Reuses the in-memory pseudobulk slice -- no full-h5ad read at query time. Each
+    isoform carries its total count plus per-sample / per-cell-type breakdowns (for mouseover) and
+    protein meta. No clustering here -- this view shows individual isoform structures, IGV-style."""
+    gene = ctx.resolve_gene(gene) or gene
+    if scope == "sample" and sample:
+        sel_samples = [sample] if sample in ctx.samples else []
+    else:
+        scope = "combined"
+        sel_samples = _resolve_selected_samples(ctx, samples, groups)
+    cell_states = list(cell_types) if cell_types else None
+
+    transcript_structures = _load_structures(ctx, gene)
+    agg = _molecule_counts(ctx, gene, sel_samples, cell_states)
+    total_counts = {iid: a["total"] for iid, a in agg.items()}
+
+    isoform_records = [{"isoform_id": iid, "count": cnt} for iid, cnt in total_counts.items()]
+    plotted, _, _ = isv.build_plotted_isoforms(
+        isoform_records, transcript_structures, gene,
+        cluster_mode="block", cluster_features="tokens",
+        min_count=min_count, max_isoforms=max_isoforms,
+    )
+
+    out_isoforms = []
+    for it in plotted:
+        iid = it.get("isoform_id") or it.get("resolved_id")
+        tokens = it.get("tokens") or it.get("tokens_trimmed") or []
+        segs = isv.build_isoform_segments(tokens, ctx.exon_lookup, gene)
+        pmeta = ctx.protein_meta(iid) or {}
+        a = agg.get(iid, {})
+        out_isoforms.append({
+            "isoform_id": iid,
+            "known": bool(str(iid).startswith("ENST")),
+            "exon_segments": [_seg_json(seg) for seg in segs],
+            "count": round(total_counts.get(iid, 0.0), 3),
+            "by_sample": {k: round(v, 3) for k, v in (a.get("by_sample") or {}).items()},
+            "by_cell_type": {k: round(v, 3) for k, v in (a.get("by_cell_type") or {}).items()},
+            "protein_length": pmeta.get("protein_length"),
+            "nmd_status": pmeta.get("nmd_status"),
+            "intron_retention": pmeta.get("intron_retention"),
+        })
+    out_isoforms.sort(key=lambda d: d["count"], reverse=True)
+
+    return {
+        "gene": gene,
+        "symbol": ctx.gene_symbol_dict.get(gene, gene),
+        "scope": scope,
+        "sample": sample if scope == "sample" else None,
+        "samples": sel_samples,
+        "gene_model": gene_model_track(ctx, gene),
+        "isoforms": out_isoforms,
+        "isoform_count": len(out_isoforms),
+        "total_reads": round(sum(total_counts.values()), 1),
+    }
+
+
+def _molecule_counts(ctx, gene, sel_samples, cell_states):
+    """{isoform_id: {'total', 'by_sample':{lib:c}, 'by_cell_type':{ct:c}}} from the combined pseudobulk
+    slice. Pure in-memory: take the gene's isoform columns, the matching obs rows (selected samples /
+    cell types), and sum -- plus grouped sub-sums per sample and per cell type."""
+    out = {}
+    if ctx._X is None:
+        return out
+    var_idx = ctx._gene_to_vars.get(gene, [])
+    if not var_idx:
+        return out
+    sel_set = set(sel_samples)
+    cs_set = set(cell_states) if cell_states else None
+
+    rows, samps, cts = [], [], []
+    for ri, m in enumerate(ctx._col_meta):
+        if m["sample"] not in sel_set:
+            continue
+        if cs_set is not None and m["cell_type"] not in cs_set:
+            continue
+        rows.append(ri)
+        samps.append(m["sample"])
+        cts.append(m["cell_type"])
+    if not rows:
+        return out
+
+    var_names = [str(ctx._adata.var_names[vi]) for vi in var_idx]
+    Xg = ctx._X[:, var_idx].tocsr()
+    sub = Xg[rows, :]
+    total = np.asarray(sub.sum(axis=0)).ravel()
+
+    def _group_sums(labels):
+        idx_by = {}
+        for i, lab in enumerate(labels):
+            idx_by.setdefault(lab, []).append(i)
+        return {lab: np.asarray(sub[idxs, :].sum(axis=0)).ravel() for lab, idxs in idx_by.items()}
+
+    by_sample_arr = _group_sums(samps)
+    by_ct_arr = _group_sums(cts)
+
+    for j in range(len(var_names)):
+        t = float(total[j])
+        if t <= 0:
+            continue
+        iid = _isoform_id_from_var(var_names[j], gene)
+        rec = out.setdefault(iid, {"total": 0.0, "by_sample": {}, "by_cell_type": {}})
+        rec["total"] += t
+        for lab, arr in by_sample_arr.items():
+            v = float(arr[j])
+            if v:
+                rec["by_sample"][lab] = rec["by_sample"].get(lab, 0.0) + v
+        for lab, arr in by_ct_arr.items():
+            v = float(arr[j])
+            if v:
+                rec["by_cell_type"][lab] = rec["by_cell_type"].get(lab, 0.0) + v
+    return out
+
+
+def query_reads(ctx: RunContext, gene, cell_types, conditions=None, max_isoforms=300):
+    """Read-level (molecule) view: drive the engine's plot_isoform_structures_by_conditions to emit its
+    per-molecule rows (the *_isoform_ids.tsv files) for the requested gene x cell_states x conditions,
+    then parse them into per-covariate panels. Each molecule keeps its EXACT structure (tokens_raw ->
+    exon segments) and shared cluster_index, reproducing the ISV pileup. Memoized on disk (the engine's
+    output dir) + in-process; first render of a (gene, selection) builds counts caches (slower)."""
+    gene = ctx.resolve_gene(gene) or gene
+    symbol = ctx.gene_symbol_dict.get(gene, gene)
+    cell_states = [str(c) for c in cell_types] if cell_types else None
+    conds = list(conditions) if conditions else sorted(ctx.groups.keys())
+
+    out_dir = _reads_out_dir(ctx, cell_states, max_isoforms)
+    cs_label = "+".join(cell_states) if cell_states else "all"
+    tsvs = _find_reads_tsvs(out_dir, symbol, cs_label)
+    if not all(c in tsvs for c in conds):
+        with ctx._reads_lock:
+            tsvs = _find_reads_tsvs(out_dir, symbol, cs_label)
+            if not all(c in tsvs for c in conds):
+                _run_engine_reads(ctx, gene, cell_states, conds, out_dir, max_isoforms)
+                tsvs = _find_reads_tsvs(out_dir, symbol, cs_label)
+
+    panels, n_clusters = [], 0
+    for cond in conds:
+        path = tsvs.get(cond)
+        if not path or not os.path.exists(path):
+            panels.append({"condition": cond, "n_molecules": 0, "molecules": []})
+            continue
+        mols = _parse_reads_tsv(ctx, path, gene)
+        n_clusters = max(n_clusters, 1 + max((m["cluster_index"] for m in mols), default=-1))
+        panels.append({"condition": cond, "n_molecules": len(mols), "molecules": mols})
+
+    return {
+        "gene": gene, "symbol": symbol,
+        "cell_states": cell_states or ["all"], "conditions": conds,
+        "max_isoforms": max_isoforms, "n_clusters": n_clusters,
+        "gene_model": gene_model_track(ctx, gene),
+        "panels": panels,
+        "total_molecules": sum(p["n_molecules"] for p in panels),
+    }
+
+
+def _reads_out_dir(ctx, cell_states, max_isoforms):
+    """A stable cache subdir per (cell_states, max_isoforms). The engine writes
+    <out>/<symbol>/<cond>__<cellstates>__<symbol>_isoform_ids.tsv, so multiple genes with the same
+    selection share one dir and just add files (auto-cached by filename)."""
+    sig = "|".join(sorted(cell_states or ["all"])) + f"|mi{max_isoforms}"
+    h = hashlib.md5(sig.encode()).hexdigest()[:10]
+    return os.path.join(ctx.reads_cache_root, f"sel_{h}")
+
+
+def _run_engine_reads(ctx, gene, cell_states, conds, out_dir, max_isoforms):
+    """Invoke the engine head-lessly (stdout captured). It writes the per-condition *_isoform_ids.tsv
+    we parse. groupby_rev=True is the viewer default; the engine auto-flips orientation per sample."""
+    os.makedirs(out_dir, exist_ok=True)
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            isv.plot_isoform_structures_by_conditions(
+                sample_dict=ctx.viewer_sample_dict, conditions=conds, cell_states=cell_states,
+                barcode_sample_dict=ctx.barcode_sample_dict, genes=[gene],
+                gene_model=ctx.gene_model_path, output_dir=out_dir,
+                gene_symbol_dict=ctx.gene_symbol_dict, rebuild_index=False,
+                combined_condition_view=False, groupby_rev=True, max_isoforms=max_isoforms,
+            )
+    except Exception as exc:  # pragma: no cover - surface engine errors but keep the server alive
+        print(f"[isv_web] read-level render failed for {gene}: {exc}")
+
+
+def _find_reads_tsvs(out_dir, symbol, cs_label):
+    """Map condition -> *_isoform_ids.tsv path for files matching this gene symbol + cell-state label.
+    Filenames: '<condition>__<cellstates>__<symbol>_isoform_ids.tsv'."""
+    out = {}
+    if not os.path.isdir(out_dir):
+        return out
+    suffix = f"__{cs_label}__{symbol}_isoform_ids.tsv"
+    for path in glob.glob(os.path.join(out_dir, "**", "*_isoform_ids.tsv"), recursive=True):
+        name = os.path.basename(path)
+        if name.endswith(suffix):
+            cond = name[: -len(suffix)]
+            out[cond] = path
+    return out
+
+
+def _parse_reads_tsv(ctx, path, gene):
+    """Parse one engine *_isoform_ids.tsv into per-molecule rows with exact exon segments."""
+    mols = []
+    with open(path) as fh:
+        for r in csv.DictReader(fh, delimiter="\t"):
+            iid = (r.get("isoform_id") or "").strip()
+            if not iid:
+                continue
+            toks = [t for t in (r.get("tokens_raw") or "").split("|") if t]
+            segs = isv.build_isoform_segments(toks, ctx.exon_lookup, gene) if toks else []
+            try:
+                ci = int(r.get("cluster_index") or 0)
+            except (TypeError, ValueError):
+                ci = 0
+            try:
+                cnt = float(r.get("count") or 1.0)
+            except (TypeError, ValueError):
+                cnt = 1.0
+            pmeta = ctx.protein_meta(iid) or {}
+            mols.append({
+                "isoform_id": iid,
+                "sample": _sample_suffix(iid),
+                "known": iid.startswith("ENST"),
+                "count": round(cnt, 3),
+                "cluster_index": ci,
+                "exon_segments": [_seg_json(s) for s in segs],
+                "protein_length": pmeta.get("protein_length"),
+                "nmd_status": pmeta.get("nmd_status"),
+            })
+    return mols
+
+
+def _sample_suffix(isoform_id):
+    """Novel molecule ids are '<molecule>.<library>' -> return the library; ENST/known -> None."""
+    s = str(isoform_id)
+    if s.startswith("ENST"):
+        return None
+    if "." in s:
+        head, tail = s.split(".", 1)
+        if head.isdigit():
+            return tail
+    return None
 
 
 def _load_structures(ctx: RunContext, gene):
@@ -548,6 +879,15 @@ def _find_sample_h5ad(run_dir, library):
         if hits:
             return hits[0]
     return None
+
+
+def _find_plain_sample_h5ad(run_dir, library):
+    """The plain '<library>.h5ad' molecule matrix the ISV engine consumes for the read-level view
+    (NOT the -isoform/-gene/-junction variants)."""
+    hits = glob.glob(os.path.join(run_dir, "**", f"{library}.h5ad"), recursive=True)
+    hits = [h for h in hits if not os.path.basename(h).replace(".h5ad", "").endswith(
+        ("-isoform", "-gene", "-junction", "-isoform-em", "-isoform-wta"))]
+    return hits[0] if hits else None
 
 
 def _find_combined_h5ad(run_dir):

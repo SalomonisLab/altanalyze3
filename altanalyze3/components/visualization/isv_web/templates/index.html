@@ -3,82 +3,115 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>AltAnalyze3 — Isoform Structure Viewer</title>
+  <title>ISV — Isoform Structure Viewer</title>
   <link rel="stylesheet" href="/static/styles.css"/>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
   <script src="https://d3js.org/d3.v7.min.js"></script>
 </head>
 <body>
+  <header id="topbar">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 40 40" width="30" height="30" aria-hidden="true">
+        <path d="M9 6c10 6 12 16 22 22M9 34c10-6 12-16 22-22" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
+        <circle cx="9" cy="6" r="2.6" fill="currentColor"/><circle cx="31" cy="34" r="2.6" fill="currentColor"/>
+        <circle cx="9" cy="34" r="2.6" fill="currentColor"/><circle cx="31" cy="6" r="2.6" fill="currentColor"/>
+      </svg>
+      <div class="brand-txt">
+        <div class="brand-name">ISV</div>
+        <div class="brand-sub">Isoform Structure Viewer</div>
+      </div>
+    </div>
+    <div class="brand-tag">AltAnalyze3 · long-read single-cell isoforms</div>
+  </header>
+
   <div id="app">
     <aside id="panel">
-      <h1>ISV <span class="sub">isoform structure viewer</span></h1>
-
       <section class="field">
         <label>Gene</label>
         <input id="gene-input" type="text" autocomplete="off" placeholder="symbol or ENSG…"/>
         <div id="gene-suggest" class="suggest"></div>
       </section>
 
-      <section class="field">
-        <label>Combine columns by</label>
-        <select id="combine-by">
-          <option value="group">Group (covariate)</option>
-          <option value="cell_type">Cell type</option>
-          <option value="cell_type_x_covariate">Cell type × covariate</option>
-        </select>
-      </section>
+      <div class="tab-controls" data-for="heatmap">
+        <section class="field">
+          <label>Columns</label>
+          <div id="combine-seg" class="seg">
+            <button class="seg-btn on" data-v="cell_type_x_covariate">cell type × covariate</button>
+            <button class="seg-btn" data-v="cell_type">cell type</button>
+            <button class="seg-btn" data-v="group">covariate</button>
+          </div>
+        </section>
+      </div>
 
       <section class="field">
-        <label>Samples</label>
-        <div id="samples" class="multi"></div>
-      </section>
-
-      <section class="field">
-        <label>Groups</label>
-        <div id="groups" class="multi"></div>
-      </section>
-
-      <section class="field">
-        <label>Cell types <input id="celltype-filter" class="mini" placeholder="filter…"/></label>
+        <label>Cell types <input id="celltype-filter" class="mini" placeholder="filter…"/>
+          <button id="ct-all" class="lnk">all</button><button id="ct-none" class="lnk">none</button></label>
         <div id="cell-types" class="multi scroll"></div>
       </section>
 
       <section class="field">
-        <label>Restrict by junctions</label>
-        <div id="junctions" class="multi scroll small"></div>
+        <label>Covariate / groups <button id="grp-all" class="lnk">all</button></label>
+        <div id="groups" class="multi"></div>
+        <div class="hint" data-for="molecule">each covariate becomes a stacked read-pileup panel</div>
       </section>
 
-      <details class="thresholds" open>
-        <summary>Clustering thresholds</summary>
-        <div class="field">
-          <label>Similarity threshold <span id="sim-val">0.85</span></label>
+      <details class="adv">
+        <summary>Advanced</summary>
+        <section class="field">
+          <label>Samples <span class="hint">(blank = all)</span></label>
+          <div id="samples" class="multi"></div>
+        </section>
+        <div class="field inline" data-for="molecule">
+          <label>Max molecules / panel</label><input id="maxreads" type="number" min="10" step="10" value="300"/>
+        </div>
+        <section class="field" data-for="heatmap">
+          <label>Restrict by junctions</label>
+          <div id="junctions" class="multi scroll small"></div>
+        </section>
+        <div class="field" data-for="heatmap">
+          <label>Cluster similarity <span id="sim-val">0.85</span></label>
           <input id="sim" type="range" min="0" max="1" step="0.01" value="0.85"/>
         </div>
-        <div class="field">
-          <label>Min split fraction <span id="msf-val">0.05</span></label>
-          <input id="msf" type="range" min="0" max="0.5" step="0.01" value="0.05"/>
-        </div>
-        <div class="field inline">
-          <label>Min count</label><input id="mincount" type="number" min="0" value="1"/>
-          <label>Max isoforms</label><input id="maxiso" type="number" min="1" value="1500"/>
-        </div>
-        <div class="field inline">
+        <div class="field inline" data-for="heatmap">
+          <label>Min split</label><input id="msf" type="number" min="0" max="0.5" step="0.01" value="0.05"/>
           <label>Strategy</label>
           <select id="strategy">
             <option>subsequence</option><option>jaccard</option><option>substring</option>
             <option>overlap</option><option>anchor-weighted</option>
           </select>
+        </div>
+        <div class="field inline" data-for="heatmap">
+          <label>Min count</label><input id="mincount" type="number" min="0" value="1"/>
+          <label>Max isoforms</label><input id="maxiso" type="number" min="1" value="1500"/>
+        </div>
+        <div class="field inline" data-for="heatmap">
           <label>Mode</label>
           <select id="mode"><option>block</option><option>base</option><option>full</option></select>
+          <label class="check"><input id="introns" type="checkbox" checked/> introns</label>
         </div>
-        <label class="check"><input id="introns" type="checkbox" checked/> include introns</label>
+        <label class="check" data-for="heatmap"><input id="rownorm" type="checkbox" checked/> row-normalize heat (per isoform)</label>
       </details>
 
       <button id="render-btn">Render</button>
       <div id="status"></div>
+      <div id="legend" class="legend"></div>
     </aside>
 
     <main id="canvas-wrap">
-      <div id="header-bar"></div>
+      <div id="tabbar">
+        <button class="tab on" data-tab="heatmap">Cell type × covariate</button>
+        <button class="tab" data-tab="molecule">Molecule view <span class="tab-badge">read-level</span></button>
+      </div>
+      <div id="header-bar">
+        <div id="title-block"></div>
+        <div id="zoom-tools" class="zoom-tools hidden">
+          <button id="zoom-out" title="zoom out">−</button>
+          <button id="zoom-in" title="zoom in">+</button>
+          <button id="zoom-reset" title="reset">reset</button>
+          <span class="zoom-hint">scroll = zoom · drag = pan</span>
+        </div>
+      </div>
       <div id="plot"></div>
     </main>
   </div>
