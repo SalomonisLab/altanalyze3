@@ -59,6 +59,29 @@ def _load_psi_matrix():
     return pd.read_csv(src, sep='\t', index_col=0)
 
 
+def _load_isoform_filtered_matrix(kind):
+    """Load the filtered isoform pseudobulk (features x cluster-sample) for the differentials.
+
+    `kind` is 'tpm' or 'ratio'. Prefers the compact h5ad
+    ('isoform_combined_pseudo_cluster_<kind>-filtered.h5ad', obs=cluster-sample, var=features,
+    X=values), reconstructing the same features x cluster-sample DataFrame a pd.read_csv of the TSV
+    would yield (X.T). Falls back to the legacy '-filtered.txt' if only that exists (old runs). The
+    h5ad is validated value-identical to the TSV (write_pseudobulk_h5ad_from_memmap, Pearson r=1)."""
+    h5ad_path = f'isoform_combined_pseudo_cluster_{kind}-filtered.h5ad'
+    txt_path = f'isoform_combined_pseudo_cluster_{kind}-filtered.txt'
+    if os.path.exists(h5ad_path):
+        import anndata as ad
+        a = ad.read_h5ad(h5ad_path)
+        X = a.X.toarray() if hasattr(a.X, 'toarray') else np.asarray(a.X)
+        # obs = cluster-sample (rows of X), var = features (cols) -> features x cluster-sample = X.T
+        return pd.DataFrame(X.T, index=list(a.var_names), columns=list(a.obs_names))
+    if os.path.exists(txt_path):
+        return pd.read_csv(txt_path, sep='\t', index_col=0)
+    raise FileNotFoundError(
+        f"isoform {kind} filtered pseudobulk not found: expected {h5ad_path} (or legacy {txt_path}). "
+        f"Run the isoform combine (sclr-isoquant / combine_isoforms) first.")
+
+
 def _resolve_uid(raw_uid, uid_to_group, data_type):
     if raw_uid in uid_to_group:
         return raw_uid
@@ -243,9 +266,9 @@ def compute_differentials(sample_dict,conditions,cluster_order,gene_symbol_file,
             compare_two_groups_per_cluster(condition1,condition2,cluster_order,groups_file,psi_matrix,junction_coords_file,gene_symbol_file,dataType='junction',method=method)
 
         if 'isoform' in analyses:
-            # Compute Differential Isoform abundance between groups and cell types
-            isoform_dir = 'isoform_combined_pseudo_cluster_tpm-filtered.txt'
-            isoform_matrix = pd.read_csv(isoform_dir, sep='\t', index_col=0)
+            # Compute Differential Isoform abundance between groups and cell types.
+            # Source: the filtered TPM pseudobulk h5ad (falls back to legacy -filtered.txt).
+            isoform_matrix = _load_isoform_filtered_matrix('tpm')
             log2_iso_matrix = np.log2(isoform_matrix + 1)
             uid_to_group = isoa.get_sample_to_group(sample_dict,'isoform')
             groups_file = pd.DataFrame({
@@ -257,8 +280,8 @@ def compute_differentials(sample_dict,conditions,cluster_order,gene_symbol_file,
             compare_two_groups_per_cluster(condition1,condition2,cluster_order,groups_file,log2_iso_matrix,None,gene_symbol_file,dataType='isoform',method=method)
 
         if 'isoform-ratio' in analyses:
-            isoform_dir = 'isoform_combined_pseudo_cluster_ratio-filtered.txt'
-            isoform_matrix = pd.read_csv(isoform_dir, sep='\t', index_col=0)
+            # Source: the filtered ratio pseudobulk h5ad (falls back to legacy -filtered.txt).
+            isoform_matrix = _load_isoform_filtered_matrix('ratio')
             uid_to_group = isoa.get_sample_to_group(sample_dict,'isoform')
             groups_file = pd.DataFrame({
                 'grp': [uid_to_group.get(_resolve_uid(col.split('.', 1)[1], uid_to_group, 'isoform'), 'unknown') for col in isoform_matrix.columns],  # Extract UID and map to group

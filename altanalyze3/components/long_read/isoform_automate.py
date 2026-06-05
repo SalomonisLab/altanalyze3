@@ -604,13 +604,14 @@ def export_pseudo_counts(metadata_file,barcode_cluster_dirs,dataType='junction',
         fused_filter=fused_filter, cluster_order=cluster_order, min_group_size=min_group_size,
     )
 
-    # Organize and filter. With fused_filter the counts '-filtered.txt' was already written directly
-    # from the memmap (no dense unfiltered file to re-read); otherwise run the legacy chunked filter.
-    if not fused_filter:
+    # Organize and filter.
+    #   * ISOFORM: the combine wrote counts/tpm/ratio as h5ad (full + filtered) directly from the
+    #     memmaps -- no dense .txt exists and the differentials read the filtered h5ad, so the legacy
+    #     chunked filter-from-txt is GONE.
+    #   * JUNCTION: with fused_filter (default) the counts '-filtered.txt' was already written from the
+    #     memmap; only the non-fused junction path needs the legacy chunked filter.
+    if dataType != 'isoform' and not fused_filter:
         iso.export_and_filter_pseudobulk_chunks(pseudo_counts, pseudo_counts[:-4]+'-filtered.txt', cluster_order, min_group_size=min_group_size)
-    if dataType == 'isoform':
-        iso.export_and_filter_pseudobulk_chunks(pseudo_ratios, pseudo_ratios[:-4]+'-filtered.txt', cluster_order, min_group_size=min_group_size)
-        iso.export_and_filter_pseudobulk_chunks(pseudo_tpm, pseudo_tpm[:-4]+'-filtered.txt', cluster_order, min_group_size=min_group_size)
 
 # ---------------------------------------------------------------------------
 # PER-SAMPLE building blocks (4-phase cluster mode). Each operates on ONE uid in

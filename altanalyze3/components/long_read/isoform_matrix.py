@@ -1036,11 +1036,10 @@ def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_
             counts_mm, features, column_names, combined_pseudo_file[:-4] + '-filtered.txt',
             cell_type_order=cluster_order, min_group_size=min_group_size,
         )
-    else:
-        # Isoform path: keep the dense unfiltered counts .txt -- the legacy chunked filter
-        # (export_and_filter_pseudobulk_chunks in export_pseudo_counts) re-reads it to build the
-        # counts/tpm/ratio '-filtered.txt' with their independent masks. (h5ad written above too.)
-        _write_memmap_tsv(counts_mm, features, column_names, combined_pseudo_file)
+    # ISOFORM path: NO dense .txt at all. The combined pseudobulks are now h5ad-only -- counts (full +
+    # filtered) written above, and tpm/ratio (full + filtered) written below. The differentials read
+    # the filtered h5ad directly (comparisons.py), so the legacy dense counts/tpm/ratio .txt and the
+    # chunked filter-from-txt pass are gone (they were the multi-GB throwaway nothing reads).
     _memtrace("after_write_combined_pseudo")
 
     del counts_mm
@@ -1075,8 +1074,20 @@ def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_
 
         combined_tpm_file = f'{collection_name}_combined_pseudo_cluster_tpm.txt'
         combined_isoform_ratio_file = f'{collection_name}_combined_pseudo_cluster_ratio.txt'
-        _write_memmap_tsv(tpm_mm, features, column_names, combined_tpm_file)
-        _write_memmap_tsv(ratio_mm, features, column_names, combined_isoform_ratio_file)
+        # h5ad-only: write tpm + ratio as SPARSE h5ad (full + filtered), mirroring counts. NO dense
+        # .txt. The differentials read '<collection>_combined_pseudo_cluster_{tpm,ratio}-filtered.h5ad'.
+        write_pseudobulk_h5ad_from_memmap(
+            tpm_mm, features, column_names,
+            f'{collection_name}_combined_pseudo_cluster_tpm.h5ad',
+            filtered_path=f'{collection_name}_combined_pseudo_cluster_tpm-filtered.h5ad',
+            cell_type_order=cluster_order, min_group_size=min_group_size,
+        )
+        write_pseudobulk_h5ad_from_memmap(
+            ratio_mm, features, column_names,
+            f'{collection_name}_combined_pseudo_cluster_ratio.h5ad',
+            filtered_path=f'{collection_name}_combined_pseudo_cluster_ratio-filtered.h5ad',
+            cell_type_order=cluster_order, min_group_size=min_group_size,
+        )
         _memtrace("after_write_combined_tpm")
 
         del tpm_mm
