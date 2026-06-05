@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>AltAnalyze3 — Isoform Structure Viewer</title>
+  <link rel="stylesheet" href="/static/styles.css"/>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+</head>
+<body>
+  <div id="app">
+    <aside id="panel">
+      <h1>ISV <span class="sub">isoform structure viewer</span></h1>
+
+      <section class="field">
+        <label>Gene</label>
+        <input id="gene-input" type="text" autocomplete="off" placeholder="symbol or ENSG…"/>
+        <div id="gene-suggest" class="suggest"></div>
+      </section>
+
+      <section class="field">
+        <label>Combine columns by</label>
+        <select id="combine-by">
+          <option value="group">Group (covariate)</option>
+          <option value="cell_type">Cell type</option>
+          <option value="cell_type_x_covariate">Cell type × covariate</option>
+        </select>
+      </section>
+
+      <section class="field">
+        <label>Samples</label>
+        <div id="samples" class="multi"></div>
+      </section>
+
+      <section class="field">
+        <label>Groups</label>
+        <div id="groups" class="multi"></div>
+      </section>
+
+      <section class="field">
+        <label>Cell types <input id="celltype-filter" class="mini" placeholder="filter…"/></label>
+        <div id="cell-types" class="multi scroll"></div>
+      </section>
+
+      <section class="field">
+        <label>Restrict by junctions</label>
+        <div id="junctions" class="multi scroll small"></div>
+      </section>
+
+      <details class="thresholds" open>
+        <summary>Clustering thresholds</summary>
+        <div class="field">
+          <label>Similarity threshold <span id="sim-val">0.85</span></label>
+          <input id="sim" type="range" min="0" max="1" step="0.01" value="0.85"/>
+        </div>
+        <div class="field">
+          <label>Min split fraction <span id="msf-val">0.05</span></label>
+          <input id="msf" type="range" min="0" max="0.5" step="0.01" value="0.05"/>
+        </div>
+        <div class="field inline">
+          <label>Min count</label><input id="mincount" type="number" min="0" value="1"/>
+          <label>Max isoforms</label><input id="maxiso" type="number" min="1" value="1500"/>
+        </div>
+        <div class="field inline">
+          <label>Strategy</label>
+          <select id="strategy">
+            <option>subsequence</option><option>jaccard</option><option>substring</option>
+            <option>overlap</option><option>anchor-weighted</option>
+          </select>
+          <label>Mode</label>
+          <select id="mode"><option>block</option><option>base</option><option>full</option></select>
+        </div>
+        <label class="check"><input id="introns" type="checkbox" checked/> include introns</label>
+      </details>
+
+      <button id="render-btn">Render</button>
+      <div id="status"></div>
+    </aside>
+
+    <main id="canvas-wrap">
+      <div id="header-bar"></div>
+      <div id="plot"></div>
+    </main>
+  </div>
+
+  <div id="tooltip" class="tooltip hidden"></div>
+  <div id="ctxmenu" class="ctxmenu hidden"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
