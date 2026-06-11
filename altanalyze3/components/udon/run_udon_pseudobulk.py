@@ -70,10 +70,20 @@ def main():
     ap.add_argument("--no-goelite", action="store_true")
     ap.add_argument("--keep-suspect", action="store_true", help="do not drop TotalSeq/empty/'0' pseudobulks")
     ap.add_argument("--subset-celltypes", default=None, help="comma list to restrict cell types (smoke test)")
+    ap.add_argument("--cell-type", default=None,
+                    help="restrict the FULL analysis to ONE cell type (e.g. 'MPP-MEP'); output dir gets a "
+                         "_<celltype> suffix unless --output-dir is given")
+    ap.add_argument("--no-gene-filter", action="store_true",
+                    help="skip the up-front UDON gene filter (protein-coding only; drop RPL/RPS ribosomal + "
+                         "XIST/TSIX; keep Y) that reduces batch effects (RNA modality only)")
     args = ap.parse_args()
 
     pb_path = os.path.abspath(args.pseudobulk)
-    outdir = os.path.abspath(args.output_dir) if args.output_dir else os.path.join(os.path.dirname(pb_path), "UDON_results")
+    if args.output_dir:
+        outdir = os.path.abspath(args.output_dir)
+    else:
+        base = os.path.join(os.path.dirname(pb_path), "UDON_results")
+        outdir = f"{base}_{args.cell_type.replace('/', '-')}" if args.cell_type else base
     os.makedirs(outdir, exist_ok=True)
     lg = setup_logger(os.path.join(outdir, "udon_run.log"))
     log = lambda m: lg.info(m)
@@ -96,6 +106,11 @@ def main():
             bad = sorted(set(adata.obs[args.sample_col].astype(str).values[susp]))
             log(f"dropping {int(susp.sum())} suspect pseudobulks from samples: {bad}")
             adata = adata[~susp].copy()
+    if args.cell_type and args.cell_type not in set(adata.obs[args.celltype_col].astype(str)):
+        # validate now; the actual restriction is applied to the FOLDS (control matching needs all
+        # cell types to score sample similarity, so we must NOT subset the AnnData before matching).
+        log(f"FATAL: --cell-type '{args.cell_type}' not found. Available (first 40): "
+            f"{sorted(set(adata.obs[args.celltype_col].astype(str)))[:40]}"); sys.exit(2)
     if args.subset_celltypes:
         cts = set(args.subset_celltypes.split(","))
         adata = adata[adata.obs[args.celltype_col].astype(str).isin(cts)].copy()
@@ -144,6 +159,12 @@ def main():
     folds, fold_obs = P.build_fold_matrix(
         adata, args.sample_col, args.celltype_col, args.annot_col,
         control_label=args.control_label, mode=fold_mode, selected_controls=selected, logger=log)
+    if args.cell_type:                                    # restrict to ONE cell type AFTER matching+folds
+        keep = fold_obs[args.celltype_col].astype(str) == args.cell_type
+        folds = folds.loc[:, fold_obs.index[keep]]; fold_obs = fold_obs[keep]
+        log(f"RESTRICTED folds to cell type '{args.cell_type}': {folds.shape[1]} pseudobulks")
+    if args.modality == "rna" and not args.no_gene_filter:   # up-front batch-reduction gene filter
+        folds = folds.loc[P.filter_udon_genes(list(folds.index), species=args.species, logger=log)]
     udon = P.assemble_udon_adata(folds, fold_obs)
     log(f"UDON adata assembled: {udon.shape} (varm pseudobulk_folds: {folds.shape})")
 
@@ -224,6 +245,22 @@ def main():
         plot_markers_df(udon.uns["marker_heatmap"], udon.uns["udon_marker_genes_top_n"],
                         udon.uns["udon_clusters"], os.path.join(outdir, "marker_heatmap.pdf"))
         log("wrote marker_heatmap.png + marker_heatmap.pdf (MarkerFinder layout, rasterized)")
+        # standard UDON binary heatmaps: donor x cluster + cell-type x cluster
+        from udon_binary_heatmaps import make_udon_binary_heatmaps
+        study_of = None
+        if args.sample_metadata and os.path.exists(args.sample_metadata):
+            _sm = pd.read_csv(args.sample_metadata, sep="\t", index_col=0)
+            if "Dataset" in _sm.columns:
+                study_of = _sm["Dataset"].astype(str).to_dict()
+        donor_of = None
+        _pbdir = os.path.dirname(os.path.abspath(pb_path))
+        for _c in (os.path.join(_pbdir, "UDON", "AML_harmonized_metadata.xlsx"),
+                   os.path.join(_pbdir, "AML_harmonized_metadata.xlsx")):
+            if os.path.exists(_c):
+                _cl = pd.read_excel(_c, sheet_name="Clinical_Metadata")
+                donor_of = dict(zip(_cl["Sample"].astype(str), _cl["Donor_ID"].astype(str))); break
+        make_udon_binary_heatmaps(udon.uns["udon_clusters"], outdir, donor_of=donor_of, study_of=study_of)
+        log("wrote celltype_cluster_heatmap" + (" + donor_cluster_heatmap" if donor_of else ""))
     except Exception as e:
         log(f"heatmap skipped: {e}")
     finally:

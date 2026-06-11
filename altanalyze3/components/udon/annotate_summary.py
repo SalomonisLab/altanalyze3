@@ -14,8 +14,8 @@ from study_aware_integrate import sva_remove
 from satay_heatmap import compute_pmap
 
 PB = "/Users/saljh8/Dropbox/Collaborations/Grimes/UDON/cellHarmony-datasets/final/pseudobulk"
-SAT = os.path.join(PB, "UDON", "satay_metadata")
 SA = os.path.join(PB, "UDON", "study_aware")
+SAT = os.path.join(SA, "SATAY-UDON")          # consolidated with the other SATAY-UDON outputs
 S, CT, AN = "Sample", "Hs-BM-titrated-reference-centroid", "Annotation"
 
 
@@ -39,11 +39,17 @@ def main():
 
     # --- per-program top differential markers (EVERY program, no winner-take-all threshold) ---
     progs = sorted(set(prog), key=lambda x: int(x[1:]))
-    cent = pd.DataFrame({p: Fc.iloc[:, (prog == p)].mean(axis=1).values for p in progs}, index=common)
+    # markers = genes whose expression CORRELATES with program membership (markerFinder-style),
+    # computed per program so EVERY program (incl. catch-alls) gets its top genes, and the
+    # program-SPECIFIC identity genes (RUNX1T1, HOXB, ...) are recovered.
+    X = Fc.values.astype(float); Xc = X - X.mean(axis=1, keepdims=True)
+    Xnorm = np.linalg.norm(Xc, axis=1) + 1e-9
     top10, top50 = {}, {}
     for p in progs:
-        spec = (cent[p] - cent.drop(columns=p).max(axis=1)).sort_values(ascending=False)  # program vs best-other
-        top10[p] = ",".join(spec.index[:10]); top50[p] = list(spec.index[:50])
+        ind = (prog == p).astype(float); ind = ind - ind.mean()
+        corr = (Xc @ ind) / (Xnorm * (np.linalg.norm(ind) + 1e-9))
+        gs = [common[i] for i in np.argsort(corr)[::-1]]
+        top10[p] = ",".join(gs[:10]); top50[p] = gs[:50]
     pd.DataFrame({"program": progs, "top10_markers": [top10[p] for p in progs]}).to_csv(
         os.path.join(SA, "final_program_markers_all.txt"), sep="\t", index=False)
 
@@ -62,34 +68,37 @@ def main():
         keep = [k for k in vc.index if psc_tot.get(k, 0) and vc[k] / psc_tot[k] >= 0.4]
         constituents[p] = ",".join(keep[:8])
 
-    # --- GO-Elite top pathway per program (annotation) ---
-    print("GO-Elite top pathway per program ...")
-    from altanalyze3.components.goelite import GOEliteRunner, EnrichmentSettings, prepare_species_resources
-    parsed = prepare_species_resources("human")
-    runner = GOEliteRunner(parsed, settings=EnrichmentSettings(min_term_size=5, max_term_size=2000))
-    prepared = runner.prepare_background([str(g) for g in common])
-    pathway = {}
-    for p in progs:
-        try:
-            res = runner.run_prepared(top50[p], prepared, apply_prioritization=True)
-            sel2 = sorted([r for r in res if getattr(r, "selected", False)], key=lambda r: getattr(r, "fdr", 1.0))
-            if sel2:
-                node = runner.go_tree.get(sel2[0].term_id) if hasattr(runner, "go_tree") else None
-                pathway[p] = getattr(node, "name", "") if node else sel2[0].term_id
-            else:
-                pathway[p] = "(no enriched term)"
-        except Exception:
-            pathway[p] = "(no enriched term)"
+    # --- GO-Elite per program: STANDARD UDON output, written to study_aware/goelite/ ---
+    print("GO-Elite per program (standard UDON output -> study_aware/goelite/) ...")
+    import anndata as adata_mod
+    from goelite_enrichment import run_goelite_on_udon
+    mk_long = pd.DataFrame([{"marker": g, "top_cluster": p} for p in progs for g in top50[p]])
+    aa = adata_mod.AnnData(X=np.zeros((1, 1), dtype="float32"))
+    aa.uns["udon_marker_genes_top_n"] = mk_long
+    godir = os.path.join(SA, "goelite")
+    run_goelite_on_udon(aa, godir, species="Hs", background_genes=common, logger=lambda m: None)
+    # top GO term per program (for the heatmap callout), read from the standard selected results
+    pathway = {p: "(no enriched term)" for p in progs}
+    selp = os.path.join(godir, "GOElite_UDON_selected.tsv")
+    if os.path.exists(selp):
+        sel = pd.read_csv(selp, sep="\t")
+        if len(sel):
+            for pc, grp in sel.groupby("cluster"):
+                pathway[str(pc)] = grp.sort_values("fdr").iloc[0]["term_name"]
+    pd.DataFrame({"program": progs, "top_gene": [top10[p].split(",")[0] for p in progs],
+                  "top_go_term": [pathway.get(p, "(no enriched term)") for p in progs]}
+                 ).to_csv(os.path.join(SAT, "program_callouts.tsv"), sep="\t", index=False)
 
-    # --- merge into SUMMARY tsv ---
-    d = pd.read_csv(os.path.join(SAT, "SUMMARY_study_aware_final_p01.tsv"), sep="\t")
-    for c in ["TopMarkers", "markers"]:
-        if c in d.columns: d = d.drop(columns=c)
+    # --- build SUMMARY (p<0.01) from the canonical program-level enrichment + annotations ---
+    enr = pd.read_csv(os.path.join(SAT, "satay_cluster_enrichment.tsv"), sep="\t")
+    d = enr[enr["p"] < 0.01].rename(columns={"cluster": "Program", "category": "Category",
+            "feature": "Feature", "overlap": "nDonors", "odds_ratio": "OddsRatio", "fdr": "FDR"})
+    d = d[["Program", "Category", "Feature", "nDonors", "OddsRatio", "p", "FDR"]].sort_values(["Category", "p"])
     d.insert(1, "UDON_cluster_merged", d["Program"].map(pmap))
     d.insert(2, "UDON_clusters_perstudy", d["Program"].map(constituents))
     d.insert(3, "Top10_markers", d["Program"].map(top10))
     d.insert(4, "TopEnrichedPathway", d["Program"].map(pathway))
-    d.to_csv(os.path.join(SAT, "SUMMARY_study_aware_final_p01.tsv"), sep="\t", index=False)
+    d.to_csv(os.path.join(SAT, "SUMMARY_p01.tsv"), sep="\t", index=False)
     print("columns:", list(d.columns))
     print("\nper-program annotation (every program has markers):")
     for p in progs:

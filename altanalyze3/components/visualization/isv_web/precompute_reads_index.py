@@ -189,6 +189,15 @@ def main(argv=None):
     out_dir = os.path.join(root, "_isv_web_cache", "mol_index")
     build_reads_index(sample_dict, barcode_sample_dict, out_dir)
 
+    # also build the molecule -> FINAL collapsed-isoform index (for the "group reads by final isoform"
+    # molecule view); no-op if FINAL_structure_to_exemplar.tsv / tier1 mol2struct files are absent.
+    try:
+        from . import precompute_final_isoform_index as pfi
+        final_tsv, lib2m2s = pfi.discover(root)
+        pfi.build_mol2final_index(lib2m2s, final_tsv, out_dir)
+    except Exception as e:
+        print(f"[reads-index] mol2final index skipped: {e}")
+
 
 if __name__ == "__main__":
     main()

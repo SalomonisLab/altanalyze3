@@ -86,11 +86,30 @@ def is_nmd(transcript_seq, stop_codon_pos, last_exon_start, start_codon_pos, pen
         return True
     return False
 
+def _tx_pos_to_genomic(exons_sorted, strand, tx_pos):
+    """Map a 0-based TRANSCRIPT position (5'->3') to a 1-based GENOMIC coordinate. exons_sorted is the
+    transcript's exons as (chrom, start, end, strand) sorted by genomic start ascending (the form used in
+    extract_cds_and_protein). Used to convert the CDS start/stop (computed in transcript coords) back to
+    genomic so a viewer can shade coding vs 5'/3'-UTR exon portions and place the start/stop codons."""
+    tx_pos = max(0, int(tx_pos))
+    order = exons_sorted if strand == '+' else list(reversed(exons_sorted))   # '-' transcript starts at the genomic-last exon
+    cum = 0
+    for (_chrom, s, e, _st) in order:
+        elen = e - s + 1
+        if tx_pos < cum + elen:
+            off = tx_pos - cum
+            return (s + off) if strand == '+' else (e - off)
+        cum += elen
+    last = order[-1]
+    return last[2] if strand == '+' else last[1]                              # clamp to the 3' end
+
+
 def extract_cds_and_protein(transcripts, genome_fasta, ref_first_exons=None, query_transcript_to_gene={}):
     genome_seq = SeqIO.to_dict(SeqIO.parse(genome_fasta, "fasta"))
     cds_records = []
     transcript_records = []
     protein_records = []
+    coding_records = []        # per-isoform coding-region annotation (start/stop codon -> genomic)
     for transcript_id, data in tqdm(transcripts.items(), desc="Processing Transcripts"):
         #if transcript_id=='ENST00000356073.8':
         exons = data["exons"]
@@ -156,11 +175,24 @@ def extract_cds_and_protein(transcripts, genome_fasta, ref_first_exons=None, que
                 penultimate_exon_start_relative = last_exon_start_relative - penultimate_exon_length #check if last intron length needs to be included?
                 nmd_annotation = ";(NMD)" if is_nmd(transcript_seq, stop_codon_pos, last_exon_start_relative, orf_start, penultimate_exon_start_relative) else ""
                 protein_description = f";Protein;gene_id:{gene_id}{nmd_annotation}" if gene_id else f"Protein{nmd_annotation}"
+                # coding-region annotation: CDS start codon (5') and stop codon (3') in GENOMIC coords (the
+                # stop codon is included). The 5'-UTR is the exon span before cds_start; the 3'-UTR after cds_end.
+                strand = exons[0][3]
+                cds_end_tx = min(stop_codon_pos + 2, len(transcript_seq) - 1)        # include the 3-nt stop codon
+                cds_g_start = _tx_pos_to_genomic(exons, strand, orf_start)            # first base of the start codon
+                cds_g_end = _tx_pos_to_genomic(exons, strand, cds_end_tx)             # last base of the stop codon
+                coding_records.append({
+                    "transcript_id": transcript_id, "gene_id": gene_id, "chromosome": exons[0][0], "strand": strand,
+                    "cds_start_genomic": cds_g_start, "cds_end_genomic": cds_g_end,
+                    "cds_genomic_min": min(cds_g_start, cds_g_end), "cds_genomic_max": max(cds_g_start, cds_g_end),
+                    "protein_length": len(orf_seq), "transcript_length": len(transcript_seq),
+                    "nmd_status": "Potential-NMD" if nmd_annotation else "Not-NMD",
+                })
             protein_records.append(SeqRecord(Seq(orf_seq), id=transcript_id, description=protein_description.replace(" ", "")))
                 #print (orf_start,(len(orf_seq) * 3),last_exon_length,last_exon_start_relative,stop_codon_pos,transcript_seq,[nmd_annotation])
         except KeyError as e:
             print(f"Error: {e}. Check if chromosome identifiers match between GFF and genome FASTA.")
-    return cds_records, transcript_records, protein_records
+    return cds_records, transcript_records, protein_records, coding_records
 
 def parse_transcript_associations(file_path):
     df = pd.read_csv(file_path, sep='\t', header=None)
@@ -213,12 +245,29 @@ def gff_translate(query_gff_file, genome_fasta, ref_gff_file=None, transcript_as
     
     query_transcript_to_gene, intron_retention_dict = parse_transcript_associations(transcript_associations_file) if os.path.exists(transcript_associations_file) else {}
     ref_first_exons = get_reference_first_exons(ref_gff_file) if os.path.exists(ref_gff_file) else {}
-    cds_records, transcript_records, protein_records = extract_cds_and_protein(query_transcripts, genome_fasta, query_transcript_to_gene=query_transcript_to_gene, ref_first_exons=ref_first_exons)
-    
+    cds_records, transcript_records, protein_records, coding_records = extract_cds_and_protein(query_transcripts, genome_fasta, query_transcript_to_gene=query_transcript_to_gene, ref_first_exons=ref_first_exons)
+
     # Output protein information to CSV
     export_protein_summary(protein_records, intron_retention_dict, "protein_summary.txt")
+    # Output per-isoform coding-region annotation (start/stop codon -> genomic; coding vs UTR exon portions)
+    export_coding_regions(coding_records, "coding_regions.txt")
 
     return cds_records, transcript_records, protein_records
+
+def export_coding_regions(coding_records, output_file):
+    """Write the per-isoform coding-region annotation (one row per translated isoform): the genomic start-
+    codon and stop-codon positions, so a viewer can shade which exons / exon portions are coding (CDS)
+    vs non-coding (5'/3'-UTR) and place the start/stop. cds_start_genomic = first base of the start codon
+    (5' end of the CDS), cds_end_genomic = last base of the stop codon (3' end); use strand to orient, or
+    cds_genomic_min/max for the coding span to intersect with exon blocks."""
+    cols = ["Transcript ID", "Gene ID", "Chromosome", "Strand", "CDS Start (genomic)", "CDS End (genomic)",
+            "CDS Genomic Min", "CDS Genomic Max", "Protein Length", "Transcript Length", "NMD Status"]
+    rows = [[r["transcript_id"], r["gene_id"], r["chromosome"], r["strand"], r["cds_start_genomic"],
+             r["cds_end_genomic"], r["cds_genomic_min"], r["cds_genomic_max"], r["protein_length"],
+             r["transcript_length"], r["nmd_status"]] for r in coding_records]
+    pd.DataFrame(rows, columns=cols).to_csv(output_file, index=False, sep='\t')
+    print(f"{len(rows)} isoform coding regions written to {output_file}")
+
 
 def export_protein_summary(protein_records, intron_retention_dict, output_csv_file):
     summary_data = []

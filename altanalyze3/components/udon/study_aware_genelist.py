@@ -19,8 +19,11 @@ Writes inspectable intermediates:
 import os, sys, numpy as np, pandas as pd
 from scipy.stats import hypergeom
 from sklearn.cluster import AgglomerativeClustering
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import pseudobulk_protocol as P
 
-SA = "/Users/saljh8/Dropbox/Collaborations/Grimes/UDON/cellHarmony-datasets/final/pseudobulk/UDON/study_aware"
+_CELLTYPE, _GENEFILT, _SPECIES, _SFX = P.udon_restriction()   # honours --cell-type via UDON_CELL_TYPE
+SA = "/Users/saljh8/Dropbox/Collaborations/Grimes/UDON/cellHarmony-datasets/final/pseudobulk/UDON/study_aware" + _SFX
 N_UNIVERSE = 18451
 JACCARD_LINK = 0.08      # complete-linkage: every pair in a group shares Jaccard >= this (~7/50 genes)
 CORE_FLOOR = 3           # a conserved program's members must share >= this many genes (full intersection)

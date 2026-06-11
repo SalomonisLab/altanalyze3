@@ -2,11 +2,18 @@ import os
 import pandas as pd
 import numpy as np
 import seaborn as sns
+import matplotlib
 import matplotlib.pyplot as plt
 from scipy.stats import zscore
 from matplotlib.colors import ListedColormap
 from matplotlib import cm
 from matplotlib.colors import to_hex
+
+# Embed editable TrueType fonts in PDF/PS (required: text editable in Illustrator, not paths)
+matplotlib.rcParams['font.family'] = 'sans-serif'
+matplotlib.rcParams['font.sans-serif'] = ['Arial', 'Helvetica', 'DejaVu Sans']
+matplotlib.rcParams['pdf.fonttype'] = 42
+matplotlib.rcParams['ps.fonttype'] = 42
 
 # Define a colormap to use for marker expression heatmap
 N = 256
@@ -48,7 +55,8 @@ def assign_rainbow_colors_to_groups(groups):
     return groups_to_color
 
 
-def plot_markers_df(marker_heatmap, markers_df, clusters, path_to_save_figure):
+def plot_markers_df(marker_heatmap, markers_df, clusters, path_to_save_figure,
+                    left_callouts=None, right_callouts=None):
     """ Plots a heatmap of the MarkerFinder results
     Arguments
     ---------
@@ -70,12 +78,14 @@ def plot_markers_df(marker_heatmap, markers_df, clusters, path_to_save_figure):
 
     """
     try:
-        # Group columns by cluster and rows by top_cluster. If the caller passes an
-        # UNSORTED clusters frame (e.g. raw NMF order), the cluster color bar ends up
-        # scrambled (same cluster split across the axis). Sort here so the heatmap is
-        # always coherent regardless of input order.
-        clusters = clusters.sort_values("cluster")
-        markers_df = markers_df.sort_values("top_cluster", kind="stable")
+        # Group columns by cluster and rows by top_cluster, in NUMERIC (natural) order so the
+        # axis reads P0,P1,P2,...,P10 (not lexicographic P0,P1,P10,P2). Extract the trailing
+        # integer of each label; non-numeric labels fall back to 0.
+        import re as _re
+        def _natnum(x):
+            m = _re.search(r"\d+", str(x)); return int(m.group()) if m else 0
+        clusters = clusters.iloc[np.argsort([_natnum(c) for c in clusters["cluster"]], kind="stable")]
+        markers_df = markers_df.iloc[np.argsort([_natnum(c) for c in markers_df["top_cluster"]], kind="stable")]
 
         # get Dictionary of cluster-names to assigned colors (hexadecimal value)
         groups_to_colors = assign_rainbow_colors_to_groups(groups=np.array(clusters["cluster"]))
@@ -121,8 +131,10 @@ def plot_markers_df(marker_heatmap, markers_df, clusters, path_to_save_figure):
 
         # Build the heatmap
         plt.close("all")
-        fig = plt.figure(constrained_layout=True, figsize=(9, 5))
-        ax = fig.add_gridspec(2, 2, width_ratios=(1, 20), height_ratios=(1, 20),
+        _w = 9.5 if (left_callouts or right_callouts) else 9.0   # heatmap width -> ~70% of the prior 13.5in
+        fig = plt.figure(constrained_layout=True, figsize=(_w, 5))
+        _wr = (0.4, 20) if (left_callouts or right_callouts) else (1, 20)   # left color bar -> ~40% width
+        ax = fig.add_gridspec(2, 2, width_ratios=_wr, height_ratios=(1, 20),
                       wspace=0.005, hspace=0.01)  # Adjusted to create space for row annotation and top markers
         ax2 = fig.add_subplot(ax[1, 1])
         ax1 = fig.add_subplot(ax[0, 1])
@@ -158,7 +170,29 @@ def plot_markers_df(marker_heatmap, markers_df, clusters, path_to_save_figure):
         ax3.set_yticks(label_to_position2.values)
         ax3.set_yticklabels(label_to_position2.index.values)   # row clusters (was label_to_position -> off-by-one)
         # ax3.yaxis.tick_left()
-        fig.suptitle('Marker Finder Heatmap', fontsize=16)
+        # remove seaborn's auto axis labels (the DataFrame index/column name shows up as
+        # "pseudobulk"); and no figure title.
+        for _ax in (ax1, ax2, ax3):
+            _ax.set_xlabel(""); _ax.set_ylabel("")
+        # per-cluster callouts: top GO term (left) + top marker gene (right), aligned with each
+        # cluster's contiguous marker-row block.
+        if left_callouts or right_callouts:
+            _tc = markers_df["top_cluster"].astype(str).values
+            _rt = ax2.get_yaxis_transform()          # right callouts anchored to heatmap (ax2)
+            _lt = ax3.get_yaxis_transform()          # left callouts anchored to the color bar (ax3)
+            if left_callouts:
+                ax3.set_yticklabels([])              # fold P# into the left GO-term label (no separate ticks)
+            _s = 0
+            for _i in range(1, len(_tc) + 1):
+                if _i == len(_tc) or _tc[_i] != _tc[_s]:
+                    _c = _tc[_s]; _yc = (_s + _i - 1) / 2.0 + 0.5
+                    if right_callouts and _c in right_callouts:
+                        ax2.text(1.01, _yc, str(right_callouts[_c]), transform=_rt,
+                                 ha="left", va="center", fontsize=7, color="#3B6FB0", style="italic")
+                    if left_callouts and _c in left_callouts:   # GO term LEFT of the color bar, P# prefixed
+                        ax3.text(-0.6, _yc, f"{_c}  {left_callouts[_c]}", transform=_lt,
+                                 ha="right", va="center", fontsize=7, color="#2E8B57")
+                    _s = _i
         # Rasterize the dense heatmap quadmeshes so the PDF stays small (vector
         # quadmesh of millions of cells balloons to >200 MB); layout/colors unchanged.
         for _ax in (ax1, ax2, ax3):
@@ -166,7 +200,14 @@ def plot_markers_df(marker_heatmap, markers_df, clusters, path_to_save_figure):
                 _coll.set_rasterized(True)
         base = os.path.splitext(path_to_save_figure)[0]
         plt.savefig(base + ".png", dpi=300, bbox_inches='tight', pad_inches=0.5)
-        plt.savefig(base + ".pdf", dpi=300, bbox_inches='tight', pad_inches=0.5)
+        # Adobe "Insufficient data for an image" / "Unsupported PNG filter": matplotlib's
+        # rasterized image uses a FlateDecode + PNG-predictor stream that desyncs. Disable PDF
+        # stream compression -> raw, predictor-free image stream that renders everywhere.
+        # (vector text stays editable; the file is larger but valid.)
+        import matplotlib as _mpl
+        _prev = _mpl.rcParams['pdf.compression']; _mpl.rcParams['pdf.compression'] = 0
+        plt.savefig(base + ".pdf", dpi=200)
+        _mpl.rcParams['pdf.compression'] = _prev
 
     except Exception as e:
         print(str(e))

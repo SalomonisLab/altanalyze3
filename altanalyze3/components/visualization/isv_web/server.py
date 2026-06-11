@@ -152,7 +152,8 @@ def create_app(ctx: da.RunContext) -> FastAPI:
         g = ctx.resolve_gene(q.gene)
         if not g:
             raise HTTPException(404, f"gene not found in this run: {q.gene}")
-        sig = "reads:" + json.dumps({**q.dict(), "gene": g}, sort_keys=True, default=str)
+        sig = "reads:" + json.dumps({**q.dict(), "gene": g, "grp": ctx.molecule_grouping},
+                                    sort_keys=True, default=str)
         cache = app.state.query_cache
         if sig in cache:
             return cache[sig]
@@ -162,6 +163,23 @@ def create_app(ctx: da.RunContext) -> FastAPI:
             cache.clear()
         cache[sig] = res
         return res
+
+    @app.get("/api/grouping")
+    def grouping_get():
+        """Current molecule-view grouping mode."""
+        return {"molecule_grouping": ctx.molecule_grouping, "modes": ["final_isoform", "structure"]}
+
+    @app.post("/api/grouping")
+    def grouping_set(mode: str = Query(..., description="final_isoform | structure")):
+        """Backend switch for the molecule-view grouping (final-isoform vs legacy live structure-clustering).
+        Flushes the query cache so the next read render uses the new mode.
+            curl -X POST 'http://HOST:PORT/api/grouping?mode=structure'
+        """
+        if mode not in ("final_isoform", "structure"):
+            raise HTTPException(400, "mode must be 'final_isoform' or 'structure'")
+        ctx.molecule_grouping = mode
+        app.state.query_cache.clear()
+        return {"molecule_grouping": ctx.molecule_grouping}
 
     @app.get("/api/isoform/{isoform_id:path}/protein", response_class=PlainTextResponse)
     def protein(isoform_id: str):

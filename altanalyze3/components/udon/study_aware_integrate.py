@@ -26,10 +26,12 @@ UDON_DIR = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, UDON_D
 import pseudobulk_protocol as P
 
 PB = "/Users/saljh8/Dropbox/Collaborations/Grimes/UDON/cellHarmony-datasets/final/pseudobulk"
-SA = os.path.join(PB, "UDON", "study_aware")
+_CELLTYPE, _GENEFILT, _SPECIES, _SFX = P.udon_restriction()   # honours --cell-type via UDON_CELL_TYPE
+SA = os.path.join(PB, "UDON", "study_aware" + _SFX)
 S, CT, AN = "Sample", "Hs-BM-titrated-reference-centroid", "Annotation"
 JACCARD_THR = 0.15
 EXCLUDE_SINGLE_STUDY = True
+SCORE_FLOOR = 0.0          # exclude pseudobulks whose best-program classification score < this (low confidence)
 
 
 def regress_r2(y, X):
@@ -76,6 +78,13 @@ def main():
     surv = (cvu["status"] == "conserved").values if EXCLUDE_SINGLE_STUDY else np.ones(len(keys), bool)
     log(f"[2] gene-list conserved/unique: dropped {int((~surv).sum())} unique (single-study) clusters "
         f"-> {int(surv.sum())} surviving conserved clusters")
+    n_groups = len(set(cvu["genelist_group"].values[surv])) if surv.any() else 0
+    if int(surv.sum()) < 2 or n_groups < 2:
+        log(f"[2] ABORT: only {int(surv.sum())} conserved cross-study cluster(s) in {n_groups} program(s). "
+            f"Study-aware integration needs >=2 conserved programs -- the per-study data is too thin for "
+            f"cross-study conservation here (typical when restricted to a single cell type). "
+            f"Use the naive run instead (UDON/celltype_<cell type>/).")
+        rep.close(); return
     Cs = C.iloc[np.where(surv)[0]]
     comp_s = cvu["genelist_group"].values[surv]; study_s = study[surv]
     prelim = pd.get_dummies(pd.Series(comp_s)).values             # bio model = gene-list conserved group
@@ -101,7 +110,11 @@ def main():
     sus = np.array([bool(re.search("TotalSeq|empty", str(s), re.I)) or str(x) == "0"
                     for s, x in zip(a.obs[S], a.obs[AN])]); a = a[~sus].copy()
     folds, fobs = P.build_fold_matrix(a, S, CT, AN, mode="matched", selected_controls=sel, logger=lambda m: None)
-    folds = folds.loc[genes]                                       # common gene space
+    if _CELLTYPE:                                                  # restrict reclassification to the cell type
+        m = fobs[CT].astype(str) == _CELLTYPE
+        folds = folds.loc[:, fobs.index[m]]; fobs = fobs[m]
+        log(f"[restriction] reclassifying only '{_CELLTYPE}': {folds.shape[1]} pseudobulks")
+    folds = folds.loc[genes]                                       # common (gene-filtered) gene space
     SM = pd.read_csv(os.path.join(PB, "evaluation/outputs/sample_metadata.tsv"), sep="\t", index_col=0)
     pb_study = SM.reindex(fobs[S].astype(str))["Dataset"].astype(str).values
 
@@ -115,7 +128,7 @@ def main():
         return np.argmax(cor, axis=0)
 
     Fmat = folds.values                                           # genes x pseudobulks
-    lab = assign(Fmat)
+    lab = assign(Fmat); score = np.zeros(Fmat.shape[1])
     for it in range(2):                                           # re-SVA iterations
         bio = pd.get_dummies(pd.Series(lab)).values
         Fclean = sva_remove(Fmat, bio, pb_study, log=log)
@@ -124,11 +137,17 @@ def main():
         Fz = Fclean - Fclean.mean(0, keepdims=True); Fz /= (np.linalg.norm(Fz, axis=0, keepdims=True) + 1e-12)
         Cz = global_centroids - global_centroids.mean(1, keepdims=True)
         Cz /= (np.linalg.norm(Cz, axis=1, keepdims=True) + 1e-12)
-        lab = np.argmax(Cz @ Fz, axis=0)
+        cor = Cz @ Fz                                             # programs x pseudobulks
+        lab = np.argmax(cor, axis=0); score = np.max(cor, axis=0)   # best-program correlation = score
         log(f"    re-SVA iter {it+1}: classified {len(lab)} pseudobulks into {len(set(lab))} programs")
 
-    out = pd.DataFrame({"pseudobulk": folds.columns, "Sample": fobs[S].values,
-                        "Dataset": pb_study, "final_program": [f"P{x}" for x in lab]})
+    # exclude low-confidence classifications: best-program score < SCORE_FLOOR (analogous to SVM score<0)
+    keep = score >= SCORE_FLOOR
+    log(f"[5b] excluded {int((~keep).sum())} pseudobulks with classification score < {SCORE_FLOOR} "
+        f"(low confidence); {int(keep.sum())} retained")
+    out = pd.DataFrame({"pseudobulk": np.asarray(folds.columns)[keep], "Sample": fobs[S].values[keep],
+                        "Dataset": np.asarray(pb_study)[keep], "final_program": [f"P{x}" for x in lab[keep]],
+                        "score": np.round(score[keep], 3)})
     out.to_csv(os.path.join(SA, "final_program_assignments.tsv"), sep="\t", index=False)
 
     # 6. evaluate batch: Dataset dominance of final programs

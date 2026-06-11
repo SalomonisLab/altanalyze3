@@ -42,8 +42,22 @@ or pass `--build_reads_index` to `run.py` (idempotent; ~3 min / ~4 GB for the 4-
 
 If the index is **absent** for any selected sample, the view falls back to driving the engine
 (`plot_isoform_structures_by_conditions`), which is correct but slower (first render ~10–30 s, then
-cached to `_isv_web_cache/reads/` + memoized). Clustering is **never** precomputed — it is always done
-live, so thresholds/strategy stay dynamic.
+cached to `_isv_web_cache/reads/` + memoized).
+
+### Molecule-view grouping (final collapsed isoform vs live clustering)
+The read-level view groups reads two ways (`ctx.molecule_grouping`):
+- **`final_isoform`** (default) — each read is grouped/coloured/labelled by the **final collapsed isoform**
+  it maps to (the isoform-collapse protocol's read→isoform assignment), and **all reads in a group share one
+  RNA + one protein FASTA** (the final isoform's). The final isoforms are *ordered* via `group_structures`
+  so similar ones sit together (clustered, not random). Requires the **mol→final index**:
+  `_isv_web_cache/mol_index/<lib>.mol2final.db`, built by `precompute_final_isoform_index` (joins each
+  sample's `tier1/<lib>.mol2struct.tsv` with `gff-output/FINAL_structure_to_exemplar.tsv`; ~98–99 % of reads
+  resolve, the rest fall back to their own id). It is built automatically alongside the reads index.
+- **`structure`** (legacy) — live structure-clustering (`group_structures`) over the reads, kept intact.
+
+Switch at runtime without restart: `curl -X POST 'http://HOST:PORT/api/grouping?mode=structure'` (or
+`?mode=final_isoform`); `GET /api/grouping` reports the current mode. Env `ISV_GROUPING` sets the startup default.
+Thresholds/strategy stay dynamic in `structure` mode.
 
 ## Run
 ```bash

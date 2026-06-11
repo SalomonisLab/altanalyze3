@@ -75,15 +75,73 @@ def bh_fdr(p):
     return np.clip(q, 0, 1)
 
 
-def build_features():
-    """sample -> {feature: 0/1} for mutations + clinical; plus a 'defined' mask per feature category.
-    Also populates DONOR_OF (Sample -> Donor_ID) for donor-level aggregation."""
-    global DONOR_OF
+MIN_LEVEL = 5          # a categorical level must have >= this many samples to be testable
+
+
+def _features_from_table(df, sample_col="Sample"):
+    """Parse + STRICTLY validate the standard SATAY-UDON metadata table (see
+    SATAY_METADATA_FORMAT.md). Raises ValueError on any spec violation rather than coercing."""
+    global DONOR_OF, UNIT_MODE
+    if sample_col not in df.columns:
+        raise ValueError(f"[metadata] required column '{sample_col}' not found. Columns: {list(df.columns)}")
+    df = df.copy(); df[sample_col] = df[sample_col].astype(str).str.strip()
+    dup = sorted(df[sample_col][df[sample_col].duplicated()].unique())
+    if dup:
+        raise ValueError(f"[metadata] duplicate {sample_col} values not allowed (one row per sample): {dup[:8]}")
+    df = df.set_index(sample_col)
+    if "Donor_ID" in df.columns:
+        DONOR_OF = dict(zip(df.index, df["Donor_ID"].astype(str)))
+    if not DONOR_OF:
+        UNIT_MODE = "sample"          # no Donor_ID -> distinct samples
+    cov_cols = [c for c in df.columns if c not in ("Donor_ID", "Study", "Dataset")]
+    if not cov_cols:
+        raise ValueError("[metadata] no covariate columns (only Sample/Donor_ID/Study present).")
+    feat, defined, bad = {}, {}, []
+    for col in cov_cols:
+        present = df[col].astype(str).str.strip()
+        present = present[~present.isin(DROP_VALUES)]
+        vals = set(present.values)
+        if not vals:
+            continue
+        if vals <= {"0", "1", "0.0", "1.0"}:                       # binary covariate -> presence test
+            dfn = set(present.index)
+            feat[("binary", col)] = {s: int(float(present[s]) == 1) for s in dfn}
+            defined[("binary", col)] = dfn
+            continue
+        numeric_frac = pd.to_numeric(present, errors="coerce").notna().mean()
+        if numeric_frac > 0.9 and present.nunique() > 12:          # continuous numeric -> must pre-bin
+            bad.append(f"{col} (continuous: {present.nunique()} numeric values -> pre-bin into binary/categorical)")
+            continue
+        dfn = set(present.index)                                    # categorical -> per-level tests
+        for lev, n in present.value_counts().items():
+            if n < MIN_LEVEL:
+                continue
+            feat[("categorical", f"{col}={lev}")] = {s: int(present.get(s) == lev) for s in dfn}
+            defined[("categorical", f"{col}={lev}")] = dfn
+    if bad:
+        raise ValueError("[metadata] columns that are neither binary {0,1} nor categorical:\n  " +
+                         "\n  ".join(bad))
+    if not feat:
+        raise ValueError("[metadata] no testable covariates (all columns empty or below MIN_LEVEL).")
+    return feat, defined
+
+
+def build_features(metadata_path=None):
+    """SATAY-UDON covariate features. PRIMARY input = a standard tab-delimited metadata table
+    (--metadata / UDON_METADATA env; see _features_from_table for the spec). The legacy 2-tab AML
+    xlsx is only a deprecated fallback when no standard file is provided."""
+    global DONOR_OF, UNIT_MODE
+    metadata_path = metadata_path or os.environ.get("UDON_METADATA")
+    if metadata_path:
+        sep = "," if str(metadata_path).lower().endswith(".csv") else "\t"
+        return _features_from_table(pd.read_csv(metadata_path, sep=sep, dtype=str))
+    import sys as _sys
+    print("[satay] WARNING: no --metadata / UDON_METADATA given -- falling back to the LEGACY AML "
+          "xlsx. Provide a standard metadata file for reproducible runs.", file=_sys.stderr)
     mm = pd.read_excel(XLSX, sheet_name="Mutation_Matrix")
     clin = pd.read_excel(XLSX, sheet_name="Clinical_Metadata")
     if "Donor_ID" in clin.columns:
         DONOR_OF = dict(zip(clin["Sample"].astype(str), clin["Donor_ID"].astype(str)))
-    global UNIT_MODE
     if not DONOR_OF:
         UNIT_MODE = "sample"          # donor IDs not supplied -> fall back to distinct samples
     mut_cols = [c for c in mm.columns if c not in ("Dataset", "Sample")]
@@ -125,9 +183,10 @@ def load_run(path):
 def enrich(cl, feat, defined, run_label):
     rows = []
     clusters = sorted(cl["cluster"].unique())
-    # mutation + clinical: collapse to distinct donors/samples (>= MIN_UNITS required)
-    for (cat, fname), smap in feat.items():
-        dfn = defined[(cat, fname)]
+    # mutation + clinical (+ demographic): collapse to distinct donors/samples (>= MIN_UNITS required)
+    for k, smap in feat.items():
+        cat, fname = (k if len(k) == 2 else ("demographic", k[0]))   # age key is a 1-tuple
+        dfn = defined[k]
         sub = cl[cl["Sample"].isin(dfn)]
         if len(sub) < 10: continue
         fpos = sub["Sample"].map(smap).fillna(0).astype(int).values

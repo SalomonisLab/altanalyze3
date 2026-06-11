@@ -25,6 +25,74 @@ CHRY_MARKERS = ["RPS4Y1","DDX3Y","EIF1AY","KDM5D","UTY","USP9Y","NLGN4Y","TMSB4Y
 SEX_GENES = set(CHRY_MARKERS + ["XIST"])
 
 
+def filter_udon_genes(genes, species="Hs", pc_path=None, min_pc_frac=0.5, logger=print):
+    """Restrict UDON features to minimize batch effects, done up front on the feature set:
+      - protein-coding only (requires a species annotation; applied ONLY if the majority of
+        detected features match it, else the namespace likely differs and we don't restrict),
+      - drop ribosomal genes (symbol begins with RPL/RPS, e.g. RPL*/RPS*; mouse Rpl/Rps too),
+      - drop XIST and TSIX (X-inactivation; strong sex-batch drivers).
+    Y-chromosome genes are ALWAYS kept (loss-of-Y in confirmed males is a real disease signal),
+    which also exempts the Y-linked RPS4Y1/RPS4Y2 from the ribosomal rule. Returns kept genes."""
+    import os
+    if pc_path is None:
+        pc_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ProteinCoding-Hs-Mm.txt")
+    pc = set(pd.read_csv(pc_path, sep="\t", names=["g"])["g"].astype(str)) if os.path.exists(pc_path) else set()
+    sym = [str(g).split("_")[0] for g in genes]
+    frac = float(np.mean([s in pc for s in sym])) if pc else 0.0
+    restrict_pc = bool(pc) and frac >= min_pc_frac
+    if pc and not restrict_pc:
+        logger(f"[gene-filter] only {frac:.0%} of features in the {species} protein-coding annotation "
+               f"(<{min_pc_frac:.0%}); NOT restricting to protein-coding (namespace mismatch?)")
+    elif restrict_pc:
+        logger(f"[gene-filter] protein-coding ({species}): {frac:.0%} of features matched -> restricting")
+    Y = {g.upper() for g in CHRY_MARKERS}
+    keep, n_nc, n_rib, n_x = [], 0, 0, 0
+    for g, s in zip(genes, sym):
+        u = s.upper()
+        if u in Y:                                       # always keep Y (loss-of-Y indicator)
+            keep.append(g); continue
+        if restrict_pc and s not in pc:
+            n_nc += 1; continue
+        if u in ("XIST", "TSIX"):
+            n_x += 1; continue
+        if u.startswith("RPL") or u.startswith("RPS"):   # ribosomal (RPS4Y* already kept above)
+            n_rib += 1; continue
+        keep.append(g)
+    logger(f"[gene-filter] {len(genes)} -> {len(keep)} features (dropped {n_nc} non-coding, "
+           f"{n_rib} ribosomal RPL/RPS, {n_x} XIST/TSIX; Y-chromosome genes kept)")
+    return keep
+
+
+def udon_restriction():
+    """Shared UDON precursor config (so the non-CLI study-aware scripts honour --cell-type too).
+    Reads env vars: UDON_CELL_TYPE (restrict to one cell type), UDON_GENE_FILTER (default on),
+    UDON_SPECIES (default Hs), UDON_TAG (arbitrary output-folder suffix, e.g. to keep a gene-filtered
+    run separate from an old one). Returns (cell_type|None, gene_filter:bool, species, path_suffix)."""
+    import os
+    ct = (os.environ.get("UDON_CELL_TYPE") or "").strip() or None
+    gf = (os.environ.get("UDON_GENE_FILTER", "1").strip().lower() not in ("0", "false", "no", "off"))
+    sp = os.environ.get("UDON_SPECIES", "Hs")
+    tag = (os.environ.get("UDON_TAG") or "").strip()
+    sfx = (("_" + ct.replace("/", "-")) if ct else "") + (("_" + tag) if tag else "")
+    return ct, gf, sp, sfx
+
+
+def restrict_folds(folds, fobs, celltype_col, logger=print):
+    """Apply the env-configured cell-type restriction (pseudobulk columns) + gene filter (rows)
+    to a fold matrix. fobs is indexed by pseudobulk. Returns (folds, fobs)."""
+    ct, gf, sp, _ = udon_restriction()
+    if ct:
+        if celltype_col in fobs.columns:
+            keep = fobs[celltype_col].astype(str).values == ct
+        else:                                            # fall back to parsing 'celltype__Sample'
+            keep = np.array([str(c).split("__", 1)[0] == ct for c in folds.columns])
+        folds = folds.loc[:, folds.columns[keep]]; fobs = fobs.loc[folds.columns]
+        logger(f"[restriction] cell type '{ct}': {folds.shape[1]} pseudobulks")
+    if gf:
+        folds = folds.loc[filter_udon_genes(list(folds.index), species=sp, logger=logger)]
+    return folds, fobs
+
+
 # --------------------------------------------------------------------------- #
 # Sex prediction (chrY-vs-XIST dosage; validated 27/27 vs name-encoded sex)
 # --------------------------------------------------------------------------- #

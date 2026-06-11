@@ -59,7 +59,7 @@ def plot_byfield(mats, title, outbase):
         cts, M, _ = mats[f]
         y += TITLE_ROWS; placements.append((f, cts, M, y)); y += len(cts) + GAP_ROWS
     total = y
-    fig_h = 0.20 * total + 1.0
+    fig_h = 0.20 * total + 1.6
     fig, ax = plt.subplots(figsize=(0.34 * ncol + 4.8, fig_h))
     for (f, cts, M, y0) in placements:
         nlp = -np.log10(np.clip(M, 1e-12, 1)); nlp[M >= P_THR] = 0.0
@@ -69,16 +69,18 @@ def plot_byfield(mats, title, outbase):
         for i, ct in enumerate(cts):
             ax.text(-0.25, y0 + i + 0.5, ct, ha="right", va="center", fontsize=10)
         ax.text(ncol / 2.0, y0 - 0.20, f, ha="center", va="bottom", fontsize=13, fontweight="bold")
-    ax.set_xlim(-0.5, ncol + 0.2); ax.set_ylim(total + 0.3, -0.7)        # invert y -> top-down
-    ax.set_xticks(np.arange(ncol) + 0.5); ax.set_xticklabels(clusters, rotation=90, fontsize=10)
-    ax.set_yticks([]); ax.tick_params(length=0)
+    # cluster labels + legend in DATA coords, right under the last block (no figure-margin gap)
+    for j, c in enumerate(clusters):
+        ax.text(j + 0.5, total + 0.4, str(c), ha="center", va="top", rotation=90, fontsize=10)
+    ax.set_xlim(-0.5, ncol + 0.2); ax.set_ylim(total + 3.4, -0.7)        # invert y -> top-down
+    ax.set_xticks([]); ax.set_yticks([]); ax.tick_params(length=0)
     for sp in ax.spines.values(): sp.set_visible(False)
     ax.set_title(title, fontsize=15, pad=12)
     leg = [Patch(fc="#990000", label="<0.0001"), Patch(fc="#E60000", label="0.001"),
            Patch(fc="#FF4D4D", label="0.01"), Patch(fc="#FFB3B3", label="0.1"),
            Patch(fc="#000000", label="n.s.")]
-    fig.legend(handles=leg, title="P-value", loc="lower center", bbox_to_anchor=(0.5, -0.004),
-               ncol=5, fontsize=11, title_fontsize=11, frameon=False)
+    ax.legend(handles=leg, title="P-value", loc="upper center", bbox_to_anchor=(ncol / 2.0, total + 2.4),
+              bbox_transform=ax.transData, ncol=5, fontsize=11, title_fontsize=11, frameon=False)
     dpi_png = max(80, min(200, int(63000 / max(fig_h, 1))))              # keep PNG under the 2^16 pixel cap
     fig.savefig(outbase + ".png", dpi=dpi_png, bbox_inches="tight")
     fig.savefig(outbase + ".pdf", bbox_inches="tight"); plt.close(fig)   # vector PDF (no image stream)

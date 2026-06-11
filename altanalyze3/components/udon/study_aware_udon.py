@@ -28,10 +28,11 @@ from markerFinder import marker_finder_wrapper
 from visualizations import plot_markers_df
 
 PB = "/Users/saljh8/Dropbox/Collaborations/Grimes/UDON/cellHarmony-datasets/final/pseudobulk"
-OUT = os.path.join(PB, "UDON", "study_aware"); os.makedirs(OUT, exist_ok=True)
+_CELLTYPE, _GENEFILT, _SPECIES, _SFX = P.udon_restriction()   # honours --cell-type via UDON_CELL_TYPE
+OUT = os.path.join(PB, "UDON", "study_aware" + _SFX); os.makedirs(OUT, exist_ok=True)
 PERSTUDY = os.path.join(OUT, "per_study"); os.makedirs(PERSTUDY, exist_ok=True)
 S, CT, AN = "Sample", "Hs-BM-titrated-reference-centroid", "Annotation"
-MIN_STUDY_PB = 200
+MIN_STUDY_PB = 20 if _CELLTYPE else 200      # a single cell type has far fewer pseudobulks per study
 TOP_MARKERS = 50
 GO_TERM_JACCARD_THR = 0.10     # conserved if GO-term Jaccard >= this links clusters across studies
 
@@ -48,6 +49,7 @@ def build_combined_folds(log):
     sel, _ = P.select_matched_controls(a, S, CT, AN, "n_cells", sex, chemistry_of=chem, logger=lambda m: None)
     folds, fobs = P.build_fold_matrix(a, S, CT, AN, mode="matched", selected_controls=sel, logger=log)
     fobs["Dataset"] = fobs[S].map(study)
+    folds, fobs = P.restrict_folds(folds, fobs, CT, logger=log)   # cell-type + gene filter (env-configured)
     log(f"[combined] global non-negative folds {folds.shape}; min={float(folds.to_numpy().min()):.3f}")
     return folds, fobs
 

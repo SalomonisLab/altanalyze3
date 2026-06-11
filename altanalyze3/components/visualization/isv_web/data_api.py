@@ -91,6 +91,7 @@ class RunContext:
 
         # protein layer
         self._protein_meta = {}        # transcript_id -> {protein_length, nmd_status, intron_retention, longest}
+        self._coding = {}              # transcript_id -> (cds_genomic_min, cds_genomic_max, strand) for UCSC coding/UTR
         self._fasta_index = {}         # transcript_id -> (path, offset, length) for protein_sequences.fasta
         self._mrna_index = {}          # transcript_id -> (path, offset, length) for transcript_sequences.fasta
         self._orf_index = {}           # transcript_id -> (path, offset, length) for orf_sequences.fasta (CDS)
@@ -117,6 +118,16 @@ class RunContext:
         self.reads_index_dir = os.path.join(self.run_dir, "_isv_web_cache", "mol_index")
         self._reads_lock = threading.Lock()
 
+        # molecule-view grouping mode:
+        #   'final_isoform' -> group reads by the FINAL collapsed isoform they map to (via <lib>.mol2final.db,
+        #                      built by precompute_final_isoform_index); the final isoform IS the "cluster"
+        #                      and drives the FASTA link-outs. Finals are ORDERED via the existing
+        #                      group_structures so the layout is clustered, not random.
+        #   'structure'     -> legacy: live structure-clustering (group_structures over the reads).
+        # Switchable at runtime (POST /api/grouping) or via env ISV_GROUPING; the legacy path is kept intact.
+        self.molecule_grouping = os.environ.get("ISV_GROUPING", "final_isoform")
+        self._mol2final_lock = threading.Lock()
+
     # -- loaders -----------------------------------------------------------
 
     def load_all(self):
@@ -126,6 +137,7 @@ class RunContext:
         self._load_gene_symbols()
         self._index_genes_from_var_names()
         self._index_protein_summary()
+        self._index_coding_regions()
         self._index_protein_fasta()
         self._build_viewer_inputs()
         return self
@@ -293,6 +305,33 @@ class RunContext:
                     "longest_isoform_length": _to_int(p[5]) if len(p) > 5 else None,
                 }
 
+    def _index_coding_regions(self):
+        """coding_regions.txt (written by gff_translate during protein translation): transcript_id ->
+        (cds_genomic_min, cds_genomic_max, strand). Lets the isoform view draw coding (CDS) exon portions
+        full-height and non-coding (5'/3'-UTR) portions half-height, UCSC genome-browser style."""
+        path = os.path.join(self.gff_output_dir, "coding_regions.txt")
+        if not os.path.exists(path):
+            return
+        with open(path) as fh:
+            fh.readline()                                            # header
+            for line in fh:
+                p = line.rstrip("\n").split("\t")
+                if len(p) < 8:
+                    continue
+                lo, hi = _to_int(p[6]), _to_int(p[7])                # CDS Genomic Min / Max
+                if lo is not None and hi is not None:
+                    self._coding[p[0].strip()] = (lo, hi, p[3].strip())
+        if self._coding:
+            print(f"[isv_web] coding regions: {len(self._coding):,} isoforms (CDS/UTR exon rendering)")
+
+    def coding_region(self, isoform_id):
+        """(cds_genomic_min, cds_genomic_max, strand) for an isoform, or None. Tolerant to id variants."""
+        for key in _id_lookup_keys(isoform_id):
+            v = self._coding.get(key)
+            if v:
+                return v
+        return None
+
     def _index_protein_fasta(self):
         self._fasta_index = _build_fasta_offset_index(
             os.path.join(self.gff_output_dir, "protein_sequences.fasta"))
@@ -311,6 +350,27 @@ class RunContext:
             if m:
                 return m
         return None
+
+    def mol2final(self, lib, mols):
+        """{molecule_id: final_isoform_id} for the given molecules of one sample, from <lib>.mol2final.db
+        (built by precompute_final_isoform_index). Empty dict if the index is absent. Read-only, batched."""
+        from . import precompute_final_isoform_index as pfi
+        db = pfi.mol2final_db_path(self.reads_index_dir, lib)
+        mols = [str(m) for m in mols]
+        if not mols or not os.path.exists(db):
+            return {}
+        out = {}
+        try:
+            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            for i in range(0, len(mols), 900):
+                chunk = mols[i:i + 900]
+                q = "SELECT mol, final FROM m2f WHERE mol IN (%s)" % ",".join("?" * len(chunk))
+                for m, fin in con.execute(q, chunk):
+                    out[str(m)] = fin
+            con.close()
+        except Exception:
+            pass
+        return out
 
     def protein_fasta(self, isoform_id):
         return self._seek_fasta(self._fasta_index, isoform_id)
@@ -438,11 +498,14 @@ def query_isoforms(ctx: RunContext, gene, samples, groups, cell_types, combine_b
                 tokens = it.get("tokens") or it.get("tokens_trimmed") or sg_tokens
                 segs = isv.build_isoform_segments(tokens, ctx.exon_lookup, gene)
                 pmeta = ctx.protein_meta(iid) or {}
+                cds = ctx.coding_region(iid)                         # (cds_min, cds_max, strand) genomic, or None
                 out_isoforms.append({
                     "isoform_id": iid,
                     "known": bool(str(iid).startswith("ENST")),
                     "cluster_id": cluster_id,
                     "exon_segments": [_seg_json(seg) for seg in segs],
+                    "cds_min": cds[0] if cds else None,             # coding (CDS) genomic span -> tall blocks
+                    "cds_max": cds[1] if cds else None,             # outside this span = UTR -> thin blocks
                     "expression": {c["key"]: round(col_counts[c["key"]].get(iid, 0.0), 3) for c in columns},
                     "total_count": round(total_counts.get(iid, 0.0), 3),
                     "protein_length": pmeta.get("protein_length"),
@@ -719,6 +782,59 @@ def _reads_index_available(ctx, conds):
     return all(os.path.exists(pri.reads_db_path(ctx.reads_index_dir, lib)) for lib in sel)
 
 
+def _resolve_finals(ctx, uids, uid_src):
+    """uid -> FINAL collapsed isoform id. ENST reads are their own final; others are looked up per-sample in
+    <lib>.mol2final.db; unresolved reads fall back to their own id (so nothing disappears)."""
+    final_by_uid = {}
+    by_lib = defaultdict(list)
+    for u in uids:
+        mol, lib = uid_src.get(u, (u, None))
+        if isinstance(mol, str) and mol.startswith("ENST"):
+            final_by_uid[u] = mol
+        elif lib is not None:
+            by_lib[lib].append((u, mol))
+        else:
+            final_by_uid[u] = u
+    for lib, pairs in by_lib.items():
+        m2f = ctx.mol2final(lib, [m for _, m in pairs])
+        for u, mol in pairs:
+            final_by_uid[u] = m2f.get(str(mol)) or final_by_uid.get(u) or u
+    for u in uids:
+        final_by_uid.setdefault(u, u)
+    return final_by_uid
+
+
+def _order_clusters_by_final(ctx, gene, uids, final_by_uid, tokens_by_uid, union_count):
+    """cluster_index per uid = the slot of its FINAL isoform. Finals are ORDERED by running group_structures
+    over ONE representative read-structure per final (the most-abundant read), so structurally-similar finals
+    are adjacent in the display rather than random; reads then inherit their final's slot."""
+    rep, fcount = {}, defaultdict(float)
+    for u in uids:
+        fin = final_by_uid.get(u, u)
+        fcount[fin] += union_count.get(u, 0.0)
+        if u in tokens_by_uid and union_count.get(u, 0.0) >= rep.get(fin, (-1.0, None))[0]:
+            rep[fin] = (union_count.get(u, 0.0), tokens_by_uid[u])
+    finals = list(rep)
+    order = {}
+    try:
+        recs = [{"isoform_id": f, "count": fcount[f], "gene_id": gene} for f in finals]
+        ts = {f: rep[f][1] for f in finals}
+        plotted, _, _ = isv.build_plotted_isoforms(recs, ts, gene, "block", "tokens", 1, len(recs))
+        grouped = isv.group_structures(plotted, gene, "tokens", "subsequence", 0.85, 0.05,
+                                       include_introns=True, cluster_mode="block", exon_lookup=ctx.exon_lookup)
+        for cluster in grouped:
+            for sg in (cluster if isinstance(cluster, list) else [cluster]):
+                for it in sg.get("items", []):
+                    f = str(it.get("isoform_id") or it.get("resolved_id"))
+                    if f not in order:
+                        order[f] = len(order)
+    except Exception:
+        order = {}
+    for f in sorted(finals, key=lambda x: -fcount.get(x, 0.0)):   # finals not placed by clustering -> by abundance
+        order.setdefault(f, len(order))
+    return {u: order.get(final_by_uid.get(u, u), 0) for u in uids}
+
+
 def _query_reads_index(ctx, gene, symbol, cell_states, conds, max_isoforms, panel_by):
     """Fast read-level path: fetch the gene's molecules from the per-sample reads index (~ms), cluster
     DYNAMICALLY (group_structures) over the union, then split into panels. Returns None to signal the
@@ -733,6 +849,7 @@ def _query_reads_index(ctx, gene, symbol, cell_states, conds, max_isoforms, pane
     # 1) retrieve molecule rows + per-sample structures
     rows_by_uid = defaultdict(list)     # uid -> [(lib, ct, cnt)]
     tokens_by_uid = {}                  # uid -> tokens
+    uid_src = {}                        # uid -> (bare molecule_id, library) for the mol->final lookup
     union_count = defaultdict(float)
     for lib in sel_libs:
         db = pri.reads_db_path(ctx.reads_index_dir, lib)
@@ -764,6 +881,7 @@ def _query_reads_index(ctx, gene, symbol, cell_states, conds, max_isoforms, pane
                 if not tk:
                     continue
                 tokens_by_uid[uid] = tk
+                uid_src[uid] = (mol, lib)
             rows_by_uid[uid].append((lib, ct, float(cnt)))
             union_count[uid] += float(cnt)
 
@@ -790,12 +908,19 @@ def _query_reads_index(ctx, gene, symbol, cell_states, conds, max_isoforms, pane
         panel_sel[key] = top
         selected.update(u for u, _ in top)
 
-    # 3) one dynamic clustering over the union of selected molecules -> globally consistent cluster_index
+    # 3) assign each molecule a cluster_index. Two modes (ctx.molecule_grouping):
     uids = [u for u in selected if u in tokens_by_uid]
-    records = [{"isoform_id": u, "count": union_count[u], "gene_id": gene} for u in uids]
-    tstructs = {u: tokens_by_uid[u] for u in uids}
+    # 3a) resolve every selected read to the FINAL collapsed isoform it maps to (own-id fallback).
+    final_by_uid = _resolve_finals(ctx, uids, uid_src)
     cidx = {}
-    if uids:
+    if uids and ctx.molecule_grouping == "final_isoform":
+        # GROUP BY FINAL ISOFORM: each final isoform is a cluster; order the finals via group_structures
+        # (one representative read-structure per final) so similar finals sit together, not randomly.
+        cidx = _order_clusters_by_final(ctx, gene, uids, final_by_uid, tokens_by_uid, union_count)
+    elif uids:
+        # LEGACY: live structure-clustering over the reads (kept for the runtime toggle-back).
+        records = [{"isoform_id": u, "count": union_count[u], "gene_id": gene} for u in uids]
+        tstructs = {u: tokens_by_uid[u] for u in uids}
         plotted, _, _ = isv.build_plotted_isoforms(records, tstructs, gene, "block", "tokens", 1, len(records))
         grouped = isv.group_structures(plotted, gene, "tokens", "subsequence", 0.85, 0.05,
                                        include_introns=True, cluster_mode="block", exon_lookup=ctx.exon_lookup)
@@ -812,12 +937,25 @@ def _query_reads_index(ctx, gene, symbol, cell_states, conds, max_isoforms, pane
             if uid not in tokens_by_uid:
                 continue
             segs = isv.build_isoform_segments(tokens_by_uid[uid], ctx.exon_lookup, gene)
-            pmeta = ctx.protein_meta(uid) or {}
+            fin = final_by_uid.get(uid, uid)
+            # in final-isoform mode the collapsed isoform IS the unit -> its protein meta + FASTA apply to all reads
+            pmeta = ctx.protein_meta(fin if ctx.molecule_grouping == "final_isoform" else uid) or {}
             ci = cidx.get(uid, 0)
+            # which (cell type, sample) this read/molecule is detected in -- scoped to this panel.
+            det = []
+            for (lib, ct, cnt) in rows_by_uid.get(uid, []):
+                if cs_set is not None and ct not in cs_set:
+                    continue
+                in_panel = (ct == key) if panel_by == "cell_type" else (ctx.samples.get(lib, {}).get("group") == key)
+                if in_panel:
+                    det.append({"cell_type": ct, "sample": lib, "count": round(float(cnt), 3)})
+            det.sort(key=lambda d: -d["count"])
             mols.append({
-                "isoform_id": uid, "sample": _sample_suffix(uid), "known": uid.startswith("ENST"),
+                "isoform_id": uid, "final_isoform_id": fin,
+                "sample": _sample_suffix(uid), "known": uid.startswith("ENST"),
                 "count": round(c, 3), "cluster_index": ci, "color_index": ci,
                 "exon_segments": [_seg_json(s) for s in segs],
+                "detections": det,
                 "protein_length": pmeta.get("protein_length"), "nmd_status": pmeta.get("nmd_status"),
             })
         panels.append({"condition": key, "n_molecules": len(mols), "molecules": mols})
@@ -887,6 +1025,7 @@ def _parse_reads_tsv(ctx, path, gene):
             pmeta = ctx.protein_meta(iid) or {}
             mols.append({
                 "isoform_id": iid,
+                "final_isoform_id": iid,        # engine path: ids already collapsed-isoform-level
                 "sample": _sample_suffix(iid),
                 "known": iid.startswith("ENST"),
                 "count": round(cnt, 3),

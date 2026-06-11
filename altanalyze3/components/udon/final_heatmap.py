@@ -15,13 +15,19 @@ from markerFinder import marker_finder_wrapper
 from visualizations import plot_markers_df
 
 PB = "/Users/saljh8/Dropbox/Collaborations/Grimes/UDON/cellHarmony-datasets/final/pseudobulk"
-SA = os.path.join(PB, "UDON", "study_aware")
+_CELLTYPE, _GENEFILT, _SPECIES, _SFX = P.udon_restriction()   # honours --cell-type via UDON_CELL_TYPE
+SA = os.path.join(PB, "UDON", "study_aware" + _SFX)
 S, CT, AN = "Sample", "Hs-BM-titrated-reference-centroid", "Annotation"
 TOP_N = 40
 
 
 def main():
-    fa = pd.read_csv(os.path.join(SA, "final_program_assignments.tsv"), sep="\t")
+    fap = os.path.join(SA, "final_program_assignments.tsv")
+    if not os.path.exists(fap):
+        print(f"final_program_assignments.tsv not found in {SA}: study-aware integration produced no final "
+              f"programs (see integration_report.txt) -- skipping final heatmap.")
+        return
+    fa = pd.read_csv(fap, sep="\t")
     common = list(pd.read_csv(os.path.join(SA, "per_study_cluster_centroids.tsv"),
                               sep="\t", index_col=0).columns)
     print(f"final programs: {fa['final_program'].nunique()} ; pseudobulks: {len(fa)} ; genes: {len(common)}")
@@ -51,7 +57,25 @@ def main():
     print(f"markers: {len(markers)} across {markers['top_cluster'].nunique()} programs")
     markers.to_csv(os.path.join(SA, "final_program_markers.txt"), sep="\t", index=False)
     heat.to_csv(os.path.join(SA, "final_program_heatmap.txt"), sep="\t")
-    plot_markers_df(heat, markers, groups, os.path.join(SA, "final_program_heatmap.pdf"))
+    # per-cluster callouts: top GO-Elite term (left) + top marker gene (right), from annotate_summary
+    left_c = right_c = None
+    co = os.path.join(SA, "SATAY-UDON", "program_callouts.tsv")
+    if os.path.exists(co):
+        c = pd.read_csv(co, sep="\t")
+        left_c = dict(zip(c["program"].astype(str), c["top_go_term"].astype(str)))
+        right_c = dict(zip(c["program"].astype(str), c["top_gene"].astype(str)))
+    plot_markers_df(heat, markers, groups, os.path.join(SA, "final_program_heatmap.pdf"),
+                    left_callouts=left_c, right_callouts=right_c)
+    # standard UDON binary heatmaps (donor x cluster, cell-type x cluster)
+    try:
+        from udon_binary_heatmaps import make_udon_binary_heatmaps
+        clin = pd.read_excel(os.path.join(PB, "UDON", "AML_harmonized_metadata.xlsx"), sheet_name="Clinical_Metadata")
+        donor_of = dict(zip(clin["Sample"].astype(str), clin["Donor_ID"].astype(str)))
+        study_of = dict(zip(fa["Sample"].astype(str), fa["Dataset"].astype(str)))
+        make_udon_binary_heatmaps(pd.DataFrame({"cluster": fa["final_program"].values}, index=fa["pseudobulk"]),
+                                  SA, donor_of=donor_of, study_of=study_of)
+    except Exception as e:
+        print("binary heatmaps skipped:", e)
     print("wrote final_program_heatmap.png + .pdf + final_program_markers.txt + final_program_heatmap.txt")
     # program sizes (for the color bar legend)
     print(groups["cluster"].value_counts().to_string())

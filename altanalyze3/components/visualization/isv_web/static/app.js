@@ -6,7 +6,7 @@
  *                                     per-covariate read pileup with a shared gene model + axis at the
  *                                     bottom -- the interactive analogue of the ISV PDF.
  * Shared: genomic ruler + reference gene-model track, wheel-zoom / drag-pan, mouseover (exon region +
- * coords + protein length), right-click protein / mRNA FASTA export.
+ * coords + protein length), left-click protein / mRNA / ORF FASTA export.
  */
 (function () {
   "use strict";
@@ -19,6 +19,9 @@
     last: null,
   };
   let view = null;
+  // any control change auto-renders (debounced so toggling several chips/sliders = one render). No Render button.
+  let _renderTimer = null;
+  const autoRender = () => { clearTimeout(_renderTimer); _renderTimer = setTimeout(() => { if (state.gene || geneInput.value.trim()) render(); }, 300); };
 
   const KNOWN = "#1d5fa8", NOVEL = "#b0306b", REF_FILL = "#3d4a5c";
   const cyanYellow = d3.interpolateRgb("#00FFFF", "#FFFF00");
@@ -48,7 +51,7 @@
       b.className = "chip"; b.dataset.id = it.id;
       b.innerHTML = it.sub ? `${it.label}<em>${it.sub}</em>` : it.label;
       if (store.has(it.id)) b.classList.add("on");
-      b.onclick = () => { b.classList.toggle("on"); b.classList.contains("on") ? store.add(it.id) : store.delete(it.id); };
+      b.onclick = () => { b.classList.toggle("on"); b.classList.contains("on") ? store.add(it.id) : store.delete(it.id); autoRender(); };
       host.appendChild(b);
     });
   }
@@ -59,7 +62,7 @@
     if (t.classList.contains("on")) return;
     $$("#tabbar .tab").forEach((x) => x.classList.remove("on")); t.classList.add("on");
     state.tab = t.dataset.tab; syncTabVisibility();
-    if (state.gene) render();
+    if (state.gene || geneInput.value.trim()) render();   // auto-render the other tab (gene may be set via input, not state.gene)
   }));
   function syncTabVisibility() {
     $$(".tab-controls").forEach((el) => { el.hidden = el.dataset.for !== state.tab; });
@@ -101,23 +104,26 @@
   $("#combine-seg").addEventListener("click", (e) => {
     const b = e.target.closest(".seg-btn"); if (!b) return;
     $$("#combine-seg .seg-btn").forEach((x) => x.classList.remove("on")); b.classList.add("on");
-    state.combineBy = b.dataset.v; if (state.gene) render();
+    state.combineBy = b.dataset.v; if (state.gene || geneInput.value.trim()) render();
   });
   $("#panel-seg").addEventListener("click", (e) => {
     const b = e.target.closest(".seg-btn"); if (!b) return;
     $$("#panel-seg .seg-btn").forEach((x) => x.classList.remove("on")); b.classList.add("on");
-    state.panelBy = b.dataset.v; if (state.gene) render();
+    state.panelBy = b.dataset.v; if (state.gene || geneInput.value.trim()) render();
   });
-  $("#sim").addEventListener("input", (e) => $("#sim-val").textContent = e.target.value);
+  $("#sim").addEventListener("input", (e) => { $("#sim-val").textContent = e.target.value; autoRender(); });
   $("#celltype-filter").addEventListener("input", (e) => {
     const f = e.target.value.toLowerCase();
     $$("#cell-types .chip").forEach((c) => { c.style.display = c.textContent.toLowerCase().includes(f) ? "" : "none"; });
   });
-  $("#ct-all").onclick = () => { state.cellTypeOrder.forEach((t) => state.cellTypes.add(t)); refreshChips("#cell-types", state.cellTypes); };
-  $("#ct-none").onclick = () => { state.cellTypes.clear(); refreshChips("#cell-types", state.cellTypes); };
-  $("#grp-all").onclick = () => { state.catalog.groups.forEach((g) => state.groups.add(g)); refreshChips("#groups", state.groups); };
+  $("#ct-all").onclick = () => { state.cellTypeOrder.forEach((t) => state.cellTypes.add(t)); refreshChips("#cell-types", state.cellTypes); autoRender(); };
+  $("#ct-none").onclick = () => { state.cellTypes.clear(); refreshChips("#cell-types", state.cellTypes); autoRender(); };
+  $("#grp-all").onclick = () => { state.catalog.groups.forEach((g) => state.groups.add(g)); refreshChips("#groups", state.groups); autoRender(); };
   function refreshChips(sel, store) { $$(sel + " .chip").forEach((c) => c.classList.toggle("on", store.has(c.dataset.id))); }
-  $("#render-btn").addEventListener("click", render);
+  // every threshold/option control auto-renders on change (replaces the removed Render button)
+  ["#maxreads", "#msf", "#strategy", "#mincount", "#maxiso", "#mode", "#introns", "#rownorm"].forEach((sel) => {
+    const el = $(sel); if (el) el.addEventListener("change", autoRender);
+  });
   $("#zoom-in").onclick = () => view && view.svg.transition().duration(160).call(view.zoom.scaleBy, 1.6);
   $("#zoom-out").onclick = () => view && view.svg.transition().duration(160).call(view.zoom.scaleBy, 1 / 1.6);
   $("#zoom-reset").onclick = () => view && view.svg.transition().duration(220).call(view.zoom.transform, d3.zoomIdentity);
@@ -238,7 +244,7 @@
     (gm && gm.blocks || []).forEach((b) => {
       const xa = xz(b.start), xb = xz(b.end);
       if (xb < trackX0 || xa > trackX1) return;
-      g.append("rect").attr("class", "ref-exon").attr("x", xa).attr("y", refTopY + 3).attr("width", Math.max(1.6, xb - xa)).attr("height", refH - 6).attr("rx", 1.5)
+      g.append("rect").attr("class", "ref-exon").attr("x", xa).attr("y", refTopY + 3).attr("width", Math.max(1.6, xb - xa)).attr("height", refH - 6)
         .on("mousemove", (ev) => showTip(ev, `<b>${b.exon_id || "exon"}</b><br>${gm.chrom ? gm.chrom + ":" : ""}${fmt(b.start)}–${fmt(b.end)}<br><span class="muted">reference gene model</span>`))
         .on("mouseleave", hideTip);
       if (withLabels) {
@@ -293,8 +299,13 @@
     // MAXPANEL so dense pileups stay compact (greater vertical compression) while small panels stay readable.
     panels.forEach((p) => {
       const raw = p.mol.map((m) => Math.min(R.ROW_CAP, Math.max(R.ROW_MIN, m.count * R.READ_PX)));
-      const rawSum = raw.reduce((a, b) => a + b, 0);
-      const scale = rawSum > R.MAXPANEL ? R.MAXPANEL / rawSum : 1;
+      const rawSum = raw.reduce((a, b) => a + b, 0) || 1;
+      // target panel height: compress dense pileups to <= MAXPANEL, but EXPAND sparse ones so every distinct
+      // isoform cluster gets >= ~13px of vertical space -- otherwise (low-read genes like LAT) the per-cluster
+      // labels collapse into one illegible stack and reads are too thin to hover individually.
+      const nClusters = new Set(p.mol.map((m) => m.cluster_index)).size;
+      const targetH = Math.min(R.MAXPANEL, Math.max(rawSum, nClusters * 13));
+      const scale = targetH / rawSum;
       let h = 0; p._rows = [];
       p.mol.forEach((m, i) => { const hh = Math.max(0.55, raw[i] * scale); p._rows.push({ m, dy: h, h: hh }); h += hh; });
       p._bodyH = Math.max(18, h);
@@ -310,7 +321,9 @@
     svg.append("defs").append("clipPath").attr("id", "rclip").append("rect")
       .attr("x", trackX0).attr("y", 0).attr("width", trackX1 - trackX0).attr("height", height);
     const gStatic = svg.append("g");
-    const gx = svg.append("g").attr("clip-path", "url(#rclip)");
+    // exon/backbone layer is drawn ON TOP; make it transparent to the mouse so hovering an exon falls through
+    // to the per-panel hit overlay below (so exons, labels, and gaps all trigger the isoform tooltip).
+    const gx = svg.append("g").attr("clip-path", "url(#rclip)").style("pointer-events", "none");
 
     // static per-panel chrome: box, top-left title, sparse molecule labels, mouse overlay
     panels.forEach((p) => {
@@ -319,29 +332,37 @@
       gStatic.append("rect").attr("class", "panel-hdr-band").attr("x", 6).attr("y", top).attr("width", width - 12).attr("height", R.HDR).attr("rx", 7);
       gStatic.append("text").attr("class", "panel-label").attr("x", 16).attr("y", top + 15)
         .html(`${p.condition}<tspan class="panel-sub-inline"> · ${p.n_molecules.toLocaleString()} reads</tspan>`);
-      // sparse left labels: first row of each cluster, or rows tall enough
-      let seenCl = new Set();
+      // one left label per isoform cluster, VERTICALLY CENTERED in that cluster's block of reads
+      const clExtent = new Map();   // cluster_index -> [yTop, yBot, representative molecule]
       p._rows.forEach((r) => {
-        const first = !seenCl.has(r.m.cluster_index); seenCl.add(r.m.cluster_index);
-        if (r.h >= 7 || first) {
-          gStatic.append("text").attr("class", "mol-label " + (r.m.known ? "known" : "novel"))
-            .attr("x", R.LEFT - 8).attr("y", p._y + r.dy + Math.min(r.h, 9))
-            .text(truncate(r.m.isoform_id, 20));
-        }
+        const e = clExtent.get(r.m.cluster_index);
+        if (!e) clExtent.set(r.m.cluster_index, [r.dy, r.dy + r.h, r.m]);
+        else { e[0] = Math.min(e[0], r.dy); e[1] = Math.max(e[1], r.dy + r.h); }
       });
-      // one mouse overlay per panel -> resolve molecule by y (avoids thousands of hit rects)
-      gStatic.append("rect").attr("class", "panel-hit").attr("x", trackX0).attr("y", p._y).attr("width", trackX1 - trackX0).attr("height", p._bodyH).attr("fill", "transparent")
+      clExtent.forEach(([yTop, yBot, m]) => {
+        gStatic.append("text").attr("class", "mol-label " + (m.known ? "known" : "novel"))
+          .attr("x", R.LEFT - 8).attr("y", p._y + (yTop + yBot) / 2).attr("dominant-baseline", "central")
+          .text(truncate(m.final_isoform_id || m.isoform_id, 20));   // labelled by its final collapsed isoform
+      });
+      // one mouse overlay per panel, spanning the LABEL column + the exon track. Rows are contiguous, so map
+      // EVERY y to the row whose bottom is just past it (no gaps) and extend well below the last read. Hover
+      // shows the isoform tooltip (anywhere: label, exons, gaps); LEFT-click (or right-click) opens the menu.
+      const rowAt = (my) => p._rows.find((rr) => my < rr.dy + rr.h) || p._rows[p._rows.length - 1];
+      const openMenu = function (ev) {
+        ev.preventDefault(); ev.stopPropagation();
+        const r = rowAt(d3.pointer(ev, this)[1]);
+        if (r) showCtx(ev, r.m, p.mol.map((m) => m.final_isoform_id || m.isoform_id));
+      };
+      gStatic.append("rect").attr("class", "panel-hit").attr("x", 6).attr("y", p._y)
+        .attr("width", trackX1 - 6).attr("height", p._bodyH + R.PAD + R.PANEL_GAP)
+        .attr("fill", "transparent").style("cursor", "pointer")
         .on("mousemove", function (ev) {
-          const my = d3.pointer(ev, this)[1];
-          const r = p._rows.find((rr) => my >= rr.dy && my < rr.dy + rr.h);
+          const r = rowAt(d3.pointer(ev, this)[1]);
           if (r) showTip(ev, molTip(r.m, p.condition));
         })
         .on("mouseleave", hideTip)
-        .on("contextmenu", function (ev) {
-          const my = d3.pointer(ev, this)[1];
-          const r = p._rows.find((rr) => my >= rr.dy && my < rr.dy + rr.h);
-          if (r) { ev.preventDefault(); showCtx(ev, r.m, p.mol.map((m) => m.isoform_id)); }
-        });
+        .on("click", openMenu)
+        .on("contextmenu", (ev) => ev.preventDefault());
     });
 
     function drawX(xz) {
@@ -374,8 +395,21 @@
     renderLegend(res);
   }
   function molTip(m, cond) {
-    return `<b>${m.isoform_id}</b> <span class="muted">${m.known ? "known" : "novel"}</span>`
-      + (m.sample ? `<br>sample: ${m.sample}` : "") + `<br>${cond} · cluster ${m.cluster_index}`
+    const fid = m.final_isoform_id || m.isoform_id;
+    const det = m.detections || [];
+    let where;
+    if (det.length) {
+      const lines = det.slice(0, 8).map((d) =>
+        `&nbsp;&nbsp;${d.cell_type} · <span class="muted">${d.sample}</span>${d.count != null ? ` (${fmtCount(d.count)})` : ""}`);
+      where = `<br>detected in:<br>${lines.join("<br>")}`
+        + (det.length > 8 ? `<br><span class="muted">&nbsp;&nbsp;+${det.length - 8} more</span>` : "");
+    } else {
+      where = m.sample ? `<br>sample: ${m.sample}` : "";
+    }
+    return `<b>${fid}</b> <span class="muted">${m.known ? "known" : "novel"}</span>`
+      + (fid !== m.isoform_id ? `<br><span class="muted">read: ${m.isoform_id}</span>` : "")
+      + `<br>${cond} · isoform group ${m.cluster_index}`
+      + where
       + `<br>reads: <b>${fmtCount(m.count)}</b>`
       + `<br>protein length: ${m.protein_length != null ? m.protein_length + " aa" : "n/a"}`
       + (m.nmd_status ? `<br>NMD: ${m.nmd_status}` : "");
@@ -392,7 +426,10 @@
     const gm = res.gene_model || {};
     const [lo, hi] = extentOf(isos, gm);
 
-    const showBlocks = cols.some((c) => c.group);
+    // covariate "block" labels only when they ADD info (cell-type × covariate: group=covariate spans the
+    // cell-type columns). In the covariate-only view group == column label, so the block label just
+    // duplicates the column header below -> suppress it.
+    const showBlocks = cols.some((c) => c.group && c.group !== c.label);
     const annoHdrH = (showBlocks ? H.BLOCK_LBL : 0) + H.COLHDR_H;
     const HEADER = Math.max(annoHdrH, H.RULER_H + H.REF_H, 40);
     const annoW = Math.max(H.CELL_W, cols.length * H.CELL_W);
@@ -413,10 +450,12 @@
     isos.forEach((iso, r) => {
       const y = HEADER + r * (H.ROW_H + H.ROW_GAP);
       const row = gStatic.append("g").attr("transform", `translate(0,${y})`);
-      row.append("rect").attr("class", "rowhit").attr("x", 0).attr("y", 0).attr("width", width).attr("height", H.ROW_H).attr("fill", "transparent")
+      const exportIso = (ev) => { ev.preventDefault(); ev.stopPropagation(); showCtx(ev, iso, isos.map((i) => i.isoform_id), iso.cluster_id, res.isoforms); };
+      row.append("rect").attr("class", "rowhit").attr("x", 0).attr("y", 0).attr("width", width).attr("height", H.ROW_H).attr("fill", "transparent").style("cursor", "pointer")
         .on("mousemove", (ev) => { if (ev.target.classList.contains("rowhit")) showTip(ev, isoTip(iso)); })
         .on("mouseleave", hideTip)
-        .on("contextmenu", (ev) => { ev.preventDefault(); showCtx(ev, iso, isos.map((i) => i.isoform_id), iso.cluster_id, res.isoforms); });
+        .on("click", exportIso)             // LEFT-click opens the sequence-export menu (like the molecule view)
+        .on("contextmenu", (ev) => ev.preventDefault());
       row.append("text").attr("class", "iso-label " + (iso.known ? "known" : "novel")).attr("x", 12).attr("y", H.ROW_H * 0.7).text(truncate(iso.isoform_id, 28));
     });
     drawHeatStrip(gStatic, isos, cols, exprX0, HEADER, showBlocks, bodyH);
@@ -432,17 +471,30 @@
           const a = xz(Math.min(...exs.map((e) => e.a))), b = xz(Math.max(...exs.map((e) => e.b)));
           g.append("line").attr("class", "backbone").attr("x1", a).attr("x2", b).attr("y1", H.ROW_H / 2).attr("y2", H.ROW_H / 2).attr("stroke", color).attr("opacity", 0.5);
         }
+        const exportIso = (ev) => { ev.preventDefault(); ev.stopPropagation(); showCtx(ev, iso, isos.map((i) => i.isoform_id), iso.cluster_id, res.isoforms); };
         iso.merged.introns.forEach((s) => {
           const xa = xz(s.a), xb = xz(s.b);
-          g.append("rect").attr("class", "seg intron").attr("x", xa).attr("y", H.ROW_H / 2 - 2.5).attr("width", Math.max(1.5, xb - xa)).attr("height", 5).attr("fill", color).attr("opacity", 0.5)
-            .on("mousemove", (ev) => showTip(ev, `<b>intron retention</b><br>${fmt(s.a)}–${fmt(s.b)}<br><span class="muted">${iso.isoform_id}</span>`)).on("mouseleave", hideTip);
+          g.append("rect").attr("class", "seg intron").attr("x", xa).attr("y", H.ROW_H / 2 - 2.5).attr("width", Math.max(1.5, xb - xa)).attr("height", 5).attr("fill", color).attr("opacity", 0.5).style("cursor", "pointer")
+            .on("mousemove", (ev) => showTip(ev, `<b>intron retention</b><br>${fmt(s.a)}–${fmt(s.b)}<br><span class="muted">${iso.isoform_id}</span>`)).on("mouseleave", hideTip)
+            .on("click", exportIso).on("contextmenu", (ev) => ev.preventDefault());
         });
+        // UCSC genome-browser style: coding (CDS) exon portions full-height (tall), non-coding (5'/3'-UTR)
+        // portions half-height (thin). cds_min/cds_max = the isoform's coding genomic span (null => no CDS).
+        const exH = H.ROW_H - 6, exY = 3;
+        const utrH = Math.max(3, exH * 0.5), utrY = exY + (exH - utrH) / 2;
+        const cdsLo = iso.cds_min, cdsHi = iso.cds_max;
+        const exonRect = (s, ga, gb, y, h) => g.append("rect").attr("class", "seg exon")
+          .attr("x", xz(ga)).attr("y", y).attr("width", Math.max(1.5, xz(gb) - xz(ga))).attr("height", h).attr("fill", color).style("cursor", "pointer")
+          .on("mousemove", (ev) => showTip(ev, `<b>${s.label || "exon"}</b><br>${gm.chrom ? gm.chrom + ":" : ""}${fmt(s.a)}–${fmt(s.b)}<br>${iso.protein_length != null ? iso.protein_length + " aa · " : ""}<span class="muted">${iso.isoform_id}</span>`))
+          .on("mouseleave", hideTip).on("click", exportIso).on("contextmenu", (ev) => ev.preventDefault());
         exs.forEach((s) => {
-          const xa = xz(s.a), xb = xz(s.b);
-          g.append("rect").attr("class", "seg exon").attr("x", xa).attr("y", 3).attr("width", Math.max(2, xb - xa)).attr("height", H.ROW_H - 6).attr("rx", 2).attr("fill", color)
-            .on("mousemove", (ev) => showTip(ev, `<b>${s.label || "exon"}</b><br>${gm.chrom ? gm.chrom + ":" : ""}${fmt(s.a)}–${fmt(s.b)}<br>${iso.protein_length != null ? iso.protein_length + " aa · " : ""}<span class="muted">${iso.isoform_id}</span>`))
-            .on("mouseleave", hideTip)
-            .on("contextmenu", (ev) => { ev.preventDefault(); showCtx(ev, iso, isos.map((i) => i.isoform_id), iso.cluster_id, res.isoforms); });
+          if (cdsLo != null && cdsHi != null) {
+            exonRect(s, s.a, s.b, utrY, utrH);                          // UTR (thin) across the whole exon
+            const ca = Math.max(s.a, cdsLo), cb = Math.min(s.b, cdsHi);
+            if (cb > ca) exonRect(s, ca, cb, exY, exH);                 // CDS (tall) over the coding overlap
+          } else {
+            exonRect(s, s.a, s.b, exY, exH);                           // no CDS info -> full height (unchanged)
+          }
         });
       });
     }
@@ -508,17 +560,20 @@
   function hideTip() { $("#tooltip").classList.add("hidden"); }
   function showCtx(ev, iso, visibleIds, clusterId, allIsoforms) {
     const m = $("#ctxmenu"); m.innerHTML = "";
+    // FASTA link-outs key off the FINAL collapsed isoform, so every read in a group shares one RNA + one
+    // protein (molecule view). Falls back to isoform_id where there's no collapse mapping (heatmap view).
+    const fid = iso.final_isoform_id || iso.isoform_id;
     const head = document.createElement("div"); head.className = "ctx-head";
-    head.innerHTML = `${iso.isoform_id}<span>${iso.protein_length != null ? iso.protein_length + " aa" : ""}</span>`;
+    head.innerHTML = `${fid}<span>${iso.protein_length != null ? iso.protein_length + " aa" : ""}</span>`;
     m.appendChild(head);
     const item = (label, fn) => { const d = document.createElement("div"); d.textContent = label; d.onclick = () => { fn(); hideCtx(); }; m.appendChild(d); };
-    item("Export protein sequence (FASTA)", () => dl("/api/isoform/" + encodeURIComponent(iso.isoform_id) + "/protein"));
-    item("Export ORF / CDS sequence (FASTA)", () => dl("/api/isoform/" + encodeURIComponent(iso.isoform_id) + "/orf"));
-    item("Export mRNA sequence (FASTA)", () => dl("/api/isoform/" + encodeURIComponent(iso.isoform_id) + "/mrna"));
+    item("Export protein sequence (FASTA)", () => dl("/api/isoform/" + encodeURIComponent(fid) + "/protein"));
+    item("Export ORF / CDS sequence (FASTA)", () => dl("/api/isoform/" + encodeURIComponent(fid) + "/orf"));
+    item("Export mRNA sequence (FASTA)", () => dl("/api/isoform/" + encodeURIComponent(fid) + "/mrna"));
     if (clusterId != null && allIsoforms) item("Export all proteins in cluster", () =>
       dlPost("/api/proteins", allIsoforms.filter((i) => i.cluster_id === clusterId).map((i) => i.isoform_id), "cluster_proteins.fasta"));
-    if (visibleIds) item("Export all visible proteins", () => dlPost("/api/proteins", visibleIds, "visible_proteins.fasta"));
-    item("Copy isoform id", () => navigator.clipboard && navigator.clipboard.writeText(iso.isoform_id));
+    if (visibleIds) item("Export all visible proteins", () => dlPost("/api/proteins", [...new Set(visibleIds)], "visible_proteins.fasta"));
+    item("Copy isoform id", () => navigator.clipboard && navigator.clipboard.writeText(fid));
     m.classList.remove("hidden");
     m.style.left = Math.min(ev.pageX, window.innerWidth - 260) + "px";
     m.style.top = Math.min(ev.pageY, window.innerHeight - m.offsetHeight - 8) + "px";
@@ -566,11 +621,15 @@
   function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
   function setStatus(s) { $("#status").textContent = s; }
 
-  // deep link: ?gene=HOPX&tab=molecule&cells=HSC-1,HSC-2,MPP-1&groups=young,AML-NPM1  (auto-renders)
+  // deep link: ?gene=BID&tab=molecule&cells=HSC-1,HSC-2,MPP-1&groups=young,AML-NPM1  (auto-renders).
+  // With no params, DEFAULT to gene BID in the molecule view with HSC-1/HSC-2/MPP-1/MPP-MEP selected.
+  const DEFAULT_GENE = "BID";
+  const DEFAULT_CELLS = ["HSC-1", "HSC-2", "MPP-1"];
   function applyDeepLink() {
     const q = new URLSearchParams(location.search);
-    const gene = q.get("gene"); if (!gene) return;
-    const tab = q.get("tab");
+    const hasGene = !!q.get("gene");
+    const gene = q.get("gene") || DEFAULT_GENE;
+    const tab = q.get("tab") || (hasGene ? null : "molecule");
     if (tab === "molecule" || tab === "heatmap") {
       state.tab = tab; $$("#tabbar .tab").forEach((x) => x.classList.toggle("on", x.dataset.tab === tab)); syncTabVisibility();
     }
@@ -578,7 +637,8 @@
     if (panel === "cell_type" || panel === "covariate") {
       state.panelBy = panel; $$("#panel-seg .seg-btn").forEach((x) => x.classList.toggle("on", x.dataset.v === panel));
     }
-    const cells = (q.get("cells") || "").split(",").map((s) => s.trim()).filter(Boolean);
+    let cells = (q.get("cells") || "").split(",").map((s) => s.trim()).filter(Boolean);
+    if (!hasGene && !cells.length) cells = DEFAULT_CELLS.slice();
     cells.forEach((c) => state.cellTypes.add(c)); if (cells.length) refreshChips("#cell-types", state.cellTypes);
     const groups = (q.get("groups") || "").split(",").map((s) => s.trim()).filter(Boolean);
     groups.forEach((g) => state.groups.add(g)); if (groups.length) refreshChips("#groups", state.groups);

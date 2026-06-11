@@ -23,7 +23,11 @@ def unique_marker_finder(input_df, groups):
                                "pearson_r": top_r.values,
                                "p_value": [p_val_df.loc[i, j] for i, j in zip(top_cluster.index.values, top_cluster.values)]})
 
-    markers_df = markers_df.sort_values(by=["top_cluster", "pearson_r"], ascending=[True, False])
+    # NUMERIC (natural) cluster order: P0,P1,...,P10 not lexicographic P0,P1,P10,...
+    import re as _re
+    _num = lambda x: int(_re.search(r"\d+", str(x)).group()) if _re.search(r"\d+", str(x)) else 0
+    markers_df = (markers_df.assign(_k=markers_df["top_cluster"].map(_num))
+                  .sort_values(by=["_k", "pearson_r"], ascending=[True, False]).drop(columns="_k"))
 
     return markers_df
 
@@ -39,8 +43,11 @@ def create_final_marker_heatmap(input_df, markers_df, groups_df):
     # Create a new row 'column_clusters-flat' based on the 'cluster' values from groups_df
     column_clusters = groups_df.loc[final_marker_heatmap.columns].transpose()
     final_marker_heatmap = pd.concat([column_clusters, final_marker_heatmap])
-    sorted_columns = final_marker_heatmap.iloc[0].sort_values().index
-    final_marker_heatmap = final_marker_heatmap[sorted_columns]
+    import re as _re, numpy as _np
+    _num = lambda x: int(_re.search(r"\d+", str(x)).group()) if _re.search(r"\d+", str(x)) else 0
+    _cc = final_marker_heatmap.iloc[0]                        # cluster per pseudobulk column
+    sorted_columns = _cc.iloc[_np.argsort([_num(v) for v in _cc.values], kind="stable")].index
+    final_marker_heatmap = final_marker_heatmap[sorted_columns]   # numeric cluster order
 
     # Create a new column 'row_clusters-flat' based on the 'top_cluster' values from markers_df
     row_clusters = markers_df.loc[final_marker_heatmap.index[1:], 'top_cluster']
