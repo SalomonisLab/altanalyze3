@@ -13,6 +13,7 @@ from .api import (
     DEFAULT_RESPONSE_MATRIX,
     FastCommParams,
     _expression_from_h5ad,
+    _filter_lr_sources,
     _required_genes,
     _resolve_default_resource_paths,
 )
@@ -20,6 +21,7 @@ from .scoring import (
     add_receiver_response_scores,
     finalize_scores,
     load_response_matrix,
+    limit_lr_candidates_per_state_pair,
     make_receiver_delta,
     make_state_pseudobulk,
     score_ligand_receptor_expression,
@@ -34,6 +36,7 @@ class FastCommBenchmarkParams:
     split_key: str = "Donor"
     lr_table: Path = DEFAULT_LR_TABLE
     response_matrix: Optional[Path] = DEFAULT_RESPONSE_MATRIX
+    lr_sources: Optional[List[str]] = None
     layer: Optional[str] = None
     gene_symbol_col: Optional[str] = None
     species: Optional[str] = None
@@ -41,6 +44,7 @@ class FastCommBenchmarkParams:
     min_ligand_expr: float = 0.01
     min_receptor_expr: float = 0.01
     min_lr_expression_score: float = 0.001
+    max_lr_candidates_per_state_pair: int = 25
     include_self_edges: bool = False
     top_n_stability: int = 100
 
@@ -79,10 +83,12 @@ def _score_subset(
         lr_table,
         min_ligand_expr=params.min_ligand_expr,
         min_receptor_expr=params.min_receptor_expr,
+        min_lr_expression_score=params.min_lr_expression_score,
         include_self_edges=params.include_self_edges,
     )
     if params.min_lr_expression_score > 0 and not edges.empty:
         edges = edges.loc[edges["lr_expression_score"] >= params.min_lr_expression_score].copy()
+    edges = limit_lr_candidates_per_state_pair(edges, params.max_lr_candidates_per_state_pair)
     receiver_delta = make_receiver_delta(state.expression)
     edges = add_receiver_response_scores(edges, receiver_delta, response_matrix)
     scores = finalize_scores(edges)
@@ -151,7 +157,7 @@ def run_benchmark(params: FastCommBenchmarkParams) -> Dict[str, object]:
             species=params.species,
         )
     )
-    lr_table = pd.read_csv(resolved_lr_table, sep=None, engine="python")
+    lr_table = _filter_lr_sources(pd.read_csv(resolved_lr_table, sep="\t"), params.lr_sources)
     response_matrix = load_response_matrix(str(resolved_response_path)) if resolved_response_path else None
     required_genes = _required_genes(lr_table, response_matrix)
     expression, metadata, gene_diagnostics = _expression_from_h5ad(

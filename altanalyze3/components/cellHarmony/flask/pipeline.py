@@ -1452,14 +1452,20 @@ def run_cellharmony_pipeline(
         fastcomm_scores_path = fastcomm_dir / "fastcomm_scores.tsv"
         fastcomm_pairs_path = fastcomm_dir / "state_pair_summary.tsv"
         fastcomm_state_expression_path = fastcomm_dir / "state_expression.tsv"
+        fastcomm_species = str(meta.get("species", "")).strip().lower() or None
         fastcomm_result = run_fastcomm(
             FastCommParams(
-                h5ad=combined_h5ad_path,
+                adata=approx_result.query_adata,
                 output=fastcomm_scores_path,
+                response_matrix=None,
+                lr_sources=("CellChatDB",),
                 state_pair_output=fastcomm_pairs_path,
                 state_expression_output=fastcomm_state_expression_path,
                 state_key=query_cluster_key,
+                species=fastcomm_species if fastcomm_species in {"human", "mouse"} else None,
                 min_cells=5,
+                min_lr_expression_score=0.2,
+                max_lr_candidates_per_state_pair=5,
                 include_self_edges=False,
             )
         )
@@ -1477,7 +1483,7 @@ def run_cellharmony_pipeline(
             )
         )
         fastcomm_sample_key = next(
-            (candidate for candidate in ("sample", "Library", "group", "Donor") if candidate in approx_result.query_adata.obs.columns),
+            (candidate for candidate in ("Library", "group", "sample", "Donor") if candidate in approx_result.query_adata.obs.columns),
             None,
         )
         fastcomm_split_summary: Dict[str, object] = {}
@@ -1489,7 +1495,12 @@ def run_cellharmony_pipeline(
                     output_dir=fastcomm_split_dir,
                     state_key=query_cluster_key,
                     split_key=fastcomm_sample_key,
+                    response_matrix=None,
+                    lr_sources=["CellChatDB"],
+                    species=fastcomm_species if fastcomm_species in {"human", "mouse"} else None,
                     min_cells=5,
+                    min_lr_expression_score=0.2,
+                    max_lr_candidates_per_state_pair=5,
                     include_self_edges=False,
                 )
             )

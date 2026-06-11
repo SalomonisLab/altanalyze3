@@ -62,7 +62,7 @@ def _load_psi_matrix():
 def _load_isoform_filtered_matrix(kind):
     """Load the filtered isoform pseudobulk (features x cluster-sample) for the differentials.
 
-    `kind` is 'cpm' or 'ratio'. The isoform analyses are H5AD-ONLY: read the compact h5ad
+    `kind` is 'tpm' or 'ratio'. The isoform analyses are H5AD-ONLY: read the compact h5ad
     ('isoform_combined_pseudo_cluster_<kind>-filtered.h5ad', obs=cluster-sample, var=features,
     X=values) and reconstruct the same features x cluster-sample DataFrame a pd.read_csv of the legacy
     TSV would yield (X.T). There is NO .txt fallback -- the combine writes h5ad only, and falling back
@@ -82,20 +82,20 @@ def _load_isoform_filtered_matrix(kind):
     return pd.DataFrame(X.T, index=list(a.var_names), columns=list(a.obs_names))
 
 
-def _load_gene_cpm_matrix():
-    """Load the study-combined GENE CPM pseudobulk (genes x cluster-sample) -- EXACTLY mirroring the
-    isoform path. The gene combine wrote 'gene_combined_pseudo_cluster_cpm.h5ad' using the same CPM
+def _load_gene_tpm_matrix():
+    """Load the study-combined GENE TPM pseudobulk (genes x cluster-sample) -- EXACTLY mirroring the
+    isoform path. The gene combine wrote 'gene_combined_pseudo_cluster_tpm.h5ad' using the same TPM
     normalization the isoform combine uses (counts / column_total * 1e6 = CP1M), and ALL genes are
     retained (the FULL, not -filtered, h5ad). The caller then applies the identical downstream
     log2(matrix + 1), so gene fold-changes are on the same scale as isoform fold-changes.
 
     (Previously this applied cellHarmony log2-CP10k, an EXTRA per-column 1e4 normalization that
-    compressed the range ~100x vs the isoform log2(CPM+1); switched to plain CPM to match isoform.)"""
-    h5ad_path = 'gene_combined_pseudo_cluster_cpm.h5ad'
+    compressed the range ~100x vs the isoform log2(TPM+1); switched to plain TPM to match isoform.)"""
+    h5ad_path = 'gene_combined_pseudo_cluster_tpm.h5ad'
     if not os.path.exists(h5ad_path):
         raise FileNotFoundError(
-            f"gene CPM pseudobulk h5ad not found: {h5ad_path}. Run the gene combine "
-            f"(isoform_automate.combine_genes, compute_cpm) before gene differentials.")
+            f"gene TPM pseudobulk h5ad not found: {h5ad_path}. Run the gene combine "
+            f"(isoform_automate.combine_genes, compute_tpm) before gene differentials.")
     import anndata as ad
     a = ad.read_h5ad(h5ad_path)
     X = a.X.toarray() if hasattr(a.X, 'toarray') else np.asarray(a.X)
@@ -305,8 +305,8 @@ def compute_differentials(sample_dict,conditions,cluster_order,gene_symbol_file,
 
         if 'isoform' in analyses:
             # Compute Differential Isoform abundance between groups and cell types.
-            # Source: the filtered CPM pseudobulk h5ad (falls back to legacy -filtered.txt).
-            isoform_matrix = _load_isoform_filtered_matrix('cpm')
+            # Source: the filtered TPM pseudobulk h5ad (falls back to legacy -filtered.txt).
+            isoform_matrix = _load_isoform_filtered_matrix('tpm')
             log2_iso_matrix = np.log2(isoform_matrix + 1)
             uid_to_group = isoa.get_sample_to_group(sample_dict,'isoform')
             groups_file = pd.DataFrame({
@@ -330,10 +330,10 @@ def compute_differentials(sample_dict,conditions,cluster_order,gene_symbol_file,
             compare_two_groups_per_cluster(condition1,condition2,cluster_order,groups_file,isoform_matrix,None,gene_symbol_file,dataType='isoform-ratio',method=method)
 
         if 'gene' in analyses:
-            # Gene-level differential expression -- EXACTLY mirroring the isoform path: CPM pseudobulk
-            # (all genes retained) -> log2(CPM + 1). Same metaDataAnalysis stats engine; stats only, no
+            # Gene-level differential expression -- EXACTLY mirroring the isoform path: TPM pseudobulk
+            # (all genes retained) -> log2(TPM + 1). Same metaDataAnalysis stats engine; stats only, no
             # annotation. Outputs: diff-cluster-gene/ and diff-covariate-gene/.
-            gene_matrix = _load_gene_cpm_matrix()
+            gene_matrix = _load_gene_tpm_matrix()
             log2_gene_matrix = np.log2(gene_matrix + 1)
             uid_to_group = isoa.get_sample_to_group(sample_dict, 'gene')
             groups_file = pd.DataFrame({

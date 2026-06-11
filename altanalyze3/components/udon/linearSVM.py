@@ -40,9 +40,14 @@ def classify(train, fold_matrix_with_mf_genes, groups):
 
     prob = regression.decision_function(fold_matrix_with_mf_genes.transpose())  # it should be a # of samples/patients by # of features format so we are transposing it
 
-    # Determine the cluster with the maximum probability for each sample
-    final_clusters = np.argmax(prob, axis=1)
-    final_clusters = pd.DataFrame(train.columns[final_clusters], index=fold_matrix_with_mf_genes.columns, columns=['cluster'])
+    # Determine the cluster with the maximum decision value for each sample.
+    # Binary case (2 clusters): decision_function is 1-D -> sign selects the class.
+    # Use regression.classes_ for the canonical decision-function column order.
+    if np.ndim(prob) == 1:
+        pred = np.where(prob > 0, regression.classes_[1], regression.classes_[0])
+    else:
+        pred = np.asarray(regression.classes_)[np.argmax(prob, axis=1)]
+    final_clusters = pd.DataFrame(pred, index=fold_matrix_with_mf_genes.columns, columns=['cluster'])
     final_clusters = final_clusters.sort_values('cluster')
 
     return final_clusters

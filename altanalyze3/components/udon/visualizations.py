@@ -1,3 +1,4 @@
+import os
 import pandas as pd
 import numpy as np
 import seaborn as sns
@@ -69,6 +70,13 @@ def plot_markers_df(marker_heatmap, markers_df, clusters, path_to_save_figure):
 
     """
     try:
+        # Group columns by cluster and rows by top_cluster. If the caller passes an
+        # UNSORTED clusters frame (e.g. raw NMF order), the cluster color bar ends up
+        # scrambled (same cluster split across the axis). Sort here so the heatmap is
+        # always coherent regardless of input order.
+        clusters = clusters.sort_values("cluster")
+        markers_df = markers_df.sort_values("top_cluster", kind="stable")
+
         # get Dictionary of cluster-names to assigned colors (hexadecimal value)
         groups_to_colors = assign_rainbow_colors_to_groups(groups=np.array(clusters["cluster"]))
 
@@ -148,11 +156,17 @@ def plot_markers_df(marker_heatmap, markers_df, clusters, path_to_save_figure):
                             cbar=False,
                             ax=ax3)
         ax3.set_yticks(label_to_position2.values)
-        ax3.set_yticklabels(label_to_position.index.values)
+        ax3.set_yticklabels(label_to_position2.index.values)   # row clusters (was label_to_position -> off-by-one)
         # ax3.yaxis.tick_left()
         fig.suptitle('Marker Finder Heatmap', fontsize=16)
-        # fig.tight_layout()
-        plt.savefig(path_to_save_figure, dpi=10, bbox_inches='tight', format="pdf", pad_inches=0.9)
+        # Rasterize the dense heatmap quadmeshes so the PDF stays small (vector
+        # quadmesh of millions of cells balloons to >200 MB); layout/colors unchanged.
+        for _ax in (ax1, ax2, ax3):
+            for _coll in _ax.collections:
+                _coll.set_rasterized(True)
+        base = os.path.splitext(path_to_save_figure)[0]
+        plt.savefig(base + ".png", dpi=300, bbox_inches='tight', pad_inches=0.5)
+        plt.savefig(base + ".pdf", dpi=300, bbox_inches='tight', pad_inches=0.5)
 
     except Exception as e:
         print(str(e))
@@ -354,7 +368,7 @@ def plot_markers_df_subplots(marker_heatmap, markers_df, clusters, groups_to_col
                             cbar=False,
                             ax=ax3)
         ax3.set_yticks(label_to_position2.values)
-        ax3.set_yticklabels(label_to_position.index.values)
+        ax3.set_yticklabels(label_to_position2.index.values)   # row clusters (was label_to_position -> off-by-one)
 
         fig.suptitle('Marker Finder Heatmap', fontsize=16)
 

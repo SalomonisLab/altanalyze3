@@ -19,6 +19,7 @@ import glob
 import hashlib
 import io
 import os
+import sqlite3
 import threading
 
 # The engine draws via matplotlib.pyplot. The read-level view invokes it from a FastAPI worker thread;
@@ -92,6 +93,7 @@ class RunContext:
         self._protein_meta = {}        # transcript_id -> {protein_length, nmd_status, intron_retention, longest}
         self._fasta_index = {}         # transcript_id -> (path, offset, length) for protein_sequences.fasta
         self._mrna_index = {}          # transcript_id -> (path, offset, length) for transcript_sequences.fasta
+        self._orf_index = {}           # transcript_id -> (path, offset, length) for orf_sequences.fasta (CDS)
         self._fasta_lock = threading.Lock()
         self._gene_index_cache = {}    # h5ad path -> (gene_to_pos, indptr, indices), loaded once
         self._struct_cache = {}        # gene -> {transcript_id: [tokens]} (known + novel)
@@ -109,6 +111,10 @@ class RunContext:
         self.viewer_sample_dict = {}   # library -> [{matrix: <plain sample h5ad>, groups, library}]
         self.barcode_sample_dict = {}  # library -> Series(barcode -> cell_type)  (== barcode_series)
         self.reads_cache_root = os.path.join(self.run_dir, "_isv_web_cache", "reads")
+        # per-gene molecule RETRIEVAL index (built at indexing time): <lib>.reads.db -> gene -> (mol,ct,cnt).
+        # When present for the selected samples, the read view fetches molecules in ~ms (no whole-matrix
+        # counts load) and clusters DYNAMICALLY at viz time. Falls back to the engine when absent.
+        self.reads_index_dir = os.path.join(self.run_dir, "_isv_web_cache", "mol_index")
         self._reads_lock = threading.Lock()
 
     # -- loaders -----------------------------------------------------------
@@ -123,6 +129,32 @@ class RunContext:
         self._index_protein_fasta()
         self._build_viewer_inputs()
         return self
+
+    def prewarm_reads(self, log=print):
+        """Exercise the read-level fast path once at startup so the FIRST user click is instant: this
+        opens each sample's reads.db + transcripts.db and triggers one-time init of the clustering
+        machinery (build_plotted_isoforms / group_structures). No-op if the retrieval index is absent."""
+        import time
+        try:
+            if not _reads_index_available(self, sorted(self.groups.keys())):
+                log("[isv_web] read index absent; skipping pre-warm (read view will use engine fallback)")
+                return
+            t = time.time()
+            cands = []
+            h = self.resolve_gene("HOPX")
+            if h:
+                cands.append(h)
+            cands += self.all_genes[:10]
+            for g in cands:
+                r = query_reads(self, g, cell_types=None, conditions=None, max_isoforms=50,
+                                panel_by="covariate")
+                if r.get("total_molecules", 0) > 0:
+                    log(f"[isv_web] read-level path pre-warmed on {r.get('symbol', g)} "
+                        f"({time.time() - t:.1f}s); first click will be fast")
+                    return
+            log(f"[isv_web] read pre-warm ran ({time.time() - t:.1f}s) but found no molecules to cluster")
+        except Exception as exc:  # pragma: no cover - never block startup on pre-warm
+            log(f"[isv_web] read pre-warm skipped: {type(exc).__name__}: {exc}")
 
     def _build_viewer_inputs(self):
         """Assemble the sample_dict + barcode_sample_dict the engine's by-conditions renderer expects
@@ -267,6 +299,9 @@ class RunContext:
         # mRNA / full transcript sequences (header '>TRANSCRIPT_ID ;transcript;gene_id:ENSG...')
         self._mrna_index = _build_fasta_offset_index(
             os.path.join(self.gff_output_dir, "transcript_sequences.fasta"))
+        # ORF / CDS nucleotide sequences (header '>TRANSCRIPT_ID ;CDS;gene_id:ENSG...')
+        self._orf_index = _build_fasta_offset_index(
+            os.path.join(self.gff_output_dir, "orf_sequences.fasta"))
 
     # -- protein / mRNA lookups (tolerant to ENST vs novel molecule.sample, version, (NMD)) ---------
 
@@ -282,6 +317,9 @@ class RunContext:
 
     def mrna_fasta(self, isoform_id):
         return self._seek_fasta(getattr(self, "_mrna_index", {}), isoform_id)
+
+    def orf_fasta(self, isoform_id):
+        return self._seek_fasta(getattr(self, "_orf_index", {}), isoform_id)
 
     def _seek_fasta(self, index, isoform_id):
         """Return the FASTA record text for an isoform id (trying tolerant key variants), or None."""
@@ -564,16 +602,30 @@ def _molecule_counts(ctx, gene, sel_samples, cell_states):
     return out
 
 
-def query_reads(ctx: RunContext, gene, cell_types, conditions=None, max_isoforms=300):
+def query_reads(ctx: RunContext, gene, cell_types, conditions=None, max_isoforms=300,
+                panel_by="covariate"):
     """Read-level (molecule) view: drive the engine's plot_isoform_structures_by_conditions to emit its
-    per-molecule rows (the *_isoform_ids.tsv files) for the requested gene x cell_states x conditions,
-    then parse them into per-covariate panels. Each molecule keeps its EXACT structure (tokens_raw ->
-    exon segments) and shared cluster_index, reproducing the ISV pileup. Memoized on disk (the engine's
-    output dir) + in-process; first render of a (gene, selection) builds counts caches (slower)."""
+    per-molecule rows (the *_isoform_ids.tsv files), then parse them into stacked pileup panels. Each
+    molecule keeps its EXACT structure (tokens_raw -> exon segments) and cluster_index, reproducing the
+    ISV pileup. Memoized on disk (the engine's output dir) + in-process.
+
+    panel_by:
+      'covariate' (default) -> one panel per covariate, pooling the selected cell types (1 engine call).
+      'cell_type'           -> one panel per selected cell type, pooling the selected covariates'
+                               samples (1 engine call per cell type)."""
     gene = ctx.resolve_gene(gene) or gene
     symbol = ctx.gene_symbol_dict.get(gene, gene)
     cell_states = [str(c) for c in cell_types] if cell_types else None
     conds = list(conditions) if conditions else sorted(ctx.groups.keys())
+
+    # FAST PATH: per-gene retrieval index present -> fetch molecules in ~ms, cluster at viz time.
+    if _reads_index_available(ctx, conds):
+        fast = _query_reads_index(ctx, gene, symbol, cell_states, conds, max_isoforms, panel_by)
+        if fast is not None:
+            return fast
+
+    if panel_by == "cell_type":
+        return _query_reads_by_celltype(ctx, gene, symbol, cell_states, conds, max_isoforms)
 
     out_dir = _reads_out_dir(ctx, cell_states, max_isoforms)
     cs_label = "+".join(cell_states) if cell_states else "all"
@@ -595,9 +647,50 @@ def query_reads(ctx: RunContext, gene, cell_types, conditions=None, max_isoforms
         n_clusters = max(n_clusters, 1 + max((m["cluster_index"] for m in mols), default=-1))
         panels.append({"condition": cond, "n_molecules": len(mols), "molecules": mols})
 
+    color_count = _assign_panel_colors(panels)
     return {
-        "gene": gene, "symbol": symbol,
+        "gene": gene, "symbol": symbol, "panel_by": "covariate", "color_count": color_count,
         "cell_states": cell_states or ["all"], "conditions": conds,
+        "max_isoforms": max_isoforms, "n_clusters": n_clusters,
+        "gene_model": gene_model_track(ctx, gene),
+        "panels": panels,
+        "total_molecules": sum(p["n_molecules"] for p in panels),
+    }
+
+
+def _query_reads_by_celltype(ctx, gene, symbol, cell_states, conds, max_isoforms):
+    """One pileup panel per selected cell type, pooling the selected covariates' samples. Implemented by
+    running the engine once per cell type with a pooled sample_dict (groups overridden to 'all') so all
+    samples fall into a single 'all' condition; cell_states=[ct] makes that panel cell-type-specific."""
+    if not cell_states:
+        return {"gene": gene, "symbol": symbol, "panel_by": "cell_type", "cell_states": ["all"],
+                "conditions": conds, "max_isoforms": max_isoforms, "n_clusters": 0,
+                "gene_model": gene_model_track(ctx, gene), "panels": [], "total_molecules": 0}
+    cond_set = set(conds)
+    sel_libs = [lib for lib in ctx.viewer_sample_dict if ctx.samples.get(lib, {}).get("group") in cond_set]
+    if not sel_libs:
+        sel_libs = list(ctx.viewer_sample_dict)
+    pooled_sd = {lib: [{**ctx.viewer_sample_dict[lib][0], "groups": "all"}] for lib in sel_libs}
+
+    panels, n_clusters = [], 0
+    for ct in cell_states:
+        out_dir = _reads_out_dir(ctx, [ct], max_isoforms)
+        tsvs = _find_reads_tsvs(out_dir, symbol, ct)
+        if "all" not in tsvs:
+            with ctx._reads_lock:
+                tsvs = _find_reads_tsvs(out_dir, symbol, ct)
+                if "all" not in tsvs:
+                    _run_engine_reads(ctx, gene, [ct], ["all"], out_dir, max_isoforms, sample_dict=pooled_sd)
+                    tsvs = _find_reads_tsvs(out_dir, symbol, ct)
+        path = tsvs.get("all")
+        mols = _parse_reads_tsv(ctx, path, gene) if path and os.path.exists(path) else []
+        n_clusters = max(n_clusters, 1 + max((m["cluster_index"] for m in mols), default=-1))
+        panels.append({"condition": ct, "n_molecules": len(mols), "molecules": mols})
+
+    color_count = _assign_panel_colors(panels)
+    return {
+        "gene": gene, "symbol": symbol, "panel_by": "cell_type", "color_count": color_count,
+        "cell_states": cell_states, "conditions": conds,
         "max_isoforms": max_isoforms, "n_clusters": n_clusters,
         "gene_model": gene_model_track(ctx, gene),
         "panels": panels,
@@ -614,15 +707,141 @@ def _reads_out_dir(ctx, cell_states, max_isoforms):
     return os.path.join(ctx.reads_cache_root, f"sel_{h}")
 
 
-def _run_engine_reads(ctx, gene, cell_states, conds, out_dir, max_isoforms):
+def _reads_index_available(ctx, conds):
+    """True if every sample in the selected covariates has a per-gene reads index db."""
+    from . import precompute_reads_index as pri
+    cond_set = set(conds)
+    sel = [lib for lib in ctx.viewer_sample_dict if ctx.samples.get(lib, {}).get("group") in cond_set]
+    if not sel:
+        sel = list(ctx.viewer_sample_dict)
+    if not sel:
+        return False
+    return all(os.path.exists(pri.reads_db_path(ctx.reads_index_dir, lib)) for lib in sel)
+
+
+def _query_reads_index(ctx, gene, symbol, cell_states, conds, max_isoforms, panel_by):
+    """Fast read-level path: fetch the gene's molecules from the per-sample reads index (~ms), cluster
+    DYNAMICALLY (group_structures) over the union, then split into panels. Returns None to signal the
+    caller to fall back to the engine path (e.g. unexpected empty structures)."""
+    from . import precompute_reads_index as pri
+    cond_set = set(conds)
+    cs_set = set(cell_states) if cell_states else None
+    sel_libs = [lib for lib in ctx.viewer_sample_dict if ctx.samples.get(lib, {}).get("group") in cond_set]
+    if not sel_libs:
+        sel_libs = list(ctx.viewer_sample_dict)
+
+    # 1) retrieve molecule rows + per-sample structures
+    rows_by_uid = defaultdict(list)     # uid -> [(lib, ct, cnt)]
+    tokens_by_uid = {}                  # uid -> tokens
+    union_count = defaultdict(float)
+    for lib in sel_libs:
+        db = pri.reads_db_path(ctx.reads_index_dir, lib)
+        if not os.path.exists(db):
+            continue
+        try:
+            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            recs = con.execute("SELECT mol, ct, cnt FROM mol WHERE gene=?", (gene,)).fetchall()
+            con.close()
+        except Exception:
+            return None
+        if not recs:
+            continue
+        sdb = ctx.viewer_sample_dict[lib][0].get("transcript_associations") or os.path.join(
+            os.path.dirname(ctx.viewer_sample_dict[lib][0]["matrix"]), "gff-output", "gene_indexes_v2", "transcripts.db")
+        structs = isv.load_transcript_associations_from_sqlite(sdb, gene)[0] if os.path.exists(sdb) else {}
+        for mol, ct, cnt in recs:
+            if cnt <= 0 or (cs_set is not None and ct not in cs_set):
+                continue
+            mol = str(mol)
+            # bare numeric molecule ids (local layout) aren't unique across samples -> namespace with
+            # the library; ids that already carry a '.' suffix (integrated layout) or ENST are unique.
+            uid = mol if (mol.startswith("ENST") or "." in mol) else f"{mol}.{lib}"
+            if uid not in tokens_by_uid:
+                tk = structs.get(mol)
+                if not tk:
+                    r = isv.resolve_isoform_id(mol, structs)
+                    tk = structs.get(r) if r else None
+                if not tk:
+                    continue
+                tokens_by_uid[uid] = tk
+            rows_by_uid[uid].append((lib, ct, float(cnt)))
+            union_count[uid] += float(cnt)
+
+    if not union_count:
+        return {"gene": gene, "symbol": symbol, "panel_by": panel_by, "color_count": 0,
+                "cell_states": cell_states or ["all"], "conditions": conds, "max_isoforms": max_isoforms,
+                "n_clusters": 0, "gene_model": gene_model_track(ctx, gene), "panels": [], "total_molecules": 0,
+                "source": "index"}
+
+    # 2) per-panel counts, then per-panel top-max_isoforms, then UNION those for one clustering
+    #    (mirrors the engine's per-condition top-k -> union so every panel keeps its own molecules).
+    panel_keys = conds if panel_by != "cell_type" else (cell_states or sorted({r[1] for rs in rows_by_uid.values() for r in rs}))
+    panel_count = {k: defaultdict(float) for k in panel_keys}
+    for uid, rs in rows_by_uid.items():
+        for (lib, ct, cnt) in rs:
+            if cs_set is not None and ct not in cs_set:
+                continue
+            key = ct if panel_by == "cell_type" else ctx.samples.get(lib, {}).get("group")
+            if key in panel_count:
+                panel_count[key][uid] += cnt
+    panel_sel, selected = {}, set()
+    for key in panel_keys:
+        top = sorted(panel_count[key].items(), key=lambda kv: -kv[1])[:max_isoforms]
+        panel_sel[key] = top
+        selected.update(u for u, _ in top)
+
+    # 3) one dynamic clustering over the union of selected molecules -> globally consistent cluster_index
+    uids = [u for u in selected if u in tokens_by_uid]
+    records = [{"isoform_id": u, "count": union_count[u], "gene_id": gene} for u in uids]
+    tstructs = {u: tokens_by_uid[u] for u in uids}
+    cidx = {}
+    if uids:
+        plotted, _, _ = isv.build_plotted_isoforms(records, tstructs, gene, "block", "tokens", 1, len(records))
+        grouped = isv.group_structures(plotted, gene, "tokens", "subsequence", 0.85, 0.05,
+                                       include_introns=True, cluster_mode="block", exon_lookup=ctx.exon_lookup)
+        for ci, cluster in enumerate(grouped):
+            for sg in (cluster if isinstance(cluster, list) else [cluster]):
+                for it in sg.get("items", []):
+                    cidx[str(it.get("isoform_id") or it.get("resolved_id"))] = ci
+
+    # 4) build panels from the per-panel selections, coloring directly by the shared cluster_index
+    panels = []
+    for key in panel_keys:
+        mols = []
+        for uid, c in panel_sel[key]:
+            if uid not in tokens_by_uid:
+                continue
+            segs = isv.build_isoform_segments(tokens_by_uid[uid], ctx.exon_lookup, gene)
+            pmeta = ctx.protein_meta(uid) or {}
+            ci = cidx.get(uid, 0)
+            mols.append({
+                "isoform_id": uid, "sample": _sample_suffix(uid), "known": uid.startswith("ENST"),
+                "count": round(c, 3), "cluster_index": ci, "color_index": ci,
+                "exon_segments": [_seg_json(s) for s in segs],
+                "protein_length": pmeta.get("protein_length"), "nmd_status": pmeta.get("nmd_status"),
+            })
+        panels.append({"condition": key, "n_molecules": len(mols), "molecules": mols})
+
+    n_clusters = (max(cidx.values()) + 1) if cidx else 0
+    used = {m["color_index"] for p in panels for m in p["molecules"]}
+    return {
+        "gene": gene, "symbol": symbol, "panel_by": panel_by, "color_count": len(used), "source": "index",
+        "cell_states": cell_states or ["all"], "conditions": conds, "max_isoforms": max_isoforms,
+        "n_clusters": n_clusters, "gene_model": gene_model_track(ctx, gene),
+        "panels": panels, "total_molecules": sum(p["n_molecules"] for p in panels),
+    }
+
+
+def _run_engine_reads(ctx, gene, cell_states, conds, out_dir, max_isoforms, sample_dict=None):
     """Invoke the engine head-lessly (stdout captured). It writes the per-condition *_isoform_ids.tsv
-    we parse. groupby_rev=True is the viewer default; the engine auto-flips orientation per sample."""
+    we parse. groupby_rev=True is the viewer default; the engine auto-flips orientation per sample.
+    `sample_dict` overrides the default (used by cell-type mode to pool covariates under one group)."""
     os.makedirs(out_dir, exist_ok=True)
     buf = io.StringIO()
     try:
         with contextlib.redirect_stdout(buf):
             isv.plot_isoform_structures_by_conditions(
-                sample_dict=ctx.viewer_sample_dict, conditions=conds, cell_states=cell_states,
+                sample_dict=sample_dict or ctx.viewer_sample_dict, conditions=conds, cell_states=cell_states,
                 barcode_sample_dict=ctx.barcode_sample_dict, genes=[gene],
                 gene_model=ctx.gene_model_path, output_dir=out_dir,
                 gene_symbol_dict=ctx.gene_symbol_dict, rebuild_index=False,
@@ -672,11 +891,49 @@ def _parse_reads_tsv(ctx, path, gene):
                 "known": iid.startswith("ENST"),
                 "count": round(cnt, 3),
                 "cluster_index": ci,
+                # normalized cluster structure signature (stable across engine calls -> stable color)
+                "_cstruct": (r.get("cluster_tokens_exon_intron") or r.get("cluster_tokens_exon")
+                             or r.get("tokens_trimmed") or "").strip(),
                 "exon_segments": [_seg_json(s) for s in segs],
                 "protein_length": pmeta.get("protein_length"),
                 "nmd_status": pmeta.get("nmd_status"),
             })
     return mols
+
+
+def _assign_panel_colors(panels):
+    """Give every molecule a `color_index` keyed by a STABLE structure signature so the same isoform
+    cluster is the same color in every panel (and across covariate/cell-type modes) -- the way the ISV
+    engine colors clusters. Per panel, a cluster's canonical signature = the modal cluster structure of
+    its members (so all members of one cluster share a color, matching the engine's per-cluster color).
+    A single global registry then maps each canonical signature -> a color slot, ordered by total
+    molecule support (largest cluster = slot 0)."""
+    from collections import Counter, defaultdict
+    for p in panels:
+        by_cl = defaultdict(list)
+        for m in p["molecules"]:
+            by_cl[m["cluster_index"]].append(m)
+        canon = {}
+        for ci, members in by_cl.items():
+            cnt = Counter(m.get("_cstruct") or "" for m in members)
+            non_empty = {k: v for k, v in cnt.items() if k}
+            pick = max(non_empty.items(), key=lambda kv: (kv[1], kv[0]))[0] if non_empty else f"__cl{ci}"
+            canon[ci] = pick
+        for m in p["molecules"]:
+            m["color_key"] = canon[m["cluster_index"]]
+
+    support = Counter()
+    for p in panels:
+        for m in p["molecules"]:
+            support[m["color_key"]] += 1
+    order = [k for k, _ in sorted(support.items(), key=lambda kv: (-kv[1], kv[0]))]
+    reg = {k: i for i, k in enumerate(order)}
+    for p in panels:
+        for m in p["molecules"]:
+            m["color_index"] = reg[m["color_key"]]
+            m.pop("_cstruct", None)
+            m.pop("color_key", None)
+    return len(reg)
 
 
 def _sample_suffix(isoform_id):

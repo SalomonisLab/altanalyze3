@@ -14,7 +14,7 @@
   const $$ = (s) => Array.from(document.querySelectorAll(s));
   const api = (p, o) => fetch(p, o).then((r) => { if (!r.ok) throw new Error(r.status + " " + p); return r; });
   const state = {
-    catalog: null, tab: "heatmap", gene: null, combineBy: "cell_type_x_covariate",
+    catalog: null, tab: "heatmap", gene: null, combineBy: "cell_type_x_covariate", panelBy: "covariate",
     samples: new Set(), groups: new Set(), cellTypes: new Set(), cellTypeOrder: [], junctions: new Set(),
     last: null,
   };
@@ -24,8 +24,12 @@
   const cyanYellow = d3.interpolateRgb("#00FFFF", "#FFFF00");
   // professional qualitative palette (RGB hex, non-rainbow) keyed by cluster index, consistent across panels
   const CLUSTER_COLORS = ["#2b6cb0", "#c0531f", "#2f8a4e", "#7a4fb5", "#c2306b", "#0e8a9c", "#b8902a",
-    "#4a5bbf", "#cf5aa0", "#2f9b8a", "#9a5b2e", "#56657a", "#1f7a5a", "#a23c5e", "#3d7ec2", "#8a7a1f"];
+    "#4a5bbf", "#cf5aa0", "#2f9b8a", "#9a5b2e", "#56657a", "#1f7a5a", "#a23c5e", "#3d7ec2", "#8a7a1f",
+    "#6d4ca0", "#1d8f74", "#bf6a2a", "#8a2f52", "#3a6ea5", "#7b9b3a", "#a64d79", "#2d7d8a"];
   const clusterColor = (i) => CLUSTER_COLORS[(((i | 0) % CLUSTER_COLORS.length) + CLUSTER_COLORS.length) % CLUSTER_COLORS.length];
+  // color by the backend's stable structure-keyed color_index (consistent across panels + modes);
+  // fall back to per-panel cluster_index if absent.
+  const colorFor = (m) => clusterColor(m.color_index != null ? m.color_index : m.cluster_index);
 
   // ===================================================================== catalog / menus
   async function loadCatalog() {
@@ -99,6 +103,11 @@
     $$("#combine-seg .seg-btn").forEach((x) => x.classList.remove("on")); b.classList.add("on");
     state.combineBy = b.dataset.v; if (state.gene) render();
   });
+  $("#panel-seg").addEventListener("click", (e) => {
+    const b = e.target.closest(".seg-btn"); if (!b) return;
+    $$("#panel-seg .seg-btn").forEach((x) => x.classList.remove("on")); b.classList.add("on");
+    state.panelBy = b.dataset.v; if (state.gene) render();
+  });
   $("#sim").addEventListener("input", (e) => $("#sim-val").textContent = e.target.value);
   $("#celltype-filter").addEventListener("input", (e) => {
     const f = e.target.value.toLowerCase();
@@ -139,20 +148,35 @@
     if (!cell_types.length) { setStatus("select cell types to build the read pileup"); return; }
     const body = {
       gene, cell_types, conditions: state.groups.size ? [...state.groups] : null,
-      max_isoforms: +$("#maxreads").value || 300,
+      max_isoforms: +$("#maxreads").value || 300, panel_by: state.panelBy,
     };
     await run("/api/reads", body, gene, "reads", true);
   }
 
   async function run(url, body, gene, mode, slow) {
-    setStatus((slow ? "generating read-level view for " : "querying ") + gene + (slow ? " (first time for a selection can take ~10–30s)…" : "…"));
+    const msg = slow ? "building read-level pileup for " + gene + "…" : "querying " + gene + "…";
+    setStatus(slow ? "generating read-level view for " + gene + " (first time for a selection can take a few seconds)…" : "querying " + gene + "…");
+    startLoading(msg);
     const t0 = performance.now();
     try {
       const res = await api(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then((r) => r.json());
       res._mode = mode; state.last = res; draw(res);
       setStatus(`rendered in ${Math.round(performance.now() - t0)} ms`);
     } catch (e) { setStatus("error: " + e.message); }
+    finally { stopLoading(); }
   }
+
+  // ----- loading overlay (animated DNA helix); delayed so instant/cached responses don't flash it -----
+  let _loadTimer = null;
+  function startLoading(msg) {
+    clearTimeout(_loadTimer);
+    _loadTimer = setTimeout(() => { $("#loading-txt").textContent = msg || "rendering…"; $("#loading").classList.remove("hidden"); }, 250);
+  }
+  function stopLoading() { clearTimeout(_loadTimer); $("#loading").classList.add("hidden"); }
+  (function buildDNA() {
+    const d = $("#dna"); if (!d) return;
+    for (let i = 0; i < 18; i++) { const s = document.createElement("span"); s.style.setProperty("--d", (i * 0.07) + "s"); d.appendChild(s); }
+  })();
 
   // ===================================================================== geometry helpers
   function mergeSegments(segs) {
@@ -324,7 +348,7 @@
       gx.selectAll("*").remove();
       panels.forEach((p) => {
         p._rows.forEach((r) => {
-          const m = r.m, yTop = p._y + r.dy, color = clusterColor(m.cluster_index);
+          const m = r.m, yTop = p._y + r.dy, color = colorFor(m);
           const exs = m.merged.exons;
           const eh = Math.max(0.7, r.h > 3 ? r.h - 0.8 : r.h);
           const ey = yTop + (r.h - eh) / 2;
@@ -489,6 +513,7 @@
     m.appendChild(head);
     const item = (label, fn) => { const d = document.createElement("div"); d.textContent = label; d.onclick = () => { fn(); hideCtx(); }; m.appendChild(d); };
     item("Export protein sequence (FASTA)", () => dl("/api/isoform/" + encodeURIComponent(iso.isoform_id) + "/protein"));
+    item("Export ORF / CDS sequence (FASTA)", () => dl("/api/isoform/" + encodeURIComponent(iso.isoform_id) + "/orf"));
     item("Export mRNA sequence (FASTA)", () => dl("/api/isoform/" + encodeURIComponent(iso.isoform_id) + "/mrna"));
     if (clusterId != null && allIsoforms) item("Export all proteins in cluster", () =>
       dlPost("/api/proteins", allIsoforms.filter((i) => i.cluster_id === clusterId).map((i) => i.isoform_id), "cluster_proteins.fasta"));
@@ -549,6 +574,10 @@
     if (tab === "molecule" || tab === "heatmap") {
       state.tab = tab; $$("#tabbar .tab").forEach((x) => x.classList.toggle("on", x.dataset.tab === tab)); syncTabVisibility();
     }
+    const panel = q.get("panel");
+    if (panel === "cell_type" || panel === "covariate") {
+      state.panelBy = panel; $$("#panel-seg .seg-btn").forEach((x) => x.classList.toggle("on", x.dataset.v === panel));
+    }
     const cells = (q.get("cells") || "").split(",").map((s) => s.trim()).filter(Boolean);
     cells.forEach((c) => state.cellTypes.add(c)); if (cells.length) refreshChips("#cell-types", state.cellTypes);
     const groups = (q.get("groups") || "").split(",").map((s) => s.trim()).filter(Boolean);
@@ -557,5 +586,6 @@
   }
 
   syncTabVisibility();
+  if (new URLSearchParams(location.search).get("spin") === "1") { $("#loading-txt").textContent = "rendering…"; $("#loading").classList.remove("hidden"); }
   loadCatalog().then(applyDeepLink).catch((e) => setStatus("catalog error: " + e.message));
 })();

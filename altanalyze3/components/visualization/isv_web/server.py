@@ -51,9 +51,10 @@ class MoleculeQuery(BaseModel):
 
 class ReadsQuery(BaseModel):
     gene: str
-    cell_types: Optional[List[str]] = None   # cell-state selection (panels' columns); None == all
-    conditions: Optional[List[str]] = None   # covariates -> one panel each; None == all groups
-    max_isoforms: int = 300                  # per-condition molecule cap (engine default)
+    cell_types: Optional[List[str]] = None   # cell-state selection; None == all
+    conditions: Optional[List[str]] = None   # covariates; None == all groups
+    max_isoforms: int = 300                  # per-panel molecule cap (engine default)
+    panel_by: str = "covariate"              # 'covariate' (panel per covariate) | 'cell_type' (panel per cell type)
 
 
 def create_app(ctx: da.RunContext) -> FastAPI:
@@ -156,7 +157,7 @@ def create_app(ctx: da.RunContext) -> FastAPI:
         if sig in cache:
             return cache[sig]
         res = da.query_reads(ctx, g, cell_types=q.cell_types, conditions=q.conditions,
-                             max_isoforms=q.max_isoforms)
+                             max_isoforms=q.max_isoforms, panel_by=q.panel_by)
         if len(cache) > 256:
             cache.clear()
         cache[sig] = res
@@ -178,6 +179,15 @@ def create_app(ctx: da.RunContext) -> FastAPI:
             raise HTTPException(404, f"no mRNA sequence for isoform: {isoform_id}")
         return PlainTextResponse(fa, headers={
             "Content-Disposition": f'attachment; filename="{_safe(isoform_id)}.mrna.fasta"',
+        })
+
+    @app.get("/api/isoform/{isoform_id:path}/orf", response_class=PlainTextResponse)
+    def orf(isoform_id: str):
+        fa = ctx.orf_fasta(isoform_id)
+        if not fa:
+            raise HTTPException(404, f"no ORF/CDS sequence for isoform: {isoform_id}")
+        return PlainTextResponse(fa, headers={
+            "Content-Disposition": f'attachment; filename="{_safe(isoform_id)}.orf.fasta"',
         })
 
     @app.post("/api/proteins")

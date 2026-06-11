@@ -127,7 +127,9 @@ def marker_finder(input_df, groups):
     r_df = pearson_corr_df_to_df(input_df, ideal_vectors)
     r_df = r_df.dropna()
     t_df = r_df * np.sqrt(degrees_f) / np.sqrt(1 - (r_df ** 2))
-    p_df = t_df.map(lambda x: t.sf(abs(x), df=degrees_f) * 2)
+    # version-agnostic elementwise p-value (DataFrame.map added in pandas 2.1; applymap deprecated)
+    p_vals = t.sf(np.abs(t_df.to_numpy()), df=degrees_f) * 2
+    p_df = pd.DataFrame(p_vals, index=t_df.index, columns=t_df.columns)
     return r_df, p_df
 
 

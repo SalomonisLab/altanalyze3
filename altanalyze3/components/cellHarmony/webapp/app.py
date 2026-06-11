@@ -2183,6 +2183,9 @@ def _prepare_fastcomm_scores(scores: pd.DataFrame) -> pd.DataFrame:
     frame = scores.copy()
     for column in ("sender_state", "receiver_state", "ligand", "receptor"):
         frame[column] = frame[column].astype(str)
+    for column in ("response_key", "response_support_genes", "pathway"):
+        if column in frame.columns:
+            frame[column] = frame[column].astype(str).replace({"nan": "", "None": ""})
     for column in ("fastcomm_score", "receiver_response_score", "lr_expression_score_scaled", "lr_expression_score"):
         if column in frame.columns:
             frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(0.0)
@@ -2217,32 +2220,44 @@ def _fastcomm_selected_splits(
 ) -> Optional[List[str]]:
     if not display_filters:
         return None
-    sample_key = str((_fastcomm_analysis(meta).get("sample_key") or "")).strip()
+    analysis = _fastcomm_analysis(meta)
+    per_sample = analysis.get("per_sample") or {}
+    split_key = str(per_sample.get("split_key") or "").strip() if isinstance(per_sample, dict) else ""
+    sample_key = str(analysis.get("sample_key") or split_key or "").strip()
     if not sample_key:
         return None
-    cache_entry = _get_expression_cache(app, meta, modality="rna")
-    display_mask = _apply_display_filter_mask(cache_entry, display_filters)
-    if not np.any(display_mask):
-        raise HTTPException(status_code=404, detail="No cells match the current display filters for cell communication.")
-    sample_values = (cache_entry.get("obs_filter_values") or {}).get(sample_key)
-    if sample_values is None:
-        adata = cache_entry.get("adata")
-        if adata is not None and sample_key in adata.obs.columns:
-            sample_values = (
-                adata.obs[sample_key]
-                .astype(str)
-                .str.strip()
-                .replace({"nan": "", "None": ""})
-                .to_numpy(dtype=str)
-            )
-    if sample_values is None:
+    selected = _display_filter_values(display_filters, sample_key)
+    if not selected:
         return None
-    selected = [
-        value
-        for value in pd.Index(np.asarray(sample_values, dtype=str)[display_mask]).unique().tolist()
-        if str(value).strip()
-    ]
     return sorted(dict.fromkeys(str(value).strip() for value in selected if str(value).strip()))
+
+
+def _display_filter_values(display_filters: Optional[List[tuple[str, List[str]]]], field: str) -> List[str]:
+    target = str(field or "").strip()
+    if not target or not display_filters:
+        return []
+    values: List[str] = []
+    for filter_field, filter_values in display_filters:
+        if str(filter_field or "").strip() != target:
+            continue
+        values.extend(str(value).strip() for value in filter_values if str(value).strip())
+    return list(dict.fromkeys(values))
+
+
+def _fastcomm_state_filter_values(meta: Dict, display_filters: Optional[List[tuple[str, List[str]]]]) -> List[str]:
+    analysis = _fastcomm_analysis(meta)
+    state_key = str(analysis.get("state_key") or meta.get("cluster_key") or "").strip()
+    return _display_filter_values(display_filters, state_key)
+
+
+def _filter_fastcomm_scores_by_states(scores: pd.DataFrame, state_values: Sequence[str]) -> pd.DataFrame:
+    selected = {str(value).strip() for value in state_values if str(value).strip()}
+    if not selected or scores.empty:
+        return scores
+    return scores.loc[
+        scores["sender_state"].astype(str).isin(selected)
+        | scores["receiver_state"].astype(str).isin(selected)
+    ].copy()
 
 
 def _aggregate_fastcomm_scores(scores: pd.DataFrame) -> pd.DataFrame:
@@ -2520,16 +2535,23 @@ def _build_fastcomm_plot_payload(
     display_filters: Optional[List[tuple[str, List[str]]]] = None,
 ) -> Dict:
     scores = _prepare_fastcomm_scores(_fastcomm_scores_table(app, meta))
+    state_filter_values = _fastcomm_state_filter_values(meta, display_filters)
     selected_splits = _fastcomm_selected_splits(app, meta, display_filters)
     if selected_splits:
-        split_scores = _prepare_fastcomm_scores(_fastcomm_split_scores_table(app, meta))
+        try:
+            split_scores = _prepare_fastcomm_scores(_fastcomm_split_scores_table(app, meta))
+        except FileNotFoundError:
+            split_scores = pd.DataFrame()
         if "split" not in split_scores.columns:
-            raise ValueError("Per-sample fastComm scores missing required column: split")
-        split_scores["split"] = split_scores["split"].astype(str)
-        filtered_split_scores = split_scores.loc[split_scores["split"].isin(selected_splits)].copy()
-        if filtered_split_scores.empty:
-            raise HTTPException(status_code=404, detail="No per-sample cell-communication scores match the current display filters.")
-        scores = _aggregate_fastcomm_scores(filtered_split_scores)
+            selected_splits = []
+        else:
+            split_scores["split"] = split_scores["split"].astype(str)
+            filtered_split_scores = split_scores.loc[split_scores["split"].isin(selected_splits)].copy()
+            if filtered_split_scores.empty:
+                raise HTTPException(status_code=404, detail="No per-sample cell-communication scores match the current display filters.")
+            scores = _aggregate_fastcomm_scores(filtered_split_scores)
+    if state_filter_values:
+        scores = _filter_fastcomm_scores_by_states(scores, state_filter_values)
     plot_key = str(plot_type or "focused_incoming").strip().lower()
     aliases = {
         "incoming": "focused_incoming",
@@ -2554,6 +2576,8 @@ def _build_fastcomm_plot_payload(
         plot_key = "focused_incoming"
 
     focus = str(population or "").strip()
+    if state_filter_values and (not focus or focus not in set(state_filter_values)):
+        focus = state_filter_values[0]
     if not focus:
         populations = _fastcomm_populations(app, meta)
         focus = populations[0] if populations else ""
@@ -2692,7 +2716,18 @@ def _build_fastcomm_plot_payload(
         }
 
     if plot_key == "per_sample":
-        split_scores = _prepare_fastcomm_scores(_fastcomm_split_scores_table(app, meta))
+        try:
+            split_scores = _prepare_fastcomm_scores(_fastcomm_split_scores_table(app, meta))
+        except FileNotFoundError:
+            return {
+                "plot_type": plot_key,
+                "population": focus,
+                "direction": direction,
+                "sample_key": str((_fastcomm_analysis(meta).get("sample_key") or "sample")),
+                "selected_splits": selected_splits or [],
+                "rows": [],
+                "message": "Per-sample fastComm scores are unavailable. Re-run the job with the current reduced fastComm settings.",
+            }
         if "split" not in split_scores.columns:
             raise ValueError("Per-sample fastComm scores missing required column: split")
         split_scores["split"] = split_scores["split"].astype(str)
@@ -2700,6 +2735,8 @@ def _build_fastcomm_plot_payload(
             split_scores = split_scores.loc[split_scores["split"].isin(selected_splits)].copy()
             if split_scores.empty:
                 raise HTTPException(status_code=404, detail="No per-sample cell-communication scores match the current display filters.")
+        if state_filter_values:
+            split_scores = _filter_fastcomm_scores_by_states(split_scores, state_filter_values)
         split_focused = _fastcomm_filter_focus(split_scores, focus, direction) if focus else split_scores.copy()
         other_col = "receiver_state" if direction == "outgoing" else "sender_state"
         grouped = (

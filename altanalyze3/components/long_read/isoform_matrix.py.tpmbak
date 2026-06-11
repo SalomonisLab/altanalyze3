@@ -309,7 +309,7 @@ def reverse_complement_seq(seq):
 def remove_feature_suffix(feature):
     return feature.split(':')[0]
 
-def calculate_barcode_match_percentage(adata, barcode_clusters, context=None):
+def calculate_barcode_match_percentage(adata, barcode_clusters):
     # Verify that the cell barcodes maximally map to provided cell barcode annotations (no naming conflicts)
     matching_barcodes = set(adata.obs_names) & set(barcode_clusters.index)
     print(len(adata.obs_names),'matrix barcodes |',len(barcode_clusters.index),'annotation barcodes |',len(matching_barcodes),'overlap')
@@ -318,26 +318,6 @@ def calculate_barcode_match_percentage(adata, barcode_clusters, context=None):
     total_barcodes_in_clusters = len(barcode_clusters.index)
     percentage = (len(matched_barcodes) / total_barcodes_in_clusters) * 100
     print(f'Barcode mapping percentage: {percentage:.2f}%')
-
-    # Guard against the silent-failure mode: ZERO overlap means the join would yield a 0-cell matrix
-    # that contributes nothing to the pseudobulk -- a silent, wrong result. The usual cause is a
-    # reverse-complement mismatch (the metadata 'reverse' flag not applied, or applied when it should
-    # not be): the cluster-file barcodes are the reverse-complement of the matrix barcodes (or vice
-    # versa). Fail loudly with the diagnosis instead of producing empty data.
-    if len(matching_barcodes) == 0:
-        try:
-            sample_clu = list(barcode_clusters.index[:3])
-        except Exception:
-            sample_clu = []
-        sample_mtx = list(adata.obs_names[:3])
-        where = f" [{context}]" if context else ""
-        raise ValueError(
-            f"calculate_barcode_match_percentage{where}: 0 of {len(adata.obs_names)} matrix barcodes "
-            f"match any of {total_barcodes_in_clusters} annotation barcodes. This almost always means a "
-            f"reverse-complement mismatch -- check the metadata 'reverse' flag for this sample (the "
-            f"cluster-file barcodes may be the reverse-complement of the matrix barcodes, or vice "
-            f"versa). Example matrix barcodes: {sample_mtx}; example annotation barcodes: {sample_clu}."
-        )
 
     adata = adata[sorted(matching_barcodes), :]
     adata.obs.index.name = None
@@ -369,8 +349,8 @@ def tsv_to_adata(file_path: str):
     return adata
 
 
-def pseudo_cluster_counts(sample, combined_adata, cell_threshold=0, count_threshold=0, compute_cpm=False, cpm_threshold=1, status=True):
-    if compute_cpm:
+def pseudo_cluster_counts(sample, combined_adata, cell_threshold=0, count_threshold=0, compute_tpm=False, tpm_threshold=1, status=True):
+    if compute_tpm:
         dataType = 'isoform'
     else:
         dataType = 'junction'
@@ -396,41 +376,41 @@ def pseudo_cluster_counts(sample, combined_adata, cell_threshold=0, count_thresh
     # Transpose and save filtered summed groups
     filtered_summed_groups_transposed = summed_groups.transpose()
     filtered_summed_groups_transposed.to_csv(f"{sample}_{dataType}.txt", sep='\t')
-    if compute_cpm:
-        # Compute CPM values (with progress bar)
-        with tqdm(total=summed_groups.shape[0], desc="Calculating CPM values") as pbar:
-            cpm_values = summed_groups.div(summed_groups.sum(axis=1), axis=0) * 1e6
+    if compute_tpm:
+        # Compute TPM values (with progress bar)
+        with tqdm(total=summed_groups.shape[0], desc="Calculating TPM values") as pbar:
+            tpm_values = summed_groups.div(summed_groups.sum(axis=1), axis=0) * 1e6
             pbar.update(summed_groups.shape[0])
-        cpm_values_transposed = cpm_values.transpose()
+        tpm_values_transposed = tpm_values.transpose()
         # Compute gene sums only once (with progress bar)
         with tqdm(total=summed_groups.shape[1], desc="Computing gene sums") as pbar:
             gene_sums = summed_groups.T.groupby(lambda x: x.split(":")[0]).transform('sum').T
             pbar.update(summed_groups.shape[1])
         # Prepare isoform ratios efficiently
         isoform_ratios = summed_groups.div(gene_sums)
-        # Filter isoform ratios where gene CPM < 1 (with progress bar)
-        with tqdm(total=cpm_values.shape[1], desc="Filtering isoform ratios by gene CPM") as pbar:
-            gene_cpms = cpm_values.T.groupby(lambda x: x.split(":")[0]).sum().T
-            mask = gene_cpms >= cpm_threshold
-            mask = mask.reindex(columns=cpm_values.columns, method='ffill')
+        # Filter isoform ratios where gene TPM < 1 (with progress bar)
+        with tqdm(total=tpm_values.shape[1], desc="Filtering isoform ratios by gene TPM") as pbar:
+            gene_tpms = tpm_values.T.groupby(lambda x: x.split(":")[0]).sum().T
+            mask = gene_tpms >= tpm_threshold
+            mask = mask.reindex(columns=tpm_values.columns, method='ffill')
             isoform_ratios = isoform_ratios.where(mask).transpose()
-            pbar.update(cpm_values.shape[1])
+            pbar.update(tpm_values.shape[1])
         print('Pseudobulk cluster junction counts exported')
-        return filtered_summed_groups_transposed, cpm_values_transposed, isoform_ratios
+        return filtered_summed_groups_transposed, tpm_values_transposed, isoform_ratios
     else:
         return filtered_summed_groups_transposed
 
-def pseudo_counts_no_cluster(combined_adata, count_threshold=5, compute_cpm=False, cpm_threshold=1):
+def pseudo_counts_no_cluster(combined_adata, count_threshold=5, compute_tpm=False, tpm_threshold=1):
     # Convert sparse matrix to dense DataFrame for easier manipulation
     junction_counts_df = pd.DataFrame(combined_adata.X.toarray(), index=combined_adata.obs_names, columns=combined_adata.var_names)
     
     # Filter out junctions with fewer than the specified count threshold in any sample
     filtered_counts = junction_counts_df.loc[:, (junction_counts_df >= count_threshold).any(axis=0)]
     
-    if compute_cpm:
-        # Compute CPM values for each sample
+    if compute_tpm:
+        # Compute TPM values for each sample
         total_counts = filtered_counts.sum(axis=1)
-        cpm_values = (filtered_counts.T / total_counts).T * 1e6
+        tpm_values = (filtered_counts.T / total_counts).T * 1e6
         
         # Ensure the columns are correctly formatted as strings for grouping
         def extract_gene_id(x):
@@ -440,19 +420,19 @@ def pseudo_counts_no_cluster(combined_adata, count_threshold=5, compute_cpm=Fals
         gene_sums = filtered_counts.T.groupby(extract_gene_id).transform('sum').T
         isoform_ratios = filtered_counts / gene_sums
         
-        # Filter isoform ratios where gene CPM < 1 for each sample using transposed DataFrame
-        gene_cpms = cpm_values.T.groupby(extract_gene_id).transform('sum').T
-        mask = gene_cpms >= cpm_threshold
+        # Filter isoform ratios where gene TPM < 1 for each sample using transposed DataFrame
+        gene_tpms = tpm_values.T.groupby(extract_gene_id).transform('sum').T
+        mask = gene_tpms >= tpm_threshold
         isoform_ratios = isoform_ratios.where(mask, np.nan)
         
-        print('Junction counts and CPM values exported')
-        return filtered_counts.T, cpm_values.T, isoform_ratios.T
+        print('Junction counts and TPM values exported')
+        return filtered_counts.T, tpm_values.T, isoform_ratios.T
     else:
         return filtered_counts.T
 from tqdm import tqdm
 
 def export_and_filter_pseudobulks(input_file, output_file, cell_type_order=None, min_group_size = 3):
-    # Function to reduce a combined CPM, ratio, or splicing matrix (with or without null values) to rows in which clusters have multiple samples with signal (>2). Assumes null = 0.
+    # Function to reduce a combined TPM, ratio, or splicing matrix (with or without null values) to rows in which clusters have multiple samples with signal (>2). Assumes null = 0.
     
     # Step 1: Read in the optional cell type order file if provided
     if cell_type_order is None:
@@ -558,7 +538,7 @@ def concatenate_h5ad_and_compute_pseudobulks(sample_files,collection_name = ''):
 
     # Initialize empty DataFrames to store results
     combined_pseudo_pdf = None
-    combined_cpm = None
+    combined_tpm = None
     combined_isoform_to_gene_ratio = None
 
     # Loop through each sample file
@@ -575,34 +555,34 @@ def concatenate_h5ad_and_compute_pseudobulks(sample_files,collection_name = ''):
 
         # Generate pseudobulks for the current sample
         if collection_name == 'isoform':
-            pseudo_pdf, cpm, isoform_to_gene_ratio = pseudo_cluster_counts(sample_name, adata, cell_threshold=0, count_threshold=0, compute_cpm=True, status=False)
+            pseudo_pdf, tpm, isoform_to_gene_ratio = pseudo_cluster_counts(sample_name, adata, cell_threshold=0, count_threshold=0, compute_tpm=True, status=False)
         
             # Rename the columns to include the sample name
             pseudo_pdf.columns = [f'{col}.{sample_name}' for col in pseudo_pdf.columns]
-            cpm.columns = [f'{col}.{sample_name}' for col in cpm.columns]
+            tpm.columns = [f'{col}.{sample_name}' for col in tpm.columns]
             isoform_to_gene_ratio.columns = [f'{col}.{sample_name}' for col in isoform_to_gene_ratio.columns]
         
             # Ensure the original order of clusters is preserved
             if combined_pseudo_pdf is None:
                 combined_pseudo_pdf = pseudo_pdf
-                combined_cpm = cpm
+                combined_tpm = tpm
                 combined_isoform_to_gene_ratio = isoform_to_gene_ratio
             else:
                 # Reindex the dataframes to match the combined dataframe's index (cluster names) and fill missing values with 0
                 pseudo_pdf = pseudo_pdf.reindex(index=combined_pseudo_pdf.index, columns=pseudo_pdf.columns).fillna(0)
-                cpm = cpm.reindex(index=combined_cpm.index, columns=cpm.columns).fillna(0)
+                tpm = tpm.reindex(index=combined_tpm.index, columns=tpm.columns).fillna(0)
                 isoform_to_gene_ratio = isoform_to_gene_ratio.reindex(index=combined_isoform_to_gene_ratio.index, columns=isoform_to_gene_ratio.columns).fillna(0)
                 
                 # Concatenate the dataframes along columns
                 combined_pseudo_pdf = pd.concat([combined_pseudo_pdf, pseudo_pdf], axis=1)
-                combined_cpm = pd.concat([combined_cpm, cpm], axis=1)
+                combined_tpm = pd.concat([combined_tpm, tpm], axis=1)
                 combined_isoform_to_gene_ratio = pd.concat([combined_isoform_to_gene_ratio, isoform_to_gene_ratio], axis=1)
-            pseudo_cpm = collection_name+'_combined_pseudo_cluster_cpm.txt'
+            pseudo_tpm = collection_name+'_combined_pseudo_cluster_tpm.txt'
             pseudo_ratios = collection_name+'_combined_pseudo_cluster_iso-gene_ratio.txt'
-            combined_cpm.to_csv(pseudo_cpm, sep='\t')
+            combined_tpm.to_csv(pseudo_tpm, sep='\t')
             combined_isoform_to_gene_ratio.to_csv(pseudo_ratios, sep='\t')
         else:
-            pseudo_pdf = pseudo_cluster_counts(sample_name, adata, cell_threshold=0, count_threshold=0, compute_cpm=False, status=False)
+            pseudo_pdf = pseudo_cluster_counts(sample_name, adata, cell_threshold=0, count_threshold=0, compute_tpm=False, status=False)
             pseudo_pdf.columns = [f'{col}.{sample_name}' for col in pseudo_pdf.columns]
             if combined_pseudo_pdf is None:
                 combined_pseudo_pdf = pseudo_pdf
@@ -615,7 +595,7 @@ def concatenate_h5ad_and_compute_pseudobulks(sample_files,collection_name = ''):
     pseudo_counts = collection_name+'_combined_pseudo_cluster_counts.txt'
     combined_pseudo_pdf.to_csv(pseudo_counts, sep='\t')
 
-def pseudo_cluster_counts_optimized(sample, combined_adata, cell_threshold=0, count_threshold=0, compute_cpm=False, cpm_threshold=1, status=True):
+def pseudo_cluster_counts_optimized(sample, combined_adata, cell_threshold=0, count_threshold=0, compute_tpm=False, tpm_threshold=1, status=True):
     output_file = f"{sample}.txt"
     cluster_labels = combined_adata.obs['cluster'].astype(str)
     cluster_order = sorted(cluster_labels.unique().tolist())
@@ -623,12 +603,12 @@ def pseudo_cluster_counts_optimized(sample, combined_adata, cell_threshold=0, co
     with open(output_file, 'w') as f_out:
         f_out.write('Feature\t' + '\t'.join(cluster_order) + '\n')
 
-    if compute_cpm:
-        cpm_output_file = f"{sample}_cpm.txt"
+    if compute_tpm:
+        tpm_output_file = f"{sample}_tpm.txt"
         isoform_ratio_file = f"{sample}_ratio.txt"
-        with open(cpm_output_file, 'w') as cpm_out, open(isoform_ratio_file, 'w') as isoform_out:
+        with open(tpm_output_file, 'w') as tpm_out, open(isoform_ratio_file, 'w') as isoform_out:
             header = 'Feature\t' + '\t'.join(cluster_order) + '\n'
-            cpm_out.write(header)
+            tpm_out.write(header)
             isoform_out.write(header)
 
     chunk_size = 1000
@@ -652,17 +632,17 @@ def pseudo_cluster_counts_optimized(sample, combined_adata, cell_threshold=0, co
         result.insert(0, "Feature", result.index)
         result.to_csv(output_file, sep="\t", index=False, mode="a", header=False)
 
-        if compute_cpm:
-            cpm = summed_groups.div(summed_groups.sum(axis=1), axis=0) * 1e6
-            cpm_values = cpm.T.reindex(columns=cluster_order).fillna(0)
-            cpm_values.insert(0, "Feature", cpm_values.index)
-            cpm_values.to_csv(cpm_output_file, sep="\t", index=False, mode="a", header=False)
+        if compute_tpm:
+            tpm = summed_groups.div(summed_groups.sum(axis=1), axis=0) * 1e6
+            tpm_values = tpm.T.reindex(columns=cluster_order).fillna(0)
+            tpm_values.insert(0, "Feature", tpm_values.index)
+            tpm_values.to_csv(tpm_output_file, sep="\t", index=False, mode="a", header=False)
 
             isoform_cols = summed_groups.columns
             gene_ids = [col.split(":")[0] for col in isoform_cols]
 
-            # CPM threshold mask (isoform level)
-            mask = cpm >= cpm_threshold
+            # TPM threshold mask (isoform level)
+            mask = tpm >= tpm_threshold
 
             # Gene-level raw counts
             gene_counts = summed_groups.T.groupby(lambda x: x.split(":")[0]).sum().T
@@ -688,8 +668,8 @@ def pseudo_cluster_counts_optimized(sample, combined_adata, cell_threshold=0, co
                         isoform_subset = [col for col in isoform_cols if col.startswith(gid + ":")]
                         print(f"\n🔎 QC for gene: {gid}")
                         print("\nRaw counts:\n", summed_groups[isoform_subset])
-                        print("\nCPM values:\n", cpm[isoform_subset])
-                        print("\nCPM threshold mask:\n", mask[isoform_subset])
+                        print("\nTPM values:\n", tpm[isoform_subset])
+                        print("\nTPM threshold mask:\n", mask[isoform_subset])
                         print("\nGene counts:\n", gene_counts[gid])
                         print("\nBroadcasted gene counts:\n", gene_counts_broadcasted[isoform_subset])
                         print("\nCalculated ratios:\n", ratios[isoform_subset])
@@ -700,8 +680,8 @@ def pseudo_cluster_counts_optimized(sample, combined_adata, cell_threshold=0, co
             ratios.to_csv(isoform_ratio_file, sep="\t", index=False, mode="a", header=False)
 
             #print(f"Final isoform_ratios non-zero entries: {(ratios.iloc[:, 1:] > 0).sum().sum()}")
-            del cpm
-            del cpm_values
+            del tpm
+            del tpm_values
             del isoform_cols
             del gene_ids
             del mask
@@ -719,21 +699,21 @@ def pseudo_cluster_counts_optimized(sample, combined_adata, cell_threshold=0, co
         del result
         _trim_memory()
 
-    print(f"Done writing {output_file}" + (f", {cpm_output_file}, {isoform_ratio_file}" if compute_cpm else ''))
+    print(f"Done writing {output_file}" + (f", {tpm_output_file}, {isoform_ratio_file}" if compute_tpm else ''))
 
-    if compute_cpm:
-        return output_file, cpm_output_file, isoform_ratio_file
+    if compute_tpm:
+        return output_file, tpm_output_file, isoform_ratio_file
     else:
         return output_file
 
-def just_return_dense_count_files(sample, compute_cpm=False):
-    # Bypass the above function to regenerate the counts and CPM files
+def just_return_dense_count_files(sample, compute_tpm=False):
+    # Bypass the above function to regenerate the counts and TPM files
 
     output_file = f"{sample}.txt"
-    if compute_cpm:
-        cpm_output_file = f"{sample}_cpm.txt"
+    if compute_tpm:
+        tpm_output_file = f"{sample}_tpm.txt"
         isoform_ratio_file = f"{sample}_ratio.txt"
-        return output_file, cpm_output_file, isoform_ratio_file
+        return output_file, tpm_output_file, isoform_ratio_file
     else:
         return output_file
 
@@ -942,7 +922,7 @@ def write_pseudobulk_h5ad_from_memmap(memmap_data, features, columns, full_path,
     del full, X
     return
 
-def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_name='junction', compute_cpm=False, cpm_threshold=1, only_import_existing=False,
+def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_name='junction', compute_tpm=False, tpm_threshold=1, only_import_existing=False,
                                                        fused_filter=False, cluster_order=None, min_group_size=3):
     # only_import_existing=True: the per-sample pseudobulk <sample>.txt files were already produced
     # (e.g. by the per-sample parallel jobs in 4-phase cluster mode) -- skip recomputing them and go
@@ -950,7 +930,7 @@ def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_
     # (compute each sample's pseudobulk inline, then concat).
     #
     # fused_filter=True (P2/P4 optimization): write the '-filtered.txt' DIRECTLY from the in-memory
-    # counts/cpm/ratio memmaps and DO NOT materialize the dense unfiltered '_counts.txt' (the multi-GB
+    # counts/tpm/ratio memmaps and DO NOT materialize the dense unfiltered '_counts.txt' (the multi-GB
     # / cluster-121GB throwaway that nothing reads except the old filter pass). Eliminates the dense
     # full-matrix serialize AND the subsequent full pd.read_csv re-read. Output bytes of the filtered
     # files are identical to the legacy two-step path. The UNFILTERED file is only written when
@@ -976,12 +956,12 @@ def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_
         _memtrace(f"sample_start {sample_label}")
 
         if only_import_existing:
-            # Pass the SAME compute_cpm through: with compute_cpm=True this returns the
-            # (counts, cpm, ratio) triple to unpack; with False it returns just the counts path.
-            # (Previously called with compute_cpm=False then unpacked as a triple -> ValueError.)
-            res = just_return_dense_count_files(sample_prefix, compute_cpm=compute_cpm)
-            if compute_cpm:
-                pseudo_pdf_file, cpm_file, isoform_ratio_file = res
+            # Pass the SAME compute_tpm through: with compute_tpm=True this returns the
+            # (counts, tpm, ratio) triple to unpack; with False it returns just the counts path.
+            # (Previously called with compute_tpm=False then unpacked as a triple -> ValueError.)
+            res = just_return_dense_count_files(sample_prefix, compute_tpm=compute_tpm)
+            if compute_tpm:
+                pseudo_pdf_file, tpm_file, isoform_ratio_file = res
             else:
                 pseudo_pdf_file = res
         else:
@@ -994,13 +974,13 @@ def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_
             adata.obs_names_make_unique()
 
             # Generate pseudobulks for the current sample
-            if compute_cpm:
-                pseudo_pdf_file, cpm_file, isoform_ratio_file = pseudo_cluster_counts_optimized(
-                    sample_prefix, adata, cell_threshold=0, count_threshold=0, compute_cpm=compute_cpm, cpm_threshold=cpm_threshold, status=False
+            if compute_tpm:
+                pseudo_pdf_file, tpm_file, isoform_ratio_file = pseudo_cluster_counts_optimized(
+                    sample_prefix, adata, cell_threshold=0, count_threshold=0, compute_tpm=compute_tpm, tpm_threshold=tpm_threshold, status=False
                 )
             else:
                 pseudo_pdf_file = pseudo_cluster_counts_optimized(
-                    sample_prefix, adata, cell_threshold=0, count_threshold=0, compute_cpm=compute_cpm, cpm_threshold=cpm_threshold, status=False
+                    sample_prefix, adata, cell_threshold=0, count_threshold=0, compute_tpm=compute_tpm, tpm_threshold=tpm_threshold, status=False
                 )
             _memtrace("after_pseudobulk")
             del adata
@@ -1010,8 +990,8 @@ def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_
         file_info.append({
             "sample": sample_label,
             "pseudo_file": pseudo_pdf_file,
-            "cpm_file": cpm_file if compute_cpm else None,
-            "ratio_file": isoform_ratio_file if compute_cpm else None,
+            "tpm_file": tpm_file if compute_tpm else None,
+            "ratio_file": isoform_ratio_file if compute_tpm else None,
             "col_offset": total_cols,
             "ncols": len(sample_cols),
         })
@@ -1051,12 +1031,12 @@ def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_
     )
     # NO dense .txt for EITHER collection. The combined pseudobulk is h5ad-only:
     #   * counts full + filtered h5ad written above (write_pseudobulk_h5ad_from_memmap),
-    #   * isoform cpm/ratio full + filtered h5ad written below.
+    #   * isoform tpm/ratio full + filtered h5ad written below.
     # JUNCTION: PSI reads the counts-filtered h5ad directly (psi_single gene-sorts in memory + applies
     #   the min-count filter), and junction-diff annotation reads coords from the same h5ad
     #   (load_junction_coordinates). Validated PSI value- and sample-order-identical to the legacy text
     #   path (PSI_validation_OLD/NEW.tsv; 50 genes / 197 events, max abs diff 0.0).
-    # ISOFORM: the differentials read the cpm/ratio filtered h5ad (comparisons._load_isoform_filtered_matrix).
+    # ISOFORM: the differentials read the tpm/ratio filtered h5ad (comparisons._load_isoform_filtered_matrix).
     # So no junction/isoform '-filtered.txt' (or the dense unfiltered counts.txt, or the 121GB throwaway)
     # is written or read anywhere.
     _memtrace("after_write_combined_pseudo")
@@ -1068,17 +1048,17 @@ def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_
     except OSError:
         pass
 
-    if compute_cpm:
-        cpm_memmap_path = f'{collection_name}_combined_pseudo_cluster_cpm.memmap'
-        cpm_mm = _fill_memmap_from_files(
+    if compute_tpm:
+        tpm_memmap_path = f'{collection_name}_combined_pseudo_cluster_tpm.memmap'
+        tpm_mm = _fill_memmap_from_files(
             file_info,
             feature_to_row,
             total_cols,
-            "cpm_file",
+            "tpm_file",
             np.float32,
-            cpm_memmap_path,
+            tpm_memmap_path,
         )
-        _memtrace("after_fill_cpm_memmap")
+        _memtrace("after_fill_tpm_memmap")
 
         ratio_memmap_path = f'{collection_name}_combined_pseudo_cluster_ratio.memmap'
         ratio_mm = _fill_memmap_from_files(
@@ -1091,14 +1071,14 @@ def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_
         )
         _memtrace("after_fill_ratio_memmap")
 
-        combined_cpm_file = f'{collection_name}_combined_pseudo_cluster_cpm.txt'
+        combined_tpm_file = f'{collection_name}_combined_pseudo_cluster_tpm.txt'
         combined_isoform_ratio_file = f'{collection_name}_combined_pseudo_cluster_ratio.txt'
-        # h5ad-only: write cpm + ratio as SPARSE h5ad (full + filtered), mirroring counts. NO dense
-        # .txt. The differentials read '<collection>_combined_pseudo_cluster_{cpm,ratio}-filtered.h5ad'.
+        # h5ad-only: write tpm + ratio as SPARSE h5ad (full + filtered), mirroring counts. NO dense
+        # .txt. The differentials read '<collection>_combined_pseudo_cluster_{tpm,ratio}-filtered.h5ad'.
         write_pseudobulk_h5ad_from_memmap(
-            cpm_mm, features, column_names,
-            f'{collection_name}_combined_pseudo_cluster_cpm.h5ad',
-            filtered_path=f'{collection_name}_combined_pseudo_cluster_cpm-filtered.h5ad',
+            tpm_mm, features, column_names,
+            f'{collection_name}_combined_pseudo_cluster_tpm.h5ad',
+            filtered_path=f'{collection_name}_combined_pseudo_cluster_tpm-filtered.h5ad',
             cell_type_order=cluster_order, min_group_size=min_group_size,
         )
         write_pseudobulk_h5ad_from_memmap(
@@ -1107,12 +1087,12 @@ def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_
             filtered_path=f'{collection_name}_combined_pseudo_cluster_ratio-filtered.h5ad',
             cell_type_order=cluster_order, min_group_size=min_group_size,
         )
-        _memtrace("after_write_combined_cpm")
+        _memtrace("after_write_combined_tpm")
 
-        del cpm_mm
+        del tpm_mm
         del ratio_mm
         _trim_memory()
-        for path in (cpm_memmap_path, ratio_memmap_path):
+        for path in (tpm_memmap_path, ratio_memmap_path):
             try:
                 os.remove(path)
             except OSError:
@@ -1122,7 +1102,7 @@ def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_
         del features
         _trim_memory()
 
-        return combined_pseudo_file, combined_cpm_file, combined_isoform_ratio_file
+        return combined_pseudo_file, combined_tpm_file, combined_isoform_ratio_file
 
     del feature_to_row
     del features
@@ -1223,8 +1203,8 @@ def combine_h5ad_files_parallel(sample_h5ads_dict, output_file='combined.h5ad', 
 
 if __name__ == '__main__':
     sample_name = 'test'
-    compute_cpm = True
-    cpm_threshold = 1
+    compute_tpm = True
+    tpm_threshold = 1
 
     isoform_input = "WM34-isoform.h5ad"
 
@@ -1241,5 +1221,5 @@ if __name__ == '__main__':
     X = adata[:, isoform_vars].copy()
 
     pseudo_pdf_file = pseudo_cluster_counts_optimized(
-        sample_name, X, cell_threshold=0, count_threshold=0, compute_cpm=compute_cpm, 
-        cpm_threshold=cpm_threshold, status=True)
+        sample_name, X, cell_threshold=0, count_threshold=0, compute_tpm=compute_tpm, 
+        tpm_threshold=tpm_threshold, status=True)

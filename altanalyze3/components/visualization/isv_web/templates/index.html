@@ -44,6 +44,16 @@
         </section>
       </div>
 
+      <div class="tab-controls" data-for="molecule" hidden>
+        <section class="field">
+          <label>Panels (one pileup per…)</label>
+          <div id="panel-seg" class="seg">
+            <button class="seg-btn on" data-v="covariate">covariate</button>
+            <button class="seg-btn" data-v="cell_type">cell type</button>
+          </div>
+        </section>
+      </div>
+
       <section class="field">
         <label>Cell types <input id="celltype-filter" class="mini" placeholder="filter…"/>
           <button id="ct-all" class="lnk">all</button><button id="ct-none" class="lnk">none</button></label>
@@ -53,7 +63,7 @@
       <section class="field">
         <label>Covariate / groups <button id="grp-all" class="lnk">all</button></label>
         <div id="groups" class="multi"></div>
-        <div class="hint" data-for="molecule">each covariate becomes a stacked read-pileup panel</div>
+        <div class="hint" data-for="molecule">covariates restrict which samples feed the read pileup</div>
       </section>
 
       <details class="adv">
@@ -113,6 +123,10 @@
         </div>
       </div>
       <div id="plot"></div>
+      <div id="loading" class="hidden">
+        <div class="dna" id="dna"></div>
+        <div id="loading-txt" class="loading-txt">rendering…</div>
+      </div>
     </main>
   </div>
 

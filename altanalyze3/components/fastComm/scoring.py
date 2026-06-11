@@ -92,6 +92,62 @@ def make_state_pseudobulk(
     )
 
 
+def make_state_pseudobulk_from_matrix(
+    matrix,
+    *,
+    index: Sequence[str],
+    columns: Sequence[str],
+    metadata: pd.DataFrame,
+    state_key: str,
+    min_cells: int = 1,
+) -> PseudobulkState:
+    if state_key not in metadata.columns:
+        raise KeyError(f"State column {state_key!r} was not found in metadata")
+
+    obs_index = pd.Index(clean_labels(index))
+    metadata = metadata.copy()
+    metadata.index = clean_labels(metadata.index)
+    common = obs_index.intersection(metadata.index)
+    if common.empty:
+        raise ValueError("No shared cells between expression index and metadata index")
+
+    row_positions = obs_index.get_indexer(common)
+    states = metadata.loc[common, state_key].astype(str).str.strip()
+    valid = states.ne("") & states.notna()
+    row_positions = row_positions[valid.to_numpy()]
+    states = states.loc[valid]
+
+    sizes = states.value_counts().sort_index()
+    keep_states = sizes.index[sizes >= min_cells]
+    if keep_states.empty:
+        raise ValueError(f"No states passed min_cells={min_cells}")
+
+    state_names = list(keep_states.sort_values())
+    matrix_subset = matrix[row_positions]
+    if sparse.issparse(matrix_subset):
+        matrix_subset = matrix_subset.tocsr()
+
+    mean_rows: List[np.ndarray] = []
+    detection_rows: List[np.ndarray] = []
+    state_values = states.to_numpy(dtype=object)
+    for state_name in state_names:
+        mask = state_values == state_name
+        state_matrix = matrix_subset[mask]
+        if sparse.issparse(state_matrix):
+            mean_rows.append(np.asarray(state_matrix.mean(axis=0)).ravel())
+            detection_rows.append(np.asarray((state_matrix > 0).mean(axis=0)).ravel())
+        else:
+            mean_rows.append(np.asarray(state_matrix, dtype=float).mean(axis=0))
+            detection_rows.append((np.asarray(state_matrix) > 0).mean(axis=0))
+
+    column_labels = clean_labels(columns)
+    return PseudobulkState(
+        expression=pd.DataFrame(mean_rows, index=state_names, columns=column_labels).astype(float),
+        detection=pd.DataFrame(detection_rows, index=state_names, columns=column_labels).astype(float),
+        sizes=sizes.loc[state_names],
+    )
+
+
 def _gene_value(state_by_gene: pd.DataFrame, state: str, gene: str) -> float:
     if gene not in state_by_gene.columns or state not in state_by_gene.index:
         return 0.0
@@ -124,6 +180,49 @@ def _specificity(state_by_gene: pd.DataFrame, state: str, members: Sequence[str]
     return float(numerator / (denominator + _EPS))
 
 
+def _complex_arrays(
+    state: PseudobulkState,
+    complexes: Iterable[Tuple[str, ...]],
+) -> Dict[Tuple[str, ...], Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    expression = state.expression.to_numpy(dtype=float, copy=False)
+    detection = state.detection.to_numpy(dtype=float, copy=False)
+    gene_to_idx = {gene: idx for idx, gene in enumerate(clean_labels(state.expression.columns))}
+    gene_totals = expression.sum(axis=0)
+    cache: Dict[Tuple[str, ...], Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+    n_states = expression.shape[0]
+
+    for members in complexes:
+        if not members:
+            zeros = np.zeros(n_states, dtype=float)
+            cache[members] = (zeros, zeros, zeros)
+            continue
+
+        idxs = [gene_to_idx.get(member) for member in members]
+        if any(idx is None for idx in idxs):
+            zeros = np.zeros(n_states, dtype=float)
+            cache[members] = (zeros, zeros, zeros)
+            continue
+
+        idx_array = np.asarray(idxs, dtype=int)
+        if idx_array.size == 1:
+            expr_values = expression[:, idx_array[0]].astype(float, copy=True)
+            detection_values = detection[:, idx_array[0]].astype(float, copy=True)
+            denominator = float(gene_totals[idx_array[0]])
+        else:
+            member_expr = expression[:, idx_array]
+            positive = np.all(member_expr > 0, axis=1)
+            expr_values = np.zeros(n_states, dtype=float)
+            if np.any(positive):
+                expr_values[positive] = np.exp(np.log(member_expr[positive]).mean(axis=1))
+            detection_values = detection[:, idx_array].min(axis=1).astype(float, copy=False)
+            totals = gene_totals[idx_array]
+            denominator = geometric_mean(totals)
+        specificity_values = expr_values / (denominator + _EPS)
+        cache[members] = (expr_values, detection_values, specificity_values)
+
+    return cache
+
+
 def prepare_ligand_receptor_table(lr_table: pd.DataFrame) -> pd.DataFrame:
     required = {"ligand", "receptor"}
     missing = required.difference(lr_table.columns)
@@ -151,86 +250,136 @@ def score_ligand_receptor_expression(
     *,
     min_ligand_expr: float = 0.0,
     min_receptor_expr: float = 0.0,
+    min_lr_expression_score: float = 0.0,
     include_self_edges: bool = True,
 ) -> pd.DataFrame:
     lr = prepare_ligand_receptor_table(lr_table)
-    rows: List[Dict[str, object]] = []
-    states = list(state.expression.index)
-
-    for edge in lr.itertuples(index=False):
-        ligands = split_complex(edge.ligand)
-        receptors = split_complex(edge.receptor)
-        for sender in states:
-            ligand_expr = _complex_value(state.expression, sender, ligands)
-            if ligand_expr < min_ligand_expr:
-                continue
-            ligand_detection = _complex_detection(state.detection, sender, ligands)
-            ligand_specificity = _specificity(state.expression, sender, ligands)
-
-            for receiver in states:
-                if not include_self_edges and sender == receiver:
-                    continue
-                receptor_expr = _complex_value(state.expression, receiver, receptors)
-                if receptor_expr < min_receptor_expr:
-                    continue
-                receptor_detection = _complex_detection(state.detection, receiver, receptors)
-                receptor_specificity = _specificity(state.expression, receiver, receptors)
-                complex_completeness = min(ligand_detection, receptor_detection)
-                expression_score = np.log1p(ligand_expr) * np.log1p(receptor_expr)
-                specificity_score = np.sqrt(max(ligand_specificity, 0.0) * max(receptor_specificity, 0.0))
-                lr_expression_score = (
-                    expression_score
-                    * (0.5 + 0.5 * complex_completeness)
-                    * (0.5 + 0.5 * specificity_score)
-                    * float(edge.evidence_weight)
-                )
-                rows.append(
-                    {
-                        "sender_state": sender,
-                        "receiver_state": receiver,
-                        "ligand": edge.ligand,
-                        "receptor": edge.receptor,
-                        "lr_key": edge.lr_key,
-                        "pathway": edge.pathway,
-                        "interaction_class": edge.interaction_class,
-                        "ligand_expr": ligand_expr,
-                        "receptor_expr": receptor_expr,
-                        "ligand_detection": ligand_detection,
-                        "receptor_detection": receptor_detection,
-                        "complex_completeness": complex_completeness,
-                        "ligand_specificity": ligand_specificity,
-                        "receptor_specificity": receptor_specificity,
-                        "evidence_weight": float(edge.evidence_weight),
-                        "lr_expression_score": float(lr_expression_score),
-                    }
-                )
-
-    if not rows:
+    output_columns = [
+        "sender_state",
+        "receiver_state",
+        "ligand",
+        "receptor",
+        "lr_key",
+        "pathway",
+        "interaction_class",
+        "ligand_expr",
+        "receptor_expr",
+        "ligand_detection",
+        "receptor_detection",
+        "complex_completeness",
+        "ligand_specificity",
+        "receptor_specificity",
+        "evidence_weight",
+        "lr_expression_score",
+    ]
+    if lr.empty:
         return pd.DataFrame(
-            columns=[
-                "sender_state",
-                "receiver_state",
-                "ligand",
-                "receptor",
-                "lr_key",
-                "pathway",
-                "interaction_class",
-                "ligand_expr",
-                "receptor_expr",
-                "ligand_detection",
-                "receptor_detection",
-                "complex_completeness",
-                "ligand_specificity",
-                "receptor_specificity",
-                "evidence_weight",
-                "lr_expression_score",
-            ]
+            columns=output_columns
         )
-    return pd.DataFrame(rows).sort_values("lr_expression_score", ascending=False).reset_index(drop=True)
+
+    ligand_members = [split_complex(value) for value in lr["ligand"]]
+    receptor_members = [split_complex(value) for value in lr["receptor"]]
+    complex_cache = _complex_arrays(state, set(ligand_members) | set(receptor_members))
+    states = np.asarray(clean_labels(state.expression.index), dtype=object)
+    chunks: Dict[str, List[np.ndarray]] = {column: [] for column in output_columns}
+
+    ligand_values = lr["ligand"].to_numpy(dtype=object)
+    receptor_values = lr["receptor"].to_numpy(dtype=object)
+    lr_key_values = lr["lr_key"].to_numpy(dtype=object)
+    pathway_values = lr["pathway"].to_numpy(dtype=object)
+    class_values = lr["interaction_class"].to_numpy(dtype=object)
+    evidence_values = lr["evidence_weight"].to_numpy(dtype=float)
+
+    for idx in range(lr.shape[0]):
+        ligand_expr, ligand_detection, ligand_specificity = complex_cache[ligand_members[idx]]
+        receptor_expr, receptor_detection, receptor_specificity = complex_cache[receptor_members[idx]]
+        senders = np.flatnonzero(ligand_expr >= min_ligand_expr)
+        receivers = np.flatnonzero(receptor_expr >= min_receptor_expr)
+        if senders.size == 0 or receivers.size == 0:
+            continue
+
+        sender_idx = np.repeat(senders, receivers.size)
+        receiver_idx = np.tile(receivers, senders.size)
+        if not include_self_edges:
+            keep = sender_idx != receiver_idx
+            if not np.any(keep):
+                continue
+            sender_idx = sender_idx[keep]
+            receiver_idx = receiver_idx[keep]
+
+        ligand_expr_values = ligand_expr[sender_idx]
+        receptor_expr_values = receptor_expr[receiver_idx]
+        ligand_detection_values = ligand_detection[sender_idx]
+        receptor_detection_values = receptor_detection[receiver_idx]
+        ligand_specificity_values = ligand_specificity[sender_idx]
+        receptor_specificity_values = receptor_specificity[receiver_idx]
+        complex_completeness = np.minimum(ligand_detection_values, receptor_detection_values)
+        expression_score = np.log1p(ligand_expr_values) * np.log1p(receptor_expr_values)
+        specificity_score = np.sqrt(
+            np.maximum(ligand_specificity_values, 0.0)
+            * np.maximum(receptor_specificity_values, 0.0)
+        )
+        lr_expression_score = (
+            expression_score
+            * (0.5 + 0.5 * complex_completeness)
+            * (0.5 + 0.5 * specificity_score)
+            * evidence_values[idx]
+        )
+        if min_lr_expression_score > 0:
+            keep = lr_expression_score >= min_lr_expression_score
+            if not np.any(keep):
+                continue
+            sender_idx = sender_idx[keep]
+            receiver_idx = receiver_idx[keep]
+            ligand_expr_values = ligand_expr_values[keep]
+            receptor_expr_values = receptor_expr_values[keep]
+            ligand_detection_values = ligand_detection_values[keep]
+            receptor_detection_values = receptor_detection_values[keep]
+            ligand_specificity_values = ligand_specificity_values[keep]
+            receptor_specificity_values = receptor_specificity_values[keep]
+            complex_completeness = complex_completeness[keep]
+            lr_expression_score = lr_expression_score[keep]
+
+        n_rows = sender_idx.size
+        chunks["sender_state"].append(states[sender_idx])
+        chunks["receiver_state"].append(states[receiver_idx])
+        chunks["ligand"].append(np.repeat(ligand_values[idx], n_rows))
+        chunks["receptor"].append(np.repeat(receptor_values[idx], n_rows))
+        chunks["lr_key"].append(np.repeat(lr_key_values[idx], n_rows))
+        chunks["pathway"].append(np.repeat(pathway_values[idx], n_rows))
+        chunks["interaction_class"].append(np.repeat(class_values[idx], n_rows))
+        chunks["ligand_expr"].append(ligand_expr_values)
+        chunks["receptor_expr"].append(receptor_expr_values)
+        chunks["ligand_detection"].append(ligand_detection_values)
+        chunks["receptor_detection"].append(receptor_detection_values)
+        chunks["complex_completeness"].append(complex_completeness)
+        chunks["ligand_specificity"].append(ligand_specificity_values)
+        chunks["receptor_specificity"].append(receptor_specificity_values)
+        chunks["evidence_weight"].append(np.repeat(evidence_values[idx], n_rows))
+        chunks["lr_expression_score"].append(lr_expression_score)
+
+    if not chunks["lr_expression_score"]:
+        return pd.DataFrame(columns=output_columns)
+
+    return pd.DataFrame(
+        {column: np.concatenate(values) for column, values in chunks.items()},
+        columns=output_columns,
+    ).sort_values("lr_expression_score", ascending=False).reset_index(drop=True)
+
+
+def limit_lr_candidates_per_state_pair(edges: pd.DataFrame, max_candidates: Optional[int]) -> pd.DataFrame:
+    if edges.empty or max_candidates is None or max_candidates <= 0:
+        return edges
+    return (
+        edges.sort_values("lr_expression_score", ascending=False)
+        .groupby(["sender_state", "receiver_state"], sort=False, group_keys=False)
+        .head(int(max_candidates))
+        .reset_index(drop=True)
+    )
 
 
 def load_response_matrix(path: str) -> pd.DataFrame:
-    matrix = pd.read_csv(path, sep=None, engine="python", index_col=0)
+    matrix = pd.read_csv(path, sep="\t", index_col=0)
     matrix.index = clean_labels(matrix.index)
     matrix.columns = clean_labels(matrix.columns)
     return matrix.apply(pd.to_numeric, errors="coerce").fillna(0.0)
@@ -315,51 +464,81 @@ def add_receiver_response_scores(
 
     response_sub = response_matrix.loc[:, common_genes]
     delta_sub = receiver_delta.loc[:, common_genes]
-    response_scores: List[float] = []
-    promotion_scores: List[float] = []
-    response_keys: List[str] = []
-    genes_used: List[int] = []
-    support_genes: List[str] = []
-
-    for edge in out.itertuples(index=False):
-        key = ""
-        expected = None
-        for field in response_key_order:
-            candidate = str(getattr(edge, field, "")).strip()
-            if candidate and candidate in response_sub.index:
-                key = candidate
-                expected = response_sub.loc[candidate].to_numpy(dtype=float)
-                break
-        if expected is None or edge.receiver_state not in delta_sub.index:
-            response_scores.append(0.0)
-            promotion_scores.append(0.0)
-            response_keys.append("")
-            genes_used.append(0)
-            support_genes.append("")
+    response_index = pd.Index(response_sub.index.astype(str))
+    response_key_values = np.full(out.shape[0], "", dtype=object)
+    unresolved = np.ones(out.shape[0], dtype=bool)
+    for field in response_key_order:
+        if field not in out.columns or not np.any(unresolved):
             continue
+        candidates = out[field].astype(str).str.strip()
+        matched = unresolved & candidates.isin(response_index).to_numpy()
+        if np.any(matched):
+            response_key_values[matched] = candidates.loc[matched].to_numpy(dtype=object)
+            unresolved[matched] = False
 
-        observed = delta_sub.loc[edge.receiver_state].to_numpy(dtype=float)
-        cosine = _cosine(observed, expected)
-        contribution = observed * expected
-        if max_support_genes > 0:
-            nonzero = np.where((expected != 0) & np.isfinite(contribution))[0]
-            ranked = sorted(nonzero, key=lambda idx: contribution[idx], reverse=True)
-            support = [
-                f"{common_genes[idx]}:{contribution[idx]:.3g}"
-                for idx in ranked[:max_support_genes]
-                if contribution[idx] > 0
+    receiver_index = pd.Index(delta_sub.index.astype(str))
+    receiver_values = out["receiver_state"].astype(str).to_numpy(dtype=object)
+    receiver_pos = receiver_index.get_indexer(receiver_values)
+    response_pos = response_index.get_indexer(response_key_values)
+    valid = (receiver_pos >= 0) & (response_pos >= 0)
+
+    response_scores = np.zeros(out.shape[0], dtype=float)
+    promotion_scores = np.zeros(out.shape[0], dtype=float)
+    genes_used = np.zeros(out.shape[0], dtype=int)
+    support_genes = np.full(out.shape[0], "", dtype=object)
+
+    if np.any(valid):
+        delta_values = delta_sub.to_numpy(dtype=float, copy=False)
+        response_values = response_sub.to_numpy(dtype=float, copy=False)
+        delta_norm = np.linalg.norm(delta_values, axis=1)
+        response_norm = np.linalg.norm(response_values, axis=1)
+        denom = delta_norm[:, None] * response_norm[None, :]
+        cosine = np.divide(
+            delta_values @ response_values.T,
+            denom,
+            out=np.zeros((delta_values.shape[0], response_values.shape[0]), dtype=float),
+            where=denom > _EPS,
+        )
+        valid_idx = np.flatnonzero(valid)
+        valid_cosine = cosine[receiver_pos[valid_idx], response_pos[valid_idx]]
+        promotion_scores[valid_idx] = valid_cosine
+        response_scores[valid_idx] = np.maximum(valid_cosine, 0.0)
+        response_gene_counts = np.count_nonzero(response_values, axis=1)
+        genes_used[valid_idx] = response_gene_counts[response_pos[valid_idx]]
+
+        unique_pairs = pd.DataFrame(
+            {
+                "receiver_pos": receiver_pos[valid_idx],
+                "response_pos": response_pos[valid_idx],
+            }
+        ).drop_duplicates()
+        # Support strings are diagnostic only. Keep them for moderate workloads,
+        # but avoid an O(unique pairs * genes) Python pass on full web-scale runs.
+        if max_support_genes > 0 and unique_pairs.shape[0] * len(common_genes) <= 50_000_000:
+            support_by_pair: Dict[Tuple[int, int], str] = {}
+            common_gene_values = np.asarray(common_genes, dtype=object)
+            for pair in unique_pairs.itertuples(index=False):
+                contribution = delta_values[pair.receiver_pos] * response_values[pair.response_pos]
+                eligible = np.flatnonzero((response_values[pair.response_pos] != 0) & np.isfinite(contribution) & (contribution > 0))
+                if eligible.size == 0:
+                    support_by_pair[(pair.receiver_pos, pair.response_pos)] = ""
+                    continue
+                if eligible.size > max_support_genes:
+                    top_local = np.argpartition(-contribution[eligible], max_support_genes - 1)[:max_support_genes]
+                    ranked = eligible[top_local[np.argsort(-contribution[eligible][top_local])]]
+                else:
+                    ranked = eligible[np.argsort(-contribution[eligible])]
+                support_by_pair[(pair.receiver_pos, pair.response_pos)] = ";".join(
+                    f"{common_gene_values[idx]}:{contribution[idx]:.3g}" for idx in ranked
+                )
+            support_genes[valid_idx] = [
+                support_by_pair.get((int(receiver), int(response)), "")
+                for receiver, response in zip(receiver_pos[valid_idx], response_pos[valid_idx])
             ]
-        else:
-            support = []
-        response_scores.append(max(cosine, 0.0))
-        promotion_scores.append(cosine)
-        response_keys.append(key)
-        genes_used.append(int(np.count_nonzero(expected)))
-        support_genes.append(";".join(support))
 
     out["receiver_response_score"] = response_scores
     out["state_promotion_score"] = promotion_scores
-    out["response_key"] = response_keys
+    out["response_key"] = response_key_values
     out["response_genes_used"] = genes_used
     out["response_support_genes"] = support_genes
     return out

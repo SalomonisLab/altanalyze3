@@ -18,7 +18,6 @@ from altanalyze3.components.long_read.cli import (
     run_sclr_junctions,
     run_sclr_isoforms,
     run_sclr_isoquant,
-    run_sclr_gene_aggregate,
     run_sclr_diff,
 )
 from altanalyze3.utilities.io import (
@@ -352,20 +351,6 @@ class ArgsParser():
         sclr_isoquant_parser.add_argument("--species", default="human", choices=["human", "mouse"], help="Default: human")
         sclr_isoquant_parser.add_argument("--cell_annot", default=None, type=str, help="Optional explicit barcode->cluster file/dir (else discovered from the sclr cellHarmony outputs)")
         self.add_common_arguments(sclr_isoquant_parser)
-
-        # Gene aggregation (per sample, parallelizable): molecule h5ad -> <library>-gene.h5ad. Needed
-        # before gene-level differentials on runs whose -gene.h5ad were not produced during extraction.
-        sclr_gene_agg_parser = subparsers.add_parser(
-            "sclr-gene-aggregate",
-            parents=[parent_parser],
-            help="Long-read (per sample): aggregate the molecule h5ad to gene level (<library>-gene.h5ad); parallelizable. Idempotent."
-        )
-        sclr_gene_agg_parser.set_defaults(func=run_sclr_gene_aggregate)
-        sclr_gene_agg_parser.add_argument("--metadata", required=True, type=str, help="Metadata file (same one used for sclr)")
-        sclr_gene_agg_parser.add_argument("--sample", default=None, type=str, help="Process ONE uid (parallel fan-out). Omit to loop over all uids.")
-        sclr_gene_agg_parser.add_argument("--species", default="human", choices=["human", "mouse"], help="Default: human")
-        sclr_gene_agg_parser.add_argument("--cell_annot", default=None, type=str, help="Barcode->cluster file/dir (cellHarmony format), same source the isoform/junction diffs use; joined in-memory to build the per-sample gene pseudobulk")
-        self.add_common_arguments(sclr_gene_agg_parser)
 
         # Phase 4 combine (1 job): combine per-sample isoform pseudobulks + isoform differentials
         sclr_diff_parser = subparsers.add_parser(

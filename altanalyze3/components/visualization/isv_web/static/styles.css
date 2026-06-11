@@ -89,7 +89,21 @@ input[type=range] { width:100%; accent-color:var(--accent); }
 .legend .sw { width:13px; height:13px; border-radius:3px; display:inline-block; border:1px solid rgba(0,0,0,.12); }
 
 /* ---------- main ---------- */
-#canvas-wrap { flex:1; display:flex; flex-direction:column; overflow:hidden; min-width:0; }
+#canvas-wrap { flex:1; display:flex; flex-direction:column; overflow:hidden; min-width:0; position:relative; }
+
+/* ---------- loading overlay: animated DNA double helix ---------- */
+#loading { position:absolute; inset:0; z-index:50; display:flex; flex-direction:column; align-items:center;
+  justify-content:center; gap:20px; background:rgba(244,246,250,.84); backdrop-filter:blur(2px); }
+#loading.hidden { display:none; }
+.loading-txt { font-size:13px; color:var(--ink2); font-weight:600; letter-spacing:.02em; }
+.dna { display:flex; align-items:center; gap:5px; height:50px; }
+.dna span { position:relative; width:4px; height:44px; }
+.dna span::before, .dna span::after { content:""; position:absolute; left:50%; width:10px; height:10px;
+  margin-left:-5px; border-radius:50%; box-shadow:0 1px 2px rgba(20,30,50,.18); }
+.dna span::before { background:var(--accent); animation:dnaTop 1.25s ease-in-out infinite; animation-delay:var(--d); }
+.dna span::after  { background:var(--teal);   animation:dnaBot 1.25s ease-in-out infinite; animation-delay:var(--d); }
+@keyframes dnaTop { 0%,100% { top:0;    transform:scale(.5);  opacity:.5; } 50% { top:34px; transform:scale(1); opacity:1; } }
+@keyframes dnaBot { 0%,100% { top:34px; transform:scale(1);  opacity:1;  } 50% { top:0;    transform:scale(.5); opacity:.5; } }
 #tabbar { display:flex; gap:4px; padding:0 18px; background:#fff; border-bottom:1px solid var(--line); }
 #tabbar .tab { border:none; background:none; padding:14px 18px 12px; font-size:13px; font-weight:600; color:var(--ink2);
   cursor:pointer; border-bottom:2.5px solid transparent; margin-bottom:-1px; display:flex; align-items:center; gap:7px; }

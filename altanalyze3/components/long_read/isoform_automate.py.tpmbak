@@ -152,9 +152,9 @@ def _trim_memory():
             pass
 
 def exportRatios(ob,out):
-    pseudo_pdf, cpm, isoform_to_gene_ratio = iso.pseudo_cluster_counts(ob,cell_threshold=5,count_threshold=0,compute_cpm=True)
+    pseudo_pdf, tpm, isoform_to_gene_ratio = iso.pseudo_cluster_counts(ob,cell_threshold=5,count_threshold=0,compute_tpm=True)
     pseudo_pdf.to_csv(out+'_pseudo_cluster_counts.txt', sep='\t')
-    cpm.to_csv(out+'_pseudo_cluster-cpm.txt', sep='\t')
+    tpm.to_csv(out+'_pseudo_cluster-tpm.txt', sep='\t')
     isoform_to_gene_ratio.to_csv(out+'_pseudo_cluster-ratio.txt', sep='\t')
 
 def import_metadata(metadata_file, return_size = False, include_hashed_samples = False, extract_from_bams = False, reference_model = None):
@@ -201,10 +201,6 @@ def import_metadata(metadata_file, return_size = False, include_hashed_samples =
                 gff_path = str(gff_path); matrix_path = str(matrix_path)
                 del stats, n, o
                 _trim_memory()
-                # Gene-level aggregate of the molecule h5ad -> '<library>-gene.h5ad' beside it, so the
-                # later gene differentials (sclr-diff --analyses gene) find it with no extra step.
-                # Idempotent (skips if it already exists) and best-effort (never fails extraction).
-                _ensure_gene_h5ad(matrix_path)
             else:
                 # If False, assume the BAMs have been processed already (replace gff and matrix paths from bam)
                 gff_path = output_dir + ".gff.gz"
@@ -598,7 +594,7 @@ def deconvolute_libraries_by_hashed_index(sample_dict,sample_h5ads,dataType):
     """
     return update_sample_files
 
-def export_pseudo_counts(metadata_file,barcode_cluster_dirs,dataType='junction',compute_cpm=False,only_import_existing=False,fused_filter=None):
+def export_pseudo_counts(metadata_file,barcode_cluster_dirs,dataType='junction',compute_tpm=False,only_import_existing=False,fused_filter=None):
     # only_import_existing=True: per-sample pseudobulks already built (4-phase cluster mode); this call
     # only concatenates + filters across samples. Default False = single-process path (build inline).
     #
@@ -606,8 +602,8 @@ def export_pseudo_counts(metadata_file,barcode_cluster_dirs,dataType='junction',
     # SKIP materializing the dense unfiltered '<dataType>_combined_pseudo_cluster_counts.txt' (the
     # multi-GB / cluster-121GB throwaway that nothing reads except the old filter pass) AND skip the
     # subsequent full pd.read_csv re-read. Filtered output is byte-identical. Default: ON for the
-    # junction path (the 121GB bottleneck), OFF for isoform (which filters counts/cpm/ratio with
-    # independent masks -- left on the legacy two-step path for now). The CPM/ratio filtered files for
+    # junction path (the 121GB bottleneck), OFF for isoform (which filters counts/tpm/ratio with
+    # independent masks -- left on the legacy two-step path for now). The TPM/ratio filtered files for
     # isoform are still produced by the legacy chunked filter below, so PSI/diff inputs are unchanged.
     sample_dict, min_group_size = import_metadata(metadata_file, return_size = True, include_hashed_samples = True)
     cluster_order = iso.return_cluster_order(barcode_cluster_dirs)
@@ -615,7 +611,7 @@ def export_pseudo_counts(metadata_file,barcode_cluster_dirs,dataType='junction',
         fused_filter = (dataType == 'junction')
     # Memory efficient combine and pseudobulk of many h5ad files
     pseudo_counts = dataType+'_combined_pseudo_cluster_counts.txt'
-    pseudo_cpm = dataType+'_combined_pseudo_cluster_cpm.txt'
+    pseudo_tpm = dataType+'_combined_pseudo_cluster_tpm.txt'
     pseudo_ratios = dataType+'_combined_pseudo_cluster_ratio.txt'
 
     # Deconvolute multi-sample libraries (hashed) - if present
@@ -625,13 +621,13 @@ def export_pseudo_counts(metadata_file,barcode_cluster_dirs,dataType='junction',
     print (sample_files)
 
     iso.concatenate_h5ad_and_compute_pseudobulks_optimized(
-        sample_files, collection_name=dataType, compute_cpm=compute_cpm,
+        sample_files, collection_name=dataType, compute_tpm=compute_tpm,
         only_import_existing=only_import_existing,
         fused_filter=fused_filter, cluster_order=cluster_order, min_group_size=min_group_size,
     )
 
     # Organize and filter.
-    #   * ISOFORM: the combine wrote counts/cpm/ratio as h5ad (full + filtered) directly from the
+    #   * ISOFORM: the combine wrote counts/tpm/ratio as h5ad (full + filtered) directly from the
     #     memmaps -- no dense .txt exists and the differentials read the filtered h5ad, so the legacy
     #     chunked filter-from-txt is GONE.
     #   * JUNCTION: with fused_filter (default) the counts '-filtered.txt' was already written from the
@@ -642,114 +638,77 @@ def export_pseudo_counts(metadata_file,barcode_cluster_dirs,dataType='junction',
         iso.export_and_filter_pseudobulk_chunks(pseudo_counts, pseudo_counts[:-4]+'-filtered.txt', cluster_order, min_group_size=min_group_size)
 
 
-def combine_genes(metadata_file, barcode_cluster_dirs):
-    """P-combine for GENE: concatenate the PER-SAMPLE gene pseudobulks (already built in parallel by
-    export_sample_gene / sclr-gene-aggregate) into the study-combined gene pseudobulk h5ad. NO
-    per-sample work here, and NO '_gene_clustered/' copies -- the per-sample '<library>-gene.txt'
-    (+_cpm) live beside each '<library>-gene.h5ad' (the proper local dir, with the isoform/junction
-    outputs); this step only sums across samples.
+def _annotate_gene_h5ad_clusters(sample_dict, barcode_sample_dict):
+    """The per-sample '<library>-gene.h5ad' files carry NO obs['cluster'] (unlike isoform/junction,
+    which get it during their build). Join the barcode->cluster labels onto each gene h5ad's obs (the
+    SAME join the isoform/junction build uses, calculate_barcode_match_percentage), honoring the
+    per-sample reverse-complement flag, and write a sibling '<library>-gene-clustered.h5ad' that the
+    combine then consumes. Returns the list of clustered h5ad paths."""
+    import anndata as ad
+    out = []
+    for uid, samples in sample_dict.items():
+        for s in samples:
+            lib = s.get('library') or s.get('gff_name') or uid
+            src = _find_sample_gene_h5ad(os.getcwd(), lib) or _find_sample_gene_h5ad(
+                os.path.dirname(s.get('gff', '')), lib)
+            if not src:
+                raise FileNotFoundError(f"gene h5ad not found for library '{lib}'")
+            adata = ad.read_h5ad(src)
+            series = barcode_sample_dict.get(lib)
+            if series is None:
+                raise KeyError(f"no barcode->cluster series for library '{lib}'")
+            bc = series.copy()
+            if s.get('reverse'):
+                bc.index = bc.index.to_series().apply(iso.reverse_complement_seq)
+            bc = bc[~bc.index.duplicated(keep='first')]
+            bc.name = 'cluster'
+            adata = iso.calculate_barcode_match_percentage(adata, bc)
+            # Keep the '<library>-gene.h5ad' name so the combine derives the column suffix '-gene'
+            # (matching get_sample_to_group / _resolve_uid). Write into a sibling _gene_clustered/ dir
+            # so the original (cluster-less) gene h5ad is not overwritten.
+            cdir = os.path.join(os.getcwd(), "_gene_clustered")
+            os.makedirs(cdir, exist_ok=True)
+            dst = os.path.join(cdir, f"{lib}-gene.h5ad")
+            adata.write_h5ad(dst, compression='gzip')
+            out.append(dst)
+            print(f"[combine_genes] clustered {lib}: {adata.shape[0]} cells x {adata.shape[1]} genes -> {os.path.relpath(dst)}", flush=True)
+    return out
 
-    Exactly mirrors combine_isoforms (only_import_existing=True). compute_cpm=True writes the CPM
-    pseudobulk (counts/row_total * 1e6) so the gene differentials mirror the isoform method
-    (log2(CPM + 1)). Writes gene_combined_pseudo_cluster_counts.h5ad AND
-    gene_combined_pseudo_cluster_cpm.h5ad (the FULL CPM matrix -- ALL genes retained)."""
-    export_pseudo_counts(metadata_file, barcode_cluster_dirs, 'gene', compute_cpm=True,
-                         only_import_existing=True)
+
+def combine_genes(metadata_file, barcode_cluster_dirs):
+    """Build the study-combined GENE pseudobulk h5ad from the per-sample '<library>-gene.h5ad' files.
+
+    Mirrors the isoform/junction combine but for gene-level counts: assign cluster labels to each
+    gene h5ad (they lack obs['cluster']), concatenate, sum cells into per-(cell_type x sample)
+    pseudobulk columns, and write 'gene_combined_pseudo_cluster_counts.h5ad' (the FULL matrix -- ALL
+    genes retained, no expression filter). No TPM/ratio. The gene differentials
+    (compute_differentials, analyses=['gene']) read this full counts h5ad and apply log2 CP10k scaling
+    (mirroring cellHarmony-differential)."""
+    sample_dict = import_metadata(metadata_file, include_hashed_samples=True)
+    barcode_sample_dict = iso.import_barcode_clusters(barcode_cluster_dirs)
+    cluster_order = iso.return_cluster_order(barcode_cluster_dirs)
+    clustered = _annotate_gene_h5ad_clusters(sample_dict, barcode_sample_dict)
+    min_group_size = import_metadata(metadata_file, return_size=True, include_hashed_samples=True)[1]
+    # Concatenate the cluster-annotated gene h5ads. compute_tpm=True writes the TPM (CP1M) pseudobulk
+    # h5ad exactly as the isoform combine does (counts/row_total * 1e6), so the gene differentials can
+    # mirror the isoform method: log2(TPM + 1). Writes gene_combined_pseudo_cluster_counts.h5ad AND
+    # gene_combined_pseudo_cluster_tpm.h5ad (the FULL TPM matrix -- all genes retained).
+    iso.concatenate_h5ad_and_compute_pseudobulks_optimized(
+        clustered, collection_name='gene', compute_tpm=True,
+        only_import_existing=False, fused_filter=False,
+        cluster_order=cluster_order, min_group_size=min_group_size,
+    )
 
 
 def _find_sample_gene_h5ad(directory, library):
-    """Locate the ORIGINAL per-sample '<library>-gene.h5ad' (the cluster-less aggregate).
-
-    NEVER return a copy under '_gene_clustered/' -- that is THIS module's own cluster-annotated
-    output (it already carries obs['cluster']). The recursive glob below would otherwise match it on
-    a re-run, and re-joining 'cluster' raises 'columns overlap but no suffix specified'."""
     if not directory:
         return None
     cand = os.path.join(directory, f"{library}-gene.h5ad")
     if os.path.exists(cand):
         return cand
-    if not os.path.isdir(directory):
-        return []
-    hits = [h for h in glob.glob(os.path.join(directory, "**", f"{library}-gene.h5ad"), recursive=True)
-            if "_gene_clustered" not in os.path.normpath(h).split(os.sep)]
+    hits = glob.glob(os.path.join(directory, "**", f"{library}-gene.h5ad"), recursive=True) \
+        if os.path.isdir(directory) else []
     return hits[0] if hits else None
-
-
-def _gene_h5ad_path_for(matrix_path):
-    """The gene-level aggregate path for a molecule h5ad: '<prefix>-gene.h5ad' beside it
-    (the same name aggregate_to_gene_level writes and _find_sample_gene_h5ad looks for)."""
-    matrix_path = str(matrix_path)
-    return (matrix_path[:-5] if matrix_path.endswith('.h5ad') else matrix_path) + '-gene.h5ad'
-
-
-def _ensure_gene_h5ad(matrix_path):
-    """Aggregate a molecule h5ad to gene level -> '<prefix>-gene.h5ad' beside it, so the gene
-    differentials (sclr-diff --analyses gene) find it without a separate aggregation step.
-
-    Idempotent: returns immediately if the gene h5ad already exists (so re-running BAM extraction,
-    or a run where it was produced elsewhere, does no redundant work -- the "check cellHarmony and
-    skip if present" behavior). Best-effort: any failure is logged, NOT raised, so it can never break
-    the extraction itself (the gene diff is optional; the molecule/isoform/junction outputs are not)."""
-    try:
-        out = _gene_h5ad_path_for(matrix_path)
-        if os.path.exists(out):
-            print(f"[gene-agg] exists, skipping: {os.path.basename(out)}", flush=True)
-            return out
-        if not os.path.exists(str(matrix_path)):
-            print(f"[gene-agg] molecule h5ad missing, cannot aggregate: {matrix_path}", flush=True)
-            return None
-        from ..aggregate.gene_aggregate import aggregate_to_gene_level
-        return aggregate_to_gene_level(str(matrix_path), output_path=out)
-    except Exception as exc:  # never fail extraction on the optional gene aggregate
-        print(f"[gene-agg] WARNING: gene aggregation failed for {matrix_path}: {exc}", flush=True)
-        return None
-
-
-def export_sample_gene(sample_entry_list, barcode_sample_dict, uid=None):
-    """PER-SAMPLE (parallel fan-out): build ONE uid's gene-level pseudobulk beside its gene h5ad.
-
-    For each library: ensure '<library>-gene.h5ad' exists (aggregate from the molecule h5ad if not),
-    join the barcode->cluster labels onto its obs IN MEMORY (gene h5ads carry no obs['cluster']),
-    honoring the per-sample reverse-complement flag, then write the per-sample pseudobulk
-    '<library>-gene.txt' (+ '<library>-gene_cpm.txt') beside the gene h5ad -- the SAME local directory
-    as the isoform/junction outputs. NO cluster-annotated gene h5ad copy is written anywhere (no
-    '_gene_clustered/'); the annotation lives only in memory for the duration of the pseudobulk.
-
-    The cross-sample combine (combine_genes, only_import_existing=True) then just concatenates these
-    per-sample '.txt' files -- no per-sample work. This is the gene analogue of export_sample_isoform,
-    so it fans out as one bsub per uid exactly like sclr-isoquant."""
-    for s in sample_entry_list:
-        lib = s.get('library') or s.get('gff_name') or uid
-        mol = str(s.get('matrix') or '')
-        gene_h5ad = _ensure_gene_h5ad(mol)  # idempotent; aggregates if missing
-        if not gene_h5ad or not os.path.exists(gene_h5ad):
-            gene_h5ad = _find_sample_gene_h5ad(os.getcwd(), lib) or _find_sample_gene_h5ad(
-                os.path.dirname(s.get('gff', '')), lib)
-        if not gene_h5ad:
-            raise FileNotFoundError(f"gene h5ad not found/aggregatable for library '{lib}'")
-        adata = ad.read_h5ad(gene_h5ad)
-        if 'cluster' in adata.obs.columns:        # idempotent: drop any stale cluster before the join
-            adata.obs = adata.obs.drop(columns=['cluster'])
-        adata.obs.index = adata.obs.index.astype(str)
-        adata.obs_names_make_unique()
-        series = barcode_sample_dict.get(lib)
-        if series is None:
-            raise KeyError(f"no barcode->cluster series for library '{lib}'")
-        bc = series.copy()
-        if s.get('reverse'):
-            bc.index = bc.index.to_series().apply(iso.reverse_complement_seq)
-        bc = bc[~bc.index.duplicated(keep='first')]
-        bc.name = 'cluster'
-        adata = iso.calculate_barcode_match_percentage(
-            adata, bc, context=f"gene h5ad '{lib}' (reverse={bool(s.get('reverse'))})")
-        # Write the per-sample pseudobulk '<prefix>-gene.txt' (+_cpm) beside the gene h5ad.
-        prefix = gene_h5ad[:-5] if gene_h5ad.endswith('.h5ad') else gene_h5ad
-        iso.pseudo_cluster_counts_optimized(prefix, adata, cell_threshold=0, count_threshold=0,
-                                            compute_cpm=True, cpm_threshold=1, status=False)
-        print(f"[gene] {lib}: {adata.shape[0]} cells x {adata.shape[1]} genes "
-              f"-> {os.path.basename(prefix)}.txt", flush=True)
-        del adata
-        _trim_memory()
 
 # ---------------------------------------------------------------------------
 # PER-SAMPLE building blocks (4-phase cluster mode). Each operates on ONE uid in
@@ -758,8 +717,8 @@ def export_sample_gene(sample_entry_list, barcode_sample_dict, uid=None):
 # logic/outputs are identical either way.
 # ---------------------------------------------------------------------------
 
-def _pseudobulk_one_h5ad(h5ad_path, dataType, compute_cpm):
-    """Compute the per-sample pseudobulk <prefix>.txt (+_cpm/_ratio for isoform) for ONE sample h5ad,
+def _pseudobulk_one_h5ad(h5ad_path, dataType, compute_tpm):
+    """Compute the per-sample pseudobulk <prefix>.txt (+_tpm/_ratio for isoform) for ONE sample h5ad,
     using the exact same routine the cross-sample concat uses (so outputs are byte-identical whether
     built here per-sample or inline during concat)."""
     h5ad_path = str(h5ad_path)
@@ -768,7 +727,7 @@ def _pseudobulk_one_h5ad(h5ad_path, dataType, compute_cpm):
     adata.obs.index = adata.obs.index.astype(str)
     adata.obs_names_make_unique()
     iso.pseudo_cluster_counts_optimized(prefix, adata, cell_threshold=0, count_threshold=0,
-                                        compute_cpm=compute_cpm, cpm_threshold=1, status=False)
+                                        compute_tpm=compute_tpm, tpm_threshold=1, status=False)
     del adata
     _trim_memory()
     return f"{prefix}.txt"
@@ -793,17 +752,17 @@ def export_sample_junctions(sample_entry_list, ensembl_exon_dir, barcode_sample_
         combined.write_h5ad(uid_h5ad, compression='gzip')
         del combined, adata_list
         _trim_memory()
-        _pseudobulk_one_h5ad(uid_h5ad, 'junction', compute_cpm=False)
+        _pseudobulk_one_h5ad(uid_h5ad, 'junction', compute_tpm=False)
     else:
         del adata_list
         # single-library uid: export_junction_matrix wrote <gff_stem>-junction.h5ad next to the gff
         s = sample_entry_list[0]
         per = f"{str(s['gff']).split('.g')[0]}-junction.h5ad"
-        _pseudobulk_one_h5ad(per, 'junction', compute_cpm=False)
+        _pseudobulk_one_h5ad(per, 'junction', compute_tpm=False)
 
 
 def export_sample_isoform(sample_entry_list, gff_output_dir, barcode_sample_dict, uid=None,
-                          collapse_method='wta', compute_cpm=True):
+                          collapse_method='wta', compute_tpm=True):
     """P4 per-sample: re-key ONE uid's molecule h5ad onto the FINAL collapse catalog (loaded from disk
     in gff_output_dir) and build its per-sample isoform pseudobulk. Independent of the collapse
     process memory -- reads FINAL_structure_to_exemplar(.tsv/_soft.tsv). Handles multi-BAM uid by
@@ -825,9 +784,9 @@ def export_sample_isoform(sample_entry_list, gff_output_dir, barcode_sample_dict
         combined.write_h5ad(uid_h5ad, compression='gzip')
         del adatas, combined
         _trim_memory()
-        _pseudobulk_one_h5ad(uid_h5ad, 'isoform', compute_cpm=compute_cpm)
+        _pseudobulk_one_h5ad(uid_h5ad, 'isoform', compute_tpm=compute_tpm)
     else:
-        _pseudobulk_one_h5ad(out_h5ads[0], 'isoform', compute_cpm=compute_cpm)
+        _pseudobulk_one_h5ad(out_h5ads[0], 'isoform', compute_tpm=compute_tpm)
 
 
 def _isoform_molecule_h5ad(matrix_or_uid):
@@ -908,7 +867,7 @@ def combine_processed_samples(metadata_file, barcode_cluster_dirs, ensembl_exon_
     # reused. collapse_method selects winner-takes-all ('wta', default) vs EM ('em').
     export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, gencode_gff, genome_fasta,
                         collapse_method=collapse_method, force_recollapse=force_recollapse)
-    export_pseudo_counts(metadata_file,barcode_cluster_dirs,'isoform',compute_cpm=True)
+    export_pseudo_counts(metadata_file,barcode_cluster_dirs,'isoform',compute_tpm=True)
 
 
 # ---------------------------------------------------------------------------
@@ -967,7 +926,7 @@ def build_isoform_catalog(metadata_file, ensembl_exon_dir, gencode_gff, genome_f
 def combine_isoforms(metadata_file, barcode_cluster_dirs):
     """P4-combine: concatenate the per-sample isoform pseudobulks (already built by P4
     export_sample_isoform) into the combined isoform matrix. No per-sample work."""
-    export_pseudo_counts(metadata_file, barcode_cluster_dirs, 'isoform', compute_cpm=True,
+    export_pseudo_counts(metadata_file, barcode_cluster_dirs, 'isoform', compute_tpm=True,
                          only_import_existing=True)
 
 

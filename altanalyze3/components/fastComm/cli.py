@@ -34,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Response matrix, rows are LR/ligand/pathway keys. Defaults to the built upstream bundle for the inferred/provided species when available.",
     )
     score.add_argument("--no-response", action="store_true", help="Disable receiver-response scoring.")
+    score.add_argument("--lr-source", action="append", help="Restrict LR rows to this source value, e.g. CellChatDB or NicheNet. Repeat to allow multiple sources.")
     score.add_argument("--state-pair-output", type=Path, help="Optional state-pair summary TSV.")
     score.add_argument("--state-expression-output", type=Path, help="Optional state pseudobulk expression TSV.")
     score.add_argument("--state-key", default="cell_state", help="Metadata/obs column defining cell states.")
@@ -44,6 +45,12 @@ def build_parser() -> argparse.ArgumentParser:
     score.add_argument("--min-ligand-expr", type=float, default=0.01, help="Minimum sender ligand expression.")
     score.add_argument("--min-receptor-expr", type=float, default=0.01, help="Minimum receiver receptor expression.")
     score.add_argument("--min-lr-expression-score", type=float, default=0.001, help="Minimum raw LR expression score.")
+    score.add_argument(
+        "--max-lr-candidates-per-state-pair",
+        type=int,
+        default=25,
+        help="Keep the top N raw LR candidates per sender/receiver state pair before response scoring. Use 0 for no cap.",
+    )
     score.add_argument("--exclude-self-edges", action="store_true", help="Skip sender=receiver state edges.")
     score.add_argument("--baseline-state", help="Receiver baseline state used for response deltas.")
     score.add_argument("--top-n", type=int, help="Keep only the top N scored edges.")
@@ -75,6 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Response matrix used for receiver-response scoring. Defaults to the built upstream bundle for the inferred/provided species when available.",
     )
     benchmark.add_argument("--no-response", action="store_true", help="Disable receiver-response scoring.")
+    benchmark.add_argument("--lr-source", action="append", help="Restrict LR rows to this source value, e.g. CellChatDB or NicheNet. Repeat to allow multiple sources.")
     benchmark.add_argument("--layer", help="AnnData layer to use instead of X.")
     benchmark.add_argument("--gene-symbol-col", help="AnnData var column containing gene symbols.")
     benchmark.add_argument("--species", choices=["human", "mouse"], help="Optional species hint used to resolve built upstream bundles.")
@@ -82,6 +90,12 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--min-ligand-expr", type=float, default=0.01, help="Minimum sender ligand expression.")
     benchmark.add_argument("--min-receptor-expr", type=float, default=0.01, help="Minimum receiver receptor expression.")
     benchmark.add_argument("--min-lr-expression-score", type=float, default=0.001, help="Minimum raw LR expression score.")
+    benchmark.add_argument(
+        "--max-lr-candidates-per-state-pair",
+        type=int,
+        default=25,
+        help="Keep the top N raw LR candidates per sender/receiver state pair before response scoring. Use 0 for no cap.",
+    )
     benchmark.add_argument("--include-self-edges", action="store_true", help="Include sender=receiver state edges.")
     benchmark.add_argument("--top-n-stability", type=int, default=100, help="Top edge count for split-vs-full Jaccard.")
 
@@ -143,6 +157,7 @@ def main() -> int:
                 output=args.output,
                 lr_table=args.lr_table,
                 response_matrix=None if args.no_response else args.response_matrix,
+                lr_sources=args.lr_source,
                 state_pair_output=args.state_pair_output,
                 state_expression_output=args.state_expression_output,
                 state_key=args.state_key,
@@ -153,6 +168,7 @@ def main() -> int:
                 min_ligand_expr=args.min_ligand_expr,
                 min_receptor_expr=args.min_receptor_expr,
                 min_lr_expression_score=args.min_lr_expression_score,
+                max_lr_candidates_per_state_pair=args.max_lr_candidates_per_state_pair,
                 include_self_edges=not args.exclude_self_edges,
                 baseline_state=args.baseline_state,
                 top_n=args.top_n,
@@ -175,6 +191,7 @@ def main() -> int:
                 split_key=args.split_key,
                 lr_table=args.lr_table,
                 response_matrix=None if args.no_response else args.response_matrix,
+                lr_sources=args.lr_source,
                 layer=args.layer,
                 gene_symbol_col=args.gene_symbol_col,
                 species=args.species,
@@ -182,6 +199,7 @@ def main() -> int:
                 min_ligand_expr=args.min_ligand_expr,
                 min_receptor_expr=args.min_receptor_expr,
                 min_lr_expression_score=args.min_lr_expression_score,
+                max_lr_candidates_per_state_pair=args.max_lr_candidates_per_state_pair,
                 include_self_edges=args.include_self_edges,
                 top_n_stability=args.top_n_stability,
             )

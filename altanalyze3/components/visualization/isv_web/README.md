@@ -26,18 +26,24 @@ model + genomic axis at the bottom — the interactive analogue of the ISV PDF. 
 Both tabs:
 - **Mouseover** shows exon-region id + genomic coords (and protein length on isoform exons); the row
   tooltip adds **protein length + NMD + read counts** (molecule id + sample + cluster in the read view).
-- **Right-click** an isoform/molecule → export its **protein** or **mRNA** sequence (FASTA), all
-  proteins in its cluster (heatmap tab), or all visible proteins.
+- **Right-click** an isoform/molecule → export its **protein** (aa), **ORF/CDS** (nt), or **mRNA** (nt)
+  sequence (FASTA), all proteins in its cluster (heatmap tab), or all visible proteins.
 - Search **genes** (symbol or ENSG); the column order follows your cell-type selection order.
 - **Deep links / shareable URLs**: `?gene=HOPX&tab=molecule&cells=HSC-1,HSC-2,MPP-1&groups=young,AML-NPM1`
   auto-renders on load.
 
 ### Performance (read-level view)
-First render of a new (gene × cell-states) selection drives the engine and may take **~10–30 s** (it
-builds the per-sample isoform counts caches under each sample's `gene_indexes_v2/`). The result is
-persisted to `<run_dir>/_isv_web_cache/reads/` **and** memoized in-process, so repeat views (including
-after a restart) are near-instant. For uniformly fast first renders, pre-build the atomic per-cell-type
-caches once with `precompute_viewer_index.precompute(sample_dict, barcode_sample_dict)`.
+The read-level view has a **fast retrieval index**: a per-sample SQLite (`_isv_web_cache/mol_index/<lib>.reads.db`)
+mapping `gene → (molecule_id, cell_type, count)`, built once at indexing time. When present, a gene
+fetches its molecules in **~ms** (no whole-matrix counts load), then clusters **dynamically at viz time**
+— measured: HOPX read view served in **~20–60 ms** (`source: "index"` in the response), reproducing the
+engine's molecule counts (young+HSC = 300). Build it with `precompute_reads_index.build_reads_index(...)`,
+or pass `--build_reads_index` to `run.py` (idempotent; ~3 min / ~4 GB for the 4-sample test set).
+
+If the index is **absent** for any selected sample, the view falls back to driving the engine
+(`plot_isoform_structures_by_conditions`), which is correct but slower (first render ~10–30 s, then
+cached to `_isv_web_cache/reads/` + memoized). Clustering is **never** precomputed — it is always done
+live, so thresholds/strategy stay dynamic.
 
 ## Run
 ```bash
@@ -75,21 +81,22 @@ Protein length/NMD come from `protein_summary.txt` (indexed at startup); protein
 | isoform structures | `transcript_associations.txt` (read directly; known + novel) |
 | reference track + exon coords | `Hs_Ensembl_exon.txt` (`gene_segments` for the IGV ref track + ruler; `exon_lookup` for per-isoform segments / mouseover) |
 | expression / read counts (heatmap) | `isoform_combined_pseudo_cluster_counts.h5ad` (column slice + sum) |
-| individual molecules (read-level) | engine `plot_isoform_structures_by_conditions` over the per-sample `<library>.h5ad` + per-sample `gff-output/transcript_associations.txt`; parsed from its `*_isoform_ids.tsv` (cached in `_isv_web_cache/reads/`) |
+| individual molecules (read-level) | per-gene retrieval index `_isv_web_cache/mol_index/<lib>.reads.db` (counts) + per-sample `transcripts.db` (structures); clustered live. Fallback: engine `plot_isoform_structures_by_conditions` → `*_isoform_ids.tsv` (cached in `_isv_web_cache/reads/`) |
 | protein length / NMD | `gff-output/protein_summary.txt` |
-| protein / mRNA sequence (export) | `gff-output/protein_sequences.fasta`, `transcript_sequences.fasta` |
+| protein / ORF / mRNA sequence (export) | `gff-output/protein_sequences.fasta`, `orf_sequences.fasta` (CDS), `transcript_sequences.fasta` |
 
 ## API
 - `POST /api/isoforms` — heatmap tab: clustered isoforms + per-(cell-type×covariate) expression + `gene_model`.
 - `POST /api/reads` — read-level molecule tab: per-covariate panels of individual molecules
   (`{gene, cell_types, conditions, max_isoforms}`) parsed from the engine's `*_isoform_ids.tsv`.
 - `POST /api/molecules` — (legacy) pseudobulk molecule rollup; superseded by `/api/reads`.
-- `GET  /api/isoform/{id}/protein|mrna`, `POST /api/proteins` — FASTA export (single / batch).
+- `GET  /api/isoform/{id}/protein|orf|mrna`, `POST /api/proteins` — FASTA export (protein aa / ORF-CDS nt / full-transcript nt; batch proteins).
 - `GET  /api/catalog`, `/api/genes`, `/api/junctions` — menus + autocomplete.
 
 ## Files
 - `data_api.py` — data layer (RunContext + `query_isoforms` heatmap / `query_reads` read-level / `gene_model_track`); wraps the engine.
 - `server.py` — FastAPI endpoints (responses memoized per signature).
-- `run.py` — CLI launcher.
+- `precompute_reads_index.py` — builds the per-gene molecule retrieval index (`build_reads_index`); run at indexing time or via `run.py --build_reads_index`.
+- `run.py` — CLI launcher (`--build_reads_index` builds/refreshes the retrieval index at startup).
 - `templates/index.html`, `static/app.js`, `static/styles.css` — frontend (two tabs + shared IGV-style renderer).
 - `_tests/` — engine-vs-API parity + speed + e2e smoke.

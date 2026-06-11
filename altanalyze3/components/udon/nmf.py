@@ -31,19 +31,13 @@ def determine_nmf_ranks(df):
     boundary = 3.273 * sigmaTW + muTW
     print(boundary)
 
-    # Compute the eigenvalues of the covariance matrix
-    w, v = LA.eig(sigmaHat)
-    w = w.tolist()
+    # sigmaHat = Xt @ X is a symmetric Gram matrix, so eigh gives the SAME (real)
+    # eigenvalues as eig but is far faster and numerically stable -- LA.eig on a
+    # samples x samples matrix is O(n^3) and was the full-scale bottleneck.
+    w = LA.eigh(sigmaHat)[0]
 
-    k = 0
-    for i in range(len(w)):
-        try:
-            # Count the number of eigenvalues greater than the boundary
-            if w[i] > boundary:
-                k += 1
-        except Exception:
-            if w[i].real > boundary:
-                k += 1
+    # Count the number of eigenvalues greater than the boundary
+    k = int(np.sum(np.asarray(w) > boundary))
 
     est_k = 2*k   # Estimate the rank of the matrix
 
@@ -71,8 +65,11 @@ def run_nmf(df, rank):
     # enter try statement here
     w = None
     try:
-        nmf = nimfa.Snmf(mat_t, seed="nndsvd", rank=int(rank), max_iter=20, n_run=5,
-                         track_factor=True)  # n_run was originally 10 to keep the results stable
+        # seed="nndsvd" is a DETERMINISTIC initialization, so repeated runs are identical
+        # (subset check: run1 vs run2 ARI=1.000) -> n_run=1 gives the same result as n_run=5
+        # but ~5x faster; track_factor=True kept all runs in memory and is unused here.
+        nmf = nimfa.Snmf(mat_t, seed="nndsvd", rank=int(rank), max_iter=20, n_run=1,
+                         track_factor=False)
         nmf_fit = nmf()
         w = nmf_fit.basis()
     except ValueError:

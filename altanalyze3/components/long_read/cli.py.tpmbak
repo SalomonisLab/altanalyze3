@@ -323,34 +323,9 @@ def run_sclr_isoquant(args):
     collapse_method = getattr(args, "collapse_method", "wta")
     for uid, libs in sample_dict.items():
         isoa.export_sample_isoform(libs, gff_output_dir, barcode_sample_dict, uid=uid,
-                                   collapse_method=collapse_method, compute_cpm=True)
+                                   collapse_method=collapse_method, compute_tpm=True)
     logging.info("sclr-isoquant: per-sample isoform re-key + pseudobulk (%s) complete for %s.",
                  collapse_method, args.sample if getattr(args, "sample", None) else "all samples")
-
-
-def run_sclr_gene_aggregate(args):
-    """Per sample (parallel, the gene analogue of sclr-isoquant): build ONE uid's gene-level
-    pseudobulk. For each library it ensures '<library>-gene.h5ad' exists (aggregating from the
-    molecule h5ad if needed), joins the barcode->cluster labels IN MEMORY (from --cell_annot, same
-    source the isoform/junction diffs use), and writes the per-sample pseudobulk
-    '<library>-gene.txt' (+_cpm) beside the gene h5ad -- the same local dir as the isoform/junction
-    outputs. NO '_gene_clustered/' copies. With --sample, processes one uid (fan out one bsub per uid);
-    without, loops all uids. Idempotent. The combine (sclr-diff --analyses gene) then just concatenates
-    these per-sample files."""
-    import altanalyze3.components.long_read.isoform_automate as isoa
-    import altanalyze3.components.long_read.isoform_matrix as iso
-
-    sample_dict = isoa.import_metadata(str(args.metadata), include_hashed_samples=True)
-    if getattr(args, "sample", None):
-        sample_dict = _subset_metadata_to_sample(sample_dict, args.sample)
-
-    barcode_cluster_dirs = _discover_barcode_cluster_dirs(args.metadata, getattr(args, "cell_annot", None))
-    barcode_sample_dict = iso.import_barcode_clusters(barcode_cluster_dirs)
-
-    for uid, libs in sample_dict.items():
-        isoa.export_sample_gene(libs, barcode_sample_dict, uid=uid)
-    logging.info("sclr-gene-aggregate: per-sample gene pseudobulk complete for %s.",
-                 args.sample if getattr(args, "sample", None) else "all samples")
 
 
 def _parse_conditions(value):
@@ -393,11 +368,10 @@ def run_sclr_diff(args):
     analyses = [a.strip() for a in str(getattr(args, "analyses", "junction,isoform")).split(",") if a.strip()]
     if not analyses:
         raise ValueError("--analyses must include at least one of: junction, isoform, isoform-ratio, gene.")
-    wants_iso_abundance = 'isoform' in analyses          # reads the combined CPM matrix
-    wants_iso_ratio = 'isoform-ratio' in analyses         # reads the combined RATIO matrix
+    wants_isoform = any(a.startswith('isoform') for a in analyses)
     wants_gene = 'gene' in analyses
-    # Only junction + isoform(+ratio) differentials are annotated (and need the P3 protein summary).
-    # Gene-only diffs are stats-only and require NO P3 product.
+    # Only junction + isoform differentials are annotated (and need the P3 protein summary). Gene-only
+    # diffs are stats-only and require NO P3 product.
     wants_annotated = any(a in ('junction', 'isoform', 'isoform-ratio') for a in analyses)
 
     # Guard: differential annotation needs P3 outputs. Fail loudly with a clear message rather than
@@ -410,22 +384,10 @@ def run_sclr_diff(args):
                 f"sclr-diff. Differential annotation depends on the P3 protein summary."
             )
 
-    # Combine the per-sample isoform pseudobulks into the study matrices ONLY when an isoform analysis
-    # is requested AND the matrix it reads is MISSING. combine_isoforms writes ALL THREE combined h5ads
-    # (counts/cpm/ratio) in one pass, so if the needed one already exists (e.g. the isoform diff already
-    # ran and we are now adding ONLY the ratio diff), do NOT re-run it -- that would needlessly rewrite
-    # the large isoform_combined_pseudo_cluster_*.h5ad files and rebuild the viewer index. Each
-    # differential below reads its matrix off disk (CPM for 'isoform', RATIO for 'isoform-ratio').
-    iso_cpm_h5ad = 'isoform_combined_pseudo_cluster_cpm-filtered.h5ad'
-    iso_ratio_h5ad = 'isoform_combined_pseudo_cluster_ratio-filtered.h5ad'
-    need_combine = (
-        (wants_iso_abundance and not os.path.exists(iso_cpm_h5ad)) or
-        (wants_iso_ratio and not os.path.exists(iso_ratio_h5ad))
-    )
-    if need_combine:
+    # Combine the per-sample isoform pseudobulks (built per-sample in P4 sclr-isoquant) -- only when an
+    # isoform analysis is requested. Junction-only diffs reuse the P2 PSI matrix and need no combine.
+    if wants_isoform:
         isoa.combine_isoforms(str(args.metadata), barcode_cluster_dirs)
-    elif wants_iso_abundance or wants_iso_ratio:
-        logging.info("sclr-diff: combined isoform matrices already present -- skipping combine_isoforms.")
     # Gene-level differentials: build the study-combined gene pseudobulk h5ad (all genes retained) from
     # the per-sample '<library>-gene.h5ad' files. Stats-only, no annotation.
     if wants_gene:
@@ -437,10 +399,10 @@ def run_sclr_diff(args):
     )
     logging.info("sclr-diff: %s differentials complete for %s", analyses, conditions)
 
-    # ISV INDEX (final step, AFTER differentials): pre-build the isoform_structure_viewer indexes from
-    # every sample's MOLECULE isoform h5ad so later viewer queries compose instantly with no
-    # re-indexing. Relevant ONLY to the isoform-abundance analysis (the molecule viewer); skip for
-    # ratio-only, gene-only, and junction-only diffs. Best-effort + idempotent.
-    if wants_iso_abundance:
+    # ISV INDEX (final step, AFTER differentials): pre-build the isoform_structure_viewer indexes for
+    # every sample's molecule h5ad so later viewer queries compose instantly with no re-indexing.
+    # Best-effort + idempotent; cannot fail the differential workflow. Only relevant to isoform
+    # analyses -- skip for gene-only diffs.
+    if wants_isoform:
         isoa.precompute_isoform_viewer_index(str(args.metadata), barcode_cluster_dirs)
         logging.info("sclr-diff: ISV viewer index pre-build complete.")
