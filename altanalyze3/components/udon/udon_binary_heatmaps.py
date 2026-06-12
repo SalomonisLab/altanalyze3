@@ -24,7 +24,9 @@ matplotlib.rcParams['pdf.fonttype'] = 42; matplotlib.rcParams['ps.fonttype'] = 4
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap, to_rgb
 from matplotlib.gridspec import GridSpec
-from matplotlib.patches import Patch
+from matplotlib.patches import Patch, Rectangle, PathPatch
+from matplotlib.collections import PatchCollection
+from matplotlib.path import Path as MplPath
 from scipy.cluster.hierarchy import linkage, leaves_list
 from scipy.spatial.distance import pdist
 
@@ -93,25 +95,42 @@ def _plot(M, col_clusters, groups, agg, outbase, title, row_fontsize=6, row_orde
     gs = GridSpec(2, 2, width_ratios=(0.5, 40), height_ratios=(1, 22), wspace=0.01, hspace=0.02)
     axt = fig.add_subplot(gs[0, 1]); axl = fig.add_subplot(gs[1, 0]); ax = fig.add_subplot(gs[1, 1])
 
-    im = ax.imshow(M.values, cmap=ListedColormap(["#FFFFFF", "#000000"]), vmin=0, vmax=1,
-                   aspect="auto", interpolation="nearest"); im.set_rasterized(True)
+    # MAIN heatmap as FULLY VECTOR -- every binary 1-call is one rectangle, ALL of them emitted as a
+    # single flat compound PDF path (NOT matplotlib's path-collection/marker optimization, which writes
+    # the rectangle once as a Form XObject and re-places it N times -- editors rasterize that). One flat
+    # path => imports as ONE editable object whose fill color can be changed in one click in Illustrator.
+    ax.set_xlim(-0.5, npb - 0.5); ax.set_ylim(nrow - 0.5, -0.5); ax.set_aspect("auto")
+    ax.set_facecolor("#FFFFFF")
+    _ri, _ci = np.where(np.asarray(M.values) == 1)
+    if len(_ri):
+        _x0 = _ci.astype(float) - 0.5; _y0 = _ri.astype(float) - 0.5
+        _v = np.empty((len(_ri) * 5, 2))
+        _v[0::5] = np.c_[_x0, _y0]; _v[1::5] = np.c_[_x0 + 1.0, _y0]; _v[2::5] = np.c_[_x0 + 1.0, _y0 + 1.0]
+        _v[3::5] = np.c_[_x0, _y0 + 1.0]; _v[4::5] = np.c_[_x0, _y0]
+        _co = np.tile(np.array([MplPath.MOVETO, MplPath.LINETO, MplPath.LINETO, MplPath.LINETO,
+                                MplPath.CLOSEPOLY], dtype=np.uint8), len(_ri))
+        ax.add_patch(PathPatch(MplPath(_v, _co), facecolor="#000000", edgecolor="none",
+                               linewidth=0, antialiased=False, snap=False))
     ax.set_xticks([]); ax.set_yticks(range(nrow)); ax.yaxis.tick_right()
     ax.set_yticklabels(M.index, fontsize=row_fontsize); ax.tick_params(length=0)
     for sp in ax.spines.values(): sp.set_visible(False)
 
-    # top cluster color bar (one cell per pseudobulk) + P# labels at block centers
-    axt.imshow(np.array([[to_rgb(ccolors[c]) for c in seq]]), aspect="auto")
-    axt.set_yticks([]); axt.set_xticks([]); axt.set_xlim(-0.5, npb - 0.5)
+    # top cluster color bar -- VECTOR rectangles (one per cluster block, not imshow) + P# labels above
+    axt.set_xlim(-0.5, npb - 0.5); axt.set_ylim(0.5, -0.5); axt.set_xticks([]); axt.set_yticks([])
     for sp in axt.spines.values(): sp.set_visible(False)
-    s = 0
+    _tr = []; _tc = []; s = 0
     for i in range(1, npb + 1):
         if i == npb or seq[i] != seq[s]:
+            _tr.append(Rectangle((s - 0.5, -0.5), i - s, 1.0)); _tc.append(to_rgb(ccolors[seq[s]]))
             axt.text((s + i - 1) / 2.0, -0.7, str(seq[s]), ha="center", va="bottom", fontsize=7, rotation=90)
             s = i
+    axt.add_collection(PatchCollection(_tr, facecolor=_tc, edgecolor="none"))
 
-    axl.imshow(np.array([[to_rgb(gcolors[groups[r]])] for r in M.index]), aspect="auto")
-    axl.set_xticks([]); axl.set_yticks([])
+    # left group color bar -- VECTOR rectangles (one per row, not imshow) + group block labels
+    axl.set_xlim(-0.5, 0.5); axl.set_ylim(nrow - 0.5, -0.5); axl.set_xticks([]); axl.set_yticks([])
     for sp in axl.spines.values(): sp.set_visible(False)
+    axl.add_collection(PatchCollection([Rectangle((-0.5, r - 0.5), 1.0, 1.0) for r in range(nrow)],
+                                       facecolor=[to_rgb(gcolors[groups[rr]]) for rr in M.index], edgecolor="none"))
     gseq = [groups[r] for r in M.index]; s = 0
     for i in range(1, nrow + 1):
         if i == nrow or gseq[i] != gseq[s]:
@@ -123,17 +142,19 @@ def _plot(M, col_clusters, groups, agg, outbase, title, row_fontsize=6, row_orde
     fig.legend(handles=[Patch(fc="#000000", label="1 (pseudobulk of this row)"),
                         Patch(fc="#FFFFFF", ec="#888888", label="0")],
                loc="lower left", bbox_to_anchor=(0.0, -0.01), ncol=2, fontsize=9, frameon=False)
-    _prev = matplotlib.rcParams['pdf.compression']; matplotlib.rcParams['pdf.compression'] = 0
+    # no imshow anywhere => the PDF carries ZERO raster images; default flate compression keeps it small
     fig.savefig(outbase + ".png", dpi=200, bbox_inches="tight")
     fig.savefig(outbase + ".pdf", bbox_inches="tight")
-    matplotlib.rcParams['pdf.compression'] = _prev; plt.close(fig)
+    plt.close(fig)
     print(f"  wrote {os.path.basename(outbase)}  ({nrow} rows x {npb} pseudobulks)")
 
 
-def make_udon_binary_heatmaps(clusters_df, outdir, donor_of=None, study_of=None, cluster_col="cluster"):
+def make_udon_binary_heatmaps(clusters_df, outdir, donor_of=None, study_of=None, covariates_df=None,
+                              cluster_col="cluster"):
     """clusters_df: index = 'celltype__Sample', column `cluster_col`. ONE column per pseudobulk
-    (ordered by cluster, like the marker heatmap). Writes celltype_cluster_heatmap (always) and
-    donor_cluster_heatmap (if donor_of+study_of given)."""
+    (ordered by cluster, like the marker heatmap). Writes celltype_cluster_heatmap (always),
+    donor_cluster_heatmap + study_cluster_heatmap (if donor_of/study_of given), and
+    covariate_cluster_heatmap (if covariates_df given: a Sample-indexed binary covariate table)."""
     os.makedirs(outdir, exist_ok=True)
     df = pd.DataFrame({"cluster": clusters_df[cluster_col].astype(str).values}, index=clusters_df.index)
     df["Sample"] = [str(i).split("__", 1)[1] if "__" in str(i) else str(i) for i in df.index]
@@ -174,6 +195,35 @@ def make_udon_binary_heatmaps(clusters_df, outdir, donor_of=None, study_of=None,
         _plot(dn.loc[:, df.index], col_clusters, groups, None,
               os.path.join(outdir, "donor_cluster_heatmap"),
               "UDON donor pseudobulks per cluster (donors ordered by dominant cluster)", row_order=row_order)
+
+    if study_of is not None:                                    # study_cluster_heatmap (mirrors donor)
+        df["Study"] = df["Sample"].map(lambda s: study_of.get(str(s), "NA"))
+        cnt_s = pd.crosstab(df["Study"], df["cluster"])         # study x cluster pseudobulk COUNTS
+        clusters_s = sorted(cnt_s.columns, key=_natnum); cnt_s = cnt_s[clusters_s]
+        stb = pd.get_dummies(df["Study"]).T                     # study x pseudobulk (one-hot)
+        tot_s = cnt_s.sum(0); top_s = cnt_s.max(0)              # batch composition / dominance per cluster
+        pd.DataFrame({"n_pseudobulks": tot_s.astype(int), "n_studies": (cnt_s > 0).sum(0).astype(int),
+                      "top_study": cnt_s.idxmax(0), "top_study_frac": (top_s / tot_s).round(3),
+                      "batch_driven": (top_s / tot_s >= 0.7)}
+                     ).rename_axis("cluster").to_csv(os.path.join(outdir, "study_specificity_per_cluster.tsv"), sep="\t")
+        dom_s = cnt_s.idxmax(axis=1)                            # order studies by dominant cluster
+        row_order_s = sorted(cnt_s.index, key=lambda x: (_natnum(dom_s[x]), str(x)))
+        _plot(stb.loc[:, df.index], col_clusters, {x: x for x in stb.index}, None,
+              os.path.join(outdir, "study_cluster_heatmap"),
+              "UDON study composition per cluster (one column per pseudobulk)", row_order=row_order_s)
+
+    if covariates_df is not None and len(getattr(covariates_df, "columns", [])):
+        # covariate x pseudobulk (MULTI-hot: 1 if the pseudobulk's sample has that covariate)
+        cov = covariates_df.copy(); cov.index = cov.index.astype(str)
+        M_cov = cov.reindex(df["Sample"].astype(str).values).fillna(0).astype(int)
+        M_cov.index = df.index; M_cov = M_cov.T                 # covariate x pseudobulk
+        cat = {c: ("categorical" if "=" in str(c) else "binary") for c in M_cov.index}
+        clmat = pd.get_dummies(pd.Series(col_clusters, index=M_cov.columns))
+        dom_c = M_cov.dot(clmat).idxmax(axis=1)                 # dominant cluster per covariate
+        row_order_c = sorted(M_cov.index, key=lambda c: (cat[c], _natnum(str(dom_c.get(c, ""))), str(c)))
+        _plot(M_cov, col_clusters, cat, None, os.path.join(outdir, "covariate_cluster_heatmap"),
+              "UDON covariate composition per cluster (one column per pseudobulk)",
+              row_fontsize=5, row_order=row_order_c)
 
 
 def _mappings(PB):

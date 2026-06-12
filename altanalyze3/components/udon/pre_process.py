@@ -1,13 +1,13 @@
 import pandas as pd
-import numpy as np
 from tqdm import tqdm
+import time
 
 
-def calculate_pseudobulk_folds(uadata, groups='cell_types', donors='donor_id', disease_type_col='disease_type', min_cells=5, baseline='control', query='disease', control_donor_specificity='collective'):
+def calculate_pseudobulk_folds(adata, groups='cell_types', donors='donor_id', disease_type_col='disease_type', min_cells=5, baseline='control', query='disease', control_donor_specificity='collective', return_non_neg_folds=True, include_pseudobulks_also=True):
     """
         Calculate pseudobulk fold values for each gene in the adata object
 
-        :param uadata: input ann data which contains cell by gene gene expression in adata.X
+        :param adata: input ann data which contains cell by gene gene expression in adata.X
         :param groups: the column name in adata.obs that contains the cell type cluster
         :param donors: the column name in adata.obs that contains the donor id of the cell
         :param disease_type_col: the column name in adata.obs that contains which cells are “Disease” and which cells are “Healthy” for fold calculation
@@ -15,13 +15,14 @@ def calculate_pseudobulk_folds(uadata, groups='cell_types', donors='donor_id', d
         :param baseline:in the disease_type_col, the character string that refers to the baseline (denominator) for pseudobulk fold calculation. For udon, the baseline are cells labeled as “Control” in the disease_type_col
         :param query: : in the disease_type_col, the character string that refers to the query (numerator) for pseudobulk fold calculation. For udon, the baseline are cells labeled as “Disease” in the disease_type_col
         :param control_donor_specificity: how the baseline for pseudobulk-fold should be calculated? If “collective” (default), then the baseline (typically the control samples for UDON) will be calculated agnostic of donors.
+        :param return_folds_only: if True, then only the pseudobulk folds will be returned. If False, then the pseudobulk folds will be returned with all negative values removed.
         :return: adata with slot adata.varm['pseudobulk_folds'] containing the pseudobulk fold values
 
         """
 
     # separate the cells from control and disease samples
-    baseline_adata = uadata[uadata.obs[disease_type_col] == baseline, :]
-    disease_adata = uadata[uadata.obs[disease_type_col] == query, :]
+    baseline_adata = adata[adata.obs[disease_type_col] == baseline, :]
+    disease_adata = adata[adata.obs[disease_type_col] == query, :]
 
     # finalize which clusters and samples to include for pseudobulk calculation
     baseline_qc = pre_pseudobulk_qc(baseline_adata, groups=groups, donors=donors, min_cells=min_cells)
@@ -39,19 +40,50 @@ def calculate_pseudobulk_folds(uadata, groups='cell_types', donors='donor_id', d
     baseline_pseudobulks_mat = calculate_pseudobulks(adata=baseline_adata, pseudobulk_groups=baseline_qc, clusters=groups, donors=donors, donor_specificity=control_donor_specificity)
     disease_pseudobulks_mat = calculate_pseudobulks(adata=disease_adata, pseudobulk_groups=disease_qc, clusters=groups, donors=donors, donor_specificity='donor-specific')
 
+    st = time.time()
+    if include_pseudobulks_also:
+        baseline_donors_pseudobulks_mat = calculate_pseudobulks(adata=baseline_adata, pseudobulk_groups=baseline_qc,
+                                                                clusters=groups, donors=donors,
+                                                                donor_specificity='donor-specific')
+
+        adata.varm['pseudobulk_mat'] = pd.concat([baseline_donors_pseudobulks_mat, disease_pseudobulks_mat],
+                                                 axis='columns')
+    et = time.time()
+    elapsed_time = et - st
+    elapsed_minutes = elapsed_time / 60
+    print(f"Time to concatenate pseudobulks: {elapsed_minutes:.2f} minutes")
+
+    st = time.time()
     # calculate psueodbulk folds between baseline and query
     pseudobulk_folds = calculate_folds(baseline_pseudobulks_df=baseline_pseudobulks_mat, disease_pseudobulks_df=disease_pseudobulks_mat)
+    et = time.time()
+    elapsed_time = et - st
+    elapsed_minutes = elapsed_time / 60
+    print(f"Time to calculate pseudobulk folds: {elapsed_minutes:.2f} minutes")
 
-    # finally, ensure the entries in the pseudobulk folds are positive for ICGS
-    non_neg_folds = remove_negatives(pseudobulk_folds=pseudobulk_folds)
+    if return_non_neg_folds is False:
+        # remove columns with missing values in non_neg_folds
+        pseudobulk_folds = pseudobulk_folds.dropna(axis=1)
 
-    # remove columns with missing values in non_neg_folds
-    non_neg_folds = non_neg_folds.dropna(axis=1)
+        # store the pseudobulk folds in the adata object in the varp slot
+        adata.varm['pseudobulk_folds'] = pseudobulk_folds
 
-    # store the pseudobulk folds in the adata object in the varp slot
-    uadata.varm['pseudobulk_folds'] = non_neg_folds
+    else:
+        st = time.time()
+        # finally, ensure the entries in the pseudobulk folds are positive for ICGS
+        non_neg_folds = remove_negatives(pseudobulk_folds=pseudobulk_folds)
+        et = time.time()
+        elapsed_time = et - st
+        elapsed_minutes = elapsed_time / 60
+        print(f"Time to remove negatives: {elapsed_minutes:.2f} minutes")
 
-    return uadata
+        # remove columns with missing values in non_neg_folds
+        non_neg_folds = non_neg_folds.dropna(axis=1)
+
+        # store the pseudobulk folds in the adata object in the varp slot
+        adata.varm['pseudobulk_folds'] = non_neg_folds
+
+    return adata
 
 
 def remove_negatives(pseudobulk_folds):
@@ -100,6 +132,7 @@ def calculate_pseudobulks(adata, pseudobulk_groups, clusters='cell_type', donors
 
     # Filter for the cell types and donors for which to compute the pseudobulks
     adata = adata[adata.obs[clusters].isin(pseudobulk_groups[clusters])]
+    adata = adata[adata.obs[donors].isin(pseudobulk_groups[donors])]
 
     # Extract the gene expression matrix directly from adata
     gex_mat = adata.to_df()
@@ -140,8 +173,15 @@ def calculate_pseudobulks(adata, pseudobulk_groups, clusters='cell_type', donors
 
     # Convert the dictionary to a DataFrame
     pseudobulk_matrix = pd.DataFrame(pseudobulk_dict)
+	
+	######## this is where I had corrected for the QC step which was not taking place #########
+    if donor_specificity == 'donor-specific':
+        # filter for the cell type and donor combinations that are present in the pseudobulk_groups
+        combination_vector = pseudobulk_groups[clusters].astype(str) + '__' + pseudobulk_groups[donors].astype(str)
+        pseudobulk_matrix = pseudobulk_matrix.loc[:, pseudobulk_matrix.columns.isin(combination_vector)]
 
     return pseudobulk_matrix
+
 
 def calculate_folds(baseline_pseudobulks_df, disease_pseudobulks_df):
 
@@ -163,3 +203,32 @@ def calculate_folds(baseline_pseudobulks_df, disease_pseudobulks_df):
         # folds_matrix[col] = disease_pseudobulks_df[col] - baseline_mask.iloc[:, 0]
 
     return folds_matrix
+
+
+def pseudobulk_wrapper(adata, min_cells=5, cluster_key='cell_type', donor_key='donor_id', donor_specificity='donor-specific'):
+
+    # finalize which clusters and samples to include for pseudobulk calculation
+    qc_cell_types = pre_pseudobulk_qc(adata, groups=cluster_key, donors=donor_key, min_cells=min_cells)
+
+    final_elements = set(qc_cell_types[cluster_key])
+
+    # Filter the QC'd DataFrame to only include final elements
+    qc_cell_types = qc_cell_types[qc_cell_types[cluster_key].isin(final_elements)]
+
+    pseudobulks_mat = calculate_pseudobulks(adata=adata, pseudobulk_groups=qc_cell_types,
+                                                     clusters=cluster_key, donors=donor_key,
+                                                     donor_specificity=donor_specificity)
+
+    adata.uns['pseudobulk_matrix'] = pseudobulks_mat
+
+    return adata
+
+
+def matched_controls(adata, cluster_key='cell_types', donor_key='donor_id', disease_type_col='disease_type', min_cells=5, baseline='control', query='disease'):
+
+    return
+
+
+def collective_controls(adata, groups='cell_types', donors='donor_id', disease_type_col='disease_type', min_cells=5, baseline='control', query='disease'):
+
+    return

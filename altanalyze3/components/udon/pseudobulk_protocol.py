@@ -289,8 +289,9 @@ def build_fold_matrix(adata, sample_col, celltype_col, annot_col, control_label=
     folds = folds.sub(folds.min(axis=1), axis=0)
     folds = folds.dropna(axis=1)
     obs_df = pd.DataFrame(col_meta).set_index("pseudobulk").loc[folds.columns]
+    _fb_label = "dropped-no-matched-control" if (mode != "collective" and drop_unmatched) else "collective-fallback"
     logger(f"[folds] {folds.shape[0]} genes x {folds.shape[1]} disease pseudobulks "
-           f"(mode={mode}); matched-baseline={n_matched}, collective-fallback={n_fallback}, "
+           f"(mode={mode}); matched-baseline={n_matched}, {_fb_label}={n_fallback}, "
            f"skipped={n_skipped}")
     return folds, obs_df
 

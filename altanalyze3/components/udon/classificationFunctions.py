@@ -13,8 +13,8 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 def gene_cosine_similarity(train_adata, test_adata):
 
-    # for plotting purposes
-    n_cells_train = np.shape(train_adata)[0]
+    # for plotting purposes (min(shape) caps n_comps when genes < cells -- restored from pyudon)
+    n_cells_train = min(np.shape(train_adata))
     sc.tl.pca(train_adata, n_comps=min(30, n_cells_train - 1))
     sc.tl.pca(test_adata, n_comps=min(30, n_cells_train - 1))
 
@@ -27,6 +27,25 @@ def gene_cosine_similarity(train_adata, test_adata):
 
     predicted_labels = np.zeros(np.shape(similarity_matrix)[0])
     predicted_labels[row_mean_similarity < np.mean(row_mean_similarity)] = 1
+
+    return train_adata, test_adata, predicted_labels, row_mean_similarity
+
+
+def gene_pearson_corr(train_adata, test_adata):
+    """Pearson-correlation analog of gene_cosine_similarity (restored from pyudon
+    classification_functions.py). Labels a test cell as control-like (0) vs not (1) by its
+    mean Pearson correlation to the training/control cells."""
+    n_cells_train = np.shape(train_adata)[0]
+    sc.tl.pca(train_adata, n_comps=min(30, n_cells_train - 1))
+    sc.tl.pca(test_adata, n_comps=min(30, n_cells_train - 1))
+
+    similarity_matrix = np.corrcoef(test_adata.X.toarray(), train_adata.X.toarray())
+    similarity_matrix = similarity_matrix[:np.shape(test_adata)[0], np.shape(test_adata)[0]:]
+    print("computed correlation matrix", flush=True)
+
+    row_mean_similarity = np.nanmean(similarity_matrix, axis=1)
+    predicted_labels = np.zeros(np.shape(similarity_matrix)[0])
+    predicted_labels[row_mean_similarity < np.nanmean(row_mean_similarity)] = 1
 
     return train_adata, test_adata, predicted_labels, row_mean_similarity
 

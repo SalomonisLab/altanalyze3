@@ -57,7 +57,13 @@ Main steps in the run_nmf function:
 '''
 
 
-def run_nmf(df, rank):
+def run_nmf(df, rank, n_run=5):
+    """n_run: number of NMF restarts. Default 5 -- the original pyudon stability default
+    (the developer kept multiple runs to keep clustering stable). seed='nndsvd' is a
+    deterministic init, so n_run=1 is a validated faster opt-in (run1-vs-run2 ARI=1.000).
+    Override globally without threading args via the env var UDON_NMF_RUNS (e.g. =1 for speed)."""
+    import os
+    n_run = int(os.environ.get("UDON_NMF_RUNS", n_run))
     mat = df.to_numpy()
     mat_t = mat.transpose()
 
@@ -65,10 +71,7 @@ def run_nmf(df, rank):
     # enter try statement here
     w = None
     try:
-        # seed="nndsvd" is a DETERMINISTIC initialization, so repeated runs are identical
-        # (subset check: run1 vs run2 ARI=1.000) -> n_run=1 gives the same result as n_run=5
-        # but ~5x faster; track_factor=True kept all runs in memory and is unused here.
-        nmf = nimfa.Snmf(mat_t, seed="nndsvd", rank=int(rank), max_iter=20, n_run=1,
+        nmf = nimfa.Snmf(mat_t, seed="nndsvd", rank=int(rank), max_iter=20, n_run=int(n_run),
                          track_factor=False)
         nmf_fit = nmf()
         w = nmf_fit.basis()

@@ -14,8 +14,10 @@ from study_aware_integrate import sva_remove
 from satay_heatmap import compute_pmap
 
 PB = "/Users/saljh8/Dropbox/Collaborations/Grimes/UDON/cellHarmony-datasets/final/pseudobulk"
-SA = os.path.join(PB, "UDON", "study_aware")
+_CT, _GF, _SP, _SFX = P.udon_restriction()    # honour --cell-type / UDON_TAG suffix (study_aware_<tag>)
+SA = os.path.join(PB, "UDON", "study_aware" + _SFX)
 SAT = os.path.join(SA, "SATAY-UDON")          # consolidated with the other SATAY-UDON outputs
+os.makedirs(SAT, exist_ok=True)               # create up front (fresh runs have no SATAY-UDON/ yet)
 S, CT, AN = "Sample", "Hs-BM-titrated-reference-centroid", "Annotation"
 
 

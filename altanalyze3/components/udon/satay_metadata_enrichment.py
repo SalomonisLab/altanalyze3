@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 """
+[LEGACY] SATAY-UDON metadata enrichment. The CANONICAL, pyudon-API-compatible engine is now
+`satay_udon_core.py` (make_mean_based_binary / fishers_clinical_feats / cmh_clinical_feats /
+fdr_correction / satay_udon + the standard --metadata loader), driven by `run_workflow.py`. This
+module is retained for the multi-run cross-comparison orchestration; new work should use the core.
+
 SATAY-UDON metadata enrichment: test each UDON cluster for enrichment of harmonized
 AML metadata, run identically across three UDON analyses to contrast sensitivity and
 specificity, and to compare study-level vs batch-corrected merges.

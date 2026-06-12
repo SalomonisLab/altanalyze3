@@ -57,23 +57,47 @@ def main():
     print(f"markers: {len(markers)} across {markers['top_cluster'].nunique()} programs")
     markers.to_csv(os.path.join(SA, "final_program_markers.txt"), sep="\t", index=False)
     heat.to_csv(os.path.join(SA, "final_program_heatmap.txt"), sep="\t")
-    # per-cluster callouts: top GO-Elite term (left) + top marker gene (right), from annotate_summary
-    left_c = right_c = None
-    co = os.path.join(SA, "SATAY-UDON", "program_callouts.tsv")
-    if os.path.exists(co):
-        c = pd.read_csv(co, sep="\t")
-        left_c = dict(zip(c["program"].astype(str), c["top_go_term"].astype(str)))
-        right_c = dict(zip(c["program"].astype(str), c["top_gene"].astype(str)))
+    # HARDWIRED per-program callouts (self-contained -- no dependency on annotate_summary):
+    #   right = top marker gene per program (highest pearson_r)
+    #   left  = top GO-Elite term per program (run GO-Elite on the program markers here if it
+    #           hasn't been computed yet, so the heatmap ALWAYS carries the callouts)
+    right_c = {}
+    for _p, _g in markers.sort_values("pearson_r", ascending=False).groupby("top_cluster"):
+        right_c[str(_p)] = str(_g.iloc[0]["marker"])
+    _seldir = os.path.join(SA, "goelite"); _sel = os.path.join(_seldir, "GOElite_UDON_selected.tsv")
+    if not os.path.exists(_sel):
+        try:
+            from goelite_enrichment import run_goelite_on_udon
+            _aa = ad.AnnData(X=np.zeros((1, 1), dtype="float32"))
+            _aa.uns["udon_marker_genes_top_n"] = markers[["marker", "top_cluster"]].copy()
+            run_goelite_on_udon(_aa, _seldir, species="Hs", background_genes=common, logger=lambda m: None)
+        except Exception as e:
+            print("GO-Elite for callouts skipped:", e)
+    left_c = {}
+    if os.path.exists(_sel):
+        _s = pd.read_csv(_sel, sep="\t")
+        for _p, _g in _s.sort_values("fdr").groupby("cluster"):
+            left_c[str(_p)] = str(_g.iloc[0]["term_name"])
     plot_markers_df(heat, markers, groups, os.path.join(SA, "final_program_heatmap.pdf"),
-                    left_callouts=left_c, right_callouts=right_c)
+                    left_callouts=(left_c or None), right_callouts=(right_c or None))
     # standard UDON binary heatmaps (donor x cluster, cell-type x cluster)
     try:
         from udon_binary_heatmaps import make_udon_binary_heatmaps
         clin = pd.read_excel(os.path.join(PB, "UDON", "AML_harmonized_metadata.xlsx"), sheet_name="Clinical_Metadata")
         donor_of = dict(zip(clin["Sample"].astype(str), clin["Donor_ID"].astype(str)))
         study_of = dict(zip(fa["Sample"].astype(str), fa["Dataset"].astype(str)))
+        cov_df = None                                            # covariate heatmap (from --metadata via UDON_METADATA)
+        _meta = os.environ.get("UDON_METADATA")
+        if _meta and os.path.exists(_meta):
+            try:
+                from satay_udon_core import load_metadata
+                _mb = os.environ.get("UDON_MEAN_BINARIZE")       # same --mean-binarize list as the SATAY steps
+                _mb = [c.strip() for c in _mb.split(",") if c.strip()] if _mb else None
+                cov_df, _ = load_metadata(_meta, mean_binarize=_mb)
+            except Exception as _e:
+                print("covariate heatmap metadata load skipped:", _e)
         make_udon_binary_heatmaps(pd.DataFrame({"cluster": fa["final_program"].values}, index=fa["pseudobulk"]),
-                                  SA, donor_of=donor_of, study_of=study_of)
+                                  SA, donor_of=donor_of, study_of=study_of, covariates_df=cov_df)
     except Exception as e:
         print("binary heatmaps skipped:", e)
     print("wrote final_program_heatmap.png + .pdf + final_program_markers.txt + final_program_heatmap.txt")

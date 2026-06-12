@@ -18,6 +18,10 @@ from satay_metadata_enrichment import build_features, load_run, enrich, _units, 
 from satay_heatmap import auto_covars, load_final, compute_pmap, add_age, plot, MIN_PB, TOP_CT
 from satay_heatmap_byfield import plot_byfield, P_THR
 from scipy.stats import fisher_exact
+# canonical pyudon-compatible SATAY API (validated == original pyudon satay_udon.py; see satay_udon_core)
+from satay_udon_core import (make_mean_based_binary, fishers_clinical_feats, cmh_clinical_feats,
+                             fdr_correction, load_metadata, render_satay)
+from satay_udon_core import satay_udon as satay_udon_run
 
 PB = "/Users/saljh8/Dropbox/Collaborations/Grimes/UDON/cellHarmony-datasets/final/pseudobulk"
 TOPOUT = os.path.join(PB, "UDON")          # cross-run files at UDON root (satay_metadata is ignored)

@@ -76,6 +76,8 @@ def main():
     ap.add_argument("--no-gene-filter", action="store_true",
                     help="skip the up-front UDON gene filter (protein-coding only; drop RPL/RPS ribosomal + "
                          "XIST/TSIX; keep Y) that reduces batch effects (RNA modality only)")
+    ap.add_argument("--min-cells", type=int, default=5,
+                    help="drop pseudobulks built from fewer than this many cells (QC; uses --ncells-col; 0=off)")
     args = ap.parse_args()
 
     pb_path = os.path.abspath(args.pseudobulk)
@@ -115,6 +117,16 @@ def main():
         cts = set(args.subset_celltypes.split(","))
         adata = adata[adata.obs[args.celltype_col].astype(str).isin(cts)].copy()
         log(f"SUBSET to cell types {cts}: {adata.shape}")
+    # QC: drop pseudobulks built from < min_cells cells (restores the developer's QC step that
+    # otherwise lets low-confidence pseudobulks leak into fold computation). No-op if the input
+    # pseudobulks were already filtered upstream.
+    if args.min_cells > 0 and args.ncells_col in adata.obs.columns:
+        nc = pd.to_numeric(adata.obs[args.ncells_col], errors="coerce").fillna(0).values
+        keep = nc >= args.min_cells
+        if not keep.all():
+            log(f"QC: dropping {int((~keep).sum())} pseudobulks with {args.ncells_col} < {args.min_cells} "
+                f"(min={int(nc.min())}, kept {int(keep.sum())}/{len(keep)})")
+            adata = adata[keep].copy()
 
     annots = adata.obs[args.annot_col].astype(str).values
     n_ctrl = int((annots == args.control_label).sum()); n_dis = int((annots != args.control_label).sum())
@@ -236,15 +248,38 @@ def main():
         except Exception as e2:
             log(f"h5ad write skipped ({e2}); key tables already in udon_core/")
 
-    # ---- heatmap: canonical MarkerFinder layout/colors (visualizations.plot_markers_df),
-    #      now with the dense quadmesh rasterized -> writes marker_heatmap.png + .pdf
-    #      (the layout is unchanged; only the >200MB vector blow-up is fixed). ----
+    # ---- GO-Elite FIRST (so the marker heatmap can carry per-cluster GO-term callouts) ----
+    if not args.no_goelite and n_clusters > 0:
+        try:
+            from goelite_enrichment import run_goelite_on_udon
+            run_goelite_on_udon(udon, os.path.join(outdir, "goelite"), species=args.species, logger=log)
+        except Exception as e:
+            log(f"GO-Elite skipped: {e}")
+
+    # ---- heatmap: canonical MarkerFinder layout + per-cluster callouts (right = top marker gene,
+    #      left = top GO-Elite term), numeric cluster order, embedded fonts, rasterized quadmesh. ----
     try:
         os.chdir(UDON_DIR)
         from visualizations import plot_markers_df
+        # per-cluster callouts: top marker gene (highest pearson_r) + top GO-Elite term (lowest FDR)
+        left_c, right_c = {}, {}
+        try:
+            _mk = pd.DataFrame(udon.uns.get("udon_marker_genes_top_n"))
+            if _mk is not None and len(_mk) and "pearson_r" in _mk.columns:
+                for _cc, _g in _mk.sort_values("pearson_r", ascending=False).groupby("top_cluster"):
+                    right_c[str(_cc)] = str(_g.iloc[0]["marker"])
+            _sel = os.path.join(outdir, "goelite", "GOElite_UDON_selected.tsv")
+            if os.path.exists(_sel):
+                _s = pd.read_csv(_sel, sep="\t")
+                if len(_s):
+                    for _cc, _g in _s.sort_values("fdr").groupby("cluster"):
+                        left_c[str(_cc)] = str(_g.iloc[0]["term_name"])
+        except Exception as _e:
+            log(f"marker-heatmap callouts skipped: {_e}")
         plot_markers_df(udon.uns["marker_heatmap"], udon.uns["udon_marker_genes_top_n"],
-                        udon.uns["udon_clusters"], os.path.join(outdir, "marker_heatmap.pdf"))
-        log("wrote marker_heatmap.png + marker_heatmap.pdf (MarkerFinder layout, rasterized)")
+                        udon.uns["udon_clusters"], os.path.join(outdir, "marker_heatmap.pdf"),
+                        left_callouts=(left_c or None), right_callouts=(right_c or None))
+        log("wrote marker_heatmap.png + marker_heatmap.pdf (MarkerFinder layout + top-gene/GO callouts)")
         # standard UDON binary heatmaps: donor x cluster + cell-type x cluster
         from udon_binary_heatmaps import make_udon_binary_heatmaps
         study_of = None
@@ -259,20 +294,25 @@ def main():
             if os.path.exists(_c):
                 _cl = pd.read_excel(_c, sheet_name="Clinical_Metadata")
                 donor_of = dict(zip(_cl["Sample"].astype(str), _cl["Donor_ID"].astype(str))); break
-        make_udon_binary_heatmaps(udon.uns["udon_clusters"], outdir, donor_of=donor_of, study_of=study_of)
-        log("wrote celltype_cluster_heatmap" + (" + donor_cluster_heatmap" if donor_of else ""))
+        cov_df = None                                       # covariate heatmap (from --metadata via UDON_METADATA)
+        _meta = os.environ.get("UDON_METADATA")
+        if _meta and os.path.exists(_meta):
+            try:
+                from satay_udon_core import load_metadata
+                _mb = os.environ.get("UDON_MEAN_BINARIZE")      # same --mean-binarize list as the SATAY steps
+                _mb = [c.strip() for c in _mb.split(",") if c.strip()] if _mb else None
+                cov_df, _ = load_metadata(_meta, mean_binarize=_mb)
+            except Exception as _e:
+                log(f"covariate heatmap metadata load skipped: {_e}")
+        make_udon_binary_heatmaps(udon.uns["udon_clusters"], outdir, donor_of=donor_of, study_of=study_of,
+                                  covariates_df=cov_df)
+        log("wrote celltype/study cluster heatmaps" + (" + donor + covariate" if donor_of else ""))
     except Exception as e:
         log(f"heatmap skipped: {e}")
     finally:
         os.chdir(prev_cwd)
 
-    # ---- GO-Elite ----
-    if not args.no_goelite and n_clusters > 0:
-        try:
-            from goelite_enrichment import run_goelite_on_udon
-            run_goelite_on_udon(udon, os.path.join(outdir, "goelite"), species=args.species, logger=log)
-        except Exception as e:
-            log(f"GO-Elite skipped: {e}")
+    # (GO-Elite now runs before the heatmap, above, so the marker heatmap can carry GO callouts)
 
     # ---- run summary ----
     with open(os.path.join(outdir, "RUN_SUMMARY.md"), "w") as f:
