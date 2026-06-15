@@ -21,6 +21,9 @@ from altanalyze3.components.fastComm.reporting import ExemplarReportParams, writ
 from altanalyze3.components.fastCNV.main import FastCNVParams, bundled_gene_coordinates, run_fastcnv
 from altanalyze3.components.rna2adt.api import load_bundle as load_rna2adt_bundle
 from altanalyze3.components.rna2lipid.api import load_bundle as load_rna2lipid_bundle
+from altanalyze3.components.rna2metabolite.api import load_bundle as load_rna2metabolite_bundle
+from altanalyze3.components.rna2lipid.aml.api import load_bundle as load_rna2lipid_aml_bundle
+from altanalyze3.components.rna2grn.api import load_bundle as load_rna2grn_bundle
 from altanalyze3.components.visualization import NetPerspective, approximate_umap as approx_mod, marker_heatmap_h5ad as marker_mod
 
 from .job_manager import JobStore
@@ -49,6 +52,33 @@ _MODALITY_DEFINITIONS: Dict[str, Dict[str, object]] = {
         "id": "adt",
         "label": "ADT (CITE-seq)",
         "feature_label": "ADT",
+        "supports_marker_heatmap": True,
+        "supports_marker_network": False,
+        "supports_differential_network": False,
+        "supports_differential_go": False,
+    },
+    "metabolite": {
+        "id": "metabolite",
+        "label": "Metabolite (AML)",
+        "feature_label": "metabolite",
+        "supports_marker_heatmap": True,
+        "supports_marker_network": False,
+        "supports_differential_network": False,
+        "supports_differential_go": False,
+    },
+    "lipid": {
+        "id": "lipid",
+        "label": "Lipid (AML)",
+        "feature_label": "lipid",
+        "supports_marker_heatmap": True,
+        "supports_marker_network": False,
+        "supports_differential_network": False,
+        "supports_differential_go": False,
+    },
+    "grn": {
+        "id": "grn",
+        "label": "GRN (TF activity)",
+        "feature_label": "TF",
         "supports_marker_heatmap": True,
         "supports_marker_network": False,
         "supports_differential_network": False,
@@ -105,8 +135,14 @@ def _normalize_modality_id(value: object, *, default: str = "rna") -> str:
     raw = str(value or "").strip().lower()
     if not raw or raw in {"none", "null", "false", "off"}:
         return default
-    if raw in {"lipid", "lipids"}:
+    if raw in {"lipids"}:
         return "lipids"
+    if raw in {"lipid", "lipid_aml", "aml_lipid", "rna2lipid_aml"}:
+        return "lipid"
+    if raw in {"metabolite", "metabolites", "rna2metabolite"}:
+        return "metabolite"
+    if raw in {"grn", "grns", "regulon", "regulons", "gene_regulatory_network", "rna2grn", "tf_activity"}:
+        return "grn"
     if raw in {"adt", "adts", "cite", "cite-seq", "citeseq"}:
         return "adt"
     if raw in {"cell_communication", "cell communication", "communication", "fastcomm", "fastcomm_network"}:
@@ -351,6 +387,181 @@ def _build_imputed_adt_adata(
     return adt_adata, summary
 
 
+# --------------------------------------------------------------------------- #
+# AML imputation modalities (metabolite, lipid, GRN) — pseudobulk-trained, so
+# imputed per (sample x cell-state) pseudobulk and broadcast to cells.
+# --------------------------------------------------------------------------- #
+_PB_SAMPLE_COLS = ("sample", "Sample", "library", "Library", "orig.ident", "dataset", "Dataset")
+
+
+def _pseudobulk_group_key(obs: pd.DataFrame, cluster_obs_col: Optional[str]) -> pd.Series:
+    """Per-cell (sample x cell-state) group label used to form pseudobulks."""
+    if cluster_obs_col and cluster_obs_col in obs.columns:
+        cstate = obs[cluster_obs_col].astype(str)
+    else:
+        cstate = pd.Series("all", index=obs.index)
+    sample_col = next((c for c in _PB_SAMPLE_COLS if c in obs.columns), None)
+    sample = obs[sample_col].astype(str) if sample_col else pd.Series("all", index=obs.index)
+    return sample.str.cat(cstate, sep="|")
+
+
+def _impute_pseudobulk_predictions(query_adata, bundle, cluster_obs_col):
+    """Sum counts per (sample x cell-state) pseudobulk -> CP10k+log1p inside the bundle ->
+    impute -> broadcast each pseudobulk's vector back to its cells. Returns (cells x features
+    DataFrame, summary)."""
+    key = _pseudobulk_group_key(query_adata.obs, cluster_obs_col)
+    layer = "counts" if "counts" in getattr(query_adata, "layers", {}) else None
+    added = "_pb_group" not in query_adata.obs.columns
+    query_adata.obs["_pb_group"] = key.values
+    try:
+        result = bundle.predict_from_adata(
+            query_adata, groupby="_pb_group", layer=layer, normalized=(layer is None))
+    finally:
+        if added and "_pb_group" in query_adata.obs.columns:
+            del query_adata.obs["_pb_group"]
+    per_cell = result.predictions.reindex(key.values)
+    per_cell.index = query_adata.obs_names
+    return per_cell, dict(result.summary)
+
+
+def _finalize_imputed_adata(query_adata, per_cell_df, *, modality_id, feature_label,
+                            feature_type, expression_scale, log_base, base_summary):
+    matrix = np.nan_to_num(np.asarray(per_cell_df.to_numpy(dtype=np.float32), dtype=np.float32), nan=0.0)
+    var_names = pd.Index(_make_unique_feature_names([str(v) for v in per_cell_df.columns]), dtype=str)
+    var = pd.DataFrame(index=var_names)
+    var["features"] = var_names.astype(str)
+    var["raw_feature_name"] = pd.Index([str(v) for v in per_cell_df.columns], dtype=str)
+    var["feature_type"] = feature_type
+    adata = ad.AnnData(X=matrix, obs=query_adata.obs.copy(), var=var)
+    scale_info = _attach_imputed_expression_metadata(
+        adata, matrix,
+        expression_scale=_normalize_expression_scale(expression_scale, default="linear"),
+        log_base=log_base)
+    for key in ("X_umap",):
+        if key in query_adata.obsm:
+            adata.obsm[key] = np.asarray(query_adata.obsm[key]).copy()
+    if "lineage_order" in getattr(query_adata, "uns", {}):
+        adata.uns["lineage_order"] = list(query_adata.uns["lineage_order"])
+    adata.uns["modality"] = modality_id
+    adata.uns["feature_label"] = feature_label
+    summary = dict(base_summary or {})
+    summary.update(scale_info)
+    adata.uns["prediction_summary"] = summary
+    return adata, summary
+
+
+def _build_imputed_metabolite_adata(query_adata, reference_entry, cluster_obs_col=None):
+    cfg = _reference_impute_config(reference_entry, "metabolite")
+    bundle_path = cfg.get("bundle_path")
+    bundle = load_rna2metabolite_bundle(bundle_path) if bundle_path else load_rna2metabolite_bundle()
+    per_cell, summary = _impute_pseudobulk_predictions(query_adata, bundle, cluster_obs_col)
+    return _finalize_imputed_adata(
+        query_adata, per_cell, modality_id="metabolite", feature_label="metabolite",
+        feature_type="metabolite", expression_scale=cfg.get("expression_scale", "log2"),
+        log_base=cfg.get("log_base", "2"), base_summary=summary)
+
+
+def _build_imputed_lipid_aml_adata(query_adata, reference_entry, cluster_obs_col=None):
+    cfg = _reference_impute_config(reference_entry, "lipid")
+    bundle_path = cfg.get("bundle_path")
+    bundle = load_rna2lipid_aml_bundle(bundle_path) if bundle_path else load_rna2lipid_aml_bundle()
+    per_cell, summary = _impute_pseudobulk_predictions(query_adata, bundle, cluster_obs_col)
+    return _finalize_imputed_adata(
+        query_adata, per_cell, modality_id="lipid", feature_label="lipid",
+        feature_type="lipid", expression_scale=cfg.get("expression_scale", "log2"),
+        log_base=cfg.get("log_base", "2"), base_summary=summary)
+
+
+def _grn_tf_activity_per_cell(query_adata, edge_ids) -> pd.DataFrame:
+    """Per-cell TF (regulon) activity = summed activity of the TF's target genes in the cell,
+    standardized against size-matched background (an enrichment score; SCENIC/VISION-analogous).
+    Regulon membership comes from the imputed GRN edges; activity is scored per cell against the
+    cell's own normalized expression, giving true per-cell variation."""
+    tf = np.array([str(e).split("|")[0] for e in edge_ids])
+    tgt = np.array([str(e).split("|")[1] for e in edge_ids])
+    genes = list(query_adata.var_names)
+    gidx = {g: i for i, g in enumerate(genes)}
+    X = query_adata.X
+    Xcsc = X.tocsc() if sp.issparse(X) else np.asarray(X, dtype=np.float64)
+    mu = np.asarray(Xcsc.mean(axis=0)).ravel()
+    if sp.issparse(Xcsc):
+        sq = np.asarray(Xcsc.multiply(Xcsc).mean(axis=0)).ravel()
+    else:
+        sq = (Xcsc ** 2).mean(axis=0)
+    sd = np.sqrt(np.maximum(sq - mu ** 2, 1e-12))
+    tfs = sorted(set(tf.tolist()))
+    out = np.zeros((query_adata.n_obs, len(tfs)), np.float32)
+    for k, t in enumerate(tfs):
+        cols = [gidx[g] for g in tgt[tf == t] if g in gidx]
+        if not cols:
+            continue
+        sub = Xcsc[:, cols]
+        sub = sub.toarray() if sp.issparse(sub) else np.asarray(sub)
+        z = (sub - mu[cols][None, :]) / sd[cols][None, :]
+        out[:, k] = (z.sum(axis=1) / np.sqrt(len(cols))).astype(np.float32)
+    return pd.DataFrame(out, index=query_adata.obs_names, columns=tfs)
+
+
+def _build_imputed_grn_adata(query_adata, reference_entry, cluster_obs_col=None):
+    """Returns (tf_activity_adata, edges_adata, summary). TF activity (per-cell regulon
+    enrichment) drives the viewer; per-cell broadcast edge scores drive edge differential."""
+    cfg = _reference_impute_config(reference_entry, "grn")
+    bundle_path = cfg.get("bundle_path")
+    bundle = load_rna2grn_bundle(bundle_path) if bundle_path else load_rna2grn_bundle()
+    key = _pseudobulk_group_key(query_adata.obs, cluster_obs_col)
+    layer = "counts" if "counts" in getattr(query_adata, "layers", {}) else None
+    added = "_pb_group" not in query_adata.obs.columns
+    query_adata.obs["_pb_group"] = key.values
+    try:
+        gres = bundle.predict_from_adata(query_adata, groupby="_pb_group", layer=layer)
+    finally:
+        if added and "_pb_group" in query_adata.obs.columns:
+            del query_adata.obs["_pb_group"]
+    edges = gres.predictions                                  # pseudobulk x edges (TF|Gene)
+    edge_per_cell = edges.reindex(key.values); edge_per_cell.index = query_adata.obs_names
+    tf_df = _grn_tf_activity_per_cell(query_adata, list(edges.columns))
+    tf_adata, summary = _finalize_imputed_adata(
+        query_adata, tf_df, modality_id="grn", feature_label="TF", feature_type="GRN-TF",
+        expression_scale="linear", log_base=None, base_summary=dict(gres.summary))
+    edges_adata, _ = _finalize_imputed_adata(
+        query_adata, edge_per_cell, modality_id="grn", feature_label="TF-target edge",
+        feature_type="GRN-edge", expression_scale="linear", log_base=None,
+        base_summary=dict(gres.summary))
+    summary["n_edges"] = int(edges.shape[1])
+    summary["n_tfs"] = int(tf_df.shape[1])
+    return tf_adata, edges_adata, summary
+
+
+def _emit_modality_marker_heatmap(modality_id, modality_adata, outputs_dir, query_cluster_key, meta):
+    """Per-cell-state marker heatmap for an imputed modality (mirrors the ADT marker block)."""
+    mdir = outputs_dir / f"marker_heatmap_{modality_id}"
+    mdir.mkdir(parents=True, exist_ok=True)
+    outs = marker_mod.generate_marker_heatmap_from_adata(
+        modality_adata,
+        cluster_key=query_cluster_key,
+        out=str(mdir / f"cell_state_{modality_id}_marker_heatmap.pdf"),
+        top_n=5, marker_method="markerfinder", cells_per_cluster=100, seed=0,
+        export_networks=False, network_top_n=0, network_jobs=1,
+        species=meta.get("species"), write_heatmap_tsv=False,
+        write_expression_tsv=False, write_heatmap_cache=True,
+    )
+    archive = outputs_dir / f"cell_state_{modality_id}_markers.zip"
+    _write_selected_zip(mdir, archive, suffixes=(".pdf", ".tsv", ".png", ".npz"))
+    analysis = {
+        "enabled": True, "cluster_key": query_cluster_key,
+        "heatmap_pdf": str(outs["pdf"]), "centroids_tsv": str(outs["centroids_tsv"]),
+        "markers_tsv": str(outs["markers_tsv"]), "archive": str(archive),
+        "networks": [], "modality": modality_id,
+    }
+    if outs.get("heatmap_tsv"):
+        analysis["heatmap_tsv"] = str(outs["heatmap_tsv"])
+    if outs.get("heatmap_cache"):
+        analysis["heatmap_cache"] = str(outs["heatmap_cache"])
+    if outs.get("heatmap_column_tsv"):
+        analysis["expression_tsv"] = str(outs["heatmap_column_tsv"])
+    return analysis
+
+
 def _modality_h5ad_path(meta: Dict, modality: str) -> Path:
     normalized = _normalize_modality_id(modality)
     if normalized == "rna":
@@ -365,9 +576,19 @@ def _modality_h5ad_path(meta: Dict, modality: str) -> Path:
     return path
 
 
+def _modality_differential_h5ad_path(meta: Dict, modality: str) -> Path:
+    """h5ad used for differential analysis. GRN compares edges directly, so it uses the
+    separate edge-level h5ad (``differential_h5ad``); all others use the viewer h5ad."""
+    normalized = _normalize_modality_id(modality)
+    diff = str(((meta.get("modality_artifacts") or {}).get(normalized) or {}).get("differential_h5ad", "")).strip()
+    if diff and Path(diff).exists():
+        return Path(diff)
+    return _modality_h5ad_path(meta, modality)
+
+
 def _differential_runtime_params(modality: str, comparison_type: str) -> Dict[str, object]:
     normalized = _normalize_modality_id(modality)
-    if normalized in ("lipids", "adt"):
+    if normalized in ("lipids", "adt", "metabolite", "lipid", "grn"):
         return {
             "method": "wilcoxon",
             "alpha": 0.05,
@@ -1396,6 +1617,60 @@ def run_cellharmony_pipeline(
         marker_analysis_by_modality["adt"] = adt_marker_analysis
         store.append_log(job_id, "rna2adt ADT imputation complete.")
 
+    if selected_impute_modality == "metabolite":
+        store.update_job(job_id, progress=88, message="Imputing metabolite abundance from aligned RNA (pseudobulk).")
+        store.append_log(job_id, "Running rna2metabolite imputation.")
+        met_adata, met_summary = _build_imputed_metabolite_adata(
+            approx_result.query_adata, reference_entry, cluster_obs_col=query_cluster_key)
+        met_h5ad_path = outputs_dir / "combined_with_umap_and_markers_metabolite.h5ad"
+        approx_result.query_adata.obsm["X_metabolite"] = np.asarray(met_adata.X, dtype=np.float32)
+        approx_result.query_adata.uns["metabolite_feature_names"] = met_adata.var_names.astype(str).tolist()
+        approx_result.query_adata.uns.setdefault("imputed_modalities", {})["metabolite"] = {
+            "obsm_key": "X_metabolite", "feature_names_key": "metabolite_feature_names", "summary": met_summary}
+        approx_mod.ensure_h5ad_compat_for_write(met_adata)
+        met_adata.write(met_h5ad_path, compression=resolved_h5ad_compression)
+        modality_artifacts["metabolite"] = {"h5ad": str(met_h5ad_path)}
+        marker_analysis_by_modality["metabolite"] = _emit_modality_marker_heatmap(
+            "metabolite", met_adata, outputs_dir, query_cluster_key, meta)
+        store.append_log(job_id, "rna2metabolite imputation complete.")
+
+    if selected_impute_modality == "lipid":
+        store.update_job(job_id, progress=88, message="Imputing lipid abundance from aligned RNA (pseudobulk).")
+        store.append_log(job_id, "Running rna2lipid (AML) imputation.")
+        lip_adata, lip_summary = _build_imputed_lipid_aml_adata(
+            approx_result.query_adata, reference_entry, cluster_obs_col=query_cluster_key)
+        lip_h5ad_path = outputs_dir / "combined_with_umap_and_markers_lipid.h5ad"
+        approx_result.query_adata.obsm["X_lipid"] = np.asarray(lip_adata.X, dtype=np.float32)
+        approx_result.query_adata.uns["lipid_feature_names"] = lip_adata.var_names.astype(str).tolist()
+        approx_result.query_adata.uns.setdefault("imputed_modalities", {})["lipid"] = {
+            "obsm_key": "X_lipid", "feature_names_key": "lipid_feature_names", "summary": lip_summary}
+        approx_mod.ensure_h5ad_compat_for_write(lip_adata)
+        lip_adata.write(lip_h5ad_path, compression=resolved_h5ad_compression)
+        modality_artifacts["lipid"] = {"h5ad": str(lip_h5ad_path)}
+        marker_analysis_by_modality["lipid"] = _emit_modality_marker_heatmap(
+            "lipid", lip_adata, outputs_dir, query_cluster_key, meta)
+        store.append_log(job_id, "rna2lipid (AML) imputation complete.")
+
+    if selected_impute_modality == "grn":
+        store.update_job(job_id, progress=88, message="Imputing GRN / TF activity from aligned RNA (pseudobulk).")
+        store.append_log(job_id, "Running rna2grn imputation.")
+        grn_tf_adata, grn_edges_adata, grn_summary = _build_imputed_grn_adata(
+            approx_result.query_adata, reference_entry, cluster_obs_col=query_cluster_key)
+        grn_h5ad_path = outputs_dir / "combined_with_umap_and_markers_grn.h5ad"
+        grn_edges_path = outputs_dir / "combined_with_umap_and_markers_grn_edges.h5ad"
+        approx_result.query_adata.obsm["X_grn"] = np.asarray(grn_tf_adata.X, dtype=np.float32)
+        approx_result.query_adata.uns["grn_feature_names"] = grn_tf_adata.var_names.astype(str).tolist()
+        approx_result.query_adata.uns.setdefault("imputed_modalities", {})["grn"] = {
+            "obsm_key": "X_grn", "feature_names_key": "grn_feature_names", "summary": grn_summary}
+        approx_mod.ensure_h5ad_compat_for_write(grn_tf_adata)
+        grn_tf_adata.write(grn_h5ad_path, compression=resolved_h5ad_compression)
+        approx_mod.ensure_h5ad_compat_for_write(grn_edges_adata)
+        grn_edges_adata.write(grn_edges_path, compression=resolved_h5ad_compression)
+        modality_artifacts["grn"] = {"h5ad": str(grn_h5ad_path), "differential_h5ad": str(grn_edges_path)}
+        marker_analysis_by_modality["grn"] = _emit_modality_marker_heatmap(
+            "grn", grn_tf_adata, outputs_dir, query_cluster_key, meta)
+        store.append_log(job_id, "rna2grn imputation complete.")
+
     approx_mod.ensure_h5ad_compat_for_write(approx_result.query_adata)
     approx_result.query_adata.write(combined_h5ad_path, compression=resolved_h5ad_compression)
 
@@ -1441,6 +1716,20 @@ def run_cellharmony_pipeline(
         adt_archive = marker_analysis_by_modality.get("adt", {}).get("archive")
         if adt_archive:
             artifacts["adt_marker_genes_zip"] = Path(str(adt_archive))
+    for _mod_id, _h5ad_key, _zip_key in (
+        ("metabolite", "imputed_metabolite_h5ad", "metabolite_marker_genes_zip"),
+        ("lipid", "imputed_lipid_h5ad", "lipid_marker_genes_zip"),
+        ("grn", "imputed_grn_h5ad", "grn_marker_genes_zip"),
+    ):
+        if _mod_id in modality_artifacts:
+            _h5ad_value = modality_artifacts[_mod_id].get("h5ad")
+            if _h5ad_value:
+                artifacts[_h5ad_key] = Path(_h5ad_value)
+            _archive = marker_analysis_by_modality.get(_mod_id, {}).get("archive")
+            if _archive:
+                artifacts[_zip_key] = Path(str(_archive))
+    if "grn" in modality_artifacts and modality_artifacts["grn"].get("differential_h5ad"):
+        artifacts["imputed_grn_edges_h5ad"] = Path(modality_artifacts["grn"]["differential_h5ad"])
 
     fastcnv_analysis: Dict[str, object] = {"enabled": False}
     fastcomm_analysis: Dict[str, object] = {"enabled": False}
@@ -1711,7 +2000,7 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
     if overlap:
         raise ValueError(f"Samples cannot appear in both groups: {', '.join(overlap)}")
 
-    combined_h5ad = None if modality == "cell_communication" else _modality_h5ad_path(meta, modality)
+    combined_h5ad = None if modality == "cell_communication" else _modality_differential_h5ad_path(meta, modality)
 
     comparison_tag = _comparison_tag(group1_samples, group2_samples)
     run_id = datetime.utcnow().strftime("%Y%m%d-%H%M%S")

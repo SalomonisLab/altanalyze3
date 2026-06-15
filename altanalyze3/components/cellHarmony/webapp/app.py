@@ -181,6 +181,33 @@ _DEFAULT_MODALITY_DEFINITIONS: Dict[str, Dict[str, object]] = {
         "supports_differential_network": False,
         "supports_differential_go": False,
     },
+    "metabolite": {
+        "id": "metabolite",
+        "label": "Metabolite (AML)",
+        "feature_label": "metabolite",
+        "supports_marker_heatmap": True,
+        "supports_marker_network": False,
+        "supports_differential_network": False,
+        "supports_differential_go": False,
+    },
+    "lipid": {
+        "id": "lipid",
+        "label": "Lipid (AML)",
+        "feature_label": "lipid",
+        "supports_marker_heatmap": True,
+        "supports_marker_network": False,
+        "supports_differential_network": False,
+        "supports_differential_go": False,
+    },
+    "grn": {
+        "id": "grn",
+        "label": "GRN (TF activity)",
+        "feature_label": "TF",
+        "supports_marker_heatmap": True,
+        "supports_marker_network": False,
+        "supports_differential_network": False,
+        "supports_differential_go": False,
+    },
     "cell_communication": {
         "id": "cell_communication",
         "label": "Cell communication",
@@ -197,8 +224,14 @@ def _normalize_modality_id(value: object, *, default: str = "rna") -> str:
     raw = str(value or "").strip().lower()
     if not raw or raw in {"none", "null", "false", "off"}:
         return default
-    if raw in {"lipid", "lipids"}:
+    if raw in {"lipids"}:
         return "lipids"
+    if raw in {"lipid", "lipid_aml", "aml_lipid", "rna2lipid_aml"}:
+        return "lipid"
+    if raw in {"metabolite", "metabolites", "rna2metabolite"}:
+        return "metabolite"
+    if raw in {"grn", "grns", "regulon", "regulons", "gene_regulatory_network", "rna2grn", "tf_activity"}:
+        return "grn"
     if raw in {"adt", "adts", "cite", "cite-seq", "citeseq"}:
         return "adt"
     if raw in {"cell_communication", "cell communication", "communication", "fastcomm", "fastcomm_network"}:
@@ -790,6 +823,12 @@ def _derive_live_pipeline_message(status: object, log_lines: List[str], fallback
         "rna2adt ADT imputation complete.",
         "Running rna2lipid lipid imputation.",
         "rna2lipid lipid imputation complete.",
+        "Running rna2metabolite imputation.",
+        "rna2metabolite imputation complete.",
+        "Running rna2lipid (AML) imputation.",
+        "rna2lipid (AML) imputation complete.",
+        "Running rna2grn imputation.",
+        "rna2grn imputation complete.",
         "Ambient RNA correction",
         "ambient RNA correction",
         "ambient correction",
@@ -1126,6 +1165,10 @@ def _differential_gene_h5ad_path(meta: Dict) -> Path:
         if raw_path and Path(raw_path).exists():
             return Path(raw_path)
     modality = _normalize_modality_id((meta.get("differential", {}).get("config", {}) or {}).get("modality"), default="rna")
+    # GRN differential operates on edges, served from the edge-level h5ad.
+    diff_h5ad = str(((meta.get("modality_artifacts") or {}).get(modality) or {}).get("differential_h5ad", "")).strip()
+    if diff_h5ad and Path(diff_h5ad).exists():
+        return Path(diff_h5ad)
     try:
         return _modality_h5ad_path(meta, modality)
     except FileNotFoundError:
@@ -3679,7 +3722,7 @@ def _render_expression_pdf(payload: Dict, mode: str) -> io.BytesIO:
         ax.set_ylim(global_min - pad, global_max + pad)
     else:
         umap_points = payload["umap"]
-        if _normalize_modality_id(payload.get("modality"), default="rna") in {"lipids", "adt"}:
+        if _normalize_modality_id(payload.get("modality"), default="rna") in {"lipids", "adt", "metabolite", "lipid", "grn"}:
             expression_cmap = matplotlib.colors.LinearSegmentedColormap.from_list(
                 "expression_blue_yellow_red",
                 [

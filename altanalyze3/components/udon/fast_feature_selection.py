@@ -16,11 +16,19 @@ from sklearn.decomposition import PCA, TruncatedSVD
 from sklearn.preprocessing import scale
 
 
-def fast_rank(fold_hvg, oversample=80):
+def fast_rank(fold_hvg, oversample=80, small_feature=False, rel_threshold=0.1, max_rank=30):
     """determine_nmf_ranks (nmf.py:9) via randomized SVD instead of full LA.eig on
     a samples x samples covariance (O(n^3)). Eigenvalues of scale(X)^T scale(X)
     are the squared singular values of scale(X). Returns est_k = 2*k (same as
-    original), validated to match the eig rank on the subset."""
+    original), validated to match the eig rank on the subset.
+
+    small_feature=True: for panels with few features and many pseudobulks (e.g.
+    ~129 imputed ADTs x thousands of pseudobulks) the Tracy-Widom boundary is
+    inflated by the large sample count, so only the single dominant (global)
+    component clears it -> rank 2. In this mode count STRUCTURAL components by a
+    relative-eigenvalue criterion instead (eigenvalue >= rel_threshold * the top
+    non-global eigenvalue), robust to one dominant shared component, and DO NOT
+    apply the 2x inflation. Capped at max_rank."""
     X = scale(np.asarray(fold_hvg))
     g, c = X.shape
     muTW = (np.sqrt(g - 1) + np.sqrt(c)) ** 2.0
@@ -28,7 +36,13 @@ def fast_rank(fold_hvg, oversample=80):
     boundary = 3.273 * sigmaTW + muTW
     ncomp = int(min(c - 1, oversample))
     sv = TruncatedSVD(n_components=ncomp, random_state=0).fit(X).singular_values_
-    return 2 * int((sv ** 2 > boundary).sum())
+    ev = np.sort(sv ** 2)[::-1]
+    if not small_feature:
+        return 2 * int((ev > boundary).sum())
+    if ev.size < 2:
+        return 2
+    k = int((ev >= float(rel_threshold) * ev[1]).sum())   # includes the dominant global component
+    return int(min(max(k, 2), int(max_rank)))
 
 
 def fast_variance(folds, fold_threshold=1, samples_differing=3):

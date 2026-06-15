@@ -62,8 +62,23 @@ def main():
     ap.add_argument("--score-floor", type=float, default=0.40)
     ap.add_argument("--score-margin", type=float, default=0.05)
     ap.add_argument("--rank", type=int, default=None)
-    ap.add_argument("--modality", choices=["rna", "adt"], default="rna",
-                    help="adt: skip RNA-specific protein-coding/non-coding gene filters and use all features")
+    ap.add_argument("--min-markers-per-cluster", type=int, default=None,
+                    help="retain a final NMF cluster only if it has >= this many unique marker features "
+                         "(legacy 16 == old hard-coded '>15'). Few-feature/ADT panels need a low value "
+                         "(default 1 for --modality adt) or diverse clusters collapse to 2; RNA default 16")
+    ap.add_argument("--small-feature-rank", action="store_true", default=False,
+                    help="use the small-feature NMF rank estimator (relative-eigenvalue criterion) that "
+                         "bypasses the Tracy-Widom boundary inflation yielding rank 2 for few-feature panels; "
+                         "auto-enabled for --modality adt when --rank is not supplied")
+    ap.add_argument("--rank-rel-threshold", type=float, default=0.1,
+                    help="small-feature rank: count components with eigenvalue >= this * the top "
+                         "non-global eigenvalue (default 0.1)")
+    ap.add_argument("--modality", choices=["rna", "adt", "grn", "metabolite", "lipid"], default="rna",
+                    help="non-RNA modalities (adt/grn/metabolite/lipid) skip the RNA protein-coding/non-coding "
+                         "gene filters and use ALL features (names are surface proteins / TF|target edges / "
+                         "metabolites / lipids, not gene symbols). adt forces the small-feature rank + "
+                         "min_markers=1; grn/metabolite/lipid keep the STANDARD rank + min_markers but auto-fall "
+                         "back to the small-feature rank if the standard rank collapses (<=3)")
     ap.add_argument("--fast", action="store_true",
                     help="use validated-fast feature selection (vectorized) + SVD rank instead of the "
                          "slow per-gene loop + full-eig rank (nimfa clustering unchanged)")
@@ -79,6 +94,12 @@ def main():
     ap.add_argument("--min-cells", type=int, default=5,
                     help="drop pseudobulks built from fewer than this many cells (QC; uses --ncells-col; 0=off)")
     args = ap.parse_args()
+
+    # small-feature / ADT defaults: ADT auto-uses the small-feature rank (unless an explicit --rank
+    # is given) and a min-markers-per-cluster of 1 (vs the RNA legacy 16) so diverse clusters survive.
+    _adt = args.modality == "adt"
+    min_markers = args.min_markers_per_cluster if args.min_markers_per_cluster is not None else (1 if _adt else 16)
+    small_feature_rank = args.small_feature_rank or (_adt and args.rank is None)
 
     pb_path = os.path.abspath(args.pseudobulk)
     if args.output_dir:
@@ -186,15 +207,25 @@ def main():
         from feature_selection import feature_selection_wrapper
         from clustering_wrapper import clustering_wrapper
         rank = args.rank
-        if args.modality == "adt":
-            # ADT: RNA gene filters (protein-coding, HLA/Y/dot strips) would wrongly drop
-            # surface markers (CD*, HLA.ABC, ...). Use ALL features for NMF.
-            log(f"modality=adt: skipping RNA gene filters; using all {udon.n_vars} ADT features")
+        if args.modality in ("adt", "grn", "metabolite", "lipid"):
+            # Non-RNA feature names are NOT gene symbols (CD markers; TF|target edges; metabolites; lipids),
+            # so the RNA gene filters would wrongly drop them. Use ALL features for NMF.
+            log(f"modality={args.modality}: skipping RNA gene filters; using all {udon.n_vars} features")
             udon.var["correlated_genes"] = True
-            if args.fast and rank is None:
+            if rank is None:
+                # fast SVD rank (the full samples x samples eig is the bottleneck on thousands of
+                # pseudobulks). adt forces small_feature (its tiny panel collapses the Tracy-Widom rank);
+                # the others use the standard rank but auto-fall back to small_feature if it collapses.
                 import fast_feature_selection as FFS
-                rank = FFS.fast_rank(folds)
-                log(f"fast rank (randomized SVD): {rank}")
+                rank = FFS.fast_rank(folds, small_feature=small_feature_rank, rel_threshold=args.rank_rel_threshold)
+                if rank <= 3 and not small_feature_rank:
+                    small_feature_rank = True
+                    rank = FFS.fast_rank(folds, small_feature=True, rel_threshold=args.rank_rel_threshold)
+                    if args.min_markers_per_cluster is None:
+                        min_markers = 1
+                    log(f"{args.modality}: standard NMF rank collapsed (<=3); fell back to small-feature rank")
+                log(f"{args.modality} NMF rank (TruncatedSVD, small_feature={small_feature_rank}, "
+                    f"rel_threshold={args.rank_rel_threshold}): {rank} | min_markers_per_cluster={min_markers}")
         elif args.fast:
             import fast_feature_selection as FFS
             log("FAST feature selection (vectorized; validated-identical to original)...")
@@ -218,8 +249,12 @@ def main():
         core_out = os.path.join(outdir, "udon_core")
         if os.path.exists(core_out):
             import shutil; shutil.rmtree(core_out)
-        log("UDON NMF clustering + marker finding...")
-        udon = clustering_wrapper(udon, output_filename=core_out, rank=rank)
+        log(f"UDON NMF clustering + marker finding (rank={rank}, min_markers_per_cluster={min_markers}, "
+            f"small_feature_rank={small_feature_rank})...")
+        udon = clustering_wrapper(udon, output_filename=core_out, rank=rank,
+                                  min_markers_per_cluster=min_markers,
+                                  small_feature_rank=small_feature_rank,
+                                  rank_rel_threshold=args.rank_rel_threshold)
     finally:
         os.chdir(prev_cwd)
 

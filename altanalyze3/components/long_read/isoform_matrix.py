@@ -310,6 +310,20 @@ def remove_feature_suffix(feature):
     return feature.split(':')[0]
 
 def calculate_barcode_match_percentage(adata, barcode_clusters, context=None):
+    # A barcode->cluster annotation must be 1:1 -- one cluster label per cell barcode. If the
+    # annotation file lists the same barcode more than once (e.g. two cellHarmony result sets
+    # concatenated, with a cell assigned conflicting labels), the downstream obs.join(how='inner')
+    # multiplies those rows and AnnData then rejects the now-longer obs_names with
+    # "Length of passed value for obs_names is N, but this AnnData has shape ...", killing the whole
+    # sample late in phase 1. Collapse duplicate barcodes up front (keep the first label) so a messy
+    # annotation degrades gracefully (a logged warning) instead of crashing the run.
+    if barcode_clusters.index.has_duplicates:
+        n_dup = int(barcode_clusters.index.duplicated(keep='first').sum())
+        where = f" [{context}]" if context else ""
+        print(f"WARNING: calculate_barcode_match_percentage{where}: {n_dup} duplicate annotation "
+              f"barcode(s) collapsed to first occurrence (annotation must be 1 cluster per barcode).")
+        barcode_clusters = barcode_clusters[~barcode_clusters.index.duplicated(keep='first')]
+
     # Verify that the cell barcodes maximally map to provided cell barcode annotations (no naming conflicts)
     matching_barcodes = set(adata.obs_names) & set(barcode_clusters.index)
     print(len(adata.obs_names),'matrix barcodes |',len(barcode_clusters.index),'annotation barcodes |',len(matching_barcodes),'overlap')

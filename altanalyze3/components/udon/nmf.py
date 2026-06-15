@@ -6,7 +6,7 @@ from numpy import linalg as LA
 
 
 # determine the rank of the NMF decomposition
-def determine_nmf_ranks(df):
+def determine_nmf_ranks(df, small_feature=False, rel_threshold=0.1, max_rank=30):
     # "To estimate the rank of the matrix (i.e. clusters) for SNMF, the ICGS Guide3 matrix is z-score normalized and its eigenvalues are calculated."
 
     # Convert X to a numpy array
@@ -36,12 +36,21 @@ def determine_nmf_ranks(df):
     # samples x samples matrix is O(n^3) and was the full-scale bottleneck.
     w = LA.eigh(sigmaHat)[0]
 
-    # Count the number of eigenvalues greater than the boundary
-    k = int(np.sum(np.asarray(w) > boundary))
+    if not small_feature:
+        # Count the number of eigenvalues greater than the boundary
+        k = int(np.sum(np.asarray(w) > boundary))
+        est_k = 2 * k   # Estimate the rank of the matrix
+        return est_k
 
-    est_k = 2*k   # Estimate the rank of the matrix
-
-    return est_k
+    # small_feature: few features x many pseudobulks (e.g. imputed ADT panels) inflate the
+    # Tracy-Widom boundary so only the dominant global component clears it -> rank 2. Count
+    # structural components by a relative-eigenvalue criterion (eigenvalue >= rel_threshold * the
+    # top non-global eigenvalue) instead, robust to one dominant shared component; no 2x inflation.
+    ws = np.sort(np.asarray(w))[::-1]
+    if ws.size < 2:
+        return 2
+    k = int(np.sum(ws >= float(rel_threshold) * ws[1]))   # includes the dominant global component
+    return int(min(max(k, 2), int(max_rank)))
 
 
 # write the pseudocode here ##

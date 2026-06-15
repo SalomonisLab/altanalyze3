@@ -157,6 +157,15 @@ def exportRatios(ob,out):
     cpm.to_csv(out+'_pseudo_cluster-cpm.txt', sep='\t')
     isoform_to_gene_ratio.to_csv(out+'_pseudo_cluster-ratio.txt', sep='\t')
 
+def _force_overwrite():
+    """True when the CLI was run with --force: per-sample steps REGENERATE and overwrite their outputs
+    in place instead of reloading/skipping existing files (the workflow writes over them; nothing is
+    deleted out-of-band). Carried via an environment variable so it applies across the parallel
+    per-sample worker processes the workflow spawns."""
+    import os
+    return os.environ.get("ALTANALYZE3_FORCE_OVERWRITE", "") == "1"
+
+
 def import_metadata(metadata_file, return_size = False, include_hashed_samples = False, extract_from_bams = False, reference_model = None):
     """Reads metadata file and groups samples by uid."""
 
@@ -296,7 +305,7 @@ def export_junction_matrix(matrix, gff, library, reverse, ensembl_exon_dir, barc
     # Coerce paths to str: callers may pass pathlib.Path (e.g. argparse-resolved args), but the
     # downstream string ops (gff.split('.g'), matrix_dir_to_adata) require plain strings.
     gff = str(gff); matrix = str(matrix); ensembl_exon_dir = str(ensembl_exon_dir)
-    regenerate_junction_h5ad = False
+    regenerate_junction_h5ad = _force_overwrite()   # --force: rebuild (and re-do the cellHarmony barcode match) instead of reloading
     h5ad_output_path = Path(f"{gff.split('.g')[0]}-junction.h5ad")
     if h5ad_output_path.exists() and regenerate_junction_h5ad == False:
         if return_adata:
@@ -692,7 +701,7 @@ def _ensure_gene_h5ad(matrix_path):
     the extraction itself (the gene diff is optional; the molecule/isoform/junction outputs are not)."""
     try:
         out = _gene_h5ad_path_for(matrix_path)
-        if os.path.exists(out):
+        if os.path.exists(out) and not _force_overwrite():
             print(f"[gene-agg] exists, skipping: {os.path.basename(out)}", flush=True)
             return out
         if not os.path.exists(str(matrix_path)):

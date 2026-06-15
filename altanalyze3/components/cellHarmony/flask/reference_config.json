@@ -12,13 +12,30 @@
           "reference_coords_tsv": "references/Human/BoneMarrow/Zhang-2024/Hs-MarrowAtlas-L3M_reference_umap.tsv",
           "cluster_key": "Population",
           "impute_modalities": [
-            "adt"
+            "adt",
+            "metabolite",
+            "lipid",
+            "grn"
           ],
           "impute_config": {
             "adt": {
               "bundle_path": "../../rna2adt/rna2adt_bm_bundle.pkl",
               "expression_scale": "log1p",
               "log_base": "e"
+            },
+            "metabolite": {
+              "bundle_path": "../../rna2metabolite/artifacts/rna2metabolite_aml_bundle.pkl.gz",
+              "expression_scale": "log2",
+              "log_base": "2"
+            },
+            "lipid": {
+              "bundle_path": "../../rna2lipid/aml/artifacts/rna2lipid_aml_bundle.pkl.gz",
+              "expression_scale": "log2",
+              "log_base": "2"
+            },
+            "grn": {
+              "bundle_path": "../../rna2grn/rna2grn_bundle.pkl.gz",
+              "expression_scale": "linear"
             }
           },
           "ambient_options": [

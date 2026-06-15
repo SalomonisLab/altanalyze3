@@ -201,6 +201,8 @@ def run_sclr(args):
     """
     import altanalyze3.components.long_read.isoform_automate as isoa
     import altanalyze3.components.cellHarmony.cellHarmony_automate as cha
+    if getattr(args, "force", False):
+        os.environ["ALTANALYZE3_FORCE_OVERWRITE"] = "1"   # --force: regenerate + overwrite existing per-sample outputs
 
     species = args.species
     work_dir = _cellharmony_outdir(args.metadata)
@@ -216,9 +218,14 @@ def run_sclr(args):
     metadata_for_extract = str(args.metadata)
     if getattr(args, "sample", None):
         metadata_for_extract = _write_single_sample_metadata(args.metadata, args.sample, work_dir)
+    # --skip-bam-extract resumes phase 1 from the already-extracted <library>.gff.gz/.h5ad (no
+    # multi-hour re-extraction); default is to extract from the BAMs.
+    extract_from_bams = not getattr(args, "skip_bam_extract", False)
+    if not extract_from_bams:
+        logging.info("sclr: --skip-bam-extract set; reusing existing per-sample gff/h5ad (no BAM extraction).")
     sample_dict = isoa.import_metadata(
         metadata_for_extract, include_hashed_samples=True,
-        extract_from_bams=True, reference_model=exon_annot,
+        extract_from_bams=extract_from_bams, reference_model=exon_annot,
     )
 
     # Step 2 (optional): gene aggregation + cellHarmony per sample -> barcode->cluster TSV.
@@ -304,6 +311,8 @@ def run_sclr_isoquant(args):
     separate one-job call (sclr-diff)."""
     import altanalyze3.components.long_read.isoform_automate as isoa
     import altanalyze3.components.long_read.isoform_matrix as iso
+    if getattr(args, "force", False):
+        os.environ["ALTANALYZE3_FORCE_OVERWRITE"] = "1"
 
     species = args.species
     work_dir = _cellharmony_outdir(args.metadata)
@@ -339,6 +348,8 @@ def run_sclr_gene_aggregate(args):
     these per-sample files."""
     import altanalyze3.components.long_read.isoform_automate as isoa
     import altanalyze3.components.long_read.isoform_matrix as iso
+    if getattr(args, "force", False):
+        os.environ["ALTANALYZE3_FORCE_OVERWRITE"] = "1"
 
     sample_dict = isoa.import_metadata(str(args.metadata), include_hashed_samples=True)
     if getattr(args, "sample", None):

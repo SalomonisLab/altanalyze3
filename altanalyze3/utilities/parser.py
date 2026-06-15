@@ -305,6 +305,8 @@ class ArgsParser():
         sclr_parser.add_argument("--gene_symbol", default=None, type=str, help="Ensembl-id -> symbol table. Default: bundled gzipped <species> annotations")
         sclr_parser.add_argument("--cellHarmony_ref", default=None, type=str, help="Align to this reference: a cellHarmony registry id (e.g. hs_bm_reference) or a centroid .txt path. Mutually exclusive with --cell_annot.")
         sclr_parser.add_argument("--cell_annot", default=None, type=str, help="Use existing barcode->cluster annotations (cellHarmony format) instead of aligning. Mutually exclusive with --cellHarmony_ref.")
+        sclr_parser.add_argument("--force", action="store_true", help="Reprocess and OVERWRITE existing per-sample outputs in place (re-extract / rebuild the junction h5ad with the cellHarmony barcode match / re-aggregate the gene h5ad) instead of reloading or skipping them. Nothing is deleted out-of-band.")
+        sclr_parser.add_argument("--skip-bam-extract", dest="skip_bam_extract", action="store_true", help="RESUME phase 1 without re-extracting the BAMs: reuse the already-written <library>.gff.gz / <library>.h5ad and pick up at cellHarmony + junction export. Combine with --force to rebuild the junction h5ad / redo the barcode match (e.g. after fixing the annotation file). Skips the multi-hour extraction.")
         self.add_common_arguments(sclr_parser)
 
         # Phase 2 (integration, 1 job): combine per-sample junction pseudobulks + PSI + splice diff
@@ -351,6 +353,7 @@ class ArgsParser():
         sclr_isoquant_parser.add_argument("--collapse_method", default="wta", choices=["wta", "em"], help="Must match the method used for sclr-isoforms (P3). wta (default) or em.")
         sclr_isoquant_parser.add_argument("--species", default="human", choices=["human", "mouse"], help="Default: human")
         sclr_isoquant_parser.add_argument("--cell_annot", default=None, type=str, help="Optional explicit barcode->cluster file/dir (else discovered from the sclr cellHarmony outputs)")
+        sclr_isoquant_parser.add_argument("--force", action="store_true", help="Reprocess + overwrite existing per-sample outputs instead of skipping.")
         self.add_common_arguments(sclr_isoquant_parser)
 
         # Gene aggregation (per sample, parallelizable): molecule h5ad -> <library>-gene.h5ad. Needed
@@ -365,6 +368,7 @@ class ArgsParser():
         sclr_gene_agg_parser.add_argument("--sample", default=None, type=str, help="Process ONE uid (parallel fan-out). Omit to loop over all uids.")
         sclr_gene_agg_parser.add_argument("--species", default="human", choices=["human", "mouse"], help="Default: human")
         sclr_gene_agg_parser.add_argument("--cell_annot", default=None, type=str, help="Barcode->cluster file/dir (cellHarmony format), same source the isoform/junction diffs use; joined in-memory to build the per-sample gene pseudobulk")
+        sclr_gene_agg_parser.add_argument("--force", action="store_true", help="Re-aggregate + overwrite the existing <library>-gene.h5ad instead of skipping.")
         self.add_common_arguments(sclr_gene_agg_parser)
 
         # Phase 4 combine (1 job): combine per-sample isoform pseudobulks + isoform differentials

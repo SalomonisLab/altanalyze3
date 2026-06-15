@@ -43,7 +43,7 @@ def make_mean_based_binary(df, cols_to_convert, direction="greater"):
     return out.astype(int)
 
 
-def load_metadata(path, sample_col="Sample", mean_binarize=None, direction="greater"):
+def load_metadata(path, sample_col="Sample", mean_binarize=None, direction="greater", drop_cols=None):
     """Read + validate the standard SATAY-UDON metadata table (SATAY_METADATA_FORMAT.md).
     Returns (binary covariate DataFrame indexed by Sample, donor_of dict Sample->Donor_ID or None).
     Binary {0,1} columns kept; categorical -> one-hot per level (undefined samples = NaN, not 0);
@@ -55,11 +55,22 @@ def load_metadata(path, sample_col="Sample", mean_binarize=None, direction="grea
     df[sample_col] = df[sample_col].astype(str).str.strip()
     dups = sorted(df[sample_col][df[sample_col].duplicated()].unique())
     if dups:
-        raise ValueError(f"[metadata] duplicate {sample_col} values not allowed (one row/sample): {dups[:8]}")
+        # Collapse duplicate-Sample rows by keeping the MOST-COMPLETE row per Sample (fewest blank
+        # fields). This handles standardized metadata where the same specimen appears in >1 dataset
+        # with an empty placeholder row; keeping the data-bearing row is the correct resolution.
+        import sys as _sys
+        _blank = df.replace({"": np.nan}).isna().sum(axis=1)
+        df = (df.assign(_blank=_blank.values).sort_values("_blank")
+                .drop_duplicates(sample_col, keep="first").drop(columns="_blank")
+                .reset_index(drop=True))
+        print(f"[metadata] WARNING: collapsed {len(dups)} duplicate {sample_col} value(s) to the "
+              f"most-complete row each: {dups[:8]}{'...' if len(dups) > 8 else ''}", file=_sys.stderr)
     df = df.set_index(sample_col)
     donor_of = df["Donor_ID"].astype(str).to_dict() if "Donor_ID" in df.columns else None
     mean_binarize = set(mean_binarize or [])
-    reserved = {"Donor_ID", "Study", "Dataset"}
+    # reserved = never tested as covariates (IDs/batch); drop_cols adds caller-specified
+    # non-clinical columns (e.g. provenance: source, notes) that would otherwise dominate as dataset proxies.
+    reserved = {"Donor_ID", "Study", "Dataset"} | {str(c).strip() for c in (drop_cols or [])}
     parts, bad = [], []
     for col in [c for c in df.columns if c not in reserved]:
         s = df[col].astype(str).str.strip().where(lambda x: ~x.isin(DROP_VALUES), other=np.nan)
@@ -291,6 +302,8 @@ def main():
     ap.add_argument("--sample-col", default="Sample")
     ap.add_argument("--batch-key", default=None, help="metadata column to stratify by (uses CMH instead of Fisher)")
     ap.add_argument("--mean-binarize", default=None, help="comma list of numeric covariate columns to binarize at their mean")
+    ap.add_argument("--drop-cols", default=None, help="comma list of metadata columns to EXCLUDE from testing "
+                    "(e.g. provenance fields like source,notes that act as dataset/batch proxies)")
     ap.add_argument("--min-donors", type=int, default=MIN_UNITS)
     ap.add_argument("--min-pb", type=int, default=MIN_PB)
     ap.add_argument("--fdr-alpha", type=float, default=0.05)
@@ -300,7 +313,8 @@ def main():
 
     os.makedirs(args.outdir, exist_ok=True)
     mb = args.mean_binarize.split(",") if args.mean_binarize else None
-    binary, donor_of = load_metadata(args.metadata, sample_col=args.sample_col, mean_binarize=mb)
+    dc = args.drop_cols.split(",") if args.drop_cols else None
+    binary, donor_of = load_metadata(args.metadata, sample_col=args.sample_col, mean_binarize=mb, drop_cols=dc)
     print(f"[satay] metadata: {binary.shape[1]} binary covariates x {binary.shape[0]} samples; "
           f"donor-level={'yes' if donor_of else 'no (per-sample)'}")
     cl = pd.read_csv(args.udon_clusters, sep="\t", index_col=0)

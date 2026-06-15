@@ -6,7 +6,12 @@ from linearSVM import *
 from feature_selection import *
 
 
-def clustering_wrapper(adata, output_filename, rank=None, min_group_size=3, top_n_genes=60, rho_threshold=0.2, marker_finder_rho=0.2, write_files=True):
+def clustering_wrapper(adata, output_filename, rank=None, min_group_size=3, top_n_genes=60, rho_threshold=0.2, marker_finder_rho=0.2, write_files=True, min_markers_per_cluster=16, small_feature_rank=False, rank_rel_threshold=0.1):
+    """min_markers_per_cluster: a final NMF cluster is retained only if it has at least this many
+    unique marker features (legacy hard-coded behavior was ">15", i.e. 16). For small-feature
+    panels (e.g. ~129 imputed ADTs) set this to 1 so diverse clusters are not collapsed.
+    small_feature_rank: pass through to determine_nmf_ranks when rank is auto-determined here, so the
+    Tracy-Widom boundary inflation (few features x many pseudobulks -> rank 2) is bypassed."""
 
     if write_files is True:
         os.mkdir(output_filename)
@@ -23,7 +28,7 @@ def clustering_wrapper(adata, output_filename, rank=None, min_group_size=3, top_
     # when rank is not 2 or not provided by the user (that they trust more), then automatically calculate number of clusters for NMF to determine (aka rank)
     # requires the determineNMFRank.py script
     if rank is None:
-        est_k = determine_nmf_ranks(fold_matrix_hvg)
+        est_k = determine_nmf_ranks(fold_matrix_hvg, small_feature=small_feature_rank, rel_threshold=rank_rel_threshold)
         rank = est_k
 
     # run and time the NMF analysis using the runNMF.py script
@@ -94,8 +99,10 @@ def clustering_wrapper(adata, output_filename, rank=None, min_group_size=3, top_
     print("--- %s seconds ---" % (time.time() - start_time))
 
     # clean the marker heatmap file for the final clusters in mf genes
+    # retain clusters with at least `min_markers_per_cluster` unique markers (legacy: >15 == >=16).
+    # small-feature panels (few ADTs) must lower this (e.g. 1) or diverse clusters collapse.
     robust_clusters_final = markers_df['top_cluster'].value_counts(sort=False)
-    robust_clusters_final = robust_clusters_final[robust_clusters_final > 15].index
+    robust_clusters_final = robust_clusters_final[robust_clusters_final >= int(min_markers_per_cluster)].index
 
     # Keep only samples that belong to the large clusters
     final_clusters_clean = final_clusters[final_clusters['cluster'].isin(robust_clusters_final)]
@@ -116,7 +123,7 @@ def clustering_wrapper(adata, output_filename, rank=None, min_group_size=3, top_
         final_clusters_path = os.path.join(cd, output_filename, "udon_clusters.txt")
         markers_df_og.to_csv(mf_genes_path, sep="\t")
         marker_heatmap.to_csv(mf_heatmap_path, sep="\t")
-        final_clusters.to_csv(final_clusters_path, sep="\t")
+        final_clusters_clean.to_csv(final_clusters_path, sep="\t")   # only the FINAL (marker-robust) models
 
     return adata
 

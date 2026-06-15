@@ -659,8 +659,17 @@ function normalizeModalityId(value, fallback = "rna") {
   if (!raw || raw === "none") {
     return fallback;
   }
-  if (raw === "lipid") {
+  if (raw === "lipids") {
     return "lipids";
+  }
+  if (raw === "lipid" || raw === "lipid_aml" || raw === "aml_lipid" || raw === "rna2lipid_aml") {
+    return "lipid";
+  }
+  if (raw === "metabolite" || raw === "metabolites" || raw === "rna2metabolite") {
+    return "metabolite";
+  }
+  if (raw === "grn" || raw === "grns" || raw === "regulon" || raw === "regulons" || raw === "gene_regulatory_network" || raw === "rna2grn" || raw === "tf_activity") {
+    return "grn";
   }
   if (raw === "adts" || raw === "cite" || raw === "cite-seq" || raw === "citeseq") {
     return "adt";
@@ -689,6 +698,15 @@ function modalityDefinition(modalityId) {
   } else if (normalized === "adt") {
     defaultFeatureLabel = "ADT";
     defaultExample = "Hu.CD4";
+  } else if (normalized === "metabolite") {
+    defaultFeatureLabel = "metabolite";
+    defaultExample = "Lactate";
+  } else if (normalized === "lipid") {
+    defaultFeatureLabel = "lipid";
+    defaultExample = "Hex2Cer 18:1;2O/16:0";
+  } else if (normalized === "grn") {
+    defaultFeatureLabel = "TF";
+    defaultExample = "GATA1";
   }
   return availableModalities().find((entry) => normalizeModalityId(entry.id) === normalized)
     || {
@@ -708,6 +726,9 @@ function modalityExampleFeature(modalityId) {
   let fallback = "MPO";
   if (normalized === "lipids") fallback = "PE(O-16:0/22:4)";
   else if (normalized === "adt") fallback = "CD4";
+  else if (normalized === "metabolite") fallback = "Lactate";
+  else if (normalized === "lipid") fallback = "Hex2Cer 18:1;2O/16:0";
+  else if (normalized === "grn") fallback = "GATA1";
   return String(modalityDefinition(modalityId).example_feature || fallback).trim() || fallback;
 }
 
@@ -2828,6 +2849,12 @@ function buildQcCellSummary(data) {
     "rna2adt ADT imputation complete.",
     "Running rna2lipid lipid imputation.",
     "rna2lipid lipid imputation complete.",
+    "Running rna2metabolite imputation.",
+    "rna2metabolite imputation complete.",
+    "Running rna2lipid (AML) imputation.",
+    "rna2lipid (AML) imputation complete.",
+    "Running rna2grn imputation.",
+    "rna2grn imputation complete.",
     "Ambient RNA correction",
     "ambient RNA correction",
     "ambient correction",
@@ -2936,6 +2963,13 @@ async function populateDownloadLinks(jobId, statusData = null) {
     lipid_marker_genes_zip: "Download lipid marker ZIP",
     imputed_adt_h5ad: "Download imputed_adt_h5ad",
     adt_marker_genes_zip: "Download ADT marker ZIP",
+    imputed_metabolite_h5ad: "Download imputed_metabolite_h5ad",
+    metabolite_marker_genes_zip: "Download metabolite marker ZIP",
+    imputed_lipid_h5ad: "Download imputed_lipid_h5ad",
+    lipid_marker_genes_zip: "Download lipid (AML) marker ZIP",
+    imputed_grn_h5ad: "Download imputed_grn_h5ad (TF activity)",
+    imputed_grn_edges_h5ad: "Download imputed_grn_edges_h5ad",
+    grn_marker_genes_zip: "Download GRN marker ZIP",
     fastcomm_archive: "Download cell communication ZIP",
   };
   Object.keys(artifacts).forEach((key) => {
@@ -4898,7 +4932,7 @@ function renderPanelExpression(panelKey, expressionData, mode, dotScale) {
       maxValue = minValue + 1e-9;
     }
     const normalizedModality = normalizeModalityId(expressionData?.modality);
-    const useImputedPalette = normalizedModality === "lipids" || normalizedModality === "adt";
+    const useImputedPalette = normalizedModality === "lipids" || normalizedModality === "adt" || normalizedModality === "metabolite" || normalizedModality === "lipid" || normalizedModality === "grn";
     const colorscale = useImputedPalette
       ? [
           [0.0, "#2563eb"],
