@@ -860,6 +860,9 @@ function availableVisualizationModes(panelKey) {
   if (modality === "rna" && fastCommAvailable()) {
     modes.push({ value: "fastcomm_network", label: "Cell communication" });
   }
+  if (modality === "grn") {
+    modes.push({ value: "grn_network", label: "GRN edges" });
+  }
   return modes;
 }
 
@@ -958,7 +961,45 @@ function updateExpressionModeOptions() {
     }
     markerPopulationField.classList.toggle("hidden", !showMarkerPopulation);
     geneField.classList.toggle("hidden", !showGene);
+    const showGrn = mode === "grn_network";
+    ["grn-genes-field", "grn-sample-field", "grn-cellstate-field", "grn-threshold-field"].forEach((suffix) => {
+      const el = document.getElementById(panelElementId(panelKey, suffix));
+      if (el) {
+        el.classList.toggle("hidden", !showGrn);
+      }
+    });
+    // GRN edges use their own Sample / Cell type dropdowns — the generic display filters
+    // don't apply to the network, so hide them to avoid confusion.
+    const filterStack = document.getElementById(panelElementId(panelKey, "filter-stack"));
+    if (filterStack) {
+      filterStack.classList.toggle("hidden", showGrn);
+    }
   });
+}
+
+function populateGrnDropdowns(panelKey, data) {
+  const fill = (suffix, values) => {
+    const sel = document.getElementById(panelElementId(panelKey, suffix));
+    if (!sel) return;
+    const desired = ["", ...(values || [])];
+    const existing = Array.from(sel.options).map((o) => o.value);
+    if (existing.length === desired.length && existing.every((v, i) => v === desired[i])) {
+      return;
+    }
+    const current = sel.value;
+    sel.innerHTML = "";
+    desired.forEach((v) => {
+      const o = document.createElement("option");
+      o.value = v;
+      o.textContent = v === "" ? "(any)" : v;
+      sel.appendChild(o);
+    });
+    if (desired.includes(current)) {
+      sel.value = current;
+    }
+  };
+  fill("grn-sample", data && data.available_samples);
+  fill("grn-cellstate", data && data.available_cell_states);
 }
 
 function setPanelGeneValue(panelKey, value) {
@@ -1060,6 +1101,12 @@ async function renderMarkerHeatmapViewer(jobId, panelKey) {
 function renderExpressionNetwork(panelKey, payload) {
   resetVisualizationSurface(panelKey);
   const plot = document.getElementById(panelPlotId(panelKey));
+  if (plot) {
+    // resetVisualizationSurface clears the container height; cytoscape needs a sized container,
+    // otherwise it mounts blank (e.g. after a Plotly "no edges" message at a high threshold).
+    plot.style.height = "560px";
+    plot.style.minHeight = "560px";
+  }
   const elements = (payload.elements || []).map((element) => {
     if (!element.data || !element.data.id || element.data.source) {
       return element;
@@ -1096,7 +1143,12 @@ function renderExpressionNetwork(panelKey, payload) {
       {
         selector: "edge",
         style: {
-          width: 1.8,
+          // GRN edges carry a score (regulatory activity) -> encode as width so cell-state
+          // differences are visible (e.g. HLF edges thick in HSC, absent in monocytes).
+          width: (edge) => {
+            const s = Math.abs(Number(edge.data("score")) || 0);
+            return s > 0 ? Math.max(1, Math.min(9, 1 + s * 24)) : 1.8;
+          },
           "line-color": networkEdgeColor,
           "target-arrow-color": networkEdgeColor,
           "target-arrow-shape": networkEdgeArrowShape,
@@ -1665,7 +1717,7 @@ function updateImputeModalityField() {
     return;
   }
   Array.from(select.options).forEach((option) => {
-    if (option.value === "none") {
+    if (option.value === "none" || option.value === "all") {
       option.hidden = false;
       option.disabled = false;
       return;
@@ -1674,7 +1726,8 @@ function updateImputeModalityField() {
     option.hidden = !enabled;
     option.disabled = !enabled;
   });
-  if (!supported.includes(normalizeModalityId(select.value, ""))) {
+  const current = select.value;
+  if (current !== "none" && current !== "all" && !supported.includes(normalizeModalityId(current, ""))) {
     select.value = "none";
   }
 }
@@ -1783,6 +1836,22 @@ function hookForms() {
     document.getElementById(panelElementId(panelKey, "marker-population")).addEventListener("change", () => {
       loadVisualizationPanel(panelKey);
     });
+    ["grn-genes", "grn-sample", "grn-cellstate"].forEach((suffix) => {
+      const el = document.getElementById(panelElementId(panelKey, suffix));
+      if (el) {
+        el.addEventListener("change", () => loadVisualizationPanel(panelKey));
+      }
+    });
+    const grnThreshold = document.getElementById(panelElementId(panelKey, "grn-threshold"));
+    if (grnThreshold) {
+      grnThreshold.addEventListener("input", () => {
+        const lbl = document.getElementById(panelElementId(panelKey, "grn-threshold-value"));
+        if (lbl) {
+          lbl.textContent = Number(grnThreshold.value).toFixed(3);
+        }
+      });
+      grnThreshold.addEventListener("change", () => loadVisualizationPanel(panelKey));
+    }
     document.getElementById(panelElementId(panelKey, "filter1-field")).addEventListener("change", () => {
       syncDisplayFilterValueOptions(panelKey, 1);
       loadVisualizationPanel(panelKey);
@@ -2136,7 +2205,10 @@ async function handleQcSubmit(evt) {
     mit_percent: evt.target.mit_percent.value,
     align_cutoff: evt.target.align_cutoff.value,
     ambient_correction: evt.target.ambient_correction.value,
-    impute_modality: evt.target.impute_modality ? evt.target.impute_modality.value : "none",
+    impute_modalities: (() => {
+      const value = evt.target.impute_modality ? evt.target.impute_modality.value : "none";
+      return value && value !== "none" ? [value] : [];   // "all" expands on the backend
+    })(),
   };
   try {
     if (selectedReferenceDiffersFromLoadedJob()) {
@@ -2961,15 +3033,11 @@ async function populateDownloadLinks(jobId, statusData = null) {
     marker_genes_zip: "Download marker genes ZIP",
     imputed_lipids_h5ad: "Download imputed_lipids_h5ad",
     lipid_marker_genes_zip: "Download lipid marker ZIP",
-    imputed_adt_h5ad: "Download imputed_adt_h5ad",
-    adt_marker_genes_zip: "Download ADT marker ZIP",
-    imputed_metabolite_h5ad: "Download imputed_metabolite_h5ad",
-    metabolite_marker_genes_zip: "Download metabolite marker ZIP",
-    imputed_lipid_h5ad: "Download imputed_lipid_h5ad",
-    lipid_marker_genes_zip: "Download lipid (AML) marker ZIP",
-    imputed_grn_h5ad: "Download imputed_grn_h5ad (TF activity)",
-    imputed_grn_edges_h5ad: "Download imputed_grn_edges_h5ad",
-    grn_marker_genes_zip: "Download GRN marker ZIP",
+    imputed_lipids_results_zip: "Download Lipids results ZIP",
+    imputed_adt_results_zip: "Download ADT results ZIP",
+    imputed_metabolite_results_zip: "Download Metabolite results ZIP",
+    imputed_lipid_results_zip: "Download Lipid (AML) results ZIP",
+    imputed_grn_results_zip: "Download GRN results ZIP",
     fastcomm_archive: "Download cell communication ZIP",
   };
   Object.keys(artifacts).forEach((key) => {
@@ -3128,7 +3196,9 @@ function updateDifferentialUi(state) {
     ? `Perform cell-state differential ${featureLabel} analysis.`
     : "Differential analysis is only enabled when two or more samples were uploaded for the job.";
   if (detailTitle) {
-    detailTitle.textContent = featureLabel === "lipid" ? "Lipid Detail" : "Gene Detail";
+    detailTitle.textContent = selectedModality === "grn"
+      ? "GRN Detail"
+      : (featureLabel === "lipid" ? "Lipid Detail" : "Gene Detail");
   }
 
   let statusMessage = state.message || "";
@@ -3713,7 +3783,12 @@ function renderDifferentialNetwork(payload) {
       {
         selector: "edge",
         style: {
-          width: 1.8,
+          // GRN edges carry a score (regulatory activity) -> encode as width so cell-state
+          // differences are visible (e.g. HLF edges thick in HSC, absent in monocytes).
+          width: (edge) => {
+            const s = Math.abs(Number(edge.data("score")) || 0);
+            return s > 0 ? Math.max(1, Math.min(9, 1 + s * 24)) : 1.8;
+          },
           "line-color": networkEdgeColor,
           "target-arrow-color": networkEdgeColor,
           "target-arrow-shape": networkEdgeArrowShape,
@@ -4071,6 +4146,11 @@ function updateDifferentialLrToggle(payload) {
   if (!toggle) {
     return;
   }
+  // GRN edges have no ligand/receptor split — show a single edge-score distribution.
+  if (normalizeModalityId(payload && payload.modality) === "grn") {
+    toggle.classList.add("hidden");
+    return;
+  }
   const ligand = String((payload && payload.ligand) || "").trim();
   const receptor = String((payload && payload.receptor) || "").trim();
   if (!ligand && !receptor) {
@@ -4190,20 +4270,22 @@ function resetDifferentialResults() {
 
 function resetDifferentialGeneDetail() {
   const featureLabel = String((currentDifferentialState && currentDifferentialState.feature_label) || "gene");
-  const capitalizedFeature = featureLabel.charAt(0).toUpperCase() + featureLabel.slice(1);
+  const isGrn = featureLabel === "TF";   // GRN is the only TF-feature modality
+  const detailNoun = isGrn ? "edge" : featureLabel;
+  const capitalizedFeature = detailNoun.charAt(0).toUpperCase() + detailNoun.slice(1);
   const plot = document.getElementById("differential-gene-plot");
   Plotly.purge(plot);
   plot.classList.add("hidden");
-  document.getElementById("differential-selected-gene").textContent = `Select a ${featureLabel} from the left panel.`;
+  document.getElementById("differential-selected-gene").textContent = `Select a ${detailNoun} from the left panel.`;
   document.getElementById("download-differential-gene-btn").classList.add("hidden");
   document.getElementById("download-differential-gene-btn").removeAttribute("href");
   const empty = document.getElementById("differential-gene-empty");
-  empty.textContent = `Select a ${featureLabel} from the differential view to compare ${featureLabel} values between groups.`;
+  empty.textContent = `Select a ${detailNoun} from the differential view to compare ${detailNoun} values between groups.`;
   empty.classList.remove("hidden");
   document.getElementById("differential-gene-stats").classList.add("hidden");
   const detailTitle = document.getElementById("differential-detail-title");
   if (detailTitle) {
-    detailTitle.textContent = `${capitalizedFeature} Detail`;
+    detailTitle.textContent = isGrn ? "GRN Detail" : `${capitalizedFeature} Detail`;
   }
   const lrToggle = document.getElementById("differential-lr-toggle");
   if (lrToggle) {
@@ -4505,6 +4587,7 @@ function panelModeLabel(mode) {
     marker_heatmap: "marker_heatmap",
     marker_network: "marker_network",
     fastcomm_network: "fastcomm_network",
+    grn_network: "grn_network",
   };
   return labels[mode] || "plot";
 }
@@ -4578,6 +4661,25 @@ async function loadVisualizationPanel(panelKey) {
         throw new Error(data.detail || "fastComm network unavailable.");
       }
       panelPlotData[panelKey] = { source: "fastcomm_network", payload: data };
+      renderVisualizationPanel(panelKey);
+      return;
+    }
+
+    if (mode === "grn_network") {
+      const genesRaw = String(document.getElementById(panelElementId(panelKey, "grn-genes"))?.value || "");
+      const genes = genesRaw.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+      const params = new URLSearchParams();
+      genes.forEach((g) => params.append("genes", g));
+      params.set("sample", getPanelSelectValue(panelKey, "grn-sample"));
+      params.set("cell_state", getPanelSelectValue(panelKey, "grn-cellstate"));
+      params.set("threshold", String(document.getElementById(panelElementId(panelKey, "grn-threshold"))?.value || "0"));
+      const resp = await fetch(apiPath(`/jobs/${jobId}/grn/network?${params.toString()}`));
+      const data = await parseApiResponse(resp);
+      if (!resp.ok) {
+        throw new Error(data.detail || "GRN network unavailable.");
+      }
+      populateGrnDropdowns(panelKey, data);
+      panelPlotData[panelKey] = { source: "grn_network", payload: data };
       renderVisualizationPanel(panelKey);
       return;
     }
@@ -5029,6 +5131,19 @@ function renderVisualizationPanel(panelKey) {
       return;
     }
     renderExpressionNetwork(panelKey, data.payload);
+    return;
+  }
+  if (mode === "grn_network") {
+    const p = data.payload || {};
+    const scoreType = p.score_type ? ` (${p.score_type})` : "";
+    setPanelSummary(panelKey, p.sample
+      ? `GRN edges · ${p.sample}${p.cell_state ? " · " + p.cell_state : ""}${scoreType}.`
+      : `GRN edge network${scoreType}.`);
+    if (!(p.elements || []).length) {
+      renderVisualizationMessage(panelKey, p.message || "No GRN edges matched.", "GRN edges");
+      return;
+    }
+    renderExpressionNetwork(panelKey, p);
     return;
   }
   if (mode === "fastcomm_network") {

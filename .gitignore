@@ -92,6 +92,13 @@ altanalyze3/components/Daedalus/phase_*/wandb/
 # Proteus large pretraining corpora.
 altanalyze3/components/Proteus/data/
 
+# iso2function: extracted/parsed interaction tables + crosswalk outputs (regenerable from the source
+# supplementary zips via `iso2function ingest`/`crosswalk`) and any downloaded reference snapshots.
+# artifacts/ is already covered by the components/*/artifacts/ rule above. resources/ stays TRACKED
+# (small bundled lookups only).
+altanalyze3/components/iso2function/data/
+altanalyze3/components/iso2function/external/
+
 # Miscellaneous scratch / runtime
 altanalyze3/components/tests/logs/
 tmp/

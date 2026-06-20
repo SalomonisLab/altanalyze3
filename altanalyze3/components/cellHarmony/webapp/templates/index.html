@@ -106,6 +106,7 @@
                     <span>Impute modality</span>
                     <select name="impute_modality" id="qc-impute-modality-select">
                       <option value="none" selected>None</option>
+                      <option value="all">All available</option>
                       <option value="lipids">Lipids</option>
                       <option value="adt">ADT (CITE-seq)</option>
                       <option value="metabolite">Metabolite (AML)</option>
@@ -195,8 +196,24 @@
                         <span>Marker cell state</span>
                         <select id="viz1-marker-population"></select>
                       </label>
+                      <label class="field hidden inline-field compact-inline-field" id="viz1-grn-genes-field">
+                        <span>GRN genes</span>
+                        <input id="viz1-grn-genes" placeholder="e.g. GATA1, SPI1" list="viz1-feature-suggestions">
+                      </label>
+                      <label class="field hidden inline-field compact-inline-field" id="viz1-grn-sample-field">
+                        <span>Sample</span>
+                        <select id="viz1-grn-sample" class="compact-select"></select>
+                      </label>
+                      <label class="field hidden inline-field compact-inline-field" id="viz1-grn-cellstate-field">
+                        <span>Cell type</span>
+                        <select id="viz1-grn-cellstate" class="compact-select"></select>
+                      </label>
+                      <label class="field hidden inline-field compact-inline-field" id="viz1-grn-threshold-field">
+                        <span>Edge |score| &ge; <span id="viz1-grn-threshold-value">0.000</span></span>
+                        <input id="viz1-grn-threshold" type="range" min="0" max="0.3" step="0.002" value="0">
+                      </label>
                     </div>
-                    <div class="stack viz-filter-stack">
+                    <div class="stack viz-filter-stack" id="viz1-filter-stack">
                       <span class="field-group-label">Filter data to display</span>
                       <div class="display-filter-grid">
                         <label class="field compact-field">
@@ -252,8 +269,24 @@
                         <span>Marker cell state</span>
                         <select id="viz2-marker-population"></select>
                       </label>
+                      <label class="field hidden inline-field compact-inline-field" id="viz2-grn-genes-field">
+                        <span>GRN genes</span>
+                        <input id="viz2-grn-genes" placeholder="e.g. GATA1, SPI1" list="viz2-feature-suggestions">
+                      </label>
+                      <label class="field hidden inline-field compact-inline-field" id="viz2-grn-sample-field">
+                        <span>Sample</span>
+                        <select id="viz2-grn-sample" class="compact-select"></select>
+                      </label>
+                      <label class="field hidden inline-field compact-inline-field" id="viz2-grn-cellstate-field">
+                        <span>Cell type</span>
+                        <select id="viz2-grn-cellstate" class="compact-select"></select>
+                      </label>
+                      <label class="field hidden inline-field compact-inline-field" id="viz2-grn-threshold-field">
+                        <span>Edge |score| &ge; <span id="viz2-grn-threshold-value">0.000</span></span>
+                        <input id="viz2-grn-threshold" type="range" min="0" max="0.3" step="0.002" value="0">
+                      </label>
                     </div>
-                    <div class="stack viz-filter-stack">
+                    <div class="stack viz-filter-stack" id="viz2-filter-stack">
                       <span class="field-group-label">Filter data to display</span>
                       <div class="display-filter-grid">
                         <label class="field compact-field">

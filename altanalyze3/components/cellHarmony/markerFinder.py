@@ -363,6 +363,19 @@ def _plot_marker_heatmap(
     ax_row.set_ylabel("")
     ax_row.set_xlabel("")
 
+    # Name each cluster block on the column/row bars (e.g. MUT vs WT) so the groups are identified.
+    # Only for small cluster counts -> many-cluster cell-state heatmaps are left unchanged.
+    if len(cluster_colors) <= 12:
+        col_pos = pd.Series(np.arange(len(clusters)), index=clusters.values).groupby(level=0).mean()
+        ax_col.set_xticks(col_pos.values + 0.5)
+        ax_col.set_xticklabels(col_pos.index.tolist(), fontsize=9)
+        ax_col.xaxis.set_ticks_position("top")
+        ax_col.tick_params(length=0)
+        row_pos = pd.Series(np.arange(len(marker_clusters)), index=marker_clusters).groupby(level=0).mean()
+        ax_row.set_yticks(row_pos.values + 0.5)
+        ax_row.set_yticklabels(row_pos.index.tolist(), fontsize=9, rotation=90, va="center")
+        ax_row.tick_params(length=0)
+
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 

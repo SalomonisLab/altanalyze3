@@ -57,7 +57,8 @@ class QCSettings(BaseModel):
     mit_percent: int = 15
     align_cutoff: float = 0.4
     ambient_correction: str = Field(default="no", pattern="^(no|yes)$")
-    impute_modality: Optional[str] = "none"
+    impute_modality: Optional[str] = "none"          # legacy single-select
+    impute_modalities: Optional[List[str]] = None    # multi-select
 
 
 class JobConfigSettings(BaseModel):
@@ -2076,6 +2077,132 @@ def _build_differential_network_payload(app: FastAPI, meta: Dict, population: st
     }
 
 
+_GRN_EDGE_CACHE: Dict[str, Any] = {}
+
+
+def _grn_edges_adata(meta: Dict) -> ad.AnnData:
+    edges_path = str(((meta.get("modality_artifacts") or {}).get("grn") or {}).get("differential_h5ad", "")).strip()
+    if not edges_path or not Path(edges_path).exists():
+        raise FileNotFoundError("GRN edge output is unavailable for this job.")
+    mtime = Path(edges_path).stat().st_mtime
+    cached = _GRN_EDGE_CACHE.get(edges_path)
+    if not cached or cached[0] != mtime:
+        _GRN_EDGE_CACHE[edges_path] = (mtime, ad.read_h5ad(edges_path))
+    return _GRN_EDGE_CACHE[edges_path][1]
+
+
+_LINEAGE_ORDER_CACHE: Dict[str, Any] = {}
+
+
+def _as_str_list(value):   # uns['lineage_order'] may be a numpy array
+    return [] if value is None else [str(v) for v in list(value)]
+
+
+def _combined_lineage_order(meta: Dict) -> List[str]:
+    """Cached lineage_order from the combined RNA h5ad (read once per job, not per request)."""
+    cpath = str((meta.get("artifacts") or {}).get("combined_h5ad", "")).strip()
+    if not cpath or not Path(cpath).exists():
+        return []
+    mtime = Path(cpath).stat().st_mtime
+    cached = _LINEAGE_ORDER_CACHE.get(cpath)
+    if not cached or cached[0] != mtime:
+        try:
+            order = _as_str_list(ad.read_h5ad(cpath, backed="r").uns.get("lineage_order"))
+        except Exception:
+            order = []
+        _LINEAGE_ORDER_CACHE[cpath] = (mtime, order)
+    return _LINEAGE_ORDER_CACHE[cpath][1]
+
+
+def _order_by_lineage(values, adata, meta: Dict) -> List[str]:
+    """Order cell-state values by uns['lineage_order'] (from the edge h5ad, or cached from the
+    combined RNA h5ad for older jobs); unknowns sorted at the end."""
+    vals = {str(v) for v in values}
+    order = _as_str_list(adata.uns.get("lineage_order")) or _combined_lineage_order(meta)
+    ordered = [c for c in order if c in vals]
+    ordered += sorted(v for v in vals if v not in set(ordered))
+    return ordered
+
+
+def _build_grn_network_payload(meta: Dict, genes, *, sample: str = "", cell_state: str = "",
+                               threshold: float = 0.0, max_edges: int = 300) -> Dict:
+    """Cytoscape network of rna2grn edges (TF->target) involving the requested genes, scored
+    for a selected sample/cell-state (or any). Edge scores come from the (sample x cell-state)
+    pseudobulk edge h5ad; when no cell state is chosen the score is averaged across cell states."""
+    adata = _grn_edges_adata(meta)
+    var_names = adata.var_names.astype(str).to_numpy()
+    cluster_key = str(meta.get("cluster_key") or meta.get("reference_cluster_key") or "")
+    # value lists for the explorer dropdowns (condition-style sample column preferred)
+    sample_pref = ("Library", "library", "group", "condition", "Sample", "sample", "dataset", "Dataset", "orig.ident")
+    disp_col = next((c for c in sample_pref
+                     if c in adata.obs.columns and 1 < int(adata.obs[c].astype(str).nunique()) <= 200), None)
+    available_samples = sorted(set(adata.obs[disp_col].astype(str))) if disp_col else []
+    cell_values = (set(adata.obs[cluster_key].astype(str)) if cluster_key and cluster_key in adata.obs.columns else set())
+    available_cell_states = _order_by_lineage(cell_values, adata, meta)
+    req = {_normalize_gene_token(g) for g in (genes or []) if str(g).strip()}
+    empty = {"sample": sample, "cell_state": cell_state, "threshold": threshold, "elements": [], "n_edges": 0,
+             "score_type": "edge score",
+             "available_samples": available_samples, "available_cell_states": available_cell_states}
+    if not req:
+        return {**empty, "message": "Enter one or more genes."}
+
+    mask = np.ones(adata.n_obs, dtype=bool)
+    if sample:
+        # match the requested value against whichever sample-like column actually holds it
+        # (e.g. the user picks "AML" from Library, or "0" from sample)
+        scol = next((c for c in pipeline_mod._PB_SAMPLE_COLS
+                     if c in adata.obs.columns and str(sample) in set(adata.obs[c].astype(str))), None)
+        if scol is None:
+            return {**empty, "message": f"Sample '{sample}' not found."}
+        mask &= (adata.obs[scol].astype(str).to_numpy() == str(sample))
+    if cell_state and cluster_key and cluster_key in adata.obs.columns:
+        mask &= (adata.obs[cluster_key].astype(str).to_numpy() == str(cell_state))
+    if int(mask.sum()) == 0:
+        return {**empty, "message": "No pseudobulks match the selected sample / cell type."}
+
+    sub = adata.X[mask]
+    sub = sub.toarray() if hasattr(sub, "toarray") else np.asarray(sub)
+    # Absolute imputed edge score for the selected sample/cell state. These ARE strongly
+    # cell-state-specific (e.g. SPI1 edges ~0.3 in monocytes vs ~0.001 in erythroid; HLF high
+    # only in HSC) — the activity is encoded as edge score (rendered as edge width).
+    scores = np.asarray(sub, dtype=float).mean(axis=0)
+    score_type = "edge score"
+
+    # keep edges whose TF or target matches a requested gene, above the |score| threshold
+    keep = []
+    for j in range(len(var_names)):
+        ev = var_names[j]
+        if "|" not in ev:
+            continue
+        tf, tgt = ev.split("|", 1)
+        if (_normalize_gene_token(tf) not in req) and (_normalize_gene_token(tgt) not in req):
+            continue
+        sc = float(scores[j])
+        if not np.isfinite(sc) or abs(sc) < float(threshold):
+            continue
+        keep.append((j, tf, tgt, sc))
+    keep.sort(key=lambda t: -abs(t[3]))
+    keep = keep[:int(max_edges)]
+
+    nodes: Dict[str, Dict] = {}
+    edges_out = []
+    for j, tf, tgt, sc in keep:
+        for nid, role in ((tf, "tf"), (tgt, "target")):
+            node = nodes.setdefault(nid, {"data": {"id": nid, "label": nid, "role": role,
+                                                    "queried": _normalize_gene_token(nid) in req}})
+            if role == "tf":
+                node["data"]["role"] = "tf"
+            # reuse the network renderer's log2fc->color mapping: TFs red, targets blue
+            node["data"]["log2fc"] = 1.0 if node["data"]["role"] == "tf" else -1.0
+        edges_out.append({"data": {
+            "id": f"{tf}__{tgt}__{j}", "source": tf, "target": tgt, "score": round(sc, 4),
+            "interaction_type": "transcription", "direction": "up" if sc >= 0 else "down"}})
+    msg = "" if edges_out else "No GRN edges matched the requested genes at this threshold."
+    return {"sample": sample, "cell_state": cell_state, "threshold": threshold, "score_type": score_type,
+            "n_edges": len(edges_out), "elements": list(nodes.values()) + edges_out, "message": msg,
+            "available_samples": available_samples, "available_cell_states": available_cell_states}
+
+
 def _build_marker_network_payload(meta: Dict, population: str, modality: str = "rna") -> Dict:
     marker_analysis = _modality_marker_analysis(meta, modality) or {}
     networks = marker_analysis.get("networks") or []
@@ -3020,9 +3147,16 @@ def _build_differential_gene_detail_payload(
             },
         }
 
-    expression_cache = _get_expression_cache(app, meta, modality=modality)
-    adata = expression_cache["adata"]
-    resolved_gene = _resolve_gene_name(expression_cache["var_names"], gene)
+    if modality == "grn":
+        # GRN detail is an edge ("TF|target") distribution — read the edge-level h5ad, not the
+        # per-TF activity matrix served by the expression cache.
+        adata, _grn_detail_path = _open_gene_detail_adata(app, meta, gene)
+        var_names = adata.var_names.astype(str).to_numpy()
+    else:
+        expression_cache = _get_expression_cache(app, meta, modality=modality)
+        adata = expression_cache["adata"]
+        var_names = expression_cache["var_names"]
+    resolved_gene = _resolve_gene_name(var_names, gene)
     if not resolved_gene:
         raise KeyError(f"Gene '{gene}' not found in the aligned AnnData output.")
     if population_col not in adata.obs.columns:
@@ -4274,9 +4408,18 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             _normalize_modality_id(value, default="")
             for value in (reference_entry.get("impute_modalities") or [])
         }
-        requested_modality = _normalize_modality_id(qc.impute_modality, default="")
-        if requested_modality and requested_modality not in supported_modalities:
-            raise HTTPException(status_code=400, detail="Selected impute modality is not supported for this reference.")
+        if qc.impute_modalities is not None:
+            requested_raw = qc.impute_modalities
+        elif qc.impute_modality and qc.impute_modality != "none":
+            requested_raw = [qc.impute_modality]
+        else:
+            requested_raw = []
+        requested = [m for m in (_normalize_modality_id(v, default="") for v in requested_raw) if m]
+        # "all" selects every supported modality (expanded at run time); not a literal modality
+        unsupported = [m for m in requested if m != "all" and m not in supported_modalities]
+        if unsupported:
+            raise HTTPException(status_code=400,
+                                detail=f"Impute modalities not supported for this reference: {', '.join(unsupported)}")
         meta = store.update_job(job_id, qc=qc.model_dump(), message="QC parameters saved.")
         return JSONResponse({"job_id": job_id, "qc": meta["qc"]})
 
@@ -4470,6 +4613,31 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         meta = store.get_job(job_id)
         try:
             return JSONResponse(_build_marker_network_payload(meta, population, modality=modality))
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+
+    @app.get("/api/jobs/{job_id}/grn/network")
+    async def grn_network(
+        job_id: str,
+        genes: List[str] = Query(default=[]),
+        sample: str = Query(default=""),
+        cell_state: str = Query(default=""),
+        threshold: float = Query(default=0.0),
+        max_edges: int = Query(default=300),
+    ):
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        meta = store.get_job(job_id)
+        gene_list = []
+        for entry in genes:
+            gene_list.extend(str(entry).replace(",", " ").split())
+        try:
+            return JSONResponse(_build_grn_network_payload(
+                meta, gene_list, sample=sample, cell_state=cell_state,
+                threshold=threshold, max_edges=max_edges))
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
         except ValueError as exc:

@@ -665,6 +665,34 @@ def _molecule_counts(ctx, gene, sel_samples, cell_states):
     return out
 
 
+def _attach_structure_reads(ctx, res, gene, cell_states, conds, panel_by):
+    """Attach per-panel, per-(final)isoform TRUE read totals from the counts matrix -- the SAME
+    authoritative source as the isoform view. The molecule pileup returns only the top-N molecules per
+    panel, so summing the displayed molecules undercounts; the tooltip uses these totals instead."""
+    if not res or not res.get("panels"):
+        return res
+    try:
+        g = ctx.resolve_gene(gene) or gene
+        sel_samples = _resolve_selected_samples(ctx, None, conds)
+        cs = list(cell_states) if cell_states else None
+        if panel_by == "cell_type":
+            keys = [str(p.get("condition")) for p in res["panels"]]
+            col_defs = [{"key": k, "label": k, "group": None} for k in keys]
+            combine_by = "cell_type"
+        else:
+            col_defs = [{"key": g2, "label": g2, "group": g2} for g2 in _sorted_groups(ctx, sel_samples)]
+            combine_by = "group"
+        col_counts, _ = _compose_counts(ctx, g, sel_samples, cs, combine_by, col_defs)
+        for p in res["panels"]:
+            cc = col_counts.get(str(p.get("condition")), {})
+            p["structure_reads"] = {iid: round(float(v), 1) for iid, v in cc.items() if v}
+    except Exception as exc:
+        print(f"[isv_web] structure-read totals unavailable for {gene}: {exc}")
+        for p in res.get("panels", []):
+            p.setdefault("structure_reads", {})
+    return res
+
+
 def query_reads(ctx: RunContext, gene, cell_types, conditions=None, max_isoforms=300,
                 panel_by="covariate"):
     """Read-level (molecule) view: drive the engine's plot_isoform_structures_by_conditions to emit its
@@ -685,10 +713,12 @@ def query_reads(ctx: RunContext, gene, cell_types, conditions=None, max_isoforms
     if _reads_index_available(ctx, conds):
         fast = _query_reads_index(ctx, gene, symbol, cell_states, conds, max_isoforms, panel_by)
         if fast is not None:
-            return fast
+            return _attach_structure_reads(ctx, fast, gene, cell_states, conds, panel_by)
 
     if panel_by == "cell_type":
-        return _query_reads_by_celltype(ctx, gene, symbol, cell_states, conds, max_isoforms)
+        return _attach_structure_reads(
+            ctx, _query_reads_by_celltype(ctx, gene, symbol, cell_states, conds, max_isoforms),
+            gene, cell_states, conds, panel_by)
 
     out_dir = _reads_out_dir(ctx, cell_states, max_isoforms)
     cs_label = "+".join(cell_states) if cell_states else "all"
@@ -711,7 +741,7 @@ def query_reads(ctx: RunContext, gene, cell_types, conditions=None, max_isoforms
         panels.append({"condition": cond, "n_molecules": len(mols), "molecules": mols})
 
     color_count = _assign_panel_colors(panels)
-    return {
+    res = {
         "gene": gene, "symbol": symbol, "panel_by": "covariate", "color_count": color_count,
         "cell_states": cell_states or ["all"], "conditions": conds,
         "max_isoforms": max_isoforms, "n_clusters": n_clusters,
@@ -719,6 +749,7 @@ def query_reads(ctx: RunContext, gene, cell_types, conditions=None, max_isoforms
         "panels": panels,
         "total_molecules": sum(p["n_molecules"] for p in panels),
     }
+    return _attach_structure_reads(ctx, res, gene, cell_states, conds, panel_by)
 
 
 def _query_reads_by_celltype(ctx, gene, symbol, cell_states, conds, max_isoforms):

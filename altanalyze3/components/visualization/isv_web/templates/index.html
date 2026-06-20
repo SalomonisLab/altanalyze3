@@ -8,6 +8,11 @@
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
   <script src="https://d3js.org/d3.v7.min.js"></script>
+  <!-- vector PDF export of the splicing graph (right-click -> Export graph as PDF); vendored locally
+       so the feature works offline and doesn't depend on a CDN path. jsPDF must load before svg2pdf
+       (svg2pdf registers jsPDF.API.svg at load time). -->
+  <script src="/static/jspdf.umd.min.js"></script>
+  <script src="/static/svg2pdf.umd.min.js"></script>
 </head>
 <body>
   <header id="topbar">
@@ -111,6 +116,7 @@
       <div id="tabbar">
         <button class="tab on" data-tab="heatmap">Cell type × covariate</button>
         <button class="tab" data-tab="molecule">Molecule view <span class="tab-badge">read-level</span></button>
+        <button class="tab" data-tab="lines">Isoform usage <span class="tab-badge">lines</span></button>
       </div>
       <div id="header-bar">
         <div id="title-block"></div>

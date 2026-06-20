@@ -170,3 +170,25 @@ input[type=range] { width:100%; accent-color:var(--accent); }
 .ctxmenu .ctx-head span { color:var(--accent-d); font-weight:600; }
 .ctxmenu div:not(.ctx-head) { padding:8px 11px; cursor:pointer; font-size:12.5px; border-radius:7px; color:var(--ink); }
 .ctxmenu div:not(.ctx-head):hover { background:var(--accent-soft); color:var(--accent-d); }
+
+/* ---- PDF export save dialog (right-click -> Export graph as PDF) ---- */
+.modal { position:fixed; inset:0; z-index:1000; display:flex; align-items:center; justify-content:center;
+  background:rgba(20,28,46,0.42); }
+.modal.hidden { display:none; }
+.modal-card { width:560px; max-width:92vw; background:var(--panel); border:1px solid var(--line);
+  border-radius:14px; padding:20px 22px 18px; box-shadow:0 22px 60px rgba(16,24,44,0.38); }
+.modal-title { font-size:15px; font-weight:700; color:var(--brand1); margin-bottom:14px; }
+.modal-label { display:block; font-size:11px; font-weight:600; letter-spacing:.03em; text-transform:uppercase;
+  color:var(--ink2); margin-bottom:6px; }
+.modal-input { width:100%; box-sizing:border-box; padding:10px 11px; border:1px solid var(--line);
+  border-radius:8px; font-size:13px; font-family:ui-monospace,Menlo,monospace; color:var(--ink); }
+.modal-input:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
+.modal-hint { font-size:11px; color:var(--ink2); margin-top:7px; }
+.modal-hint code { background:var(--line2); padding:1px 4px; border-radius:4px; }
+.modal-actions { display:flex; justify-content:flex-end; gap:10px; margin-top:18px; }
+.btn-ghost { background:var(--line2); border:1px solid var(--line); color:var(--ink); padding:8px 15px;
+  border-radius:8px; font-weight:600; font-size:13px; cursor:pointer; }
+.btn-ghost:hover { border-color:var(--accent); color:var(--accent); }
+.btn-primary { background:linear-gradient(180deg,var(--accent),var(--accent-d)); color:#fff; border:none;
+  padding:8px 17px; border-radius:8px; font-weight:700; font-size:13px; cursor:pointer; }
+.btn-primary:hover { filter:brightness(1.05); }

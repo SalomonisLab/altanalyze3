@@ -20,7 +20,10 @@ from altanalyze3.components.long_read.cli import (
     run_sclr_isoquant,
     run_sclr_gene_aggregate,
     run_sclr_diff,
+    run_sclr_iso2func_network,
 )
+from altanalyze3.components.bam.variant_impact import run_variant_impact
+from altanalyze3.components.iso2function.cli import run_iso2function
 from altanalyze3.utilities.io import (
     get_indexed_references,
     is_bam_indexed
@@ -385,7 +388,63 @@ class ArgsParser():
         sclr_diff_parser.add_argument("--species", default="human", choices=["human", "mouse"], help="Default: human")
         sclr_diff_parser.add_argument("--gene_symbol", default=None, type=str, help="Ensembl-id -> symbol table. Default: bundled gzipped <species> annotations")
         sclr_diff_parser.add_argument("--cell_annot", default=None, type=str, help="Optional explicit barcode->cluster file/dir (else discovered from the sclr cellHarmony outputs)")
+        sclr_diff_parser.add_argument("--network-viz", action="store_true", help="After differentials, generate iso2function condition interaction-network figures (cross-cell-state + group-contrast rewiring) for the top differential TF isoforms")
+        sclr_diff_parser.add_argument("--network-viz-group", default=None, type=str, help="Reference group for the cross-cell-state network analysis (default: control of the first --conditions pair)")
+        sclr_diff_parser.add_argument("--network-viz-edges", default="all,PDI", type=str, help="Interaction types for the network viz: any of all,PDI,PPI (default all,PDI)")
         self.add_common_arguments(sclr_diff_parser)
+
+        # Standalone (remote-submittable) network visualization -- same step as sclr-diff --network-viz.
+        sclr_netviz_parser = subparsers.add_parser(
+            "sclr-iso2func-network",
+            parents=[parent_parser],
+            help="iso2function condition interaction-network figures for a finished long-read analysis dir (cross-cell-state + group-contrast rewiring)"
+        )
+        sclr_netviz_parser.set_defaults(func=run_sclr_iso2func_network)
+        sclr_netviz_parser.add_argument("--metadata", required=True, type=str, help="Metadata file (same one used for sclr); its directory is the default dataset dir")
+        sclr_netviz_parser.add_argument("--dataset", default=None, type=str, help="Directory with the combined pseudobulk h5ads (default: the metadata file's directory)")
+        sclr_netviz_parser.add_argument("--out_dir", default=None, type=str, help="Output dir (default: <dataset>/iso2function_network)")
+        sclr_netviz_parser.add_argument("--reference-group", default="young", type=str, help="Reference group for the cross-cell-state analysis (default: young)")
+        sclr_netviz_parser.add_argument("--conditions", default=None, type=str, help="Optional group-contrast pairs, e.g. 'AML-SRSF2,aged;MDS-post-SRSF2,MDS-pre-SRSF2'")
+        sclr_netviz_parser.add_argument("--edge-types", default="all,PDI", type=str, help="Interaction types: any of all,PDI,PPI (default all,PDI)")
+        sclr_netviz_parser.add_argument("--top-tfs", default=10, type=int, help="Number of top rewiring TF isoforms to plot per group (default 10)")
+        self.add_common_arguments(sclr_netviz_parser)
+
+        variant_impact_parser = subparsers.add_parser(
+            "variant-impact",
+            parents=[parent_parser],
+            help="Cell-state-resolved expression impact of called variants: per variant, run MarkerFinder (MUT vs WT) within each cell state with >= --min-cells of each, and optionally impute UNK-genotype cells"
+        )
+        variant_impact_parser.set_defaults(func=run_variant_impact)
+        variant_impact_parser.add_argument("--metadata", required=True, type=str, help="sclr metadata file (uid, bam, library, ...); samples, BAMs and per-sample h5ad paths are taken from it")
+        variant_impact_parser.add_argument("--variants", required=True, type=str, help="Variant positions, genotyped straight from the BAM's =/X CIGAR (no reference FASTA): 'chr:pos:label' semicolon-separated (e.g. 'chr21:34799432:RUNX1_W279*;chr17:76736877:SRSF2_P95R'), OR a mutations file (chrom start end label type)")
+        variant_impact_parser.add_argument("--level", default="gene", choices=["gene", "isoform", "both"], help="Expression matrix to test: gene (<library>-gene.h5ad), isoform (<library>-isoform.h5ad), or both. Default: gene")
+        variant_impact_parser.add_argument("--cell_annot", dest="cell_annot", default=None, type=str, help="cellHarmony barcode->cluster file for cell states. If omitted, obs['cluster'] in the h5ad is used")
+        variant_impact_parser.add_argument("--mut-min", dest="mut_min", default=1, type=int, help="Min mutant (X CIGAR) reads in a cell to call MUT for the COMBINED confident set. Default: 1")
+        variant_impact_parser.add_argument("--wt-min", dest="wt_min", default=2, type=int, help="Min wild-type (= CIGAR) reads in a cell to call WT for the COMBINED confident set. Default: 2")
+        variant_impact_parser.add_argument("--min-cells", dest="min_cells", default=20, type=int, help="Minimum called MUT and WT cells in a cell state to run MarkerFinder. Default: 20")
+        variant_impact_parser.add_argument("--top-n", dest="top_n", default=50, type=int, help="Top markers per group (MUT/WT). Default: 50")
+        variant_impact_parser.add_argument("--min-mapq", dest="min_mapq", default=20, type=int, help="Minimum read mapping quality for genotyping. Default: 20")
+        variant_impact_parser.add_argument("--indel-window", dest="indel_window", default=5, type=int, help="bp window around an indel locus to absorb left/right-alignment when picking the major indel allele. Default: 5")
+        variant_impact_parser.add_argument("--impute", action="store_true", help="Impute genotype for undetected cells from the per-cell-state MarkerFinder signature, then expand and re-render the heatmap")
+        variant_impact_parser.add_argument("--gene_symbol", default=None, type=str, help="Optional Ensembl-id -> symbol table for gene-level heatmap labels")
+        variant_impact_parser.add_argument("--samples", nargs="*", default=None, help="Optional subset of uids/libraries to process (default: all in metadata)")
+        variant_impact_parser.add_argument("--output", default=None, type=str, help="Output directory (default: ./variant_impact)")
+        self.add_common_arguments(variant_impact_parser, exclude=["output"])
+
+        # iso2function: isoform-resolved PPI/PDI/function annotation + interaction networks (TFIso atlas)
+        iso2func_parser = subparsers.add_parser(
+            "sclr-iso2func",
+            parents=[parent_parser],
+            help="Annotate isoform PPI/PDI/function (TFIso atlas) and build structure-keyed interaction networks"
+        )
+        iso2func_parser.set_defaults(func=run_iso2function)
+        iso2func_parser.add_argument("action", choices=["ingest", "crosswalk", "associate", "network", "enrich", "all"],
+                                     help="pipeline stage to run")
+        iso2func_parser.add_argument("--out-dir", default=None, type=str, help="Output dir for parsed/crosswalk/product tables (default: component data/ dir)")
+        iso2func_parser.add_argument("--artifacts-dir", default=None, type=str, help="Output dir for network/figure artifacts (default: component artifacts/)")
+        iso2func_parser.add_argument("--clone", action="append", default=None, help="Restrict the network to these atlas clone_ids (repeatable)")
+        iso2func_parser.add_argument("--detected-only", action="store_true", help="Drop assayed-negative edges from the exported network")
+        self.add_common_arguments(iso2func_parser)
 
         return general_parser
 

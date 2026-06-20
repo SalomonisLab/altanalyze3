@@ -57,6 +57,11 @@ class ReadsQuery(BaseModel):
     panel_by: str = "covariate"              # 'covariate' (panel per covariate) | 'cell_type' (panel per cell type)
 
 
+class ExportPdfRequest(BaseModel):
+    path: str                                # absolute/local path the user chose in the save dialog
+    pdf_base64: str                          # the client-rendered (svg2pdf) PDF, base64 or data-URI
+
+
 def create_app(ctx: da.RunContext) -> FastAPI:
     app = FastAPI(title="AltAnalyze3 ISV Viewer", version="1.0")
     app.state.ctx = ctx
@@ -218,6 +223,44 @@ def create_app(ctx: da.RunContext) -> FastAPI:
         return PlainTextResponse(body, headers={
             "Content-Disposition": 'attachment; filename="isoform_proteins.fasta"',
         })
+
+    # ---- PDF export of the current splicing graph (right-click -> "Export graph as PDF…") ----
+    @app.get("/api/export/defaults")
+    def export_defaults():
+        """A sensible default directory to pre-fill the PDF save dialog: the run dir, else ~/Desktop, else ~."""
+        for cand in (getattr(ctx, "run_dir", None),
+                     os.path.expanduser("~/Desktop"), os.path.expanduser("~")):
+            if cand and os.path.isdir(cand):
+                return {"dir": os.path.abspath(cand), "sep": os.sep}
+        return {"dir": os.getcwd(), "sep": os.sep}
+
+    @app.post("/api/export/pdf")
+    def export_pdf(req: ExportPdfRequest):
+        """Write a client-rendered (svg2pdf) vector PDF of the current graph to a LOCAL path the user
+        chooses in the save dialog. This viewer is a local-only app, so writing to the user's own
+        filesystem is the intended behaviour (no upload leaves the machine)."""
+        import base64
+        path = os.path.abspath(os.path.expanduser((req.path or "").strip()))
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+        data = req.pdf_base64 or ""
+        if data.startswith("data:") and "," in data:
+            data = data.split(",", 1)[1]
+        try:
+            raw = base64.b64decode(data)
+        except Exception as e:
+            raise HTTPException(400, f"invalid PDF payload: {e}")
+        if not raw.startswith(b"%PDF"):
+            raise HTTPException(400, "payload is not a PDF")
+        parent = os.path.dirname(path) or "."
+        if not os.path.isdir(parent):
+            raise HTTPException(400, f"directory does not exist: {parent}")
+        try:
+            with open(path, "wb") as fh:
+                fh.write(raw)
+        except OSError as e:
+            raise HTTPException(400, f"could not write {path}: {e}")
+        return {"ok": True, "path": path, "bytes": len(raw)}
 
     return app
 

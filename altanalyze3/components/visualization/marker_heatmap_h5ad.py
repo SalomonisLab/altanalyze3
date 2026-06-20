@@ -564,10 +564,12 @@ def _plot_heatmap(heatmap_df, output_path, cluster_counts, cluster_order, column
     from mpl_toolkits.axes_grid1 import make_axes_locatable
     from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
-    fixed_width = 7.5
+    fixed_width = 8.3
     fixed_height = 8.5
     fig, ax = plt.subplots(figsize=(fixed_width, fixed_height))
-    fig.subplots_adjust(left=0.08, right=0.88, top=0.82, bottom=0.08)
+    # right margin widened ~0.8" (≈20 chars) so long row labels (e.g. isoform IDs) are not clipped;
+    # plot area is preserved by the matching figure-width increase.
+    fig.subplots_adjust(left=0.08, right=0.80, top=0.82, bottom=0.08)
 
     contrast = float(os.environ.get("MARKER_HEATMAP_CONTRAST", "1.0"))
     if contrast <= 0:
@@ -817,6 +819,7 @@ def generate_marker_heatmap_from_adata(
     write_heatmap_tsv=True,
     write_expression_tsv=True,
     write_heatmap_cache=True,
+    pval_threshold=0.001,
 ):
     total_started = time.perf_counter()
     timings = {}
@@ -915,7 +918,7 @@ def generate_marker_heatmap_from_adata(
         cluster_order,
         top_n,
         effect_df=effect_df,
-        pval_threshold=0.001,
+        pval_threshold=pval_threshold,
     )
     print(f"[INFO] Selected {selected.shape[0]} markers after FDR/effect filtering.")
     _log_step_timing(

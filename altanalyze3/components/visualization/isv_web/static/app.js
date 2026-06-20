@@ -133,7 +133,7 @@
   function render() {
     const gene = state.gene || geneInput.value.trim();
     if (!gene) { setStatus("enter a gene"); return; }
-    return state.tab === "molecule" ? renderReads(gene) : renderHeatmap(gene);
+    return state.tab === "molecule" ? renderReads(gene) : state.tab === "lines" ? renderLines(gene) : renderHeatmap(gene);
   }
 
   async function renderHeatmap(gene) {
@@ -157,6 +157,21 @@
       max_isoforms: +$("#maxreads").value || 300, panel_by: state.panelBy,
     };
     await run("/api/reads", body, gene, "reads", true);
+  }
+
+  // Isoform-usage LINE view: reuse /api/isoforms with covariate×cell-type columns (so every (group,cell-type)
+  // is a column); usage = isoform reads / column total. Same default filters as the heatmap tab.
+  async function renderLines(gene) {
+    const body = {
+      gene, samples: [...state.samples], groups: [...state.groups], cell_types: selectedCellTypes(),
+      combine_by: "cell_type_x_covariate",
+      cluster_similarity_threshold: +$("#sim").value, min_split_fraction: +$("#msf").value,
+      min_count: +$("#mincount").value, max_isoforms: +$("#maxiso").value,
+      cluster_strategy: $("#strategy").value, cluster_mode: $("#mode").value,
+      filter_junctions: [...state.junctions], include_introns: $("#introns").checked,
+    };
+    if (body.cell_types.length === 0) { setStatus("select cell types for the line view"); return; }
+    await run("/api/isoforms", body, gene, "lines", false);
   }
 
   async function run(url, body, gene, mode, slow) {
@@ -267,7 +282,7 @@
   function draw(res) {
     const plot = $("#plot"); plot.innerHTML = ""; view = null;
     titleBlock(res);
-    return res._mode === "reads" ? drawReads(res) : drawHeatmap(res);
+    return res._mode === "reads" ? drawReads(res) : res._mode === "lines" ? drawLines(res) : drawHeatmap(res);
   }
 
   // ============================ READ-LEVEL PILEUP (molecule view) ============================
@@ -309,6 +324,14 @@
       let h = 0; p._rows = [];
       p.mol.forEach((m, i) => { const hh = Math.max(0.55, raw[i] * scale); p._rows.push({ m, dy: h, h: hh }); h += hh; });
       p._bodyH = Math.max(18, h);
+      // per-structure (isoform cluster) read totals IN THIS PANEL: many molecules collapse to one
+      // structure, so the tooltip reports the cluster's summed reads (not the single hovered molecule's).
+      const clTot = new Map(), clMol = new Map();
+      p.mol.forEach((m) => {
+        clTot.set(m.cluster_index, (clTot.get(m.cluster_index) || 0) + (+m.count || 0));
+        clMol.set(m.cluster_index, (clMol.get(m.cluster_index) || 0) + 1);
+      });
+      p._clTot = clTot; p._clMol = clMol;
     });
     let y = 10;
     panels.forEach((p) => { p._top = y; p._y = y + R.HDR; y += R.HDR + p._bodyH + R.PAD + R.PANEL_GAP; });
@@ -358,7 +381,7 @@
         .attr("fill", "transparent").style("cursor", "pointer")
         .on("mousemove", function (ev) {
           const r = rowAt(d3.pointer(ev, this)[1]);
-          if (r) showTip(ev, molTip(r.m, p.condition));
+          if (r) showTip(ev, molTip(r.m, p.condition, p));
         })
         .on("mouseleave", hideTip)
         .on("click", openMenu)
@@ -394,9 +417,15 @@
     if (truncated) setStatus(`note: ${truncated.toLocaleString()} low-rank molecules hidden (cap ${R.MAX_ROWS}/panel) — raise "Max molecules / panel"`);
     renderLegend(res);
   }
-  function molTip(m, cond) {
+  function molTip(m, cond, p) {
     const fid = m.final_isoform_id || m.isoform_id;
     const det = m.detections || [];
+    // total reads assigned to this isoform STRUCTURE in this cell-state/condition panel, from the
+    // authoritative counts matrix (server: panel.structure_reads). The molecule pileup is top-N capped,
+    // so summing displayed molecules undercounts -- fall back to that sum only if the total is absent.
+    const sr = (p && p.structure_reads) ? p.structure_reads[fid] : undefined;
+    const structTotal = (sr != null) ? sr
+      : ((p && p._clTot && p._clTot.has(m.cluster_index)) ? p._clTot.get(m.cluster_index) : m.count);
     let where;
     if (det.length) {
       const lines = det.slice(0, 8).map((d) =>
@@ -410,7 +439,7 @@
       + (fid !== m.isoform_id ? `<br><span class="muted">read: ${m.isoform_id}</span>` : "")
       + `<br>${cond} · isoform group ${m.cluster_index}`
       + where
-      + `<br>reads: <b>${fmtCount(m.count)}</b>`
+      + `<br>reads (this structure · ${cond}): <b>${fmtCount(structTotal)}</b>`
       + `<br>protein length: ${m.protein_length != null ? m.protein_length + " aa" : "n/a"}`
       + (m.nmd_status ? `<br>NMD: ${m.nmd_status}` : "");
   }
@@ -502,6 +531,112 @@
     renderLegend(res);
   }
 
+  // ============================ ISOFORM USAGE LINE PLOTS (per covariate × cell type) ============================
+  // Top panels: one stacked line panel per covariate (condition); x = cell types, y = % isoform usage, one
+  // colored line per isoform. Bottom: the SAME structure layout as the heatmap tab (linear genomic axis +
+  // reference track + per-isoform exon rows with UCSC CDS-tall/UTR-thin), color-matched to the lines, zoomable.
+  const LP = { LEFT: 214, RMARGIN: 28, YAX_W: 34, PANEL_H: 132, PANEL_GAP: 26, TITLE_H: 20, XLAB_H: 50,
+               RULER_H: 30, REF_H: 26, ROW_H: 20, ROW_GAP: 6, TOPN: 10 };
+  function drawLines(res) {
+    const plot = $("#plot");
+    if (!res.isoforms || !res.isoforms.length) { plot.innerHTML = "<p class='empty'>No isoforms for this selection.</p>"; $("#zoom-tools").classList.add("hidden"); return; }
+    const cols = res.columns || [];
+    if (!cols.some((c) => c.group && c.group !== c.label)) {
+      plot.innerHTML = "<p class='empty'>The line view needs covariate × cell-type columns — select cell types and ≥1 covariate group, then Render.</p>"; $("#zoom-tools").classList.add("hidden"); return; }
+    $("#zoom-tools").classList.remove("hidden");
+    const gm = res.gene_model || {};
+    const isosAll = res.isoforms.map((iso) => ({ ...iso, merged: mergeSegments(iso.exon_segments) }));
+    const colTotal = {}; cols.forEach((c) => { colTotal[c.key] = isosAll.reduce((s, iso) => s + (iso.expression[c.key] || 0), 0); });
+    const tot = (iso) => cols.reduce((s, c) => s + (iso.expression[c.key] || 0), 0);
+    const isos = isosAll.slice().sort((a, b) => tot(b) - tot(a)).slice(0, LP.TOPN);   // top isoforms by reads
+    const color = new Map(isos.map((iso, i) => [iso.isoform_id, CLUSTER_COLORS[i % CLUSTER_COLORS.length]]));
+    const usage = (iso, c) => (colTotal[c.key] ? 100 * (iso.expression[c.key] || 0) / colTotal[c.key] : 0);
+    const conds = []; cols.forEach((c) => { const g = c.group || "all"; const last = conds[conds.length - 1]; if (!last || last.group !== g) conds.push({ group: g, cols: [c] }); else last.cols.push(c); });
+    const [lo, hi] = extentOf(isos, gm);
+
+    const containerW = plot.clientWidth || 1100;
+    const width = Math.max(containerW - 4, 980);
+    const plotX0 = LP.LEFT, plotX1 = width - LP.RMARGIN, trackX0 = LP.LEFT, trackX1 = plotX1;
+    let y = 12;
+    conds.forEach((cd) => { cd._titleY = y; cd._plotTop = y + LP.TITLE_H; cd._plotBot = cd._plotTop + LP.PANEL_H; y = cd._plotBot + LP.XLAB_H + LP.PANEL_GAP; });
+    const structTop = y + 4, rulerBase = structTop + LP.RULER_H - 6, refTop = structTop + LP.RULER_H;
+    const rowsTop = refTop + LP.REF_H + 10;
+    const height = rowsTop + isos.length * (LP.ROW_H + LP.ROW_GAP) + 22;
+    const x0 = d3.scaleLinear().domain([lo, hi]).range([trackX0, trackX1]);
+
+    const svg = d3.select(plot).append("svg").attr("width", width).attr("height", height);
+    svg.append("defs").append("clipPath").attr("id", "lclip").append("rect").attr("x", trackX0).attr("y", 0).attr("width", trackX1 - trackX0).attr("height", height);
+    const gStatic = svg.append("g");
+    const gx = svg.append("g").attr("clip-path", "url(#lclip)");
+
+    // ---- one line panel per condition (covariate) ----
+    conds.forEach((cd) => {
+      const px0 = plotX0 + LP.YAX_W, px1 = plotX1;
+      const xc = (i) => (cd.cols.length <= 1 ? (px0 + px1) / 2 : px0 + (i * (px1 - px0)) / (cd.cols.length - 1));
+      const yv = (u) => cd._plotBot - (clamp(u, 0, 100) / 100) * LP.PANEL_H;
+      const gp = gStatic.append("g");
+      gp.append("text").attr("class", "panel-label").attr("x", plotX0).attr("y", cd._titleY + 14).text(cd.group);
+      [0, 25, 50, 75, 100].forEach((u) => {
+        const yy = yv(u);
+        gp.append("line").attr("x1", px0).attr("x2", px1).attr("y1", yy).attr("y2", yy).attr("stroke", "#e6e9f0").attr("stroke-width", 1);
+        gp.append("text").attr("x", px0 - 6).attr("y", yy + 3).attr("text-anchor", "end").attr("font-size", 9.5).attr("fill", "#8a94a4").text(u);
+      });
+      gp.append("text").attr("x", plotX0 + 2).attr("y", yv(50)).attr("transform", `rotate(-90 ${plotX0 + 2} ${yv(50)})`).attr("text-anchor", "middle").attr("font-size", 10).attr("fill", "#6b7686").text("% usage");
+      cd.cols.forEach((c, i) => {
+        const cx = xc(i);
+        gp.append("text").attr("x", cx).attr("y", cd._plotBot + 12).attr("transform", `rotate(-40 ${cx} ${cd._plotBot + 12})`).attr("text-anchor", "end").attr("font-size", 10).attr("fill", "#6b7686").text(truncate(c.label, 16));
+      });
+      isos.forEach((iso) => {
+        const col = color.get(iso.isoform_id);
+        const pts = cd.cols.map((c, i) => [xc(i), yv(usage(iso, c))]);
+        gp.append("path").attr("d", pts.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + "," + p[1].toFixed(1)).join("")).attr("fill", "none").attr("stroke", col).attr("stroke-width", 2).attr("opacity", 0.95);
+        pts.forEach((p, i) => gp.append("circle").attr("cx", p[0]).attr("cy", p[1]).attr("r", 2.7).attr("fill", col).style("cursor", "pointer")
+          .on("mousemove", (ev) => showTip(ev, `<b>${iso.isoform_id}</b><br>${cd.group} · ${cd.cols[i].label}<br>usage: <b>${usage(iso, cd.cols[i]).toFixed(1)}%</b> · ${iso.expression[cd.cols[i].key] || 0} reads`)).on("mouseleave", hideTip));
+      });
+    });
+
+    // ---- isoform structures (heatmap-tab layout; color-matched, zoomable) ----
+    gStatic.append("text").attr("x", plotX0).attr("y", structTop - 3).attr("font-size", 11).attr("font-weight", 700).attr("fill", "#8a94a4").text("ISOFORM STRUCTURES");
+    isos.forEach((iso, r) => {
+      const yy = rowsTop + r * (LP.ROW_H + LP.ROW_GAP);
+      const g = gStatic.append("g").attr("transform", `translate(0,${yy})`);
+      const exportIso = (ev) => { ev.preventDefault(); ev.stopPropagation(); showCtx(ev, iso, isos.map((i) => i.isoform_id), iso.cluster_id, res.isoforms); };
+      g.append("rect").attr("class", "rowhit").attr("x", 0).attr("y", 0).attr("width", width).attr("height", LP.ROW_H).attr("fill", "transparent").style("cursor", "pointer")
+        .on("mousemove", (ev) => { if (ev.target.classList.contains("rowhit")) showTip(ev, isoTip(iso)); }).on("mouseleave", hideTip)
+        .on("click", exportIso).on("contextmenu", (ev) => ev.preventDefault());
+      g.append("rect").attr("x", 12).attr("y", LP.ROW_H / 2 - 4.5).attr("width", 9).attr("height", 9).attr("rx", 2).attr("fill", color.get(iso.isoform_id));
+      g.append("text").attr("class", "iso-label " + (iso.known ? "known" : "novel")).attr("x", 26).attr("y", LP.ROW_H * 0.7).text(truncate(iso.isoform_id, 24));
+    });
+    function drawX(xz) {
+      gx.selectAll("*").remove();
+      drawAxis(gx, xz, gm, lo, hi, trackX0, trackX1, rulerBase, refTop, LP.REF_H, true);
+      isos.forEach((iso, r) => {
+        const yy = rowsTop + r * (LP.ROW_H + LP.ROW_GAP);
+        const g = gx.append("g").attr("transform", `translate(0,${yy})`);
+        const col = color.get(iso.isoform_id), exs = iso.merged.exons;
+        const exportIso = (ev) => { ev.preventDefault(); ev.stopPropagation(); showCtx(ev, iso, isos.map((i) => i.isoform_id), iso.cluster_id, res.isoforms); };
+        if (exs.length) {
+          const a = xz(Math.min(...exs.map((e) => e.a))), b = xz(Math.max(...exs.map((e) => e.b)));
+          g.append("line").attr("class", "backbone").attr("x1", a).attr("x2", b).attr("y1", LP.ROW_H / 2).attr("y2", LP.ROW_H / 2).attr("stroke", col).attr("opacity", 0.5);
+        }
+        iso.merged.introns.forEach((s) => {
+          g.append("rect").attr("class", "seg intron").attr("x", xz(s.a)).attr("y", LP.ROW_H / 2 - 2.5).attr("width", Math.max(1.5, xz(s.b) - xz(s.a))).attr("height", 5).attr("fill", col).attr("opacity", 0.5).style("cursor", "pointer")
+            .on("mousemove", (ev) => showTip(ev, `<b>intron retention</b><br>${fmt(s.a)}–${fmt(s.b)}<br><span class="muted">${iso.isoform_id}</span>`)).on("mouseleave", hideTip).on("click", exportIso).on("contextmenu", (ev) => ev.preventDefault());
+        });
+        const exH = LP.ROW_H - 6, exY = 3, utrH = Math.max(3, exH * 0.5), utrY = exY + (exH - utrH) / 2;
+        const cdsLo = iso.cds_min, cdsHi = iso.cds_max;
+        const exonRect = (s, ga, gb, ry, h) => g.append("rect").attr("class", "seg exon").attr("x", xz(ga)).attr("y", ry).attr("width", Math.max(1.5, xz(gb) - xz(ga))).attr("height", h).attr("fill", col).style("cursor", "pointer")
+          .on("mousemove", (ev) => showTip(ev, `<b>${s.label || "exon"}</b><br>${gm.chrom ? gm.chrom + ":" : ""}${fmt(s.a)}–${fmt(s.b)}<br>${iso.protein_length != null ? iso.protein_length + " aa · " : ""}<span class="muted">${iso.isoform_id}</span>`)).on("mouseleave", hideTip).on("click", exportIso).on("contextmenu", (ev) => ev.preventDefault());
+        exs.forEach((s) => {
+          if (cdsLo != null && cdsHi != null) { exonRect(s, s.a, s.b, utrY, utrH); const ca = Math.max(s.a, cdsLo), cb = Math.min(s.b, cdsHi); if (cb > ca) exonRect(s, ca, cb, exY, exH); }
+          else exonRect(s, s.a, s.b, exY, exH);
+        });
+      });
+    }
+    installZoom(svg, x0, trackX0, trackX1, height, drawX);
+    renderLegend(res);
+  }
+
   function drawHeatStrip(g, isos, cols, x0, HEADER, showBlocks, bodyH) {
     const hdrBase = HEADER - 6;
     if (showBlocks) {
@@ -567,12 +702,12 @@
     head.innerHTML = `${fid}<span>${iso.protein_length != null ? iso.protein_length + " aa" : ""}</span>`;
     m.appendChild(head);
     const item = (label, fn) => { const d = document.createElement("div"); d.textContent = label; d.onclick = () => { fn(); hideCtx(); }; m.appendChild(d); };
-    item("Export protein sequence (FASTA)", () => dl("/api/isoform/" + encodeURIComponent(fid) + "/protein"));
-    item("Export ORF / CDS sequence (FASTA)", () => dl("/api/isoform/" + encodeURIComponent(fid) + "/orf"));
-    item("Export mRNA sequence (FASTA)", () => dl("/api/isoform/" + encodeURIComponent(fid) + "/mrna"));
+    item("Export protein sequence (FASTA)", () => saveFasta("/api/isoform/" + encodeURIComponent(fid) + "/protein", safeName(fid) + ".fasta"));
+    item("Export ORF / CDS sequence (FASTA)", () => saveFasta("/api/isoform/" + encodeURIComponent(fid) + "/orf", safeName(fid) + ".orf.fasta"));
+    item("Export mRNA sequence (FASTA)", () => saveFasta("/api/isoform/" + encodeURIComponent(fid) + "/mrna", safeName(fid) + ".mrna.fasta"));
     if (clusterId != null && allIsoforms) item("Export all proteins in cluster", () =>
-      dlPost("/api/proteins", allIsoforms.filter((i) => i.cluster_id === clusterId).map((i) => i.isoform_id), "cluster_proteins.fasta"));
-    if (visibleIds) item("Export all visible proteins", () => dlPost("/api/proteins", [...new Set(visibleIds)], "visible_proteins.fasta"));
+      saveFasta("/api/proteins", "cluster_proteins.fasta", allIsoforms.filter((i) => i.cluster_id === clusterId).map((i) => i.isoform_id)));
+    if (visibleIds) item("Export all visible proteins", () => saveFasta("/api/proteins", "visible_proteins.fasta", [...new Set(visibleIds)]));
     item("Copy isoform id", () => navigator.clipboard && navigator.clipboard.writeText(fid));
     m.classList.remove("hidden");
     m.style.left = Math.min(ev.pageX, window.innerWidth - 260) + "px";
@@ -586,6 +721,132 @@
     if (!r.ok) { setStatus("nothing to export"); return; }
     const blob = await r.blob(); const u = URL.createObjectURL(blob);
     const a = document.createElement("a"); a.href = u; a.download = fname; a.click(); URL.revokeObjectURL(u);
+  }
+  function safeName(s) { return String(s).replace(/[^A-Za-z0-9._-]+/g, "_"); }
+  // Save a FASTA via the native "Save As" picker (choose folder + filename). Open the picker FIRST while the
+  // right-click->menu-click user gesture is still valid; fetching before the picker would consume the gesture
+  // and make showSaveFilePicker throw silently (the old `dl`/window.location just downloaded with no dialog).
+  // Safari/Firefox (no File System Access API) fall back to a normal download. `postBody` set => POST.
+  async function saveFasta(url, suggestedName, postBody) {
+    let handle = null;
+    if (window.showSaveFilePicker) {
+      try {
+        handle = await window.showSaveFilePicker({
+          suggestedName,
+          types: [{ description: "FASTA sequence", accept: { "text/plain": [".fasta", ".fa", ".txt"] } }],
+        });
+      } catch (e) {
+        if (e && e.name === "AbortError") { setStatus("export canceled"); return; }
+        handle = null;   // picker unavailable/denied -> download fallback below
+      }
+    }
+    setStatus("fetching sequence…");
+    let blob;
+    try {
+      const opt = postBody !== undefined
+        ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(postBody) }
+        : undefined;
+      const r = await fetch(url, opt);
+      if (!r.ok) { setStatus("nothing to export (HTTP " + r.status + ")"); return; }
+      blob = await r.blob();
+      if (!blob.size) { setStatus("empty sequence — nothing to export"); return; }
+    } catch (e) { setStatus("export error: " + ((e && e.message) || e)); return; }
+    if (handle) {
+      try {
+        const ws = await handle.createWritable(); await ws.write(blob); await ws.close();
+        setStatus("saved → " + handle.name); return;
+      } catch (e) { setStatus("save error: " + ((e && e.message) || e)); return; }
+    }
+    const u = URL.createObjectURL(blob);   // fallback: standard download to the browser's default folder
+    const a = document.createElement("a"); a.href = u; a.download = suggestedName; a.click(); URL.revokeObjectURL(u);
+    setStatus("downloaded " + suggestedName);
+  }
+
+  // ===================================================================== PDF export (right-click)
+  // RIGHT-click the splicing graph -> "Export graph as PDF…". The displayed D3/SVG is rendered to a
+  // VECTOR pdf (svg2pdf, editable text) in the browser, then a NATIVE filesystem picker
+  // (showSaveFilePicker: choose folder + filename) writes it. Safari/Firefox fall back to a download.
+  const _plotEl = $("#plot");
+  if (_plotEl) _plotEl.addEventListener("contextmenu", (ev) => {
+    if (!_plotEl.querySelector("svg")) return;          // nothing rendered yet -> let native menu show
+    ev.preventDefault();
+    showGraphMenu(ev);
+  });
+  function showGraphMenu(ev) {
+    const m = $("#ctxmenu"); m.innerHTML = "";
+    const head = document.createElement("div"); head.className = "ctx-head";
+    head.innerHTML = `Splicing graph<span>${state.tab || ""}</span>`;
+    m.appendChild(head);
+    const d = document.createElement("div"); d.textContent = "Export graph as PDF…";
+    d.onclick = () => { exportGraphPdf(); hideCtx(); }; m.appendChild(d);
+    m.classList.remove("hidden");
+    m.style.left = Math.min(ev.pageX, window.innerWidth - 260) + "px";
+    m.style.top = Math.min(ev.pageY, window.innerHeight - m.offsetHeight - 8) + "px";
+  }
+  // svg2pdf does NOT resolve our external stylesheet, so elements colored via CSS classes (panel-box,
+  // mol-exon, labels, …) export with the SVG default fill = BLACK (the "black background"). Build an export
+  // clone with computed styles inlined and a white background rect painted first, so the PDF matches screen.
+  function svgForExport(svg) {
+    const clone = svg.cloneNode(true);
+    const PROPS = ["fill","fill-opacity","stroke","stroke-width","stroke-opacity","stroke-dasharray","opacity",
+                   "font-family","font-size","font-weight","font-style","text-anchor","dominant-baseline","letter-spacing"];
+    const src = [svg, ...svg.querySelectorAll("*")], dst = [clone, ...clone.querySelectorAll("*")];
+    for (let i = 0; i < src.length; i++) {
+      const cs = getComputedStyle(src[i]); let st = dst[i].getAttribute("style") || "";
+      for (const p of PROPS) { const v = cs.getPropertyValue(p); if (v) st += p + ":" + v + ";"; }
+      dst[i].setAttribute("style", st);
+    }
+    const NS = "http://www.w3.org/2000/svg", bg = document.createElementNS(NS, "rect");
+    bg.setAttribute("x", 0); bg.setAttribute("y", 0);
+    bg.setAttribute("width", svg.getAttribute("width") || svg.clientWidth || 1000);
+    bg.setAttribute("height", svg.getAttribute("height") || svg.clientHeight || 700);
+    bg.setAttribute("fill", "#ffffff");
+    clone.insertBefore(bg, clone.firstChild);
+    return clone;
+  }
+  async function exportGraphPdf() {
+    const svg = $("#plot").querySelector("svg");
+    if (!svg) { setStatus("no graph to export"); return; }
+    if (!window.jspdf || !window.jspdf.jsPDF) { setStatus("PDF library not loaded"); return; }
+    const gene = ((geneInput && geneInput.value) || "graph").trim() || "graph";
+    const fname = (`${gene}_${state.tab || "graph"}.pdf`).replace(/[^A-Za-z0-9._-]+/g, "_");
+    // Open the native picker FIRST, while the right-click user gesture is still valid. Rendering the
+    // (async) PDF before this would consume the gesture and make showSaveFilePicker throw silently.
+    let handle = null;
+    if (window.showSaveFilePicker) {
+      try {
+        handle = await window.showSaveFilePicker({
+          suggestedName: fname,
+          types: [{ description: "PDF document", accept: { "application/pdf": [".pdf"] } }],
+        });
+      } catch (e) {
+        if (e && e.name === "AbortError") { setStatus("PDF export canceled"); return; }
+        handle = null;   // picker unavailable/failed -> download fallback below
+      }
+    }
+    setStatus("rendering PDF…");
+    let blob;
+    try {
+      const w = Math.ceil(+svg.getAttribute("width") || svg.clientWidth || 1000);
+      const h = Math.ceil(+svg.getAttribute("height") || svg.clientHeight || 700);
+      const doc = new window.jspdf.jsPDF({ unit: "pt", format: [w, h], compress: true });
+      const exp = svgForExport(svg);   // inline computed styles + white bg (svg2pdf ignores external CSS -> black)
+      if (typeof doc.svg === "function") await doc.svg(exp, { x: 0, y: 0, width: w, height: h });
+      else if (window.svg2pdf) await window.svg2pdf(exp, doc, { x: 0, y: 0, width: w, height: h });
+      else throw new Error("svg2pdf not loaded");
+      blob = doc.output("blob");
+    } catch (e) { setStatus("PDF render error: " + ((e && e.message) || e)); return; }
+    if (handle) {
+      try {
+        const ws = await handle.createWritable(); await ws.write(blob); await ws.close();
+        setStatus(`saved PDF → ${handle.name}`); return;
+      } catch (e) { setStatus("PDF save error: " + ((e && e.message) || e)); return; }
+    }
+    // FALLBACK (Safari/Firefox, or picker unavailable): normal download.
+    const u = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = u; a.download = fname; a.click();
+    URL.revokeObjectURL(u);
+    setStatus(`downloaded ${fname}`);
   }
 
   // ===================================================================== header / legend
@@ -605,7 +866,11 @@
     if (state.tab === "molecule") {
       const n = res && res.n_clusters ? res.n_clusters : 4;
       const sw = Array.from({ length: Math.min(n, 8) }, (_, i) => `<span class="sw" style="background:${clusterColor(i)}"></span>`).join("");
-      el.innerHTML = `<div class="lg-row"><span>clusters</span>${sw}</div><div class="lg-row muted">each row = one molecule · row height ∝ read count</div><div class="lg-row muted">right-click → export protein / mRNA</div>`;
+      el.innerHTML = `<div class="lg-row"><span>clusters</span>${sw}</div><div class="lg-row muted">each row = one molecule · row height ∝ read count</div><div class="lg-row muted">left-click → protein / mRNA FASTA · right-click → graph PDF</div>`;
+    } else if (state.tab === "lines") {
+      el.innerHTML = `<div class="lg-row muted">% isoform usage by cell type · one panel per covariate</div>
+        <div class="lg-row muted">top ${LP.TOPN} isoforms by reads · color shared by line + structure</div>
+        <div class="lg-row muted">left-click a structure row → protein / mRNA FASTA · right-click graph → PDF</div>`;
     } else {
       const stops = [0, .25, .5, .75, 1].map((t) => `${cyanYellow(t)} ${t * 100}%`).join(",");
       el.innerHTML = `<div class="lg-row"><span>expression</span><div class="lg-grad" style="background:linear-gradient(90deg,${stops})"></div></div>

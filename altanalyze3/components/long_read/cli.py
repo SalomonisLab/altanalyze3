@@ -448,6 +448,33 @@ def run_sclr_diff(args):
     )
     logging.info("sclr-diff: %s differentials complete for %s", analyses, conditions)
 
+    # Count-aware junction->isoform ATTRIBUTION (alternative to isoform_predict.py).
+    # Best-effort, non-breaking: writes attribution/*-attributed.txt next to the dPSI
+    # event tables, naming the isoform whose regulation drives each PSI change and the
+    # mechanism (inclusion vs competing isoform). Requires the isoform-abundance diff
+    # (Mean_<cond> columns) and the Ensembl exon db; skipped cleanly otherwise.
+    if wants_annotated:
+        try:
+            from altanalyze3.components.annotation import isoform_attribute as _isoattr
+            try:
+                _exon_db = _resolve_default(getattr(args, "exon_annot", None), species, "exon_annot", work_dir)
+            except Exception:
+                _exon_db = None
+            _ctrl = (conditions[0][0] if conditions and isinstance(conditions[0], (list, tuple)) else None)
+            _isoattr.attribute_differentials(os.getcwd(), exon_db=_exon_db,
+                                             control_label=_ctrl or "young")
+        except Exception as _e:
+            logging.warning("sclr-diff: count-aware attribution step skipped: %s", _e)
+
+        # Per-junction isoform IMPORTANCE (Goals 1 & 2): run-once, expression-based top
+        # isoform + 0-1 importance list for each junction of every event, replacing the
+        # length-based pick. Clique-free, fast (~2s/cluster). Best-effort, non-breaking.
+        try:
+            from altanalyze3.components.annotation import isoform_importance as _isoimp
+            _isoimp.annotate_differentials(os.getcwd())
+        except Exception as _e:
+            logging.warning("sclr-diff: isoform-importance step skipped: %s", _e)
+
     # ISV INDEX (final step, AFTER differentials): pre-build the isoform_structure_viewer indexes from
     # every sample's MOLECULE isoform h5ad so later viewer queries compose instantly with no
     # re-indexing. Relevant ONLY to the isoform-abundance analysis (the molecule viewer); skip for
@@ -455,3 +482,32 @@ def run_sclr_diff(args):
     if wants_iso_abundance:
         isoa.precompute_isoform_viewer_index(str(args.metadata), barcode_cluster_dirs)
         logging.info("sclr-diff: ISV viewer index pre-build complete.")
+
+    # iso2function NETWORK VISUALIZATION (final step, AFTER differentials): cross-cell-state + group-
+    # contrast interaction-network figures for the top differential TF isoforms. Opt-in via --network-viz;
+    # best-effort + non-breaking. Reads the combined pseudobulk h5ads in the cwd; the --conditions group
+    # pairs become the contrasts and the control of the first pair the cross-state reference group.
+    if getattr(args, "network_viz", False) and wants_iso_abundance:
+        try:
+            from altanalyze3.components.iso2function.network import deploy as _netviz
+            _ref = getattr(args, "network_viz_group", None) or (conditions[0][1] if conditions else "control")
+            _ets = [e.strip() for e in str(getattr(args, "network_viz_edges", "all,PDI")).split(",") if e.strip()]
+            _netviz.run_network_visualization(os.getcwd(), metadata=str(args.metadata),
+                                              reference_group=_ref, comparisons=conditions, edge_types=_ets)
+            logging.info("sclr-diff: iso2function network visualization complete.")
+        except Exception as _e:
+            logging.warning("sclr-diff: network-viz step skipped: %s", _e)
+
+
+def run_sclr_iso2func_network(args):
+    """Standalone (and remote-submittable) iso2function network visualization for a finished long-read
+    analysis directory -- the same step sclr-diff runs with --network-viz, callable on its own as one
+    cluster job. Reads the combined pseudobulk h5ads + metadata; writes iso2function_network/ figures."""
+    from altanalyze3.components.iso2function.network import deploy as _netviz
+    comps = _parse_conditions(getattr(args, "conditions", None)) or None
+    ets = [e.strip() for e in str(getattr(args, "edge_types", "all,PDI")).split(",") if e.strip()]
+    dataset = os.path.abspath(getattr(args, "dataset", None) or os.path.dirname(str(args.metadata)) or ".")
+    _netviz.run_network_visualization(dataset, out_dir=getattr(args, "out_dir", None),
+                                      metadata=str(args.metadata), reference_group=args.reference_group,
+                                      comparisons=comps, edge_types=ets, top_tfs=int(getattr(args, "top_tfs", 10)))
+    logging.info("sclr-iso2func-network: complete -> %s", dataset)
