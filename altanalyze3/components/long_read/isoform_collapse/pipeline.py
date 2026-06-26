@@ -21,8 +21,8 @@ import os
 import resource
 import time
 
-from ..isoform_collapse_utils import structure_tokens_for_containment
-from .scored_collapse import collapse_gene, collapse_gene_em
+from ..isoform_collapse_utils import structure_tokens_for_containment, junction_core_tokens
+from .scored_collapse import collapse_gene, collapse_gene_em, collapse_gene_jc
 
 # Default gene->chrom reference = the gzipped exon annotation BUNDLED in the program directory
 # (components/long_read/resources/), resolved relative to this package so it works on any machine
@@ -162,8 +162,12 @@ def _collapse_chrom(args):
         tok = {s: tuple(structure_tokens_for_containment(s, g)) for s in all_structs}
         if collapse_method == 'em':
             res = collapse_gene_em(sr, tok, min_reads=1, enst=enst)
-        else:
+        elif collapse_method == 'wta_legacy':
             res = collapse_gene(sr, tok, min_reads=1, enst=enst)
+        else:   # 'wta' (default): junction-core collapse -- terminal-extent-insensitive (3'UTR/5' start)
+            core = {s: tuple(junction_core_tokens(s, g)) for s in all_structs}
+            flen = {s: len(tok[s]) for s in all_structs}   # full-length proxy for the ENST longest tiebreak
+            res = collapse_gene_jc(sr, tok, core, flen, min_reads=1, enst=enst)
         enst_ids = res.get('enst', {})
         reps = set(res['long_reps']) | set(res['other_reps'])
         final = {s: s for s in reps}
@@ -604,6 +608,17 @@ def stage3_rekey_h5ad(sample, h5ad_path, ta_path, kept_struct2exemplar, outdir,
         if not isinstance(cl, pd.Series):
             cl = pd.Series(cl)
         cl.index = cl.index.astype(str)
+        # Drop duplicate barcodes in the annotation before mapping: pandas .map()/get_indexer require a
+        # uniquely-valued mapper index. A pre-dedup cellHarmony annotation can carry duplicate
+        # barcode keys (28 in the KINNEX-5 preDedup file) which otherwise crash the re-key with
+        # "InvalidIndexError: Reindexing only valid with uniquely valued Index objects". Keep the first
+        # cluster per barcode (harmless for unique annotations; deterministic for duplicated ones).
+        if cl.index.has_duplicates:
+            n_dup = int(cl.index.duplicated().sum())
+            print(f"[stage3:{sample}] WARNING: cell annotation has {n_dup} duplicate barcode key(s); "
+                  f"keeping the first cluster per barcode (prefer the deduplicated cellHarmony "
+                  f"annotation, e.g. combined_cellHarmony_unique_barcodes.txt).")
+            cl = cl[~cl.index.duplicated(keep='first')]
         bc_index = obs.index.astype(str)
         mapped = bc_index.map(cl)
         n_fwd = int(pd.notna(mapped).sum())

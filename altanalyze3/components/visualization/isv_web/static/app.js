@@ -14,14 +14,14 @@
   const $$ = (s) => Array.from(document.querySelectorAll(s));
   const api = (p, o) => fetch(p, o).then((r) => { if (!r.ok) throw new Error(r.status + " " + p); return r; });
   const state = {
-    catalog: null, tab: "heatmap", gene: null, combineBy: "cell_type_x_covariate", panelBy: "covariate",
+    catalog: null, tab: "heatmap", gene: null, combineBy: "cell_type_x_covariate", panelBy: "covariate", netPanelBy: "covariate",
     samples: new Set(), groups: new Set(), cellTypes: new Set(), cellTypeOrder: [], junctions: new Set(),
     last: null,
   };
   let view = null;
   // any control change auto-renders (debounced so toggling several chips/sliders = one render). No Render button.
   let _renderTimer = null;
-  const autoRender = () => { clearTimeout(_renderTimer); _renderTimer = setTimeout(() => { if (state.gene || geneInput.value.trim()) render(); }, 300); };
+  const autoRender = () => { clearTimeout(_renderTimer); _renderTimer = setTimeout(() => { if (state.tab === "network" || state.gene || geneInput.value.trim()) render(); }, 300); };
 
   const KNOWN = "#1d5fa8", NOVEL = "#b0306b", REF_FILL = "#3d4a5c";
   const cyanYellow = d3.interpolateRgb("#00FFFF", "#FFFF00");
@@ -62,7 +62,7 @@
     if (t.classList.contains("on")) return;
     $$("#tabbar .tab").forEach((x) => x.classList.remove("on")); t.classList.add("on");
     state.tab = t.dataset.tab; syncTabVisibility();
-    if (state.gene || geneInput.value.trim()) render();   // auto-render the other tab (gene may be set via input, not state.gene)
+    if (state.tab === "network" || state.gene || geneInput.value.trim()) render();   // network is gene-free; others need a gene
   }));
   function syncTabVisibility() {
     $$(".tab-controls").forEach((el) => { el.hidden = el.dataset.for !== state.tab; });
@@ -70,6 +70,7 @@
       if (el.classList.contains("tab-controls")) return;
       el.style.display = el.dataset.for === state.tab ? "" : "none";
     });
+    const gf = $("#gene-field"); if (gf) gf.style.display = (state.tab === "network") ? "none" : "";   // network is gene-free
     renderLegend();
   }
 
@@ -111,6 +112,11 @@
     $$("#panel-seg .seg-btn").forEach((x) => x.classList.remove("on")); b.classList.add("on");
     state.panelBy = b.dataset.v; if (state.gene || geneInput.value.trim()) render();
   });
+  $("#net-panel-seg").addEventListener("click", (e) => {
+    const b = e.target.closest(".seg-btn"); if (!b) return;
+    $$("#net-panel-seg .seg-btn").forEach((x) => x.classList.remove("on")); b.classList.add("on");
+    state.netPanelBy = b.dataset.v; updateNetPanelNote(); if (state.tab === "network") renderNetwork();
+  });
   $("#sim").addEventListener("input", (e) => { $("#sim-val").textContent = e.target.value; autoRender(); });
   $("#celltype-filter").addEventListener("input", (e) => {
     const f = e.target.value.toLowerCase();
@@ -131,6 +137,7 @@
 
   // ===================================================================== query dispatch
   function render() {
+    if (state.tab === "network") return renderNetwork();   // network view is gene-free (uses contexts), check first
     const gene = state.gene || geneInput.value.trim();
     if (!gene) { setStatus("enter a gene"); return; }
     return state.tab === "molecule" ? renderReads(gene) : state.tab === "lines" ? renderLines(gene) : renderHeatmap(gene);
@@ -172,6 +179,54 @@
     };
     if (body.cell_types.length === 0) { setStatus("select cell types for the line view"); return; }
     await run("/api/isoforms", body, gene, "lines", false);
+  }
+
+  // ---- Interaction network tab (PPI/PDI contrast) ----
+  let _netMeta = null, _netT = null, _netWired = false;
+  async function netInit() {
+    if (!_netMeta || _netMeta.available === false) {   // retry a transient meta failure rather than caching it
+      try { _netMeta = await api("/api/network/meta").then((r) => r.json()); } catch (e) { _netMeta = { available: false }; }
+    }
+    const a = $("#net-ctx-a"), b = $("#net-ctx-b");
+    if (a && b && _netMeta.contexts && _netMeta.contexts.length) {
+      const opts = _netMeta.contexts.map((c) => `<option value="${c}">${c.replace("||", " · ")}</option>`).join("");
+      a.innerHTML = opts; b.innerHTML = opts; netDefaults();
+    }
+    if (!_netWired) {
+      const et = $("#net-edgetype"); if (et) { et.value = "PDI"; et.onchange = () => renderNetwork(); }   // default PDI
+      ["#net-genes", "#net-thresh"].forEach((s) => { const el = $(s); if (el) el.oninput = () => { clearTimeout(_netT); _netT = setTimeout(renderNetwork, 350); }; });
+      updateNetPanelNote();
+      _netWired = true;   // the shared cell-type/covariate chips re-render via autoRender(); no Contrast button
+    }
+  }
+  // ensure the shared chips carry a usable default for the contrast (default cell types + both covariates)
+  function netDefaults() {
+    if (!selectedCellTypes().length) { DEFAULT_CELLS.forEach((c) => state.cellTypes.add(c)); refreshChips("#cell-types", state.cellTypes); }
+    if (state.groups.size < 2 && state.catalog) { (state.catalog.groups || []).forEach((g) => state.groups.add(g)); refreshChips("#groups", state.groups); }
+  }
+  function updateNetPanelNote() {
+    const el = $("#net-panel-note"); if (!el) return;
+    el.textContent = state.netPanelBy === "cell_type"
+      ? "Windows = the first 2 selected cell types; covariates aggregated (chips below)"
+      : "Windows = the first 2 selected covariates; cell types summed (chips below)";
+  }
+  async function renderNetwork() {
+    if (!_netMeta || _netMeta.available === false) await netInit();
+    if (!_netMeta || _netMeta.available === false) { setStatus("no interaction network precomputed for this dataset (run precompute_isvweb)"); return; }
+    netDefaults();
+    const cts = selectedCellTypes(), gs = [...state.groups], byCell = state.netPanelBy === "cell_type";
+    if (byCell) {
+      if (gs.length < 1) { setStatus("select at least 1 covariate"); return; }
+      if (cts.length < 2) { setStatus("select 2 cell types to contrast (one per window)"); return; }
+    } else {
+      if (!cts.length) { setStatus("select cell types to build the interaction networks"); return; }
+      if (gs.length < 2) { setStatus("select 2 covariates to contrast (e.g. young + AML-NPM1)"); return; }
+    }
+    const genes = ($("#net-genes").value || "").split(",").map((s) => s.trim()).filter(Boolean);
+    const body = { cell_types: cts, groups: gs, threshold: +$("#net-thresh").value || 1,
+                   genes: genes.length ? genes : null, edge_type: $("#net-edgetype").value, panel_by: state.netPanelBy };
+    const title = (byCell ? cts : gs).slice(0, 2).join(" vs ");
+    await run("/api/network", body, title, "network", false);
   }
 
   async function run(url, body, gene, mode, slow) {
@@ -281,6 +336,7 @@
   // ===================================================================== draw dispatch
   function draw(res) {
     const plot = $("#plot"); plot.innerHTML = ""; view = null;
+    if (res._mode === "network") return drawNetwork(res);
     titleBlock(res);
     return res._mode === "reads" ? drawReads(res) : res._mode === "lines" ? drawLines(res) : drawHeatmap(res);
   }
@@ -637,6 +693,167 @@
     renderLegend(res);
   }
 
+  // ============================ INTERACTION NETWORK (PPI/PDI, side-by-side contrast) ============================
+  // Two expression-supported subgraphs (ctxA | ctxB) on a SHARED force layout (so the same nodes sit in the
+  // same place and differences pop). Source isoforms = diamonds (edge color = isoform); targets = circles;
+  // node fill/size = per-context CPM; PDI = directed arrow, PPI = line. Mirrors the iso2function ego figures.
+  let _fcoseReg = false;
+  function ensureFcose() { if (_fcoseReg) return; _fcoseReg = true; try { if (window.cytoscapeFcose) cytoscape.use(window.cytoscapeFcose); } catch (e) {} }
+  function setNetTitle(res) {
+    const tb = $("#title-block"); if (!tb) return;   // replace the stale per-gene title with a network title (no BID)
+    const et = (res.edge_type || "all").toUpperCase();
+    tb.innerHTML = `<span class="tb-gene">Interactions</span> `
+      + `<span class="tb-ensg">${res.A.ctx.replace("||", " · ")}  vs  ${res.B.ctx.replace("||", " · ")}</span> `
+      + `<span class="pill">${et}</span> <span class="pill">${res.mode}</span> `
+      + `<span class="pill">${res.A.edges.length} | ${res.B.edges.length} edges</span>`;
+  }
+  function drawNetwork(res) {
+    const plot = $("#plot"); $("#zoom-tools").classList.add("hidden");
+    const A = res.A, B = res.B; setNetTitle(res);
+    if (!A.edges.length && !B.edges.length) {
+      plot.innerHTML = "<p class='empty'>No expression-supported interactions for these contexts. Lower the CPM threshold, or search a regulator (e.g. MAX, DDIT3).</p>"; renderNetLegend(new Map()); return;
+    }
+    if (typeof cytoscape === "undefined") { plot.innerHTML = "<p class='empty'>Cytoscape failed to load.</p>"; renderNetLegend(new Map()); return; }
+    const PAL = CLUSTER_COLORS, isoColor = new Map(); let ci = 0;
+    [A, B].forEach((s) => s.edges.forEach((e) => { if (!isoColor.has(e.src_iso)) isoColor.set(e.src_iso, PAL[ci++ % PAL.length]); }));
+    const nodeMap = new Map();
+    [A, B].forEach((s) => s.nodes.forEach((n) => { if (!nodeMap.has(n.id)) nodeMap.set(n.id, { id: n.id, kind: n.kind, gene: n.gene, enst: n.enst, aa: n.aa, nmd: n.nmd }); }));
+    const cpmA = new Map(A.nodes.map((n) => [n.id, n.cpm])), cpmB = new Map(B.nodes.map((n) => [n.id, n.cpm]));
+    const vmax = Math.max(1, ...[...cpmA.values(), ...cpmB.values(), 1]);
+    const _spectral = (typeof d3.interpolateSpectral === "function") ? d3.interpolateSpectral   // matplotlib "Spectral"
+      : d3.interpolateRgbBasis(["#9e0142", "#d53e4f", "#f46d43", "#fdae61", "#fee08b", "#ffffbf", "#e6f598", "#abdda4", "#66c2a5", "#3288bd", "#5e4fa2"]);
+    const col = (c) => c == null ? "#e9e9e9" : _spectral(1 - Math.log1p(c) / Math.log1p(vmax));   // reversed: low CPM = blue, high = red
+    const sz = (c) => c == null ? 8 : 8 + 34 * (Math.log1p(c) / Math.log1p(vmax));   // diameter proportional to log-scaled relative expression (log1p(CPM)/log1p(max))
+    const ekey = (e) => e.src_iso + "|" + e.tgt_gene + "|" + e.type;
+    const inA = new Set(), inB = new Set();   // only nodes incident to an edge IN that side are shown there
+    A.edges.forEach((e) => { inA.add(e.src_iso); inA.add(e.tgt_gene); });
+    B.edges.forEach((e) => { inB.add(e.src_iso); inB.add(e.tgt_gene); });
+    const inEither = (id) => inA.has(id) || inB.has(id);
+    // ---- layout: SERVER igraph Fruchterman-Reingold (visualization/NetPerspective.py); fcose only as fallback ----
+    let pos = new Map();
+    if (res.layout && Object.keys(res.layout).length) {
+      Object.entries(res.layout).forEach(([id, xy]) => { if (inEither(id)) pos.set(id, { x: +xy[0], y: +xy[1] }); });
+    }
+    if (!pos.size) {
+      ensureFcose();
+      const layoutEls = [];
+      nodeMap.forEach((n) => { if (inEither(n.id)) layoutEls.push({ data: { id: n.id } }); });
+      const seen = new Set();
+      [A, B].forEach((s) => s.edges.forEach((e) => { const k = ekey(e); if (!seen.has(k)) { seen.add(k); layoutEls.push({ data: { id: k, source: e.src_iso, target: e.tgt_gene } }); } }));
+      const byGene = {};
+      nodeMap.forEach((n) => { if (n.kind === "isoform" && inEither(n.id)) (byGene[n.gene] = byGene[n.gene] || []).push(n.id); });
+      Object.values(byGene).forEach((arr) => { for (let i = 1; i < arr.length; i++) layoutEls.push({ data: { id: "glue|" + i + "|" + arr[i], source: arr[i - 1], target: arr[i], glue: 1 } }); });
+      const lay = cytoscape({ headless: true, elements: layoutEls });
+      const lname = window.cytoscapeFcose ? "fcose" : "cose";
+      const Nn = layoutEls.reduce((a, e) => a + (e.data.source ? 0 : 1), 0); const big = Nn > 120;
+      try {
+        lay.layout({ name: lname, quality: big ? "default" : "proof", animate: false, randomize: true,
+          nodeRepulsion: big ? 30000 : 10000, idealEdgeLength: (e) => e.data("glue") ? 24 : (big ? 230 : 110),
+          edgeElasticity: (e) => e.data("glue") ? 0.9 : (big ? 0.08 : 0.3), gravity: big ? 0.03 : 0.18, gravityRange: 5.5,
+          numIter: big ? 4500 : 1800, nodeSeparation: big ? 340 : 140, packComponents: true, tile: true, nodeDimensionsIncludeLabels: false }).run();
+      } catch (e) { try { lay.layout({ name: "cose", animate: false, nodeRepulsion: big ? 700000 : 200000, idealEdgeLength: big ? 120 : 70 }).run(); } catch (e2) {} }
+      lay.nodes().forEach((n) => pos.set(n.id(), { x: n.position("x"), y: n.position("y") })); lay.destroy();
+    }
+    // normalize to a comfortable model-space density so node separation is consistent (FR coords are unit-scale)
+    if (pos.size) {
+      const xs = [...pos.values()].map((p) => p.x), ys = [...pos.values()].map((p) => p.y);
+      const cur = Math.max(1, Math.hypot(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)));
+      const k = (150 * Math.sqrt(pos.size)) / cur;
+      pos.forEach((p) => { p.x *= k; p.y *= k; });
+    }
+    // ---- two rendered Cytoscape panels: shared positions, each only its edge-incident nodes ----
+    const H = Math.max(560, Math.min(880, 140 + Math.ceil(Math.sqrt(nodeMap.size)) * 46));
+    plot.innerHTML = `<div style="display:flex;flex-direction:column;height:${H + 26}px">`
+      + `<div style="display:flex;font-weight:700;font-size:12px;color:#1f2a3a;padding:4px 0">`
+      + `<div style="flex:1;text-align:center">${A.ctx.replace("||", " · ")} <span style="color:#8a94a4;font-weight:400">· ${A.edges.length} edges</span></div>`
+      + `<div style="flex:1;text-align:center">${B.ctx.replace("||", " · ")} <span style="color:#8a94a4;font-weight:400">· ${B.edges.length} edges</span></div></div>`
+      + `<div style="display:flex;flex:1;min-height:0"><div id="net-a" style="flex:1;border-right:1px dashed #dfe4ec"></div><div id="net-b" style="flex:1"></div></div></div>`;
+    const style = [
+      { selector: "node", style: { "label": "data(id)", "font-size": 8, "text-valign": "top", "text-margin-y": -1, "color": "#333", "text-background-color": "#ffffff", "text-background-opacity": 0.55, "text-background-padding": 1, "border-width": 0.6, "border-color": "#555", "min-zoomed-font-size": 6 } },
+      { selector: 'node[kind="isoform"]', style: { "shape": "diamond", "border-color": "#000", "border-width": 1 } },
+      { selector: "edge", style: { "width": 1.5, "line-color": "data(ec)", "opacity": 0.7, "curve-style": "straight" } },
+      { selector: 'edge[dir="PDI"]', style: { "target-arrow-shape": "triangle", "target-arrow-color": "data(ec)", "arrow-scale": 0.8 } },
+    ];
+    // shared bounding box over the WHOLE combined layout (both panels fit to THIS, not their own subset)
+    const allXY = [...pos.values()];
+    const bx0 = Math.min(...allXY.map((p) => p.x)), bx1 = Math.max(...allXY.map((p) => p.x));
+    const by0 = Math.min(...allXY.map((p) => p.y)), by1 = Math.max(...allXY.map((p) => p.y));
+    const bcx = (bx0 + bx1) / 2, bcy = (by0 + by1) / 2, bw = Math.max(1, bx1 - bx0), bh = Math.max(1, by1 - by0);
+    // tooltip: constituent isoform id(s) + amino-acid length (or NMD); partner genes show gene + CPM
+    function netTipHTML(id, ctxLabel, c, isos) {
+      const m = nodeMap.get(id) || {};
+      const cpmRow = `CPM: <b>${c != null ? c : "n/d"}</b>`;
+      const isNmd = (s) => s === "NMD" || s === "Potential-NMD";   // NOT "Not-NMD" (which contains 'NMD')
+      if (m.kind === "isoform") {
+        const prot = isNmd(m.nmd) ? `<span style="color:#c0392b">${m.nmd}</span>`
+          : (m.aa != null ? `${m.aa} aa` : "length n/d");
+        return `<b>${id}</b><br><span class="muted">isoform · ${m.gene}</span><br>`
+          + (m.enst ? `transcript: <b>${m.enst}</b><br>` : "")
+          + `protein: <b>${prot}</b><br>${ctxLabel}<br>${cpmRow}`;
+      }
+      // partner / target gene: list the isoforms underlying its expression (ranked by CPM in THIS panel)
+      let isoRows = "";
+      if (isos && isos.length) {
+        isoRows = `<br><span class="muted">isoforms (CPM):</span><br>` + isos.map((x) =>
+          `&nbsp;${x.enst}${x.aa != null ? " · " + x.aa + " aa" : ""} · <b>${x.cpm}</b>`).join("<br>");
+      }
+      return `<b>${id}</b><br><span class="muted">partner gene</span><br>${ctxLabel}<br>${cpmRow}${isoRows}`;
+    }
+    function panel(sel, side, present, cpm) {
+      const els = [];
+      const sideIsos = new Map(side.nodes.map((n) => [n.id, n.isos]));   // per-panel gene-isoform breakdown
+      nodeMap.forEach((n) => { if (!present.has(n.id) || !pos.get(n.id)) return; els.push({ data: { id: n.id, kind: n.kind, gene: n.gene }, position: { ...pos.get(n.id) } }); });
+      side.edges.forEach((e) => els.push({ data: { id: ekey(e), source: e.src_iso, target: e.tgt_gene, ec: isoColor.get(e.src_iso), dir: e.type } }));
+      const cy = cytoscape({ container: $(sel), elements: els, style, layout: { name: "preset", fit: false }, wheelSensitivity: 0.25, minZoom: 0.05, maxZoom: 5, boxSelectionEnabled: false, autoungrabify: true });   // nodes fixed (no dragging); pan/zoom + click still work
+      cy.nodes().forEach((n) => { const c = cpm.get(n.id()); n.style({ "background-color": col(c), "width": sz(c), "height": sz(c) }); });   // size = CPM, MODEL units (constant across panels)
+      cy.on("mouseover", "node", (ev) => { const oe = ev.originalEvent || {}; const id = ev.target.id(); const c = cpm.get(id); showTip({ pageX: oe.pageX || 0, pageY: oe.pageY || 0 }, netTipHTML(id, side.ctx.replace("||", " · "), c, sideIsos.get(id))); });
+      cy.on("mouseout", "node", hideTip);
+      return cy;
+    }
+    const cyA = panel("#net-a", A, inA, cpmA), cyB = panel("#net-b", B, inB, cpmB);
+    // IDENTICAL viewport: fit the SHARED combined bbox -> same zoom + pan -> shared nodes at the same screen
+    // position AND CPM-scaled sizes at the same apparent scale on both sides.
+    function fitShared(cy) {
+      const pad = 42, cw = cy.width() || 500, ch = cy.height() || 500;
+      let z = Math.min((cw - 2 * pad) / bw, (ch - 2 * pad) / bh);
+      z = Math.max(0.5, Math.min(z, 1.5));   // never shrink below 0.5 -> nodes stay separated (pan/zoom to explore the rest)
+      cy.zoom(z); cy.pan({ x: cw / 2 - bcx * z, y: ch / 2 - bcy * z });
+    }
+    fitShared(cyA); fitShared(cyB);
+    let sync = false;
+    const linkv = (s, d) => s.on("viewport", () => { if (sync) return; sync = true; d.viewport({ zoom: s.zoom(), pan: { ...s.pan() } }); sync = false; });
+    linkv(cyA, cyB); linkv(cyB, cyA);
+    // click a node -> its first-degree interactions at full opacity, everything else dimmed to 0.2 (both panels,
+    // synced by node id); click empty space to reset.
+    function netHighlight(id) {
+      [cyA, cyB].forEach((cy) => {
+        cy.elements().style("opacity", 0.2);
+        const n = cy.getElementById(id);
+        if (!n.empty()) n.closedNeighborhood().style("opacity", 1);   // node + its edges + neighbor nodes
+      });
+    }
+    function netClear() { [cyA, cyB].forEach((cy) => cy.elements().style("opacity", 1)); }
+    [cyA, cyB].forEach((cy) => {
+      cy.on("tap", "node", (ev) => netHighlight(ev.target.id()));
+      cy.on("tap", (ev) => { if (ev.target === cy) netClear(); });
+    });
+    renderNetLegend(isoColor);
+  }
+  const SPECTRAL_CSS = "linear-gradient(90deg,#5e4fa2,#3288bd,#66c2a5,#abdda4,#e6f598,#ffffbf,#fee08b,#fdae61,#f46d43,#d53e4f,#9e0142)";   // low (blue) -> high (red)
+  function renderNetLegend(isoColor) {
+    const el = $("#legend"); if (!el) return;
+    const arrow = '<svg width="30" height="10" style="vertical-align:middle"><line x1="1" y1="5" x2="20" y2="5" stroke="#7a7f8a" stroke-width="2"/><path d="M20,1.5 L29,5 L20,8.5 Z" fill="#7a7f8a"/></svg>';
+    const line = '<svg width="30" height="10" style="vertical-align:middle"><line x1="1" y1="5" x2="29" y2="5" stroke="#7a7f8a" stroke-width="2"/></svg>';
+    const sw = [...isoColor.entries()].slice(0, 10).map(([iso, c]) => `<div class="lg-row"><span class="sw" style="background:${c}"></span>${iso}</div>`).join("");
+    el.innerHTML =
+      `<div class="lg-row"><span>CPM</span><div style="flex:1;height:10px;margin-left:8px;border-radius:3px;background:${SPECTRAL_CSS}"></div></div>`
+      + `<div class="lg-row"><span class="muted">low</span><span class="muted" style="margin-left:auto">high</span></div>`
+      + `<div class="lg-row">${arrow}&nbsp;PDI · regulator → DNA</div>`
+      + `<div class="lg-row">${line}&nbsp;PPI · physical partner</div>`
+      + `<div class="lg-row"><span style="font-size:13px;line-height:1">◆</span>&nbsp;isoform&nbsp;&nbsp;<span style="font-size:13px;line-height:1">●</span>&nbsp;gene&nbsp;·&nbsp;size = CPM</div>`
+      + (sw ? `<div class="lg-row muted" style="margin-top:4px">edge color = source isoform</div>${sw}` : "");
+  }
+
   function drawHeatStrip(g, isos, cols, x0, HEADER, showBlocks, bodyH) {
     const hdrBase = HEADER - 6;
     if (showBlocks) {
@@ -871,6 +1088,8 @@
       el.innerHTML = `<div class="lg-row muted">% isoform usage by cell type · one panel per covariate</div>
         <div class="lg-row muted">top ${LP.TOPN} isoforms by reads · color shared by line + structure</div>
         <div class="lg-row muted">left-click a structure row → protein / mRNA FASTA · right-click graph → PDF</div>`;
+    } else if (state.tab === "network") {
+      renderNetLegend(new Map());
     } else {
       const stops = [0, .25, .5, .75, 1].map((t) => `${cyanYellow(t)} ${t * 100}%`).join(",");
       el.innerHTML = `<div class="lg-row"><span>expression</span><div class="lg-grad" style="background:linear-gradient(90deg,${stops})"></div></div>
@@ -890,12 +1109,12 @@
   // With no params, DEFAULT to gene BID in the molecule view with HSC-1/HSC-2/MPP-1/MPP-MEP selected.
   const DEFAULT_GENE = "BID";
   const DEFAULT_CELLS = ["HSC-1", "HSC-2", "MPP-1"];
-  function applyDeepLink() {
+  async function applyDeepLink() {
     const q = new URLSearchParams(location.search);
     const hasGene = !!q.get("gene");
     const gene = q.get("gene") || DEFAULT_GENE;
     const tab = q.get("tab") || (hasGene ? null : "molecule");
-    if (tab === "molecule" || tab === "heatmap") {
+    if (tab === "molecule" || tab === "heatmap" || tab === "lines" || tab === "network") {
       state.tab = tab; $$("#tabbar .tab").forEach((x) => x.classList.toggle("on", x.dataset.tab === tab)); syncTabVisibility();
     }
     const panel = q.get("panel");
@@ -907,6 +1126,17 @@
     cells.forEach((c) => state.cellTypes.add(c)); if (cells.length) refreshChips("#cell-types", state.cellTypes);
     const groups = (q.get("groups") || "").split(",").map((s) => s.trim()).filter(Boolean);
     groups.forEach((g) => state.groups.add(g)); if (groups.length) refreshChips("#groups", state.groups);
+    if (state.tab === "network") {   // gene-free: uses the cell-type/covariate chips above; apply ?npanel/ntype/nthr/ngenes
+      await netInit();
+      const np = q.get("npanel");
+      if (np === "cell_type" || np === "covariate") {
+        state.netPanelBy = np; $$("#net-panel-seg .seg-btn").forEach((x) => x.classList.toggle("on", x.dataset.v === np)); updateNetPanelNote();
+      }
+      const et = $("#net-edgetype"); if (et && q.get("ntype")) et.value = q.get("ntype");
+      const th = $("#net-thresh"); if (th && q.get("nthr")) th.value = q.get("nthr");
+      const g2 = $("#net-genes"); if (g2 && q.get("ngenes") != null) g2.value = q.get("ngenes");
+      render(); return;
+    }
     geneInput.value = gene; loadJunctions(gene).finally(() => render());
   }
 

@@ -6,15 +6,49 @@ import numpy as np
 import scipy.stats as stats
 
 plt.rcParams['axes.linewidth'] = 0.5
-plt.rcParams['pdf.fonttype'] = 42
+plt.rcParams['pdf.fonttype'] = 42  # Embed fonts as TrueType (editable text)
+plt.rcParams['ps.fonttype'] = 42   # Same for PostScript
 plt.rcParams['font.family'] = 'sans-serif'
-plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
+plt.rcParams['font.sans-serif'] = ['Arial', 'Helvetica', 'DejaVu Sans']
 plt.rcParams['figure.facecolor'] = 'white'
+
+
+def extract_cluster(comp, cluster_order=None):
+    """Return the cell-state/cluster label embedded in a comparison name.
+
+    Handles both dPSI naming conventions:
+      cluster-events  : <group>-<cluster>-Others-<cluster>  (e.g. young-MEP-2-Others-MEP-2)
+      covariate-events: <group1>-<group2>-<cluster>         (e.g. young-aged-cDC2-1)
+
+    With cluster_order (the known label vocabulary), the cluster is the longest known
+    label that is a hyphen/space-bounded suffix of the name; falls back to the legacy
+    'Others-' split when no vocabulary is supplied.
+    """
+    if cluster_order:
+        cands = [cl for cl in cluster_order
+                 if comp == cl or comp.endswith("-" + cl) or comp.endswith(" " + cl)]
+        if cands:
+            return max(cands, key=len)
+    if "Others-" in comp:
+        return comp.split("Others-")[-1]
+    return comp
+
+
+def resolve_pval_column(col_indices, pval_type):
+    """Pick the p-value column for the requested type ('raw'|'fdr'), auto-detecting the
+    statistic family present (ebayes or mwu). Returns None if no match is found."""
+    for family in ("ebayes", "mwu"):
+        col = f"{family}AdjPval" if pval_type == "fdr" else f"{family}Pval"
+        if col in col_indices:
+            return col
+    return None
+
 
 def analyze_splicing_events(
     stats_files,
-    output_dir='output_plots', 
-    mwu_pval_threshold=0.05, 
+    output_dir='output_plots',
+    pval_threshold=0.05,
+    pval_type='raw',
     diff_means_threshold=1.0,
     custom_events=None,
     sample_min=3,
@@ -45,9 +79,10 @@ def analyze_splicing_events(
             condition1_name = condition_cols[0].replace("N_", "")
             condition2_name = condition_cols[1].replace("N_", "")
 
-            required_cols = {"Feature", "Isoform_1|Length", "Isoform_2|Length", "Event_Type", "Event_Direction", "mwuPval"}
-            if not required_cols.issubset(set(col_indices.keys())):
-                print(f"Skipping {stats_file}: Missing required columns.")
+            pval_col = resolve_pval_column(col_indices, pval_type)
+            required_cols = {"Feature", "Isoform_1|Length", "Isoform_2|Length", "Event_Type", "Event_Direction"}
+            if pval_col is None or not required_cols.issubset(set(col_indices.keys())):
+                print(f"Skipping {stats_file}: missing required columns or no '{pval_type}' p-value column.")
                 continue
 
             diff_means_col = [col for col in header if col.startswith("DiffMeans_")]
@@ -69,9 +104,9 @@ def analyze_splicing_events(
                 if event_direction is None:
                     continue
                 try:
-                    mwu_pval = float(cols[col_indices["mwuPval"]])
+                    pval = float(cols[col_indices[pval_col]])
                 except:
-                    mwu_pval = 1
+                    pval = 1
 
                 n_count1 = int(cols[col_indices[condition_cols[0]]])
                 n_count2 = int(cols[col_indices[condition_cols[1]]])
@@ -91,7 +126,7 @@ def analyze_splicing_events(
                     if feature not in custom_events:
                         continue
                 else:
-                    if (mwu_pval > mwu_pval_threshold) or (diff_means < diff_means_threshold) or (n_count1 < sample_min) or (n_count2 < sample_min):
+                    if (pval > pval_threshold) or (diff_means < diff_means_threshold) or (n_count1 < sample_min) or (n_count2 < sample_min):
                         continue
 
                 if event_direction not in event_data:
@@ -133,14 +168,9 @@ def analyze_splicing_events(
         comparisons = list(data_dict.keys())
         event_types = sorted({etype for comp in data_dict.values() for etype in comp})
 
-        def extract_cluster(comp):
-            if "Others-" in comp:
-                return comp.split("Others-")[-1]
-            return comp
-
         if cluster_order:
             cluster_order = cluster_order[::-1]
-            comparison_to_cluster = {comp: extract_cluster(comp) for comp in comparisons}
+            comparison_to_cluster = {comp: extract_cluster(comp, cluster_order) for comp in comparisons}
             comparisons = sorted(
                 comparisons,
                 key=lambda c: cluster_order.index(comparison_to_cluster[c]) if comparison_to_cluster[c] in cluster_order else len(cluster_order)
@@ -197,16 +227,15 @@ def plot_protein_length_distributions(cond1_dict, cond2_dict, diff_dict, output_
         upper = min(q3 + (scale * iqr), max(data))
         return lower, upper
 
-    def extract_cluster(comp):
-        if "Others-" in comp:
-            return comp.split("Others-")[-1]
-        return comp
-
-    # Filter and order comparisons based on cluster_order
+    # Order comparisons by cluster_order, keeping ALL comparisons (unknown clusters last).
+    # Uses the shared extract_cluster so covariate-events names (no 'Others-') also match.
     all_comparisons = sorted(set(cond1_dict) & set(cond2_dict) & set(diff_dict))
     if cluster_order:
-        cluster_to_comp = {extract_cluster(c): c for c in all_comparisons if extract_cluster(c) in cluster_order}
-        comparisons = [cluster_to_comp[cluster] for cluster in cluster_order if cluster in cluster_to_comp]
+        comparisons = sorted(
+            all_comparisons,
+            key=lambda c: cluster_order.index(extract_cluster(c, cluster_order))
+            if extract_cluster(c, cluster_order) in cluster_order else len(cluster_order)
+        )
     else:
         comparisons = all_comparisons
 
@@ -224,7 +253,8 @@ def plot_protein_length_distributions(cond1_dict, cond2_dict, diff_dict, output_
         positions.extend([2 * i + 1, 2 * i + 2])
 
         try:
-            _, p = stats.mannwhitneyu(c2, c1, alternative='two-sided')
+            # Paired test: c1 (isoform_1) and c2 (isoform_2) are matched per event
+            _, p = stats.wilcoxon(c1, c2, alternative='two-sided')
         except:
             p = 1
         p_texts.append(format_p_value(p) if p < 0.05 else None)
@@ -245,7 +275,7 @@ def plot_protein_length_distributions(cond1_dict, cond2_dict, diff_dict, output_
     ax1.legend(handles=legend_handles, loc='lower right', fontsize=8)
 
     ax1.set_yticks([np.mean([positions[2*i], positions[2*i+1]]) for i in range(len(comparisons))])
-    ax1.set_yticklabels([extract_cluster(c) for c in comparisons])
+    ax1.set_yticklabels([extract_cluster(c, cluster_order) for c in comparisons])
     ax1.set_xlabel("Protein Length (Amino Acids)")
     ax1.set_title("Protein Length Distributions")
 
@@ -296,7 +326,7 @@ def plot_protein_length_distributions(cond1_dict, cond2_dict, diff_dict, output_
 
 
     ax2.set_yticks(positions)
-    ax2.set_yticklabels([extract_cluster(c) for c in comparisons], fontsize=8)
+    ax2.set_yticklabels([extract_cluster(c, cluster_order) for c in comparisons], fontsize=8)
     ax2.set_xlabel("Difference in Protein Length (Amino Acids)")
     ax2.set_title("Difference in Protein Length (Cluster - Others)")
     ax2.axvline(0, color='red', linestyle='dashed', linewidth=1)
@@ -312,33 +342,104 @@ def import_feature_ids(file_path):
     print('features to filter for imported...')
     return feature_ids
 
+def derive_cluster_order(input_dir):
+    """Without a cellHarmony labels file, build the cluster vocabulary from cluster-events
+    filenames (the authoritative <cluster>-Others-<cluster> labels) in the input folder and
+    a sibling dPSI-cluster-events folder, ordered alphabetically."""
+    vocab = set()
+    sibling = os.path.join(os.path.dirname(os.path.normpath(input_dir)), "dPSI-cluster-events")
+    for d in {input_dir, sibling}:
+        for f in glob.glob(os.path.join(d, "*_stats-annotated.txt")):
+            comp = os.path.basename(f).replace("_stats-annotated.txt", "")
+            if "Others-" in comp:
+                vocab.add(comp.split("Others-")[-1])
+    return sorted(vocab)
+
+
 if __name__ == '__main__':
-    stats_folder = "dPSI-cluster-events"
-    output_dir = "dPSI-cluster-events/output_plots"
-    os.makedirs(output_dir, exist_ok=True)
+    import argparse
 
-    sys.path.insert(0, "/data/salomonis-archive/LabFiles/Nathan/Revio/altanalyze3")
-    import altanalyze3.components.long_read.isoform_matrix as iso
-    bc_dir = '/data/salomonis-archive/LabFiles/Nathan/Revio/Young-Healthy-Revio/Illumina/SoupX-hg38/cellHarmony-labels-young-old.txt'
-    cluster_order = iso.return_cluster_order([bc_dir])
+    parser = argparse.ArgumentParser(
+        description="Splice-event bar charts and protein-length plots from AltAnalyze3 dPSI "
+                    "*_stats-annotated.txt files (dPSI-cluster-events or dPSI-covariate-events)."
+    )
+    parser.add_argument('--input-dir', required=True,
+                        help="Folder of *_stats-annotated.txt files (e.g. .../dPSI-covariate-events).")
+    parser.add_argument('--group1', default=None,
+                        help="First condition/group to select (e.g. young). For cluster-events this "
+                             "is the group compared against Others.")
+    parser.add_argument('--group2', default=None,
+                        help="Second condition/group for covariate-events (e.g. aged). Either "
+                             "filename order (group1-group2 or group2-group1) is matched.")
+    parser.add_argument('--dpsi', type=float, default=0.1,
+                        help="Minimum |DiffMeans| (dPSI) threshold. Default 0.1.")
+    parser.add_argument('--pval', type=float, default=0.05,
+                        help="p-value threshold for filtering. Default 0.05.")
+    parser.add_argument('--pval-type', choices=['raw', 'fdr'], default='raw',
+                        help="Filter on raw p-values (ebayesPval/mwuPval) or FDR-adjusted "
+                             "(ebayesAdjPval/mwuAdjPval). Default raw.")
+    parser.add_argument('--sample-min', type=int, default=3,
+                        help="Minimum N per condition. Default 3.")
+    parser.add_argument('--barcode-dir', default=None,
+                        help="Optional cellHarmony labels file; sets cluster (row) order via "
+                             "isoform_matrix.return_cluster_order. If omitted, cluster order is "
+                             "derived alphabetically from cluster-events filenames.")
+    parser.add_argument('--custom-events', default=None,
+                        help="Optional file of Feature IDs to restrict to (bypasses thresholds).")
+    parser.add_argument('--output-dir', default=None,
+                        help="Output folder. Default: <input-dir>/<comparison-name>.")
+    args = parser.parse_args()
 
-    mwu_pval_threshold = 0.05
-    diff_means_threshold = 0.1
+    if not os.path.isdir(args.input_dir):
+        sys.exit(f"Input dir not found: {args.input_dir}")
 
-    custom_events = None 
-    if custom_events is not None:
-        custom_events = import_feature_ids(custom_events)
+    def comp_name(path):
+        return os.path.basename(path).replace("_stats-annotated.txt", "")
 
-    input_files = glob.glob(os.path.join(stats_folder, "*stats-annotated.txt"))
+    def selected(path):
+        c = comp_name(path)
+        if args.group1 and args.group2:
+            return (c.startswith(f"{args.group1}-{args.group2}-") or
+                    c.startswith(f"{args.group2}-{args.group1}-"))
+        if args.group1:
+            return c.startswith(f"{args.group1}-")
+        return True
+
+    all_files = sorted(glob.glob(os.path.join(args.input_dir, "*_stats-annotated.txt")))
+    input_files = [f for f in all_files if selected(f)]
     if not input_files:
-        print(f"No input files found in {stats_folder}. Ensure the folder contains valid files.")
+        sys.exit(f"No *_stats-annotated.txt files in {args.input_dir} match the requested comparison.")
+    print(f"Selected {len(input_files)} of {len(all_files)} files in {args.input_dir}")
+
+    if args.group1 and args.group2:
+        comparison_label = f"{args.group1}-{args.group2}"
+    elif args.group1:
+        comparison_label = f"{args.group1}-vs-Others"
     else:
-        analyze_splicing_events(
-            input_files,
-            output_dir=output_dir, 
-            custom_events=custom_events,
-            mwu_pval_threshold=mwu_pval_threshold,
-            diff_means_threshold=diff_means_threshold,
-            sample_min=3,
-            cluster_order=cluster_order,
-        )
+        comparison_label = "all-comparisons"
+    output_dir = args.output_dir or os.path.join(args.input_dir, comparison_label)
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"Output -> {output_dir}")
+
+    if args.barcode_dir:
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+        sys.path.insert(0, repo_root)
+        import altanalyze3.components.long_read.isoform_matrix as iso
+        cluster_order = iso.return_cluster_order([args.barcode_dir])
+    else:
+        cluster_order = derive_cluster_order(args.input_dir)
+        print(f"No --barcode-dir given; derived {len(cluster_order)} cluster labels "
+              f"(alphabetical) from cluster-events filenames.")
+
+    custom_events = import_feature_ids(args.custom_events) if args.custom_events else None
+
+    analyze_splicing_events(
+        input_files,
+        output_dir=output_dir,
+        pval_threshold=args.pval,
+        pval_type=args.pval_type,
+        diff_means_threshold=args.dpsi,
+        custom_events=custom_events,
+        sample_min=args.sample_min,
+        cluster_order=cluster_order,
+    )

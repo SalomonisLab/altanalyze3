@@ -140,7 +140,22 @@ class RunContext:
         self._index_coding_regions()
         self._index_protein_fasta()
         self._build_viewer_inputs()
+        self._load_network()
         return self
+
+    def _load_network(self):
+        """Load the precomputed isoform-resolved interaction graph (isvweb_network.json) if present, so the
+        network tab answers contrast queries in-memory. Optional -- absent => network tab simply has no data."""
+        self.network = None
+        try:
+            from . import network as _net
+            p = _net.find_network_artifact(self.run_dir, self.gff_output_dir)
+            if p:
+                self.network = _net.load_network(p)
+                print(f"[isv_web] network: {len(self.network['edges'])} edges, "
+                      f"{len(self.network['contexts'])} contexts from {p}", flush=True)
+        except Exception as e:
+            print(f"[isv_web] network artifact not loaded: {e}", flush=True)
 
     def prewarm_reads(self, log=print):
         """Exercise the read-level fast path once at startup so the FIRST user click is instant: this

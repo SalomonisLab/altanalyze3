@@ -1,10 +1,16 @@
-import os, sys, csv, copy
+import os, sys, csv, copy, time
 import pandas as pd
 sys.path.insert(1, os.path.join(sys.path[0], '..'))
 from . import isoform_automate as isoa
 from ..annotation import junction_isoform as ji
 from ..oncosplice import metadataAnalysis as ma
 import numpy as np
+
+# Wall-clock set once at the start of compute_differentials. _reset_stats_folder archives ONLY files
+# older than this (stale output from a PRIOR diff run), so that the multiple comparisons of the CURRENT
+# run -- each writing its own '<condA>-<condB>-<cluster>_stats.txt' -- coexist in the same folder instead
+# of each comparison sweeping the previous one into _prior_run/.
+_DIFF_RUN_START = None
 
 def _reset_stats_folder(stats_folder):
     """Archive any prior per-cluster stats/annotated files in stats_folder before a fresh diff run.
@@ -18,8 +24,13 @@ def _reset_stats_folder(stats_folder):
     if not os.path.isdir(stats_folder):
         return
     import glob, shutil
+    # Spare files written during THIS run (mtime >= _DIFF_RUN_START); archive only STALE prior-run files.
+    # This is what lets several comparisons in one sclr-diff call coexist (each has a distinct
+    # condA-condB-cluster prefix) rather than each clobbering the previous into _prior_run/.
+    cutoff = _DIFF_RUN_START
     prior = [f for f in glob.glob(os.path.join(stats_folder, '*.txt'))
-             if f.endswith('stats.txt') or f.endswith('-annotated.txt')]
+             if (f.endswith('stats.txt') or f.endswith('-annotated.txt'))
+             and (cutoff is None or os.path.getmtime(f) < cutoff)]
     if not prior:
         return
     archive = os.path.join(stats_folder, '_prior_run')
@@ -262,6 +273,10 @@ def compute_differentials(sample_dict,conditions,cluster_order,gene_symbol_file,
     """method: 'mwu' (default, Mann-Whitney rank test) or 'limma' (empirical-Bayes moderated t-test,
     as used for pseudobulks in cellHarmony-differential). The stats-file schema is identical either
     way, so all downstream annotation is unchanged."""
+    # Mark the start of this run so _reset_stats_folder only archives STALE prior-run files and spares
+    # every comparison written below -- so all `conditions` coexist instead of clobbering one another.
+    global _DIFF_RUN_START
+    _DIFF_RUN_START = time.time()
     analyzed_intial_conditions = []
     for pair in conditions:
         (condition1,condition2) = pair

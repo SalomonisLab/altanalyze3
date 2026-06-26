@@ -8,6 +8,11 @@
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
   <script src="https://d3js.org/d3.v7.min.js"></script>
+  <!-- Cytoscape.js + fcose layout for the interaction-network tab -->
+  <script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+  <script src="https://unpkg.com/layout-base@2.0.1/layout-base.js"></script>
+  <script src="https://unpkg.com/cose-base@2.2.0/cose-base.js"></script>
+  <script src="https://unpkg.com/cytoscape-fcose@2.2.0/cytoscape-fcose.js"></script>
   <!-- vector PDF export of the splicing graph (right-click -> Export graph as PDF); vendored locally
        so the feature works offline and doesn't depend on a CDN path. jsPDF must load before svg2pdf
        (svg2pdf registers jsPDF.API.svg at load time). -->
@@ -32,7 +37,7 @@
 
   <div id="app">
     <aside id="panel">
-      <section class="field">
+      <section class="field" id="gene-field">
         <label>Gene</label>
         <input id="gene-input" type="text" autocomplete="off" placeholder="symbol or ENSG…"/>
         <div id="gene-suggest" class="suggest"></div>
@@ -57,6 +62,21 @@
             <button class="seg-btn" data-v="cell_type">cell type</button>
           </div>
         </section>
+      </div>
+
+      <div class="tab-controls" data-for="network" hidden>
+        <section class="field">
+          <label>Panels (one per window)</label>
+          <div id="net-panel-seg" class="seg">
+            <button class="seg-btn on" data-v="covariate">covariate</button>
+            <button class="seg-btn" data-v="cell_type">cell type</button>
+          </div>
+        </section>
+        <section class="field"><label class="muted" id="net-panel-note" style="font-size:10px">Windows = the 2 selected covariates; cell types summed (chips below)</label></section>
+        <section class="field"><label>Search genes (comma-sep; empty = global)</label><input id="net-genes" type="text" placeholder="MAX, DDIT3"/></section>
+        <section class="field"><label>Min CPM (both interactors)</label><input id="net-thresh" type="number" value="1" step="0.5" min="0"/></section>
+        <section class="field"><label>Interaction type</label>
+          <select id="net-edgetype"><option value="all">all</option><option value="PPI">PPI</option><option value="PDI">PDI</option></select></section>
       </div>
 
       <section class="field">
@@ -117,6 +137,7 @@
         <button class="tab on" data-tab="heatmap">Cell type × covariate</button>
         <button class="tab" data-tab="molecule">Molecule view <span class="tab-badge">read-level</span></button>
         <button class="tab" data-tab="lines">Isoform usage <span class="tab-badge">lines</span></button>
+        <button class="tab" data-tab="network">Interactions <span class="tab-badge">PPI/PDI</span></button>
       </div>
       <div id="header-bar">
         <div id="title-block"></div>

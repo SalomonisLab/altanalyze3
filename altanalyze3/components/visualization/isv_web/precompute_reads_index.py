@@ -131,10 +131,12 @@ def build_reads_index(viewer_sample_dict, barcode_sample_dict, out_dir, log=prin
 
 
 def _build_sample_dict(metadata, cell_annot, root, only_uid=None):
-    """Construct sample_dict (library -> [{matrix, groups, library}]) + barcode_sample_dict EXACTLY as
-    the workflow's own isoform_automate.precompute_isoform_viewer_index does, so matrix resolution is
-    authoritative: the MOLECULE matrix is '<stem>-isoform.h5ad', with a '<root>/<uid>-isoform.h5ad'
-    fallback for multi-BAM / hashed uids (the convention these datasets use)."""
+    """Construct sample_dict (library -> [{matrix, groups, library}]) + barcode_sample_dict for the
+    READ-LEVEL (molecule) index. The reads.db must be built from the PLAIN '<lib>.h5ad' MOLECULE matrix
+    (individual reads) -- exactly the file data_api._build_viewer_inputs / _find_plain_sample_h5ad feed
+    the engine -- NOT the collapsed '<lib>-isoform.h5ad' (that is the isoform-level matrix used for the
+    heatmap/counts caches; building reads.db from it yields isoforms, not molecules). Both names sit in
+    the same per-sample dir beside the BAM, so derive the plain matrix from the isoform-h5ad path."""
     from ...long_read import isoform_automate as isoa
     from ...long_read import cli as _cli
     from ...long_read.isoform_matrix import import_barcode_clusters
@@ -145,11 +147,15 @@ def _build_sample_dict(metadata, cell_annot, root, only_uid=None):
     for uid, libs in items:
         for s in libs:
             lib = s.get("library") or uid
-            mol = isoa._isoform_molecule_h5ad(s.get("matrix"))
-            if not os.path.exists(mol):
-                alt = isoa._isoform_molecule_h5ad(os.path.join(root, str(uid)))
+            iso = isoa._isoform_molecule_h5ad(s.get("matrix"))                   # '<dir>/<lib>-isoform.h5ad'
+            if not os.path.exists(iso):
+                alt = isoa._isoform_molecule_h5ad(os.path.join(root, str(uid)))  # multi-BAM / hashed-uid fallback
                 if os.path.exists(alt):
-                    mol = alt
+                    iso = alt
+            # prefer the PLAIN molecule matrix '<dir>/<lib>.h5ad' (per-read); fall back to the isoform
+            # h5ad only if it is absent.
+            plain = iso[:-len("-isoform.h5ad")] + ".h5ad" if iso.endswith("-isoform.h5ad") else iso
+            mol = plain if os.path.exists(plain) else iso
             sample_dict[lib] = [{"matrix": str(mol), "groups": s.get("groups"), "library": lib}]
     return sample_dict, barcode_sample_dict
 

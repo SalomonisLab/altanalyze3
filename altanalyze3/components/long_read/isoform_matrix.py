@@ -262,6 +262,16 @@ def import_barcode_clusters(barcode_cluster_dir):
         df = _read_barcode_cluster_file(dir, ['barcode_cluster', 'cluster'])
         df[['barcode', 'sample_name']] = df['barcode_cluster'].str.split('.', expand=True)
         for sample, group in df.groupby('sample_name'):
+            # Drop duplicate barcodes (keep the first cluster) so the per-sample barcode->cluster index is
+            # UNIQUE. A non-unique index here is the root cause of "InvalidIndexError: Reindexing only valid
+            # with uniquely valued Index objects" in every downstream .map()/reindex (e.g. the stage3 re-key
+            # that crashed GATA2-TET2-ASXL1-post with a pre-dedup cellHarmony annotation). Warn so the
+            # duplicate annotation is caught, not silently propagated.
+            n0 = len(group)
+            group = group.drop_duplicates(subset='barcode', keep='first')
+            if len(group) < n0:
+                print(f"[import_barcode_clusters] {sample}: dropped {n0 - len(group)} duplicate barcode(s) "
+                      f"(kept first cluster); prefer a de-duplicated cellHarmony annotation.")
             barcode_sample_dict_final[sample] = group.set_index('barcode')['cluster']
     return barcode_sample_dict_final
 

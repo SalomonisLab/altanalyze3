@@ -62,6 +62,15 @@ class ExportPdfRequest(BaseModel):
     pdf_base64: str                          # the client-rendered (svg2pdf) PDF, base64 or data-URI
 
 
+class NetworkQuery(BaseModel):
+    cell_types: List[str]                    # cell states to aggregate (mean CPM) into each panel
+    groups: List[str]                        # covariate groups; panel A = groups[0], panel B = groups[1]
+    threshold: float = 1.0                   # expression evidence: both endpoints' mean CPM must exceed this
+    genes: Optional[List[str]] = None        # None => global topology; else search + first-degree
+    edge_type: Optional[str] = None          # None/"all" | "PPI" | "PDI"
+    panel_by: str = "covariate"              # 'covariate' (window per covariate) | 'cell_type' (window per cell type)
+
+
 def create_app(ctx: da.RunContext) -> FastAPI:
     app = FastAPI(title="AltAnalyze3 ISV Viewer", version="1.0")
     app.state.ctx = ctx
@@ -95,7 +104,27 @@ def create_app(ctx: da.RunContext) -> FastAPI:
                 "min_count": 1, "max_isoforms": 1500,
                 "cluster_strategy": "subsequence", "cluster_mode": "block",
             },
+            "has_network": ctx.network is not None,
         }
+
+    @app.get("/api/network/meta")
+    def network_meta():
+        """Contexts, groups, and searchable regulators for the network tab (empty if no artifact)."""
+        net = ctx.network
+        if not net:
+            return {"available": False, "contexts": [], "groups": [], "regulators": []}
+        regs = sorted({e["src_gene"] for e in net["edges"]} | {e["tgt_gene"] for e in net["edges"]})
+        return {"available": True, "contexts": net["contexts"], "groups": net.get("groups", []),
+                "regulators": regs, "n_edges": len(net["edges"])}
+
+    @app.post("/api/network")
+    def network(q: NetworkQuery):
+        from . import network as _net
+        if not ctx.network:
+            raise HTTPException(404, "no interaction network for this dataset (run precompute_isvweb)")
+        et = None if (not q.edge_type or q.edge_type.lower() == "all") else q.edge_type.upper()
+        return _net.query_network(ctx.network, q.cell_types, q.groups, threshold=q.threshold,
+                                  genes=q.genes or None, edge_type=et, panel_by=q.panel_by)
 
     @app.get("/api/genes")
     def genes(q: str = Query("", min_length=0), limit: int = 25):

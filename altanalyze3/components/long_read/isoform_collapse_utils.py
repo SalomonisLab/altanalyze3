@@ -207,6 +207,64 @@ def structure_tokens_for_containment(structure: str, default_gene: str = "") -> 
     return filter_exon_intron_tokens(tokenize(structure), default_gene)
 
 
+def junction_core_tokens(structure: str, default_gene: str = "") -> List[str]:
+    """Collapse key: annotated splice structure, ignoring novel splice sites AND terminal extent.
+
+    Confirmed design (TNFAIP8 ``ENST00000274456`` vs the longer-3'UTR novel
+    ``9202046.WF40_…``): two isoforms with the SAME ordered ANNOTATED splice junctions
+    are the same isoform even if they differ in 5' start position or 3'UTR length.
+
+    Two normalisations are applied, in order:
+
+    1. Novel-site normalisation -- a novel splice site inside an exon/intron region is
+       reduced to its annotated region, KEEPING the region: ``E1.3_12345`` -> ``E1.3``
+       (and ``I5.1_119373698`` -> ``I5.1``).  The novel coordinate (too frequent;
+       treated as artifact) is ignored, but the region itself is retained, so the
+       exon is NOT lost (unlike a blanket ``E*_coord`` drop, which would turn
+       ``E1|E5.3_999|E7`` into a spurious ``E1|E7`` exon-skip).  Consecutive duplicate
+       tokens created by this reduction are collapsed.
+    2. Terminal-extent strip -- keep only the tokens from the donor of the FIRST splice
+       junction to the acceptor of the LAST splice junction, dropping the 5' extent
+       before the first junction and the 3'UTR / read-end extent after the last
+       junction.
+
+    A splice junction is a transition between tokens of DIFFERENT exon BLOCKS
+    (``E1.2`` -> ``E7.1``); contiguous sub-exons of one block (``E7.1`` -> ``E7.2``)
+    are NOT a junction.  Everything interior to the first/last junction is preserved,
+    so intron-retention and alternative annotated-exon usage keep isoforms distinct.
+
+    Mono-exon / junctionless structures have no core to extract and are returned
+    verbatim (they only ever collapse by exact identity / containment).
+    """
+    raw = tokenize(structure)
+    if not raw:
+        return []
+
+    # 1. Normalise novel coords to their annotated region, keep region, collapse consecutive dups.
+    norm: List[str] = []
+    for t in raw:
+        gid, base, _coord = split_token(t, default_gene)          # E1.3_12345 -> base 'E1.3'
+        canon = base if gid == default_gene else f"{gid}:{base}"
+        if not norm or norm[-1] != canon:
+            norm.append(canon)
+    if len(norm) <= 1:
+        return norm
+
+    # 2. Strip terminal extent: donor(first junction) .. acceptor(last junction).
+    def _block(t):
+        if ':' in t:
+            g, b = t.split(':', 1)
+        else:
+            g, b = default_gene, t
+        return (g, b.split('.')[0])               # 'E7.2' -> 'E7' ; 'I5.1' -> 'I5' ; 'U8.1' -> 'U8'
+
+    blocks = [_block(t) for t in norm]
+    jx = [i for i in range(len(blocks) - 1) if blocks[i] != blocks[i + 1]]
+    if not jx:                                     # single exon block, no splice junction
+        return norm
+    return norm[jx[0]: jx[-1] + 2]                 # donor(first junction) .. acceptor(last junction)
+
+
 def contiguous_containment_fold(
     structures: Sequence[dict],
     default_gene: str = "",
@@ -349,5 +407,6 @@ __all__ = [
     "exon_block_count",
     "is_contiguous_subsequence",
     "structure_tokens_for_containment",
+    "junction_core_tokens",
     "contiguous_containment_fold",
 ]

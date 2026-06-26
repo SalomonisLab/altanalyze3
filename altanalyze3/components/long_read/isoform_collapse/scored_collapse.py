@@ -331,6 +331,155 @@ def collapse_gene(struct_reads: Dict[str, int], tok: Dict[str, tuple],
     return res
 
 
+def collapse_gene_jc(struct_reads: Dict[str, int], tok: Dict[str, tuple],
+                     core: Dict[str, tuple], flen: Dict[str, int],
+                     min_reads: int = DEFAULT_MIN_READS, enst: Dict[str, str] = None):
+    """Junction-core winner-takes-all collapse (terminal-extent-insensitive).
+
+    Identity and containment are decided on the JUNCTION CORE ``core[s]``
+    (``junction_core_tokens``: novel coords normalised to their annotated region;
+    terminal extent before the first / after the last splice junction stripped), so
+    isoforms differing only in 5' start or 3'UTR length collapse together. ``flen[s]``
+    is the full-structure region length, used ONLY to rank reference transcripts
+    (longest nucleotides wins as the fold target). ``tok[s]`` is the full containment
+    token list, used only for catalog block counts.
+
+    Rules (confirmed with the user):
+      * Every ENST is a representative; an ENST is NEVER folded, and NEVER merged into
+        another ENST (two references sharing a core both survive as separate isoforms).
+      * A non-ENST whose core is a contiguous subsequence of (or equals) a kept ENST's
+        core folds INTO that ENST; if several qualify, into the longest-``flen`` one.
+      * Remaining novels collapse among themselves by core: a fuller core represents
+        its terminal-truncated fragment cores; among EQUAL cores the highest-read
+        structure wins (read count, never length, for novels).
+
+    Returns the same dict shape as :func:`collapse_gene`. Invariants are checked on
+    ``core`` (the key the fold edges are defined over), not the full tokens.
+    """
+    obs_structs = [s for s, n in struct_reads.items() if n >= min_reads]
+    if not obs_structs:
+        return dict(long_reps=[], other_reps=[], assignment={}, blocks={}, score={},
+                    structs=[], enst={})
+    enst = enst or {}
+
+    # ENST injection: keep an ENST only if its core is identity/contiguity-related to some observed core
+    # (same "catalog observed isoforms + their known names" philosophy as collapse_gene).
+    obs_set = set(obs_structs)
+    kept_enst: Dict[str, str] = {}
+    for es, eid in enst.items():
+        ec = core.get(es)
+        if ec is None:
+            continue
+        if es in obs_set:
+            kept_enst[es] = eid
+            continue
+        for os_ in obs_structs:
+            oc = core[os_]
+            if ec == oc or is_contiguous_subsequence(oc, ec) or is_contiguous_subsequence(ec, oc):
+                kept_enst[es] = eid
+                break
+
+    structs = list(obs_structs) + [s for s in kept_enst if s not in struct_reads]
+    enst_ids = {s: kept_enst[s] for s in structs if s in kept_enst}
+    enst_set = set(enst_ids)
+
+    assignment: Dict[str, str] = {}
+
+    # ENST containment: an ENST whose core is a PROPER contiguous-subsequence of a longer ENST's core folds
+    # INTO the longest-flen such container ENST (e.g. ENST00000504771 'E5.2|E7.1' -> ENST00000503646
+    # 'E4.2|E5.1|E5.2|E7.1'; the substring transcript's molecules go to the container). Equal cores are NOT
+    # proper substrings, so two references with the SAME region structure are NEVER merged -- both survive.
+    # Process longest-core first, so a container is a decided survivor before any shorter ENST tests it
+    # (ENST parents are therefore always surviving reps -- no chained ENST->ENST->ENST parents).
+    enst_ranked = sorted(enst_set, key=lambda e: (-len(core[e]), -flen.get(e, 0), e))
+    surviving_enst: List[str] = []
+    for e in enst_ranked:
+        ce = core[e]
+        containers = [c for c in surviving_enst
+                      if len(core[c]) > len(ce) and is_contiguous_subsequence(ce, core[c])]
+        if containers:
+            assignment[e] = max(containers, key=lambda c: (flen.get(c, 0), c))
+        else:
+            surviving_enst.append(e)
+
+    reps: List[str] = list(surviving_enst)                 # every surviving ENST is a representative
+    # ENST fold targets, longest full-length first (the "longest nucleotides" tiebreak; ENST-only).
+    enst_by_len = sorted(surviving_enst, key=lambda s: (-flen.get(s, 0), s))
+
+    # ENST-FIRST fold: a non-ENST whose core is a contiguous subsequence of (or equals) a kept ENST core
+    # folds into the longest-flen such ENST. This is what lets a novel that is LONGER in full structure
+    # than the ENST (extra 3'UTR) still fold INTO the shorter ENST -- they share a junction core.
+    remaining: List[str] = []
+    for s in obs_structs:
+        if s in enst_set:
+            continue
+        cs = core[s]
+        target = None
+        for es in enst_by_len:
+            if is_contiguous_subsequence(cs, core[es]):
+                target = es
+                break
+        if target is not None:
+            assignment[s] = target
+        else:
+            remaining.append(s)
+
+    # Remaining novels collapse among themselves. Process fuller-core first; among EQUAL cores the
+    # highest-read structure is processed first and becomes the representative (novel winner = read count).
+    remaining.sort(key=lambda s: (-len(core[s]), -struct_reads.get(s, 0), s))
+    novel_reps: List[str] = []
+    for s in remaining:
+        cs = core[s]
+        parent = None
+        for r in novel_reps:
+            if is_contiguous_subsequence(cs, core[r]):
+                parent = r
+                break
+        if parent is not None:
+            assignment[s] = parent
+        else:
+            novel_reps.append(s)
+            reps.append(s)
+
+    # ---- catalog metadata: block count (full structure), score, long/other bin ----
+    blocks = {s: exon_blocks(tok[s]) for s in structs}
+    obs_blocks = [blocks[s] for s in structs if s not in enst_set]
+    maxb = max(obs_blocks, default=0) or (max(blocks.values()) if blocks else 1) or 1
+    score = {}
+    for s in structs:
+        if s in enst_set:
+            score[s] = 1_000_000.0 * (blocks[s] / maxb)
+        else:
+            score[s] = 2.0 * (blocks[s] / maxb) * struct_reads.get(s, 0)
+    long_set = {s for s in reps if s in enst_set or blocks[s] > LONG_BIN_FRACTION * maxb}
+    long_reps_s = [s for s in reps if s in long_set]
+    other_reps_s = [s for s in reps if s not in long_set]
+
+    # Drop childless 0-read injected ENST reps (clustered but represent nothing observed), as collapse_gene.
+    if enst_ids:
+        n_children = collections.Counter(assignment.values())
+        drop = {s for s in reps
+                if s in enst_set and struct_reads.get(s, 0) == 0 and n_children.get(s, 0) == 0}
+        if drop:
+            long_reps_s = [s for s in long_reps_s if s not in drop]
+            other_reps_s = [s for s in other_reps_s if s not in drop]
+            structs = [s for s in structs if s not in drop]
+            assignment = {c: p for c, p in assignment.items() if c not in drop}
+            enst_ids = {s: e for s, e in enst_ids.items() if s not in drop}
+
+    res = dict(
+        long_reps=long_reps_s,
+        other_reps=other_reps_s,
+        assignment=assignment,
+        blocks={s: blocks[s] for s in structs},
+        score={s: score[s] for s in structs},
+        structs=structs,
+        enst=enst_ids,
+    )
+    _check_invariants(res, struct_reads, core)
+    return res
+
+
 def _candidate_parents_for_child(ci, structs, tok, postings, rep_indices, rep_set):
     """All representatives (in rep_set) that the child ci is a perfect contiguous subsequence of."""
     clen = len(tok[structs[ci]])
