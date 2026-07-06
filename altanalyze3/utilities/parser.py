@@ -24,6 +24,7 @@ from altanalyze3.components.long_read.cli import (
 )
 from altanalyze3.components.bam.variant_impact import run_variant_impact
 from altanalyze3.components.iso2function.cli import run_iso2function
+from altanalyze3.components.snaf.cli import run_snaf, run_snaf_ts, run_snaf_b, run_snaf_precompute_control
 from altanalyze3.utilities.io import (
     get_indexed_references,
     is_bam_indexed
@@ -445,6 +446,114 @@ class ArgsParser():
         iso2func_parser.add_argument("--clone", action="append", default=None, help="Restrict the network to these atlas clone_ids (repeatable)")
         iso2func_parser.add_argument("--detected-only", action="store_true", help="Drop assayed-negative edges from the exported network")
         self.add_common_arguments(iso2func_parser)
+
+        # SNAF: tumor-specificity-only (DB-free, offline, cross-platform)
+        snaf_ts_parser = subparsers.add_parser(
+            "snaf-ts",
+            parents=[parent_parser],
+            help="SNAF tumor-specificity scoring only (mean/mle/BayesTS). Needs a junction-count matrix + normal control h5ad; no Alt91_db, no MHC binder, no internet."
+        )
+        snaf_ts_parser.set_defaults(func=run_snaf_ts)
+        snaf_ts_parser.add_argument("--juncounts", required=True, type=str, help="Junction-count matrix (TSV; rows=junction UIDs, cols=tumor samples)")
+        snaf_ts_parser.add_argument("--control_h5ad", required=True, type=str, help="Normal-tissue control h5ad (e.g. GTEx_junction_counts.h5ad), obs=junctions/var=samples with var['tissue'],var['total_count'],obs['mean']")
+        snaf_ts_parser.add_argument("--add_control", default=None, type=str, help="Extra controls 'name=path.txt,name2=path.h5ad' (TSV DataFrame or h5ad)")
+        snaf_ts_parser.add_argument("--methods", nargs="*", default=["mle"], choices=["mle", "bayesian"], help="Tumor-specificity methods to add beyond the always-on 'mean'. Default: mle")
+        snaf_ts_parser.add_argument("--filter_mode", default="maxmin", choices=["maxmin", "prevalance"], help="Neojunction sifting mode. Default: maxmin")
+        snaf_ts_parser.add_argument("--min_samples", default=1, type=int, help="Keep only neojunctions expressed in >= this many tumor samples (recurrence filter). Default: 1 (no filtering)")
+        snaf_ts_parser.add_argument("--t_min", default=20, type=int, help="maxmin: min (tumor - normal-mean) count. Default: 20")
+        snaf_ts_parser.add_argument("--n_max", default=3, type=int, help="maxmin: max normal-mean count. Default: 3")
+        snaf_ts_parser.add_argument("--normal_cutoff", default=5, type=int, help="prevalance: normal count cutoff. Default: 5")
+        snaf_ts_parser.add_argument("--tumor_cutoff", default=20, type=int, help="prevalance: tumor count cutoff. Default: 20")
+        snaf_ts_parser.add_argument("--normal_prevalance_cutoff", default=0.01, type=float, help="prevalance: max normal fraction. Default: 0.01")
+        snaf_ts_parser.add_argument("--tumor_prevalance_cutoff", default=0.1, type=float, help="prevalance: min tumor fraction. Default: 0.1")
+        snaf_ts_parser.add_argument("--bayes_mode", default="XY", choices=["XY", "Y"], help="BayesTS model (XY=tissue-dist+expression). Default: XY")
+        snaf_ts_parser.add_argument("--bayes_epoch", default=2000, type=int, help="BayesTS SVI steps. Default: 2000")
+        snaf_ts_parser.add_argument("--control_stats", default=None, type=str, help="Precomputed control-stats table from `snaf-precompute-control` (default: auto-detect <control_h5ad>.snaf_stats.tsv.gz). When present, the full control matrix is NOT loaded.")
+        snaf_ts_parser.add_argument("--max_bayests_percentile", default=0.9, type=float, help="Drop sifted neojunctions whose precomputed BayesTS percentile exceeds this (0-1; lower=more tumor-specific). DEFAULT 0.9 (BayesTS filtering ON); auto-skips when the control has no BayesTS. Pass 1.0 (or a value >=1) to disable.")
+        self.add_common_arguments(snaf_ts_parser)
+
+        # SNAF: full MHC-bound T-antigen pipeline
+        snaf_parser = subparsers.add_parser(
+            "snaf",
+            parents=[parent_parser],
+            help="SNAF full T-antigen pipeline: sifting -> in-silico translation -> MHC binding (MHCflurry/netMHCpan) -> immunogenicity -> burden/frequency. Needs --db_dir (Alt91_db + controls) and --hla."
+        )
+        snaf_parser.set_defaults(func=run_snaf)
+        snaf_parser.add_argument("--juncounts", required=True, type=str, help="Junction-count matrix (TSV; rows=junction UIDs, cols=tumor samples)")
+        snaf_parser.add_argument("--db_dir", required=True, type=str, help="SNAF reference dir containing Alt91_db/ and controls/")
+        snaf_parser.add_argument("--hla", required=True, type=str, help="Per-sample HLA table (sample<TAB>hla1,hla2,... or sample + HLA columns)")
+        snaf_parser.add_argument("--gtex_db", default=None, type=str, help="Override control h5ad path (default: <db_dir>/controls/GTEx_junction_counts.h5ad)")
+        snaf_parser.add_argument("--gtex_mode", default="count", choices=["count", "psi"], help="Control mode. Default: count")
+        snaf_parser.add_argument("--binding_method", default="MHCflurry", choices=["MHCflurry", "netMHCpan"], help="MHC binder. Default: MHCflurry (cross-platform)")
+        snaf_parser.add_argument("--software_path", default=None, type=str, help="netMHCpan executable path (only for --binding_method netMHCpan)")
+        snaf_parser.add_argument("--genome_fasta", default=None, type=str, help="Local indexed genome FASTA for offline UTR/novel-exon sequence retrieval (else UCSC DAS)")
+        snaf_parser.add_argument("--download_ref", action="store_true", help="If the reference bundle is missing under --db_dir, download it (~2.7 GB) from altanalyze.org and extract it there instead of erroring")
+        snaf_parser.add_argument("--add_control", default=None, type=str, help="Extra controls 'name=path.txt,name2=path.h5ad'")
+        snaf_parser.add_argument("--not_in_db", action="store_true", help="Drop junctions documented in any Ensembl transcript")
+        snaf_parser.add_argument("--strict", action="store_true", help="Require canonical start-codon support during translation")
+        snaf_parser.add_argument("--filter_mode", default="maxmin", choices=["maxmin", "prevalance"], help="Neojunction sifting mode. Default: maxmin")
+        snaf_parser.add_argument("--min_samples", default=1, type=int, help="Keep only neojunctions expressed in >= this many tumor samples (recurrence filter). Default: 1 (no filtering)")
+        snaf_parser.add_argument("--t_min", default=20, type=int, help="maxmin: min (tumor - normal-mean) count. Default: 20")
+        snaf_parser.add_argument("--n_max", default=3, type=int, help="maxmin: max normal-mean count. Default: 3")
+        snaf_parser.add_argument("--normal_cutoff", default=5, type=int, help="prevalance: normal count cutoff. Default: 5")
+        snaf_parser.add_argument("--tumor_cutoff", default=20, type=int, help="prevalance: tumor count cutoff. Default: 20")
+        snaf_parser.add_argument("--normal_prevalance_cutoff", default=0.01, type=float, help="prevalance: max normal fraction. Default: 0.01")
+        snaf_parser.add_argument("--tumor_prevalance_cutoff", default=0.1, type=float, help="prevalance: min tumor fraction. Default: 0.1")
+        snaf_parser.add_argument("--control_stats", default=None, type=str, help="Precomputed control-stats table from `snaf-precompute-control` (default: auto-detect <gtex_db>.snaf_stats.tsv.gz). When present, the full control matrix is NOT loaded and BayesTS is not re-run.")
+        snaf_parser.add_argument("--max_bayests_percentile", default=0.9, type=float, help="Drop sifted neojunctions whose precomputed BayesTS percentile exceeds this (0-1; lower=more tumor-specific). DEFAULT 0.9 (BayesTS filtering ON); auto-skips when the control has no BayesTS. Pass 1.0 (or a value >=1) to disable.")
+        self.add_common_arguments(snaf_parser)
+
+        # SNAF-B: surface / B-antigen pipeline (pure-python: tmhmm.py + Biopython; no REST)
+        snaf_b_parser = subparsers.add_parser(
+            "snaf-b",
+            parents=[parent_parser],
+            help="SNAF surface/B-antigen pipeline: membrane-protein neojunctions -> ORF recovery -> transmembrane topology (pure-python tmhmm.py) -> novelty vs UniProt -> stringency-gated candidates. Needs --db_dir and --freq_path (from a prior `snaf` run)."
+        )
+        snaf_b_parser.set_defaults(func=run_snaf_b)
+        snaf_b_parser.add_argument("--juncounts", required=True, type=str, help="Junction-count matrix (TSV; rows=junction UIDs, cols=tumor samples)")
+        snaf_b_parser.add_argument("--db_dir", required=True, type=str, help="SNAF reference dir containing Alt91_db/ and controls/")
+        snaf_b_parser.add_argument("--freq_path", required=True, type=str, help="T-antigen frequency table from a prior `snaf` run (frequency_stage0_verbosity1_uid_gene_symbol_coord_mean_mle.txt)")
+        snaf_b_parser.add_argument("--mode", default="short_read", choices=["short_read", "long_read", "find_full_length"], help="Surface prediction mode. Default: short_read")
+        snaf_b_parser.add_argument("--validation_gtf", default=None, type=str, help="Long-read/EST GTF (e.g. SQANTI) enabling stringency-4/5 support gates; omit for stringency-3-only (fully offline)")
+        snaf_b_parser.add_argument("--no_tmhmm", action="store_true", help="Disable the transmembrane-topology gate (otherwise pure-python tmhmm.py is used)")
+        snaf_b_parser.add_argument("--tmhmm_path", default=None, type=str, help="Path to a legacy TMHMM 2.0c binary (Linux); if unset, the pure-python tmhmm.py is used")
+        snaf_b_parser.add_argument("--n_stride", default=2, type=int, help="ORF-check stride. Default: 2")
+        snaf_b_parser.add_argument("--gtex_db", default=None, type=str, help="Override control h5ad path (default: <db_dir>/controls/GTEx_junction_counts.h5ad)")
+        snaf_b_parser.add_argument("--control_stats", default=None, type=str, help="Precomputed control-stats table from `snaf-precompute-control` (default: auto-detect <gtex_db>.snaf_stats.tsv.gz). When present, the full control matrix is NOT loaded.")
+        snaf_b_parser.add_argument("--gtex_mode", default="count", choices=["count", "psi"], help="Control mode. Default: count")
+        snaf_b_parser.add_argument("--genome_fasta", default=None, type=str, help="Local indexed genome FASTA for offline UTR-event sequence retrieval (else UCSC DAS)")
+        snaf_b_parser.add_argument("--add_control", default=None, type=str, help="Extra controls 'name=path.txt,name2=path.h5ad'")
+        snaf_b_parser.add_argument("--not_in_db", action="store_true", help="Drop junctions documented in any Ensembl transcript")
+        snaf_b_parser.add_argument("--download_ref", action="store_true", help="If the reference bundle is missing under --db_dir, download it (~2.7 GB) instead of erroring")
+        snaf_b_parser.add_argument("--filter_mode", default="maxmin", choices=["maxmin", "prevalance"], help="Neojunction sifting mode. Default: maxmin")
+        snaf_b_parser.add_argument("--min_samples", default=1, type=int, help="Keep only neojunctions expressed in >= this many tumor samples (recurrence filter). Default: 1 (no filtering)")
+        snaf_b_parser.add_argument("--t_min", default=20, type=int, help="maxmin: min (tumor - normal-mean) count. Default: 20")
+        snaf_b_parser.add_argument("--n_max", default=3, type=int, help="maxmin: max normal-mean count. Default: 3")
+        snaf_b_parser.add_argument("--normal_cutoff", default=5, type=int, help="prevalance: normal count cutoff. Default: 5")
+        snaf_b_parser.add_argument("--tumor_cutoff", default=20, type=int, help="prevalance: tumor count cutoff. Default: 20")
+        snaf_b_parser.add_argument("--normal_prevalance_cutoff", default=0.01, type=float, help="prevalance: max normal fraction. Default: 0.01")
+        snaf_b_parser.add_argument("--tumor_prevalance_cutoff", default=0.1, type=float, help="prevalance: min tumor fraction. Default: 0.1")
+        self.add_common_arguments(snaf_b_parser)
+
+        # SNAF precompute-control: build the small per-junction control-stats table ONCE
+        # (mean/std/mle/normal_prevalence + BayesTS sigma/percentile) so subsequent runs never
+        # load the multi-GB control matrix or re-run BayesTS.
+        snaf_pc_parser = subparsers.add_parser(
+            "snaf-precompute-control",
+            parents=[parent_parser],
+            help="SNAF one-time control preprocessing: read a control h5ad and write a small per-junction stats table (mean/std/mle/normal_prevalence + BayesTS sigma/percentile). Runs consume this instead of the full matrix -- no multi-GB load, no per-run BayesTS."
+        )
+        snaf_pc_parser.set_defaults(func=run_snaf_precompute_control)
+        snaf_pc_parser.add_argument("--control_h5ad", required=True, type=str, help="Control h5ad to summarize (e.g. GTEx_junction_counts.h5ad)")
+        snaf_pc_parser.add_argument("--stats_output", default=None, type=str, help="Output stats-table path (default: <control_h5ad>.snaf_stats.tsv.gz, auto-detected at runtime)")
+        snaf_pc_parser.add_argument("--normal_cutoff", default=5, type=int, help="Count cutoff for normal_prevalence. Default: 5 (MUST match the runtime --normal_cutoff)")
+        snaf_pc_parser.add_argument("--bayes_mode", default="XY", choices=["XY", "Y"], help="BayesTS model. Default: XY")
+        snaf_pc_parser.add_argument("--bayes_epoch", default=2000, type=int, help="BayesTS SVI steps. Default: 2000")
+        snaf_pc_parser.add_argument("--bayes_batch", default=50000, type=int, help="BayesTS junctions per batched joint run (bounds memory). Default: 50000")
+        snaf_pc_parser.add_argument("--bayes_cores", default=None, type=int, help="Parallel workers for the (independent, identical-result) BayesTS batches. Default: cpu_count-2. Set 1 to force serial. Bit-identical to serial; ~Nx faster.")
+        snaf_pc_parser.add_argument("--no_bayes", action="store_true", help="Skip BayesTS (write only mean/std/mle/normal_prevalence)")
+        snaf_pc_parser.add_argument("--bayes_juncounts", default=None, type=str, help="Restrict BayesTS to the junctions in this cohort count matrix (intersected with the control). ~50x faster than all-GTEx; percentile ranks tumor-specificity among the tested cohort. Basic stats (mean/mle/prevalence) are still written for ALL control junctions.")
+        self.add_common_arguments(snaf_pc_parser)
 
         return general_parser
 

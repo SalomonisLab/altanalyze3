@@ -4,6 +4,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 import scipy.stats as stats
+import re
 
 plt.rcParams['axes.linewidth'] = 0.5
 plt.rcParams['pdf.fonttype'] = 42  # Embed fonts as TrueType (editable text)
@@ -11,6 +12,18 @@ plt.rcParams['ps.fonttype'] = 42   # Same for PostScript
 plt.rcParams['font.family'] = 'sans-serif'
 plt.rcParams['font.sans-serif'] = ['Arial', 'Helvetica', 'DejaVu Sans']
 plt.rcParams['figure.facecolor'] = 'white'
+
+
+def parse_isoform_length(isoform_label):
+    """Parse the protein length from an isoform token like 'ENST00000681979|973' or
+    'ENST00000681979|973(NMD)'. Returns the leading integer, or None if unparseable.
+    (The plain int(split('|')[1]) form throws on the '(NMD)' suffix and drops the row.)"""
+    try:
+        tail = isoform_label.split("|", 1)[1]
+    except Exception:
+        return None
+    m = re.match(r"(\d+)", tail)
+    return int(m.group(1)) if m else None
 
 
 def extract_cluster(comp, cluster_order=None):
@@ -52,7 +65,8 @@ def analyze_splicing_events(
     diff_means_threshold=1.0,
     custom_events=None,
     sample_min=3,
-    cluster_order=[]
+    cluster_order=[],
+    write_significant=True
 ):
     event_data = {}  
     overall_event_data = {}  
@@ -85,6 +99,12 @@ def analyze_splicing_events(
                 print(f"Skipping {stats_file}: missing required columns or no '{pval_type}' p-value column.")
                 continue
 
+            sig_out = None
+            if write_significant:
+                os.makedirs(output_dir, exist_ok=True)
+                sig_out = open(os.path.join(output_dir, comparison_name + "_significant-results.tsv"), "w")
+                sig_out.write("SourceFile\t" + "\t".join(header) + "\n")
+
             diff_means_col = [col for col in header if col.startswith("DiffMeans_")]
             for line in f:
                 cols = line.strip().split("\t")
@@ -94,10 +114,9 @@ def analyze_splicing_events(
                 isoform_2 = cols[col_indices["Isoform_2|Length"]]
                 event_type = cols[col_indices["Event_Type"]]
                 event_direction = cols[col_indices["Event_Direction"]]
-                try:
-                    isoform_1_length = int(isoform_1.split("|")[1]) 
-                    isoform_2_length = int(isoform_2.split("|")[1]) 
-                except:
+                isoform_1_length = parse_isoform_length(isoform_1)
+                isoform_2_length = parse_isoform_length(isoform_2)
+                if isoform_1_length is None or isoform_2_length is None:
                     continue
 
                 event_direction = event_direction_map.get(event_direction, None)
@@ -129,6 +148,9 @@ def analyze_splicing_events(
                     if (pval > pval_threshold) or (diff_means < diff_means_threshold) or (n_count1 < sample_min) or (n_count2 < sample_min):
                         continue
 
+                if sig_out is not None:
+                    sig_out.write(comparison_name + "\t" + line.strip() + "\n")
+
                 if event_direction not in event_data:
                     event_data[event_direction] = {}
                 if comparison_name not in event_data[event_direction]:
@@ -153,6 +175,8 @@ def analyze_splicing_events(
                 cond2_dict.setdefault(comparison_name, []).append(isoform_2_length)
                 diff_dict.setdefault(comparison_name, []).append(isoform_2_length - isoform_1_length)
 
+        if sig_out is not None:
+            sig_out.close()
         print(comparison_name, significant_events, 'unique events')
 
     #print("Comparisons seen:", len(overall_event_data))
@@ -178,12 +202,29 @@ def analyze_splicing_events(
 
         event_counts = {etype: [len(data_dict.get(comp, {}).get(etype, set())) for comp in comparisons] for etype in event_types}
 
+        # Fixed event-type -> RGB colour map so a given event type is the same colour in
+        # every plot (positional colouring would shift as the set of event types changes).
+        event_color_map = {
+            'Alt C-Terminal Exon':     '#808080',  # grey
+            "Alt3' SS":                '#87CEEB',  # skyblue
+            "Alt5' SS":                '#FA8072',  # salmon
+            'AltPolyA':                '#800080',  # purple
+            'AltPromoter':             '#FFD700',  # gold
+            'Cassette Exon':           '#6495ED',  # cornflowerblue
+            'Intron Retention':        '#00FF00',  # lime
+            'Mutually-Exclusive Exon': '#0000FF',  # blue
+            'Trans-Splicing':          '#FF0000',  # red
+        }
+        default_color = '#BBBBBB'
+
         fig, ax = plt.subplots(figsize=(10, 6))
         bottom = [0] * len(comparisons)
-        colors = ['grey','skyblue','salmon','purple', 'gold','cornflowerblue','lime','blue','red']
 
-        for i, etype in enumerate(event_types):
-            ax.barh(comparisons, event_counts[etype], left=bottom, label=etype, color=colors[i % len(colors)])
+        for etype in event_types:
+            if etype not in event_color_map:
+                print(f"Warning: no colour defined for event type '{etype}'; using {default_color}")
+            ax.barh(comparisons, event_counts[etype], left=bottom, label=etype,
+                    color=event_color_map.get(etype, default_color))
             bottom = [bottom[j] + event_counts[etype][j] for j in range(len(comparisons))]
 
         ax.set_xlabel("Count of Splicing Events")
@@ -388,6 +429,12 @@ if __name__ == '__main__':
                         help="Optional file of Feature IDs to restrict to (bypasses thresholds).")
     parser.add_argument('--output-dir', default=None,
                         help="Output folder. Default: <input-dir>/<comparison-name>.")
+    parser.add_argument('--exclude-clusters', default=None,
+                        help="Comma-separated cluster labels to drop from the row order "
+                             "(e.g. 'ERP-7,MEP-Eryth-2').")
+    parser.add_argument('--write-significant', action=argparse.BooleanOptionalAction, default=True,
+                        help="Write <comparison>_significant-results.tsv per file. Default on "
+                             "(--no-write-significant to disable).")
     args = parser.parse_args()
 
     if not os.path.isdir(args.input_dir):
@@ -431,6 +478,15 @@ if __name__ == '__main__':
         print(f"No --barcode-dir given; derived {len(cluster_order)} cluster labels "
               f"(alphabetical) from cluster-events filenames.")
 
+    if args.exclude_clusters:
+        drop = {c.strip() for c in args.exclude_clusters.split(",") if c.strip()}
+        n_before = len(input_files)
+        # resolve each file's cluster against the full order BEFORE removing the excluded labels
+        input_files = [f for f in input_files
+                       if extract_cluster(comp_name(f), cluster_order) not in drop]
+        cluster_order = [c for c in cluster_order if c not in drop]
+        print(f"Excluded clusters {sorted(drop)}: dropped {n_before - len(input_files)} file(s)")
+
     custom_events = import_feature_ids(args.custom_events) if args.custom_events else None
 
     analyze_splicing_events(
@@ -442,4 +498,5 @@ if __name__ == '__main__':
         custom_events=custom_events,
         sample_min=args.sample_min,
         cluster_order=cluster_order,
+        write_significant=args.write_significant,
     )

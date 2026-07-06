@@ -1,0 +1,21 @@
+name: snaf
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      # Current GitHub build (the PyPI release lags the SNAF refactor).
+      - git+https://github.com/SalomonisLab/altanalyze3.git
+      # Tumor-specificity (BayesTS)
+      - torch
+      - pyro-ppl
+      # MHC binding + immunogenicity for the full T-antigen pipeline.
+      # NOTE: mhcflurry/tensorflow require newer numpy/pandas than altanalyze3's
+      # pinned core, so the full pipeline needs its own environment (this one) --
+      # do not co-install into the tumor-specificity/core env.
+      - mhcflurry
+      - tensorflow
+      - tf-keras
+      - xmltodict

@@ -1,0 +1,40 @@
+name: "snaf_ts"
+description: SNAF tumor-specificity scoring for splice junctions (mean, closed-form MLE, and BayesTS). Cross-platform and fully offline.
+keywords:
+  - neoantigen
+  - splicing
+  - tumor-specificity
+  - bayests
+tools:
+  - "altanalyze3":
+      description: "AltAnalyze3 SNAF neoantigen workflow"
+      homepage: "https://github.com/SalomonisLab/altanalyze3"
+      licence: ["Apache-2.0"]
+input:
+  - - meta:
+        type: map
+        description: Groovy Map containing sample information, e.g. `[ id:'cohort1' ]`
+    - juncounts:
+        type: file
+        description: Junction-count matrix (TSV; rows=junction UIDs, cols=tumor samples)
+        pattern: "*.{txt,tsv}"
+  - - control_h5ad:
+        type: file
+        description: Normal-tissue control h5ad (e.g. GTEx_junction_counts.h5ad)
+        pattern: "*.h5ad"
+output:
+  - ts:
+      - meta:
+          type: map
+          description: Groovy Map containing sample information
+      - "*/neojunction_tumor_specificity.csv":
+          type: file
+          description: Per-neojunction tumor-specificity scores
+          pattern: "*neojunction_tumor_specificity.csv"
+  - versions:
+      - "versions.yml":
+          type: file
+          description: File containing software versions
+          pattern: "versions.yml"
+authors:
+  - "@SalomonisLab"

@@ -12,8 +12,17 @@ logger = logging.getLogger()   # this is a singleton, all .tf .keras logger will
 logger.setLevel(level=logging.ERROR)
 import tensorflow as tf
 tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
-import tensorflow.keras as keras
-from tensorflow.keras import layers
+# DeepImmuno's model was trained/saved with the Keras 2 API (TF-checkpoint format).
+# Keras 3 (bundled with TF>=2.16) dropped TF-checkpoint loading from load_weights, so on a
+# modern TF the model can no longer be loaded via tensorflow.keras. tf_keras is the
+# standalone Keras 2 package; it loads the original checkpoint bit-identically and coexists
+# in-process with the Keras 3 that mhcflurry uses (they are separate modules).
+try:
+    import tf_keras as keras
+    from tf_keras import layers
+except Exception:
+    import tensorflow.keras as keras
+    from tensorflow.keras import layers
 import numpy as np
 import pandas as pd
 import argparse
@@ -198,28 +207,83 @@ def computing_s(peptide,mhc):
     return float(scoring)
 
 
-def file_process(df_input):
+_DEEPIMMUNO_STATE = None   # (cnn_model, after_pca, hla_dic, dic_inventory), loaded once per process
 
-    after_pca = np.loadtxt(os.path.join(os.path.dirname(os.path.abspath(__file__)),'data/after_pca.txt'))
-    hla = pd.read_csv(os.path.join(os.path.dirname(os.path.abspath(__file__)),'data/hla2paratopeTable_aligned.txt'),sep='\t')
+
+def _load_deepimmuno_state():
+    '''Build the CNN + read the reference tables ONCE per process and cache them.
+    The original file_process() rebuilt the model, re-loaded its weights from disk, and
+    re-read the PCA/HLA tables on EVERY call -- and immunogenicity_prediction calls it
+    once per neojunction, so on a large cohort this dominated runtime (days). Caching is
+    exact: same architecture, same weights, same tables -> identical predictions.'''
+    global _DEEPIMMUNO_STATE
+    if _DEEPIMMUNO_STATE is not None:
+        return _DEEPIMMUNO_STATE
+    base = os.path.dirname(os.path.abspath(__file__))
+    after_pca = np.loadtxt(os.path.join(base, 'data/after_pca.txt'))
+    hla = pd.read_csv(os.path.join(base, 'data/hla2paratopeTable_aligned.txt'), sep='\t')
     hla_dic = hla_df_to_dic(hla)
-    inventory = list(hla_dic.keys())
-    dic_inventory = dict_inventory(inventory)
+    dic_inventory = dict_inventory(list(hla_dic.keys()))
     cnn_model = seperateCNN()
-    cnn_model.load_weights(os.path.join(os.path.dirname(os.path.abspath(__file__)),'models/cnn_model_331_3_7/'))
+    cnn_model.load_weights(_resolve_ckpt_prefix(os.path.join(base, 'models/cnn_model_331_3_7'))).expect_partial()
+    _DEEPIMMUNO_STATE = (cnn_model, after_pca, hla_dic, dic_inventory)
+    return _DEEPIMMUNO_STATE
+
+
+def _resolve_ckpt_prefix(ckpt_dir):
+    '''The shipped checkpoint has an EMPTY basename (files are literally '.index' /
+    '.data-00000-of-00001', with checkpoint pointing at "."), which load_weights cannot
+    open (it resolves to the directory). Alias them ONCE to a real 'variables' prefix so
+    load_weights works on any Keras/TF version. Returns the usable prefix.'''
+    import shutil
+    prefix = os.path.join(ckpt_dir, 'variables')
+    if not os.path.exists(prefix + '.index'):
+        dot_index = os.path.join(ckpt_dir, '.index')
+        if os.path.exists(dot_index):
+            shutil.copy(dot_index, prefix + '.index')
+            for f in os.listdir(ckpt_dir):
+                if f.startswith('.data-'):
+                    shutil.copy(os.path.join(ckpt_dir, f), os.path.join(ckpt_dir, 'variables' + f))
+    return prefix if os.path.exists(prefix + '.index') else os.path.join(ckpt_dir, '')
+
+
+_IMMUNO_SCORE_CACHE = {}   # (peptide, HLA) -> immunogenicity float; pure function, so
+                           # shared (peptide, HLA) pairs across neojunctions are scored once.
+
+
+def file_process(df_input):
+    cnn_model, after_pca, hla_dic, dic_inventory = _load_deepimmuno_state()
 
     ori_score = df_input
     ori_score.columns = ['peptide', 'HLA']
-    ori_score['immunogenicity'] = ['0'] * ori_score.shape[0]
-    dataset_score = construct_aaindex(ori_score, hla_dic, after_pca, dic_inventory)
+    peps = ori_score['peptide'].tolist()
+    hlas = ori_score['HLA'].tolist()
 
-    input1_score = pull_peptide_aaindex(dataset_score)
-    input2_score = pull_hla_aaindex(dataset_score)
-    label_score = pull_label_aaindex(dataset_score)
-    scoring = cnn_model.predict(x=[input1_score, input2_score])
-    scoring = cnn_model.predict(x=[input1_score, input2_score])
-    ori_score['immunogenicity'] = scoring
-    
+    # Encode + predict only the unique, not-yet-cached (peptide, HLA) pairs, then map
+    # back by key. Row-wise encoding is deterministic, so this is identical to scoring
+    # the full frame in one batch.
+    todo = list({(p, h) for p, h in zip(peps, hlas) if (p, h) not in _IMMUNO_SCORE_CACHE})
+    if todo:
+        scoring = None
+        if os.environ.get('SNAF_FAST_NN') == '1':
+            try:
+                # pure-NumPy CNN reimplementation (matches keras to float32 epsilon, no TensorFlow)
+                from .fast_cnn import predict_immunogenicity_fast
+                fast_df = pd.DataFrame({'peptide': [p for p, h in todo], 'HLA': [h for p, h in todo]})
+                scoring = np.asarray(predict_immunogenicity_fast(fast_df)['immunogenicity'], dtype=float).ravel()
+            except Exception:
+                scoring = None
+        if scoring is None:
+            sub = pd.DataFrame({'peptide': [p for p, h in todo], 'HLA': [h for p, h in todo],
+                                'immunogenicity': ['0'] * len(todo)})
+            dataset_score = construct_aaindex(sub, hla_dic, after_pca, dic_inventory)
+            input1_score = pull_peptide_aaindex(dataset_score)
+            input2_score = pull_hla_aaindex(dataset_score)
+            scoring = np.asarray(cnn_model.predict(x=[input1_score, input2_score], verbose=0)).ravel()
+        for (p, h), s in zip(todo, scoring):
+            _IMMUNO_SCORE_CACHE[(p, h)] = float(s)
+
+    ori_score['immunogenicity'] = [_IMMUNO_SCORE_CACHE[(p, h)] for p, h in zip(peps, hlas)]
     return ori_score
 
 

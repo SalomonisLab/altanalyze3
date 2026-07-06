@@ -92,6 +92,7 @@ def combine_and_align_h5(
     generate_umap=False,
     save_adata=False,
     unsupervised_cluster=False,
+    leiden_resolution=0.5,
     append_obs_field=None,
     alignment_mode="cosine",
     min_alignment_score=None,
@@ -791,8 +792,8 @@ def combine_and_align_h5(
             sc.pp.pca(adata_unsup_metacell, n_comps=50)
             sc.pp.neighbors(adata_unsup_metacell)
             sc.tl.umap(adata_unsup_metacell)
-            sc.tl.leiden(adata_unsup_metacell, flavor="leidenalg")
-            print('[metacell] unsupervised clustering performed on metacells')
+            sc.tl.leiden(adata_unsup_metacell, flavor="leidenalg", resolution=leiden_resolution)
+            print(f'[metacell] unsupervised clustering performed on metacells (resolution={leiden_resolution})')
             ensure_category_palette(adata_unsup_metacell, 'leiden')
 
             metacell_cluster_map = adata_unsup_metacell.obs['leiden'].astype(str).to_dict()
@@ -861,10 +862,10 @@ def combine_and_align_h5(
             sc.pp.pca(adata_unsup, n_comps=50)
             sc.pp.neighbors(adata_unsup)
             sc.tl.umap(adata_unsup)
-            sc.tl.leiden(adata_unsup, flavor="leidenalg", resolution=0.5)
+            sc.tl.leiden(adata_unsup, flavor="leidenalg", resolution=leiden_resolution)
             n_clusters = adata_unsup.obs['leiden'].nunique()
             n_cells = adata_unsup.n_obs
-            print(f"[cell] Unsupervised clustering completed: {n_clusters} clusters from {n_cells} cells (resolution=0.5)")
+            print(f"[cell] Unsupervised clustering completed: {n_clusters} clusters from {n_cells} cells (resolution={leiden_resolution})")
             print('[cell] unsupervised clustering performed on individual cells')
 
             sc.tl.rank_genes_groups(adata_unsup, groupby='leiden', method='wilcoxon', use_raw=False)
@@ -1230,6 +1231,7 @@ if __name__ == '__main__':
     parser.add_argument('--generate_umap', action='store_true', help='generate UMAP and marker analysis')
     parser.add_argument('--save_adata', action='store_true', help='save updated AnnData object')
     parser.add_argument('--unsupervised_cluster', action='store_true', help='perform unsupervised clustering analysis')
+    parser.add_argument('--resolution', type=float, default=0.5, help='Leiden clustering resolution (default 0.5)')
     parser.add_argument('--append_obs', type=str, default=None, help='Field in .obs to append to the cell barcode (e.g., donor_id)')
     parser.add_argument('--alignment_mode', type=str, default="cosine", help='Alignment mode: "cosine" or "classic"')
     parser.add_argument('--align_cutoff', type=float, default=None, help='Exclude cells with AlignmentScore below this threshold (default: include all)')
@@ -1267,6 +1269,7 @@ if __name__ == '__main__':
     save_adata = args.save_adata
     alignment_mode = args.alignment_mode
     unsupervised_cluster = args.unsupervised_cluster
+    leiden_resolution = args.resolution
     append_obs_field = args.append_obs
     align_cutoff = args.align_cutoff
     gene_translation = args.gene_translation
@@ -1331,6 +1334,7 @@ if __name__ == '__main__':
             generate_umap=generate_umap,
             save_adata=save_adata,
             unsupervised_cluster=unsupervised_cluster,
+            leiden_resolution=leiden_resolution,
             append_obs_field=append_obs_field,
             alignment_mode=alignment_mode,
             min_alignment_score=align_cutoff,

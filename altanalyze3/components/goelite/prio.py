@@ -14,6 +14,7 @@ from .structures import EnrichmentResult, GOTree
 class PrioritizationSettings:
     min_z: float = 1.96
     max_fdr: float = 0.1
+    max_rawp: Optional[float] = None   # if set, gate term significance on raw p (not FDR)
     min_overlap: int = 3
     delta_z: float = 0.5
     parent_min_overlap_ratio: float = 1.25
@@ -30,7 +31,8 @@ def prioritize_terms(
     ordered = sorted(results, key=lambda res: res.significance_tuple())
 
     for res in ordered:
-        if abs(res.z_score) < cfg.min_z or res.fdr > cfg.max_fdr or res.overlap < cfg.min_overlap:
+        sig_fail = (res.p_value > cfg.max_rawp) if cfg.max_rawp is not None else (res.fdr > cfg.max_fdr)
+        if abs(res.z_score) < cfg.min_z or sig_fail or res.overlap < cfg.min_overlap:
             continue
 
         descendants = tree.descendants(res.term_id)

@@ -43,7 +43,7 @@ def _is_finite_number(value: object) -> bool:
         return False
 
 
-def _prepare_goelite_plot_frame(frame: pd.DataFrame) -> pd.DataFrame:
+def _prepare_goelite_plot_frame(frame: pd.DataFrame, significance: str = "fdr") -> pd.DataFrame:
     if frame is None or frame.empty:
         return pd.DataFrame()
     prepared = frame.copy()
@@ -57,7 +57,9 @@ def _prepare_goelite_plot_frame(frame: pd.DataFrame) -> pd.DataFrame:
     prepared["fdr"] = pd.to_numeric(prepared.get("fdr"), errors="coerce")
     prepared["p_value"] = pd.to_numeric(prepared.get("p_value"), errors="coerce")
     prepared["z_score"] = pd.to_numeric(prepared.get("z_score"), errors="coerce")
-    prepared["fdr_plot"] = prepared["fdr"].fillna(prepared["p_value"]).clip(lower=1e-300, upper=1.0)
+    # y-axis metric: raw p-value when significance=='rawp', else FDR
+    _metric = prepared["p_value"] if significance == "rawp" else prepared["fdr"]
+    prepared["fdr_plot"] = _metric.fillna(prepared["p_value"]).clip(lower=1e-300, upper=1.0)
     prepared["is_positive_sig"] = prepared["fdr_plot"].le(0.05) & prepared["z_score"].gt(2.0)
     prepared["is_selected_positive_sig"] = prepared["selected"] & prepared["is_positive_sig"]
     prepared = prepared.loc[
@@ -130,10 +132,12 @@ def write_goelite_scatter_pdf(
     title_prefix: str = "GO-Elite",
     keywords: Sequence[str] = GOELITE_HIGHLIGHT_KEYWORDS,
     top_label_count: int = 4,
+    significance: str = "fdr",
 ) -> Path | None:
-    prepared = _prepare_goelite_plot_frame(frame)
+    prepared = _prepare_goelite_plot_frame(frame, significance=significance)
     if prepared.empty:
         return None
+    y_axis_label = "Fishers raw p" if significance == "rawp" else "Fishers FDR p"
 
     output_path = Path(out_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -156,7 +160,9 @@ def write_goelite_scatter_pdf(
                 continue
             labels = _select_goelite_labels(pop_df, keywords=keywords, top_label_count=top_label_count)
             positive = pop_df.loc[pop_df["is_selected_positive_sig"]]
-            background = pop_df.loc[~pop_df["is_positive_sig"]]
+            # every non-selected term is drawn (grey); previously terms that were
+            # significant-but-not-selected fell in neither set and vanished.
+            background = pop_df.loc[~pop_df["is_selected_positive_sig"]]
 
             fig, ax = plt.subplots(figsize=(9.2, 7.8))
             if not background.empty:
@@ -179,27 +185,10 @@ def write_goelite_scatter_pdf(
                     linewidths=0,
                     zorder=3,
                 )
-            for index, label in enumerate(labels):
-                dx, dy = annotation_offsets[min(index, len(annotation_offsets) - 1)]
-                ax.annotate(
-                    str(label["term_name"]),
-                    xy=(float(label["z_score"]), float(label["fdr_plot"])),
-                    xytext=(dx, dy),
-                    textcoords="offset points",
-                    ha="left",
-                    va="center",
-                    fontsize=9,
-                    color=str(label["label_color"]),
-                    arrowprops={
-                        "arrowstyle": "-",
-                        "color": str(label["label_color"]),
-                        "linewidth": 1.0,
-                        "alpha": 0.9,
-                        "shrinkA": 0,
-                        "shrinkB": 0,
-                    },
-                    zorder=4,
-                )
+            # Term labels are drawn AFTER the axis limits/scale are final (see
+            # below) so each dot->term leader can be a single straight 2-point
+            # Line2D rather than a FancyArrowPatch (which exports to PDF as a
+            # multi-anchor path that is awkward to edit in Illustrator).
 
             x_values = pop_df["z_score"].to_numpy(dtype=float)
             y_values = pop_df["fdr_plot"].to_numpy(dtype=float)
@@ -220,6 +209,33 @@ def write_goelite_scatter_pdf(
             ax.set_ylabel("")
             fig.tight_layout()
             fig.canvas.draw()
+
+            # Draw term labels + single straight 2-point leader lines now that
+            # transData reflects the final log-scaled axis. The leader endpoint
+            # is the label anchor (dot position offset by `annotation_offsets`
+            # points); computing it in data space keeps the line aligned through
+            # the tight-bbox save. Each leader is one Line2D (2 anchors only).
+            data_inv = ax.transData.inverted()
+            for index, label in enumerate(labels):
+                dx, dy = annotation_offsets[min(index, len(annotation_offsets) - 1)]
+                zx = float(label["z_score"])
+                fy = float(label["fdr_plot"])
+                lbl_trans = mtransforms.offset_copy(ax.transData, fig=fig, x=dx, y=dy, units="points")
+                x1, y1 = data_inv.transform(lbl_trans.transform((zx, fy)))
+                ax.plot(
+                    [zx, x1], [fy, y1],
+                    color=str(label["label_color"]),
+                    linewidth=1.0,
+                    alpha=0.9,
+                    solid_capstyle="butt",
+                    zorder=4,
+                )
+                ax.text(
+                    x1, y1, str(label["term_name"]),
+                    ha="left", va="center",
+                    fontsize=9, color=str(label["label_color"]), zorder=4,
+                )
+
             guide_transform = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
             guide_display_xy = guide_transform.transform((0.0, 0.5))
             guide_figure_xy = fig.transFigure.inverted().transform(guide_display_xy)
@@ -259,7 +275,7 @@ def write_goelite_scatter_pdf(
                     zorder=5,
                 )
             ax.annotate(
-                "Fishers FDR p",
+                y_axis_label,
                 xy=(0.0, 0.5),
                 xycoords=guide_transform,
                 xytext=(-46, 0),

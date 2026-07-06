@@ -10,9 +10,12 @@ import matplotlib.pyplot as plt
 import anndata as ad
 from scipy.optimize import minimize, minimize_scalar
 from scipy import stats
-from scipy.sparse import csr_matrix, find
+from scipy.sparse import csr_matrix, find, hstack as sparse_hstack, issparse
 from tqdm import tqdm
 import re
+import logging
+
+logger = logging.getLogger(__name__)
 
 # try:
 #     import pymc3 as pm   # conda install -c conda-forge pymc3 mkl-service
@@ -31,7 +34,7 @@ import re
 # '''
 
 
-def gtex_configuration(df,gtex_db,t_min_arg,n_max_arg,normal_cutoff_arg,tumor_cutoff_arg,normal_prevalance_cutoff_arg,tumor_prevalance_cutoff_arg,add_control=None):
+def gtex_configuration(df,gtex_db,t_min_arg,n_max_arg,normal_cutoff_arg,tumor_cutoff_arg,normal_prevalance_cutoff_arg,tumor_prevalance_cutoff_arg,add_control=None,control_stats_path=None,use_summary='auto'):
     global adata_gtex
     global adata
     global t_min
@@ -41,13 +44,61 @@ def gtex_configuration(df,gtex_db,t_min_arg,n_max_arg,normal_cutoff_arg,tumor_cu
     global normal_prevalance_cutoff
     global tumor_prevalance_cutoff
     tested_junctions = set(df.index)
-    adata = ad.read_h5ad(gtex_db)
-    adata = adata[np.logical_not(adata.obs_names.duplicated()),:] 
-    adata = adata[list(set(adata.obs_names).intersection(tested_junctions)),:]  
+
+    # ---- Summary-backed control path (the precompute architecture) ----------------------
+    # If a per-junction stats table exists for this control (built ONCE, offline, by
+    # snaf-precompute-control), load ONLY that small table -- mean/std/mle/normal_prevalence
+    # [+ BayesTS] -- and NEVER open the multi-GB count matrix. Sifting reads obs['mean'] and
+    # obs['normal_prevalence']; tumor specificity reads obs['mle']; BayesTS is already done.
+    # Skipped when add_control is given (those still need their full matrices to combine).
+    if use_summary is not False and add_control is None:
+        from .control_stats import default_stats_path, load_control_stats
+        _sp = control_stats_path if control_stats_path is not None else default_stats_path(gtex_db)
+        _stats = load_control_stats(_sp)
+        if _stats is not None:
+            keep = [u for u in _stats.index if u in tested_junctions]
+            sub = _stats.loc[keep]
+            obs = pd.DataFrame(index=sub.index)
+            for c in ('mean','std','mle','normal_prevalence','bayests_sigma','bayests_percentile'):
+                if c in sub.columns:
+                    obs[c] = sub[c].values
+            var = pd.DataFrame(index=['_summary']); var['tissue'] = 'summary'; var['total_count'] = 1.0
+            adata_gtex = ad.AnnData(X=csr_matrix((sub.shape[0], 1), dtype=np.float32), obs=obs, var=var)
+            adata_gtex.uns['snaf_summary_backed'] = True
+            adata_gtex.uns['snaf_summary_cutoff'] = float(normal_cutoff_arg)
+            adata = adata_gtex
+            t_min = t_min_arg; n_max = n_max_arg
+            normal_cutoff = normal_cutoff_arg; tumor_cutoff = tumor_cutoff_arg
+            normal_prevalance_cutoff = normal_prevalance_cutoff_arg; tumor_prevalance_cutoff = tumor_prevalance_cutoff_arg
+            print('Loaded control SUMMARY ({}/{} tested junctions) from {} -- full count matrix NOT loaded'.format(
+                sub.shape[0], len(tested_junctions), _sp))
+            return adata_gtex
+    # -------------------------------------------------------------------------------------
+    # Read the (potentially multi-GB) control DB in backed mode and subset to the
+    # tested junctions ON DISK, so only the intersecting rows are pulled into RAM
+    # (the whole point of passing `df` here). Falls back to a full read if the
+    # h5ad cannot be opened backed.
+    # Bulk-read the control into memory then subset in-memory. anndata's BACKED
+    # fancy-indexing over ~1M labels does per-row h5ad seeks and is pathologically slow
+    # (26+ min on a 1M-row intersection) whereas a full read + in-memory subset is ~4s.
+    # Only fall back to on-disk backed subsetting if the control does not fit in RAM.
+    try:
+        adata = ad.read_h5ad(gtex_db)
+        adata = adata[np.logical_not(adata.obs_names.duplicated()), :]
+        keep = [o for o in adata.obs_names if o in tested_junctions]   # preserves DB order, deterministic
+        adata = adata[keep, :].copy()
+    except MemoryError:
+        adata = ad.read_h5ad(gtex_db, backed='r')
+        adata = adata[np.logical_not(adata.obs_names.duplicated()), :]
+        keep = [o for o in adata.obs_names if o in tested_junctions]
+        adata = adata[keep, :].to_memory()
     print('Current loaded gtex cohort with shape {}'.format(adata.shape))
     tissue_dict = adata.var['tissue'].to_dict()
     adata_gtex = adata   # already has mean and tissue variables
     if add_control is not None:
+        left_X = csr_matrix(adata.X)
+        left_rows = adata.obs_names.tolist()
+        left_cols = adata.var_names.tolist()
         for id_, control in add_control.items():
             if isinstance(control,pd.DataFrame):
                 assert len(set(control.columns).intersection(tissue_dict.keys())) == 0  # sample id can not be ambiguous
@@ -55,36 +106,33 @@ def gtex_configuration(df,gtex_db,t_min_arg,n_max_arg,normal_cutoff_arg,tumor_cu
                 control = control.loc[list(set(control.index).intersection(tested_junctions)),:]
                 print('Adding cohort {} with shape {} to the database'.format(id_,control.shape))
                 tissue_dict_right = {k:id_ for k in control.columns}
-                tissue_dict.update(tissue_dict_right)
-                df_left = adata.to_df()
-                df_right = control
-                df_combine = df_left.join(other=df_right,how='outer').fillna(0)
-                adata = ad.AnnData(X=csr_matrix(df_combine.values),obs=pd.DataFrame(index=df_combine.index),var=pd.DataFrame(index=df_combine.columns))
+                right_X = csr_matrix(control.values.astype(np.float32))
+                right_rows = control.index.tolist(); right_cols = control.columns.tolist()
 
             elif isinstance(control,ad.AnnData):
                 assert len(set(control.var_names).intersection(tissue_dict.keys())) == 0
                 control = control[np.logical_not(control.obs_names.duplicated()),:]
                 control = control[list(set(control.obs_names).intersection(tested_junctions)),:]
                 print('Adding cohort {} with shape {} to the database'.format(id_,control.shape))
-                if 'tissue' in control.var.columns:   # if tissue is in var columns, it will be used 
+                if 'tissue' in control.var.columns:   # if tissue is in var columns, it will be used
                     tissue_dict_right = control.var['tissue'].to_dict()
                 else:
                     tissue_dict_right = {k:id_ for k in control.var_names}
-                tissue_dict.update(tissue_dict_right)
-                df_left = adata.to_df()
-                df_right = control.to_df()
-                df_combine = df_left.join(other=df_right,how='outer').fillna(0)
-                adata = ad.AnnData(X=csr_matrix(df_combine.values),obs=pd.DataFrame(index=df_combine.index),var=pd.DataFrame(index=df_combine.columns))
-            
+                right_X = csr_matrix(control.X)
+                right_rows = control.obs_names.tolist(); right_cols = control.var_names.tolist()
+
             else:
                 raise Exception('control must be either in dataframe or anndata format')
 
-            print('now the shape of control db is {}'.format(adata.shape))
-            adata.var['tissue'] = adata.var_names.map(tissue_dict).values
-            adata.obs['mean'] = np.array(adata.X.mean(axis=1)).squeeze()
-            total_count = np.array(adata.X.sum(axis=0)).squeeze() / 1e6
-            adata.var['total_count'] = total_count
-            
+            tissue_dict.update(tissue_dict_right)
+            left_X, left_rows, left_cols = _combine_two_sparse(left_X, left_rows, left_cols, right_X, right_rows, right_cols)
+            print('now the shape of control db is {}'.format((len(left_rows), len(left_cols))))
+
+        adata = ad.AnnData(X=left_X, obs=pd.DataFrame(index=left_rows), var=pd.DataFrame(index=left_cols))
+        adata.var['tissue'] = adata.var_names.map(tissue_dict).values
+        adata.obs['mean'] = np.asarray(adata.X.mean(axis=1)).ravel()
+        adata.var['total_count'] = np.asarray(adata.X.sum(axis=0)).ravel() / 1e6
+
 
     t_min = t_min_arg
     n_max = n_max_arg
@@ -109,16 +157,32 @@ def get_all_normal_h5ad(uids,outdir,name):
         get_all_normal_h5ad(uids=uids,outdir='.',name='junction')
         
     '''
-    adata_new = adata[uids,:]
+    uids = [u for u in uids if u in set(adata.obs_names)]
+    adata_new = adata[uids,:].copy()
     print(adata_new)
-    adata_new.write(os.path.join(outdir,'{}.h5ad'))
+    if not os.path.exists(outdir):
+        os.makedirs(outdir, exist_ok=True)
+    if not name.endswith('.h5ad'):
+        name = '{}.h5ad'.format(name)
+    adata_new.write(os.path.join(outdir, name))
+    return adata_new
+
+
+# Set SNAF_LEGACY_SIFTING=1 to force the original dense implementation (kept for
+# numerical-equivalence testing). Default is the vectorized/sparse path, which lifts
+# the ~100k-junction memory ceiling and is dramatically faster.
+_USE_LEGACY_SIFTING = os.environ.get('SNAF_LEGACY_SIFTING', '0') == '1'
 
 
 def multiple_crude_sifting(junction_count_matrix,add_control,dict_exonlist,outdir,filter_mode):
+    if _USE_LEGACY_SIFTING:
+        prevalance_fn, maxmin_fn = multiple_crude_sifting_prevalance, multiple_crude_sifting_maxmin
+    else:
+        prevalance_fn, maxmin_fn = multiple_crude_sifting_prevalance_fast, multiple_crude_sifting_maxmin_fast
     if filter_mode == 'prevalance':
-        valid,invalid,cond_df = multiple_crude_sifting_prevalance(junction_count_matrix,add_control,dict_exonlist,outdir)
+        valid,invalid,cond_df = prevalance_fn(junction_count_matrix,add_control,dict_exonlist,outdir)
     elif filter_mode == 'maxmin':
-        valid,invalid,cond_df = multiple_crude_sifting_maxmin(junction_count_matrix,add_control,dict_exonlist,outdir)
+        valid,invalid,cond_df = maxmin_fn(junction_count_matrix,add_control,dict_exonlist,outdir)
     return valid,invalid, cond_df
 
 def multiple_crude_sifting_prevalance(junction_count_matrix,add_control=None,dict_exonlist=None,outdir='.'):
@@ -267,6 +331,230 @@ def multiple_crude_sifting_maxmin(junction_count_matrix,add_control=None,dict_ex
     return valid,invalid,cond_df
 
 
+# ---------------------------------------------------------------------------
+# Vectorized / sparse re-implementations of the crude-sifting step.
+#
+# The original functions above tile a per-junction mean column into a full
+# dense (n_junctions x n_samples) DataFrame with pd.concat([col]*n_samples) and
+# then build several more full dense copies, and densify the entire sparse GTEx
+# control matrix with .toarray(). That is the reason the workflow could not
+# handle >~100k junctions. The _fast versions below produce byte-for-byte the
+# same `valid`/`invalid`/`cond_df` using numpy broadcasting and scipy.sparse
+# (no tiling, no densification of the control DB). Equivalence is verified in
+# tests/test_sifting_equivalence.py.
+# ---------------------------------------------------------------------------
+
+def _build_gene_pair_sets(dict_exonlist):
+    '''Precompute, per gene, the set of consecutive exon pairs (e1,e2) that occur
+    in any documented transcript. Replaces the per-junction triple-regex scan
+    (3 re.compile + 3 re.search per junction) in the legacy code with an O(1)
+    set membership test. A junction ENSG:e1-e2 is "in Ensembl db" iff (e1,e2) is
+    an adjacent pair in the pipe-joined exon string of some transcript, which is
+    exactly what the ^e1|e2| / |e1|e2| / |e1|e2$ patterns matched.'''
+    gene_pair_sets = {}
+    for ensg, exonlist in dict_exonlist.items():
+        pairs = set()
+        for exonstring in exonlist:
+            toks = exonstring.split('|')
+            for a, b in zip(toks[:-1], toks[1:]):
+                pairs.add((a, b))
+        gene_pair_sets[ensg] = pairs
+    return gene_pair_sets
+
+
+def _filter_valid_not_in_db(valid, dict_exonlist):
+    '''Keep only junctions NOT documented in any Ensembl transcript (same result
+    as the legacy per-junction regex loop, but via precomputed pair sets).'''
+    gene_pair_sets = _build_gene_pair_sets(dict_exonlist)
+    updated_valid = []
+    for uid in valid:
+        ensg = uid.split(':')[0]
+        exons = ':'.join(uid.split(':')[1:])
+        if '_' in exons or 'U' in exons or 'ENSG' in exons or 'I' in exons:
+            updated_valid.append(uid)
+            continue
+        e1, e2 = exons.split('-')
+        pairs = gene_pair_sets.get(ensg)
+        if pairs is not None and (e1, e2) in pairs:
+            continue  # documented -> drop
+        updated_valid.append(uid)
+    return updated_valid
+
+
+def _mean_vector_from_control(control, index):
+    '''Per-junction mean across control samples, aligned to `index`, without
+    densifying the whole control matrix. Works for DataFrame or AnnData.'''
+    if isinstance(control, pd.DataFrame):
+        s = control.mean(axis=1)
+    elif isinstance(control, ad.AnnData):
+        X = control.X
+        if issparse(X):
+            m = np.asarray(X.mean(axis=1)).ravel()
+        else:
+            m = np.asarray(X).mean(axis=1)
+        s = pd.Series(m, index=control.obs_names)
+    else:
+        raise Exception('control must be either in dataframe or anndata format')
+    return s.reindex(index).fillna(0.0).values.astype(np.float64)
+
+
+def _prevalance_vector_from_control(control, index, cutoff):
+    '''Per-junction fraction of control samples with count > cutoff, aligned to
+    `index`, computed directly on the sparse matrix (no .toarray()).'''
+    if isinstance(control, pd.DataFrame):
+        frac = np.count_nonzero((control > cutoff).values, axis=1) / control.shape[1]
+        s = pd.Series(frac, index=control.index)
+    elif isinstance(control, ad.AnnData):
+        # Summary-backed control: prevalence was precomputed (at snaf_summary_cutoff); use it
+        # directly instead of scanning a matrix that isn't loaded.
+        if control.uns.get('snaf_summary_backed') and 'normal_prevalence' in control.obs.columns:
+            pc = control.uns.get('snaf_summary_cutoff')
+            if pc is not None and float(pc) != float(cutoff):
+                logger.warning('normal_cutoff=%s differs from precomputed summary cutoff=%s; '
+                               'prevalence reflects the precompute cutoff.', cutoff, pc)
+            return control.obs['normal_prevalence'].reindex(index).fillna(0.0).values.astype(np.float64)
+        X = control.X
+        n = control.shape[1]
+        if issparse(X):
+            # (X > cutoff) stays sparse for cutoff >= 0; count per row via sum
+            frac = np.asarray((X > cutoff).sum(axis=1)).ravel() / n
+        else:
+            frac = np.count_nonzero(np.asarray(X) > cutoff, axis=1) / n
+        s = pd.Series(frac, index=control.obs_names)
+    else:
+        raise Exception('control must be either in dataframe or anndata format')
+    return s.reindex(index).fillna(0.0).values.astype(np.float64)
+
+
+def _reindex_csr_rows(X, old_index, new_index):
+    '''Return a CSR matrix whose rows follow `new_index`, filling missing rows with
+    zeros. Pure sparse gather (permutation matmul) -- never densifies.'''
+    X = csr_matrix(X)
+    pos = pd.Index(old_index).get_indexer(pd.Index(new_index))   # -1 where missing
+    present = pos >= 0
+    rows = np.nonzero(present)[0]
+    cols = pos[present]
+    P = csr_matrix((np.ones(len(rows), dtype=X.dtype), (rows, cols)),
+                   shape=(len(new_index), X.shape[0]))
+    return P.dot(X).tocsr()
+
+
+def _combine_two_sparse(left_X, left_rows, left_cols, right_X, right_rows, right_cols):
+    '''Outer-join two sparse matrices on their row labels (union) and concatenate
+    their columns -- the sparse equivalent of df_left.join(df_right,how="outer").
+    Replaces adata.to_df()/control.to_df() dense materialization.'''
+    left_idx = pd.Index(left_rows)
+    right_idx = pd.Index(right_rows)
+    right_only = right_idx.difference(left_idx, sort=False)
+    new_rows = left_idx.append(right_only)
+    L = _reindex_csr_rows(left_X, left_rows, new_rows)
+    R = _reindex_csr_rows(right_X, right_rows, new_rows)
+    X = sparse_hstack([L, R]).tocsr()
+    return X, list(new_rows), list(left_cols) + list(right_cols)
+
+
+def multiple_crude_sifting_maxmin_fast(junction_count_matrix, add_control=None, dict_exonlist=None, outdir='.'):
+    if not os.path.exists(outdir):
+        os.makedirs(outdir, exist_ok=True)
+
+    jc_index = junction_count_matrix.index
+    jc_cols = junction_count_matrix.columns
+    jc_vals = np.asarray(junction_count_matrix.values, dtype=np.float64)   # single dense copy of the input
+    n_samples = jc_vals.shape[1]
+
+    max_vec = jc_vals.max(axis=1)
+    df = pd.DataFrame(index=jc_index, data={'max': max_vec})
+    df_to_write = []
+
+    # GTEx mean (already precomputed in adata_gtex.obs['mean']); align, missing -> 0
+    mean_vec = adata_gtex.obs['mean'].reindex(jc_index).fillna(0.0).values.astype(np.float64)
+    df['mean'] = mean_vec
+    df['diff'] = max_vec - mean_vec
+    df['cond'] = (mean_vec < n_max) & (df['diff'].values > t_min)
+    valid = jc_index[df['cond'].values].tolist()
+    df_to_write.append(df.copy())
+    print('reduce valid NeoJunction from {} to {} because they are present in GTEx'.format(df.shape[0], len(valid)))
+
+    if dict_exonlist is not None:
+        updated_valid = _filter_valid_not_in_db(valid, dict_exonlist)
+        print('reduce valid Neojunction from {} to {} because they are present in Ensembl db'.format(len(valid), len(updated_valid)))
+        valid = updated_valid
+
+    # per-cell condition matrix (single boolean array via broadcasting, no tiling)
+    cond_arr = (mean_vec[:, None] < n_max) & ((jc_vals - mean_vec[:, None]) > t_min)
+
+    if add_control is not None:
+        for id_, control in add_control.items():
+            n_previous_valid = len(valid)
+            mean_add = _mean_vector_from_control(control, jc_index)
+            diff_add = max_vec - mean_add
+            cond_add = (mean_add < n_max) & (diff_add > t_min)
+            valid_add = jc_index[cond_add].tolist()
+            valid = list(set(valid).intersection(set(valid_add)))
+            tmp = df.copy(); tmp.drop(columns=['mean', 'diff', 'cond'], inplace=True)
+            tmp['mean_add'] = mean_add; tmp['diff_add'] = diff_add; tmp['cond_add'] = cond_add
+            tmp.rename(columns=lambda x: x + '_{}'.format(id_), inplace=True)
+            df_to_write.append(tmp)
+            cond_arr &= (mean_add[:, None] < n_max) & ((jc_vals - mean_add[:, None]) > t_min)
+            print('reduce valid Neojunction from {} to {} because they are present in added control {}'.format(n_previous_valid, len(valid), id_))
+
+    invalid = list(set(jc_index).difference(set(valid)))
+    cond_df = pd.DataFrame(cond_arr, index=jc_index, columns=jc_cols)
+    df_to_write = pd.concat(df_to_write, axis=1)
+    df_to_write.to_csv(os.path.join(outdir, 'NeoJunction_statistics_maxmin.txt'), sep='\t')
+    return valid, invalid, cond_df
+
+
+def multiple_crude_sifting_prevalance_fast(junction_count_matrix, add_control=None, dict_exonlist=None, outdir='.'):
+    if not os.path.exists(outdir):
+        os.makedirs(outdir, exist_ok=True)
+
+    jc_index = junction_count_matrix.index
+    jc_cols = junction_count_matrix.columns
+    jc_vals = np.asarray(junction_count_matrix.values, dtype=np.float64)
+
+    df_to_write = []
+    df = pd.DataFrame(index=jc_index)
+    prevalance_tumor = np.count_nonzero(jc_vals > tumor_cutoff, axis=1) / jc_vals.shape[1]
+    df['prevalance_tumor'] = prevalance_tumor
+    # GTEx: count-over-cutoff directly on the sparse control matrix (no .toarray())
+    prevalance_normal = _prevalance_vector_from_control(adata_gtex, jc_index, normal_cutoff)
+    df['prevalance_normal'] = prevalance_normal
+    df['cond'] = (prevalance_tumor > tumor_prevalance_cutoff) & (prevalance_normal < normal_prevalance_cutoff)
+    valid = jc_index[df['cond'].values].tolist()
+    df_to_write.append(df.copy())
+    print('reduce valid NeoJunction from {} to {} because they are present in GTEx'.format(df.shape[0], len(valid)))
+
+    if dict_exonlist is not None:
+        updated_valid = _filter_valid_not_in_db(valid, dict_exonlist)
+        print('reduce valid Neojunction from {} to {} because they are present in Ensembl db'.format(len(valid), len(updated_valid)))
+        valid = updated_valid
+
+    if add_control is not None:
+        for id_, control in add_control.items():
+            n_previous_valid = len(valid)
+            prevalance_normal_add = _prevalance_vector_from_control(control, jc_index, normal_cutoff)
+            cond_add = (prevalance_tumor > tumor_prevalance_cutoff) & (prevalance_normal_add < normal_prevalance_cutoff)
+            valid_add = jc_index[cond_add].tolist()
+            valid = list(set(valid).intersection(set(valid_add)))
+            tmp = pd.DataFrame(index=jc_index)
+            tmp['prevalance_normal_add'] = prevalance_normal_add
+            tmp['cond_add'] = cond_add
+            tmp.rename(columns=lambda x: x + '_{}'.format(id_), inplace=True)
+            df_to_write.append(tmp)
+            print('reduce valid Neojunction from {} to {} because they are present in added control {}'.format(n_previous_valid, len(valid), id_))
+
+    invalid = list(set(jc_index).difference(set(valid)))
+    # per-cell condition: valid-row gate AND per-sample tumor count > tumor_cutoff
+    valid_set = set(valid)
+    row_valid = np.array([j in valid_set for j in jc_index])
+    cond_arr = row_valid[:, None] & (jc_vals > tumor_cutoff)
+    cond_df = pd.DataFrame(cond_arr, index=jc_index, columns=jc_cols)
+    df_to_write = pd.concat(df_to_write, axis=1)
+    df_to_write.to_csv(os.path.join(outdir, 'NeoJunction_statistics_prevalance.txt'), sep='\t')
+    return valid, invalid, cond_df
+
+
 def crude_tumor_specificity(uid,count):    # for NeoJunction class, since we normally start from Jcmq with check_gtex=False, rarely being called.
     detail = ''
     if uid not in set(adata.obs_names):
@@ -312,7 +600,7 @@ def split_array_to_chunks(array,cores=None):
     return sub_arrays
 
 
-def add_tumor_specificity_frequency_table(df,method='mean',remove_quote=True,cores=None):
+def add_tumor_specificity_frequency_table(df,method='mean',remove_quote=True,cores=None,bayes_kwargs=None):
     '''
     add tumor specificty to each neoantigen-uid in the frequency table produced by SNAF T pipeline
 
@@ -320,6 +608,8 @@ def add_tumor_specificity_frequency_table(df,method='mean',remove_quote=True,cor
     :param method: string, either 'mean', or 'mle', or 'bayesian'
     :param remove quote: boolean, whether to remove the quotation or not, as one column in frequency table df is list, when loaded in memory using pandas, it will be added a quote, we can remove it
     :param cores: int, how many cpu cores to use for this computation, default None and use all the cpu the program detected
+    :param bayes_kwargs: dict or None, extra options forwarded to BayesTS when method=='bayesian'
+                         (e.g. {'mode':'XY','epoch':2000,'weights_dict':{...},'noise':3.0,'min_sample':10})
 
     :return new_df: a dataframe with one added column containing tumor specificity score
 
@@ -329,46 +619,36 @@ def add_tumor_specificity_frequency_table(df,method='mean',remove_quote=True,cor
 
     '''
     from ast import literal_eval
-    import multiprocessing as mp
     if remove_quote:
         df['samples'] = [literal_eval(item) for item in df['samples']]
-    if cores is None:
-        cores = mp.cpu_count()
 
-    if method != 'bayesian': 
-        pool = mp.Pool(processes=cores)
-        print('{} subprocesses have been spawned'.format(cores))
+    all_unique_junctions = list(set([item.split(',')[1] for item in df.index]))
 
-        all_unique_junctions = list(set([item.split(',')[1] for item in df.index]))
-        sub_arrays = split_array_to_chunks(all_unique_junctions,cores=cores)
-        r = [pool.apply_async(func=add_tumor_specificity_frequency_table_atomic_func,args=(sub_array,method,)) for sub_array in sub_arrays]  
+    if method != 'bayesian':
+        # Fully vectorized batch score (byte-identical to the per-uid loop, per
+        # tumor_specificity_batch's contract): mean = obs['mean'] lookup, mle = sparse
+        # closed-form pass -- NO per-junction AnnData slicing / X.toarray(). This per-uid
+        # loop was the dominant cost of generate_results (called 2 methods x 3 stages).
+        all_score_dict = tumor_specificity_batch(all_unique_junctions, methods=(method,))[method].to_dict()
+        col = [all_score_dict[item.split(',')[1]] for item in df.index]
+    else:
+        # Direct BayesTS integration (joint model over all queried junctions),
+        # replacing the legacy per-junction pymc3 path. Cross-platform (CPU).
+        try:
+            from . import bayests
+        except (ImportError, ValueError):   # allow standalone loading in tests
+            import importlib.util as _ilu
+            _spec = _ilu.spec_from_file_location('snaf_bayests', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bayests.py'))
+            bayests = _ilu.module_from_spec(_spec); _spec.loader.exec_module(bayests)
+        bk = {'mode': 'XY', 'epoch': 2000}
+        if bayes_kwargs:
+            bk.update(bayes_kwargs)
+        res = bayests.compute_bayests_sigma(adata, uids=all_unique_junctions, **bk)
+        score_dict = res['mean_sigma'].to_dict()
+        col = [score_dict.get(item.split(',')[1], np.nan) for item in df.index]
 
-        pool.close()
-        pool.join()
-        results = []
-        for collect in r:
-            result = collect.get()
-            results.append(result)
-        all_score_dict = {}
-        for score_dict in results:
-            all_score_dict.update(score_dict)
-        col = []
-        for item in df.index:
-            col.append(all_score_dict[item.split(',')[1]])
-        new_df = df.copy()
-        new_df['tumor_specificity_{}'.format(method)] = col
-
-    else:   # seems like bayesian doesn't work well with multiprocessing
-        all_unique_junctions = list(set([item.split(',')[1] for item in df.index]))
-        score_dict = {}
-        for uid in tqdm(all_unique_junctions,total=len(all_unique_junctions)):
-            score_dict[uid] = tumor_specificity(uid,'bayesian')
-        for item in df.index:
-            col.append(score_dict[item.split(',')[1]])
-        new_df = df.copy()
-        new_df['tumor_specificity_{}'.format(method)] = col
-            
-
+    new_df = df.copy()
+    new_df['tumor_specificity_{}'.format(method)] = col
     return new_df
 
 def add_tumor_specificity_frequency_table_atomic_func(sub_array,method):
@@ -383,7 +663,7 @@ def tumor_specificity(uid,method,return_df=False):
     try:
         info = adata[[uid],:]
     except:
-        print('{} not detected in gtex, impute as zero'.format(uid))
+        logger.debug('%s not detected in gtex, impute as zero', uid)
         info = ad.AnnData(X=csr_matrix(np.full((1,adata.shape[1]),0)),obs=pd.DataFrame(data={'mean':[0]},index=[uid]),var=adata.var)  # weired , anndata 0.7.6 can not modify the X in place? anndata 0.7.2 can do that in scTriangulate
     df = pd.DataFrame(data={'value':info.X.toarray().squeeze(),'tissue':info.var['tissue'].values},index=info.var_names)
     if method == 'mean':
@@ -399,73 +679,80 @@ def tumor_specificity(uid,method,return_df=False):
         scale_factor_dict = adata.var['total_count'].to_dict()
         df['value_cpm'] = df['value'].values / df.index.map(scale_factor_dict).values
         y = df['value_cpm'].values
-        # mle_model = minimize(mle_func,np.array([0.2]),args=(y,),bounds=((0,1),),method='Nelder-Mead')
-        mle_model = minimize_scalar(mle_func,bounds=(0,1),args=(y,),method='bounded')
-        if mle_model.success:
-            sigma = mle_model.x
-        else:   
-            sigma = 0
-            print(uid,y, mle_model)   # debug purpose
+        # Closed-form MLE of the half-normal scale is sqrt(mean(y^2)); the original
+        # code used minimize_scalar over the bound (0,1), so clip identically. This
+        # is exact (not an approximation) and removes a per-junction optimizer call.
+        if len(y) > 0:
+            sigma = float(min(np.sqrt(np.mean(np.square(y))), 1.0))
+        else:
+            sigma = 0.0
         if return_df:
             return sigma,df
         else:
             return sigma
     elif method == 'bayesian':
-        scale_factor_dict = adata.var['total_count'].to_dict()
-        df['value_cpm'] = df['value'].values / df.index.map(scale_factor_dict).values
-        y = df['value_cpm'].values
-        x = []
-        for tissue in adata.var['tissue'].unique():
-            sub = adata[uid,adata.var['tissue']==tissue]
-            total_count = sub.shape[1]
-            c = np.count_nonzero(sub.X.toarray())
-            scaled_c = round(c * (25/total_count),0)
-            x.append(scaled_c)
-        x = np.array(x)
-        try:
-            with pm.Model() as m:
-                sigma = pm.Uniform('sigma',lower=0,upper=1)
-                nc = pm.HalfNormal('nc',sigma=sigma,observed=y)
-                nc_hat = pm.Deterministic('nc_hat',pm.math.sum(nc)/len(y))
-                psi = pm.Beta('psi',alpha=2,beta=nc_hat*20)
-                mu = pm.Gamma('mu',alpha=nc_hat*50,beta=1)
-                c = pm.ZeroInflatedPoisson('c',psi,mu,observed=x)
-                trace = pm.sample(draws=1000,step=pm.NUTS(target_accept=0.95),tune=1000,return_inferencedata=False,cores=1)
-                '''
-                the error of "Got error No model on context stack. trying to find log_likelihood in translation" maybe due to pymc build and how they launch multi-cores.
-                remember, my build can only work when cores=1, which further indicate there might be an issue revolving around it.
-                https://stackoverflow.com/questions/69888492/sampling-of-pymc3-in-python-gets-runtime-error-of-bootstrapping-phase
-                '''
+        # BayesTS is a JOINT model over all queried junctions -- scoring one uid in
+        # isolation is not meaningful. Use the batch entry point instead, which runs
+        # the real BayesTS (torch/pyro, cross-platform) once over the whole set:
+        #     snaf.add_tumor_specificity_frequency_table(df, method='bayesian')
+        # or, directly:
+        #     from altanalyze3.components.snaf import bayests
+        #     bayests.compute_bayests_sigma(adata, uids=[...], mode='XY')
+        # (The legacy per-junction pymc3 model that lived here required pymc3/theano,
+        # which does not install cleanly on macOS/Windows; it has been retired.)
+        raise NotImplementedError(
+            "Per-junction bayesian scoring is retired. BayesTS is a joint model; "
+            "call add_tumor_specificity_frequency_table(df, method='bayesian') or "
+            "bayests.compute_bayests_sigma(adata, uids=...) for the batch score.")
 
-            df = az.summary(trace,round_to=2)
 
-            '''
-            az.summary(trace)
+def tumor_specificity_batch(uids, methods=('mean', 'mle')):
+    '''Vectorized equivalent of ``[tumor_specificity(u, m) for u in uids]`` for each
+    method in ``methods``. Returns a DataFrame indexed by ``uids`` with one column per
+    method ('mean' -> mean_gtex_count, 'mle' -> tumor_specificity_mle).
 
-                    mean    sd  hdi_3%  hdi_97%  mcse_mean  mcse_sd  ess_bulk  ess_tail  r_hat
-            sigma    0.47  0.01    0.46     0.48       0.00     0.00    182.23     98.84   1.02
-            nc_hat   0.22  0.00    0.22     0.22       0.00     0.00    200.00    200.00    NaN
-            mu      22.97  0.52   21.87    23.87       0.04     0.03    196.69     94.84   1.00
+    Results are IDENTICAL to the per-uid path (this only removes the Python-level loop):
+      - mean : ``adata.obs['mean']`` (missing junction -> 0)
+      - mle  : ``min(sqrt(mean(cpm^2)), 1.0)`` where ``cpm = count / var['total_count']``,
+               the same closed-form half-normal MLE, averaged over ALL control samples.
 
-            az.plot_posterior(trace,var_names=['sigma','nc_hat','mu'])
-            az.plot_forest(trace,,var_names=['sigma','nc_hat','mu'])
+    Memory-safe: the MLE is computed with sparse row ops (no densification of the
+    junctions x samples control matrix).'''
+    uids = list(uids)
+    present_set = set(adata.obs_names)
+    out = pd.DataFrame(index=uids)
 
-            gv = pm.model_to_graphviz(m)
-            gv.format = 'pdf'
-            gv.render(filename='model_graph');sys.exit('stop')
-            # to run the above, you need to module load graphviz so that dot is exposed to the program
+    if 'mean' in methods:
+        out['mean'] = adata.obs['mean'].reindex(uids).fillna(0.0).values.astype(np.float64)
 
-            '''
-            sigma = df.iloc[0]['mean']
+    if 'mle' in methods:
+        # Summary-backed control: mle was precomputed per junction; look it up (no matrix).
+        if adata.uns.get('snaf_summary_backed') and 'mle' in adata.obs.columns:
+            out['mle'] = adata.obs['mle'].reindex(uids).fillna(0.0).values.astype(np.float64)
+            return out
+        sigma = np.zeros(len(uids), dtype=np.float64)
+        present_uids = [u for u in uids if u in present_set]
+        if present_uids:
+            inv_scale = (1.0 / adata.var['total_count'].values.astype(np.float64))  # per-sample CPM factor
+            pos = {u: i for i, u in enumerate(uids)}
+            n_cols = adata.shape[1]
+            # Process in chunks so the (chunk x samples) sparse intermediates stay small
+            # -- keeps peak memory bounded on multi-hundred-k neojunction cohorts while
+            # remaining fully vectorized. Row-wise math is unchanged, so results are identical.
+            CHUNK = 50000
+            for start in range(0, len(present_uids), CHUNK):
+                batch = present_uids[start:start + CHUNK]
+                X = adata[batch, :].X
+                if not issparse(X):
+                    X = csr_matrix(np.asarray(X))
+                Xs = X.multiply(inv_scale[None, :])                        # cpm, sparse
+                sq_sum = np.asarray(Xs.multiply(Xs).sum(axis=1)).ravel()   # sum of cpm^2 per junction
+                s = np.minimum(np.sqrt(sq_sum / n_cols), 1.0)             # mean over ALL samples, clipped
+                for u, val in zip(batch, s):
+                    sigma[pos[u]] = val
+        out['mle'] = sigma
 
-        except:
-            sigma = None
-            print(uid,x,y)
-
-        if return_df:
-            return sigma,df
-        else:
-            return sigma
+    return out
             
 
 

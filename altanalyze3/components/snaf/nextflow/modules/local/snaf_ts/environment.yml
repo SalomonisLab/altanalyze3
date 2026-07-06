@@ -1,0 +1,12 @@
+name: snaf_ts
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      # Install the current GitHub build (the PyPI release lags the SNAF refactor).
+      - git+https://github.com/SalomonisLab/altanalyze3.git
+      - torch
+      - pyro-ppl

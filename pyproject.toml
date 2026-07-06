@@ -27,10 +27,25 @@ dependencies = [
     "scanpy==1.10.3",
     "scikit-learn==1.3.2",
     "scipy==1.14.1",
+    "seaborn==0.13.2",
+    "lifelines==0.30.0",
     "setuptools==68.2.2",
     "statsmodels==0.14.0",
     "tqdm==4.62.3"
 ]
+
+[project.optional-dependencies]
+# SNAF neoantigen workflow extras (all cross-platform; import lazily so the core
+# package never requires them):
+#   snaf-bayes   -> BayesTS tumor-specificity (torch + pyro), and MHCflurry binding
+#   snaf-immuno  -> deepimmuno immunogenicity prediction (tensorflow)
+#   snaf         -> everything above
+snaf-bayes = ["torch>=1.13", "pyro-ppl>=1.8.4", "mhcflurry>=2.0", "xmltodict>=0.13"]
+snaf-immuno = ["tensorflow>=2.10"]
+#   snaf-surface -> B-antigen surface pipeline: pure-python transmembrane topology
+#                   (tmhmm.py) + gene-symbol lookup (mygene). Biopython is already core.
+snaf-surface = ["tmhmm.py>=1.3", "mygene>=3.2"]
+snaf = ["torch>=1.13", "pyro-ppl>=1.8.4", "mhcflurry>=2.0", "xmltodict>=0.13", "tensorflow>=2.10", "tmhmm.py>=1.3", "mygene>=3.2"]
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -39,3 +54,4 @@ where = ["."]
 "altanalyze3.components.fastCNV" = ["resources/*.tsv"]
 "altanalyze3.components.fastComm" = ["resources/*.tsv", "configs/*.json"]
 "altanalyze3.components.long_read" = ["resources/*.gz"]
+"altanalyze3.components.snaf" = ["nextflow/*.nf", "nextflow/*.config", "nextflow/conf/*", "nextflow/assets/*", "nextflow/modules/local/*/*"]

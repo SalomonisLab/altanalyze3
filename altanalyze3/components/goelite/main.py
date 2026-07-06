@@ -54,9 +54,13 @@ def main(argv: List[str] | None = None) -> int:
     ap.add_argument("--max-term-size", type=int, default=2000)
     ap.add_argument("--min-z", type=float, default=1.96)
     ap.add_argument("--max-fdr", type=float, default=0.1)
+    ap.add_argument("--max-rawp", type=float, default=None,
+                    help="Gate term significance on raw p-value (not FDR); also plots raw p on the y-axis.")
     ap.add_argument("--min-overlap", type=int, default=2)
     ap.add_argument("--delta-z", type=float, default=0.5)
     ap.add_argument("--top-label-count", type=int, default=4, help="Number of top enriched terms to label in the PDF.")
+    ap.add_argument("--name", type=str, default=None,
+                    help="Comparison name; prepended to output filenames and used as the plot title.")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO)
@@ -84,6 +88,7 @@ def main(argv: List[str] | None = None) -> int:
     )
     settings.prioritization.min_z = args.min_z
     settings.prioritization.max_fdr = args.max_fdr
+    settings.prioritization.max_rawp = args.max_rawp
     settings.prioritization.min_overlap = args.min_overlap
     settings.prioritization.delta_z = args.delta_z
 
@@ -133,21 +138,26 @@ def main(argv: List[str] | None = None) -> int:
     ]
     df = pd.DataFrame.from_records(records)
 
-    tsv_path = os.path.join(args.outdir, "goelite_results.tsv")
+    # optional comparison name -> prepended to output filenames and used as the plot title
+    prefix = f"{args.name}_" if args.name else ""
+    title_prefix = args.name if args.name else "GO-Elite"
+
+    tsv_path = os.path.join(args.outdir, f"{prefix}goelite_results.tsv")
     df.to_csv(tsv_path, sep="\t", index=False)
     logger.info("Wrote results table: %s", tsv_path)
 
-    pdf_path = os.path.join(args.outdir, "goelite_results.pdf")
+    pdf_path = os.path.join(args.outdir, f"{prefix}goelite_results.pdf")
     written_pdf = write_goelite_scatter_pdf(
         df,
         pdf_path,
-        title_prefix="GO-Elite",
+        title_prefix=title_prefix,
         top_label_count=args.top_label_count,
+        significance=("rawp" if args.max_rawp is not None else "fdr"),
     )
     if written_pdf is not None:
         logger.info("Wrote results PDF: %s", written_pdf)
 
-    json_path = os.path.join(args.outdir, "goelite_results.json")
+    json_path = os.path.join(args.outdir, f"{prefix}goelite_results.json")
     with open(json_path, "w", encoding="utf-8") as handle:
         json.dump(records, handle, indent=2)
     logger.info("Wrote results JSON: %s", json_path)

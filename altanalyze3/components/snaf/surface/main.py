@@ -5,6 +5,8 @@ import subprocess
 import multiprocessing as mp
 import re
 import pickle
+import logging
+logger = logging.getLogger(__name__)
 from datetime import datetime,date
 from ast import literal_eval
 import requests
@@ -24,11 +26,81 @@ mpl.rcParams['ps.fonttype'] = 42
 mpl.rcParams['font.family'] = 'Arial'
 
 
-def initialize(db_dir):
+_MEMBRANE_FOUNDATION_VERSION = 2   # v2: only dict_fa is subset (with lazy full-load fallback);
+                                   # the small dicts load full because SNAF-B can reference ANY
+                                   # gene (trans-splicing fusion partners), not just membrane ones.
+
+
+def _foundation_path(db_dir):
+    '''Where the precomputed SNAF-B membrane FASTA subset lives. Default: in the Alt91_db dir;
+    overridable via SNAF_INDEX_DIR when the reference dir is read-only/shared.'''
+    base = 'snaf_b_membrane_foundation.pkl'
+    d = os.environ.get('SNAF_INDEX_DIR')
+    if d:
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, base)
+    return os.path.join(db_dir, 'Alt91_db', base)
+
+
+class _FoundationFa(dict):
+    '''Membrane-gene FASTA subset with LAZY full-load on a miss. SNAF-B's sequence lookups can
+    reference a NON-membrane gene as a trans-splicing fusion PARTNER (subexon_tran's fusion
+    branch), which the membrane subset lacks -- so on the first miss we load the full gene FASTA
+    once and merge, then serve any gene. Keeps the common membrane-only case at ~248 MB instead
+    of the full ~2 GB, while remaining correct for every gene.'''
+    def __init__(self, membrane_fa, full_fasta_path):
+        super().__init__(membrane_fa)
+        self._full_fasta_path = full_fasta_path
+        self._full_loaded = False
+
+    def __missing__(self, key):
+        if not self._full_loaded:
+            self._full_loaded = True
+            logger.info('SNAF-B: gene %s not in membrane FASTA subset (trans-splicing partner?); '
+                        'loading the full gene FASTA once.', key)
+            for k, v in fasta_to_dict(self._full_fasta_path).items():
+                if not dict.__contains__(self, k):
+                    dict.__setitem__(self, k, v)
+        if dict.__contains__(self, key):
+            return dict.__getitem__(self, key)
+        raise KeyError(key)
+
+
+def build_membrane_foundation(db_dir, out_path=None, force=False, _fa=None):
+    '''Precompute the membrane-gene SEQUENCE subset of the ~2 GB gene FASTA (dict_fa) -- the only
+    big reference. dict_exonCoords/df_exonlist/dict_biotype are small (~1.5 s) and load FULL at
+    runtime because SNAF-B can reference non-membrane genes (trans-splicing partners); the
+    subset here is wrapped at runtime with a lazy full-load fallback so those still resolve.
+    Built ONCE; surface.initialize auto-loads it. Atomic write, idempotent (rebuilds on a
+    version bump).'''
+    out_path = out_path or _foundation_path(db_dir)
+    if (not force) and os.path.exists(out_path):
+        try:
+            with open(out_path, 'rb') as f:
+                if pickle.load(f).get('version') == _MEMBRANE_FOUNDATION_VERSION:
+                    return out_path
+        except Exception:
+            pass   # unreadable / wrong version -> rebuild
+    alt = os.path.join(db_dir, 'Alt91_db')
+    membrane = set(read_uniprot_seq(os.path.join(alt, 'uniprot_isoform_enhance.fasta')).keys())
+    fa = _fa if _fa is not None else fasta_to_dict(os.path.join(alt, 'Hs_gene-seq-2000_flank.fa'))
+    obj = {'version': _MEMBRANE_FOUNDATION_VERSION, 'membrane': membrane,
+           'dict_fa': {g: v for g, v in fa.items() if g in membrane}}
+    tmp = '{}.tmp{}'.format(out_path, os.getpid())
+    with open(tmp, 'wb') as f:
+        pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
+    os.replace(tmp, out_path)
+    return out_path
+
+
+def initialize(db_dir, use_foundation='auto', foundation_path=None):
     '''
     setting up additional global variables for running B antigen program
 
     :param db_dir: string, the path to the database folder
+    :param use_foundation: 'auto' (default) serves gene sequences (dict_fa) from the precomputed
+                           membrane subset with a lazy full-load fallback; False forces the full
+                           2 GB FASTA into memory.
 
     Examples::
 
@@ -44,19 +116,38 @@ def initialize(db_dir):
     global dict_uni_fa
     global df_topology
     print('{} {} starting surface antigen initialization'.format(date.today(),datetime.now().strftime('%H:%M:%S')))
-    transcript_db = os.path.join(db_dir,'Alt91_db','mRNA-ExonIDs.txt')
-    exon_table = os.path.join(db_dir,'Alt91_db','Hs_Ensembl_exon_add_col.txt')
-    fasta = os.path.join(db_dir,'Alt91_db','Hs_gene-seq-2000_flank.fa')
-    biotype_db = os.path.join(db_dir,'Alt91_db','Hs_Ensembl_transcript-biotypes.txt')
-    membrane_db = os.path.join(db_dir,'Alt91_db','human_membrane_proteins_acc2ens.txt')
-    membrane_fasta_db = os.path.join(db_dir,'Alt91_db','uniprot_isoform_enhance.fasta')
-    df_exonlist = pd.read_csv(transcript_db,sep='\t',header=None,names=['EnsGID','EnsTID','EnsPID','Exons'])  # index is number
-    dict_exonCoords = exonCoords_to_dict(exon_table) 
-    dict_fa = fasta_to_dict(fasta)
-    dict_biotype = biotype(pd.read_csv(biotype_db,sep='\t'))  # index is number
-    df_membrane_proteins = pd.read_csv(membrane_db,sep='\t',index_col=0)
-    dict_uni_fa = read_uniprot_seq(membrane_fasta_db)
-    df_topology = pd.read_csv(os.path.join(db_dir,'Alt91_db','ENSP_topology.txt'),sep='\t')
+    alt = os.path.join(db_dir, 'Alt91_db')
+    fasta_path = os.path.join(alt, 'Hs_gene-seq-2000_flank.fa')
+    # Small references -- ALWAYS loaded FULL: SNAF-B can reference ANY gene (trans-splicing
+    # fusion partners), so these must not be restricted to membrane genes.
+    df_membrane_proteins = pd.read_csv(os.path.join(alt, 'human_membrane_proteins_acc2ens.txt'), sep='\t', index_col=0)
+    dict_uni_fa = read_uniprot_seq(os.path.join(alt, 'uniprot_isoform_enhance.fasta'))
+    df_topology = pd.read_csv(os.path.join(alt, 'ENSP_topology.txt'), sep='\t')
+    df_exonlist = pd.read_csv(os.path.join(alt, 'mRNA-ExonIDs.txt'), sep='\t', header=None, names=['EnsGID', 'EnsTID', 'EnsPID', 'Exons'])
+    dict_exonCoords = exonCoords_to_dict(os.path.join(alt, 'Hs_Ensembl_exon_add_col.txt'))
+    dict_biotype = biotype(pd.read_csv(os.path.join(alt, 'Hs_Ensembl_transcript-biotypes.txt'), sep='\t'))
+    # The 2 GB gene FASTA (dict_fa) is the only big reference: serve the membrane subset from the
+    # foundation and lazily full-load on a miss (fusion partners). No foundation -> full load +
+    # build it for next time.
+    fpath = foundation_path or _foundation_path(db_dir)
+    if use_foundation is not False and os.path.exists(fpath):
+        try:
+            with open(fpath, 'rb') as f:
+                fo = pickle.load(f)
+            if fo.get('version') == _MEMBRANE_FOUNDATION_VERSION:
+                dict_fa = _FoundationFa(fo['dict_fa'], fasta_path)
+                print('{} {} finished surface antigen initialization -- gene FASTA from membrane foundation ({} genes, lazy fallback), full 2GB FASTA NOT loaded'.format(
+                    date.today(), datetime.now().strftime('%H:%M:%S'), len(fo['dict_fa'])))
+                return
+        except Exception as e:
+            logger.warning('membrane foundation unreadable (%s); falling back to full FASTA', e)
+    dict_fa = fasta_to_dict(fasta_path)   # full 2GB load
+    if use_foundation is not False:
+        try:
+            build_membrane_foundation(db_dir, fpath, _fa=dict_fa)
+            print('SNAF-B: cached membrane FASTA foundation for future runs -> {}'.format(fpath))
+        except Exception as e:
+            logger.warning('could not cache membrane foundation (%s)', e)
     print('{} {} finished surface antigen initialization'.format(date.today(),datetime.now().strftime('%H:%M:%S')))
 
 def generate_full_results(outdir,freq_path,mode,validation_gtf):
@@ -87,6 +178,15 @@ def generate_full_results(outdir,freq_path,mode,validation_gtf):
                                             freq_df_path=freq_path,
                                             mode='long_read',outdir=os.path.join(outdir,'B_candidates'),name='lr_str3_report_{}_{}.txt'.format(style,overlap_extracellular))
     elif mode == 'short_read':
+        # Parallel pre-warm of the is_support (GTF validation) cache ONCE, so the many
+        # (serial, memoized) stringency-4/5 x style x overlap generate_results passes below are
+        # all cache hits -- this is the generate_full_results speedup on the SNAF-B bottleneck.
+        try:
+            with open(os.path.join(outdir, 'surface_antigen_sr.p'), 'rb') as _f:
+                _res = pickle.load(_f)
+            prewarm_support_cache(_res, validation_gtf)
+        except Exception as _e:
+            logger.warning('is_support pre-warm skipped (%s); passes will compute lazily', _e)
         # first strigency 5
         for style in [None,'deletion','insertion']:
             for overlap_extracellular in [True,False]:
@@ -596,7 +696,36 @@ def split_array_to_chunks(array,cores=None):
         sub_arrays.append(item_in_group)
     return sub_arrays
 
-def run(uids,outdir,prediction_mode='short_read',n_stride=2,gtf=None,tmhmm=False,software_path=None,serialize=True):
+def _process_sa_chunk(chunk, mode, n_stride, tmhmm, software_path):
+    '''Process one contiguous chunk of membrane tuples -> list of SurfaceAntigen objects.
+    Each antigen is independent and only reads shared globals (dict_fa/dict_exonCoords/
+    gtf_dict/tmhmm model, inherited by fork), so running chunks in parallel is byte-identical
+    to the original serial loop.'''
+    out = []
+    for uid, score, df, ed, freq in chunk:
+        sa = SurfaceAntigen(uid, score, df, ed, freq, False)
+        sa.detect_type()
+        sa.retrieve_junction_seq()
+        if mode == 'long_read':
+            sa.recovery_full_length_protein_long_read(gtf_dict)
+            sa.find_orf()
+            sa.pseudo_orf_check()
+            sa.align_uniprot(tmhmm=tmhmm, software_path=software_path)
+        elif mode == 'find_full_length':
+            sa.recovery_full_length_protein()
+            sa.find_orf()
+            sa.orf_check(n_stride=n_stride)
+            sa.fake_align_uniprot(tmhmm=tmhmm, software_path=software_path)
+        else:   # short_read
+            sa.recovery_full_length_protein()
+            sa.find_orf()
+            sa.orf_check(n_stride=n_stride)
+            sa.align_uniprot(tmhmm=tmhmm, software_path=software_path)
+        out.append(sa)
+    return out
+
+
+def run(uids,outdir,prediction_mode='short_read',n_stride=2,gtf=None,tmhmm=False,software_path=None,serialize=True,cores=None):
     '''
     main function for run B antigen pipeline
 
@@ -618,52 +747,46 @@ def run(uids,outdir,prediction_mode='short_read',n_stride=2,gtf=None,tmhmm=False
     '''
     if not os.path.exists(outdir):
         os.mkdir(outdir)
-    results = []
-    if prediction_mode == 'short_read':
-        file_name = 'surface_antigen_sr.p'
-        for uid,score,df,ed,freq in tqdm(uids,total=len(uids)):
-            sa = SurfaceAntigen(uid,score,df,ed,freq,False)
-            sa.detect_type()
-            sa.retrieve_junction_seq()
-            sa.recovery_full_length_protein()
-            sa.find_orf()
-            sa.orf_check(n_stride=n_stride)
-            sa.align_uniprot(tmhmm=tmhmm,software_path=software_path)
-            results.append(sa)
-    elif prediction_mode == 'long_read':
-        file_name = 'surface_antigen_lr.p'
+    file_name = {'short_read': 'surface_antigen_sr.p', 'long_read': 'surface_antigen_lr.p',
+                 'find_full_length': 'surface_antigen_sr_ffl.p'}[prediction_mode]
+    if prediction_mode == 'long_read':
+        # module globals so the (forked) chunk workers inherit them copy-on-write
+        global gtf_dict, gtf_starts
         gtf_dict = process_est_or_long_read_with_id(gtf)
-        for uid,score,df,ed,freq in tqdm(uids,total=len(uids)):
-            sa = SurfaceAntigen(uid,score,df,ed,freq,False)
-            sa.detect_type()
-            sa.retrieve_junction_seq()
-            sa.recovery_full_length_protein_long_read(gtf_dict)  # change
-            sa.find_orf()
-            sa.pseudo_orf_check()  # change
-            sa.align_uniprot(tmhmm=tmhmm,software_path=software_path)
-            results.append(sa)
-    elif prediction_mode == 'find_full_length':
-        file_name = 'surface_antigen_sr_ffl.p'
-        for uid,score,df,ed,freq in tqdm(uids,total=len(uids)):
-            sa = SurfaceAntigen(uid,score,df,ed,freq,False)
-            sa.detect_type()
-            sa.retrieve_junction_seq()
-            sa.recovery_full_length_protein()
-            sa.find_orf()
-            sa.orf_check(n_stride=n_stride)
-            sa.fake_align_uniprot(tmhmm=tmhmm,software_path=software_path)
-            results.append(sa)
-    
+        gtf_starts = _GTF_STARTS_CACHE.get(os.path.abspath(gtf)) if isinstance(gtf, str) and os.path.exists(gtf) else None
+    if tmhmm:   # warm the tmhmm model in the parent so forked workers inherit it (no per-worker load)
+        try:
+            from .alignment import _load_tmhmm_model
+            _load_tmhmm_model()
+        except Exception:
+            pass
+    # Per-antigen processing is independent -> parallelize across cores (fork pool on posix,
+    # safe-serial fallback on macOS-without-flag / Windows via _parallel_apply). CONTIGUOUS
+    # chunks + in-order results preserve the exact original ordering -> byte-identical output.
+    import math
+    uids = list(uids)
+    if cores is None:
+        cores = mp.cpu_count()
+    k = max(1, min(cores, len(uids))) if uids else 1
+    sz = max(1, math.ceil(len(uids) / k))
+    chunks = [uids[i:i + sz] for i in range(0, len(uids), sz)]
+    from ..snaf import _parallel_apply
+    nested = _parallel_apply(_process_sa_chunk,
+                             [(c, prediction_mode, n_stride, tmhmm, software_path) for c in chunks], cores)
+    results = [sa for chunk in nested if chunk for sa in chunk]
+
     if serialize:
         with open(os.path.join(outdir,file_name),'wb') as f:
             pickle.dump(results,f)     
 
-    # remove scratch
+    # remove scratch (only the legacy TMHMM 2.0c binary writes this fasta; the
+    # pure-python tmhmm.py does not, so guard against its absence).
     if tmhmm:
         name = os.getpid()
-        int_file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)),'scratch','{}.fasta'.format(name))  
-        os.remove(int_file_path) 
-    
+        int_file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)),'scratch','{}.fasta'.format(name))
+        if os.path.exists(int_file_path):
+            os.remove(int_file_path)
+
     return results
 
 def batch_run(uid_list,cores,n_stride,tmhmm=False,software_path=None,serialize=False,outdir='.',name=None):
@@ -726,10 +849,29 @@ def process_est_or_long_read(gtf):
     return gtf_dict
 
 
-def process_est_or_long_read_with_id(gtf):
+_GTF_PARSE_CACHE = {}   # path -> parsed gtf_dict; the validation GTF is re-used across
+                        # every stringency x style x overlap pass, so parse it only once.
+
+_GTF_INDEX_VERSION = 2
+
+
+def _gtf_index_path(gtf):
+    '''Where the persistent parsed-GTF index lives. Default: next to the GTF (like a .fai/.tbi
+    sidecar). Overridable via SNAF_INDEX_DIR (keyed by GTF basename) when the reference dir is
+    read-only or shared.'''
+    d = os.environ.get('SNAF_INDEX_DIR')
+    if d:
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, os.path.basename(str(gtf)) + '.snaf_gtf_index.pkl')
+    return str(gtf) + '.snaf_gtf_index.pkl'
+
+
+def _parse_gtf_raw(gtf):
+    '''Parse a GTF into {chrom:{'+':[transcript,...],'-':[...]}} where each transcript is
+    [attrs,(start,end),(start,end),...]. Identical structure/order to the original parser.'''
     gtf_dict = {}
-    with open(gtf,'r') as f: 
-        transcript = -1  # interpret as the index of the last-processed transcript
+    with open(gtf,'r') as f:
+        transcript = -1  # index of the last-processed transcript
         for line in f:
             if transcript > -1:
                 lchrom, lsource, ltyp, lstart, lend, lscore, lstrand, lphase, lattrs = chrom, source, typ, start, end, score, strand, phase, attrs
@@ -738,16 +880,81 @@ def process_est_or_long_read_with_id(gtf):
                 if transcript == -1:
                     composition = [attrs]
                 if len(composition) > 1:
-                    gtf_dict.setdefault(lchrom,{'+':[],'-':[]})[lstrand].append(composition)    
-                    composition = [attrs] 
-                transcript += 1      
+                    gtf_dict.setdefault(lchrom,{'+':[],'-':[]})[lstrand].append(composition)
+                    composition = [attrs]
+                transcript += 1
             elif typ == 'exon':
                 composition.append((int(start),int(end)))
             else:
                 continue
     return gtf_dict
 
+
+def build_gtf_index(gtf, index_path=None, force=False):
+    '''Parse the GTF ONCE and persist the query structure to disk so future runs LOAD it (fast)
+    instead of re-parsing the multi-hundred-MB GTF. Transcripts are sorted by start per
+    (chrom,strand) -- the support query early-breaks on that order, so this both speeds the
+    query and hardens it against an unsorted GTF. Also stores a parallel per-(chrom,strand)
+    array of transcript starts for O(log n) bisect. One-time; returns index_path. Byte-safe
+    (atomic replace). Idempotent: skips rebuild when the index is newer than the GTF.'''
+    index_path = index_path or _gtf_index_path(gtf)
+    if (not force) and os.path.exists(index_path) and os.path.getmtime(index_path) >= os.path.getmtime(gtf):
+        return index_path
+    gtf_dict = _parse_gtf_raw(gtf)
+    starts = {}
+    for chrom, sd in gtf_dict.items():
+        starts[chrom] = {}
+        for strand in ('+', '-'):
+            sd[strand].sort(key=lambda t: int(t[1][0]))          # by first-exon start
+            starts[chrom][strand] = [int(t[1][0]) for t in sd[strand]]
+    tmp = '{}.tmp{}'.format(index_path, os.getpid())
+    with open(tmp, 'wb') as f:
+        pickle.dump({'version': _GTF_INDEX_VERSION, 'gtf_dict': gtf_dict, 'starts': starts},
+                    f, protocol=pickle.HIGHEST_PROTOCOL)
+    os.replace(tmp, index_path)
+    return index_path
+
+
+# per-(chrom,strand) sorted transcript-start arrays, keyed by abspath -> used by the support
+# query to bisect to the candidate range instead of scanning from index 0.
+_GTF_STARTS_CACHE = {}
+gtf_starts = None   # module global set alongside gtf_dict; enables the bisect fast-path below
+
+
+def process_est_or_long_read_with_id(gtf):
+    cache_key = os.path.abspath(gtf) if isinstance(gtf, str) and os.path.exists(gtf) else None
+    if cache_key is not None and cache_key in _GTF_PARSE_CACHE:
+        return _GTF_PARSE_CACHE[cache_key]
+    gtf_dict = None
+    starts = None
+    if cache_key is not None:
+        idx = _gtf_index_path(gtf)
+        if not (os.path.exists(idx) and os.path.getmtime(idx) >= os.path.getmtime(gtf)):
+            build_gtf_index(gtf, idx)                 # one-time build (or rebuild if stale)
+        try:
+            with open(idx, 'rb') as f:
+                obj = pickle.load(f)
+            if obj.get('version') == _GTF_INDEX_VERSION:
+                gtf_dict = obj['gtf_dict']; starts = obj.get('starts')
+        except Exception:
+            gtf_dict = None
+    if gtf_dict is None:                              # no writable index location -> parse in memory
+        gtf_dict = _parse_gtf_raw(gtf)
+    if cache_key is not None:
+        _GTF_PARSE_CACHE[cache_key] = gtf_dict
+        if starts is not None:
+            _GTF_STARTS_CACHE[cache_key] = starts
+    return gtf_dict
+
+_SUPPORT_CACHE = {}   # (uid, ORF-peptide, strict) -> (support_bool, transcript_attrs).
+                      # Deterministic given the (single) validation GTF, so memoizing it
+                      # removes the 6x redundant recompute across style x overlap passes.
+
+
 def is_support_by_est_or_long_read(sa,op,strict=True):
+    _key = (sa.uid, op, bool(strict))
+    if _key in _SUPPORT_CACHE:
+        return _SUPPORT_CACHE[_key]
     coord = uid_to_coord(sa.uid)
     start_coord, end_coord = coord.split(':')[1].split('(')[0].split('-')
     start_coord, end_coord = int(start_coord), int(end_coord)
@@ -757,17 +964,29 @@ def is_support_by_est_or_long_read(sa,op,strict=True):
     attrs = values[first_key]
     chrom = attrs[0]
     strand = attrs[1]
-    transcripts = gtf_dict[chrom][strand]   # the first item is attrs
+    transcripts = gtf_dict[chrom][strand]   # the first item is attrs; sorted by start
     candidate_transcripts = []
-    for transcript in transcripts:
-        transcript_start = int(transcript[1][0])
-        transcript_end = int(transcript[-1][-1])
-        if transcript_start > start_coord:
-            break
-        elif transcript_start < start_coord and transcript_end > end_coord:
-            candidate_transcripts.append(transcript)
-        else:
-            continue
+    _starts = gtf_starts.get(chrom, {}).get(strand) if gtf_starts is not None else None
+    if _starts is not None:
+        # Bisect to the transcripts starting at/-before start_coord (indices [0,hi)), then keep
+        # those that strictly contain [start_coord,end_coord]. Identical to the linear early-break
+        # scan below (which relies on the same sorted order) but O(log n + hi) not O(scan-from-0).
+        import bisect as _bisect
+        hi = _bisect.bisect_right(_starts, start_coord)
+        for i in range(hi):
+            transcript = transcripts[i]
+            if _starts[i] < start_coord and int(transcript[-1][-1]) > end_coord:
+                candidate_transcripts.append(transcript)
+    else:
+        for transcript in transcripts:
+            transcript_start = int(transcript[1][0])
+            transcript_end = int(transcript[-1][-1])
+            if transcript_start > start_coord:
+                break
+            elif transcript_start < start_coord and transcript_end > end_coord:
+                candidate_transcripts.append(transcript)
+            else:
+                continue
     return_value = False
     return_cand = None
     for cand in candidate_transcripts:
@@ -801,8 +1020,51 @@ def is_support_by_est_or_long_read(sa,op,strict=True):
                 return_value = True
                 return_cand = attrs
                 break
+    _SUPPORT_CACHE[_key] = (return_value, return_cand)
     return return_value, return_cand
-    
+
+
+def _support_prewarm_chunk(chunk):
+    '''Worker: compute is_support for a chunk of (sa, op, strict) -> {(uid,op,strict):(value,cand)}.'''
+    return {(sa.uid, op, strict): is_support_by_est_or_long_read(sa, op, strict) for sa, op, strict in chunk}
+
+
+def prewarm_support_cache(results, gtf, cores=None):
+    '''Parallel pre-pass: compute EVERY is_support (GTF long-read validation) result the
+    downstream stringency-4/5 passes will need, ONCE across cores, and fill the shared
+    _SUPPORT_CACHE. The subsequent (serial, memoized) generate_results passes are then all
+    cache hits -- this is the generate_full_results speedup. gtf_dict/gtf_starts are set here
+    so fork children inherit them (COW). Result-identical: it fills the same cache lazily.'''
+    if not results:
+        return
+    global gtf_dict, gtf_starts
+    if gtf is not None:
+        gtf_dict = process_est_or_long_read_with_id(gtf)
+        gtf_starts = _GTF_STARTS_CACHE.get(os.path.abspath(gtf)) if isinstance(gtf, str) and os.path.exists(gtf) else None
+    seen = set(); tasks = []
+    for sa in results:
+        if len(sa.comments) > 0:
+            continue
+        for op, n, t, a in zip(sa.orfp, sa.nmd, sa.translatability, sa.alignment):
+            if n == '#' and t == '#' and a == True:
+                for strict in (True, False):     # str5 uses strict=True, str4 strict=False
+                    key = (sa.uid, op, strict)
+                    if key in _SUPPORT_CACHE or key in seen:
+                        continue
+                    seen.add(key); tasks.append((sa, op, strict))
+    if not tasks:
+        return
+    import math
+    if cores is None:
+        cores = mp.cpu_count()
+    k = max(1, min(cores, len(tasks))); sz = max(1, math.ceil(len(tasks) / k))
+    chunks = [tasks[i:i + sz] for i in range(0, len(tasks), sz)]
+    from ..snaf import _parallel_apply
+    for d in _parallel_apply(_support_prewarm_chunk, [(c,) for c in chunks], cores):
+        if d:
+            _SUPPORT_CACHE.update(d)
+
+
 def report_candidates(pickle_path,candidates_path,validation_path,freq_df_path,mode,outdir='.',name=None):
     '''
     report SNAF-B antigen candidates, a more organized and tidy file format for all the candidate.
@@ -942,14 +1204,18 @@ def fake_generate_results(pickle_path,strigency=3,outdir='.',gtf=None,long_read=
     if not os.path.exists(outdir):
         os.mkdir(outdir)
     if gtf is not None:
-        global gtf_dict
+        global gtf_dict, gtf_starts
         gtf_dict = process_est_or_long_read_with_id(gtf)
+        gtf_starts = _GTF_STARTS_CACHE.get(os.path.abspath(gtf)) if isinstance(gtf, str) and os.path.exists(gtf) else None
     if overlap_extracellular:   # have to load some database
         global ensg2ensps
         global ensp2regions
-        ensg2ensps = pd.Series(index=df_exonlist['EnsGID'].values,data=df_exonlist['EnsPID'].values).groupby(level=0).apply(lambda x:x.tolist()).to_dict()
-        df_topology['region'] = [(int(start),int(end)) for start,end in zip(df_topology['genomic_start'],df_topology['genomic_stop'])]
-        ensp2regions = df_topology.groupby(by='ensembl_prot')['region'].apply(lambda x:x.tolist()).to_dict()
+        # These depend only on the static globals from initialize(); build once and
+        # reuse across every stringency x style x overlap pass.
+        if globals().get('ensg2ensps') is None or globals().get('ensp2regions') is None:
+            ensg2ensps = pd.Series(index=df_exonlist['EnsGID'].values,data=df_exonlist['EnsPID'].values).groupby(level=0).apply(lambda x:x.tolist()).to_dict()
+            df_topology['region'] = [(int(start),int(end)) for start,end in zip(df_topology['genomic_start'],df_topology['genomic_stop'])]
+            ensp2regions = df_topology.groupby(by='ensembl_prot')['region'].apply(lambda x:x.tolist()).to_dict()
     with open(pickle_path,'rb') as f:
         results = pickle.load(f)
     count_candidates = 0
@@ -1024,6 +1290,58 @@ def fake_generate_results(pickle_path,strigency=3,outdir='.',gtf=None,long_read=
 
 
 
+def _eval_sa_for_generate(sa, strigency, style, overlap_extracellular):
+    '''Per-antigen evaluation for generate_results, as a pure function of sa + the (fork-
+    inherited) globals (dict_uni_fa, gtf_dict/gtf_starts, ensg2ensps/ensp2regions). Returns
+    ('further', text) | ('candidate', tuple) | ('none', None). Byte-identical to the original
+    inline loop body (is_support is the expensive GTF-validation step being parallelized).'''
+    if len(sa.comments) > 0:
+        return ('further', str(sa))
+    ensg = sa.uid.split(':')[0]
+    ref_seq = list(dict_uni_fa[ensg].items())[0][1]
+    valid_indices = []
+    sends = []
+    cand_attrs = None
+    for i, (op, n, t, a) in enumerate(zip(sa.orfp, sa.nmd, sa.translatability, sa.alignment)):
+        if strigency == 5:
+            if n == '#' and t == '#' and a == True:
+                value, cand_attrs = is_support_by_est_or_long_read(sa, op, strict=True)
+                if value:
+                    send = send_or_not(op, ref_seq, style, overlap_extracellular, sa)
+                    sends.append(send)
+                    if send: valid_indices.append(i)
+        elif strigency == 4:
+            if n == '#' and t == '#' and a == True:
+                value, cand_attrs = is_support_by_est_or_long_read(sa, op, strict=False)
+                if value:
+                    send = send_or_not(op, ref_seq, style, overlap_extracellular, sa)
+                    sends.append(send)
+                    if send: valid_indices.append(i)
+        elif strigency == 3:
+            if n == '#' and t == '#' and a == True:
+                send = send_or_not(op, ref_seq, style, overlap_extracellular, sa)
+                sends.append(send)
+                if send:
+                    valid_indices.append(i); cand_attrs = None
+        elif strigency == 2:
+            if t == '#' and a == True:
+                send = compare_length(op, ref_seq, style)
+                if send:
+                    valid_indices.append(i); cand_attrs = None
+        elif strigency == 1:
+            if a == True:
+                send = compare_length(op, ref_seq, style)
+                if send:
+                    valid_indices.append(i); cand_attrs = None
+    if any(sends):
+        return ('candidate', (sa, sa.score, sa.freq, len(valid_indices), sa.uid, valid_indices, cand_attrs))
+    return ('none', None)
+
+
+def _eval_sa_chunk_for_generate(chunk, strigency, style, overlap_extracellular):
+    return [_eval_sa_for_generate(sa, strigency, style, overlap_extracellular) for sa in chunk]
+
+
 def generate_results(pickle_path,strigency=3,outdir='.',gtf=None,long_read=False,style=None,overlap_extracellular=False):
     '''
     Generate candidates for B antigen
@@ -1053,69 +1371,35 @@ def generate_results(pickle_path,strigency=3,outdir='.',gtf=None,long_read=False
     if not os.path.exists(outdir):
         os.mkdir(outdir)
     if gtf is not None:
-        global gtf_dict
+        global gtf_dict, gtf_starts
         gtf_dict = process_est_or_long_read_with_id(gtf)
+        gtf_starts = _GTF_STARTS_CACHE.get(os.path.abspath(gtf)) if isinstance(gtf, str) and os.path.exists(gtf) else None
     if overlap_extracellular:   # have to load some database
         global ensg2ensps
         global ensp2regions
-        ensg2ensps = pd.Series(index=df_exonlist['EnsGID'].values,data=df_exonlist['EnsPID'].values).groupby(level=0).apply(lambda x:x.tolist()).to_dict()
-        df_topology['region'] = [(int(start),int(end)) for start,end in zip(df_topology['genomic_start'],df_topology['genomic_stop'])]
-        ensp2regions = df_topology.groupby(by='ensembl_prot')['region'].apply(lambda x:x.tolist()).to_dict()
+        # These depend only on the static globals from initialize(); build once and
+        # reuse across every stringency x style x overlap pass.
+        if globals().get('ensg2ensps') is None or globals().get('ensp2regions') is None:
+            ensg2ensps = pd.Series(index=df_exonlist['EnsGID'].values,data=df_exonlist['EnsPID'].values).groupby(level=0).apply(lambda x:x.tolist()).to_dict()
+            df_topology['region'] = [(int(start),int(end)) for start,end in zip(df_topology['genomic_start'],df_topology['genomic_stop'])]
+            ensp2regions = df_topology.groupby(by='ensembl_prot')['region'].apply(lambda x:x.tolist()).to_dict()
     with open(pickle_path,'rb') as f:
         results = pickle.load(f)
     count_candidates = 0
     count_further = 0
     candidates = []
+    # Per-sa evaluation, serial: is_support results are MEMOIZED in _SUPPORT_CACHE, which is
+    # pre-warmed IN PARALLEL by generate_full_results before the (many) stringency x style x
+    # overlap passes -- so this loop is cache-hit fast. (Parallelizing per-call instead would
+    # give each fork worker its own cache and lose the cross-call reuse -> slower.)
     with open(os.path.join(outdir,'further.txt'),'w') as f2:
-        for sa in results:
-            uid = sa.uid
-            ensg = sa.uid.split(':')[0]
-            ref_seq = list(dict_uni_fa[ensg].items())[0][1]
-            valid_indices = []
-            if len(sa.comments) > 0:
-                print(sa,file=f2)
+        for kind, payload in (_eval_sa_for_generate(sa, strigency, style, overlap_extracellular) for sa in results):
+            if kind == 'further':
+                print(payload, file=f2)
                 count_further += 1
-            else:
-                sends = []
-                for i,(op,n,t,a) in enumerate(zip(sa.orfp,sa.nmd,sa.translatability,sa.alignment)):
-                    if strigency == 5:
-                        if n == '#' and t == '#' and a==True:
-                            value,cand_attrs = is_support_by_est_or_long_read(sa,op,strict=True)
-                            if value:
-                                send = send_or_not(op,ref_seq,style,overlap_extracellular,sa)
-                                sends.append(send)
-                                if send:
-                                    valid_indices.append(i)
-                    elif strigency == 4:
-                        if n == '#' and t == '#' and a==True:
-                            value,cand_attrs = is_support_by_est_or_long_read(sa,op,strict=False)
-                            if value:
-                                send = send_or_not(op,ref_seq,style,overlap_extracellular,sa)
-                                sends.append(send)
-                                if send:
-                                    valid_indices.append(i)
-                    elif strigency == 3:
-                        if n == '#' and t == '#' and a==True:
-                            send = send_or_not(op,ref_seq,style,overlap_extracellular,sa)
-                            sends.append(send)
-                            if send:
-                                valid_indices.append(i)
-                                cand_attrs = None
-                    elif strigency == 2:    # out of development
-                        if t == '#' and a==True:
-                            send = compare_length(op,ref_seq,style)
-                            if send:
-                                valid_indices.append(i)
-                                cand_attrs = None
-                    elif strigency == 1:   # out of development
-                        if a==True:
-                            send = compare_length(op,ref_seq,style)
-                            if send:
-                                valid_indices.append(i)
-                                cand_attrs = None
-                if any(sends):
-                    candidates.append((sa,sa.score,sa.freq,len(valid_indices),sa.uid,valid_indices,cand_attrs))
-                    count_candidates += 1
+            elif kind == 'candidate':
+                candidates.append(payload)
+                count_candidates += 1
     if count_candidates > 0:
         sorted_candidates = sorted(candidates,key=lambda x:(x[1],-x[2],-x[3]),reverse=False)
         uid_list = list(list(zip(*sorted_candidates))[4])
@@ -1134,24 +1418,43 @@ def generate_results(pickle_path,strigency=3,outdir='.',gtf=None,long_read=False
     return count_candidates,count_further
 
 
+_ENSG_SYMBOL_CACHE = {}   # ensg -> symbol; mygene is a WEB call and generate_full_results
+                          # looks up the same candidate genes across ~11 stringency passes.
+
+
 def ensemblgene_to_symbol(query,species):
-    '''
+    '''Map Ensembl gene IDs to symbols. Memoized (mygene is a WEB service and was the
+    generate_full_results bottleneck -- the same candidate genes are queried across every
+    stringency x style x overlap pass). Honors SNAF_OFFLINE=1 (skip the network entirely,
+    return the Ensembl IDs). On any failure it degrades to the Ensembl IDs, so results are
+    still produced fully offline.
+
     Examples::
-        from sctriangulate.preprocessing import GeneConvert
-        converted_list = GeneConvert.ensemblgene_to_symbol(['ENSG00000010404','ENSG00000010505'],species='human')
+        converted_list = ensemblgene_to_symbol(['ENSG00000010404','ENSG00000010505'],species='human')
     '''
-    # assume query is a list, will also return a list
-    import mygene
-    mg = mygene.MyGeneInfo()
-    out = mg.querymany(query,scopes='ensemblgene',fileds='symbol',species=species,returnall=True,as_dataframe=True,df_index=True)
-    result = out['out']['symbol'].fillna('unknown_gene').tolist()
-    try:
-        assert len(query) == len(result)
-    except AssertionError:    # have duplicate results
-        df = out['out']
-        df_unique = df.loc[~df.index.duplicated(),:]
-        result = df_unique['symbol'].fillna('unknown_gene').tolist()
-    return result    
+    import logging
+    _logger = logging.getLogger(__name__)
+    query = list(query)
+    # Offline / fully-cached fast path: no network call.
+    if os.environ.get('SNAF_OFFLINE', '0') == '1':
+        return [_ENSG_SYMBOL_CACHE.get(g, g) for g in query]
+    missing = [g for g in query if g not in _ENSG_SYMBOL_CACHE]
+    if missing:
+        try:
+            import mygene
+            mg = mygene.MyGeneInfo()
+            out = mg.querymany(missing,scopes='ensemblgene',fields='symbol',species=species,returnall=True,as_dataframe=True,df_index=True)
+            df = out['out']
+            df = df.loc[~df.index.duplicated(),:]
+            sym = df['symbol'].fillna('unknown_gene').to_dict()
+            for g in missing:
+                _ENSG_SYMBOL_CACHE[g] = sym.get(g, g)
+        except Exception as e:
+            _logger.warning("SNAF-B: gene-symbol lookup unavailable (%s); using Ensembl gene IDs as "
+                            "symbols. For symbols install mygene / enable network: pip install mygene", e)
+            for g in missing:
+                _ENSG_SYMBOL_CACHE.setdefault(g, g)
+    return [_ENSG_SYMBOL_CACHE.get(g, g) for g in query]
     
 
 def get_exon_table(ensgid,outdir='.'):
@@ -1463,8 +1766,10 @@ class SurfaceAntigen(object):
     def align_uniprot(self,tmhmm,software_path=None):
         results = alignment_to_uniprot(self.orfp,self.uid,dict_uni_fa,tmhmm,software_path)
         self.alignment = results
-        if tmhmm:
-            subprocess.run('rm -r ./TMHMM_*',shell=True)  
+        # Only the legacy TMHMM 2.0c binary leaves ./TMHMM_* scratch dirs; the pure-python
+        # tmhmm.py does not, so only clean up (quietly) when the binary path was used.
+        if tmhmm and software_path:
+            subprocess.run('rm -r ./TMHMM_* 2>/dev/null',shell=True)
 
     def fake_align_uniprot(self,tmhmm,software_path=None):
         # no TMHMM at all
@@ -1599,17 +1904,24 @@ def subexon_tran(subexon,EnsID,flag):  # flag either site1 or site2
     return exon_seq
 
 def retrieveSeqFromUCSCapi(chr_,start,end):
-    url = 'http://genome.ucsc.edu/cgi-bin/das/hg38/dna?segment={0}:{1},{2}'.format(chr_,start,end)
-    response = requests.get(url)
-    status_code = response.status_code
-    assert status_code == 200
+    # Offline-first: reuse the T-antigen resolver, which reads a local genome FASTA when
+    # one is configured (set_genome_fasta / SNAF_GENOME_FASTA), forbids the network under
+    # SNAF_OFFLINE=1, and only falls back to the UCSC DAS web service otherwise. It returns
+    # the '#'*10 placeholder on any failure and never raises.
     try:
-        my_dict = xmltodict.parse(response.content)
-    except:
-        exon_seq = '#' * 10  # indicating the UCSC doesn't work
-        return exon_seq
-    exon_seq = my_dict['DASDNA']['SEQUENCE']['DNA']['#text'].replace('\n','').upper()
-    return exon_seq
+        from ..snaf import retrieveSeqFromUCSCapi as _resolve
+        return _resolve(chr_, start, end)
+    except Exception:
+        pass
+    # Last-resort local behavior (rarely reached): honor SNAF_OFFLINE, degrade gracefully.
+    try:
+        if os.environ.get('SNAF_OFFLINE', '0') == '1':
+            return '#' * 10
+        response = requests.get('http://genome.ucsc.edu/cgi-bin/das/hg38/dna?segment={0}:{1},{2}'.format(chr_, start, end), timeout=20)
+        assert response.status_code == 200
+        return xmltodict.parse(response.content)['DASDNA']['SEQUENCE']['DNA']['#text'].replace('\n', '').upper()
+    except Exception:
+        return '#' * 10
 
 def utrAttrs(EnsID):  # try to get U0.1's attribute, but dict_exonCoords doesn't have, so we just wanna get the first entry for its EnsGID
     exonDict = dict_exonCoords[EnsID] 

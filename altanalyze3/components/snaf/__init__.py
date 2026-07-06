@@ -1,14 +1,26 @@
 from .snaf import snaf_configuration,NeoJunction,JunctionCountMatrixQuery,uid_to_coord, add_coord_frequency_table, enhance_frequency_table
-from .gtex import gtex_configuration, tumor_specificity, add_tumor_specificity_frequency_table, get_all_normal_h5ad
+from .gtex import gtex_configuration, tumor_specificity, tumor_specificity_batch, add_tumor_specificity_frequency_table, get_all_normal_h5ad
 from .gtex_viewer import gtex_viewer_configuration, gtex_visual_combine, gtex_visual_subplots, gtex_visual_combine_plotly, gtex_visual_per_tissue_count
 from .proteomics import *
 from .downstream import *
 from datetime import datetime,date
-from .dash_app import run_dash_T_antigen,run_pweblogo
+# dash_app / bayests are optional (dash, torch+pyro respectively); guard so the
+# core package imports without them.
+try:
+    from .dash_app import run_dash_T_antigen,run_pweblogo
+except Exception:
+    run_dash_T_antigen = run_pweblogo = None
+try:
+    from . import bayests
+    from .bayests import compute_bayests_sigma
+except Exception:
+    bayests = None
+    compute_bayests_sigma = None
 import os,sys
 
 def initialize(df,db_dir,gtex_mode='count',software_path=None,binding_method=None,t_min=20,n_max=3,
-               normal_cutoff=5, tumor_cutoff=20, normal_prevalance_cutoff=0.01, tumor_prevalance_cutoff=0.1, add_control=None):
+               normal_cutoff=5, tumor_cutoff=20, normal_prevalance_cutoff=0.01, tumor_prevalance_cutoff=0.1, add_control=None,
+               genome_fasta=None, gtex_db=None, download_ref=False, control_stats_path=None):
     '''
     Setting up global variable for running the program
 
@@ -39,17 +51,30 @@ def initialize(df,db_dir,gtex_mode='count',software_path=None,binding_method=Non
         snaf.initialize(db_dir=db_dir,gtex_mode='count',binding_method='MHCflurry',software_path=None)
 
     '''
+    from .reference import ensure_reference
     print('{} {} starting initialization'.format(date.today(),datetime.now().strftime('%H:%M:%S')))
-    exon_table = os.path.join(db_dir,'Alt91_db','Hs_Ensembl_exon_add_col.txt')
-    transcript_db = os.path.join(db_dir,'Alt91_db','mRNA-ExonIDs.txt')
-    fasta = os.path.join(db_dir,'Alt91_db','Hs_gene-seq-2000_flank.fa')  # 2000 only affect the query_from_dict_fa function
-    if gtex_mode == 'count':
-        gtex_db = os.path.join(db_dir,'controls','GTEx_junction_counts.h5ad')
-        # gtex_db = '/data/salomonis2/LabFiles/Frank-Li/neoantigen/revision/ts/gene/gtex_count.h5ad'
-    elif gtex_mode == 'psi':
-        gtex_db = os.path.join(db_dir,'controls','GTEx_junction_psi.h5ad')
-    snaf_configuration(exon_table,transcript_db,db_dir,fasta,software_path,binding_method)
-    adata = gtex_configuration(df,gtex_db,t_min,n_max,normal_cutoff, tumor_cutoff, normal_prevalance_cutoff, tumor_prevalance_cutoff, add_control)
+    # Resolve (and optionally download) the reference bundle. Fails LOUDLY with the
+    # exact fix command if missing -- never a silent skip. Also tolerates the
+    # tarball's top-level data/ nesting, so --db_dir can point at either level.
+    root = ensure_reference(db_dir, gtex_mode=gtex_mode, download=download_ref)
+    exon_table = os.path.join(root,'Alt91_db','Hs_Ensembl_exon_add_col.txt')
+    transcript_db = os.path.join(root,'Alt91_db','mRNA-ExonIDs.txt')
+    fasta = os.path.join(root,'Alt91_db','Hs_gene-seq-2000_flank.fa')  # 2000 only affect the query_from_dict_fa function
+    # Honor an explicit --gtex_db override (previously computed by the CLI but
+    # silently discarded); otherwise derive it from the resolved reference root.
+    if gtex_db is None:
+        if gtex_mode == 'count':
+            gtex_db = os.path.join(root,'controls','GTEx_junction_counts.h5ad')
+        elif gtex_mode == 'psi':
+            gtex_db = os.path.join(root,'controls','GTEx_junction_psi.h5ad')
+    # Validate every referenced file up front so a missing/typo'd path errors here
+    # with a clear message instead of deep inside anndata/pandas.
+    for label,p in (('exon_table',exon_table),('transcript_db',transcript_db),
+                    ('gene-flank fasta',fasta),('GTEx control h5ad',gtex_db)):
+        if not os.path.exists(p):
+            raise FileNotFoundError('SNAF {}: required reference file not found: {}'.format(label,p))
+    snaf_configuration(exon_table,transcript_db,root,fasta,software_path,binding_method,genome_fasta=genome_fasta)
+    adata = gtex_configuration(df,gtex_db,t_min,n_max,normal_cutoff, tumor_cutoff, normal_prevalance_cutoff, tumor_prevalance_cutoff, add_control, control_stats_path=control_stats_path)
     gtex_viewer_configuration(adata)
     print('{} {} finishing initialization'.format(date.today(),datetime.now().strftime('%H:%M:%S')))
 

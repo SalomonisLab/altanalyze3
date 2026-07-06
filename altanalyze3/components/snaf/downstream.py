@@ -770,8 +770,25 @@ def survival_analysis(burden,survival,n,stratification_plot,survival_plot,
     return burden_output,quantiles
 
 
+def _prepare_report_candidates(jcmq, df, remove_quote=True):
+    '''Sample-INDEPENDENT setup for report_candidates, computed ONCE and reused across every
+    sample. The per-sample call otherwise repeats df.copy + samples literal_eval + per-column
+    to_dict + uid->pos build, making the whole candidate report O(samples x neojunctions);
+    hoisting this makes it O(neojunctions) + O(samples x matching_rows). Byte-identical.'''
+    df = df.copy()
+    from ast import literal_eval
+    if remove_quote:
+        df['samples'] = [literal_eval(item) for item in df['samples']]
+    df_score = df.filter(like='tumor_specificity', axis=1)
+    score_dict = {}
+    for col in df_score.columns.tolist() + ['n_sample', 'coord', 'symbol']:
+        score_dict[col] = df[col].to_dict()
+    uid_to_pos = {u: i for i, u in enumerate(jcmq.subset.index.tolist())}
+    return {'df': df, 'score_dict': score_dict, 'uid_to_pos': uid_to_pos}
+
+
 def report_candidates(jcmq,df,sample,outdir,remove_quote=True,metrics={'netMHCpan_el':'binding_affinity','deepimmuno_immunogenicity':'immunogenicity'},
-                      criterion=[('netMHCpan_el',0,'<=',2),('deepimmuno_immunogenicity',1,'==','True'),]):
+                      criterion=[('netMHCpan_el',0,'<=',2),('deepimmuno_immunogenicity',1,'==','True'),],prepared=None):
     '''
     this function will report a txt file for all the T antigen candidate for a specific tumor sample.
 
@@ -806,22 +823,27 @@ def report_candidates(jcmq,df,sample,outdir,remove_quote=True,metrics={'netMHCpa
     '''
     if not os.path.exists(outdir):
         os.mkdir(outdir)
-    df = df.copy()
-    from ast import literal_eval
-    if remove_quote:
-        df['samples'] = [literal_eval(item) for item in df['samples']]
-    # build dict for retrieving specificity scores and occurence
-    df_score = df.filter(like='tumor_specificity',axis=1)
-    score_dict = {}   # {tumor_specificity_mle:{aa1_uid1:0.5,aa2_uid2:0.6},tumor_specifity_bayesian:{}...}
-    for col in df_score.columns.tolist() + ['n_sample','coord','symbol']:
-        tmp = df[col].to_dict()
-        score_dict[col] = tmp
+    # Sample-INDEPENDENT setup (df copy + samples literal_eval + score_dict + uid_to_pos) is
+    # hoisted into `prepared` so the caller computes it ONCE across all samples instead of per
+    # sample (O(samples x neojunctions) -> O(neojunctions)). Computed here when called standalone.
+    if prepared is None:
+        prepared = _prepare_report_candidates(jcmq, df, remove_quote)
+    df = prepared['df']
+    score_dict = prepared['score_dict']
     # start to process jcmq
     junction_count_dict = jcmq.junction_count_matrix[sample].to_dict()
     col_index = jcmq.subset.columns.tolist().index(sample)
     results = jcmq.results[0]
     hlas = jcmq.results[1]
     selected_hla = hlas[col_index]
+    # Precompute uid -> row position ONCE (the original rebuilt the index list and did a
+    # linear .index() per candidate row => O(rows x junctions)). And memoize the per-uid
+    # HLA/criterion-filtered EnhancedPeptides: filter_based_on_hla/criterion return fresh
+    # objects and never mutate the shared nj, so no deepcopy is needed and the result is
+    # constant across the many peptides that share a junction. Byte-identical output.
+    uid_to_pos = prepared['uid_to_pos']
+    filtered_ep_cache = {}    # uid -> HLA-filtered EnhancedPeptides (per-sample: depends on selected_hla)
+    criterion_ep_cache = {}   # uid -> criterion-filtered EnhancedPeptides
     with open(os.path.join(outdir,'T_antigen_candidates_{}.txt'.format(sample)),'w') as f:
         f.write('sample\tpeptide\tuid\tjunction_count\tphase\tevidences\thla\t')
         metrics_stream = '\t'.join(list(metrics.values())) + '\t'
@@ -834,17 +856,19 @@ def report_candidates(jcmq,df,sample,outdir,remove_quote=True,metrics={'netMHCpa
                 aa,uid = item.split(',')
                 jc = junction_count_dict[uid]
                 stream += '{}\t{}\t{}\t'.format(aa,uid,jc)
-                row_index = jcmq.subset.index.tolist().index(uid)
-                nj = deepcopy(results[row_index])
-                nj.enhanced_peptides = nj.enhanced_peptides.filter_based_on_hla(selected_hla=selected_hla)
-                ep = nj.enhanced_peptides.filter_based_on_criterion(criterion,True)  # only report valid hla
+                filtered_ep = filtered_ep_cache.get(uid)
+                if filtered_ep is None:
+                    filtered_ep = results[uid_to_pos[uid]].enhanced_peptides.filter_based_on_hla(selected_hla=selected_hla)
+                    filtered_ep_cache[uid] = filtered_ep
+                    criterion_ep_cache[uid] = filtered_ep.filter_based_on_criterion(criterion,True)  # only report valid hla
+                ep = criterion_ep_cache[uid]
                 origin = ep[len(aa)][aa]['origin']
                 stream += '{}\t{}\t'.format(origin[2],origin[3])  # phase, evidences
                 for hla in ep[len(aa)][aa].keys():
                     if hla != 'origin':
                         stream += '{}\t'.format(hla)
                         for k,v in metrics.items():
-                            s = nj.enhanced_peptides[len(aa)][aa][hla][k][0]
+                            s = filtered_ep[len(aa)][aa][hla][k][0]
                             stream += '{}\t'.format(s)
                         for k,v in score_dict.items():
                             s = v[item]
@@ -910,25 +934,65 @@ def reformat_frequency_table(df,remove_quote=True):
     return result
         
 
+# process-level (in-memory) memo of ENSG -> symbol, keyed by species (so a multi-species
+# process can't cross-contaminate the per-species disk caches). Shared across every call
+# within one run (the 4 enhance_frequency_table calls query heavily overlapping gene sets).
+_ENSG_SYMBOL_MEMO = {}   # species -> {ensg: symbol}
+
+def _ensg_symbol_cache_path(species):
+    cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
+    os.makedirs(cache_dir, exist_ok=True)
+    return os.path.join(cache_dir, 'ensemblgene_to_symbol_{}_cache.json'.format(species))
+
 def ensemblgene_to_symbol(query,species):
     '''
     Examples::
         from sctriangulate.preprocessing import GeneConvert
         converted_list = GeneConvert.ensemblgene_to_symbol(['ENSG00000010404','ENSG00000010505'],species='human')
+
+    Lossless speedup vs. the original: the ENSG -> symbol answer for a given gene is
+    deterministic, so we (1) query each unique ENSG at most once (the SNAF frequency
+    tables repeat the same gene across many peptides), (2) memoize in-process so the 4
+    enhance_frequency_table calls share results, and (3) persist a per-species JSON
+    cache under the package data/ dir so repeat runs are instant with no network. The
+    symbol returned for any ENSG is byte-identical to a direct mygene.querymany call
+    (same first-hit-per-gene rule, same 'unknown_gene' fill).
     '''
     # assume query is a list, will also return a list
-    import mygene
-    mg = mygene.MyGeneInfo()
-    out = mg.querymany(query,scopes='ensemblgene',fileds='symbol',species=species,returnall=True,as_dataframe=True,df_index=True)
-
-    df = out['out']
-    df_unique = df.loc[~df.index.duplicated(),:]
-    df_unique['symbol'].fillna('unknown_gene',inplace=True)
-    mapping = df_unique['symbol'].to_dict()
+    import json
+    memo = _ENSG_SYMBOL_MEMO.setdefault(species, {})
+    cache_path = _ensg_symbol_cache_path(species)
+    # seed the in-memory memo from the on-disk cache once
+    if not memo and os.path.exists(cache_path):
+        try:
+            with open(cache_path) as f:
+                memo.update(json.load(f))
+        except Exception:
+            pass
+    # only genes we have never resolved need to be queried (dedup + cache miss)
+    todo = list(dict.fromkeys([g for g in query if g not in memo]))
+    if todo:
+        import mygene
+        mg = mygene.MyGeneInfo()
+        out = mg.querymany(todo,scopes='ensemblgene',fileds='symbol',species=species,returnall=True,as_dataframe=True,df_index=True)
+        df = out['out']
+        df_unique = df.loc[~df.index.duplicated(),:]
+        df_unique['symbol'].fillna('unknown_gene',inplace=True)
+        mapping = df_unique['symbol'].to_dict()
+        for g in todo:
+            # missing key can only happen if mygene dropped a term; fall back to
+            # 'unknown_gene' (the same value fillna would have produced).
+            memo[g] = mapping.get(g, 'unknown_gene')
+        # persist the enlarged cache for future runs
+        try:
+            with open(cache_path, 'w') as f:
+                json.dump(memo, f)
+        except Exception:
+            pass
 
     result = []
     for item in query:
-        result.append(mapping[item])
+        result.append(memo[item])
 
     return result
 

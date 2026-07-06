@@ -6,9 +6,9 @@ group-based differential analysis in a dedicated Differential workspace.
 
 Full walkthrough video:
 
-[Watch the full cellHarmony-web walkthrough on Vimeo](https://vimeo.com/manage/videos/1183088658/01170fe26e)
+[Watch the full cellHarmony-web walkthrough on Vimeo](https://vimeo.com/1179728118/c5e0c39d24)
 
-[![cellHarmony web walkthrough preview](../../../../docs/cellHarmony-web.png)](https://vimeo.com/manage/videos/1183088658/01170fe26e)
+[![cellHarmony web walkthrough preview](../../../../docs/cellHarmony-web.png)](https://vimeo.com/1179728118/c5e0c39d24)
 
 Additional detailed documentation:
 

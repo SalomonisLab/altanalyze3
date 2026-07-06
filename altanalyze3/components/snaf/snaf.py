@@ -23,6 +23,11 @@ from tqdm import tqdm
 from itertools import compress
 from ast import literal_eval
 from bisect import bisect, bisect_left
+import operator as _operator
+# Operator lookup for filter_based_on_criterion -- replaces a per-item eval() (the biggest
+# single cost in candidate filtering) with a direct, byte-identical comparison.
+_CRITERION_OPS = {'==': _operator.eq, '!=': _operator.ne, '<': _operator.lt,
+                  '<=': _operator.le, '>': _operator.gt, '>=': _operator.ge}
 
 
 # for biopython, pip install biopython
@@ -31,7 +36,13 @@ from Bio.Seq import Seq
 
 # other modules
 from .binding import run_netMHCpan,run_MHCflurry
-from .deepimmuno import run_deepimmuno
+# deepimmuno pulls in tensorflow, which is heavy and not always installable on
+# macOS/Windows. Import it lazily (only the immunogenicity step needs it) so the
+# rest of SNAF -- and `import snaf` -- works without tensorflow.
+try:
+    from .deepimmuno import run_deepimmuno
+except Exception:
+    run_deepimmuno = None
 from .data_io import *
 from .visualize import *
 from .gtex import *
@@ -45,8 +56,90 @@ mpl.rcParams['ps.fonttype'] = 42
 mpl.rcParams['font.family'] = 'Arial'
 
 
+# ---------------------------------------------------------------------------
+# Cross-platform parallelism.
+#
+# The worker functions below (each_chunk_func, show_neoantigen_*_single_run)
+# read module globals that snaf_configuration()/gtex_configuration() populate at
+# RUNTIME (dict_fa, dict_exonCoords, adata, ...). Under the 'fork' start method
+# those globals are inherited for free. macOS (since Py3.8) and Windows default
+# to 'spawn', where the child re-imports the module and the runtime globals are
+# undefined -> the workers crash. macOS still *supports* fork, so we explicitly
+# use a fork context there (and on Linux). On Windows, where fork does not exist,
+# we fall back to a correct serial map (slower, but works everywhere).
+# ---------------------------------------------------------------------------
+_DARWIN_FORK_WARNED = False
+
+
+def ensure_darwin_fork_safety():
+    '''On macOS, guarantee OBJC_DISABLE_INITIALIZE_FORK_SAFETY is in the ENVIRONMENT by
+    re-exec'ing the process once if it isn't. This must be done before the Obj-C runtime /
+    TensorFlow / Accelerate initialize -- setting os.environ at runtime is too late (libobjc
+    already read the flag at interpreter startup), which is why fork children otherwise abort
+    with "objc ... Crashing instead" (or deadlock). No-op off macOS or if already set. Call
+    at a CLI entry point BEFORE any heavy import.'''
+    if sys.platform == 'darwin' and os.environ.get('OBJC_DISABLE_INITIALIZE_FORK_SAFETY') != 'YES':
+        os.environ['OBJC_DISABLE_INITIALIZE_FORK_SAFETY'] = 'YES'
+        os.execv(sys.executable, [sys.executable] + sys.argv)   # restart clean with the flag set
+
+
+def _mp_context():
+    try:
+        if 'fork' in mp.get_all_start_methods():
+            # macOS: once an Obj-C framework (tensorflow/mhcflurry/Accelerate) has spun up
+            # threads in the parent, fork() makes the child abort ("+[__NSCFConstantString
+            # initialize] ... Crashing instead") or deadlock. The ONLY reliable guard is
+            # OBJC_DISABLE_INITIALIZE_FORK_SAFETY being in the environment BEFORE the process
+            # started (setting it now is too late). The CLI re-execs to ensure this; a bare
+            # library import may not have it, so fall back to SAFE serial instead of crashing.
+            if sys.platform == 'darwin' and os.environ.get('OBJC_DISABLE_INITIALIZE_FORK_SAFETY') != 'YES':
+                global _DARWIN_FORK_WARNED
+                if not _DARWIN_FORK_WARNED:
+                    _DARWIN_FORK_WARNED = True
+                    print('[SNAF] macOS: parallel binding/immunogenicity disabled (running SERIALLY, '
+                          'safe but slower). For the parallel speedup, start Python with '
+                          'OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES set in the environment before launch '
+                          '(the `altanalyze3 snaf*` CLI does this for you).', flush=True)
+                return None
+            return mp.get_context('fork')
+    except Exception:
+        pass
+    return None   # no fork (Windows) -> caller runs serially
+
+
+def _limit_child_threads():
+    '''Fork-worker initializer: cap intra-op threading to 1. With N workers each defaulting to
+    torch/BLAS = all-cores threads, a fork pool spawns N x cores threads on cores CPUs and
+    THRASHES (this is why the MDS affinity ran ~8 min). 1 thread/worker -> N threads on N cores.
+    Identical results.'''
+    try:
+        import torch; torch.set_num_threads(1)
+    except Exception:
+        pass
+    for _v in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS', 'VECLIB_MAXIMUM_THREADS', 'NUMEXPR_NUM_THREADS'):
+        os.environ[_v] = '1'
+
+
+def _parallel_apply(func, arg_tuples, cores):
+    '''Apply func(*args) for each args tuple, in parallel via a fork pool when
+    available, otherwise serially. Returns results in input order.'''
+    arg_tuples = list(arg_tuples)
+    ctx = _mp_context()
+    if ctx is None or cores is None or cores <= 1 or len(arg_tuples) <= 1:
+        return [func(*args) for args in arg_tuples]
+    _init = None if os.environ.get('SNAF_NO_THREAD_CAP') == '1' else _limit_child_threads   # A/B toggle
+    pool = ctx.Pool(processes=cores, initializer=_init)
+    try:
+        r = [pool.apply_async(func=func, args=args) for args in arg_tuples]
+        pool.close()
+        pool.join()
+        return [c.get() for c in r]
+    finally:
+        pool.terminate()
+
+
 # configuration
-def snaf_configuration(exon_table,transcript_db,db_dir,fasta,software_path_arg=None,binding_method_arg=None):
+def snaf_configuration(exon_table,transcript_db,db_dir,fasta,software_path_arg=None,binding_method_arg=None,genome_fasta=None):
     global dict_exonCoords
     global dict_fa
     global software_path
@@ -55,10 +148,13 @@ def snaf_configuration(exon_table,transcript_db,db_dir,fasta,software_path_arg=N
     global dict_start_codon
     global phase_inferer_gtf_dict
     dict_exonCoords = exonCoords_to_dict(exon_table)
+    uid_to_coord.cache_clear()   # coords depend on dict_exonCoords; invalidate the memo on reconfigure
     dict_exonlist = construct_dict_exonlist(transcript_db)
     dict_fa = fasta_to_dict(fasta)
     software_path = software_path_arg
     binding_method = binding_method_arg
+    if genome_fasta is not None:
+        set_genome_fasta(genome_fasta)
 
     df_start_codon = pd.read_csv(os.path.join(db_dir,'Alt91_db','df_start_codon.txt'),sep='\t',index_col=0)
     df_start_codon['start_codon'] = [literal_eval(item) for item in df_start_codon['start_codon']]
@@ -242,11 +338,14 @@ class JunctionCountMatrixQuery():
         
     '''
 
-    def __init__(self,junction_count_matrix,cores=None,add_control=None,not_in_db=False,outdir='.',filter_mode='maxmin'):
+    def __init__(self,junction_count_matrix,cores=None,add_control=None,not_in_db=False,outdir='.',filter_mode='maxmin',min_samples=1,control_stats_df=None,max_bayests_percentile=None):
         self.junction_count_matrix = junction_count_matrix
         if cores is None:
             cores = mp.cpu_count()
         self.cores = cores
+        self.min_samples = min_samples
+        self.control_stats_df = control_stats_df
+        self.max_bayests_percentile = max_bayests_percentile
         if not_in_db:
             self.get_neojunctions(add_control=add_control,dict_exonlist=dict_exonlist,outdir=outdir,filter_mode=filter_mode)
         else:
@@ -279,8 +378,62 @@ class JunctionCountMatrixQuery():
     
     def get_neojunctions(self,add_control,dict_exonlist,outdir,filter_mode):
         self.valid, self.invalid, self.cond_df = multiple_crude_sifting(self.junction_count_matrix,add_control,dict_exonlist,outdir,filter_mode)
-        self.subset = self.junction_count_matrix.loc[self.valid,:]
-        self.cond_subset_df = self.cond_df.loc[self.valid,:]
+        # Optional recurrence filter: keep only neojunctions expressed (per the sifting
+        # per-cell condition) in at least `min_samples` tumor samples. Default 1 = keep
+        # every sifted junction (identical to the unfiltered pipeline); >1 drops
+        # singletons/low-recurrence events up front, shrinking the feature space before
+        # the expensive translation/binding/immunogenicity steps.
+        min_samples = getattr(self, 'min_samples', 1)
+        if min_samples and min_samples > 1 and len(self.valid) > 0:
+            # positional row-sum (pandas .loc[<405k-label list>] is slow at 2.6M rows);
+            # byte-identical to cond_df.loc[self.valid].sum(axis=1).
+            if self.cond_df.index.is_unique:
+                pos = self.cond_df.index.get_indexer(self.valid)
+                expressed_vals = np.asarray(self.cond_df.values[pos]).sum(axis=1)
+            else:
+                expressed_vals = self.cond_df.loc[self.valid, :].sum(axis=1).values
+            keep = [u for u, e in zip(self.valid, expressed_vals) if e >= min_samples]
+            keepset = set(keep)   # hoist out of the comprehension below; rebuilding set(keep)
+            dropped = len(self.valid) - len(keep)   # per iteration was O(len(valid)*len(keep))
+            self.invalid = list(self.invalid) + [u for u in self.valid if u not in keepset]
+            self.valid = keep
+            print('recurrence filter (min_samples={}): reduced valid NeoJunction to {} (dropped {})'.format(
+                min_samples, len(self.valid), dropped))
+        # BayesTS tumor-specificity filter (control-side, precomputed): drop sifted junctions
+        # whose precomputed bayests_percentile exceeds the threshold (i.e. broadly expressed in
+        # normal). Junctions ABSENT from the control table are maximally tumor-specific -> kept.
+        cs = getattr(self, 'control_stats_df', None)
+        mbp = getattr(self, 'max_bayests_percentile', None)
+        if cs is None and mbp is not None:
+            # Summary-backed control mode: BayesTS was precomputed into adata_gtex.obs, so the
+            # filter needs no separate control_stats_df -- use the summary's percentile column.
+            try:
+                from . import gtex as _g
+                _ag = getattr(_g, 'adata_gtex', None)
+                if _ag is not None and 'bayests_percentile' in _ag.obs.columns:
+                    cs = _ag.obs
+            except Exception:
+                pass
+        if cs is not None and mbp is not None and len(self.valid) > 0 and 'bayests_percentile' in cs.columns:
+            pct = cs['bayests_percentile'].reindex(self.valid).values
+            keepmask = ~np.isfinite(pct) | (pct <= mbp)
+            keep = [u for u, k in zip(self.valid, keepmask) if k]
+            keepset = set(keep)
+            dropped = len(self.valid) - len(keep)
+            self.invalid = list(self.invalid) + [u for u in self.valid if u not in keepset]
+            self.valid = keep
+            print('BayesTS filter (percentile<={}): reduced valid NeoJunction to {} (dropped {})'.format(
+                mbp, len(self.valid), dropped))
+        # positional selection (same pathology as the recurrence filter above): byte-identical
+        # to .loc[self.valid] because self.valid is a subset of the (unique) index in order.
+        if self.junction_count_matrix.index.is_unique:
+            self.subset = self.junction_count_matrix.iloc[self.junction_count_matrix.index.get_indexer(self.valid)]
+        else:
+            self.subset = self.junction_count_matrix.loc[self.valid,:]
+        if self.cond_df.index.is_unique:
+            self.cond_subset_df = self.cond_df.iloc[self.cond_df.index.get_indexer(self.valid)]
+        else:
+            self.cond_subset_df = self.cond_df.loc[self.valid,:]
 
     def get_neojunction_info(self,event):  # more for B cell antigen, since we design it in a way that B cell pipeline completely rely on T pipeline for GTEx check
         ed = self.subset.loc[event,:].to_dict()
@@ -445,9 +598,20 @@ class JunctionCountMatrixQuery():
 
             jcmq.run(hlas=hlas,outdir='result',name='after_prediction.p')
         '''
+        import time as _t
+        _t0 = _t.time()
         self.parallelize_run(kind=1,strict=strict)
+        print('[STAGE-TIMING] translation (kind=1): {:.1f}s'.format(_t.time()-_t0))
         print(self)
+        # Global batched pre-passes: predict all MHCflurry + deepimmuno pairs ONCE
+        # (batched per allele) in the parent, so the forked kind=3 workers only do cache
+        # lookups. Lossless -- fills the same caches, just batched instead of ~N per-junction
+        # predict calls. Inherited by the fork children via copy-on-write.
+        self._precompute_binding(hlas)
+        self._precompute_immunogenicity()
+        _t1 = _t.time()
         self.parallelize_run(kind=3,hlas=hlas)
+        print('[STAGE-TIMING] binding+immunogenicity (kind=3, cached): {:.1f}s'.format(_t.time()-_t1))
         self.serialize(outdir=outdir,name=name)
 
     @staticmethod
@@ -476,8 +640,21 @@ class JunctionCountMatrixQuery():
             # report candidates
             if stage == 3:
                 dff = pd.read_csv(os.path.join(outdir,'frequency_stage{}_verbosity1_uid_gene_symbol_coord_mean_mle.txt'.format(stage)),sep='\t',index_col=0)
-                for sample in tqdm(jcmq.junction_count_matrix.columns,total=jcmq.junction_count_matrix.shape[1]):
-                    report_candidates(jcmq,dff,sample,os.path.join(outdir,'T_candidates'),True)
+                # Compute the sample-independent report setup ONCE (was repeated per sample ->
+                # O(samples x neojunctions)); pass it to every per-sample report_candidates call.
+                from .downstream import _prepare_report_candidates
+                _prep = _prepare_report_candidates(jcmq, dff, True)
+                # Parallelize the per-sample candidate reports: each sample is independent and
+                # writes its own file, and this serial loop dominated generate_results at cohort
+                # scale (346 samples). Fork workers inherit jcmq/dff/_prep via copy-on-write (held
+                # in a class attr, NOT pickled per task); safe-serial fallback on macOS-no-flag.
+                _tdir = os.path.join(outdir,'T_candidates'); os.makedirs(_tdir, exist_ok=True)
+                JunctionCountMatrixQuery._rc_ctx = (jcmq, dff, _prep, _tdir)
+                try:
+                    _parallel_apply(JunctionCountMatrixQuery._report_candidates_one,
+                                    [(s,) for s in jcmq.junction_count_matrix.columns], jcmq.cores)
+                finally:
+                    JunctionCountMatrixQuery._rc_ctx = None
                 print('concatenating all T antigen files into one & indicate whether in AltAnalyze database')
                 df_list = []
                 for sample in jcmq.junction_count_matrix.columns:
@@ -495,27 +672,142 @@ class JunctionCountMatrixQuery():
         df = pd.read_csv(os.path.join(outdir,'frequency_stage0_verbosity1_uid.txt'),sep='\t',index_col=0)
         enhance_frequency_table(df,True,True,outdir,'frequency_stage0_verbosity1_uid_gene_symbol_coord_mean_mle.txt')        
 
+    _rc_ctx = None   # (jcmq, dff, prep, tdir) set before the report_candidates fork; COW-inherited
+
+    @staticmethod
+    def _report_candidates_one(sample):
+        '''Fork-worker: write one sample's T-antigen candidate file. jcmq/dff/prep are read from
+        the inherited class-attr context (not pickled per task).'''
+        from .downstream import report_candidates
+        jcmq, dff, prep, tdir = JunctionCountMatrixQuery._rc_ctx
+        report_candidates(jcmq, dff, sample, tdir, True, prepared=prep)
+        return sample
+
+    @staticmethod
+    def _processing_chunk(peptides):
+        '''Fork-worker: antigen-processing scores for a chunk of peptides (allele-independent).'''
+        from . import binding as _binding
+        return _binding.compute_processing_scores(peptides)
+
+    @staticmethod
+    def _predict_binding_chunk(pairs):
+        '''Fork-worker: presentation percentile for a chunk of (peptide, allele) pairs,
+        reusing the shared processing cache. Bit-identical to stock mhcflurry.'''
+        from . import binding as _binding
+        return _binding.predict_presentation_pairs(pairs)
+
+    def _precompute_binding(self, hlas):
+        '''Global batched MHC-binding pre-pass. Gather every unique (peptide, allele)
+        pair across ALL neojunctions and predict them with mhcflurry in one large call
+        per allele -- filling the process-level cache in the PARENT before the kind=3
+        fork, so the per-junction stage becomes pure cache lookups. Lossless: it fills
+        the exact cache run_MHCflurry would fill lazily (predict() is deterministic),
+        just batched. Only the (batched) MHCflurry path is pre-computed; netMHCpan is
+        left to its own per-call path.'''
+        if binding_method != 'MHCflurry':
+            return
+        import time as _t
+        from . import binding as _binding
+        from collections import defaultdict
+        t0 = _t.time()
+        allele_to_peps = defaultdict(set)
+        cond = self.cond_subset_df
+        for index, nj in enumerate(self.translated):
+            if nj is None or not getattr(nj, 'peptides', None):
+                continue
+            cond_row = cond.iloc[index].tolist()
+            hlas_row = list(compress(hlas, cond_row))
+            if not hlas_row:
+                continue
+            combined_unique_hlas = reduce(lambda a, b: list(set(a + b)), hlas_row)
+            dhlas = hla_formatting(combined_unique_hlas, 'netMHCpan_output', 'deepimmuno')
+            peps = []
+            for k, v in nj.peptides.items():
+                try:
+                    peps.extend(list(zip(*v))[0])
+                except IndexError:
+                    continue
+            for h in dhlas:
+                allele_to_peps[h].update(peps)
+        # Build the flat list of unique pairs still to predict, then predict them in
+        # PARALLEL across the fork pool (batched per allele inside each worker), merging
+        # the returned score dicts into the parent cache before the kind=3 fork.
+        all_pairs = [(p, h) for h, peps in allele_to_peps.items() for p in peps
+                     if (p, h) not in _binding._MHCFLURRY_SCORE_CACHE]
+        n_pairs = len(all_pairs)
+        # Print the pair count up front so the binding wall-time can be projected before
+        # the (long) prediction runs: ~780 mhcflurry pairs/s on an 8-core CPU.
+        print('[PAIR-COUNT] {} unique (peptide,allele) pairs to predict; est {:.1f} min on CPU'.format(
+            n_pairs, n_pairs / 780.0 / 60.0), flush=True)
+        if n_pairs:
+            # (a) Antigen-processing score ONCE per unique peptide (allele-independent; ~96% of
+            #     presentation cost). Parallelized; populates the shared cache inherited by the
+            #     pair workers via copy-on-write. This is the key results-identical speedup.
+            tp = _t.time()
+            unique_peps = list({p for p, h in all_pairs if p not in _binding._PROCESSING_CACHE})
+            if unique_peps:
+                if os.environ.get('SNAF_FAST_NN') != '0':
+                    # Fast pure-NumPy processing is ~4k pep/s SINGLE-process; forking pays
+                    # per-worker predictor+weight setup (~8x) that dwarfs the tiny NumPy compute
+                    # (measured: 8 fork workers 14.1s vs single-process 2.3s). Run inline.
+                    _binding._PROCESSING_CACHE.update(_binding.compute_processing_scores(unique_peps))
+                else:
+                    pchunks = [c for c in (unique_peps[i::self.cores] for i in range(self.cores)) if c]
+                    for d in _parallel_apply(JunctionCountMatrixQuery._processing_chunk,
+                                             [(c,) for c in pchunks], self.cores):
+                        if d:
+                            _binding._PROCESSING_CACHE.update(d)
+            print('[STAGE-TIMING]   antigen-processing: {} unique peptides, {:.1f}s'.format(
+                len(unique_peps), _t.time() - tp), flush=True)
+            # (b) Affinity + logistic + percentile per allele, reusing the processing cache.
+            ta = _t.time()
+            chunks = [c for c in (all_pairs[i::self.cores] for i in range(self.cores)) if c]
+            for d in _parallel_apply(JunctionCountMatrixQuery._predict_binding_chunk,
+                                     [(c,) for c in chunks], self.cores):
+                if d:
+                    _binding._MHCFLURRY_SCORE_CACHE.update(d)
+            print('[STAGE-TIMING]   affinity+presentation: {} pairs, {:.1f}s'.format(n_pairs, _t.time() - ta), flush=True)
+        print('[STAGE-TIMING] precompute binding total: {} alleles, {} unique pairs, {:.1f}s'.format(
+            len(allele_to_peps), n_pairs, _t.time() - t0))
+
+    def _precompute_immunogenicity(self):
+        '''Global batched immunogenicity pre-pass for the binders (presentation
+        percentile <= 2, 9/10-mers -- the same gate immunogenicity_prediction applies),
+        running the deepimmuno CNN once over all unique such pairs to fill the shared
+        cache before the kind=3 fork.'''
+        if binding_method != 'MHCflurry':
+            return
+        try:
+            from .deepimmuno import deepimmuno as _di
+        except Exception:
+            return
+        import time as _t
+        import pandas as pd
+        from . import binding as _binding
+        t0 = _t.time()
+        todo = [(p, h) for (p, h), pct in _binding._MHCFLURRY_SCORE_CACHE.items()
+                if pct is not None and pct <= 2 and len(p) in (9, 10)
+                and (p, h) not in _di._IMMUNO_SCORE_CACHE]
+        if not todo:
+            return
+        df = pd.DataFrame({0: [p for p, h in todo], 1: [h for p, h in todo]})
+        _di.file_process(df)   # populates _IMMUNO_SCORE_CACHE
+        print('[STAGE-TIMING] precompute immunogenicity: {} binder pairs, {:.1f}s'.format(len(todo), _t.time() - t0))
+
     def parallelize_run(self,kind,hlas=None,strict=False):
-        pool = mp.Pool(processes=self.cores)
         if kind == 1 or kind == 2:
             sub_dfs = JunctionCountMatrixQuery.split_df_to_chunks(self.subset,self.cores)
-            r = [pool.apply_async(func=JunctionCountMatrixQuery.each_chunk_func,args=(sub_df,kind,None,strict,)) for sub_df in sub_dfs]
-            pool.close()
-            pool.join()
+            arg_tuples = [(sub_df,kind,None,strict,) for sub_df in sub_dfs]
             results = []
-            for collect in r:
-                result = collect.get()
+            for result in _parallel_apply(JunctionCountMatrixQuery.each_chunk_func, arg_tuples, self.cores):
                 results.extend(result)
             self.translated = results
         elif kind == 3:
             sub_arrays = JunctionCountMatrixQuery.split_array_to_chunks(self.translated,self.cores)
             sub_cond_dfs = JunctionCountMatrixQuery.split_df_to_chunks(self.cond_subset_df,self.cores)
-            r = [pool.apply_async(func=JunctionCountMatrixQuery.each_chunk_func,args=(sub_array,kind,hlas,False,sub_cond_df,binding_method,)) for sub_array,sub_cond_df in zip(sub_arrays,sub_cond_dfs)]
-            pool.close()
-            pool.join()
+            arg_tuples = [(sub_array,kind,hlas,False,sub_cond_df,binding_method,) for sub_array,sub_cond_df in zip(sub_arrays,sub_cond_dfs)]
             results = []
-            for collect in r:
-                result = collect.get()
+            for result in _parallel_apply(JunctionCountMatrixQuery.each_chunk_func, arg_tuples, self.cores):
                 results.extend(result)
             self.results = (results,hlas)
 
@@ -523,7 +815,7 @@ class JunctionCountMatrixQuery():
         elif kind == 4: # heterogeneous hlas for each sample
             self.cond_subset_df = self.cond_df.loc[self.valid,:]
             need_to_predict_across_samples = []  # [[nj,None,nj,nj,None...],]
-            for i,(label,content) in enumerate(self.cond_subset_df.iteritems()):
+            for i,(label,content) in enumerate(self.cond_subset_df.items()):
                 need_to_predict = []
                 number_need = 0
                 for item in zip(self.translated,content.values):
@@ -535,14 +827,8 @@ class JunctionCountMatrixQuery():
                 need_to_predict_across_samples.append(need_to_predict)
                 print('{} has {} junctions to proceed predictions, HLA are {}'.format(label,number_need,hlas[i]))
             print('Binding and immunogenicity prediction starts')
-            r = [pool.apply_async(func=JunctionCountMatrixQuery.each_chunk_func,args=(need_to_predict,kind,hlas,)) for need_to_predict,hlas in zip(need_to_predict_across_samples,hlas)]
-            pool.close()
-            pool.join()
-            results = []
-            for collect in r:
-                result = collect.get()
-                results.append(result)
-            self.results = results 
+            arg_tuples = [(need_to_predict,kind,hla_row,) for need_to_predict,hla_row in zip(need_to_predict_across_samples,hlas)]
+            self.results = _parallel_apply(JunctionCountMatrixQuery.each_chunk_func, arg_tuples, self.cores)
 
     def serialize(self,outdir,name):
         if not os.path.exists(outdir):
@@ -600,16 +886,10 @@ class JunctionCountMatrixQuery():
         sub_arrays = JunctionCountMatrixQuery.split_array_to_chunks(self.results[0],self.cores)
         sub_conds = JunctionCountMatrixQuery.split_df_to_chunks(self.cond_subset_df,self.cores)
         hlas = self.results[1]
-        pool = mp.Pool(processes=self.cores)
 
-        r = [pool.apply_async(func=JunctionCountMatrixQuery.show_neoantigen_burden_single_run,args=(sub_array,sub_cond,hlas,stage,verbosity,contain_uid,criterion,)) for sub_array,sub_cond in zip(sub_arrays,sub_conds)]
-        pool.close()
-        pool.join()
-        results = []
-        for collect in r:
-            result = collect.get()
-            results.append(result)
-        
+        arg_tuples = [(sub_array,sub_cond,hlas,stage,verbosity,contain_uid,criterion,) for sub_array,sub_cond in zip(sub_arrays,sub_conds)]
+        results = _parallel_apply(JunctionCountMatrixQuery.show_neoantigen_burden_single_run, arg_tuples, self.cores)
+
         burden_valid = pd.concat(results,axis=0)
         burden_valid.index = self.subset.index
         burden_valid.columns = self.subset.columns
@@ -643,15 +923,9 @@ class JunctionCountMatrixQuery():
         sub_conds = JunctionCountMatrixQuery.split_df_to_chunks(self.cond_subset_df,self.cores)
         hlas = self.results[1]
         column_names = self.subset.columns
-        pool = mp.Pool(processes=self.cores)
 
-        r = [pool.apply_async(func=JunctionCountMatrixQuery.show_neoantigen_frequency_single_run,args=(sub_array,sub_cond,hlas,column_names,stage,verbosity,contain_uid,criterion,)) for sub_array,sub_cond in zip(sub_arrays,sub_conds)]
-        pool.close()
-        pool.join()
-        results = []
-        for collect in r:
-            result = collect.get()
-            results.append(result)  
+        arg_tuples = [(sub_array,sub_cond,hlas,column_names,stage,verbosity,contain_uid,criterion,) for sub_array,sub_cond in zip(sub_arrays,sub_conds)]
+        results = _parallel_apply(JunctionCountMatrixQuery.show_neoantigen_frequency_single_run, arg_tuples, self.cores)
 
         # let's define another function for merging dictionary, but not overwrite the values
         def merge_key_and_values(dic1,dic2):
@@ -667,7 +941,15 @@ class JunctionCountMatrixQuery():
         # plot
         if plot:
             fig,ax = plt.subplots()
-            ax.bar(x=np.arange(df.shape[0]),height=df['n_sample'].values,edgecolor='k')
+            _n = df.shape[0]; _h = df['n_sample'].values; _x = np.arange(_n)
+            if _n <= 200:
+                ax.bar(x=_x,height=_h,edgecolor='k',linewidth=0.8)
+            else:
+                # ax.bar creates one Rectangle patch PER neoantigen -> millions of vector paths
+                # (minutes of PDF rendering) at cohort scale. Above 200 the 1px bars merge into a
+                # solid mass, so render the rank-occurrence profile as ONE filled path (fill_between
+                # is O(1) paths and visually equivalent to the bar chart for a rank plot).
+                ax.fill_between(_x,_h,step='mid',color=(0.20,0.40,0.60),linewidth=0)
             ax.set_xlabel('Neoantigen rank by its occurence (descending order)')
             ax.set_ylabel('Occurence (n_sample)')
             ax.set_title('Neoantigen Occurence')
@@ -675,7 +957,9 @@ class JunctionCountMatrixQuery():
             plt.close()
             fig,ax = plt.subplots()
             try:
-                sns.histplot(df['n_sample'].values,binwidth=1,kde=True,ax=ax)
+                # KDE is an O(n) smooth-curve fit+render (tens of thousands of bezier segments) --
+                # keep it only when cheap; the histogram itself conveys the occurrence distribution.
+                sns.histplot(df['n_sample'].values,binwidth=1,kde=(_n <= 20000),ax=ax)
                 ax.set_yscale(yscale)
                 plt.savefig(os.path.join(outdir,'x_occurence_{}'.format(plot_name)),bbox_inches='tight')
                 plt.close()
@@ -712,15 +996,9 @@ class JunctionCountMatrixQuery():
         sub_conds = JunctionCountMatrixQuery.split_df_to_chunks(self.cond_subset_df,self.cores)
         hlas = self.results[1]
         column_names = self.subset.columns
-        pool = mp.Pool(processes=self.cores)
 
-        r = [pool.apply_async(func=JunctionCountMatrixQuery.show_neoantigen_frequency_single_run,args=(sub_array,sub_cond,hlas,column_names,stage,verbosity,contain_uid,criterion,)) for sub_array,sub_cond in zip(sub_arrays,sub_conds)]
-        pool.close()
-        pool.join()
-        results = []
-        for collect in r:
-            result = collect.get()
-            results.append(result)  
+        arg_tuples = [(sub_array,sub_cond,hlas,column_names,stage,verbosity,contain_uid,criterion,) for sub_array,sub_cond in zip(sub_arrays,sub_conds)]
+        results = _parallel_apply(JunctionCountMatrixQuery.show_neoantigen_frequency_single_run, arg_tuples, self.cores)
 
         # let's define another function for merging dictionary, but not overwrite the values
         def merge_key_and_values(dic1,dic2):
@@ -748,6 +1026,30 @@ class JunctionCountMatrixQuery():
                 
 
 
+    # Derive candidates directly from an (already HLA-filtered) EnhancedPeptides object
+    # + uid, mirroring NeoJunction.derive_candidates exactly. This lets the burden/
+    # frequency workers avoid deepcopy'ing the whole NeoJunction per (junction,sample):
+    # filter_based_on_hla / filter_based_on_criterion already return FRESH objects and
+    # never mutate the shared nj, so no copy is needed. Byte-identical candidate lists.
+    @staticmethod
+    def _candidates_from_ep(ep,uid,stage,verbosity,contain_uid,criterion=None):
+        if stage == 1:
+            candidates = ep.simplify_to_list(verbosity=verbosity)
+        elif stage == 2:
+            candidates = ep.filter_based_on_criterion([('netMHCpan_el',0,'<=',2),]).simplify_to_list(verbosity=verbosity)
+        elif stage == 3:
+            candidates = ep.filter_based_on_criterion([('netMHCpan_el',0,'<=',2),('deepimmuno_immunogenicity',1,'==','True'),]).simplify_to_list(verbosity=verbosity)
+        elif stage == 'custom':
+            candidates = ep.filter_based_on_criterion(criterion).simplify_to_list(verbosity=verbosity)
+        if contain_uid:
+            new = []
+            for item in candidates:
+                tmp = [str(i) for i in item]
+                tmp.append(uid)
+                new.append(','.join(tmp))
+            candidates = new
+        return candidates
+
     # let's define an atomic function inside here
     @staticmethod
     def show_neoantigen_burden_single_run(sub_array,sub_cond,hlas,stage,verbosity,contain_uid,criterion=None):
@@ -759,11 +1061,10 @@ class JunctionCountMatrixQuery():
                 if nj is None or not cond :
                     nj_burden.append(0)
                 else:
-                    nj_copy = deepcopy(nj)
-                    nj_copy.enhanced_peptides = nj_copy.enhanced_peptides.filter_based_on_hla(selected_hla=hla)
-                    nj_copy.derive_candidates(stage=stage,verbosity=verbosity,contain_uid=contain_uid,criterion=criterion)
-                    nj_burden.append(len(nj_copy.candidates))
-            nj_burden_2d.append(nj_burden)  
+                    ep = nj.enhanced_peptides.filter_based_on_hla(selected_hla=hla)
+                    candidates = JunctionCountMatrixQuery._candidates_from_ep(ep,nj.uid,stage,verbosity,contain_uid,criterion)
+                    nj_burden.append(len(candidates))
+            nj_burden_2d.append(nj_burden)
         df = pd.DataFrame(data=nj_burden_2d)
         return df
 
@@ -775,16 +1076,15 @@ class JunctionCountMatrixQuery():
             cond_row = sub_cond.iloc[index].values
             for hla,column_name,cond in zip(hlas,column_names,cond_row):
                 if nj is not None and cond:
-                    nj_copy = deepcopy(nj)
-                    nj_copy.enhanced_peptides = nj_copy.enhanced_peptides.filter_based_on_hla(selected_hla=hla)
-                    nj_copy.derive_candidates(stage=stage,verbosity=verbosity,contain_uid=contain_uid,criterion=criterion)
-                    for cand in nj_copy.candidates:
+                    ep = nj.enhanced_peptides.filter_based_on_hla(selected_hla=hla)
+                    candidates = JunctionCountMatrixQuery._candidates_from_ep(ep,nj.uid,stage,verbosity,contain_uid,criterion)
+                    for cand in candidates:
                         try:
                             dic[cand].append(column_name)
                         except KeyError:
                             dic[cand] = []
-                            dic[cand].append(column_name)       
-        return dic   
+                            dic[cand].append(column_name)
+        return dic
 
 class EnhancedPeptides():
     def __init__(self,peptides,hlas,kind):
@@ -901,12 +1201,12 @@ class EnhancedPeptides():
                         continue
                     boolean_list = []
                     for criterion in criteria:
-                        if criterion[1] == 1:   # matched is not a number
-                            eval_string = 'attrs[\'{}\'][{}] {} \'{}\''.format(criterion[0],criterion[1],criterion[2],criterion[3])
-                        elif criterion[1] == 0:   # matched is a number
-                            eval_string = 'attrs[\'{}\'][{}] {} {}'.format(criterion[0],criterion[1],criterion[2],criterion[3])
+                        # Apply the operator directly instead of building a string and eval()-ing
+                        # it per (peptide,hla,criterion) -- eval was the single biggest cost here
+                        # (577k calls). Byte-identical: same value `attrs[name][idx]` compared to
+                        # the same cutoff (numeric for idx==0, string for idx==1) with the same op.
                         try:
-                            boolean = eval(eval_string)                            
+                            boolean = _CRITERION_OPS[criterion[2]](attrs[criterion[0]][criterion[1]], criterion[3])
                         except KeyError:
                             boolean = False
                         boolean_list.append(boolean)
@@ -1099,6 +1399,14 @@ class NeoJunction():
 
 
     def immunogenicity_prediction(self):
+        global run_deepimmuno
+        if run_deepimmuno is None:
+            try:
+                from .deepimmuno import run_deepimmuno as _rdi
+                run_deepimmuno = _rdi
+            except Exception as e:
+                raise ImportError('Immunogenicity prediction requires tensorflow (deepimmuno). '
+                                  'Install tensorflow, or skip immunogenicity (use stage 1/2 outputs).') from e
         reduced = self.enhanced_peptides.filter_based_on_criterion([('netMHCpan_el',0,'<=',2),],False)
         ep = self.enhanced_peptides.filter_based_on_criterion([('netMHCpan_el',0,'<=',2),],True)
         if ep.is_empty():
@@ -1302,18 +1610,63 @@ def utrJunction(site,EnsGID,strand,chr_,flag,seq_len=100):  # U0.1_438493849, he
         exon_seq = str(Seq(exon_seq).reverse_complement())
     return exon_seq
 
+_genome_fasta_path = None
+_genome_fasta_handle = None
+
+
+def set_genome_fasta(path):
+    '''Point SNAF at a local (indexed) genome FASTA so UTR / novel-exon sequence
+    retrieval works fully OFFLINE, instead of querying the UCSC DAS web service.'''
+    global _genome_fasta_path, _genome_fasta_handle
+    _genome_fasta_path = path
+    _genome_fasta_handle = None
+
+
+def _get_genome_fasta():
+    global _genome_fasta_path, _genome_fasta_handle
+    if _genome_fasta_path is None:
+        _genome_fasta_path = os.environ.get('SNAF_GENOME_FASTA')
+    if not _genome_fasta_path:
+        return None
+    if _genome_fasta_handle is None:
+        import pysam
+        _genome_fasta_handle = pysam.FastaFile(_genome_fasta_path)
+    return _genome_fasta_handle
+
+
+def _local_genome_seq(chr_, start, end):
+    fa = _get_genome_fasta()
+    if fa is None:
+        return None
+    refs = set(fa.references)
+    candidates = [chr_, chr_[3:] if str(chr_).startswith('chr') else 'chr' + str(chr_)]
+    ref = next((c for c in candidates if c in refs), None)
+    if ref is None:
+        return None
+    # UCSC DAS returns 1-based inclusive [start,end]; pysam.fetch is 0-based half-open
+    return fa.fetch(ref, int(start) - 1, int(end)).upper()
+
+
 def retrieveSeqFromUCSCapi(chr_,start,end):
-    url = 'http://genome.ucsc.edu/cgi-bin/das/hg38/dna?segment={0}:{1},{2}'.format(chr_,start,end)
-    response = requests.get(url)
-    status_code = response.status_code
-    assert status_code == 200
+    # Offline-first: if a local genome FASTA is configured (set_genome_fasta or
+    # the SNAF_GENOME_FASTA env var), read the sequence locally and never touch
+    # the network. Otherwise fall back to the UCSC DAS web service (set
+    # SNAF_OFFLINE=1 to forbid the network entirely). On any failure, return the
+    # '#'*10 placeholder used by callers to mark an unresolved sequence.
+    local = _local_genome_seq(chr_, start, end)
+    if local is not None:
+        return local
+    if os.environ.get('SNAF_OFFLINE', '0') == '1':
+        return '#' * 10
     try:
+        url = 'http://genome.ucsc.edu/cgi-bin/das/hg38/dna?segment={0}:{1},{2}'.format(chr_,start,end)
+        response = requests.get(url)
+        assert response.status_code == 200
         my_dict = xmltodict.parse(response.content)
-    except:
-        exon_seq = '#' * 10  # indicating the UCSC doesn't work
+        exon_seq = my_dict['DASDNA']['SEQUENCE']['DNA']['#text'].replace('\n','').upper()
         return exon_seq
-    exon_seq = my_dict['DASDNA']['SEQUENCE']['DNA']['#text'].replace('\n','').upper()
-    return exon_seq
+    except Exception:
+        return '#' * 10  # indicating the UCSC doesn't work
 
 def is_consecutive(subexon1,subexon2):
     # I only care of E3.3-E3.4, other form will automatically being labelled as not consecutive
@@ -1452,7 +1805,12 @@ def add_coord_frequency_table(df,remove_quote=True):
     return df
 
 
+@functools.lru_cache(maxsize=None)
 def uid_to_coord(uid):
+    # Pure function of uid given the (post-config, immutable) dict_exonCoords. It is called
+    # once per junction PER STAGE ([3,2,1]) and again per sample in report_candidates, so the
+    # same uids are recomputed many times; memoizing collapses that to one computation each.
+    # snaf_configuration clears this cache when a new reference is loaded.
     tmp_list = uid.split(':')
     if len(tmp_list) == 2:
         ensg,exons = tmp_list

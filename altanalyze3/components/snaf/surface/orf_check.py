@@ -111,7 +111,9 @@ def translatability_check(uid,orf):
     return check
 
 def check_translation(EnsGID,EnsPID):
-    if EnsPID == 'None':    # usually from RefSeq dataset
+    if not isinstance(EnsPID, str):   # missing/NaN EnsPID in the reference table -> treat as non-translatable
+        result = '*'
+    elif EnsPID == 'None':    # usually from RefSeq dataset
         result = '*'
     elif 'PEP' in EnsPID:   # ENSP854949-PEP
         result = '*'
