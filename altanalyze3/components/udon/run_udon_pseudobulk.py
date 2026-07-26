@@ -73,7 +73,7 @@ def main():
     ap.add_argument("--rank-rel-threshold", type=float, default=0.1,
                     help="small-feature rank: count components with eigenvalue >= this * the top "
                          "non-global eigenvalue (default 0.1)")
-    ap.add_argument("--modality", choices=["rna", "adt", "grn", "metabolite", "lipid"], default="rna",
+    ap.add_argument("--modality", choices=["rna", "adt", "grn", "metabolite", "lipid", "psi"], default="rna",
                     help="non-RNA modalities (adt/grn/metabolite/lipid) skip the RNA protein-coding/non-coding "
                          "gene filters and use ALL features (names are surface proteins / TF|target edges / "
                          "metabolites / lipids, not gene symbols). adt forces the small-feature rank + "
@@ -207,9 +207,11 @@ def main():
         from feature_selection import feature_selection_wrapper
         from clustering_wrapper import clustering_wrapper
         rank = args.rank
-        if args.modality in ("adt", "grn", "metabolite", "lipid"):
-            # Non-RNA feature names are NOT gene symbols (CD markers; TF|target edges; metabolites; lipids),
-            # so the RNA gene filters would wrongly drop them. Use ALL features for NMF.
+        if args.modality in ("adt", "grn", "metabolite", "lipid", "psi"):
+            # Non-RNA feature names are NOT gene symbols (CD markers; TF|target edges; metabolites; lipids;
+            # PSI splice-event UIDs), so the RNA gene filters would wrongly drop them. Use ALL features for NMF.
+            # PSI (0-1) and GRN (0-4) are bounded, non-count values: UDON folds are plain differences
+            # (disease - control), i.e. delta-PSI / delta-GRN, so NO CP10k/log is applied to them.
             log(f"modality={args.modality}: skipping RNA gene filters; using all {udon.n_vars} features")
             udon.var["correlated_genes"] = True
             if rank is None:

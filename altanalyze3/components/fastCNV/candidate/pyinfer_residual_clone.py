@@ -150,6 +150,232 @@ def _clone_sort_key(value: object) -> tuple[int, str]:
     return (2, text)
 
 
+# ---- annotated clone heatmap (clone + timepoint + mutation left block) --------------------------
+# Categorical palettes (RGB hex only; no named colors / rainbow). Clone: N largest coloured, rest lumped.
+_ANN_CLONE_COLORS = ["#E31A1C", "#1F78B4", "#33A02C", "#FF7F00", "#6A3D9A", "#B15928", "#A6CEE3",
+                     "#FB9A99", "#FDBF6F", "#CAB2D6", "#017377", "#B2DF8A", "#FFB300", "#7A0177"]
+_ANN_TP_COLORS = ["#1B7837", "#4393C3", "#762A83", "#E08214", "#B2182B", "#35978F", "#8C510A",
+                  "#878787", "#01665E", "#BF812D", "#BBBBBB"]
+_ANN_MUT_COLORS = ["#D7191C", "#2C7BB6", "#1A9641", "#7B3294", "#E66101", "#008B8B", "#C51B7D",
+                   "#4D4D4D", "#B8860B", "#005A32"]
+_ANN_CLONE_MINOR = "#9E9E9E"
+_ANN_CLONE_WT = "#DCDCDC"
+_ANN_TP_ORDER = ["Diag", "postHMA", "sAML", "FirstR", "VEN-IR", "MISTRG", "Relapse", "postTx", "NA"]
+_ANN_N_MAJOR = 12
+
+
+def _ann_runs(vals):
+    i = 0
+    while i < len(vals):
+        j = i
+        while j < len(vals) and vals[j] == vals[i]:
+            j += 1
+        yield i, j, vals[i]
+        i = j
+
+
+def _ann_dilate(mask, k):
+    out = mask.copy()
+    for s in range(1, k + 1):
+        out[s:] |= mask[:-s]
+        out[:-s] |= mask[s:]
+    return out
+
+
+def _chry_display_block(fastcnv_prefix, barcodes, width):
+    """Per-cell chrY copy signal from the fastCNV window scores, aligned to `barcodes`, as a
+    display block (cells x width). chrY is excluded from the residual clone MODEL (sex chromosome),
+    so this restores it for VISUALIZATION only, centered on the donor's own chrY median -> LOY reads
+    as a strong loss (blue) while chrY-present cells stay ~0; sex-safe (a female donor has a flat
+    chrY block). Returns (block, ncols) or (None, 0)."""
+    npz = _prefix_path(fastcnv_prefix, "cnv_window_scores.npz")
+    win = _prefix_path(fastcnv_prefix, "cnv_windows.tsv")
+    if not npz.exists() or not win.exists():
+        return None, 0
+    try:
+        z = np.load(npz, allow_pickle=True)
+        wdf = pd.read_csv(win, sep="\t")
+    except Exception:
+        return None, 0
+    yidx = np.flatnonzero(wdf["chr"].astype(str).values == "chrY")
+    if yidx.size == 0:
+        return None, 0
+    sc = z["scores"]
+    bc = np.array([str(b) for b in z["cell_barcodes"]])
+    ymean = np.nanmean(sc[:, yidx], axis=1).astype(np.float32)
+    ymap = dict(zip(bc, ymean))
+    vals = np.array([ymap.get(b, np.nan) for b in barcodes], dtype=np.float32)
+    finite = np.isfinite(vals)
+    center = float(np.nanmedian(vals[finite])) if finite.any() else 0.0
+    v = np.nan_to_num(vals - center, nan=0.0)             # present ~0, LOY strongly negative
+    fin = v[finite]
+    mad = 1.4826 * float(np.median(np.abs(fin - np.median(fin)))) if fin.size else 0.1
+    v = np.where(v < -max(0.5, 3.0 * mad), v, 0.0)        # show only CLEAR chrY LOSS (LOY); zero the
+    #                        noisy chrY-present cells (only ~2 chrY windows => per-cell estimate is noisy)
+    w = int(max(width, 1))
+    return np.repeat(v[:, None], w, axis=1).astype(np.float32), w
+
+
+def _write_annotated_clone_heatmap(
+    params: ResidualCloneParams,
+    residual: np.ndarray,
+    chrom: np.ndarray,
+    cell_df: pd.DataFrame,
+    obs: pd.DataFrame,
+) -> Dict[str, Path]:
+    """Custom annotated heatmap: LEFT vector block (clone | timepoint | one bar per mutation) beside the
+    residual clone heatmap, as two independently-resizable objects. Timepoint is read from obs['timepoint']
+    (skipped if absent); mutation bars from obs columns named 'mut_<gene>' (variant DETECTED = nonzero;
+    blank = not detected, which is NOT wild-type). Column labels are rotated 90deg with a bounding box.
+    Rendered with NO bbox_inches='tight' and vector rectangles so it opens flat in Acrobat/Illustrator."""
+    import matplotlib
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+    import matplotlib as mpl
+    from matplotlib.colors import LinearSegmentedColormap
+    from matplotlib.patches import Rectangle, Patch
+    plt.rcParams["font.family"] = "sans-serif"
+    plt.rcParams["font.sans-serif"] = ["Arial", "Helvetica", "DejaVu Sans"]
+    plt.rcParams["pdf.fonttype"] = 42
+    plt.rcParams["ps.fonttype"] = 42
+
+    matrix, chrom_labels, boundaries = _binned_residual_matrix(residual, chrom, params)
+    if matrix.shape[1] == 0:
+        return {}
+    barcodes = cell_df["CellBarcode"].astype(str).to_numpy()
+    # append chrY as a DISPLAY-only block (LOY signal; chrY is excluded from the clone model)
+    yblock, ync = _chry_display_block(params.fastcnv_prefix, barcodes, params.heatmap_min_chrom_bins)
+    if ync:
+        matrix = np.hstack([matrix, yblock])
+        chrom_labels = list(chrom_labels) + ["chrY"]
+        boundaries = list(boundaries) + [boundaries[-1] + ync]
+    clones = cell_df["global_clone_id"].astype(str).to_numpy()
+    states = cell_df["cell_state"].astype(str).to_numpy() if "cell_state" in cell_df else np.array(["NA"] * len(barcodes))
+    obs_a = obs.reindex(barcodes)
+    tp = (obs_a["timepoint"].astype(str).to_numpy() if "timepoint" in obs_a.columns
+          else np.array(["NA"] * len(barcodes)))
+    mut_cols = [c for c in obs_a.columns if str(c).startswith("mut_")]
+    genes = [c[4:] for c in mut_cols]
+    mut_mat = (obs_a[mut_cols].fillna(0).to_numpy() > 0) if mut_cols else np.zeros((len(barcodes), 0), bool)
+
+    # downsample per (clone, cell_state), boosting non-WT so clones stay visible
+    n = len(barcodes)
+    cap = int(params.heatmap_max_cells) if params.heatmap_max_cells else n
+    display_cap = min(cap, 6000)
+    if n > display_cap:
+        rng = np.random.default_rng(0)
+        frame = pd.DataFrame({"i": np.arange(n), "clone": clones, "state": states})
+        keep = []
+        for _, g in frame.groupby(["clone", "state"], sort=False):
+            q = max(1, int(np.floor(display_cap * len(g) / n)))
+            if str(g["clone"].iloc[0]) != "WT":
+                q = max(q, min(len(g), 20))
+            idx = g["i"].to_numpy()
+            keep.append(idx if q >= len(idx) else np.sort(rng.choice(idx, size=q, replace=False)))
+        sel = np.sort(np.concatenate(keep))
+        matrix = matrix[sel]; clones = clones[sel]; states = states[sel]
+        tp = tp[sel]; mut_mat = mut_mat[sel]
+    ncell = matrix.shape[0]
+
+    ckey = np.array([_clone_sort_key(c)[0] * 1_000_000 + (int(_clone_sort_key(c)[1]) if str(_clone_sort_key(c)[1]).isdigit() else 0)
+                     for c in clones])
+    order = np.lexsort((np.arange(ncell), states, ckey))
+    Xo = matrix[order]; clo = clones[order]; tpo = tp[order]; mgo = mut_mat[order]
+
+    disp = Xo - np.nanmedian(Xo, axis=1, keepdims=True)
+    disp = np.nan_to_num(disp, nan=0.0, posinf=0.0, neginf=0.0)
+    _auto = disp[:, :-ync] if ync else disp        # colour scale from AUTOSOMES only; the appended chrY
+    vmax = max(float(np.nanquantile(np.abs(_auto), 0.995)), 0.05)   # copy block (LOY ~ -2) would else
+    disp = np.clip(disp, -vmax, vmax)              # inflate vmax and wash out the autosomal residuals
+    disp = np.where(np.abs(disp) < float(params.heatmap_filter_threshold), 0.0, disp).astype(np.float32)
+    nbin = disp.shape[1]
+    heat_cmap = LinearSegmentedColormap.from_list(
+        "pyinfer_residual", ["#1f4fa3", "#597fc5", "#f7f7f7", "#d95f5f", "#a51f1f"])
+    heat_rgb = heat_cmap(mpl.colors.Normalize(-vmax, vmax)(disp))[:, :, :3]
+
+    cl_sizes = pd.Series(clo).value_counts()
+    majors = [c for c in cl_sizes.index if c not in ("WT",)][:_ANN_N_MAJOR]
+    clone_col = {c: _ANN_CLONE_COLORS[i % len(_ANN_CLONE_COLORS)] for i, c in enumerate(majors)}
+    clone_col["WT"] = _ANN_CLONE_WT
+    clone_col["clone_loy"] = "#2458A6"
+    cc = lambda c: clone_col.get(c, _ANN_CLONE_MINOR)
+    present_tp = [t for t in _ANN_TP_ORDER if t in set(tpo)] + [t for t in sorted(set(tpo)) if t not in _ANN_TP_ORDER]
+    tp_col = {t: _ANN_TP_COLORS[i % len(_ANN_TP_COLORS)] for i, t in enumerate(present_tp)}
+    gene_col = {g: _ANN_MUT_COLORS[i % len(_ANN_MUT_COLORS)] for i, g in enumerate(genes)}
+    gtot = mut_mat.sum(axis=0) if mut_mat.shape[1] else np.array([])
+
+    has_tp = "timepoint" in obs_a.columns
+    ann_names = (["clone"] + (["timepoint"] if has_tp else []) + list(genes))
+    ncol_ann = len(ann_names)
+    fig = plt.figure(figsize=(16, 9), facecolor="white")
+    axA = fig.add_axes([0.045, 0.20, 0.006 + 0.016 * ncol_ann, 0.70])
+    col = 0
+    for a, b_, c in _ann_runs(clo):
+        axA.add_patch(Rectangle((col, a), 1, b_ - a, facecolor=cc(c), edgecolor="none"))
+    col += 1
+    if has_tp:
+        for a, b_, t in _ann_runs(tpo):
+            axA.add_patch(Rectangle((col, a), 1, b_ - a, facecolor=tp_col.get(t, "#BBBBBB"), edgecolor="none"))
+        col += 1
+    for gi in range(len(genes)):
+        arr = mgo[:, gi].astype(bool)
+        dil = (max(1, ncell // 300) if gtot[gi] < 150 else 0)
+        present = _ann_dilate(arr, dil) if dil > 0 else arr
+        for a, b_, v in _ann_runs(present):
+            if v:
+                axA.add_patch(Rectangle((col + gi, a), 1, b_ - a, facecolor=gene_col[genes[gi]], edgecolor="none"))
+    axA.set_xlim(0, ncol_ann); axA.set_ylim(ncell, 0); axA.set_xticks([]); axA.set_yticks([])
+    lab_cols = (["#000000"] + (["#000000"] if has_tp else []) + [gene_col[g] for g in genes])
+    for i, (nm, colr) in enumerate(zip(ann_names, lab_cols)):
+        axA.text(i + 0.5, -ncell * 0.008, nm, ha="center", va="bottom", rotation=90, fontsize=7, color=colr)
+    for s in axA.spines.values():                 # bounding box around the metadata block
+        s.set_visible(True); s.set_edgecolor("#000000"); s.set_linewidth(0.8)
+
+    axh = fig.add_axes([0.20, 0.20, 0.70, 0.70])
+    axh.imshow(heat_rgb, aspect="auto", origin="upper", interpolation="nearest",
+               extent=[0, nbin, ncell, 0], rasterized=True)
+    axh.set_xlim(0, nbin); axh.set_ylim(ncell, 0); axh.set_yticks([])
+    centers = [(boundaries[i] + boundaries[i + 1]) / 2.0 for i in range(len(chrom_labels))]
+    for bnd in boundaries[1:-1]:
+        axh.plot([bnd, bnd], [0, ncell], color="#202020", lw=0.35)
+    axh.set_xticks(centers)
+    axh.set_xticklabels([c.replace("chr", "") for c in chrom_labels], fontsize=6)
+    axh.set_xlabel("chromosome  |  cells ordered by fastCNV residual clone (jointly across all donor samples)", fontsize=8)
+    n_samples = int(pd.Series(cell_df["sample"]).nunique()) if "sample" in cell_df else 0
+    axh.set_title(f"fastCNV residual-candidate clone heatmap (one donor run; clones called jointly across {n_samples} samples)", fontsize=10)
+    axc = fig.add_axes([0.915, 0.55, 0.010, 0.30])
+    cb = mpl.colorbar.ColorbarBase(axc, cmap=heat_cmap, norm=mpl.colors.Normalize(-vmax, vmax))
+    cb.ax.tick_params(labelsize=6); axc.set_title("residual\n- 1", fontsize=6)
+
+    axl = fig.add_axes([0.045, 0.015, 0.9, 0.135]); axl.axis("off")
+    clone_handles = ([Patch(facecolor=_ANN_CLONE_WT, label=f"WT ({int((clo == 'WT').sum()):,})")] +
+                     [Patch(facecolor=cc(c), label=f"{c} ({int((clo == c).sum()):,})") for c in majors])
+    minor_n = int((~np.isin(clo, majors + ["WT"])).sum())
+    if minor_n:
+        clone_handles.append(Patch(facecolor=_ANN_CLONE_MINOR, label=f"minor clones ({minor_n:,})"))
+    l1 = axl.legend(handles=clone_handles, title="fastCNV clone (annotation)", loc="upper left",
+                    ncol=min(8, len(clone_handles)), fontsize=6.5, title_fontsize=8, frameon=False, bbox_to_anchor=(0.0, 1.0))
+    axl.add_artist(l1)
+    if has_tp:
+        tp_handles = [Patch(facecolor=tp_col[t], label=t) for t in present_tp]
+        l2 = axl.legend(handles=tp_handles, title="timepoint / condition", loc="upper left",
+                        ncol=min(8, len(tp_handles)), fontsize=6.5, title_fontsize=8, frameon=False, bbox_to_anchor=(0.0, 0.42))
+        axl.add_artist(l2)
+    if genes:
+        mut_handles = [Patch(facecolor=gene_col[g], label=f"{g} variant detected") for g in genes]
+        mut_handles.append(Patch(facecolor="#FFFFFF", edgecolor="#888888",
+                                 label="not detected (NOT wild-type; no variant sensitivity)"))
+        axl.legend(handles=mut_handles, title="mutation presence", loc="upper left",
+                   ncol=min(5, len(mut_handles)), fontsize=6.5, title_fontsize=8, frameon=False, bbox_to_anchor=(0.0, 0.04))
+
+    png = _prefix_path(params.output_prefix, "candidate_annotated_heatmap.png")
+    pdf = _prefix_path(params.output_prefix, "candidate_annotated_heatmap.pdf")
+    fig.savefig(png, dpi=200, facecolor="white")
+    fig.savefig(pdf, facecolor="white")           # NO bbox_inches='tight' (Acrobat-safe)
+    plt.close(fig)
+    return {"annotated_heatmap_png": png, "annotated_heatmap_pdf": pdf}
+
+
 def _binned_residual_matrix(
     residual: np.ndarray,
     chrom: np.ndarray,
@@ -413,6 +639,10 @@ def run_candidate(params: ResidualCloneParams) -> Dict[str, Path]:
     outputs = {"cells": cells_path, "regions": regions_path, "summary": summary_path}
     if params.write_heatmap:
         outputs.update(_write_residual_heatmaps(params, residual, chrom, cell_df))
+        try:
+            outputs.update(_write_annotated_clone_heatmap(params, residual, chrom, cell_df, obs))
+        except Exception as exc:  # annotated block is additive; never fail the run on it
+            print(f"[residual-candidate] annotated heatmap skipped: {exc}")
     return outputs
 
 

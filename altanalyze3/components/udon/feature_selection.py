@@ -85,6 +85,9 @@ def pca_feature_selection(adata, corr_threshold=0.4, n_components=30):
     adata = adata[:, adata.var['correlated_genes'] == True]
 
     exp = adata.varm['pseudobulk_folds']
+    # cap components to n_pseudobulks-1 so small cohorts (e.g. single-cell-type UDON) don't exceed
+    # min(n_samples, n_features); no-op for large cohorts. Matches the fast path (compare_workflows).
+    n_components = max(1, min(n_components, exp.shape[1] - 1))
     pca_obj = PCA(n_components, svd_solver='full')
 
     pca_obj.fit_transform(exp.transpose())

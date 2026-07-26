@@ -74,6 +74,8 @@ def fast_pca(folds, corr_index, corr_threshold=0.4, n_components=30):
     (|r|>thr, lower-triangular) to another gene in that 400-set."""
     exp = folds.loc[corr_index]
     X = exp.to_numpy()
+    # cap components to n_pseudobulks-1 (X is genes x pseudobulks; PCA fits X.T) for small cohorts
+    n_components = max(1, min(n_components, X.shape[1] - 1))
     pca = PCA(n_components=n_components, svd_solver="full").fit(X.T)
     loadings = pca.components_.T                                # genes x PCs
     genes = np.asarray(exp.index)

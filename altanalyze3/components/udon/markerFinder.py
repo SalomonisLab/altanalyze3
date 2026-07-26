@@ -1,3 +1,11 @@
+"""MarkerFinder CORRELATION CORE (Pearson of each feature to an idealized one-hot group
+vector). This module does NOT render the AltAnalyze MarkerFinder heatmap.
+
+For the full MarkerFinder that WRITES THE HEATMAP PDF (markers + heatmap TSV + figure), use
+``components.cellHarmony.markerFinder`` -> ``find_markers_from_adata`` (AnnData in) or
+``run_marker_finder_on_matrix(matrix_path, groups_path, output_dir)`` (matrix + groups file).
+``render_heatmap.py`` here is only a lightweight raster imshow, not the canonical heatmap.
+"""
 import pandas as pd
 import numpy as np
 from scipy.stats import t

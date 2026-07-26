@@ -566,3 +566,107 @@ def run_variant2clone(residual: pd.DataFrame, gene_order: pd.DataFrame, variant_
             from . import plotting
             plotting.plot_all(res, residual, gene_order, variant_df, outdir, params)
     return res
+
+
+# --------------------------------------------------------------------------- #
+# 5. CNV containment of a mutation: does ANY CNV (native cluster / merged cluster /
+#    genomic-coordinate region) contain a mutation near-exclusively? Sweep a per-cell
+#    mutation-read confidence threshold. Generic over any CNV matrix + cluster labels.
+# --------------------------------------------------------------------------- #
+def merge_clusters_by_profile(X, labels, k):
+    """Merge cluster `labels` into k groups by Ward linkage on per-cluster mean profiles of X
+    (cells x features). Returns {orig_label: merged_group}."""
+    from scipy.cluster.hierarchy import linkage, fcluster
+    X = np.asarray(X)
+    labels = np.asarray(labels)
+    uc = pd.unique(labels)
+    if k >= len(uc):
+        return {c: c for c in uc}
+    means = np.vstack([X[labels == c].mean(0) for c in uc])
+    m = fcluster(linkage(means, method="ward"), t=k, criterion="maxclust")
+    return {c: int(m[i]) for i, c in enumerate(uc)}
+
+
+def cnv_cluster_candidates(X, cluster_labels, chr_pos, merge_ks=(3, 5, 8), genomic_pct=90.0):
+    """Enumerate candidate CNV cell-memberships from an inferCNV/inferCNVpy matrix.
+
+    X            : cells x windows CNV matrix (e.g. inferCNVpy ``obsm['X_cnv']``).
+    cluster_labels : per-cell cluster labels (e.g. ``obs['cnv_leiden']``).
+    chr_pos      : {chrom: start_col} (inferCNVpy ``uns['cnv']['chr_pos']``).
+    Yields (definition, cnv_id, boolean cell-mask): (a) native clusters, (b) hierarchically MERGED
+    clusters for each k in merge_ks, (c) per-chromosome gain/loss GENOMIC regions thresholded at the
+    ``genomic_pct`` percentile of each cell's chromosome-mean CNV.
+    """
+    X = np.asarray(X)
+    lab = np.asarray(cluster_labels).astype(str)
+    uc = pd.unique(lab)
+    for c in uc:
+        yield "leiden", f"leiden_{c}", lab == c
+    for k in merge_ks:
+        cmap = merge_clusters_by_profile(X, lab, k)
+        groups = set(cmap.values())
+        if len(groups) <= 1 or len(groups) >= len(uc):
+            continue
+        merged = np.array([cmap[c] for c in lab])
+        for grp in np.unique(merged):
+            yield f"merged_k{k}", f"merged_k{k}_{grp}", merged == grp
+    order = sorted(chr_pos.items(), key=lambda kv: kv[1])
+    nbin = X.shape[1]
+    for i, (ch, s) in enumerate(order):
+        e = order[i + 1][1] if i + 1 < len(order) else nbin
+        mean = X[:, int(s):int(e)].mean(1)
+        hi, lo = np.percentile(mean, genomic_pct), np.percentile(mean, 100 - genomic_pct)
+        yield "genomic", f"{ch}:gain", mean > hi
+        yield "genomic", f"{ch}:loss", mean < lo
+
+
+def containment_metrics(mask, is_mut, min_overlap=3):
+    """Fisher-exact enrichment of a binary mutation in a CNV cell-set, plus SENSITIVITY
+    (P[in CNV | MUT] = how exclusively the mutation is contained in the CNV), PRECISION
+    (P[MUT | in CNV]) and SPECIFICITY. Returns None if fewer than ``min_overlap`` mutant cells fall
+    in the CNV (unstable)."""
+    mask = np.asarray(mask, bool)
+    is_mut = np.asarray(is_mut, bool)
+    tp = int((mask & is_mut).sum())
+    if tp < min_overlap:
+        return None
+    fp = int((mask & ~is_mut).sum())
+    fn = int((~mask & is_mut).sum())
+    tn = int((~mask & ~is_mut).sum())
+    orr, p = stats.fisher_exact([[tp, fp], [fn, tn]], alternative="greater")
+    return {"n_in_cnv": tp + fp, "n_overlap": tp, "sensitivity": tp / max(tp + fn, 1),
+            "precision": tp / max(tp + fp, 1), "specificity": tn / max(fp + tn, 1),
+            "fisher_OR": float(orr) if np.isfinite(orr) else np.inf, "fisher_p": float(p)}
+
+
+def mutation_containment_scan(candidates, reads_per_cell, thresholds=(0, 1, 2, 3), min_mut=10,
+                              near_exclusive=(0.70, 0.30)):
+    """Sweep a per-cell mutation-read confidence threshold and test every candidate CNV.
+
+    candidates      : iterable of (definition, cnv_id, boolean cell-mask) from cnv_cluster_candidates.
+    reads_per_cell  : per-cell summed mutation reads (a cell is MUT if reads > threshold).
+    Returns a DataFrame with containment_metrics per (threshold, candidate); flags
+    ``near_exclusive_and_specific`` when sensitivity >= near_exclusive[0] and precision >= near_exclusive[1].
+    """
+    reads = np.asarray(reads_per_cell)
+    n = len(reads)
+    cand = list(candidates)
+    rows = []
+    for thr in thresholds:
+        is_mut = reads > thr
+        nmut = int(is_mut.sum())
+        if nmut < min_mut:
+            continue
+        for defn, cid, mask in cand:
+            m = containment_metrics(mask, is_mut)
+            if m is None:
+                continue
+            rows.append({"read_threshold": f">{thr}", "n_mut": nmut, "baseline_mut_frac": round(nmut / n, 4),
+                         "cnv_definition": defn, "cnv_id": cid, "n_in_cnv": m["n_in_cnv"], "n_overlap": m["n_overlap"],
+                         "sensitivity": round(m["sensitivity"], 3), "precision": round(m["precision"], 3),
+                         "specificity": round(m["specificity"], 3),
+                         "fisher_OR": round(m["fisher_OR"], 2) if np.isfinite(m["fisher_OR"]) else np.inf,
+                         "fisher_p": m["fisher_p"],
+                         "near_exclusive_and_specific": bool(m["sensitivity"] >= near_exclusive[0]
+                                                             and m["precision"] >= near_exclusive[1])})
+    return pd.DataFrame(rows)

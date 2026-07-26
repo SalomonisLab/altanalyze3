@@ -395,6 +395,11 @@ class FastParams:
     heatmap_max_cells: int = 20000
     heatmap_filter_threshold: float = 1.5
     heatmap_min_chr_windows: int = 35
+    residual_candidate: bool = False
+    residual_candidate_min_abs_region_score: float = 0.05
+    residual_candidate_min_separation_mad: float = 1.5
+    residual_candidate_heatmap_filter_threshold: float = 0.03
+    residual_candidate_pyinfercnv_path: Optional[Path] = Path("/Users/saljh8/Documents/GitHub/pyInferCNV")
     sex_chrom_mode: str = "absolute_log2"
     sex_chrom_log2_unit: float = 0.040
     sex_detection_threshold_pct: float = 5.0
@@ -2762,6 +2767,33 @@ def run_fast(params: FastParams) -> Dict[str, Path]:
         query.write_h5ad(h5ad_path)
         outputs["h5ad"] = h5ad_path
 
+    if params.residual_candidate:
+        candidate_t0 = time.perf_counter()
+        try:
+            from altanalyze3.components.fastCNV.candidate.pyinfer_residual_clone import (
+                ResidualCloneParams,
+                run_candidate as run_residual_candidate,
+            )
+            candidate_prefix = Path(f"{params.output_prefix}.residual_candidate")
+            candidate_outputs = run_residual_candidate(
+                ResidualCloneParams(
+                    h5ad=params.h5ad,
+                    fastcnv_prefix=params.output_prefix,
+                    output_prefix=candidate_prefix,
+                    state_key=params.state_key,
+                    layer=params.layer,
+                    min_abs_region_score=float(params.residual_candidate_min_abs_region_score),
+                    min_separation_mad=float(params.residual_candidate_min_separation_mad),
+                    pyinfercnv_path=params.residual_candidate_pyinfercnv_path,
+                    heatmap_filter_threshold=float(params.residual_candidate_heatmap_filter_threshold),
+                )
+            )
+            for key, path in candidate_outputs.items():
+                outputs[f"residual_candidate_{key}"] = path
+            LOGGER.info("Residual candidate written in %s.", _format_duration(time.perf_counter() - candidate_t0))
+        except Exception:
+            LOGGER.exception("Residual candidate export failed; core fastCNV outputs were written.")
+
     LOGGER.info("fastCNV total runtime: %s", _format_duration(time.perf_counter() - run_start))
     return outputs
 
@@ -2848,6 +2880,23 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                    help="Minimum rendered display width per chromosome in inferCNV-style heatmaps. "
                         "Narrow chromosomes such as chrY are repeated for display only so true calls "
                         "are not compressed to an invisible stripe.")
+    p.add_argument("--residual-candidate", action="store_true",
+                   help="Also run the July 5 pyInferCNV-residual clone candidate from this primary "
+                        "fastCNV invocation. Writes <output>.residual_candidate.* tables and "
+                        "residual-scale inferCNV-style heatmaps. This is opt-in because it requires "
+                        "pyInferCNV and recomputes residuals.")
+    p.add_argument("--residual-candidate-min-abs-region-score", type=float, default=0.05,
+                   help="Minimum absolute chromosome residual shift for the residual candidate. "
+                        "July 5 SamplePre34 benchmark setting: 0.05.")
+    p.add_argument("--residual-candidate-min-separation-mad", type=float, default=1.5,
+                   help="Minimum state-local two-component separation in MAD units for the residual "
+                        "candidate. July 5 SamplePre34 benchmark setting: 1.5.")
+    p.add_argument("--residual-candidate-heatmap-filter-threshold", type=float, default=0.03,
+                   help="Residual-scale filtered heatmap threshold for the residual candidate. "
+                        "Scores with absolute residual below this are shown as neutral.")
+    p.add_argument("--residual-candidate-pyinfercnv-path", type=Path,
+                   default=Path("/Users/saljh8/Documents/GitHub/pyInferCNV"),
+                   help="Local pyInferCNV checkout used if pyinfercnv is not importable.")
     p.add_argument(
         "--sex-chrom-mode",
         choices=["off", "absolute_log2"],
@@ -2985,6 +3034,11 @@ def params_from_args(args: argparse.Namespace) -> FastParams:
         heatmap_max_cells=int(args.heatmap_max_cells),
         heatmap_filter_threshold=float(args.heatmap_filter_threshold),
         heatmap_min_chr_windows=int(args.heatmap_min_chr_windows),
+        residual_candidate=bool(args.residual_candidate),
+        residual_candidate_min_abs_region_score=float(args.residual_candidate_min_abs_region_score),
+        residual_candidate_min_separation_mad=float(args.residual_candidate_min_separation_mad),
+        residual_candidate_heatmap_filter_threshold=float(args.residual_candidate_heatmap_filter_threshold),
+        residual_candidate_pyinfercnv_path=args.residual_candidate_pyinfercnv_path,
         sex_chrom_mode=str(args.sex_chrom_mode),
         sex_chrom_log2_unit=float(args.sex_chrom_log2_unit),
         sex_chrom_het_loss=float(args.sex_chrom_het_loss),

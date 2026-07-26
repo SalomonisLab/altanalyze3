@@ -467,12 +467,55 @@ def run_marker_finder_on_file(
     )
 
 
+def run_marker_finder_on_matrix(
+    matrix_path: str,
+    groups_path: str,
+    output_dir: str,
+    *,
+    features_as_rows: bool = True,
+    cluster_key: str = "cluster",
+    fill_na: bool = True,
+    **kwargs,
+) -> MarkerOutputs:
+    """Run MarkerFinder (with heatmap) directly on a tab-delimited matrix + groups file --
+    no AnnData required. This is the entrypoint for bulk/PSI/expression matrices.
+
+    matrix_path      : tab-delimited; ``features_as_rows`` True (default) means features are
+                       rows and samples are columns (AltAnalyze convention), else transposed.
+                       First column = IDs. NaN allowed (filled per feature when ``fill_na``).
+    groups_path      : sample -> group. Accepts an AltAnalyze ``groups.<name>.txt``
+                       (sample <tab> group_num <tab> group_name) or a 2-column
+                       sample <tab> group file.
+    Writes ``marker_genes.tsv``, ``marker_heatmap.tsv`` and the heatmap **PDF** to
+    ``output_dir`` (via :func:`find_markers_from_adata`). ``cluster_order`` etc. pass through.
+    """
+    mat = pd.read_csv(matrix_path, sep="\t", index_col=0)
+    if features_as_rows:
+        mat = mat.T                                              # -> samples x features
+    mat = mat.apply(pd.to_numeric, errors="coerce")
+    if fill_na:
+        mat = mat.fillna(mat.mean())
+    mat = mat.loc[:, mat.std() > 0]
+    g = pd.read_csv(groups_path, sep="\t", header=None, index_col=0)
+    groups = (g.iloc[:, 1] if g.shape[1] >= 2 else g.iloc[:, 0]).astype(str)   # 3-col groups file -> name column
+    groups.index = groups.index.astype(str)
+    samples = [s for s in mat.index.astype(str) if s in set(groups.index)]
+    mat.index = mat.index.astype(str); mat = mat.loc[samples]
+    adata = AnnData(X=mat.to_numpy(dtype=np.float32),
+                    obs=pd.DataFrame({cluster_key: groups.reindex(samples).values}, index=pd.Index(samples)),
+                    var=pd.DataFrame(index=mat.columns.astype(str)))
+    return find_markers_from_adata(adata, cluster_key=cluster_key, output_dir=output_dir, **kwargs)
+
+
 def build_arg_parser():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Run marker discovery on an AnnData (.h5ad) file.")
-    parser.add_argument("--h5ad", required=True, help="Path to the input .h5ad file.")
-    parser.add_argument("--cluster-key", required=True, help="Column in adata.obs containing cluster labels.")
+    parser = argparse.ArgumentParser(description="Run MarkerFinder (markers + heatmap PDF) on an AnnData (.h5ad) OR a tab-delimited matrix + groups file.")
+    parser.add_argument("--h5ad", help="Input .h5ad (use with --cluster-key).")
+    parser.add_argument("--matrix", help="Tab-delimited features x samples matrix (bulk/PSI/expression); use with --groups.")
+    parser.add_argument("--groups", help="Groups file: sample<tab>group (or AltAnalyze sample<tab>num<tab>name).")
+    parser.add_argument("--samples-as-rows", action="store_true", help="Matrix has samples as rows (default: features as rows).")
+    parser.add_argument("--cluster-key", default="cluster", help="obs column with cluster labels (h5ad mode; default 'cluster').")
     parser.add_argument("--output-dir", required=True, help="Directory to write marker and heatmap outputs.")
     parser.add_argument("--layer", help="Name of adata layer to use instead of .X.")
     parser.add_argument(
@@ -513,21 +556,19 @@ def build_arg_parser():
 def main():
     parser = build_arg_parser()
     args = parser.parse_args()
-    run_marker_finder_on_file(
-        h5ad_path=args.h5ad,
-        cluster_key=args.cluster_key,
-        output_dir=args.output_dir,
-        layer=args.layer,
-        use_raw=args.use_raw,
-        n_markers=args.top_n,
-        direction=args.direction,
-        rho_threshold=args.rho_threshold,
-        min_markers_per_cluster=args.min_markers,
-        lineage_order_key=args.lineage_order_key,
-        heatmap_filename=args.heatmap_filename,
-        marker_table_filename=args.markers_tsv,
-        heatmap_table_filename=args.heatmap_tsv,
-    )
+    common = dict(output_dir=args.output_dir, n_markers=args.top_n, direction=args.direction,
+                  rho_threshold=args.rho_threshold, min_markers_per_cluster=args.min_markers,
+                  heatmap_filename=args.heatmap_filename, marker_table_filename=args.markers_tsv,
+                  heatmap_table_filename=args.heatmap_tsv)
+    if args.matrix:
+        if not args.groups:
+            parser.error("--matrix requires --groups")
+        run_marker_finder_on_matrix(args.matrix, args.groups, features_as_rows=not args.samples_as_rows, **common)
+    elif args.h5ad:
+        run_marker_finder_on_file(args.h5ad, cluster_key=args.cluster_key, layer=args.layer,
+                                  use_raw=args.use_raw, lineage_order_key=args.lineage_order_key, **common)
+    else:
+        parser.error("provide either --h5ad (with --cluster-key) or --matrix (with --groups)")
 
 
 if __name__ == "__main__":
