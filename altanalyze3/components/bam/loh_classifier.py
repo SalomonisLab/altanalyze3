@@ -124,14 +124,45 @@ def _model(kind):
 
 
 def crossval(X, y, kind="gbm", n_splits=5):
-    """Stratified n-fold out-of-fold probabilities + AUC-ROC / AUC-PR."""
-    cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+    """Stratified n-fold out-of-fold probabilities + AUC-ROC / AUC-PR.
+
+    Defensive against degenerate label vectors: returns (oof, nan, nan) when y is empty or
+    has a single class (AUC/AP are undefined there), and clamps the fold count to the smallest
+    class so StratifiedKFold never raises. Callers should guard degenerate y upstream; this keeps
+    the function from crashing an otherwise-completing run."""
+    y = np.asarray(y)
+    oof = np.full(len(y), np.nan, dtype=float)
+    classes, counts = np.unique(y, return_counts=True)
+    if len(y) == 0 or len(classes) < 2:
+        return oof, float("nan"), float("nan")
+    k = int(min(n_splits, counts.min()))
+    if k < 2:
+        return oof, float("nan"), float("nan")
+    cv = StratifiedKFold(n_splits=k, shuffle=True, random_state=42)
     oof = np.zeros(len(y), dtype=float)
     for tr, va in cv.split(X, y):
         m = _model(kind)
         m.fit(X[tr], y[tr])
         oof[va] = m.predict_proba(X[va])[:, 1]
     return oof, roc_auc_score(y, oof), average_precision_score(y, oof)
+
+
+def _write_status(out_dir, status, reason, driver, chrom, anchor, group_order, driver_traj,
+                  loh_groups, het_groups, n_loh, n_het, n_selected):
+    """Write loh_status.txt so a patient with no trainable LOH signal COMPLETES with a clear,
+    machine-readable reason instead of crashing the LSF task."""
+    os.makedirs(out_dir, exist_ok=True)
+    traj = {g: (None if np.isnan(v) else round(float(v), 4)) for g, v in zip(group_order, driver_traj)}
+    with open(os.path.join(out_dir, "loh_status.txt"), "w") as fh:
+        fh.write("status\t%s\n" % status)
+        fh.write("reason\t%s\n" % reason)
+        fh.write("driver\t%s\nchrom\t%s\nanchor\t%s\n" % (driver, chrom, anchor))
+        fh.write("driver_trajectory\t%s\n" % traj)
+        fh.write("loh_groups\t%s\nhet_groups\t%s\n" % (loh_groups, het_groups))
+        fh.write("n_selected_snvs\t%s\n" % ("" if n_selected is None else n_selected))
+        fh.write("n_labeled_LOH\t%s\nn_labeled_HET\t%s\n" % (
+            "" if n_loh is None else n_loh, "" if n_het is None else n_het))
+    print("[loh_status] %s: %s" % (status, reason))
 
 
 # ── orchestration ──────────────────────────────────────────────────────────────
@@ -162,8 +193,20 @@ def run_loh_classifier(matrix_dir, driver, chrom, anchor, out_dir, group_col="st
         het_groups = het_groups or dh
     print("LOH groups: %s | HET groups: %s" % (loh_groups, het_groups))
 
-    # 3. SNV selection
-    selected, snv_tbl = select_informative_snvs(alt, ref, goc, group_order, chrom, driver_traj,
+    # 3. SNV selection — restricted to timepoints where the driver is COVERED. A timepoint with no
+    # driver coverage (VAF = nan) carries no trajectory signal, yet the "depth in EVERY group" filter
+    # would let it veto every SNV (this is why 5801's cohort run selected 0 SNVs while its bespoke run
+    # gave AUC 0.977 — the sAML timepoint had no coverage). A trajectory needs >= 2 covered timepoints.
+    finite = ~np.isnan(driver_traj)
+    sel_groups = [g for g, f in zip(group_order, finite) if f]
+    sel_traj = driver_traj[finite]
+    if len(sel_groups) < 2:
+        _write_status(out_dir, "insufficient_timepoints",
+                      "only %d timepoint(s) have driver coverage; a trajectory needs >= 2" % len(sel_groups),
+                      driver, chrom, anchor, group_order, driver_traj, loh_groups, het_groups, None, None, 0)
+        print("INSUFFICIENT TIMEPOINTS (%d covered) -- wrote loh_status.txt, skipping classifier" % len(sel_groups))
+        return None, None
+    selected, snv_tbl = select_informative_snvs(alt, ref, goc, sel_groups, chrom, sel_traj,
                                                 min_reads_per_group, spearman_thresh)
     snv_tbl.sort_values("spearman_rho", ascending=False).to_csv(
         os.path.join(out_dir, "snv_selection.csv"), index=False)
@@ -172,7 +215,12 @@ def run_loh_classifier(matrix_dir, driver, chrom, anchor, out_dir, group_col="st
     print("selected %d %s SNVs (retained +rho=%d, lost -rho=%d) at dp>=%d, |rho|>=%.2f"
           % (len(selected), chrom, npos, nneg, min_reads_per_group, spearman_thresh))
     if not selected:
-        raise SystemExit("no informative SNVs selected -- check chrom/driver/depth")
+        _write_status(out_dir, "no_informative_snvs",
+                      "no %s SNV passed depth >= %d in every covered timepoint with |rho| >= %.2f "
+                      "vs the driver trajectory" % (chrom, min_reads_per_group, spearman_thresh),
+                      driver, chrom, anchor, group_order, driver_traj, loh_groups, het_groups, 0, 0, 0)
+        print("NO INFORMATIVE SNVs -- wrote loh_status.txt, skipping classifier")
+        return None, None
 
     # 4. features + labels
     X_all = build_features(alt, ref, selected)
@@ -181,6 +229,15 @@ def run_loh_classifier(matrix_dir, driver, chrom, anchor, out_dir, group_col="st
     Xl = X_all[lab].values
     yl = (labels[lab] == "LOH").astype(int).values
     print("labeled cells: LOH=%d HET=%d (anchor=%s)" % (int(yl.sum()), int((yl == 0).sum()), anchor))
+    n_loh, n_het = int(yl.sum()), int((yl == 0).sum())
+    if n_loh < 1 or n_het < 1:
+        reason = ("no anchor-mutant cell falls in both an LOH and a HET timepoint" if len(yl) == 0
+                  else ("only one training class present (LOH=%d, HET=%d): the driver does not "
+                        "contrast LOH vs HET across timepoints" % (n_loh, n_het)))
+        _write_status(out_dir, "not_trainable", reason, driver, chrom, anchor, group_order,
+                      driver_traj, loh_groups, het_groups, n_loh, n_het, len(selected))
+        print("NOT TRAINABLE: %s -- wrote loh_status.txt, skipping classifier" % reason)
+        return None, None
 
     # 5. cross-validated metrics (both models)
     metrics = []

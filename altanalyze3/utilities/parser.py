@@ -23,8 +23,23 @@ from altanalyze3.components.long_read.cli import (
     run_sclr_iso2func_network,
 )
 from altanalyze3.components.bam.variant_impact import run_variant_impact
-from altanalyze3.components.iso2function.cli import run_iso2function
-from altanalyze3.components.snaf.cli import run_snaf, run_snaf_ts, run_snaf_b, run_snaf_precompute_control
+# Optional subcommand handlers. iso2function and snaf may be absent from a given checkout; import
+# them lazily so a missing OPTIONAL component never breaks the core CLI (sclr, sclr-junctions, etc.).
+# This does NOT swallow the error: the stub re-raises a clear ImportError only if that subcommand is
+# actually invoked, so the failure stays loud at the point of use.
+def _missing_subcommand(_name, _err):
+    def _stub(_args, _n=_name, _e=_err):
+        raise ImportError(
+            "The '%s' subcommand is unavailable in this altanalyze3 checkout: %s" % (_n, _e))
+    return _stub
+try:
+    from altanalyze3.components.iso2function.cli import run_iso2function
+except Exception as _e:
+    run_iso2function = _missing_subcommand("sclr-iso2func", _e)
+try:
+    from altanalyze3.components.snaf.cli import run_snaf, run_snaf_ts, run_snaf_b, run_snaf_precompute_control
+except Exception as _e:
+    run_snaf = run_snaf_ts = run_snaf_b = run_snaf_precompute_control = _missing_subcommand("snaf", _e)
 from altanalyze3.utilities.io import (
     get_indexed_references,
     is_bam_indexed

@@ -1,0 +1,6 @@
+data/
+out_baseline/
+out_optimized/
+out_scale/
+*.json
+*.log

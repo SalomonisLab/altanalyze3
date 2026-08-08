@@ -28,6 +28,21 @@ import numpy as np
 import pandas as pd
 
 
+_COMPLEMENT = str.maketrans("ACGTNacgtn", "TGCANtgcan")
+
+
+def _rc(barcode):
+    """Reverse-complement a cell barcode to cellHarmony/annotation orientation.
+
+    variant_extraction writes per-cell driver genotypes with barcodes in this orientation
+    (isoform-BAM CB -> junction/h5ad), so the het-SNV pileup barcodes MUST be reverse-complemented
+    to match; otherwise the SNV features and the driver/anchor genotypes land on disjoint rows and
+    every labeled cell has all-zero SNV features (the classifier then predicts the class prior at
+    chance AUC). Any 10x '-N' gem suffix is dropped to match the bare-16mer keys."""
+    seq = barcode.split("-", 1)[0]
+    return seq.translate(_COMPLEMENT)[::-1]
+
+
 # ── S1: union of germline het-SNVs on a chromosome ─────────────────────────────
 def _open(path):
     return gzip.open(path, "rt") if str(path).endswith(".gz") else open(path)
@@ -104,7 +119,7 @@ def pileup_bam(bam_path, cands, min_mapq=20, max_depth=100000):
                 rd = pr.alignment
                 if rd.mapping_quality < min_mapq or pr.is_del or pr.is_refskip or not rd.has_tag("CB"):
                     continue
-                bc = rd.get_tag("CB"); key = (bc, _umi(rd))
+                bc = _rc(rd.get_tag("CB")); key = (bc, _umi(rd))   # annotation orientation (see _rc)
                 if key in seen:
                     continue
                 b = rd.query_sequence[pr.query_position].upper()
@@ -136,8 +151,11 @@ def _driver_cols(extraction_dir, sample, drivers):
 
 
 def build_patient_matrices(patient, chrom, timepoints, manifest_bams, germline_vcfs, extraction_dir,
-                           drivers, out_dir, min_dp=10, min_gq=20, min_mapq=20, limit=None):
-    """timepoints: list of (stage, [sample1, sample2...]) in chronological order (multi-run timepoints merged)."""
+                           drivers, out_dir, min_dp=10, min_gq=20, min_mapq=20, limit=None,
+                           sample_library=None, annotations=None, celltypes=None):
+    """timepoints: list of (stage, [sample1, sample2...]) in chronological order (multi-run timepoints merged).
+    When `annotations` is given, cells are RESTRICTED to barcodes annotated for each sample's library
+    (sample_library[sample]) — the required single-cell filter — and a celltype column is written."""
     os.makedirs(out_dir, exist_ok=True)
     all_vcfs = [v for ss in timepoints for s in ss[1] for v in [germline_vcfs.get(s)] if v]
     cands = extract_het_union(all_vcfs, chrom, min_dp, min_gq)
@@ -157,10 +175,15 @@ def build_patient_matrices(patient, chrom, timepoints, manifest_bams, germline_v
             bam = manifest_bams.get(s)
             if not bam or not os.path.exists(bam):
                 print(f"  [warn] {s}: bam missing"); continue
+            valid = annotations.get((sample_library or {}).get(s, "")) if annotations is not None else None
             pu = pileup_bam(bam, cands, min_mapq)
             for (bc, snv), (rc, ac) in pu.items():
+                if valid is not None and bc not in valid:
+                    continue                                         # drop unannotated cells (required filter)
                 m = merged.setdefault((bc, snv), [0, 0]); m[0] += rc; m[1] += ac
             for bc, dd in _driver_cols(extraction_dir, s, drivers).items():
+                if valid is not None and bc not in valid:
+                    continue
                 d0 = drv.setdefault(bc, {})
                 for dname, (w, mt) in dd.items():
                     cur = d0.setdefault(dname, [0, 0]); cur[0] += w; cur[1] += mt
@@ -176,7 +199,9 @@ def build_patient_matrices(patient, chrom, timepoints, manifest_bams, germline_v
             for dname, (w, mt) in dd.items():
                 r.at[cell, dname] = w; a.at[cell, dname] = mt
         alt_frames.append(a); ref_frames.append(r)
-        meta_rows += [{"cell": c, "sample": samples[0], "stage": stage} for c in idx]
+        lib0 = (sample_library or {}).get(samples[0], "")
+        meta_rows += [{"cell": c, "sample": samples[0], "stage": stage,
+                       "celltype": (celltypes or {}).get((lib0, c.split("::", 1)[1]), "NA")} for c in idx]
         print(f"  {stage}: {len(idx)} cells")
 
     feats = cands["snv_id"].tolist() + list(drivers)
@@ -204,6 +229,39 @@ def _germline_vcfs(manifest):
     return vc
 
 
+def _load_manifest_libraries(manifest):
+    """{sample -> cellHarmony library name} from the discovery manifest (the authoritative bridge
+    between a KINNEX BAM sample and its short-read cellHarmony annotation library)."""
+    lib = {}
+    with open(manifest) as fh:
+        for r in csv.DictReader(fh, delimiter="\t"):
+            lib[r["sample"]] = r.get("library", "")
+    return lib
+
+
+def _load_annotations(path, libraries):
+    """Parse the cellHarmony unique-barcode file ('BARCODE-1.LIBRARY<TAB>celltype' per annotated cell).
+    Returns {library -> {bare_barcode}} and {(library, bare_barcode) -> celltype}, restricted to the
+    requested libraries. Barcodes are stored bare (no '-1') and are already in annotation orientation,
+    so they match _rc(BAM CB) and the variant_extraction driver barcodes."""
+    want = set(libraries)
+    ann, ct = {}, {}
+    with open(path) as fh:
+        for ln in fh:
+            ln = ln.rstrip("\n")
+            if not ln:
+                continue
+            cell, _, celltype = ln.partition("\t")
+            bc, _, lib = cell.partition(".")
+            if lib not in want:
+                continue
+            if bc.endswith("-1"):
+                bc = bc[:-2]
+            ann.setdefault(lib, set()).add(bc)
+            ct[(lib, bc)] = celltype
+    return ann, ct
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--patient", required=True)
@@ -217,15 +275,27 @@ def main():
     ap.add_argument("--min-dp", dest="min_dp", type=int, default=10)
     ap.add_argument("--min-gq", dest="min_gq", type=int, default=20)
     ap.add_argument("--min-mapq", dest="min_mapq", type=int, default=20)
+    ap.add_argument("--annotations", default=None,
+                    help="cellHarmony unique-barcode file (BARCODE-1.LIBRARY<TAB>celltype). When given, "
+                         "cells are RESTRICTED to annotated barcodes for each sample's manifest library "
+                         "(the required single-cell filter) and a celltype column is added to cell_metadata.")
     ap.add_argument("--limit", type=int, default=None, help="test only: first N het-SNVs")
     args = ap.parse_args()
     tps = []
     for tok in args.timepoints:
         stage, samples = tok.split(":", 1)
         tps.append((stage, samples.split(",")))
+    sample_library = _load_manifest_libraries(args.manifest)
+    annotations = celltypes = None
+    if args.annotations:
+        needed = {sample_library.get(s, "") for _st, ss in tps for s in ss}
+        annotations, celltypes = _load_annotations(args.annotations, needed)
+        n = sum(len(v) for v in annotations.values())
+        print(f"[{args.patient}] annotation filter: {len(annotations)} libraries, {n} annotated barcodes")
     build_patient_matrices(args.patient, args.chrom, tps, _load_manifest_bams(args.manifest),
                            _germline_vcfs(args.manifest), args.extraction_dir, args.drivers, args.output,
-                           min_dp=args.min_dp, min_gq=args.min_gq, min_mapq=args.min_mapq, limit=args.limit)
+                           min_dp=args.min_dp, min_gq=args.min_gq, min_mapq=args.min_mapq, limit=args.limit,
+                           sample_library=sample_library, annotations=annotations, celltypes=celltypes)
 
 
 if __name__ == "__main__":

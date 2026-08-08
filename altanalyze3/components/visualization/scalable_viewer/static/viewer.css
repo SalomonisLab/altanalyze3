@@ -1,0 +1,94 @@
+/* scalable_viewer: two controls scALABLE does not have.
+ * scALABLE's own stylesheet is loaded first and is not overridden. This file only
+ * styles the dataset chip and the contrast selector, using scALABLE's own custom
+ * properties so they match the rest of the page. */
+
+.sv-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 14px;
+  border-radius: 999px;
+  background: #0f172a;
+  color: #fff;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.12);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.sv-chip > span {
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 11px;
+  opacity: 0.75;
+}
+
+.sv-chip select {
+  border: none;
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  font: inherit;
+  max-width: 320px;
+}
+
+.sv-chip select option {
+  color: var(--ink);
+  background: #fff;
+}
+
+.sv-contrast-field {
+  margin-bottom: 10px;
+}
+
+/* ------------------------------------------------------------------ removals
+ * A precomputed bundle cannot run a job, so the controls that only configure a
+ * run are taken out of the layout. The DOM nodes stay: scALABLE's own app.js
+ * reads #results-job-id, #plot-dot-scale, #download-links, #differential-group1,
+ * #differential-group2, #differential-sample-field, #differential-progress and
+ * #differential-message on every status update. `display: none` removes them
+ * from the layout, so no gap is left and the surviving panels take the space. */
+
+.sv-removed {
+  display: none !important;
+}
+
+/* CHANGE 1: the "3. Results" panel. The Explore grid drops to one column, so
+ * Visualization Panel 1 and 2 gain the 340px column plus the 16px gap. */
+#explore-controls-panel {
+  display: none !important;
+}
+
+.explore-workspace {
+  grid-template-columns: minmax(0, 1fr) !important;
+}
+
+/* Inline Dot size control, on the row the panel heading used to occupy.
+ * `.panel-head-topline` is already a flex row, so the label and its select sit on
+ * one line and the header area gets shorter, never taller. */
+.sv-dotsize {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  white-space: nowrap;
+}
+
+.sv-dotsize > span {
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted, #64748b);
+}
+
+.sv-dotsize select {
+  width: auto;
+  min-width: 66px;
+  height: 26px;
+  min-height: 0;
+  padding: 1px 6px;
+  font-size: 0.78rem;
+  line-height: 1.1;
+}

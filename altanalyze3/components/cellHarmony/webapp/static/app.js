@@ -777,6 +777,13 @@ function panelModality(panelKey) {
   if (!select || select.classList.contains("hidden")) {
     return "rna";
   }
+  // While mode === "fastcomm_network" this select is reused as the fastComm plot-type
+  // list. Leaving that mode reads the select before it is refilled, so a stale
+  // plot-type id would be treated as a modality and would drop MarkerHeatmap,
+  // MarkerNetwork and Cell communication from the plot-type options.
+  if (FASTCOMM_PLOT_OPTIONS.some((entry) => entry.id === String(select.value || "").trim().toLowerCase())) {
+    return "rna";
+  }
   return normalizeModalityId(select.value || "rna");
 }
 
@@ -3598,14 +3605,6 @@ function renderDifferentialGo(payload) {
   }
   const significant = ordered.filter((term) => Boolean(term.is_selected_positive_sig));
   const background = ordered.filter((term) => !term.is_selected_positive_sig);
-  const labels = payload.labels || [];
-  const annotationOffsets = [
-    { ax: 56, ay: -54 },
-    { ax: 68, ay: -18 },
-    { ax: 74, ay: 16 },
-    { ax: 80, ay: 48 },
-    { ax: 92, ay: 82 },
-  ];
   plot.classList.remove("hidden");
   document.getElementById("differential-plot-empty").classList.add("hidden");
   Plotly.newPlot(
@@ -3670,7 +3669,7 @@ function renderDifferentialGo(payload) {
       title: `GO terms: ${payload.population}`,
       paper_bgcolor: "rgba(0,0,0,0)",
       plot_bgcolor: "rgba(255,255,255,0.94)",
-      margin: { t: 56, l: 86, r: 280, b: 72 },
+      margin: { t: 56, l: 86, r: 72, b: 72 },
       height: 720,
       xaxis: {
         title: "Z-Score",
@@ -3686,30 +3685,6 @@ function renderDifferentialGo(payload) {
         autorange: true,
       },
       showlegend: false,
-      annotations: labels.map((label, index) => {
-        const offset = annotationOffsets[Math.min(index, annotationOffsets.length - 1)];
-        return {
-          x: Number(label.z_score),
-          y: Number(label.fdr_plot),
-          xref: "x",
-          yref: "y",
-          text: label.term_name,
-          showarrow: true,
-          arrowhead: 0,
-          arrowsize: 1,
-          arrowwidth: 1.1,
-          arrowcolor: label.label_color || "#111827",
-          ax: offset.ax,
-          ay: offset.ay,
-          font: {
-            size: 12,
-            color: label.label_color || "#111827",
-          },
-          bgcolor: "rgba(255,255,255,0)",
-          xanchor: "left",
-          yanchor: "middle",
-        };
-      }),
     },
     { responsive: true }
   );
@@ -4067,7 +4042,7 @@ function renderDifferentialGeneDetail(payload) {
   const empty = document.getElementById("differential-gene-empty");
   const stats = document.getElementById("differential-gene-stats");
   const downloadButton = document.getElementById("download-differential-gene-btn");
-  const isCommunication = normalizeModalityId(payload.modality) === "cell_communication";
+  const isCommunication = isCurrentDifferentialCommunicationAnalysis(payload);
   const isFeatureExpression = payload.view_kind === "feature_expression";
   const yTitle = isFeatureExpression
     ? "Normalized expression"
@@ -4141,22 +4116,51 @@ function renderDifferentialGeneDetail(payload) {
   `;
 }
 
+function hideDifferentialLrToggle() {
+  const toggle = document.getElementById("differential-lr-toggle");
+  if (!toggle) {
+    return;
+  }
+  toggle.classList.add("hidden");
+  toggle.hidden = true;
+  toggle.setAttribute("aria-hidden", "true");
+  toggle.querySelectorAll(".lr-toggle-btn").forEach((btn) => {
+    btn.classList.add("hidden");
+    btn.disabled = true;
+    btn.classList.remove("active");
+    btn.textContent = btn.getAttribute("data-lr-role") === "receptor" ? "Receptor" : "Ligand";
+  });
+  currentDifferentialInteraction = null;
+}
+
+function isCurrentDifferentialCommunicationAnalysis(payload) {
+  const payloadModality = normalizeModalityId(payload && payload.modality, "");
+  const configuredModality = normalizeModalityId(
+    (currentDifferentialState && currentDifferentialState.config && currentDifferentialState.config.modality)
+      || document.getElementById("differential-modality")?.value
+      || "",
+    ""
+  );
+  return payloadModality === "cell_communication" && configuredModality === "cell_communication";
+}
+
 function updateDifferentialLrToggle(payload) {
   const toggle = document.getElementById("differential-lr-toggle");
   if (!toggle) {
     return;
   }
-  // GRN edges have no ligand/receptor split — show a single edge-score distribution.
-  if (normalizeModalityId(payload && payload.modality) === "grn") {
-    toggle.classList.add("hidden");
+  if (!isCurrentDifferentialCommunicationAnalysis(payload)) {
+    hideDifferentialLrToggle();
     return;
   }
   const ligand = String((payload && payload.ligand) || "").trim();
   const receptor = String((payload && payload.receptor) || "").trim();
   if (!ligand && !receptor) {
-    toggle.classList.add("hidden");
+    hideDifferentialLrToggle();
     return;
   }
+  toggle.hidden = false;
+  toggle.removeAttribute("aria-hidden");
   toggle.classList.remove("hidden");
   const buttons = toggle.querySelectorAll(".lr-toggle-btn");
   const activeRole = payload && payload.feature_role
@@ -4287,11 +4291,7 @@ function resetDifferentialGeneDetail() {
   if (detailTitle) {
     detailTitle.textContent = isGrn ? "GRN Detail" : `${capitalizedFeature} Detail`;
   }
-  const lrToggle = document.getElementById("differential-lr-toggle");
-  if (lrToggle) {
-    lrToggle.classList.add("hidden");
-  }
-  currentDifferentialInteraction = null;
+  hideDifferentialLrToggle();
 }
 
 function clearGeneSuggestions() {

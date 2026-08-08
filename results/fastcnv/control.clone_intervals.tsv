@@ -1,7 +1,0 @@
-global_clone_id	n_cells	support_fraction	call	chr	start	end	start_gene	end_gene	n_windows	n_genes	mean_score	max_score	confidence	mean_log2_ratio	zygosity_state	clone_confidence
-clone1	1012	1.0	gain	chr19	27638483	58561915	ERVK-28	MZF1	1	832	2.017	2.017	2.017			nearest_normal
-clone1	1012	1.0	gain	chr4	53286	48986162	ZNF595	CWH43	1	260	2.046	2.046	2.046			nearest_normal
-clone2	365	1.0	gain	chr5	92128	45254948	PLEKHG4B	HCN1	1	194	2.065	2.065	2.065			nearest_normal
-clone3	145	1.0	gain	chr11	126990	50298546	LINC01001	LINC02750	1	491	2.569	2.569	2.569			nearest_normal
-clone3	145	1.0	gain	chr19	27638483	58561915	ERVK-28	MZF1	1	832	2.418	2.418	2.418			nearest_normal
-clone3	145	1.0	gain	chr5	92128	45254948	PLEKHG4B	HCN1	1	194	2.181	2.181	2.181			nearest_normal

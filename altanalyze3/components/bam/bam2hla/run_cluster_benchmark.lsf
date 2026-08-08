@@ -1,0 +1,32 @@
+#!/bin/bash
+#BSUB -W 8:00
+#BSUB -M 16000
+#BSUB -n 4
+#BSUB -J bam2hla_benchmark
+#BSUB -R "span[hosts=1]"
+#BSUB -o bam2hla_bench_%J.out
+#BSUB -e bam2hla_bench_%J.err
+#
+# Benchmark bam2hla against the OptiType calls for MDS-Ogawa-2018
+# (EGAD00001003891) on the cluster, where the 13-20 GB BAMs are on local/fast
+# storage.  Submit with:   bsub < run_cluster_benchmark.lsf
+#
+# EDIT these two paths for the cluster:
+PYTHON=/data/salomonis2/software/altanalyze3/.venv/bin/python   # needs pysam + numpy
+MODDIR=/data/salomonis2/.../altanalyze3/components/bam/bam2hla   # this module on the cluster
+
+TRUTH=/data/salomonis2/LabFiles/Frank-Li/neoantigen/revision/blood/MDS-Ogawa-2018/aggregated_hla_genotypes.txt
+HG38_BAMS=/data/salomonis-archive/BAMs/PublicDatasets/myelodysplasia_EGAD00001003891/fastqs/bams
+HG19_BAMS=/data/salomonis-archive/BAMs/PublicDatasets/myelodysplasia_EGAD00001003891/bams-hg19
+
+cd "$MODDIR" || exit 1
+
+echo "=== hg38 benchmark ==="
+$PYTHON benchmark.py run --build hg38 --bam-dir "$HG38_BAMS" \
+        --truth "$TRUTH" --out results/benchmark_hg38.tsv
+
+echo "=== hg19 benchmark ==="
+$PYTHON benchmark.py run --build hg19 --bam-dir "$HG19_BAMS" \
+        --truth "$TRUTH" --out results/benchmark_hg19.tsv
+
+echo "DONE - see results/benchmark_hg38.tsv and results/benchmark_hg19.tsv"

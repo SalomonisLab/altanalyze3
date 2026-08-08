@@ -1,5 +1,0 @@
-clone,n_cells,regions,cell_types,samples
-WT,34999,(no CNV),NK-Mature;B Memory-1;Intermediate Mono-1,control(34999)
-clone1,1012,chr19q:gain;chr4p:gain,preNeu;immNeu-1;Myeloid intermediate 1,control(1012)
-clone2,365,chr5p:gain,MKP-early;MEP-2;MKP-late,control(365)
-clone3,145,chr11p:gain;chr19q:gain;chr5p:gain,MSC Fibroblast-1;MSC Fibroblast-2;Stromal Vascular,control(145)

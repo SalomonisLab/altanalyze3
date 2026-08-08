@@ -668,8 +668,36 @@ def _plot_heatmap(heatmap_df, output_path, cluster_counts, cluster_order, column
     cbar.ax.text(-0.08, 0.5, f"{vmin:.0f}", ha="right", va="center", transform=cbar.ax.transAxes)
     cbar.ax.text(1.08, 0.5, f"{vmax:.0f}", ha="left", va="center", transform=cbar.ax.transAxes)
 
-    fig.savefig(output_path)
+    _save_figure(fig, output_path)
     plt.close(fig)
+
+
+def _save_figure(fig, output_path):
+    """Write the heatmap to `output_path` AND to a sibling `.svg`, always.
+
+    Illustrator opens the SVG with the text still text, because `svg.fonttype='none'` keeps glyphs
+    as characters instead of converting them to outlines, which matches what `pdf.fonttype=42`
+    does for the PDF. Returns the paths written.
+
+    An SVG failure never costs the caller the PDF: the primary write happens first, and a failed
+    SVG is reported rather than raised.
+    """
+    written = [output_path]
+    fig.savefig(output_path)
+    base, ext = os.path.splitext(output_path)
+    svg_path = base + ".svg"
+    if ext.lower() != ".svg":
+        prior = plt.rcParams.get("svg.fonttype")
+        try:
+            plt.rcParams["svg.fonttype"] = "none"      # keep text editable
+            fig.savefig(svg_path)
+            written.append(svg_path)
+            print(f"Saved marker heatmap SVG to: {svg_path}")
+        except Exception as exc:                        # never lose the primary figure over the SVG
+            print(f"[WARN] SVG export failed for {svg_path}: {exc}")
+        finally:
+            plt.rcParams["svg.fonttype"] = prior
+    return written
 
 
 def _load_marker_finder():

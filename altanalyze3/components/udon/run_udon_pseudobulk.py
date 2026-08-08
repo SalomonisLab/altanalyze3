@@ -83,6 +83,9 @@ def main():
                     help="use validated-fast feature selection (vectorized) + SVD rank instead of the "
                          "slow per-gene loop + full-eig rank (nimfa clustering unchanged)")
     ap.add_argument("--no-goelite", action="store_true")
+    ap.add_argument("--no-tf-enrichment", action="store_true",
+                    help="skip the TF-regulon enrichment that --modality grn runs in place of "
+                         "GO-Elite (GRN features are TF|target edges, not genes)")
     ap.add_argument("--keep-suspect", action="store_true", help="do not drop TotalSeq/empty/'0' pseudobulks")
     ap.add_argument("--subset-celltypes", default=None, help="comma list to restrict cell types (smoke test)")
     ap.add_argument("--cell-type", default=None,
@@ -285,27 +288,43 @@ def main():
         except Exception as e2:
             log(f"h5ad write skipped ({e2}); key tables already in udon_core/")
 
-    # ---- GO-Elite FIRST (so the marker heatmap can carry per-cluster GO-term callouts) ----
-    if not args.no_goelite and n_clusters > 0:
+    # ---- cluster enrichment FIRST (so the marker heatmap can carry per-cluster callouts) ----
+    # GRN features are `TF|target` regulatory edges, not genes, so Gene Ontology does not apply.
+    # For --modality grn the enrichment asks which TF drives each cluster's marker edges instead.
+    _tf_modality = args.modality == "grn"
+    if _tf_modality and n_clusters > 0 and not args.no_tf_enrichment:
+        try:
+            from tf_enrichment import run_tf_enrichment_on_udon
+            run_tf_enrichment_on_udon(udon, os.path.join(outdir, "tf_enrichment"), logger=log)
+        except Exception as e:
+            log(f"TF enrichment skipped: {e}")
+    elif not args.no_goelite and n_clusters > 0:
         try:
             from goelite_enrichment import run_goelite_on_udon
             run_goelite_on_udon(udon, os.path.join(outdir, "goelite"), species=args.species, logger=log)
         except Exception as e:
             log(f"GO-Elite skipped: {e}")
+    if _tf_modality and not args.no_goelite:
+        log("modality=grn: GO-Elite not run (features are TF|target edges, not genes); "
+            "TF-regulon enrichment used instead")
 
     # ---- heatmap: canonical MarkerFinder layout + per-cluster callouts (right = top marker gene,
     #      left = top GO-Elite term), numeric cluster order, embedded fonts, rasterized quadmesh. ----
     try:
         os.chdir(UDON_DIR)
         from visualizations import plot_markers_df
-        # per-cluster callouts: top marker gene (highest pearson_r) + top GO-Elite term (lowest FDR)
+        # per-cluster callouts: top marker feature (highest pearson_r) on the RIGHT, and on the
+        # LEFT the top enriched TF regulon for grn, else the top GO-Elite term (lowest FDR).
+        # A GRN edge PRINTS as `TF-target`; the pipe is the storage separator, not a label.
+        from tf_enrichment import display_feature
         left_c, right_c = {}, {}
         try:
             _mk = pd.DataFrame(udon.uns.get("udon_marker_genes_top_n"))
             if _mk is not None and len(_mk) and "pearson_r" in _mk.columns:
                 for _cc, _g in _mk.sort_values("pearson_r", ascending=False).groupby("top_cluster"):
-                    right_c[str(_cc)] = str(_g.iloc[0]["marker"])
-            _sel = os.path.join(outdir, "goelite", "GOElite_UDON_selected.tsv")
+                    right_c[str(_cc)] = display_feature(_g.iloc[0]["marker"])
+            _sel = (os.path.join(outdir, "tf_enrichment", "TF_enrichment_UDON_selected.tsv")
+                    if _tf_modality else os.path.join(outdir, "goelite", "GOElite_UDON_selected.tsv"))
             if os.path.exists(_sel):
                 _s = pd.read_csv(_sel, sep="\t")
                 if len(_s):
@@ -316,7 +335,9 @@ def main():
         plot_markers_df(udon.uns["marker_heatmap"], udon.uns["udon_marker_genes_top_n"],
                         udon.uns["udon_clusters"], os.path.join(outdir, "marker_heatmap.pdf"),
                         left_callouts=(left_c or None), right_callouts=(right_c or None))
-        log("wrote marker_heatmap.png + marker_heatmap.pdf (MarkerFinder layout + top-gene/GO callouts)")
+        log(f"wrote marker_heatmap.png + marker_heatmap.pdf (MarkerFinder layout; right callout = "
+            f"top marker {'edge (TF-target)' if _tf_modality else 'gene'}, left callout = "
+            f"{'enriched TF regulon' if _tf_modality else 'top GO-Elite term'})")
         # standard UDON binary heatmaps: donor x cluster + cell-type x cluster
         from udon_binary_heatmaps import make_udon_binary_heatmaps
         study_of = None

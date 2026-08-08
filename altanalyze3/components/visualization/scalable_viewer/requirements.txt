@@ -1,0 +1,11 @@
+# scalable_viewer
+# Serving needs only these four:
+fastapi>=0.100
+uvicorn>=0.23
+numpy>=1.23
+#   (jinja2 is not required: index.html is served as a static shell)
+
+# Precompute additionally needs:
+h5py>=3.8
+scikit-learn>=1.2
+umap-learn>=0.5.5

@@ -150,11 +150,17 @@ def _plot(M, col_clusters, groups, agg, outbase, title, row_fontsize=6, row_orde
 
 
 def make_udon_binary_heatmaps(clusters_df, outdir, donor_of=None, study_of=None, covariates_df=None,
-                              cluster_col="cluster"):
+                              cluster_col="cluster", covariate_row_order=None):
     """clusters_df: index = 'celltype__Sample', column `cluster_col`. ONE column per pseudobulk
     (ordered by cluster, like the marker heatmap). Writes celltype_cluster_heatmap (always),
     donor_cluster_heatmap + study_cluster_heatmap (if donor_of/study_of given), and
-    covariate_cluster_heatmap (if covariates_df given: a Sample-indexed binary covariate table)."""
+    covariate_cluster_heatmap (if covariates_df given: a Sample-indexed binary covariate table).
+
+    covariate_row_order: optional explicit row order for covariate_cluster_heatmap. The default
+    orders covariates by the cluster holding the most of their positive pseudobulks, which is raw
+    count dominance. Pass a list to order by something else -- e.g. the cluster each covariate is
+    ENRICHED in, which count dominance does not recover for a covariate that is common overall.
+    Must name every column of covariates_df exactly once."""
     os.makedirs(outdir, exist_ok=True)
     df = pd.DataFrame({"cluster": clusters_df[cluster_col].astype(str).values}, index=clusters_df.index)
     df["Sample"] = [str(i).split("__", 1)[1] if "__" in str(i) else str(i) for i in df.index]
@@ -218,9 +224,18 @@ def make_udon_binary_heatmaps(clusters_df, outdir, donor_of=None, study_of=None,
         M_cov = cov.reindex(df["Sample"].astype(str).values).fillna(0).astype(int)
         M_cov.index = df.index; M_cov = M_cov.T                 # covariate x pseudobulk
         cat = {c: ("categorical" if "=" in str(c) else "binary") for c in M_cov.index}
-        clmat = pd.get_dummies(pd.Series(col_clusters, index=M_cov.columns))
-        dom_c = M_cov.dot(clmat).idxmax(axis=1)                 # dominant cluster per covariate
-        row_order_c = sorted(M_cov.index, key=lambda c: (cat[c], _natnum(str(dom_c.get(c, ""))), str(c)))
+        if covariate_row_order is not None:
+            want, have = list(covariate_row_order), list(M_cov.index)
+            if sorted(map(str, want)) != sorted(map(str, have)):
+                raise ValueError(
+                    "covariate_row_order must name every covariate exactly once; "
+                    f"missing={sorted(set(map(str, have)) - set(map(str, want)))} "
+                    f"unknown={sorted(set(map(str, want)) - set(map(str, have)))}")
+            row_order_c = want
+        else:
+            clmat = pd.get_dummies(pd.Series(col_clusters, index=M_cov.columns))
+            dom_c = M_cov.dot(clmat).idxmax(axis=1)             # dominant cluster per covariate
+            row_order_c = sorted(M_cov.index, key=lambda c: (cat[c], _natnum(str(dom_c.get(c, ""))), str(c)))
         _plot(M_cov, col_clusters, cat, None, os.path.join(outdir, "covariate_cluster_heatmap"),
               "UDON covariate composition per cluster (one column per pseudobulk)",
               row_fontsize=5, row_order=row_order_c)

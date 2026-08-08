@@ -910,16 +910,28 @@ def run_de_for_comparisons(adata,
                            fc_thresh,
                            min_cells_per_group,
                            use_rawp=False,
-                           progress_callback=None):
+                           progress_callback=None,
+                           min_replicates_per_group=2):
 
     # Filter to cells with both labels present
     keep = adata.obs[covariate_col].isin([case_label, control_label])
     sub = adata[keep].copy()
     total_cells = sub.n_obs
 
-    min_cells = int(min_cells_per_group)
-    if total_cells < 200:
-        min_cells = max(4, min_cells)
+    # Under pseudobulk the rows of sub.obs are SAMPLES, not cells, so the size
+    # check below counts replicates. Gating those with a cells-per-group number
+    # deletes whole populations: at min_cells_per_group=3 this dropped 18 of 57
+    # population x contrast tests to 0 tested genes on the COPD metacell atlas,
+    # because the control arm never exceeded 4 replicates. The moderated t-test
+    # itself requires only 2 per arm (see _moderated_t_test), so pseudobulk gates
+    # on min_replicates_per_group and single-cell keeps the cell-count rule.
+    is_pseudobulk = "pseudobulk" in str(adata.uns.get("pseudobulk_method", ""))
+    if is_pseudobulk:
+        min_cells = int(min_replicates_per_group)
+    else:
+        min_cells = int(min_cells_per_group)
+        if total_cells < 200:
+            min_cells = max(4, min_cells)
 
     populations = _ordered_categories_from_obs(sub.obs, population_col)
     results_rows = []
@@ -3981,7 +3993,8 @@ def main():
                     help="Scanpy rank_genes_groups method for single-cell mode. Pseudobulk/perturb-screen mode uses the moderated t-test branch.")
     ap.add_argument("--alpha", type=float, default=0.05, help="FDR threshold (default: 0.05)")
     ap.add_argument("--fc", type=float, default=1.2, help="Fold-change threshold (absolute, default: 1.2)")
-    ap.add_argument("--min_cells_per_group", type=int, default=20, help="Minimum cells per group per population (default: 20; auto-relaxed to 4 if total<200)")
+    ap.add_argument("--min_cells_per_group", type=int, default=20, help="SINGLE-CELL mode only: minimum cells per group per population (default: 20; auto-relaxed to 4 if total<200). Ignored under --make_pseudobulk, which gates on --min_replicates_per_group instead.")
+    ap.add_argument("--min_replicates_per_group", type=int, default=2, help="PSEUDOBULK mode: minimum pseudobulk replicates (samples) per group per population (default: 2, which is the floor the moderated t-test itself requires). A population below this is skipped entirely and reports 0 tested genes.")
     ap.add_argument("--make_pseudobulk", action="store_true", help="If set, compute pseudobulks per (population×sample)")
     ap.add_argument("--pseudobulk_min_cells", type=int, default=10, help="Minimum cells per pseudobulk group (default: 10)")
     ap.add_argument("--perturb_screen", action="store_true", help="Run perturbation-screen mode with bootstrapped metacells per (cell type × perturb target).")
@@ -4212,6 +4225,7 @@ def main():
                 alpha=float(args.alpha),
                 fc_thresh=float(args.fc),
                 min_cells_per_group=int(per_comparison_min_cells),
+                min_replicates_per_group=int(args.min_replicates_per_group),
                 use_rawp=args.use_rawp,
                 progress_callback=progress_callback
             )
