@@ -8,8 +8,10 @@
  *   3. adds a dataset selector and a differential-contrast selector,
  *   4. adds a DotPlot mode, which scALABLE does not have, drawn with the same
  *      Plotly layout conventions and exported through scALABLE's own vector-PDF
- *      helper (app.js:460 exportPlotlyElementToVectorPdf).
- * It draws no UMAP, violin, heatmap, volcano, network or GO plot of its own.
+ *      helper (app.js:460 exportPlotlyElementToVectorPdf),
+ *   5. redraws the differential GO scatter with three colour tiers and a legend, on
+ *      scALABLE's own axes and click behaviour (installGoSignificanceTiers).
+ * It draws no UMAP, violin, heatmap, volcano or network plot of its own.
  */
 
 (function () {
@@ -17,6 +19,19 @@
   window.__SCALABLE_VIEWER__ = SV;
 
   // ---------------------------------------------------------------- utilities
+
+  // scALABLE is the analysis tool; this deployment serves precomputed bundles, so the
+  // page is named for what it is. The server already rewrites <title> and <h1> on the
+  // way out (scalable_app.py _install_index_override); this repeats it in the DOM so a
+  // page served from a browser cache still carries the new name.
+  const VIEWER_NAME = "scALABLE-viewer";
+
+  function applyViewerName() {
+    if (document.title.trim() === "scALABLE") document.title = VIEWER_NAME;
+    document.querySelectorAll("h1").forEach((node) => {
+      if (node.textContent.trim() === "scALABLE") node.textContent = VIEWER_NAME;
+    });
+  }
 
   function el(id) { return document.getElementById(id); }
 
@@ -99,6 +114,155 @@
       .forEach((id) => { const node = el(id); if (node) node.required = false; });
   }
 
+  /* GO scatter: three colour tiers and a legend.
+   *
+   * scALABLE drew two traces, blue for `is_selected_positive_sig` and grey for the
+   * rest, with `showlegend: false` (app.js:3606-3607, 3687). Blue is GO-Elite's
+   * `selected` flag, which is DAG pruning (goelite/prio.py:34-54), not the FDR call, so
+   * grey held both "significant but pruned" and "not significant" with nothing on the
+   * page to say so. The server now stamps `color_tier` on every term
+   * (scalable_app.py _install_goelite_significance_tiers); this draws it.
+   *
+   * Axes, ranges, click behaviour and hover fields are scALABLE's; the extra hover
+   * field is the overlapping-gene count, because a one-gene term can reach Z=38. */
+  function installGoSignificanceTiers() {
+    const original = window.renderDifferentialGo;
+    if (typeof original !== "function") return;
+    const FALLBACK_TIERS = [
+      { key: "representative", color: "#1f19c7", label: "GO-Elite representative" },
+      { key: "significant", color: "#60a5fa", label: "Significant, not representative" },
+      { key: "other", color: "#d1d5db", label: "Not significant" },
+    ];
+
+    window.renderDifferentialGo = function (payload) {
+      const significance = payload && payload.significance;
+      if (!significance || !Array.isArray(significance.tiers)) {
+        original(payload);   // no tier stamp: scALABLE's own two-colour plot, unchanged
+        return;
+      }
+      destroyDifferentialNetwork();
+      const plot = el("differential-plot-area");
+      const terms = payload.terms || [];
+      if (!terms.length) {
+        renderDifferentialEmpty(`No GO term enrichment was available for ${payload.population}.`);
+        return;
+      }
+      const ordered = terms.map((term) => {
+        const overlapGenes = term.overlap_genes || [];
+        const selectedGene = overlapGenes.includes(currentDifferentialGene)
+          ? currentDifferentialGene
+          : (term.selected_gene || overlapGenes[0] || null);
+        return {
+          ...term,
+          selected_gene: selectedGene,
+          z_score: Number(term.z_score),
+          fdr_plot: Number(term.fdr_plot || term.fdr || term.p_value),
+          p_value: Number(term.p_value),
+          fdr: Number(term.fdr),
+        };
+      }).filter((term) => Number.isFinite(term.z_score)
+        && Number.isFinite(term.fdr_plot) && term.fdr_plot > 0);
+      if (!ordered.length) {
+        renderDifferentialEmpty(`No GO term enrichment was available for ${payload.population}.`);
+        return;
+      }
+      const tiers = significance.tiers.length ? significance.tiers : FALLBACK_TIERS;
+      const total = Number(significance.n_terms) || terms.length;
+      const hover = (
+        "%{customdata[4]}<br>Z-score=%{x:.3f}<br>FDR=%{y:.3e}<br>Fisher p=%{customdata[6]:.3e}"
+        + "<br>Overlapping genes: %{customdata[8]}"
+        + "<br>Selected gene: %{customdata[0]}"
+        + "<br>GO genes: %{customdata[2]}<extra></extra>"
+      );
+      // Weakest evidence first so the representative terms sit on top.
+      const traces = [...tiers].reverse().map((tier) => {
+        const rows = ordered.filter((term) => (term.color_tier || "other") === tier.key);
+        return {
+          x: rows.map((term) => term.z_score),
+          y: rows.map((term) => term.fdr_plot),
+          type: "scattergl",
+          mode: "markers",
+          name: `${tier.label} (${rows.length} of ${total})`,
+          legendrank: 1000 + tiers.findIndex((entry) => entry.key === tier.key),
+          customdata: rows.map((term) => [
+            term.selected_gene,
+            term.direction,
+            (term.overlap_genes || []).join(", "),
+            term.overlap_genes || [],
+            term.term_name,
+            term.z_score,
+            term.p_value,
+            term.fdr,
+            (term.overlap_genes || []).length,
+          ]),
+          marker: { color: tier.color, size: 11, opacity: tier.key === "other" ? 0.95 : 0.98 },
+          hovertemplate: hover,
+        };
+      });
+      plot.classList.remove("hidden");
+      hide(el("differential-plot-empty"));
+      Plotly.newPlot(
+        plot,
+        traces,
+        {
+          title: `GO terms: ${payload.population}`,
+          paper_bgcolor: "rgba(0,0,0,0)",
+          plot_bgcolor: "rgba(255,255,255,0.94)",
+          margin: { t: 56, l: 86, r: 72, b: 200 },
+          height: 720,
+          xaxis: {
+            title: "Z-Score",
+            zeroline: false,
+            range: [
+              Math.min(-10, Math.floor(Math.min(...ordered.map((term) => term.z_score)) - 0.5)),
+              Math.max(20, Math.ceil(Math.max(...ordered.map((term) => term.z_score)) + 2.5)),
+            ],
+          },
+          yaxis: { title: "Fishers FDR p", type: "log", autorange: true },
+          showlegend: true,
+          // Legend under the x-axis label, note under the legend: the same stacking the
+          // PDF uses, so the on-screen plot and the download read identically.
+          legend: {
+            orientation: "h",
+            x: 0, xanchor: "left",
+            y: -0.11, yanchor: "top",
+            traceorder: "normal",
+            font: { size: 11 },
+            bgcolor: "rgba(0,0,0,0)",
+          },
+          annotations: [{
+            text: String(significance.note || "").replace(/\n/g, "<br>"),
+            xref: "paper", yref: "paper",
+            x: 0, xanchor: "left",
+            y: -0.25, yanchor: "top",
+            showarrow: false, align: "left",
+            font: { size: 10, color: "#4b5563" },
+          }],
+          hovermode: "closest",
+        },
+        { responsive: true }
+      );
+      plot.on("plotly_click", (event) => {
+        const selectedGene = event?.points?.[0]?.customdata?.[0];
+        const overlapGenes = event?.points?.[0]?.customdata?.[3] || [];
+        let gene = selectedGene;
+        if (Array.isArray(overlapGenes) && overlapGenes.length > 1) {
+          const response = window.prompt(
+            `Select a gene from this GO term:\n${overlapGenes.join(", ")}`,
+            selectedGene || overlapGenes[0] || ""
+          );
+          if (response === null) return;
+          const trimmed = response.trim();
+          if (trimmed && overlapGenes.includes(trimmed)) gene = trimmed;
+        }
+        if (gene) {
+          currentDifferentialGene = gene;
+          loadDifferentialGeneDetail(gene, payload.population);
+        }
+      });
+    };
+  }
+
   /* Panel headings replaced by an inline Dot size control.
    *
    * scALABLE has ONE global #plot-dot-scale, which lived in the deleted "3. Results"
@@ -106,7 +270,17 @@
    * visualization panel now carries its own select, placed on the heading's own row
    * so the header does not get taller. getPlotDotScale is re-pointed at the select
    * of the panel currently rendering; it keeps scALABLE's own `value * 4` scaling. */
+  const LARGE_ATLAS_CELLS = 100000;
+
+  function defaultDotSize() {
+    const entry = SV.current
+      || (SV.datasets && SV.datasets.length ? SV.datasets[0] : null);
+    const n = Number(entry && entry.n_cells);
+    return Number.isFinite(n) && n > LARGE_ATLAS_CELLS ? "0.25" : "0.5";
+  }
+
   function installPanelDotSize() {
+    const defaultDot = defaultDotSize();
     ["viz1", "viz2"].forEach((panelKey) => {
       const topline = document.querySelector(
         `#baseline-results-view .panel:nth-of-type(${panelKey === "viz1" ? 1 : 2}) .panel-head-topline`);
@@ -116,8 +290,11 @@
       const wrap = document.createElement("label");
       wrap.className = "sv-dotsize";
       wrap.innerHTML =
+        // A large atlas overplots at 0.5: the dots merge and structure disappears.
+        // Above 100k cells the default drops to 0.25. The user can still pick any value.
         `<span>Dot size</span><select id="sv-dotsize-${panelKey}" class="compact-select">`
-        + '<option value="0.25">0.25</option><option value="0.5" selected>0.5</option>'
+        + `<option value="0.25"${defaultDot === "0.25" ? " selected" : ""}>0.25</option>`
+        + `<option value="0.5"${defaultDot === "0.5" ? " selected" : ""}>0.5</option>`
         + '<option value="0.75">0.75</option><option value="1">1</option></select>';
       topline.insertBefore(wrap, topline.firstChild);
       el(`sv-dotsize-${panelKey}`).addEventListener("change", () => {
@@ -348,15 +525,343 @@
     setExplorerTab("explore");
   }
 
+  // ------------------------------------------------------------------ Study tab
+  // First tab, but NOT the landing tab: loadDataset() ends on setExplorerTab("explore"),
+  // so Explore still opens by default. Every value comes from GET /api/study, which
+  // reads the LungMAP site database (breath.sqlite) read-only; this file holds no study
+  // prose, no accession and no sample name of its own. Layout mirrors a LungMAP study
+  // page: title, description, metadata grid, then Tools / Downloads / Samples.
+
+  const SAMPLE_PAGE_SIZE = 25;
+  const SAMPLE_SKIP_KEYS = ["record_id", "target_id", "display_order", "applies_to_dataset"];
+
+  function esc(value) {
+    return String(value === null || value === undefined ? "" : value)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function studyRow(k, v) {
+    return `<div class="sv-study-row"><span class="sv-study-key">${esc(k)}</span>`
+         + `<span class="sv-study-val">${v}</span></div>`;
+  }
+
+  function studyLink(url, label) {
+    const text = esc(label || url || "");
+    if (!url) return text || "—";
+    return `<a href="${esc(url)}" target="_blank" rel="noopener">${text}</a>`;
+  }
+
+  function prettyKey(key) {
+    return String(key).replace(/_/g, " ").replace(/\./g, " ")
+      .replace(/\b[a-z]/g, (c) => c.toUpperCase());
+  }
+
+  function asNumber(value) {
+    const n = Number(String(value).replace(/,/g, ""));
+    return Number.isFinite(n) && String(value).trim() !== "" ? n : null;
+  }
+
+  function fmtCount(value) {
+    const n = asNumber(value);
+    return n === null ? (value || "—") : n.toLocaleString();
+  }
+
+  /* A scrollable, sortable, paged table with a filter box. Used for the sample list,
+   * which is 112 rows from the site database or 178 meta-samples from the bundle. */
+  function renderSampleTable(host, columns, rows) {
+    // key stays null until a header is clicked, so the first draw keeps the order the
+    // endpoint sent: lmdb:has_display_order for site samples, category order for the
+    // bundle's meta-samples.
+    const state = { key: null, dir: 1, page: 0, filter: "" };
+
+    host.innerHTML =
+      '<div class="sv-sample-tools">'
+      + '<input type="search" class="sv-sample-filter" placeholder="Filter rows">'
+      + '<span class="sv-sample-count"></span>'
+      + '<span class="sv-sample-nav">'
+      + '<button type="button" class="sv-nav-btn" data-nav="first">&laquo;</button>'
+      + '<button type="button" class="sv-nav-btn" data-nav="prev">Prev</button>'
+      + '<span class="sv-sample-page"></span>'
+      + '<button type="button" class="sv-nav-btn" data-nav="next">Next</button>'
+      + '<button type="button" class="sv-nav-btn" data-nav="last">&raquo;</button>'
+      + '</span></div>'
+      + '<div class="sv-table-scroll"><table class="sv-table">'
+      + '<thead><tr>'
+      + columns.map((c) => `<th data-col="${esc(c)}"><span>${esc(prettyKey(c))}</span>`
+                           + '<i class="sv-sort"></i></th>').join("")
+      + '</tr></thead><tbody></tbody></table></div>';
+
+    const body = host.querySelector("tbody");
+    const countNode = host.querySelector(".sv-sample-count");
+    const pageNode = host.querySelector(".sv-sample-page");
+    const filterNode = host.querySelector(".sv-sample-filter");
+
+    function filtered() {
+      if (!state.filter) return rows;
+      const needle = state.filter.toLowerCase();
+      return rows.filter((r) => columns.some(
+        (c) => String(r[c] === undefined ? "" : r[c]).toLowerCase().indexOf(needle) >= 0));
+    }
+
+    function sorted(list) {
+      const key = state.key;
+      if (!key) return list;
+      const copy = list.slice();
+      copy.sort((a, b) => {
+        const av = a[key], bv = b[key];
+        const an = asNumber(av), bn = asNumber(bv);
+        if (an !== null && bn !== null) return (an - bn) * state.dir;
+        return String(av === undefined ? "" : av)
+          .localeCompare(String(bv === undefined ? "" : bv)) * state.dir;
+      });
+      return copy;
+    }
+
+    function draw() {
+      const list = sorted(filtered());
+      const pages = Math.max(1, Math.ceil(list.length / SAMPLE_PAGE_SIZE));
+      if (state.page >= pages) state.page = pages - 1;
+      if (state.page < 0) state.page = 0;
+      const start = state.page * SAMPLE_PAGE_SIZE;
+      const slice = list.slice(start, start + SAMPLE_PAGE_SIZE);
+      body.innerHTML = slice.map((r) => "<tr>" + columns.map(
+        (c) => `<td>${esc(r[c] === undefined || r[c] === null ? "" : r[c])}</td>`).join("")
+        + "</tr>").join("");
+      countNode.textContent = list.length === rows.length
+        ? `${rows.length} rows`
+        : `${list.length} of ${rows.length} rows`;
+      pageNode.textContent = list.length
+        ? `${start + 1}–${Math.min(start + SAMPLE_PAGE_SIZE, list.length)} / ${list.length}`
+        : "0 / 0";
+      host.querySelectorAll("th").forEach((th) => {
+        const mark = th.getAttribute("data-col") === state.key
+          ? (state.dir > 0 ? "▲" : "▼") : "";
+        th.querySelector(".sv-sort").textContent = mark;
+      });
+    }
+
+    host.querySelectorAll("th").forEach((th) => {
+      th.addEventListener("click", () => {
+        const key = th.getAttribute("data-col");
+        if (state.key === key) state.dir = -state.dir;
+        else { state.key = key; state.dir = 1; }
+        state.page = 0;
+        draw();
+      });
+    });
+    host.querySelectorAll(".sv-nav-btn").forEach((b) => {
+      b.addEventListener("click", () => {
+        const list = filtered();
+        const pages = Math.max(1, Math.ceil(list.length / SAMPLE_PAGE_SIZE));
+        const nav = b.getAttribute("data-nav");
+        if (nav === "first") state.page = 0;
+        else if (nav === "prev") state.page -= 1;
+        else if (nav === "next") state.page += 1;
+        else state.page = pages - 1;
+        draw();
+      });
+    });
+    filterNode.addEventListener("input", () => {
+      state.filter = filterNode.value.trim();
+      state.page = 0;
+      draw();
+    });
+    draw();
+  }
+
+  function sampleColumns(rows) {
+    const seen = [];
+    rows.forEach((row) => Object.keys(row).forEach((key) => {
+      if (SAMPLE_SKIP_KEYS.indexOf(key) >= 0) return;
+      if (seen.indexOf(key) < 0) seen.push(key);
+    }));
+    const rest = seen.filter((k) => k !== "name");
+    return (seen.indexOf("name") >= 0 ? ["name"] : []).concat(rest);
+  }
+
+  function renderStudyPanel(panel, study) {
+    const viewer = study.viewer_stats || {};
+    const grid =
+      studyRow("Dataset ID", esc(study.dataset_id || ""))
+      + studyRow("Assay Type", esc(study.assay || "—"))
+      + studyRow("Organism", esc(study.organism || "—"))
+      + studyRow("Technology", esc((study.technologies || []).join(", ") || "—"))
+      + studyRow("Cell Count", esc(fmtCount(study.cell_count)))
+      + studyRow("Reference", study.reference && study.reference.url
+          ? studyLink(study.reference.url, study.reference.name) : "—")
+      // Every declared accession, not only the first: a study can carry a GEO series
+      // and a dbGaP study at once, and hiding the second would understate the release.
+      + studyRow("Raw data", (study.accessions || []).length
+          ? (study.accessions || []).map((a) => studyLink(a.url, a.name)).join(", ")
+          : (study.raw_data && study.raw_data.url
+              ? studyLink(study.raw_data.url, study.raw_data.name) : "—"))
+      + studyRow("Sample Type", esc(study.sample_type || "—"))
+      + studyRow("Age Range", esc((study.age_ranges || []).join(", ") || "—"))
+      + studyRow("Served in this viewer",
+          viewer.n_cells
+            ? esc(`${Number(viewer.n_cells).toLocaleString()} metacells x `
+                  + `${Number(viewer.n_genes).toLocaleString()} genes, `
+                  + `${viewer.n_states} cell states`)
+            : "—");
+
+    // Two different notices. is_fallback would mean a DIFFERENT study is on screen.
+    // source === "source_tables" means this study's OWN record, read from the TSVs the
+    // site database is built from, because the database has not been rebuilt yet.
+    const notice = study.is_fallback
+      ? '<p class="sv-study-notice">Record ' + esc(study.requested_id)
+        + ' is not in the site database yet. Showing ' + esc(study.study_id)
+        + ' instead.</p>'
+      : (study.source === "source_tables" && study.notice
+          ? `<p class="sv-study-notice">${esc(study.notice)}</p>`
+          : "");
+
+    const tools = (study.tools || []);
+    const toolsHtml = tools.length
+      ? '<ul class="sv-study-list">' + tools.map((t) => "<li>"
+          + studyLink(t.url || t.path, t.name)
+          + (t.description ? ` <span class="sv-dim">${esc(t.description)}</span>` : "")
+          + "</li>").join("") + "</ul>"
+      : '<p class="sv-dim">The site record lists no tools.</p>';
+
+    const files = (study.files || []);
+    const filesHtml = files.length
+      ? '<table class="sv-table sv-file-table"><thead><tr><th>File</th><th>Size</th>'
+        + "<th>Description</th></tr></thead><tbody>"
+        + files.map((f) => "<tr><td>" + studyLink(f.url, f.name) + "</td>"
+            + `<td>${esc(f.size || "")}</td><td>${esc(f.description || "")}</td></tr>`).join("")
+        + "</tbody></table>"
+      : '<p class="sv-dim">The site record lists no files.</p>';
+
+    panel.innerHTML =
+      `<h2 class="sv-study-title">${esc(study.title || study.study_id || "")}</h2>`
+      + notice
+      + `<div class="sv-study-card"><p class="sv-study-desc">${esc(study.description || "")}</p>`
+      + `<div class="sv-study-grid">${grid}</div></div>`
+      + '<div class="sv-study-tabs">'
+      + '<button type="button" class="sv-study-subtab active" data-sub="tools">Tools</button>'
+      + '<button type="button" class="sv-study-subtab" data-sub="downloads">Downloads</button>'
+      + '<button type="button" class="sv-study-subtab" data-sub="samples">Samples</button></div>'
+      + `<div class="sv-study-sub" data-sub-panel="tools">${toolsHtml}</div>`
+      + `<div class="sv-study-sub hidden" data-sub-panel="downloads">${filesHtml}</div>`
+      + '<div class="sv-study-sub hidden" data-sub-panel="samples">'
+      + '<p class="sv-sample-source"></p><div class="sv-sample-table"></div></div>'
+      + `<p class="sv-study-provenance">Source: ${esc(study.study_id || "")} in `
+      + `${esc(study.db_path || "")}</p>`;
+
+    panel.querySelectorAll(".sv-study-subtab").forEach((b) => {
+      b.addEventListener("click", () => {
+        panel.querySelectorAll(".sv-study-subtab").forEach((x) => x.classList.remove("active"));
+        b.classList.add("active");
+        panel.querySelectorAll(".sv-study-sub").forEach((p) => {
+          p.classList.toggle("hidden",
+            p.getAttribute("data-sub-panel") !== b.getAttribute("data-sub"));
+        });
+      });
+    });
+
+    // Samples: the site record when it is the requested study and carries sample rows;
+    // otherwise the bundle's own meta-samples. A fallback record's samples belong to a
+    // different study, so they are never shown as this viewer's samples. The caption
+    // always says which list is on screen and where it came from.
+    const host = panel.querySelector(".sv-sample-table");
+    const caption = panel.querySelector(".sv-sample-source");
+    const dbSamples = study.samples || [];
+    const viewerSamples = (study.viewer_samples || {});
+    const viewerRows = viewerSamples.rows || [];
+    if (dbSamples.length && !study.is_fallback) {
+      caption.textContent = `${dbSamples.length} samples from the LungMAP record `
+        + `${study.study_id}. Click a column to sort; type to filter.`;
+      renderSampleTable(host, sampleColumns(dbSamples), dbSamples);
+    } else if (viewerRows.length) {
+      caption.textContent = (dbSamples.length
+          ? `The ${dbSamples.length} samples of stand-in record ${study.study_id} belong to a `
+            + "different study and are not shown. "
+          : "The site record carries no sample rows. ")
+        + `Showing the ${viewerRows.length} meta-samples of the loaded bundle `
+        + `(obs column "${viewerSamples.column}"). Click a column to sort; type to filter.`;
+      renderSampleTable(host, viewerSamples.columns || sampleColumns(viewerRows), viewerRows);
+    } else {
+      caption.textContent = "No samples in the site record and none in the bundle.";
+      host.innerHTML = `<p class="sv-dim">${esc(viewerSamples.error || "")}</p>`;
+    }
+    return panel;
+  }
+
+  async function installStudyTab() {
+    const bar = document.querySelector(".workspace-tab-btn")?.parentElement;
+    const anyPanel = document.querySelector(".workspace-panel[data-tab-panel]");
+    if (!bar || !anyPanel) return;
+
+    const btn = document.createElement("button");
+    btn.className = "workspace-tab-btn";
+    btn.setAttribute("data-tab", "study");
+    btn.type = "button";
+    btn.textContent = "Study";
+    bar.insertBefore(btn, bar.firstChild);          // FIRST tab
+
+    const panel = document.createElement("section");
+    panel.className = "workspace-panel hidden";
+    panel.setAttribute("data-tab-panel", "study");
+    panel.innerHTML = '<p class="sv-dim">Loading the study record…</p>';
+    anyPanel.parentElement.insertBefore(panel, anyPanel);
+
+    // scALABLE hides a panel by removing .active, not by adding .hidden, and it
+    // re-asserts that on every tab click. Mirror BOTH so the Study panel actually
+    // swaps with Explore instead of sitting behind it.
+    function showStudy(on) {
+      if (on) {
+        document.querySelectorAll(".workspace-tab-btn").forEach((b) => b.classList.remove("active"));
+        document.querySelectorAll(".workspace-panel[data-tab-panel]").forEach((p) => {
+          p.classList.add("hidden"); p.classList.remove("active");
+        });
+        btn.classList.add("active");
+        panel.classList.remove("hidden"); panel.classList.add("active");
+      } else {
+        btn.classList.remove("active");
+        panel.classList.add("hidden"); panel.classList.remove("active");
+      }
+    }
+    SV.showStudy = showStudy;
+    btn.addEventListener("click", () => showStudy(true));
+    document.querySelectorAll('.workspace-tab-btn:not([data-tab="study"])').forEach((b) => {
+      b.addEventListener("click", () => showStudy(false));
+    });
+    showStudy(false);   // Explore is the landing tab; Study starts closed
+
+    let study = null;
+    try {
+      study = await getJson("/api/study");
+    } catch (err) {
+      panel.innerHTML = `<p class="sv-study-error">The study record could not be read: `
+        + `${esc(err.message)}</p>`;
+      console.warn("[scalable_viewer] /api/study failed", err);
+      return;
+    }
+    SV.study = study;
+    if (!study.ok) {
+      panel.innerHTML = `<p class="sv-study-error">${esc(study.error || "no study record")}</p>`
+        + `<p class="sv-dim">Database: ${esc(study.db_path || "")}<br>Tried: `
+        + `${esc((study.candidates || []).join(", "))}</p>`;
+      return;
+    }
+    renderStudyPanel(panel, study);
+  }
+
   async function boot() {
+    applyViewerName();
     stripRunWorkflow();
     stripDifferentialRunConfig();
-    installPanelDotSize();
+    installGoSignificanceTiers();
+    await installStudyTab();
     buildDatasetSelector();
     buildContrastSelector();
     installDotPlotMode();
     const catalog = await getJson("/api/catalog");
     SV.datasets = catalog.datasets || [];
+    // Built only now: the default dot size depends on the atlas size, which the
+    // catalog carries. Called before the catalog loads it would always see 0 cells.
+    installPanelDotSize();
     const select = el("sv-dataset");
     SV.datasets.forEach((entry) => {
       const option = document.createElement("option");

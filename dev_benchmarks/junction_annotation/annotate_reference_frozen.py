@@ -5,29 +5,17 @@ import sys
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))  # Up to altanalyze3
 import altanalyze3.components.long_read.gff_process as gff_process
-from altanalyze3.components.aggregate.gene_index import NovelGeneIndex, LEGACY, CORRECTED
 
 
-def annotate_junctions(adata, exon_file, novel_gene_mode=CORRECTED):
-    """Name every junction by the gene and exon regions its two splice sites touch.
-
-    ``novel_gene_mode`` only changes junctions whose two splice sites both miss the reference.
-    ``corrected`` (default) tests the chromosome, makes minus-strand genes reachable, and annotates
-    each splice site with its own coordinate. ``legacy`` reproduces the pre-2026-08 whole-gene scan
-    exactly; pass it only to reproduce an older result. See gene_index.py for what separates them.
-    """
+def annotate_junctions(adata, exon_file):
     exonCoordinates, geneData, strandData = gff_process.importEnsemblGenes(exon_file,include_introns=True)
-    gene_index = NovelGeneIndex(
-        geneData, strandData,
-        gene_chr=getattr(gff_process, "gene_chr", None),
-        mode=novel_gene_mode,
-    )
     annotations = []
 
-    var = adata.var
-    for chr, start, end, strand in zip(
-        var["chr"].tolist(), var["start"].tolist(), var["end"].tolist(), var["strand"].tolist()
-    ):
+    for idx, row in adata.var.iterrows():
+        chr = row["chr"]
+        start = row["start"]
+        end = row["end"]
+        strand = row["strand"]
         if strand == '-':
             start,end = end,start
 
@@ -49,10 +37,10 @@ def annotate_junctions(adata, exon_file, novel_gene_mode=CORRECTED):
                     return None, None
 
         def find_completely_novel_annot(chr,pos,strand):
-            gene = gene_index.find(chr, pos, strand)
-            if gene is None:
-                return None, None #f"NA:{pos}"
-            return gene, gff_process.findNovelSpliceSite(gene, pos, strand)
+            for gene in geneData:
+                if geneData[gene][0][0] <= pos <= geneData[gene][-1][1] and strandData[gene] == strand:
+                    return gene, gff_process.findNovelSpliceSite(gene, pos, strand)
+            return None, None #f"NA:{pos}"
 
         gene1,exon1 = get_annot(chr, start, strand, 2)
         gene2,exon2 = get_annot(chr, end, strand, 1)
@@ -73,12 +61,7 @@ def annotate_junctions(adata, exon_file, novel_gene_mode=CORRECTED):
                 annotations.append(f"{gene1}:{exon1}-{gene2}:{exon2}={chr}:{start}-{end}")
         elif gene1 == None: #both == None
             gene1, exon1 = find_completely_novel_annot(chr,start,strand)
-            if novel_gene_mode == LEGACY:
-                # The prior code called this twice with `start`. The call is pure, so reusing the
-                # first result keeps the output identical and halves the work.
-                gene2, exon2 = gene1, exon1
-            else:
-                gene2, exon2 = find_completely_novel_annot(chr,end,strand)
+            gene2, exon2 = find_completely_novel_annot(chr,start,strand)
             if gene1 == gene2:
                 annotations.append(f"{gene1}:{exon1}-{exon2}={chr}:{start}-{end}")
             else:

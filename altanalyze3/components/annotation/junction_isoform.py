@@ -1,4 +1,5 @@
 import os,sys
+import logging
 import pandas as pd
 import glob
 from tqdm import tqdm
@@ -423,6 +424,11 @@ def annotate_junction_stats_file(file_path, transcript_dict, gene_symbol_dict, c
             gene_symbol, longest_isoform1, longest_isoform2, coord1, coord2, event_type, proximity = event_isoform_db[feature]
         else:
             junction1, junction2 = feature.split('|')
+            ### A bulk PSI identifier appends '=chr:start-end', because the junction name alone is
+            ### not unique there. Long-read features carry no suffix, so this is a no-op for them.
+            ### Every lookup below keys on the name, so the suffix comes off first.
+            junction1 = junction1.split('=', 1)[0]
+            junction2 = junction2.split('=', 1)[0]
             gene_id = junction1.split(':')[0]  # Extract gene ID
             gene_symbol = gene_symbol_dict.get(gene_id, 'N/A')
 
@@ -475,11 +481,18 @@ def annotate_junction_stats_file(file_path, transcript_dict, gene_symbol_dict, c
             coord1 = coord_dict.get(junction1, 'N/A')
             coord2 = coord_dict.get(junction2, 'N/A')
 
-            try: 
+            ### classify_splicing_event parses the feature itself, so it must receive the junction
+            ### names without the '=chr:start-end' suffix a bulk identifier carries.
+            clean_feature = "|".join(part.split("=", 1)[0] for part in feature.split("|"))
+            try:
                 strand = "+" if int(coord1.split(":")[1].split("-")[1]) > int(coord1.split(":")[1].split("-")[0]) else "-"
-                event_type, proximity = se.classify_splicing_event(feature,strand,longest_exons1,longest_exons2,coord1,coord2)
+                event_type, proximity = se.classify_splicing_event(clean_feature,strand,longest_exons1,longest_exons2,coord1,coord2)
             except Exception as e:
-                event_type, proximity = 'Trans-Splicing', 'null'
+                ### A failure here is not evidence of trans-splicing. Reporting it as such labelled
+                ### 82% of one bulk run that way, against 3.3% real trans-splicing in the reference
+                ### file. Record that the event could not be typed, and log why.
+                event_type, proximity = 'Unclassified', 'null'
+                logging.debug(f"Could not classify {clean_feature}: {type(e).__name__}: {e}")
             
             event_isoform_db[feature] = gene_symbol, longest_isoform1, longest_isoform2, coord1, coord2, event_type, proximity
 

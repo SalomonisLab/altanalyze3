@@ -50,6 +50,50 @@ class IntronOverlaps:
         logging.debug(f"""Increment p3 counter on {step} for {key}""")
 
 
+### Reference-consuming CIGAR operations: M, D, N, =, X
+REF_CONSUMING = frozenset({0, 2, 3, 7, 8})
+
+
+def aligned_blocks(read):
+    """Return the contiguous reference intervals the read actually aligns over.
+
+    Intron retention asks where a read has aligned bases, so the alignment is split at every
+    skipped span. A read that splices an intron out has no aligned bases inside it and simply
+    does not overlap it.
+    """
+    blocks = []
+    pos = read.reference_start
+    block_start = pos
+    for op, length in read.cigartuples:
+        if op == 3:                                   # the read skips this reference span
+            if pos > block_start:
+                blocks.append((block_start, pos))
+            pos += length
+            block_start = pos
+        elif op in REF_CONSUMING:
+            pos += length
+    if pos > block_start:
+        blocks.append((block_start, pos))
+    return blocks
+
+
+def covering_extent(blocks, intron_start, intron_end):
+    """Return the aligned block that overlaps this intron, as ``(start, end)``, or None.
+
+    The alignment envelope of a long read spans many genes, so the envelope cannot say whether
+    one intron is retained. The block that touches the intron can.
+    """
+    best = None
+    for block_start, block_end in blocks:
+        if block_end > intron_start and block_start < intron_end:
+            overlap = min(block_end, intron_end) - max(block_start, intron_start)
+            if best is None or overlap > best[0]:
+                best = (overlap, block_start, block_end)
+    if best is None:
+        return None
+    return best[1], best[2]
+
+
 class Counter:
 
     def __init__(self, bam, ref, span, strandness, location, threads=None):
@@ -68,6 +112,10 @@ class Counter:
         self.used_reads = {
             IntRetCat.PRIME_5: [],
             IntRetCat.PRIME_3: [],
+            ### A read lying wholly inside an intron. update_overlaps returns this category but
+            ### counts no boundary evidence for it, matching the prior behaviour. The key was
+            ### missing, which only stayed hidden while one intron was examined per read.
+            IntRetCat.INTRON: [],
             IntRetCat.DISCARD: []
         }
 
@@ -186,69 +234,80 @@ class Counter:
                 logging.debug(f"""Not implemented combination of {current_category} and {cached_category} categories""")
                 return IntRetCat.DISCARD
 
+    def _raw_data(self, contig, intron, read_info, extent):
+        """Build one IntRetRawData for a single read against a single intron."""
+        return IntRetRawData(
+            contig = contig,
+            intron_start = intron[0],
+            intron_end = intron[1],
+            intron_name = intron[2],
+            intron_strand = intron[3],
+            read_start = extent[0],
+            read_end = extent[1],
+            read_strand = read_info["read_strand"],
+            xs_strand = read_info["xs_strand"],
+            read_name = read_info["read_name"],
+            read_1 = read_info["read_1"],
+            read_2 = read_info["read_2"],
+        )
+
     def calculate(self, contig):
+        """Count intron-retention evidence for EVERY intron each read touches.
+
+        The previous version advanced one sequential intron iterator, so exactly one intron was
+        examined per read, and it judged overlap from the alignment envelope. A long read spans
+        many introns and skips most of them, so both had to change. Each read is now scored
+        against every intron it overlaps, independently, from its aligned blocks.
+        """
+        reads_seen = 0
+        pairs_scored = 0
         with pysam.AlignmentFile(self.bam, mode="rb", threads=self.threads) as bam_handler:
             with pysam.TabixFile(str(self.ref), mode="r", parser=pysam.asBed(), threads=self.threads) as ref_handler:
                 contig_ref = get_correct_contig(contig, ref_handler)                                                # contig in the file can be both with or without 'chr' prefix
                 contig_bam = get_correct_contig(contig, bam_handler)                                                # the same as above
-                intron_iter = ref_handler.fetch(contig_ref)
-                intron = next(intron_iter)                                                                          # get initial value from intron iterator
-                no_introns = False                                                                                  # to break the outer fetching reads loop
                 for read in bam_handler.fetch(contig_bam):                                                          # fetches only mapped reads
-                    logging.debug(
-                        f"""Fetch a read {read.query_name} {contig_bam}:{read.reference_start}-{read.reference_end} {"-" if read.is_reverse else "+"}"""
-                    )
                     if skip_bam_read(read):                                                                        # gate to skip all "bad" reads
-                        logging.debug(f"""Skip a read {read.query_name}""")
-                        logging.debug(f"""is_secondary: {read.is_secondary}""")
-                        logging.debug(f"""is_duplicate: {read.is_duplicate}""")
-                        logging.debug(f"""is_supplementary: {read.is_supplementary}""")
-                        logging.debug(f"""is_paired and mate_is_unmapped: {read.is_paired and read.mate_is_unmapped}""")
                         continue
-                    while read.reference_start - intron.end >= 0:
-                        try:
-                            intron = next(intron_iter)
-                            logging.debug(
-                                f"""Switched to a new intron {intron.name} {contig_ref}:{intron.start}-{intron.end} {intron.strand}"""
-                            )
-                        except StopIteration:
-                            no_introns = True
-                            break
-                    if no_introns:                                                                              # no need to iterate over the reads if no introns left
-                        logging.debug("Halt read iteration - run out of introns")
-                        break
+                    if read.cigartuples is None:
+                        continue
+                    reads_seen += 1
+                    blocks = aligned_blocks(read)
                     xs_strand = None
                     try:
                         xs_strand = read.get_tag("XS")
                     except KeyError:
                         pass
-                    current_data = IntRetRawData(
-                        contig = contig,
-                        intron_start = intron.start,
-                        intron_end = intron.end,
-                        intron_name = intron.name,
-                        intron_strand = intron.strand,
-                        read_start = read.reference_start,
-                        read_end = read.reference_end,
-                        read_strand = "-" if read.is_reverse else "+",
-                        xs_strand = xs_strand,
-                        read_name = read.query_name,
-                        read_1 = read.is_read1,
-                        read_2 = read.is_read2,
-                    )
-                    if self.paired:
-                        if read.query_name in self.cache:
-                            cached_data = self.cache[read.query_name]
-                            overlapped_as = self.update_overlaps(current_data, cached_data)
-                            self.used_reads[overlapped_as].append(read.query_name)
-                            del self.cache[read.query_name]
-                            logging.debug(f"""Remove cached data for {read.query_name}""")
+                    read_info = {
+                        "read_strand": "-" if read.is_reverse else "+",
+                        "xs_strand": xs_strand,
+                        "read_name": read.query_name,
+                        "read_1": read.is_read1,
+                        "read_2": read.is_read2,
+                    }
+                    ### Every intron this alignment reaches, not just the next one in the file.
+                    try:
+                        candidates = list(ref_handler.fetch(contig_ref, read.reference_start, read.reference_end))
+                    except ValueError:                                                                              # contig absent from the reference
+                        continue
+                    for entry in candidates:
+                        intron = (entry.start, entry.end, entry.name, entry.strand)
+                        extent = covering_extent(blocks, entry.start, entry.end)
+                        if extent is None:
+                            continue
+                        pairs_scored += 1
+                        current_data = self._raw_data(contig, intron, read_info, extent)
+                        if self.paired:
+                            key = (read.query_name, entry.start, entry.end, entry.name)
+                            if key in self.cache:
+                                cached_data = self.cache.pop(key)
+                                overlapped_as = self.update_overlaps(current_data, cached_data)
+                                self.used_reads[overlapped_as].append(read.query_name)
+                            else:
+                                self.cache[key] = current_data
                         else:
-                            self.cache[read.query_name] = current_data
-                            logging.debug(f"""Add cached data for {read.query_name}""")
-                    else:
-                        overlapped_as = self.update_overlaps(current_data)
-                        self.used_reads[overlapped_as].append(read.query_name)
+                            overlapped_as = self.update_overlaps(current_data)
+                            self.used_reads[overlapped_as].append(read.query_name)
+        logging.info(f"{contig}: {reads_seen} reads; {pairs_scored} read-intron pairs scored")
 
     def export_counts(self):
         logging.info(f"""Save counts to {self.location}""")

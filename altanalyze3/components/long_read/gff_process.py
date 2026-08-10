@@ -1080,6 +1080,7 @@ def importEnsemblGenes(exon_file,include_introns=False):
     global exonCoordinates
     global geneData
     global exonData
+    global gene_chr
     exonCoordinates = {}
     geneData = {}
     gene_chr = {}
@@ -1093,21 +1094,32 @@ def importEnsemblGenes(exon_file,include_introns=False):
             t = data.split('\t')
             if firstRow:
                 firstRow = False
-            else:
-                gene, exon, chr, strand, start, stop = t[:6]
-                gene_chr[gene] = chr
-                start = int(start)
-                stop = int(stop)
-                if strand == '-':
-                    start, stop = stop, start
-                exon_info = (start, stop, exon)
-                if gene in geneData:
-                    geneData[gene].append(exon_info)
+                # Hs_Ensembl_exon.txt carries a header row; gene_model_all.tsv does not. Decide by
+                # whether the coordinate columns parse as integers, so a headerless file keeps its
+                # first gene. Skipping row 1 unconditionally dropped one real exon.
+                if len(t) >= 6:
+                    try:
+                        int(t[4]); int(t[5])
+                    except ValueError:
+                        continue        # a real header
                 else:
-                    geneData[gene] = [exon_info]
-                exonData[gene,exon] = start,stop
-                strandData[gene] = strand
-                prior_gene=gene
+                    continue
+            if not data:
+                continue
+            gene, exon, chr, strand, start, stop = t[:6]
+            gene_chr[gene] = chr
+            start = int(start)
+            stop = int(stop)
+            if strand == '-':
+                start, stop = stop, start
+            exon_info = (start, stop, exon)
+            if gene in geneData:
+                geneData[gene].append(exon_info)
+            else:
+                geneData[gene] = [exon_info]
+            exonData[gene,exon] = start,stop
+            strandData[gene] = strand
+            prior_gene=gene
     for gene in geneData:
         geneData[gene].sort()
         if strandData[gene] == '-':
@@ -1131,11 +1143,16 @@ def clearEnsemblCache():
     global geneData
     global exonData
     global strandData
+    global gene_chr
     global novelGene
     global novelGeneLoci
     global additional_junctions
     try:
         exonCoordinates = {}
+    except NameError:
+        pass
+    try:
+        gene_chr = {}
     except NameError:
         pass
     try:

@@ -240,17 +240,32 @@ def get_reference_first_exons(ref_gff_file):
     print(f"{len(ref_first_exons)} genes imported from the reference GFF")
     return ref_first_exons
 
-def gff_translate(query_gff_file, genome_fasta, ref_gff_file=None, transcript_associations_file=None):
+def _usable_path(path):
+    """True when the caller gave a path that exists. Both arguments below are optional, and
+    os.path.exists raises TypeError on None, so the documented defaults could never be used."""
+    return bool(path) and os.path.exists(path)
+
+
+def gff_translate(query_gff_file, genome_fasta, ref_gff_file=None, transcript_associations_file=None,
+                  outdir=None):
     query_transcripts = parse_gff(query_gff_file)
-    
-    query_transcript_to_gene, intron_retention_dict = parse_transcript_associations(transcript_associations_file) if os.path.exists(transcript_associations_file) else {}
-    ref_first_exons = get_reference_first_exons(ref_gff_file) if os.path.exists(ref_gff_file) else {}
+
+    ### Both lookups are optional. Absent files leave empty dictionaries rather than raising.
+    ### parse_transcript_associations returns a pair, so the fallback must be a pair too; the bare
+    ### {} that stood here raised "not enough values to unpack" whenever the file was missing.
+    if _usable_path(transcript_associations_file):
+        query_transcript_to_gene, intron_retention_dict = parse_transcript_associations(transcript_associations_file)
+    else:
+        query_transcript_to_gene, intron_retention_dict = {}, {}
+    ref_first_exons = get_reference_first_exons(ref_gff_file) if _usable_path(ref_gff_file) else {}
     cds_records, transcript_records, protein_records, coding_records = extract_cds_and_protein(query_transcripts, genome_fasta, query_transcript_to_gene=query_transcript_to_gene, ref_first_exons=ref_first_exons)
 
+    ### Default stays the working directory, which is what every existing caller relies on.
+    outdir = outdir or os.getcwd()
     # Output protein information to CSV
-    export_protein_summary(protein_records, intron_retention_dict, "protein_summary.txt")
+    export_protein_summary(protein_records, intron_retention_dict, os.path.join(outdir, "protein_summary.txt"))
     # Output per-isoform coding-region annotation (start/stop codon -> genomic; coding vs UTR exon portions)
-    export_coding_regions(coding_records, "coding_regions.txt")
+    export_coding_regions(coding_records, os.path.join(outdir, "coding_regions.txt"))
 
     return cds_records, transcript_records, protein_records
 

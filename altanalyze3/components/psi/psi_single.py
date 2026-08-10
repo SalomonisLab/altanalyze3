@@ -34,9 +34,14 @@ def find_uid_in_clique(the_uid, region, strand, uid2coords):
 
     return clique
 
+### Defaults preserve the behaviour these thresholds had while they were hard-coded.
+DEFAULT_MIN_READS = 20          # a sample must carry this many reads to count toward an event
+DEFAULT_MIN_DENOMINATOR = 5     # below this total, PSI for that sample is null
+DEFAULT_MIN_DPSI_RANGE = 0.1    # an event must vary by this much across samples to be reported
+
+
 # Early exit conditional checking to optimize
-def is_valid(mat, uid):
-    min_reads = 20
+def is_valid(mat, uid, min_reads=DEFAULT_MIN_READS):
     num_incl_events = np.count_nonzero(mat[0, :] >= min_reads)
     if num_incl_events <= 1:
         return False  # Early exit if inclusion events are too low
@@ -52,15 +57,16 @@ def is_valid(mat, uid):
     return True
 
 # Core PSI calculation with early exit conditions
-def calculate_psi_core(clique, uid, count, sample_columns):
+def calculate_psi_core(clique, uid, count, sample_columns,
+                       min_reads=DEFAULT_MIN_READS, min_denominator=DEFAULT_MIN_DENOMINATOR):
     sub_count = count.loc[list(clique.keys()), sample_columns]
     mat = sub_count.values
     with np.errstate(divide='ignore', invalid='ignore'):
         psi = mat[0, :] / mat.sum(axis=0)
-        psi[mat.sum(axis=0) < 5] = np.nan # Sets PSI to null where less than 5 reads
+        psi[mat.sum(axis=0) < min_denominator] = np.nan # Sets PSI to null below the read floor
     if sub_count.shape[0] > 1:
         bg_uid = sub_count.index.tolist()[np.argmax(mat[1:, :].sum(axis=1)) + 1]
-        cond = is_valid(mat, uid)
+        cond = is_valid(mat, uid, min_reads)
     else:
         bg_uid = 'None'
         cond = False
@@ -124,7 +130,9 @@ async def write_to_file(file_path, data, write_header):
         await f.write(data.to_csv(sep='\t', index=False, header=False))
 
 # PSI calculation for a chunk of genes, writing in batches
-def calculate_psi_per_gene(count, outdir, write_header=True, result_batch=None):
+def calculate_psi_per_gene(count, outdir, write_header=True, result_batch=None,
+                           min_reads=DEFAULT_MIN_READS, min_denominator=DEFAULT_MIN_DENOMINATOR,
+                           min_dpsi_range=DEFAULT_MIN_DPSI_RANGE):
     return_data = []
     count = count.set_index('uid')
     uid2coords = count.apply(lambda x: [x['start'], x['end']], axis=1, result_type='reduce').to_dict()
@@ -139,10 +147,12 @@ def calculate_psi_per_gene(count, outdir, write_header=True, result_batch=None):
         for c in ['gene', 'chrom', 'start', 'end', 'strand']:
             index_list.remove(c)
         sample_columns = index_list
-        psi_values, bg_uid, cond = calculate_psi_core(clique, uid, count, sample_columns)
+        psi_values, bg_uid, cond = calculate_psi_core(
+            clique, uid, count, sample_columns, min_reads, min_denominator
+        )
 
         # Only keep PSI results that meet the range condition
-        if np.nanmax(psi_values) - np.nanmin(psi_values) >= 0.1 and cond:
+        if np.nanmax(psi_values) - np.nanmin(psi_values) >= min_dpsi_range and cond:
             data = (uid+'|'+bg_uid, *psi_values)
             return_data.append(data)
 
@@ -187,7 +197,38 @@ def _iter_junction_rows_from_h5ad(h5ad_path, min_read=None):
     return header, _rows(), len(kept_features)
 
 
-async def main(junction_path=None, query_gene=None, outdir=None, min_read=None):
+def run_psi(args):
+    """CLI entry point for ``python -m altanalyze3 psi``."""
+    import asyncio
+    import logging
+    logging.info(f"Computing PSI from {args.junctions} -> {args.output}")
+    logging.info(
+        f"  min_reads={args.min_reads} min_denominator={args.min_denominator} "
+        f"min_dpsi_range={args.min_dpsi_range} min_junction_reads={args.min_read}"
+    )
+    asyncio.run(main(
+        junction_path=str(args.junctions),
+        query_gene=args.query_gene,
+        outdir=str(args.output),
+        min_read=args.min_read,
+        min_reads=args.min_reads,
+        min_denominator=args.min_denominator,
+        min_dpsi_range=args.min_dpsi_range,
+    ))
+
+
+async def main(junction_path=None, query_gene=None, outdir=None, min_read=None,
+               min_reads=DEFAULT_MIN_READS, min_denominator=DEFAULT_MIN_DENOMINATOR,
+               min_dpsi_range=DEFAULT_MIN_DPSI_RANGE):
+    """Compute PSI per event.
+
+    ``min_read``   drops a junction outright unless some sample exceeds it. Applies to h5ad input
+                   only, and matches the legacy '-10-counts.txt' prefilter.
+    ``min_reads``  the per-sample read floor an event must clear on both its inclusion and its
+                   exclusion side before it is reported.
+    ``min_denominator``  below this total, that sample's PSI is null rather than a ratio of noise.
+    ``min_dpsi_range``   an event must vary by at least this much across samples to be written.
+    """
     import time
     start_time = time.time()
 
@@ -221,13 +262,22 @@ async def main(junction_path=None, query_gene=None, outdir=None, min_read=None):
     result_batch = []
 
     def _parse_feature(feat):
-        """feat = 'uid=chrom:start-end' -> (uid, chrom, start, end, strand, gene). Identical to the
-        text parser's per-row coordinate extraction."""
-        uid, coords = feat.split('=')
+        """feat = 'name=chrom:start-end' -> (uid, chrom, start, end, strand, gene).
+
+        The uid keeps the coordinates. Stripping them made the identifier ambiguous: on one real
+        chromosome 16,274 junction rows carried only 11,746 distinct names, so 4,954 rows shared an
+        identifier. Two costs followed. The coordinate dictionary kept one junction per name and
+        silently dropped the rest, 305 of 1,225 rows on a single gene. And `.loc` on a repeated
+        label returned several rows, so the PSI matrix gained junctions the clique never selected.
+        """
+        name, coords = feat.split('=')
+        uid = feat
         chrom, coords = coords.split(':')
         start, end = coords.split('-')
-        strand = '+' if start < end else '-'
-        gene = uid.split(':')[0]
+        ### Compare as numbers. String order put "9999" after "10000", so any junction whose two
+        ### coordinates had different digit counts was assigned the wrong strand.
+        strand = '+' if int(start) < int(end) else '-'
+        gene = name.split(':')[0]
         return uid, chrom, start, end, strand, gene
 
     def _text_rows():
@@ -260,7 +310,8 @@ async def main(junction_path=None, query_gene=None, outdir=None, min_read=None):
                         count[name] = col
 
                     # Process chunk of genes and write to disk
-                    calculate_psi_per_gene(count, outdir, write_header, result_batch)
+                    calculate_psi_per_gene(count, outdir, write_header, result_batch,
+                                       min_reads, min_denominator, min_dpsi_range)
                     if len(result_batch) >= BATCH_SIZE:
                         # Write results in batches
                         await write_to_file(outdir, pd.concat(result_batch), write_header)
@@ -289,7 +340,8 @@ async def main(junction_path=None, query_gene=None, outdir=None, min_read=None):
             for name, col in zip(['uid', 'gene', 'chrom', 'start', 'end', 'strand'],
                                  [col_uid, col_gene, col_chrom, col_start, col_end, col_strand]):
                 count[name] = col
-            calculate_psi_per_gene(count, outdir, write_header, result_batch)
+            calculate_psi_per_gene(count, outdir, write_header, result_batch,
+                                       min_reads, min_denominator, min_dpsi_range)
             count={}
 
         if result_batch:

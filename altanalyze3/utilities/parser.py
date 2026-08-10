@@ -10,6 +10,8 @@ from altanalyze3.utilities.helpers import get_version
 from altanalyze3.components.intron_count.main import count_introns
 from altanalyze3.components.junction_count.main import count_junctions
 from altanalyze3.components.aggregate.main import aggregate
+from altanalyze3.components.psi.psi_single import run_psi
+from altanalyze3.components.psi.differential import run_bulk_differential_cli
 from altanalyze3.components.gene_model.gene_model_index import build_index
 from altanalyze3.components.fastCNV.main import bundled_gene_coordinates
 from altanalyze3.components.fastCNV.main import run_from_altanalyze_args as run_fastcnv
@@ -250,6 +252,16 @@ class ArgsParser():
             help="Reference exon BED file used for annotation"
         )
 
+        aggregate_parser.add_argument(
+            "--novel-gene-mode", dest="novel_gene_mode", type=str,
+            choices=["corrected", "legacy"], default="corrected",
+            help=("Gene assignment for junctions whose two splice sites both miss the reference. "
+                  "'corrected' (default) tests the chromosome, makes minus-strand genes reachable, "
+                  "and annotates each splice site with its own coordinate. 'legacy' reproduces the "
+                  "pre-2026-08 scan exactly, which ignores the chromosome and can never return a "
+                  "minus-strand gene; use it only to reproduce an older result.")
+        )
+
         aggregate_parser.set_defaults(func=aggregate)
 
         aggregate_parser.add_argument(
@@ -261,6 +273,76 @@ class ArgsParser():
             "--tmp", type=Path, default=Path("/tmp/altanalyze_tmp"),
             help="Temporary directory for intermediate files"
         )
+
+        # PSI parameters
+        psi_parser = subparsers.add_parser(
+            "psi",
+            help="Compute PSI per splicing event from an annotated junction matrix or h5ad"
+        )
+        psi_parser.set_defaults(func=run_psi)
+        psi_parser.add_argument(
+            "--junctions", dest="junctions", type=str, required=True,
+            help="Annotated junction matrix (the *_annotated.tsv from aggregate) or a junction h5ad"
+        )
+        psi_parser.add_argument(
+            "--output", type=str, required=True,
+            help="Output PSI file"
+        )
+        psi_parser.add_argument(
+            "--gene", dest="query_gene", type=str, default=None,
+            help="Restrict the run to one gene. Default: all genes"
+        )
+        psi_parser.add_argument(
+            "--min-reads", dest="min_reads", type=int, default=20,
+            help=("Per-sample read floor an event must clear on BOTH its inclusion and its "
+                  "exclusion side. Default: 20, the value that was previously hard-coded. Lower it "
+                  "for shallow libraries, where 20 can reject every event.")
+        )
+        psi_parser.add_argument(
+            "--min-denominator", dest="min_denominator", type=int, default=5,
+            help="Below this total read count, that sample's PSI is null. Default: 5"
+        )
+        psi_parser.add_argument(
+            "--min-dpsi-range", dest="min_dpsi_range", type=float, default=0.1,
+            help="An event must vary by at least this much PSI across samples. Default: 0.1"
+        )
+        psi_parser.add_argument(
+            "--min-junction-reads", dest="min_read", type=int, default=None,
+            help="Drop a junction unless some sample exceeds this. h5ad input only. Default: off"
+        )
+        psi_parser.add_argument(
+            "--tmp", type=Path, default=Path("/tmp/altanalyze_tmp"),
+            help="Temporary directory. assert_common_args creates it for every subcommand"
+        )
+        psi_parser.add_argument(
+            "--loglevel", type=str, default="INFO",
+            help="Logging level: DEBUG, INFO, WARNING, ERROR"
+        )
+
+        # Differential splicing parameters
+        diff_parser = subparsers.add_parser(
+            "diff-splice",
+            help="Differential splicing between two groups of bulk samples, using the long-read engine"
+        )
+        diff_parser.set_defaults(func=run_bulk_differential_cli)
+        diff_parser.add_argument("--psi", type=str, required=True, help="PSI file from 'altanalyze3 psi'")
+        diff_parser.add_argument(
+            "--groups", type=str, required=True,
+            help="Two-column file: sample<TAB>group. A header row is optional"
+        )
+        diff_parser.add_argument("--condition1", type=str, required=True, help="First group name")
+        diff_parser.add_argument("--condition2", type=str, required=True, help="Second group name")
+        diff_parser.add_argument(
+            "--method", type=str, default="limma", choices=["limma", "mwu"],
+            help=("'limma' (default) runs the empirical-Bayes moderated t-test; 'mwu' runs the "
+                  "Mann-Whitney rank test. Both write the same columns.")
+        )
+        diff_parser.add_argument(
+            "--output", type=str, required=True,
+            help="Directory for <cond1>-<cond2>-bulk_stats.txt"
+        )
+        diff_parser.add_argument("--tmp", type=Path, default=Path("/tmp/altanalyze_tmp"), help="Temporary directory")
+        diff_parser.add_argument("--loglevel", type=str, default="INFO", help="Logging level")
 
         # fastCNV parameters
         fastcnv_parser = subparsers.add_parser(

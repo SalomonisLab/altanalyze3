@@ -14,12 +14,25 @@ This module produces the first two by calling the same generators the cellHarmon
 pipeline calls, and reads a finished fastComm run for the third. It implements no
 scoring, no layout and no statistic of its own.
 
+Two further views are fed from artifacts the cellHarmony DIFFERENTIAL already wrote,
+and must never be recomputed here:
+
+  Differential GO terms      <contrast>/GeneSetEnrichment/GOElite_<tag>.tsv
+                             (writer: flask/pipeline.py:2507)
+  Differential networks      <contrast>/interaction-plots/<population>_interactions.tsv
+                             (writer: flask/pipeline.py:2431-2456)
+
+Pass `--goelite-from` and `--diff-networks-from` to ingest those files. The older
+`--goelite` flag recomputes enrichment from the bundle DEG table and does NOT reproduce
+the pipeline; it is kept only for a bundle with no differential run behind it.
+
 Run:
   PYTHONPATH=/Users/saljh8/Documents/GitHub/altanalyze3 \
   /opt/homebrew/opt/python@3.11/bin/python3.11 \
     -m altanalyze3.components.visualization.scalable_viewer.prepare_assets \
       --bundle-dir <dir> --prefix <prefix> --out <asset dir> \
       [--marker-gct <per-cell GCT>] [--markers-tsv <marker table>] \
+      [--goelite-from <differential root>] [--diff-networks-from <differential root>] \
       [--fastcomm-dir <fastComm run dir>]
 """
 from __future__ import annotations
@@ -221,6 +234,165 @@ def build_goelite(deg_tsv: str, background_genes_tsv: str, out_dir: str, *,
     return path if os.path.isfile(path) else None
 
 
+# =================================================================================
+# Pipeline artifact ingestion
+#
+# GO-Elite tables and differential interaction networks are STANDARD ARTIFACTS of the
+# cellHarmony differential run. The run writes them at flask/pipeline.py:2431-2456
+# (networks) and flask/pipeline.py:2507 (GO-Elite), into
+#
+#   <contrast dir>/GeneSetEnrichment/GOElite_<safe(tag)>.tsv
+#   <contrast dir>/interaction-plots/<safe(population)>_interactions.tsv
+#
+# The viewer must ship THOSE files. `build_goelite` and `build_differential_networks`
+# above recompute an approximation from the bundle's DEG_detailed table, and the two do
+# not agree: the pipeline enriches the ASSIGNED-GROUP gene lists
+# (DEGs/DEG_assigned_groups_<tag>.tsv, which carry the `local`, `co-regulated` and
+# `overall` groups), while the recompute enriches every DEG_detailed row with a finite
+# log2fc. On the COPD run that inflated the AT1__down query from 57 genes to 211 and
+# dropped all four `coreg_*` populations. Prefer these ingest functions.
+# =================================================================================
+
+#: Subdirectory names the cellHarmony differential writes under each contrast directory.
+PIPELINE_GOELITE_SUBDIR = "GeneSetEnrichment"
+PIPELINE_NETWORK_SUBDIR = "interaction-plots"
+
+
+def _count_data_rows(path: str) -> int:
+    """Non-empty lines minus the header, matching `awk 'END{print NR}'` minus one.
+
+    Counts by iteration so a file without a trailing newline is not undercounted.
+    """
+    total = 0
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if line.strip():
+                total += 1
+    return max(total - 1, 0)
+
+
+def find_pipeline_contrast_dir(root: str, comparison: str) -> Optional[str]:
+    """Locate the cellHarmony contrast directory for `comparison` under `root`.
+
+    The differential writes `<root>/<run name>/<comparison tag>/`, where the leaf
+    directory is named for the comparison tag the bundle also carries (for example
+    `.../differential_ms/copd_vs_noncopd/COPD_vs_non-COPD/`). Accepts `root` pointing at
+    the run collection, at one run, or at the contrast directory itself.
+    """
+    base = Path(root)
+    if not base.is_dir():
+        raise FileNotFoundError(f"pipeline artifact root not found: {root}")
+    if base.name == comparison:
+        return str(base)
+    direct = base / comparison
+    if direct.is_dir():
+        return str(direct)
+    hits = sorted(p for p in base.glob(f"*/{comparison}") if p.is_dir())
+    if len(hits) > 1:
+        raise ValueError(
+            f"{root} holds {len(hits)} directories named {comparison!r}: "
+            f"{[str(h) for h in hits]}; pass the contrast directory itself")
+    return str(hits[0]) if hits else None
+
+
+def ingest_goelite(contrast_dir: str, out_dir: str, *, comparison_tag: str) -> Dict[str, object]:
+    """Copy the differential run's own GO-Elite table into the asset directory.
+
+    Reads `<contrast_dir>/GeneSetEnrichment/GOElite_<safe(tag)>.tsv`, the exact file
+    flask/pipeline.py:2507 registers as the `goelite_tsv` artifact and the file
+    `_get_differential_go_table` (webapp/app.py:1072) reads. Copies it verbatim; this
+    function computes no enrichment.
+    """
+    import shutil
+
+    from altanalyze3.components.visualization import NetPerspective
+
+    name = f"GOElite_{NetPerspective.safe_component(comparison_tag)}.tsv"
+    source = Path(contrast_dir) / PIPELINE_GOELITE_SUBDIR / name
+    if not source.is_file():
+        raise FileNotFoundError(
+            f"the differential run under {contrast_dir} has no {PIPELINE_GOELITE_SUBDIR}/{name}; "
+            f"re-run the cellHarmony differential with GO terms enabled, or drop --goelite-from")
+    os.makedirs(out_dir, exist_ok=True)
+    target = Path(out_dir) / name
+    shutil.copy2(source, target)
+
+    source_rows = _count_data_rows(str(source))
+    target_rows = _count_data_rows(str(target))
+    if source_rows != target_rows:
+        raise AssertionError(
+            f"GO-Elite copy lost rows: {source} has {source_rows}, {target} has {target_rows}")
+    frame = pd.read_csv(target, sep="\t")
+    populations = sorted(str(v) for v in frame["population"].dropna().unique()) \
+        if "population" in frame.columns else []
+    n_selected = int((frame["selected"].astype(str) == "True").sum()) \
+        if "selected" in frame.columns else -1
+    return {"path": str(target), "source": str(source), "n_terms": source_rows,
+            "n_selected": n_selected, "n_populations": len(populations),
+            "populations": populations}
+
+
+def ingest_differential_networks(contrast_dir: str, deg_tsv: str, out_dir: str) -> List[Dict[str, str]]:
+    """Copy the differential run's own interaction networks into the asset directory.
+
+    Rebuilds the population -> filename map the pipeline used, rather than guessing a
+    population back out of a filename: flask/pipeline.py:2431-2443 groups DEG_detailed by
+    `population`, names each network `NetPerspective.safe_component(population)` and
+    de-duplicates a repeated id as `<id>_<index>`. This walks the same groups in the same
+    order and copies the `<id>.pdf`, `<id>.png` and `<id>_interactions.tsv` the run wrote.
+    A population with no file is reported, never invented.
+    """
+    import shutil
+
+    from altanalyze3.components.visualization import NetPerspective
+
+    net_dir = Path(contrast_dir) / PIPELINE_NETWORK_SUBDIR
+    if not net_dir.is_dir():
+        raise FileNotFoundError(f"no {PIPELINE_NETWORK_SUBDIR}/ under {contrast_dir}")
+    detailed = pd.read_csv(deg_tsv, sep="\t")
+    if "population" not in detailed.columns:
+        raise ValueError(f"{deg_tsv} has no 'population' column")
+    os.makedirs(out_dir, exist_ok=True)
+
+    networks: List[Dict[str, str]] = []
+    used: set = set()
+    absent: List[str] = []
+    for index, (population, _pop_df) in enumerate(detailed.groupby("population"), start=1):
+        network_id = NetPerspective.safe_component(str(population), fallback=f"network_{index}")
+        if network_id in used:
+            network_id = f"{network_id}_{index}"
+        used.add(network_id)
+        source_tsv = net_dir / f"{network_id}_interactions.tsv"
+        if not source_tsv.is_file():
+            absent.append(str(population))
+            continue
+        entry: Dict[str, str] = {"id": network_id, "population": str(population)}
+        target_tsv = Path(out_dir) / source_tsv.name
+        shutil.copy2(source_tsv, target_tsv)
+        source_rows = _count_data_rows(str(source_tsv))
+        target_rows = _count_data_rows(str(target_tsv))
+        if source_rows != target_rows:
+            raise AssertionError(
+                f"network copy lost rows: {source_tsv} has {source_rows}, "
+                f"{target_tsv} has {target_rows}")
+        entry["tsv"] = str(target_tsv)
+        entry["source_tsv"] = str(source_tsv)
+        entry["n_edges"] = source_rows
+        for kind in ("pdf", "png"):
+            source_plot = net_dir / f"{network_id}.{kind}"
+            if source_plot.is_file():
+                target_plot = Path(out_dir) / source_plot.name
+                shutil.copy2(source_plot, target_plot)
+                entry[kind] = str(target_plot)
+        networks.append(entry)
+    if absent:
+        # The pipeline skips a population with under two genes or no interaction edge
+        # (flask/pipeline.py:2438, 2459). Reported, never silently dropped.
+        print(f"[assets]   {len(absent)} of {len(used)} populations have no network file "
+              f"in {net_dir}: {absent}", flush=True)
+    return networks
+
+
 def top_marker_per_state(markers_tsv: str, order_tsv: Optional[str] = None) -> Dict[str, object]:
     """The default dot-plot gene set: the single best marker of every cell state.
 
@@ -277,8 +449,24 @@ def main(argv=None) -> int:
     ap.add_argument("--species", default="human")
     ap.add_argument("--skip-networks", action="store_true")
     ap.add_argument("--goelite", action="store_true",
-                    help="run GO-Elite per contrast (downloads go-basic.obo and goa.gaf.gz)")
+                    help="RECOMPUTE GO-Elite per contrast from the bundle DEG table "
+                         "(downloads go-basic.obo and goa.gaf.gz). This does NOT reproduce the "
+                         "cellHarmony differential's own enrichment - it enriches every "
+                         "DEG_detailed row instead of the assigned-group gene lists, and it "
+                         "omits the coreg_* populations. Prefer --goelite-from.")
+    ap.add_argument("--goelite-from", default=None,
+                    help="ingest the cellHarmony differential's OWN GeneSetEnrichment/ tables. "
+                         "Point at the directory holding the runs (for example "
+                         ".../analysis/differential_ms); each contrast is found as "
+                         "<root>/*/<comparison tag>/GeneSetEnrichment/GOElite_<tag>.tsv")
+    ap.add_argument("--diff-networks-from", default=None,
+                    help="ingest the cellHarmony differential's OWN interaction-plots/ networks "
+                         "instead of recomputing them; same root layout as --goelite-from")
     a = ap.parse_args(argv)
+
+    if a.goelite and a.goelite_from:
+        ap.error("--goelite recomputes enrichment and --goelite-from ingests the pipeline's own; "
+                 "pass only one")
 
     paths = B.BundlePaths(a.bundle_dir, a.prefix)
     meta = B.read_metadata(paths.metadata)
@@ -336,11 +524,46 @@ def main(argv=None) -> int:
     differential: Dict[str, Dict[str, object]] = {}
     for comparison in per_state:
         entry: Dict[str, object] = {}
+        tag = comparison["comparison"]
+
+        # Where the cellHarmony differential put this contrast's own artifacts.
+        goelite_contrast_dir = (find_pipeline_contrast_dir(a.goelite_from, tag)
+                                if a.goelite_from else None)
+        network_contrast_dir = (find_pipeline_contrast_dir(a.diff_networks_from, tag)
+                                if a.diff_networks_from else None)
+
         if not a.skip_networks:
-            net_dir = str(out / f"{a.prefix}_diff_networks" / comparison["comparison"])
-            nets = build_differential_networks(comparison["path"], net_dir, species="Hs")
-            entry["networks"] = nets
-            print(f"[assets] differential networks {comparison['comparison']}: {len(nets)}", flush=True)
+            net_dir = str(out / f"{a.prefix}_diff_networks" / tag)
+            if a.diff_networks_from:
+                if not network_contrast_dir:
+                    raise FileNotFoundError(
+                        f"--diff-networks-from {a.diff_networks_from} holds no contrast directory "
+                        f"named {tag!r}")
+                nets = ingest_differential_networks(network_contrast_dir, comparison["path"], net_dir)
+                edges = sum(int(n.get("n_edges", 0)) for n in nets)
+                entry["networks"] = nets
+                entry["networks_source"] = str(Path(network_contrast_dir) / PIPELINE_NETWORK_SUBDIR)
+                entry["networks_provenance"] = "cellHarmony differential (ingested)"
+                print(f"[assets] differential networks {tag}: {len(nets)} networks, {edges} edges "
+                      f"ingested from {entry['networks_source']}", flush=True)
+            else:
+                nets = build_differential_networks(comparison["path"], net_dir, species="Hs")
+                entry["networks"] = nets
+                entry["networks_provenance"] = "recomputed by prepare_assets"
+                print(f"[assets] differential networks {tag}: {len(nets)} (RECOMPUTED)", flush=True)
+
+        if a.goelite_from:
+            if not goelite_contrast_dir:
+                raise FileNotFoundError(
+                    f"--goelite-from {a.goelite_from} holds no contrast directory named {tag!r}")
+            go_dir = str(out / f"{a.prefix}_goelite" / tag)
+            info = ingest_goelite(goelite_contrast_dir, go_dir, comparison_tag=tag)
+            entry["goelite_tsv"] = info["path"]
+            entry["goelite_info"] = info
+            entry["goelite_provenance"] = "cellHarmony differential (ingested)"
+            print(f"[assets] GO-Elite {tag}: {info['n_terms']} terms "
+                  f"({info['n_selected']} selected) across {info['n_populations']} populations, "
+                  f"ingested from {info['source']}", flush=True)
         if a.goelite:
             go_dir = str(out / f"{a.prefix}_goelite" / comparison["comparison"])
             try:
@@ -352,7 +575,8 @@ def main(argv=None) -> int:
                       f"{type(exc).__name__}: {exc}", flush=True)
             if go_tsv:
                 entry["goelite_tsv"] = go_tsv
-            print(f"[assets] GO-Elite {comparison['comparison']}: {go_tsv}", flush=True)
+                entry["goelite_provenance"] = "recomputed by prepare_assets"
+            print(f"[assets] GO-Elite {comparison['comparison']}: {go_tsv} (RECOMPUTED)", flush=True)
         if entry:
             differential[comparison["id"]] = entry
     if differential:

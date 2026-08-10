@@ -118,7 +118,9 @@ def aggregate(args):
         raise FileNotFoundError(f"Exon annotation file not found: {exon_file}")
 
     adata = anndata.read_h5ad(output_path)
-    annotate_junctions(adata, exon_file)
+    novel_gene_mode = getattr(args, "novel_gene_mode", "corrected")
+    logging.info(f"Annotating junctions with novel-gene mode: {novel_gene_mode}")
+    annotate_junctions(adata, exon_file, novel_gene_mode=novel_gene_mode)
 
     annotated_path = output_path.with_name(output_path.stem + "_annotated.h5ad")
     adata.write(annotated_path)
