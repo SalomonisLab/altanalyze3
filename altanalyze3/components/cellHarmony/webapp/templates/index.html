@@ -384,7 +384,19 @@
                           <option value="go">GO Terms</option>
                         </select>
                         <select id="differential-result-population" class="compact-select"></select>
+                        <input
+                          id="differential-gene-filter"
+                          class="compact-input"
+                          type="search"
+                          list="differential-gene-filter-options"
+                          autocomplete="off"
+                          spellcheck="false"
+                          placeholder="Filter by gene"
+                          aria-label="Filter the differential view to one gene and the genes it interacts with"
+                        />
+                        <datalist id="differential-gene-filter-options"></datalist>
                       </div>
+                      <div class="differential-head-row differential-filter-note hidden" id="differential-gene-filter-note"></div>
                       <div class="differential-head-row differential-head-download-row">
                       <a class="ghost-btn hidden" id="download-differential-left-btn" href="#" target="_blank" rel="noopener">Download PDF</a>
                       </div>

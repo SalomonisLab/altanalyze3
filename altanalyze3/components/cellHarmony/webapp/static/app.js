@@ -39,6 +39,12 @@ let currentDifferentialPopulation = "";
 let currentDifferentialInteraction = null;
 let currentDifferentialFeatureRole = "ligand";
 let differentialCy = null;
+// Differential gene filter. One typed gene restricts every view of the Differential
+// Explorer to that gene and to the genes it interacts with in the selected cell state.
+// `differentialNetworkAdjacencyCache` holds one adjacency map per (job, cell state), so
+// switching between Heatmap, Volcano, Network and GO Terms costs one network fetch.
+let currentDifferentialGeneFilter = "";
+let differentialNetworkAdjacencyCache = {};
 let expressionCyByPanel = {
   viz1: null,
   viz2: null,
@@ -1914,6 +1920,8 @@ function hookForms() {
     if (!currentDifferentialState) {
       return;
     }
+    // A different modality names different features, so the typed one no longer applies.
+    clearDifferentialGeneFilter();
     currentDifferentialState = {
       ...markDifferentialConfigDirty({
         ...currentDifferentialState,
@@ -1945,6 +1953,27 @@ function hookForms() {
     currentDifferentialInteraction = null;
     loadDifferentialVisualization();
   });
+  // The gene filter. `change` fires when a datalist suggestion is picked or the field is
+  // committed; `search` fires when the native clear button of a type=search empties it.
+  const geneFilterInput = differentialGeneFilterInput();
+  if (geneFilterInput) {
+    const applyGeneFilter = () => {
+      const next = String(geneFilterInput.value || "").trim();
+      if (next === currentDifferentialGeneFilter) {
+        return;
+      }
+      currentDifferentialGeneFilter = next;
+      loadDifferentialVisualization();
+    };
+    geneFilterInput.addEventListener("change", applyGeneFilter);
+    geneFilterInput.addEventListener("search", applyGeneFilter);
+    geneFilterInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        applyGeneFilter();
+      }
+    });
+  }
   initToggleMultiSelect(document.getElementById("differential-group1"));
   initToggleMultiSelect(document.getElementById("differential-group2"));
   attachDifferentialLrToggleHandlers();
@@ -3325,6 +3354,7 @@ function differentialPopulationsForMode(state, mode) {
 }
 
 function syncDifferentialPopulationSelect(state) {
+  syncDifferentialGeneFilterLabel();
   const populationSelect = document.getElementById("differential-result-population");
   const mode = document.getElementById("differential-viz-mode").value;
   const populations = differentialPopulationsForMode(state, mode);
@@ -3350,6 +3380,234 @@ function syncDifferentialPopulationSelect(state) {
   currentDifferentialPopulation = populationSelect.value || "";
 }
 
+// ---------------------------------------------------------------------------------
+// Differential gene filter
+//
+// The box beside the cell-state select takes ONE gene. That gene resolves to a gene
+// SET: the gene itself plus every gene directly connected to it in the interaction
+// network of the selected cell state, the network `/differential/interactive/network`
+// already serves. Every view is then restricted to that set - Heatmap rows, Volcano
+// points, GO terms that overlap it, and the Network subgraph. One set, four views.
+//
+// The set is built from the network payload, never from a new statistic. When the gene
+// has no edge in that cell state, or the cell state has no network, the set is the gene
+// alone and the note under the controls says so.
+// ---------------------------------------------------------------------------------
+
+function differentialGeneFilterInput() {
+  return document.getElementById("differential-gene-filter");
+}
+
+// scALABLE runs the Differential tab on five modalities. RNA names a gene, ADT names a
+// protein, GRN names a TF. The filter box and its note follow the modality's own noun.
+function differentialFeatureNoun() {
+  return String((currentDifferentialState && currentDifferentialState.feature_label) || "gene");
+}
+
+function syncDifferentialGeneFilterLabel() {
+  const input = differentialGeneFilterInput();
+  if (!input) {
+    return;
+  }
+  const noun = differentialFeatureNoun();
+  input.placeholder = `Filter by ${noun}`;
+  input.setAttribute(
+    "aria-label",
+    `Filter the differential view to one ${noun} and the ${noun}s it interacts with`,
+  );
+}
+
+function setDifferentialGeneFilterNote(message) {
+  const note = document.getElementById("differential-gene-filter-note");
+  if (!note) {
+    return;
+  }
+  const text = String(message || "").trim();
+  note.textContent = text;
+  note.classList.toggle("hidden", !text);
+}
+
+function setDifferentialGeneFilterOptions(genes) {
+  const datalist = document.getElementById("differential-gene-filter-options");
+  if (!datalist) {
+    return;
+  }
+  const unique = Array.from(new Set((genes || []).map((gene) => String(gene || "").trim()).filter(Boolean)));
+  unique.sort((left, right) => left.localeCompare(right));
+  datalist.innerHTML = "";
+  unique.forEach((gene) => {
+    const option = document.createElement("option");
+    option.value = gene;
+    datalist.appendChild(option);
+  });
+}
+
+// The autocomplete universe is the genes of the view now loaded, so any gene offered
+// always yields a non-empty result.
+function differentialPayloadGenes(mode, payload) {
+  if (!payload) {
+    return [];
+  }
+  if (mode === "heatmap") {
+    return (payload.rows || []).map((row) => row.gene);
+  }
+  if (mode === "volcano") {
+    return (payload.points || []).map((point) => point.gene);
+  }
+  if (mode === "network") {
+    return (payload.elements || [])
+      .filter((element) => element && element.data && element.data.id && !element.data.source)
+      .map((element) => element.data.id);
+  }
+  if (mode === "go") {
+    const genes = [];
+    (payload.terms || []).forEach((term) => {
+      (term.overlap_genes || []).forEach((gene) => genes.push(gene));
+    });
+    return genes;
+  }
+  if (mode === "table") {
+    // Cell communication: the features are the ligands and the receptors.
+    const genes = [];
+    (payload.rows || []).forEach((row) => {
+      if (row.ligand) genes.push(row.ligand);
+      if (row.receptor) genes.push(row.receptor);
+    });
+    return genes;
+  }
+  return [];
+}
+
+// The ligands and receptors one cell-communication edge carries. The payload states them
+// on the edge itself and repeats them inside `top_interactions`, so both are read.
+function communicationEdgeFeatures(data) {
+  const features = [];
+  if (data.ligand) features.push(String(data.ligand));
+  if (data.receptor) features.push(String(data.receptor));
+  (data.top_interactions || []).forEach((entry) => {
+    if (entry && entry.ligand) features.push(String(entry.ligand));
+    if (entry && entry.receptor) features.push(String(entry.receptor));
+  });
+  return features;
+}
+
+function communicationRowMatches(row, geneFilter) {
+  if (!geneFilter) {
+    return true;
+  }
+  return geneFilter.genes.has(String(row.ligand || ""))
+    || geneFilter.genes.has(String(row.receptor || ""));
+}
+
+// A cell-communication view has no gene-gene network behind it, so the filter never
+// expands to interacting genes there. The note must say what it did match.
+function describeCommunicationGeneFilter(geneFilter, population, kept, total, noun) {
+  if (!geneFilter) {
+    return "";
+  }
+  return `Filtered to interactions using ${geneFilter.gene} as ligand or receptor: `
+    + `${kept} of ${total} ${noun} shown.`;
+}
+
+async function differentialNetworkAdjacency(jobId, population) {
+  const key = `${jobId}::${population}`;
+  if (differentialNetworkAdjacencyCache[key]) {
+    return differentialNetworkAdjacencyCache[key];
+  }
+  let payload = null;
+  try {
+    payload = await fetchDifferentialJson(
+      apiPath(`/jobs/${jobId}/differential/interactive/network?population=${encodeURIComponent(population)}`),
+    );
+  } catch (error) {
+    payload = null;
+  }
+  const adjacency = new Map();
+  const geneNetwork = Boolean(payload) && payload.network_type !== "cell_communication_diff";
+  if (geneNetwork) {
+    (payload.elements || []).forEach((element) => {
+      const data = element && element.data ? element.data : null;
+      if (!data) {
+        return;
+      }
+      if (data.source && data.target) {
+        const source = String(data.source);
+        const target = String(data.target);
+        if (!adjacency.has(source)) adjacency.set(source, new Set());
+        if (!adjacency.has(target)) adjacency.set(target, new Set());
+        adjacency.get(source).add(target);
+        adjacency.get(target).add(source);
+      } else if (data.id) {
+        const node = String(data.id);
+        if (!adjacency.has(node)) adjacency.set(node, new Set());
+      }
+    });
+  }
+  const entry = { adjacency, geneNetwork, available: Boolean(payload) && adjacency.size > 0 };
+  differentialNetworkAdjacencyCache[key] = entry;
+  return entry;
+}
+
+// Returns null when no gene is typed, so every render path stays unfiltered by default.
+async function resolveDifferentialGeneFilter(jobId, population) {
+  const gene = String(currentDifferentialGeneFilter || "").trim();
+  if (!gene) {
+    return null;
+  }
+  const entry = await differentialNetworkAdjacency(jobId, population);
+  const genes = new Set([gene]);
+  let neighbours = 0;
+  if (entry.geneNetwork && entry.adjacency.has(gene)) {
+    entry.adjacency.get(gene).forEach((partner) => {
+      genes.add(partner);
+      neighbours += 1;
+    });
+  }
+  return {
+    gene,
+    genes,
+    neighbours,
+    inNetwork: entry.geneNetwork && entry.adjacency.has(gene),
+    geneNetwork: entry.geneNetwork,
+    networkAvailable: entry.available,
+  };
+}
+
+function describeDifferentialGeneFilter(filter, population, kept, total, noun) {
+  if (!filter) {
+    return "";
+  }
+  const feature = differentialFeatureNoun();
+  const scope = filter.inNetwork
+    ? `${filter.gene} + ${filter.neighbours} interacting ${feature}${filter.neighbours === 1 ? "" : "s"}`
+    : (filter.networkAvailable
+      ? `${filter.gene} alone (no interaction edge in ${population})`
+      : `${filter.gene} alone (no interaction network for ${population})`);
+  return `Filtered to ${scope}: ${kept} of ${total} ${noun} shown.`;
+}
+
+function clearDifferentialGeneFilter() {
+  currentDifferentialGeneFilter = "";
+  differentialNetworkAdjacencyCache = {};
+  const input = differentialGeneFilterInput();
+  if (input) {
+    input.value = "";
+    input.classList.remove("filter-active", "filter-unmatched");
+  }
+  setDifferentialGeneFilterNote("");
+  setDifferentialGeneFilterOptions([]);
+}
+
+function markDifferentialGeneFilterMatched(matched) {
+  const input = differentialGeneFilterInput();
+  if (!input) {
+    return;
+  }
+  const active = Boolean(String(currentDifferentialGeneFilter || "").trim());
+  input.classList.toggle("filter-active", active && matched);
+  input.classList.toggle("filter-unmatched", active && !matched);
+}
+
 async function loadDifferentialVisualization() {
   const state = currentDifferentialState;
   const plotEmpty = document.getElementById("differential-plot-empty");
@@ -3371,22 +3629,24 @@ async function loadDifferentialVisualization() {
   updateDifferentialDownloadButton();
   try {
     let payload = null;
+    const geneFilter = await resolveDifferentialGeneFilter(jobId, population);
     if (mode === "heatmap") {
       payload = await fetchDifferentialJson(apiPath(`/jobs/${jobId}/differential/interactive/heatmap?population=${encodeURIComponent(population)}`));
-      renderDifferentialHeatmap(payload);
+      renderDifferentialHeatmap(payload, geneFilter);
     } else if (mode === "volcano") {
       payload = await fetchDifferentialJson(apiPath(`/jobs/${jobId}/differential/interactive/volcano?population=${encodeURIComponent(population)}`));
-      renderDifferentialVolcano(payload);
+      renderDifferentialVolcano(payload, geneFilter);
     } else if (mode === "network") {
       payload = await fetchDifferentialJson(apiPath(`/jobs/${jobId}/differential/interactive/network?population=${encodeURIComponent(population)}`));
-      renderDifferentialNetwork(payload);
+      renderDifferentialNetwork(payload, geneFilter);
     } else if (mode === "table") {
       payload = await fetchDifferentialJson(apiPath(`/jobs/${jobId}/differential/interactive/table?population=${encodeURIComponent(population)}`));
-      renderDifferentialCommunicationTable(payload);
+      renderDifferentialCommunicationTable(payload, geneFilter);
     } else if (mode === "go") {
       payload = await fetchDifferentialJson(apiPath(`/jobs/${jobId}/differential/interactive/go?population=${encodeURIComponent(population)}`));
-      renderDifferentialGo(payload);
+      renderDifferentialGo(payload, geneFilter);
     }
+    setDifferentialGeneFilterOptions(differentialPayloadGenes(mode, payload));
     const payloadDefaultGene = (payload && payload.default_gene) || "";
     const isCellCommunicationMode = mode === "network" || mode === "table";
     let staleGene = "";
@@ -3445,12 +3705,21 @@ async function fetchDifferentialJson(url) {
   return data;
 }
 
-function renderDifferentialHeatmap(payload) {
+function renderDifferentialHeatmap(payload, geneFilter = null) {
   destroyDifferentialNetwork();
   const plot = document.getElementById("differential-plot-area");
-  const rows = payload.rows || [];
+  const allRows = payload.rows || [];
+  const rows = geneFilter ? allRows.filter((row) => geneFilter.genes.has(String(row.gene))) : allRows;
+  setDifferentialGeneFilterNote(
+    describeDifferentialGeneFilter(geneFilter, payload.population, rows.length, allRows.length, "rows"),
+  );
+  markDifferentialGeneFilterMatched(rows.length > 0);
   if (!rows.length) {
-    renderDifferentialEmpty(`No heatmap rows were found for ${payload.population}.`);
+    renderDifferentialEmpty(
+      geneFilter
+        ? `No heatmap row for ${geneFilter.gene} or its interacting genes in ${payload.population}.`
+        : `No heatmap rows were found for ${payload.population}.`,
+    );
     return;
   }
   const z = rows.map((row) => row.values);
@@ -3518,16 +3787,29 @@ function renderDifferentialHeatmap(payload) {
   });
 }
 
-function renderDifferentialVolcano(payload) {
+function renderDifferentialVolcano(payload, geneFilter = null) {
   destroyDifferentialNetwork();
   const plot = document.getElementById("differential-plot-area");
-  const points = payload.points || [];
+  const allPoints = payload.points || [];
+  const points = geneFilter
+    ? allPoints.filter((point) => geneFilter.genes.has(String(point.gene)))
+    : allPoints;
+  setDifferentialGeneFilterNote(
+    describeDifferentialGeneFilter(geneFilter, payload.population, points.length, allPoints.length, "genes"),
+  );
+  markDifferentialGeneFilterMatched(points.length > 0);
   if (!points.length) {
-    renderDifferentialEmpty(`No volcano data were found for ${payload.population}.`);
+    renderDifferentialEmpty(
+      geneFilter
+        ? `No volcano point for ${geneFilter.gene} or its interacting genes in ${payload.population}.`
+        : `No volcano data were found for ${payload.population}.`,
+    );
     return;
   }
   const up = points.filter((point) => point.direction === "up");
   const down = points.filter((point) => point.direction === "down");
+  // A filtered volcano holds few enough points to name every one of them on the plot.
+  const pointMode = geneFilter && points.length <= 60 ? "markers+text" : "markers";
   plot.classList.remove("hidden");
   document.getElementById("differential-plot-empty").classList.add("hidden");
   Plotly.newPlot(
@@ -3539,7 +3821,9 @@ function renderDifferentialVolcano(payload) {
         text: down.map((point) => point.gene),
         customdata: down.map((point) => [point.gene, point.fdr, point.pval]),
         type: "scattergl",
-        mode: "markers",
+        mode: pointMode,
+        textposition: "top center",
+        textfont: { size: 10, color: "#1e293b" },
         name: "Down",
         marker: { color: "#2563eb", size: 16, opacity: 0.72 },
         hovertemplate: "%{text}<br>log2FC=%{x:.3f}<br>-log10(FDR)=%{y:.3f}<extra></extra>",
@@ -3550,7 +3834,9 @@ function renderDifferentialVolcano(payload) {
         text: up.map((point) => point.gene),
         customdata: up.map((point) => [point.gene, point.fdr, point.pval]),
         type: "scattergl",
-        mode: "markers",
+        mode: pointMode,
+        textposition: "top center",
+        textfont: { size: 10, color: "#1e293b" },
         name: "Up",
         marker: { color: "#dc2626", size: 16, opacity: 0.72 },
         hovertemplate: "%{text}<br>log2FC=%{x:.3f}<br>-log10(FDR)=%{y:.3f}<extra></extra>",
@@ -3577,19 +3863,34 @@ function renderDifferentialVolcano(payload) {
   });
 }
 
-function renderDifferentialGo(payload) {
+function renderDifferentialGo(payload, geneFilter = null) {
   destroyDifferentialNetwork();
   const plot = document.getElementById("differential-plot-area");
-  const terms = payload.terms || [];
+  const allTerms = payload.terms || [];
+  // A GO term survives the filter when its own overlapping genes meet the filter set.
+  const terms = geneFilter
+    ? allTerms.filter((term) => (term.overlap_genes || []).some((gene) => geneFilter.genes.has(String(gene))))
+    : allTerms;
+  setDifferentialGeneFilterNote(
+    describeDifferentialGeneFilter(geneFilter, payload.population, terms.length, allTerms.length, "GO terms"),
+  );
+  markDifferentialGeneFilterMatched(terms.length > 0);
   if (!terms.length) {
-    renderDifferentialEmpty(`No GO term enrichment was available for ${payload.population}.`);
+    renderDifferentialEmpty(
+      geneFilter
+        ? `No GO term for ${geneFilter.gene} or its interacting genes in ${payload.population}.`
+        : `No GO term enrichment was available for ${payload.population}.`,
+    );
     return;
   }
   const ordered = [...terms].map((term) => {
     const overlapGenes = term.overlap_genes || [];
-    const selectedGene = overlapGenes.includes(currentDifferentialGene)
-      ? currentDifferentialGene
-      : (term.selected_gene || overlapGenes[0] || null);
+    // With a filter on, the typed gene names the term wherever the term contains it.
+    const filteredPick = geneFilter && overlapGenes.includes(geneFilter.gene) ? geneFilter.gene : null;
+    const selectedGene = filteredPick
+      || (overlapGenes.includes(currentDifferentialGene)
+        ? currentDifferentialGene
+        : (term.selected_gene || overlapGenes[0] || null));
     return {
       ...term,
       selected_gene: selectedGene,
@@ -3712,15 +4013,30 @@ function renderDifferentialGo(payload) {
   });
 }
 
-function renderDifferentialNetwork(payload) {
+function renderDifferentialNetwork(payload, geneFilter = null) {
   if (payload && payload.network_type === "cell_communication_diff") {
-    renderDifferentialCommunicationNetwork(payload);
+    renderDifferentialCommunicationNetwork(payload, geneFilter);
     return;
   }
   const plot = document.getElementById("differential-plot-area");
   Plotly.purge(plot);
   destroyDifferentialNetwork();
-  const elements = (payload.elements || []).map((element) => {
+  // With a filter on, keep the typed gene and the nodes it connects to, and keep only
+  // the edges whose two ends both survive.
+  const allElements = payload.elements || [];
+  const keptElements = geneFilter
+    ? allElements.filter((element) => {
+      const data = element && element.data ? element.data : null;
+      if (!data) {
+        return false;
+      }
+      if (data.source && data.target) {
+        return geneFilter.genes.has(String(data.source)) && geneFilter.genes.has(String(data.target));
+      }
+      return data.id ? geneFilter.genes.has(String(data.id)) : false;
+    })
+    : allElements;
+  const elements = keptElements.map((element) => {
     if (!element.data || !element.data.id || element.data.source) {
       return element;
     }
@@ -3732,8 +4048,19 @@ function renderDifferentialNetwork(payload) {
       },
     };
   });
+  const countNodes = (list) => list.filter((element) => element && element.data
+    && element.data.id && !element.data.source).length;
+  setDifferentialGeneFilterNote(
+    describeDifferentialGeneFilter(
+      geneFilter, payload.population, countNodes(keptElements), countNodes(allElements), "nodes"),
+  );
+  markDifferentialGeneFilterMatched(countNodes(keptElements) > 0);
   if (!elements.length) {
-    renderDifferentialEmpty(`No interaction network was available for ${payload.population}.`);
+    renderDifferentialEmpty(
+      geneFilter
+        ? `${geneFilter.gene} has no interaction network node in ${payload.population}.`
+        : `No interaction network was available for ${payload.population}.`,
+    );
     return;
   }
   plot.classList.remove("hidden");
@@ -3824,13 +4151,57 @@ function setDifferentialNetworkHoverTooltip(text, renderedPosition = null) {
   }
 }
 
-function renderDifferentialCommunicationNetwork(payload) {
+function renderDifferentialCommunicationNetwork(payload, geneFilter = null) {
   const plot = document.getElementById("differential-plot-area");
   Plotly.purge(plot);
   destroyDifferentialNetwork();
-  const elements = payload.elements || [];
+  const allElements = payload.elements || [];
+  // The nodes are cell states, so the filter works on the edges: keep an edge that uses
+  // the typed gene as its ligand or its receptor, then keep the states those edges join
+  // plus the focus state, so the surviving edges still have both ends.
+  let elements = allElements;
+  if (geneFilter) {
+    const keptEdges = allElements.filter((element) => {
+      const data = element && element.data ? element.data : null;
+      return Boolean(data && data.source && data.target)
+        && communicationEdgeFeatures(data).some((value) => geneFilter.genes.has(value));
+    });
+    const keepNodes = new Set();
+    keptEdges.forEach((edge) => {
+      keepNodes.add(String(edge.data.source));
+      keepNodes.add(String(edge.data.target));
+    });
+    allElements.forEach((element) => {
+      const data = element && element.data ? element.data : null;
+      if (data && !data.source && data.node_type === "focus" && data.id) {
+        keepNodes.add(String(data.id));
+      }
+    });
+    elements = allElements.filter((element) => {
+      const data = element && element.data ? element.data : null;
+      if (!data) return false;
+      if (data.source && data.target) return keptEdges.indexOf(element) >= 0;
+      return data.id ? keepNodes.has(String(data.id)) : false;
+    });
+    const totalEdges = allElements.filter((e) => e && e.data && e.data.source).length;
+    setDifferentialGeneFilterNote(describeCommunicationGeneFilter(
+      geneFilter, payload.population, keptEdges.length, totalEdges, "interactions"));
+    markDifferentialGeneFilterMatched(keptEdges.length > 0);
+    // No edge survived. The focus state alone is not a network, so say so instead of
+    // drawing one lonely node.
+    if (!keptEdges.length) {
+      elements = [];
+    }
+  } else {
+    setDifferentialGeneFilterNote("");
+    markDifferentialGeneFilterMatched(true);
+  }
   if (!elements.length) {
-    renderDifferentialEmpty(`No differential cell-state network was available for ${payload.population}.`);
+    renderDifferentialEmpty(
+      geneFilter
+        ? `No cell communication interaction uses ${geneFilter.gene} in ${payload.population}.`
+        : `No differential cell-state network was available for ${payload.population}.`,
+    );
     return;
   }
   const usePresetLayout = elements.some((element) => element && !element.data?.source && element.position);
@@ -3937,13 +4308,25 @@ function renderDifferentialCommunicationNetwork(payload) {
   });
 }
 
-function renderDifferentialCommunicationTable(payload) {
+function renderDifferentialCommunicationTable(payload, geneFilter = null) {
   destroyDifferentialNetwork();
   const plot = document.getElementById("differential-plot-area");
-  const rows = payload.rows || [];
+  const allRows = payload.rows || [];
+  // One row is one ligand-receptor interaction, so the filter keeps a row whose ligand
+  // or whose receptor is the typed gene.
+  const rows = geneFilter
+    ? allRows.filter((row) => communicationRowMatches(row, geneFilter))
+    : allRows;
   const columns = payload.columns || [];
+  setDifferentialGeneFilterNote(describeCommunicationGeneFilter(
+    geneFilter, payload.population, rows.length, allRows.length, "interactions"));
+  markDifferentialGeneFilterMatched(rows.length > 0);
   if (!rows.length || !columns.length) {
-    renderDifferentialEmpty(`No differential interaction table was available for ${payload.population}.`);
+    renderDifferentialEmpty(
+      geneFilter && allRows.length
+        ? `No cell communication interaction uses ${geneFilter.gene} in ${payload.population}.`
+        : `No differential interaction table was available for ${payload.population}.`,
+    );
     return;
   }
   const labels = columns.map((column) => column
@@ -4269,6 +4652,9 @@ function resetDifferentialResults() {
   populationSelect.innerHTML = "";
   currentDifferentialPopulation = "";
   currentDifferentialGene = "";
+  // A new differential run invalidates the gene filter and every cached adjacency.
+  clearDifferentialGeneFilter();
+  syncDifferentialGeneFilterLabel();
   resetDifferentialGeneDetail();
 }
 
@@ -5258,12 +5644,29 @@ async function downloadDifferentialLeftPdf() {
       }
     }
   }
-  if (mode === "network") {
-    window.open(
-      apiPath(`/jobs/${jobId}/differential/interactive/pdf?mode=${encodeURIComponent(mode)}&population=${encodeURIComponent(population)}`),
-      "_blank",
-    );
-    return;
+  // The server PDF renderer reads the whole differential result and knows nothing about
+  // the gene filter. With a filter on, export what the screen shows instead, so the PDF
+  // and the view always carry the same genes.
+  if (String(currentDifferentialGeneFilter || "").trim()) {
+    const filterTag = `filtered_${String(currentDifferentialGeneFilter).trim()}`;
+    try {
+      if (mode === "network") {
+        await exportCytoscapeToVectorPdf(
+          differentialCy,
+          buildPdfFilename([jobId, population, mode, filterTag], mode),
+        );
+      } else {
+        await exportPlotlyElementToVectorPdf(
+          document.getElementById("differential-plot-area"),
+          buildPdfFilename([jobId, population, mode, filterTag], mode),
+        );
+      }
+      return;
+    } catch (error) {
+      console.error(error);
+      showDownloadError(error);
+      return;
+    }
   }
   window.open(
     apiPath(`/jobs/${jobId}/differential/interactive/pdf?mode=${encodeURIComponent(mode)}&population=${encodeURIComponent(population)}`),

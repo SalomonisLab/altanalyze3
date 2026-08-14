@@ -23,6 +23,7 @@ What this module adds:
 """
 from __future__ import annotations
 
+import contextvars
 import io
 import json
 import os
@@ -32,6 +33,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
+import pandas as pd
 from fastapi import HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -52,6 +54,21 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 # The served page carries this name. scALABLE is the analysis tool; this deployment
 # serves precomputed bundles, so it is named for what it is.
 VIEWER_NAME = "scALABLE-viewer"
+
+# The header's "How to Use" and "ReadMe" links. webapp/templates/index.html:30-31 points
+# both at scALABLE's own documents, which describe the upload-and-run workflow this
+# deployment removes. The viewer's own pair lives at
+# altanalyze3/components/visualization/scalable_viewer/HOW_TO_USE.md and README.md, on the
+# master branch of https://github.com/SalomonisLab/altanalyze3. The shared template is not
+# edited: _install_index_override rewrites the served body, and viewer_bootstrap.js
+# repeats the swap in the DOM so a cached page also lands on the right document.
+_GITHUB_BLOB = "https://github.com/SalomonisLab/altanalyze3/blob/master/altanalyze3/components"
+DOC_LINKS = {
+    f"{_GITHUB_BLOB}/cellHarmony/webapp/HOW_TO_USE.md":
+        f"{_GITHUB_BLOB}/visualization/scalable_viewer/HOW_TO_USE.md",
+    f"{_GITHUB_BLOB}/cellHarmony/webapp/README.md":
+        f"{_GITHUB_BLOB}/visualization/scalable_viewer/README.md",
+}
 
 
 def _load_assets(assets_root: Optional[str], catalog: da.Catalog) -> Dict[str, Dict[str, Any]]:
@@ -106,6 +123,7 @@ def create_scalable_app(
 
     _install_bundle_state_colors(app, catalog)
     _install_goelite_significance_tiers()
+    _install_violin_covariate(app)
     _install_index_override(app)
     _install_catalog_routes(app, catalog, store)
     _install_differential_select(app, store)
@@ -389,6 +407,293 @@ def _render_go_pdf(payload: Dict[str, Any]) -> io.BytesIO:
     return buf
 
 
+# ------------------------------------------------------ violin grouping covariate
+#
+# scALABLE groups the violin by one column only: the cluster key. `_build_expression_payload`
+# (app.py:3552-3564) walks `cache_entry["populations"]`, which `_get_expression_cache`
+# fills from `adata.obs[cluster_key]` (app.py:1396). The same cache entry already holds
+# every other obs column, keyed by name, in `obs_filter_values` (app.py:1432, and for a
+# bundle bundle_meta.py:156-166) - the exact list the "Annotation 1" selector offers, so
+# the new "Covariate" control needs no new precomputation and no new bundle field.
+#
+# The contract is a `covariate` query parameter:
+#   * absent            -> scALABLE's own builder runs untouched, so today's payload is
+#                          returned byte for byte,
+#   * `covariate=<col>` -> the violin, and ONLY the violin, is regrouped by that column.
+#                          Scatter, UMAP points, UMAP colouring and the global range stay
+#                          the cluster-key payload scALABLE built.
+#
+# The default the browser sends is the cluster key itself, which takes the regroup path.
+# That is deliberate and testable: `?covariate=cell_state` must return exactly the payload
+# the parameter-free request returns, which proves the regrouping loop below is scALABLE's
+# loop and not a lookalike.
+#
+# Neither webapp/app.py nor webapp/static/app.js is edited. The two expression routes are
+# re-registered ahead of the originals purely to declare the extra query parameter; each
+# then delegates to scALABLE's own endpoint object, so the error mapping, the store lookup
+# and the response headers are still scALABLE's.
+
+# Group ORDER and CAP are scALABLE's own rule, kept as-is: order by mean expression
+# descending, draw at most 10 (app.py:3564). Keeping the cap identical is what makes the
+# default grouping identical. A covariate with more groups than the cap is NOT silently
+# truncated: the payload carries the totals below and the plot title names them.
+_VIOLIN_MAX_GROUPS = 10
+
+# Set by the expression routes, read by the wrapped payload builder. It is set inside the
+# route coroutine that awaits the original endpoint, so it is visible for the whole of
+# that request and for nothing else.
+_VIOLIN_COVARIATE: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "scalable_viewer_violin_covariate", default=""
+)
+
+
+def _violin_note(covariate: str, n_total: int, n_shown: int, is_default: bool) -> str:
+    """The truncation statement that goes on the plot.
+
+    The default covariate keeps scALABLE's own wording verbatim, so the default plot is
+    unchanged. Every other covariate states the denominator as well as the cap.
+    """
+    if is_default:
+        return f"top {n_shown} states by mean"
+    if n_total > n_shown:
+        return f"top {n_shown} of {n_total} groups by mean"
+    return f"all {n_total} groups by mean"
+
+
+def _regroup_violin(app, meta, payload, covariate, modality, display_filters):
+    """Rebuild `payload['violin']` grouped by `covariate`, with scALABLE's own loop."""
+    cache_entry = W._get_expression_cache(app, meta, modality=W._normalize_modality_id(modality))
+    cluster_key = str(cache_entry.get("cluster_key") or "")
+    labels_by_field = cache_entry.get("obs_filter_values") or {}
+    labels = labels_by_field.get(covariate)
+    if labels is None:
+        payload["violin_covariate"] = covariate
+        payload["violin_covariate_error"] = (
+            f"'{covariate}' is not one of this dataset's annotation columns "
+            f"({len(labels_by_field)} available); the violin is grouped by '{cluster_key}'."
+        )
+        return payload
+
+    gene = str(payload.get("resolved_gene") or payload.get("gene") or "")
+    resolved = W._resolve_gene_name(cache_entry["var_names"], gene)
+    if not resolved:
+        # A reference-centroid payload (app.py:3369) has no per-cell matrix to regroup.
+        payload["violin_covariate"] = covariate
+        payload["violin_covariate_error"] = (
+            f"'{gene}' has no per-cell values in this dataset, so the violin cannot be "
+            f"regrouped by '{covariate}'."
+        )
+        return payload
+
+    values = W._flatten_expr(cache_entry["adata"][:, resolved].X).astype(float)
+    display_mask = W._apply_display_filter_mask(cache_entry, display_filters)
+    labels = np.asarray(labels, dtype=str)
+
+    # app.py:3552-3563 verbatim, with `labels` in place of `populations`. The one addition
+    # is the empty-string group: an obs column can leave a cell unannotated, and "" is not
+    # a biological group. The cluster key never carries it, which is why the default
+    # payload is unaffected.
+    groups: List[Dict[str, Any]] = []
+    n_unlabeled = 0
+    for label in sorted(pd.unique(labels)):
+        mask = (labels == label) & display_mask
+        if label == "":
+            n_unlabeled = int(np.count_nonzero(mask))
+            continue
+        group_values = values[mask]
+        finite_values = group_values[np.isfinite(group_values)]
+        groups.append(
+            {
+                "population": label,
+                "values": [float(v) for v in finite_values],
+                "mean": float(np.mean(finite_values)) if len(finite_values) else 0.0,
+            }
+        )
+    groups = sorted(groups, key=lambda entry: entry["mean"], reverse=True)
+
+    is_default = covariate == cluster_key
+    payload["violin"] = groups[:_VIOLIN_MAX_GROUPS]
+    payload["violin_covariate"] = covariate
+    payload["violin_cluster_key"] = cluster_key
+    payload["violin_covariate_is_default"] = bool(is_default)
+    payload["violin_n_groups_total"] = len(groups)
+    payload["violin_n_groups_shown"] = len(payload["violin"])
+    payload["violin_n_cells_unlabeled"] = n_unlabeled
+    payload["violin_note"] = _violin_note(
+        covariate, len(groups), len(payload["violin"]), is_default
+    )
+    return payload
+
+
+def _install_violin_covariate(app) -> None:
+    """Wrap the payload builder and the violin PDF, then declare the query parameter."""
+    if not getattr(W, "_scalable_viewer_violin_covariate_installed", False):
+        original_payload = W._build_expression_payload
+
+        def expression_payload(app_, meta, gene, modality="rna", display_filters=None):
+            payload = original_payload(
+                app_, meta, gene, modality=modality, display_filters=display_filters
+            )
+            covariate = str(_VIOLIN_COVARIATE.get("") or "").strip()
+            if not covariate:
+                return payload
+            return _regroup_violin(app_, meta, payload, covariate, modality, display_filters)
+
+        original_pdf = W._render_expression_pdf
+
+        def expression_pdf(payload, mode):
+            # The default covariate goes through scALABLE's own renderer, so the default
+            # PDF stays exactly the PDF this route produced before. Only a non-default
+            # covariate needs the covariate title and the x-axis label.
+            if (
+                mode == "violin"
+                and payload.get("violin_covariate")
+                and payload.get("violin")
+                and not payload.get("violin_covariate_is_default")
+            ):
+                return _render_violin_pdf(payload)
+            return original_pdf(payload, mode)
+
+        W._build_expression_payload = expression_payload
+        W._render_expression_pdf = expression_pdf
+        W._scalable_viewer_violin_covariate_installed = True
+
+    _install_expression_covariate_routes(app)
+
+
+def _install_expression_covariate_routes(app) -> None:
+    """Re-register the two expression routes with a `covariate` parameter in front of
+    scALABLE's own, and delegate the body to scALABLE's own endpoint objects."""
+    from fastapi.routing import APIRoute
+
+    targets = {}
+    for index, route in enumerate(list(app.router.routes)):
+        if not isinstance(route, APIRoute) or "GET" not in route.methods:
+            continue
+        if route.path in ("/api/jobs/{job_id}/expression", "/api/jobs/{job_id}/expression/pdf"):
+            targets.setdefault(route.path, (index, route.endpoint))
+    if len(targets) != 2:
+        raise RuntimeError(
+            "scalable_viewer: expected the two scALABLE expression routes, found "
+            f"{sorted(targets)}"
+        )
+
+    json_index, json_endpoint = targets["/api/jobs/{job_id}/expression"]
+
+    async def expression_with_covariate(
+        job_id: str,
+        gene: str = Query(...),
+        modality: str = Query("rna"),
+        covariate: str = Query(""),
+        filter1_field: Optional[str] = Query(None),
+        filter1_values: List[str] = Query([]),
+        filter2_field: Optional[str] = Query(None),
+        filter2_values: List[str] = Query([]),
+    ):
+        token = _VIOLIN_COVARIATE.set(str(covariate or "").strip())
+        try:
+            return await json_endpoint(
+                job_id,
+                gene=gene,
+                modality=modality,
+                filter1_field=filter1_field,
+                filter1_values=filter1_values,
+                filter2_field=filter2_field,
+                filter2_values=filter2_values,
+            )
+        finally:
+            _VIOLIN_COVARIATE.reset(token)
+
+    pdf_index, pdf_endpoint = targets["/api/jobs/{job_id}/expression/pdf"]
+
+    async def expression_pdf_with_covariate(
+        job_id: str,
+        gene: str = Query(...),
+        mode: str = Query("umap"),
+        modality: str = Query("rna"),
+        covariate: str = Query(""),
+        filter1_field: Optional[str] = Query(None),
+        filter1_values: List[str] = Query([]),
+        filter2_field: Optional[str] = Query(None),
+        filter2_values: List[str] = Query([]),
+    ):
+        token = _VIOLIN_COVARIATE.set(str(covariate or "").strip())
+        try:
+            return await pdf_endpoint(
+                job_id,
+                gene=gene,
+                mode=mode,
+                modality=modality,
+                filter1_field=filter1_field,
+                filter1_values=filter1_values,
+                filter2_field=filter2_field,
+                filter2_values=filter2_values,
+            )
+        finally:
+            _VIOLIN_COVARIATE.reset(token)
+
+    # Registered last, then moved in front of the original: the router matches the first
+    # route whose path and method match, so position is what makes the override effective.
+    for path, handler, index in (
+        ("/api/jobs/{job_id}/expression", expression_with_covariate, json_index),
+        ("/api/jobs/{job_id}/expression/pdf", expression_pdf_with_covariate, pdf_index),
+    ):
+        app.get(path)(handler)
+        app.router.routes.insert(index, app.router.routes.pop())
+
+
+def _render_violin_pdf(payload: Dict[str, Any]) -> io.BytesIO:
+    """The scALABLE violin PDF (app.py:3826-3858) with the covariate in the title.
+
+    Reached only for a NON-default covariate; the default covariate is drawn by
+    scALABLE's own `_render_expression_pdf`, unchanged.
+
+    Figure size, violin bodies, colours, jitter seed, marker size, tick rotation and the
+    y-limit padding are the ones `_render_expression_pdf` draws. Only the title text and
+    the x-axis label differ, so a covariate PDF and the on-screen plot say the same thing.
+    """
+    plt = W.plt
+    W._configure_matplotlib_pdf_style()
+    fig, ax = plt.subplots(figsize=(8.5, 8.5))
+    gene = payload["gene"]
+    global_min = float(payload.get("global_min", 0.0) or 0.0)
+    global_max = float(payload.get("global_max", 0.0) or 0.0)
+    if global_max <= global_min:
+        global_max = global_min + 1e-9
+    violin_data = payload["violin"]
+    positions = np.arange(1, len(violin_data) + 1)
+    parts = ax.violinplot(
+        [entry["values"] for entry in violin_data],
+        positions=positions,
+        showmeans=False,
+        showmedians=True,
+        showextrema=False,
+    )
+    for body in parts["bodies"]:
+        body.set_facecolor("#94a3b8")
+        body.set_edgecolor("#475569")
+        body.set_alpha(0.55)
+    for idx, entry in enumerate(violin_data, start=1):
+        vals = np.asarray(entry["values"], dtype=float)
+        jitter = np.random.default_rng(0).normal(0, 0.035, size=len(vals))
+        ax.scatter(np.full(len(vals), idx) + jitter, vals, s=4, c="#0f172a", alpha=0.35, linewidths=0)
+    ax.set_xticks(positions)
+    ax.set_xticklabels([entry["population"] for entry in violin_data], rotation=45, ha="right")
+    covariate = str(payload.get("violin_covariate") or "")
+    note = str(payload.get("violin_note") or "")
+    ax.set_title(f"{gene} expression by {covariate} ({note})")
+    ax.set_xlabel(covariate)
+    ax.set_ylabel("Expression")
+    pad = max((global_max - global_min) * 0.04, 0.05)
+    ax.set_ylim(global_min - pad, global_max + pad)
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="pdf", bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
 # ---------------------------------------------------------------------------- index
 
 def _install_index_override(app) -> None:
@@ -403,6 +708,12 @@ def _install_index_override(app) -> None:
     on the way out - `<title>` (webapp/templates/index.html:6, filled by app_title) and
     `<h1>` (index.html:19) - so neither app.py nor the template changes, and the served
     HTML already carries the new name before any script runs.
+
+    The two documentation links (index.html:30-31) are repointed the same way. The shared
+    template sends them to scALABLE's own HOW_TO_USE.md and README.md, which describe the
+    upload-and-run workflow this deployment removes. The viewer ships its own pair, so the
+    served page carries those instead. The template is not edited: the swap is a body
+    rewrite here, and viewer_bootstrap.js repeats it in the DOM for a cached page.
     """
     bootstrap = os.path.join(_HERE, "static", "viewer_bootstrap.js")
 
@@ -415,6 +726,8 @@ def _install_index_override(app) -> None:
         body = b"".join(chunks).decode("utf-8")
         body = body.replace("<title>scALABLE</title>", f"<title>{VIEWER_NAME}</title>")
         body = body.replace("<h1>scALABLE</h1>", f"<h1>{VIEWER_NAME}</h1>")
+        for old, new in DOC_LINKS.items():
+            body = body.replace(old, new)
         version = int(os.path.getmtime(bootstrap))
         tag = (f'<link rel="stylesheet" href="/viewer-static/viewer.css?v={version}">'
                f'<script src="/viewer-static/viewer_bootstrap.js?v={version}"></script></body>')
@@ -567,13 +880,51 @@ SITE_DB = os.environ.get(
     "LUNGMAP_SITE_DB",
     "/Users/saljh8/Dropbox/LungMAP/refactored_website/build/breath.sqlite")
 
-# EXACTLY ONE id. There is deliberately no fallback to another study: showing a
-# different study's title, description, tools, files and samples is presenting wrong
-# data, whatever the notice says. When this record is absent from the site database the
-# endpoint reads the SOURCE TABLE row instead (see read_study_record_from_tables), which
-# is this study's own pending record, and reports source="source_tables".
+# EXACTLY ONE id, and it belongs to the DATASET, not to this module. There is
+# deliberately no fallback to another study: showing a different study's title,
+# description, tools, files and samples is presenting wrong data, whatever the notice
+# says. When this record is absent from the site database the endpoint reads the SOURCE
+# TABLE row instead (see read_study_record_from_tables), which is this study's own
+# pending record, and reports source="source_tables".
+#
+# `study_ids_for_dataset` resolves the id per bundle. This constant is only the
+# deployment-wide override, and it now defaults to EMPTY.
+#
+# Until 2026-08-12 it defaulted to `lmdata:LMEX0000004416`, and every bundle inherited
+# that id. The COPD bundle then served the Study tab of `LMEX0000004416`, "Lipidomics
+# Imaging of Human Postnatal Lung in Health and Bronchopulmonary Dysplasia", a different
+# study with a different title, abstract, sample list and file list. The COPD record is
+# `lmdata:LMEX0000009416`. A shared default cannot be right for more than one dataset, so
+# there is no longer a default at all: a bundle states its own id, or the Study tab says
+# that no id is configured and names the two flags that set one.
 STUDY_CANDIDATES = [s.strip() for s in os.environ.get(
-    "LUNGMAP_STUDY_IDS", "lmdata:LMEX0000004416").split(",") if s.strip()]
+    "LUNGMAP_STUDY_IDS", "").split(",") if s.strip()]
+
+
+def study_ids_for_dataset(assets: Dict[str, Dict[str, Any]], catalog: da.Catalog,
+                          dataset_id: str) -> List[str]:
+    """The LungMAP study id of one bundle, most specific source first.
+
+    1. `study_id` in the dataset's asset manifest (`prepare_assets.py --study-id`)
+    2. `scalable_viewer.study_id` in the bundle metadata (`precompute.py --study-id`)
+    3. `LUNGMAP_STUDY_IDS`, the deployment-wide override
+    4. nothing - the Study tab reports that no id is configured
+
+    The asset manifest wins because rebuilding it costs minutes, while rebuilding a
+    bundle costs hours. Step 4 never guesses: a wrong study record is wrong data.
+    """
+    entry = (assets or {}).get(dataset_id) or {}
+    from_assets = str(entry.get("study_id") or "").strip()
+    if from_assets:
+        return [from_assets]
+    try:
+        ds = catalog.get(dataset_id)
+        from_bundle = str((ds.sv or {}).get("study_id") or "").strip()
+    except Exception:                                   # unknown dataset id, reported below
+        from_bundle = ""
+    if from_bundle:
+        return [from_bundle]
+    return list(STUDY_CANDIDATES)
 
 # The site database is built from these TSVs, so a row here is this study's real record
 # before publication. Columns are declared by the file's own #predicate header row.
@@ -715,12 +1066,41 @@ def read_study_record_from_tables(study_id, tables_root=SOURCE_TABLES):
         return None
     by_pred = head[0]
 
+    # A controlled-vocabulary term carries its own label. Deriving one by stripping the
+    # prefix and swapping underscores invents a string the database does not use:
+    # `data_type_single_nucleus_rna_seq` became "single nucleus rna seq" instead of the
+    # real label "Single-nucleus RNA-seq". Read the label; never manufacture it.
+    _VOCAB_FILES = {
+        "data_type_": "lungmap_vocabulary/data_type.tsv",
+        "sample_type_": "lungmap_vocabulary/sample_type.tsv",
+        "ingest_stage_": "lungmap_vocabulary/ingest_stage.tsv",
+        "age_range_": "lungmap_vocabulary/age_range.tsv",
+    }
+
     def pretty(term):
-        t = str(term or "")
-        for prefix in ("data_type_", "sample_type_", "ingest_stage_"):
-            if t.startswith(prefix):
-                t = t[len(prefix):]
-        return t.replace("_", " ").strip()
+        t = str(term or "").strip()
+        if not t:
+            return ""
+        for prefix, rel in _VOCAB_FILES.items():
+            if not t.startswith(prefix):
+                continue
+            path = os.path.join(tables_root, rel)
+            if not os.path.exists(path):
+                break
+            with open(path, "r", encoding="utf-8") as fh:
+                header = None
+                for line in fh:
+                    parts = line.rstrip("\n").split("\t")
+                    if parts[0] == "#predicate":
+                        header = parts
+                    elif header and len(parts) > 1 and parts[1] == t:
+                        if "rdfs:label" in header:
+                            i = header.index("rdfs:label")
+                            if i < len(parts) and parts[i].strip():
+                                return parts[i].strip()
+                        break
+            break
+        return t
 
     out = {}
     for field, link_rel, head_pred, target_rel in _SOURCE_LINKS:
@@ -820,8 +1200,66 @@ def read_study_record_from_tables(study_id, tables_root=SOURCE_TABLES):
 
     # The database reader returns these two as plain label lists. Match it, so the
     # front end joins the same shape whichever source answered.
-    out["technologies"] = [t["name"] for t in out["technologies"]]
-    out["age_ranges"] = [a["name"] for a in out["age_ranges"]]
+    # A technology is named manufacturer + label, as the site does it:
+    # "10x Genomics Chromium Single Cell Gene Expression".
+    def _label_map(rel, pred):
+        path, out_map, head = os.path.join(tables_root, rel), {}, None
+        if not os.path.exists(path):
+            return out_map
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                p = line.rstrip("\n").split("\t")
+                if p[0] == "#predicate":
+                    head = p
+                elif head and p[0] == "data" and len(p) > 1 and pred in head:
+                    i = head.index(pred)
+                    if i < len(p):
+                        out_map[p[1]] = p[i].strip()
+        return out_map
+
+    # manufacturer.tsv carries no rdfs:label; its name lives in lmdb:short_label
+    # ("10x Genomics"), with lmdb:long_label as the fallback.
+    makers = _label_map("lungmap_data/manufacturer.tsv", "lmdb:short_label")
+    if not makers:
+        makers = _label_map("lungmap_data/manufacturer.tsv", "lmdb:long_label")
+    tech_maker = _label_map("lungmap_data/technology.tsv", "lmdb:has_manufacturer")
+    tech_names = []
+    for t in out["technologies"]:
+        label = str(t.get("name") or "")
+        maker = makers.get(tech_maker.get(str(t.get("target_id") or ""), ""), "")
+        tech_names.append(f"{maker} {label}".strip()
+                          if maker and not label.startswith(maker) else label)
+    out["technologies"] = tech_names
+    out["age_ranges"] = [_ucfirst(a["name"]) for a in out["age_ranges"]]
+
+    # The analysis protocol as its own field, matching the database reader. A
+    # protocol is the supporting_file whose file__file_type row names
+    # `file_type_protocol`; nothing else in this schema links a study to a protocol
+    # (15_add_analysis_protocol.py:5-16 measured that).
+    protocol_files = set()
+    ft_path = os.path.join(tables_root, "lungmap_xref", "file__file_type.tsv")
+    if os.path.exists(ft_path):
+        with open(ft_path, "r", encoding="utf-8") as fh:
+            head_row = None
+            for line in fh:
+                cells = line.rstrip("\n").split("\t")
+                if cells[0] == "#predicate":
+                    head_row = cells
+                elif head_row and cells[0] == "data" \
+                        and "lmdb:applies_to_file" in head_row \
+                        and "lmdb:has_file_type" in head_row:
+                    file_col = head_row.index("lmdb:applies_to_file")
+                    type_col = head_row.index("lmdb:has_file_type")
+                    if max(file_col, type_col) < len(cells) \
+                            and cells[type_col].strip() == "file_type_protocol":
+                        protocol_files.add(cells[file_col].strip())
+    protocol = None
+    for entry in out["files"]:
+        target = str(entry.get("target_id") or "").split(":")[-1]
+        if target in protocol_files:
+            protocol = {"name": str(entry.get("name") or "Analysis protocol"),
+                        "url": str(entry.get("url") or "")}
+            break
 
     out.update({
         "dataset_id": bare,
@@ -830,12 +1268,16 @@ def read_study_record_from_tables(study_id, tables_root=SOURCE_TABLES):
         "description": by_pred.get("rdfs:comment", ""),
         "assay": pretty(by_pred.get("lmdb:is_data_type")),
         "sample_type": pretty(by_pred.get("lmdb:has_sample_type")),
-        "organism": "Homo sapiens" if "9606" in str(by_pred.get("lmdb:in_taxon", "")) else "",
+        # The COMMON name, which is what the site prints (pages.py:1052). The raw
+        # ontology label of obo:NCBITaxon_9606 is "homo sapiens" and belongs in the
+        # vocabulary, not on a study page.
+        "organism": "Human" if "9606" in str(by_pred.get("lmdb:in_taxon", "")) else "",
         "cell_count": by_pred.get("lmdb:has_dataset_sample_count", ""),
         "ingest_stage": pretty(by_pred.get("lmdb:has_ingest_stage")),
         "release_date": by_pred.get("lmdb:has_release_date", ""),
         "reference": reference,
         "raw_data": raw_data,
+        "protocol": protocol,
         "site_base": SITE_BASE,
         "tables_root": tables_root,
         "n_tools": len(out["tools"]), "n_files": len(out["files"]),
@@ -849,7 +1291,15 @@ def read_study_record_from_tables(study_id, tables_root=SOURCE_TABLES):
 
 # Several tool rows store a site-relative path ("/cell-cards/"). The public host is the
 # one the site itself uses: app/lungmap/web/data_routes.py:650 and api/routes.py:5.
-SITE_BASE = os.environ.get("LUNGMAP_SITE_BASE", "https://www.lungmap.net").rstrip("/")
+# Tool paths in the source tables are site-relative ("/breath-omics-analysis-page/?...")
+# and belong to the LungMAP SITE, which is a DIFFERENT SERVER from this viewer. Serving
+# them relative makes the browser resolve them against the viewer's own origin, so
+# every tool link 404s here. They must carry the site's origin.
+#
+# That origin is the LOCAL redesign instance, not the public host: this machine holds
+# the data, and a public hostname can change. Override with LUNGMAP_SITE_BASE only to
+# point at a different deployment on purpose.
+SITE_BASE = os.environ.get("LUNGMAP_SITE_BASE", "http://127.0.0.1:8001").rstrip("/")
 
 _LINK_CLASS_FIELD = {
     "experiment_tool": "tools",
@@ -899,6 +1349,18 @@ def _props_for(cur, ids: List[str]) -> Dict[str, List[tuple]]:
         for sid, pred, obj, ordinal, value in cur.execute(query, chunk):
             out.setdefault(sid, []).append((pred, obj, ordinal, value))
     return out
+
+
+def _ucfirst(text: str) -> str:
+    """Capitalise the first letter and leave every other letter alone.
+
+    The site prints a vocabulary label this way (app/lungmap/pages.py:1052 and the
+    `(ucfirst)` filter named at pages.py:2459), so `adult` reads `Adult` there. The
+    viewer printed the raw label, so the two surfaces disagreed on the word. This
+    capitalises the vocabulary's OWN label. It never rebuilds a label from a slug.
+    """
+    text = str(text or "")
+    return text[:1].upper() + text[1:] if text else text
 
 
 def _first(props: List[tuple], predicate: str):
@@ -1007,12 +1469,92 @@ def read_study_record(db_path: str, candidates: List[str]) -> Dict[str, Any]:
             tool["url"] = (SITE_BASE + tool["path"]) if tool["path"].startswith("/") \
                 else tool["path"]
         for entry in out["files"]:
-            entry["url"] = entry.get("display_url") or ""
+            # A file URL gets the same SITE_BASE prefix the tool branch above
+            # applies. Without it a site-relative display_url such as
+            # /static/protocols/LMEX0000004416_analysis_protocol.html was handed
+            # to the browser unchanged, so the viewer resolved it against its own
+            # origin (port 8062) and every such link answered 404.
+            path = entry.get("display_url") or ""
+            entry["url"] = (SITE_BASE + path) if path.startswith("/") else path
             entry["size"] = entry.get("file_size") or ""
+        # A publication row may carry its URL only inside its label, which is how the
+        # COPD record was written. Pull the first http(s) token out rather than showing
+        # a Reference with no link.
         for pub in out["publications"]:
             pub["url"] = pub.get("display_url") or pub.get("doi") or ""
-        out["technologies"] = [t["name"] for t in out["technologies"]]
-        out["age_ranges"] = [a["name"] for a in out["age_ranges"]]
+            if not pub["url"]:
+                hit = re.search(r"https?://\S+", str(pub.get("name") or ""))
+                if hit:
+                    pub["url"] = hit.group(0).rstrip(".,;)")
+        # A technology is named manufacturer + product, the way the site names it:
+        # "10x Genomics Chromium Single Cell Gene Expression". The site builds that
+        # in pages.py:147 (DbAPITechnologies) by joining the technology to its
+        # manufacturer and reading `lmdb:short_label`. manufacturer.tsv carries NO
+        # rdfs:label, so `entity.label` is NULL for every manufacturer and reading it
+        # returns nothing. The SOURCE-TABLE reader above was fixed on 2026-08-11 and
+        # this one was not, and this study serves from the database, so the viewer
+        # printed the bare product name beside the site's full one.
+        tech_ids = [str(t.get("target_id") or "") for t in out["technologies"]]
+        tech_ids = [t for t in tech_ids if t]
+        makers: Dict[str, str] = {}
+        if tech_ids:
+            for tid, maker in cur.execute(
+                "SELECT tech.id, COALESCE(short.object_literal, long.object_literal) "
+                "FROM entity tech "
+                "LEFT JOIN entity_property mlink ON mlink.subject_id = tech.id "
+                "       AND mlink.predicate = 'lmdb:has_manufacturer' "
+                "LEFT JOIN entity_property short ON short.subject_id = mlink.object_id "
+                "       AND short.predicate = 'lmdb:short_label' "
+                "LEFT JOIN entity_property long ON long.subject_id = mlink.object_id "
+                "       AND long.predicate = 'lmdb:long_label' "
+                "WHERE tech.id IN (%s)" % ",".join("?" * len(tech_ids)), tech_ids):
+                makers[str(tid)] = str(maker or "").strip()
+        technology_names = []
+        for tech in out["technologies"]:
+            label = str(tech.get("name") or "")
+            maker = makers.get(str(tech.get("target_id") or ""), "")
+            technology_names.append("%s %s" % (maker, label)
+                                    if maker and not label.startswith(maker) else label)
+        out["technologies"] = technology_names
+        out["age_ranges"] = [_ucfirst(a["name"]) for a in out["age_ranges"]]
+
+        # External accessions (GEO, dbGaP, PMID, DOI). The site resolves these through
+        # a record entity whose `lmdb:has_resource_id` holds the accession and an
+        # external_api whose `lmdb:has_id_type` names the record's class, then
+        # substitutes [ID] into `lmdb:has_link` (see refactored_website
+        # app/lungmap/pages.py:475). Reading only files and tools missed them entirely,
+        # so Raw data rendered as a dash.
+        out["db_xrefs"] = []
+        for row in cur.execute(
+            """
+            SELECT COALESCE(rid.object_literal, REPLACE(x.object_id,'lmdata:','')) AS acc,
+                   api.label AS api_label,
+                   link.object_literal AS template
+            FROM entity_property x
+            JOIN entity target ON target.id = x.object_id
+            LEFT JOIN entity_property rid
+                   ON rid.subject_id = x.object_id AND rid.predicate = 'lmdb:has_resource_id'
+            LEFT JOIN entity_property idt
+                   ON idt.predicate = 'lmdb:has_id_type'
+                  AND REPLACE(idt.object_id,'lmdata:','') = target.class
+            LEFT JOIN entity api ON api.id = idt.subject_id
+            LEFT JOIN entity_property link
+                   ON link.subject_id = idt.subject_id AND link.predicate = 'lmdb:has_link'
+            WHERE x.predicate IN ('oboInOwl:hasDbXref','lmdb:has_db_xref')
+              AND x.subject_id IN (
+                  SELECT subject_id FROM entity_property
+                  WHERE predicate IN ('lmdb:part_of_experiment','lmdb:applies_to_dataset')
+                    AND object_id = ?)
+            GROUP BY x.object_id
+            """, (study_id,)).fetchall():
+            # This cursor yields plain tuples, not sqlite3.Row, so index positionally:
+            # 0 = accession, 1 = api label, 2 = url template.
+            acc = str(row[0] or "")
+            api_label = str(row[1] or "")
+            template = str(row[2] or "")
+            url = template.replace("[ID]", acc) if template and acc else ""
+            out["db_xrefs"].append({"name": ("%s %s" % (api_label, acc)).strip(),
+                                    "accession": acc, "url": url})
 
         def pick(urls_from, hosts):
             for entry in urls_from:
@@ -1024,12 +1566,63 @@ def read_study_record(db_path: str, candidates: List[str]) -> Dict[str, Any]:
         reference = None
         if out["publications"]:
             first_pub = out["publications"][0]
-            reference = {"name": first_pub["name"], "url": first_pub.get("url", "")}
+            # The citation and its URL are one string in some publication rows. Show
+            # the citation as the link TEXT and keep the URL in the href; printing the
+            # raw address inside the link text wraps over four lines and reads badly.
+            pub_name = re.sub(r"\s*https?://\S+\s*$", "", str(first_pub["name"] or "")).strip()
+            reference = {"name": pub_name or str(first_pub["name"] or ""),
+                         "url": first_pub.get("url", "")}
         if not (reference and reference["url"]):
             hit = pick(out["files"], _REFERENCE_HOSTS) or pick(out["tools"], _REFERENCE_HOSTS)
             if hit:
                 reference = hit if not reference else {"name": reference["name"], "url": hit["url"]}
-        raw_data = pick(out["files"], _RAW_DATA_HOSTS) or pick(out["tools"], _RAW_DATA_HOSTS)
+        # Accessions first: a GEO series is the raw data, and the files/tools scan only
+        # ever found it by accident.
+        raw_data = (pick(out["db_xrefs"], _RAW_DATA_HOSTS)
+                    or pick(out["files"], _RAW_DATA_HOSTS)
+                    or pick(out["tools"], _RAW_DATA_HOSTS))
+        if not (reference and reference.get("url")):
+            hit = pick(out["db_xrefs"], _REFERENCE_HOSTS)
+            if hit:
+                reference = hit if not reference else {"name": reference["name"],
+                                                       "url": hit["url"]}
+
+        # Organism. `lmdb:in_taxon` carries the ontology term's own label, "homo
+        # sapiens". The site shows the COMMON name: it reads `species_common_name`
+        # out of ontology_property and capitalises it (pages.py:88 and pages.py:1052),
+        # which gives "Human". The viewer printed the raw term label.
+        taxon = _object_of(head, "lmdb:in_taxon")
+        organism = ""
+        if taxon:
+            row = cur.execute("SELECT value FROM ontology_property WHERE term_id = ? "
+                              "AND property = 'species_common_name'", (taxon,)).fetchone()
+            if row and row[0]:
+                organism = _ucfirst(str(row[0]))
+        if not organism:
+            organism = _ucfirst(str(_first(head, "lmdb:in_taxon") or ""))
+
+        # The analysis protocol, as its OWN field. It is a supporting_file whose file
+        # type is `protocol` (15_add_analysis_protocol.py registers it), so it reached
+        # the payload only buried inside files[] and the Study tab had no Protocol row.
+        # This is the query the site's Protocols tab runs, verbatim (pages.py:1315).
+        protocol = None
+        has_view = cur.execute("SELECT COUNT(*) FROM sqlite_master WHERE name = "
+                               "'v_supporting_file'").fetchone()[0]
+        if has_view:
+            row = cur.execute(
+                "SELECT f.label, f.display_url "
+                "FROM entity_property x "
+                "JOIN v_supporting_file f ON f.file_id = x.object_id "
+                "WHERE x.predicate = 'lmdb:has_file' "
+                "  AND x.subject_id IN (SELECT subject_id FROM entity_property "
+                "      WHERE predicate IN ('lmdb:part_of_experiment', "
+                "                          'lmdb:applies_to_dataset') "
+                "        AND object_id = ?) "
+                "  AND f.file_type_id = 'protocol' ORDER BY f.label", (study_id,)).fetchone()
+            if row:
+                path = str(row[1] or "")
+                protocol = {"name": str(row[0] or "Analysis protocol"),
+                            "url": (SITE_BASE + path) if path.startswith("/") else path}
 
         out.update({
             "ok": True,
@@ -1044,12 +1637,13 @@ def read_study_record(db_path: str, candidates: List[str]) -> Dict[str, Any]:
             "title": _first(head, "rdfs:label") or found[1] or study_id,
             "description": _first(head, "rdfs:comment") or found[2] or "",
             "assay": _first(head, "lmdb:is_data_type") or "",
-            "organism": _first(head, "lmdb:in_taxon") or "",
+            "organism": organism,
             "sample_type": _first(head, "lmdb:has_sample_type") or "",
             "cell_count": _first(head, "lmdb:has_dataset_sample_count") or "",
             "ingest_stage": _first(head, "lmdb:has_ingest_stage") or "",
             "reference": reference,
             "raw_data": raw_data,
+            "protocol": protocol,
             "n_tools": len(out["tools"]), "n_files": len(out["files"]),
             "n_samples": len(out["samples"]), "n_researchers": len(out["researchers"]),
         })
@@ -1119,9 +1713,25 @@ def _install_study_route(app, catalog: da.Catalog) -> None:
 
         `study_id` overrides the candidate list. `dataset` names the viewer bundle whose
         own meta-samples are returned as `viewer_samples`, used by the browser when the
-        site record has no sample rows yet.
+        site record has no sample rows yet, and whose own study id is used when the
+        caller names no `study_id`.
         """
-        candidates = [study_id] if study_id else list(STUDY_CANDIDATES)
+        assets = getattr(app.state, "assets", {}) or {}
+        resolved_dataset = dataset or (catalog.entries[0]["id"] if catalog.entries else "")
+        candidates = ([study_id] if study_id
+                      else study_ids_for_dataset(assets, catalog, resolved_dataset))
+        if not candidates:
+            # Never answer with another study's record. Say what is missing instead.
+            return JSONResponse({
+                "ok": False,
+                "dataset_bundle": resolved_dataset,
+                "candidates": [],
+                "error": (
+                    f"no LungMAP study id is configured for the bundle {resolved_dataset!r}. "
+                    f"Set one with `prepare_assets.py --study-id lmdata:LMEX...`, or with "
+                    f"`precompute.py --study-id`, or with the LUNGMAP_STUDY_IDS environment "
+                    f"variable. The Study tab shows no record rather than another study's."),
+            }, status_code=200)
         try:
             record = read_study_record(SITE_DB, candidates)
         except sqlite3.Error as err:
@@ -1150,8 +1760,9 @@ def _install_study_route(app, catalog: da.Catalog) -> None:
             record.setdefault("source", "site_database")
             record.setdefault("published", True)
 
-        ds_id = dataset or (catalog.entries[0]["id"] if catalog.entries else "")
+        ds_id = resolved_dataset
         record["dataset_bundle"] = ds_id
+        record["study_id_source"] = ("query" if study_id else "dataset")
         if ds_id:
             try:
                 record["viewer_samples"] = viewer_meta_samples(catalog.get(ds_id))

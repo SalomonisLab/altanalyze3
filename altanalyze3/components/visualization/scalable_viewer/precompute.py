@@ -416,6 +416,10 @@ def main(argv=None) -> int:
     ap.add_argument("--prefix", required=True, help="file-name prefix inside the bundle")
     ap.add_argument("--label", default=None, help="human label for the catalog")
     ap.add_argument("--dataset-id", default=None, help="catalog id (default: --prefix)")
+    ap.add_argument("--study-id", default=None,
+                    help="LungMAP study id this bundle belongs to, for example "
+                         "lmdata:LMEX0000009416. The viewer's Study tab reads it. Without "
+                         "it the Study tab shows no record rather than another study's")
     ap.add_argument("--cluster-key", default="cell_state", help="obs column holding the cell state")
     ap.add_argument("--layer", default="lognorm", help="layer to serve ('X' for adata.X)")
     ap.add_argument("--markers", default=None)
@@ -673,6 +677,9 @@ def main(argv=None) -> int:
             "bundle_version": B.BUNDLE_VERSION,
             "id": ds_id,
             "label": a.label or ds_id,
+            # The LungMAP study this bundle belongs to. `study_ids_for_dataset`
+            # (scalable_app.py) reads it, and shows no study record when it is empty.
+            "study_id": (a.study_id or "").strip(),
             "prefix": a.prefix,
             "built_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "layer": a.layer,

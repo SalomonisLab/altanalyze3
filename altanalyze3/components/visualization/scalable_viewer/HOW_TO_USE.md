@@ -66,6 +66,44 @@ Pick a **contrast** to choose which comparison to view, then a **cell state**.
 
 Every view exports to PDF.
 
+### Filter by gene
+
+**Filter by gene** sits beside the cell-state menu. Type a gene symbol and press Enter, or
+pick one from the list. The list offers the genes of the view you are looking at, so every
+gene it offers gives you a result.
+
+One gene selects a gene set: the gene you typed, plus every gene it interacts with in that
+cell state. All four views then show that set only.
+
+| View | What the filter keeps |
+|---|---|
+| Network | The gene, the genes it connects to, and the edges between them |
+| Heatmap | One row per gene in the set |
+| Volcano | One point per gene in the set, each point labelled |
+| GO Terms | Terms that overlap the set |
+| Cell communication | Interactions that use the gene as ligand or as receptor |
+
+A cell communication comparison has no gene-to-gene network behind it, so the filter there
+matches the gene alone. Its network keeps the interactions that use the gene and the cell
+states those interactions join. Its table keeps the matching rows.
+
+scALABLE names the feature after the modality, and the box follows: `Filter by gene` for
+RNA, `Filter by protein` for ADT, `Filter by TF` for a GRN. Changing the modality clears
+the box, because a new modality names different features.
+
+A line under the menus reports the result, for example
+`Filtered to FGF2 + 10 interacting genes: 60 of 2191 GO terms shown.`
+
+The box turns blue when the filter matches and red when it matches nothing. Clear the box
+to see everything again.
+
+Two limits. A gene with no interaction edge in that cell state gives a set of one gene, and
+the line under the menus says so. The cell communication network draws cell states, not
+genes, so the filter leaves it whole and says why.
+
+**Download PDF** follows the filter. With a filter on, the button saves the plot you see
+rather than the whole comparison.
+
 ### Reading the GO Terms plot
 
 Each point is one biological process. The x axis is the enrichment Z-score. The y axis is

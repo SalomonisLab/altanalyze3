@@ -33,6 +33,28 @@
     });
   }
 
+  /* The header's "How to Use" and "ReadMe" links. index.html:30-31 sends both to
+   * scALABLE's own documents, which describe the upload-and-run workflow this deployment
+   * removes; the viewer ships its own pair. The server already rewrites the hrefs on the
+   * way out (scalable_app.py DOC_LINKS + _install_index_override); this repeats it in the
+   * DOM so a page served from a browser cache also lands on the right document. The
+   * shared template is not edited. */
+  const GITHUB_BLOB =
+    "https://github.com/SalomonisLab/altanalyze3/blob/master/altanalyze3/components";
+  const DOC_LINKS = {
+    [`${GITHUB_BLOB}/cellHarmony/webapp/HOW_TO_USE.md`]:
+      `${GITHUB_BLOB}/visualization/scalable_viewer/HOW_TO_USE.md`,
+    [`${GITHUB_BLOB}/cellHarmony/webapp/README.md`]:
+      `${GITHUB_BLOB}/visualization/scalable_viewer/README.md`,
+  };
+
+  function applyDocLinks() {
+    document.querySelectorAll("a.docs-link[href]").forEach((node) => {
+      const next = DOC_LINKS[node.getAttribute("href")];
+      if (next) node.setAttribute("href", next);
+    });
+  }
+
   function el(id) { return document.getElementById(id); }
 
   function hide(node) { if (node) node.classList.add("hidden"); }
@@ -134,24 +156,42 @@
       { key: "other", color: "#d1d5db", label: "Not significant" },
     ];
 
-    window.renderDifferentialGo = function (payload) {
+    // `geneFilter` is the second argument scALABLE's own renderer now takes
+    // (webapp/static/app.js renderDifferentialGo). It must be forwarded, or the
+    // Differential gene filter would silently do nothing on the GO view of this viewer.
+    window.renderDifferentialGo = function (payload, geneFilter = null) {
       const significance = payload && payload.significance;
       if (!significance || !Array.isArray(significance.tiers)) {
-        original(payload);   // no tier stamp: scALABLE's own two-colour plot, unchanged
+        original(payload, geneFilter);  // no tier stamp: scALABLE's own plot, unchanged
         return;
       }
       destroyDifferentialNetwork();
       const plot = el("differential-plot-area");
-      const terms = payload.terms || [];
+      const allTerms = payload.terms || [];
+      // Same rule as scALABLE's renderer: a term survives when its overlapping genes
+      // meet the filter set (the typed gene plus the genes it interacts with).
+      const terms = geneFilter
+        ? allTerms.filter((term) => (term.overlap_genes || [])
+          .some((gene) => geneFilter.genes.has(String(gene))))
+        : allTerms;
+      setDifferentialGeneFilterNote(describeDifferentialGeneFilter(
+        geneFilter, payload.population, terms.length, allTerms.length, "GO terms"));
+      markDifferentialGeneFilterMatched(terms.length > 0);
       if (!terms.length) {
-        renderDifferentialEmpty(`No GO term enrichment was available for ${payload.population}.`);
+        renderDifferentialEmpty(geneFilter
+          ? `No GO term for ${geneFilter.gene} or its interacting genes in ${payload.population}.`
+          : `No GO term enrichment was available for ${payload.population}.`);
         return;
       }
       const ordered = terms.map((term) => {
         const overlapGenes = term.overlap_genes || [];
-        const selectedGene = overlapGenes.includes(currentDifferentialGene)
-          ? currentDifferentialGene
-          : (term.selected_gene || overlapGenes[0] || null);
+        const filteredPick = geneFilter && overlapGenes.includes(geneFilter.gene)
+          ? geneFilter.gene
+          : null;
+        const selectedGene = filteredPick
+          || (overlapGenes.includes(currentDifferentialGene)
+            ? currentDifferentialGene
+            : (term.selected_gene || overlapGenes[0] || null));
         return {
           ...term,
           selected_gene: selectedGene,
@@ -167,7 +207,9 @@
         return;
       }
       const tiers = significance.tiers.length ? significance.tiers : FALLBACK_TIERS;
-      const total = Number(significance.n_terms) || terms.length;
+      // The legend reads "<tier count> of <total>". With the gene filter on, the total
+      // must be the filtered term count, or the two numbers carry different denominators.
+      const total = geneFilter ? terms.length : (Number(significance.n_terms) || terms.length);
       const hover = (
         "%{customdata[4]}<br>Z-score=%{x:.3f}<br>FDR=%{y:.3e}<br>Fisher p=%{customdata[6]:.3e}"
         + "<br>Overlapping genes: %{customdata[8]}"
@@ -499,6 +541,152 @@
     setPanelSummary(panelKey, label);
   }
 
+  // ------------------------------------------------- violin grouping covariate
+  //
+  /* scALABLE's Violin groups cells by one column only, the cluster key: the server walks
+   * `cache_entry["populations"]` (app.py:3552), which is `adata.obs[cluster_key]`. This
+   * adds a "Covariate" select immediately to the right of "Select molecule" that names
+   * the grouping column instead.
+   *
+   * Options are the SAME list "Annotation 1" offers - `fields` from
+   * GET /api/jobs/{id}/display-filters (app.js:4430 populates Annotation 1 from it), so
+   * the two controls can never disagree about what this dataset carries.
+   *
+   * The default is the bundle's cluster key, so the plot on first paint is the plot
+   * scALABLE drew before. The server proves it rather than assuming it: a request that
+   * names the cluster key still takes the regrouping path, and must return the payload a
+   * request with no `covariate` parameter returns.
+   *
+   * One select per panel, like Dot size, so panel 1 and panel 2 stay independent.
+   *
+   * ONLY the violin request carries the parameter. A UMAP, heatmap or network request is
+   * sent exactly as scALABLE sent it before, because the covariate regroups nothing there.
+   *
+   * High cardinality: the cap is scALABLE's own - order the groups by mean expression
+   * descending and draw at most 10 (app.py:3564). It is not raised, because keeping it is
+   * what makes the default grouping identical. It is not silent either: the server returns
+   * the group total and the plot title and caption both name it, so "top 10 of 18 pool
+   * groups by mean" is on screen whenever groups are left out. */
+
+  const VIZ_PANELS = ["viz1", "viz2"];
+
+  function covariateValue(panelKey) {
+    const select = el(`sv-covariate-${panelKey}`);
+    return select ? String(select.value || "").trim() : "";
+  }
+
+  function syncCovariateVisibility() {
+    VIZ_PANELS.forEach((panelKey) => {
+      const field = el(`sv-covariate-field-${panelKey}`);
+      if (!field) return;
+      field.classList.toggle("hidden", getPanelSelectValue(panelKey, "mode") !== "violin");
+    });
+  }
+
+  function buildCovariateControls() {
+    VIZ_PANELS.forEach((panelKey) => {
+      if (el(`sv-covariate-field-${panelKey}`)) return;
+      const geneField = el(panelElementId(panelKey, "gene-field"));
+      if (!geneField || !geneField.parentElement) return;
+      const wrap = document.createElement("label");
+      // Same classes the gene field carries, so it takes the next cell of the same
+      // .viz-controls-grid row (styles.css:925) instead of starting a row of its own.
+      wrap.className = "field inline-field compact-inline-field hidden";
+      wrap.id = `sv-covariate-field-${panelKey}`;
+      wrap.innerHTML = '<span>Covariate</span>'
+        + `<select id="sv-covariate-${panelKey}" class="compact-select"></select>`;
+      geneField.parentElement.insertBefore(wrap, geneField.nextSibling);
+      el(`sv-covariate-${panelKey}`).addEventListener("change", () => {
+        loadVisualizationPanel(panelKey);
+      });
+    });
+    syncCovariateVisibility();
+  }
+
+  function fillCovariateSelectors(fields, clusterKey) {
+    const options = fields || [];
+    VIZ_PANELS.forEach((panelKey) => {
+      const select = el(`sv-covariate-${panelKey}`);
+      if (!select) return;
+      const previous = select.value;
+      select.innerHTML = "";
+      options.forEach((entry) => {
+        const option = document.createElement("option");
+        option.value = entry.value;
+        option.textContent = entry.value === clusterKey
+          ? `${entry.label} (cell type)` : entry.label;
+        select.appendChild(option);
+      });
+      const known = (value) => options.some((entry) => entry.value === value);
+      // Default = cell type. A panel the user already set keeps its own choice.
+      if (known(previous)) select.value = previous;
+      else if (known(clusterKey)) select.value = clusterKey;
+      else if (options.length) select.value = options[0].value;
+    });
+    syncCovariateVisibility();
+  }
+
+  function installViolinCovariate() {
+    buildCovariateControls();
+    if (SV.covariatePatchInstalled) return;
+
+    const originalParams = window.getDisplayFilterParams;
+    if (typeof originalParams !== "function") return;
+    window.getDisplayFilterParams = function (panelKey) {
+      const params = originalParams(panelKey);
+      if (getPanelSelectValue(panelKey, "mode") === "violin") {
+        const value = covariateValue(panelKey);
+        if (value) params.set("covariate", value);
+      }
+      return params;
+    };
+
+    // The control belongs to the Violin, so it is shown for the Violin. scALABLE hides a
+    // mode's own controls the same way (app.js:970 geneField.classList.toggle).
+    const originalModeOptions = window.updateExpressionModeOptions;
+    if (typeof originalModeOptions === "function") {
+      window.updateExpressionModeOptions = function () {
+        originalModeOptions();
+        syncCovariateVisibility();
+      };
+    }
+
+    /* Title and caption. scALABLE hard-codes "(top 10 states by mean)" (app.js:4993),
+     * which is right for the cluster key and wrong for anything else. The plot is drawn
+     * by scALABLE, then relabelled - no violin trace, colour or axis is rebuilt here. The
+     * default covariate is left completely alone, wording included. */
+    const originalRender = window.renderPanelExpression;
+    if (typeof originalRender === "function") {
+      window.renderPanelExpression = function (panelKey, data, mode, dotScale) {
+        originalRender(panelKey, data, mode, dotScale);
+        const payload = data || {};
+        if (mode !== "violin" || !payload.violin_covariate) return;
+        if (payload.violin_covariate_error) {
+          setPanelSummary(panelKey, payload.violin_covariate_error);
+          return;
+        }
+        if (payload.violin_covariate_is_default) return;
+        const covariate = payload.violin_covariate;
+        const title = `${payload.gene} by ${covariate} (${payload.violin_note})`;
+        const relayout = () => Plotly.relayout(panelPlotId(panelKey), { title });
+        try { relayout(); } catch (err) { setTimeout(relayout, 0); }
+        const unlabeled = Number(payload.violin_n_cells_unlabeled || 0);
+        const parts = [`Grouped by ${covariate}: ${payload.violin_note}.`];
+        if (Number(payload.violin_n_groups_total) > Number(payload.violin_n_groups_shown)) {
+          parts.push(`${Number(payload.violin_n_groups_total)
+            - Number(payload.violin_n_groups_shown)} lower-mean groups are not drawn.`);
+        }
+        if (unlabeled > 0) {
+          parts.push(`${unlabeled.toLocaleString()} cells have no ${covariate} value and are excluded.`);
+        }
+        const existing = document.getElementById(panelElementId(panelKey, "filter-summary"));
+        const prefix = existing && existing.textContent ? `${existing.textContent} ` : "";
+        setPanelSummary(panelKey, prefix + parts.join(" "));
+      };
+    }
+    SV.covariatePatchInstalled = true;
+  }
+
   // -------------------------------------------------------------- auto loading
 
   async function loadDataset(datasetId) {
@@ -512,9 +700,17 @@
     SV.contrasts = entry.contrasts || [];
     fillContrastSelector(SV.contrasts, SV.contrast);
     try {
-      SV.stateColors = (await getJson(`/api/jobs/${entry.id}/state-colors`)).colors || null;
+      const stateColors = await getJson(`/api/jobs/${entry.id}/state-colors`);
+      SV.stateColors = stateColors.colors || null;
+      SV.clusterKey = stateColors.cluster_key || "";
       installBundleStateColors();
     } catch (err) { console.warn("state colours unavailable", err); }
+    try {
+      // The same list the "Annotation 1" selector is built from (app.js:4430).
+      const filters = await getJson(`/api/jobs/${entry.id}/display-filters`);
+      SV.covariateFields = filters.fields || [];
+      fillCovariateSelectors(SV.covariateFields, SV.clusterKey);
+    } catch (err) { console.warn("covariate list unavailable", err); }
     await pollStatus(entry.id);
     // pollStatus starts scALABLE's own async warm-up (ensureExploreResultsReady).
     // Open Explore as soon as that reports ready; there is no Load button.
@@ -543,6 +739,20 @@
 
   function studyRow(k, v) {
     return `<div class="sv-study-row"><span class="sv-study-key">${esc(k)}</span>`
+         + `<span class="sv-study-val">${v}</span></div>`;
+  }
+
+  // A row that spans every column of the study grid.
+  //
+  // The grid is `repeat(auto-fit, minmax(300px, 1fr))`, so an ordinary row is
+  // about 300px wide. Two fields do not fit that: a paper title runs to six
+  // wrapped lines and a 30-author list to twenty-five, turning one cell into a
+  // narrow column of text beside a column of white space. Both are given the
+  // full width instead, and placed after the compact fields so the grid above
+  // them stays a tidy block.
+  function studyWideRow(k, v) {
+    return `<div class="sv-study-row sv-study-row--wide">`
+         + `<span class="sv-study-key">${esc(k)}</span>`
          + `<span class="sv-study-val">${v}</span></div>`;
   }
 
@@ -688,8 +898,6 @@
       + studyRow("Organism", esc(study.organism || "—"))
       + studyRow("Technology", esc((study.technologies || []).join(", ") || "—"))
       + studyRow("Cell Count", esc(fmtCount(study.cell_count)))
-      + studyRow("Reference", study.reference && study.reference.url
-          ? studyLink(study.reference.url, study.reference.name) : "—")
       // Every declared accession, not only the first: a study can carry a GEO series
       // and a dbGaP study at once, and hiding the second would understate the release.
       + studyRow("Raw data", (study.accessions || []).length
@@ -698,12 +906,24 @@
               ? studyLink(study.raw_data.url, study.raw_data.name) : "—"))
       + studyRow("Sample Type", esc(study.sample_type || "—"))
       + studyRow("Age Range", esc((study.age_ranges || []).join(", ") || "—"))
+      // The analysis protocol is a field of its own. It used to appear only as one
+      // row among the downloads, where a reader looking for the method never saw it.
+      + studyRow("Protocol", study.protocol && study.protocol.url
+          ? studyLink(study.protocol.url, study.protocol.name) : "—")
       + studyRow("Served in this viewer",
           viewer.n_cells
             ? esc(`${Number(viewer.n_cells).toLocaleString()} metacells x `
                   + `${Number(viewer.n_genes).toLocaleString()} genes, `
                   + `${viewer.n_states} cell states`)
-            : "—");
+            : "—")
+      // Reference and Researchers span the full grid width. Both are long
+      // free text and neither is scannable in a 300px column.
+      + studyWideRow("Reference", study.reference && study.reference.url
+          ? studyLink(study.reference.url, study.reference.name) : "—")
+      // The author list. It shipped empty for a full day.
+      + studyWideRow("Researchers", (study.researchers || []).length
+          ? esc((study.researchers || []).map((r) => r.name).join(", "))
+          : "—");
 
     // Two different notices. is_fallback would mean a DIFFERENT study is on screen.
     // source === "source_tables" means this study's OWN record, read from the TSVs the
@@ -745,9 +965,9 @@
       + `<div class="sv-study-sub" data-sub-panel="tools">${toolsHtml}</div>`
       + `<div class="sv-study-sub hidden" data-sub-panel="downloads">${filesHtml}</div>`
       + '<div class="sv-study-sub hidden" data-sub-panel="samples">'
-      + '<p class="sv-sample-source"></p><div class="sv-sample-table"></div></div>'
-      + `<p class="sv-study-provenance">Source: ${esc(study.study_id || "")} in `
-      + `${esc(study.db_path || "")}</p>`;
+      + '<p class="sv-sample-source"></p><div class="sv-sample-table"></div></div>';
+    // No provenance footer. A reader does not need this machine's database path, and
+    // printing an absolute local path on a study page is noise at best.
 
     panel.querySelectorAll(".sv-study-subtab").forEach((b) => {
       b.addEventListener("click", () => {
@@ -850,6 +1070,7 @@
 
   async function boot() {
     applyViewerName();
+    applyDocLinks();
     stripRunWorkflow();
     stripDifferentialRunConfig();
     installGoSignificanceTiers();
@@ -857,6 +1078,7 @@
     buildDatasetSelector();
     buildContrastSelector();
     installDotPlotMode();
+    installViolinCovariate();
     const catalog = await getJson("/api/catalog");
     SV.datasets = catalog.datasets || [];
     // Built only now: the default dot size depends on the atlas size, which the
@@ -871,7 +1093,33 @@
     });
     if (!SV.datasets.length) return;
     select.parentElement.classList.toggle("hidden", SV.datasets.length < 2);
-    await loadDataset(SV.datasets[0].id);
+
+    // A dataset can be named in the URL, so another page can link straight to
+    // one atlas instead of landing on whichever happens to be first. Both the
+    // bundle id (`?dataset=COPD-metacells`) and the LungMAP dataset accession
+    // (`?dataset_id=LMEX0000009416`) are accepted, because the site knows a
+    // dataset by its accession and the catalog knows it by its bundle id.
+    const wanted = new URLSearchParams(window.location.search);
+    const askedBundle = (wanted.get("dataset") || "").trim();
+    const askedRecord = (wanted.get("dataset_id") || "").trim().toUpperCase();
+    let chosen = SV.datasets[0].id;
+    if (askedBundle) {
+      const hit = SV.datasets.filter((d) => d.id === askedBundle)[0];
+      if (hit) chosen = hit.id;
+      else console.warn("[scalable_viewer] no bundle named", askedBundle);
+    } else if (askedRecord) {
+      // The catalog entry carries the accession under whichever of these the
+      // bundle metadata happened to set.
+      const hit = SV.datasets.filter((d) =>
+        [d.dataset_id, d.lungmap_id, d.accession, d.study_id]
+          .filter(Boolean)
+          .map((v) => String(v).toUpperCase())
+          .indexOf(askedRecord) >= 0)[0];
+      if (hit) chosen = hit.id;
+      else console.warn("[scalable_viewer] no bundle for record", askedRecord);
+    }
+    select.value = chosen;
+    await loadDataset(chosen);
   }
 
   document.addEventListener("DOMContentLoaded", () => {

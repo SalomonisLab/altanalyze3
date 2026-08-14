@@ -662,6 +662,43 @@ select:disabled {
   min-width: 280px;
 }
 
+/* Differential gene filter: one gene restricts every view to that gene and the genes it
+   interacts with in the selected cell state. It sits beside the cell-state select. */
+.compact-input {
+  max-width: 190px;
+  padding: 8px 10px;
+  border: 1px solid #cbd5f5;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #0f172a;
+  font-size: 0.9rem;
+  font-family: inherit;
+}
+
+.compact-input:focus {
+  outline: none;
+  border-color: #1f19c7;
+  box-shadow: 0 0 0 3px rgba(31, 25, 199, 0.16);
+}
+
+.compact-input.filter-active {
+  border-color: #1f19c7;
+  background: #eef2ff;
+}
+
+.compact-input.filter-unmatched {
+  border-color: #dc2626;
+  background: #fef2f2;
+}
+
+.differential-filter-note {
+  font-size: 0.78rem;
+  color: #475569;
+  justify-content: flex-end;
+  text-align: right;
+  max-width: 520px;
+}
+
 @media (max-width: 1100px) {
   .grid,
   .plots {

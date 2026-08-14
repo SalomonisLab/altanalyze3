@@ -101,6 +101,12 @@
 .sv-study-row{display:flex;gap:8px;font-size:.93rem}
 .sv-study-key{font-weight:700;color:#0b3d78;min-width:120px}
 .sv-study-val{color:#22303c}
+/* Reference and Researchers span every column of the auto-fit grid. In a
+   300px cell a paper title wrapped to six lines and a 30-author list to
+   twenty-five, next to empty space. */
+.sv-study-row--wide{grid-column:1/-1}
+.sv-study-row--wide .sv-study-key{flex:0 0 auto}
+.sv-study-row--wide .sv-study-val{flex:1 1 auto;max-width:none}
 .sv-study-tabs{display:flex;gap:4px;border-bottom:2px solid #d7e3ef;margin-bottom:12px}
 .sv-study-subtab{background:none;border:none;padding:8px 16px;cursor:pointer;font-size:.95rem;color:#4a6a86}
 .sv-study-subtab{color:#4a6a86}

@@ -25,9 +25,63 @@ Two functions would otherwise open an h5ad. `bundle_meta.seed_expression_cache` 
 `_get_marker_heatmap_cache_entry` (app.py:1260) both return on a cache hit. A gene column
 then comes from one slice of the memory-mapped store.
 
-`prepare_assets.py` runs the scALABLE backends that make the artifacts a bundle lacks:
-fastComm scores, per-cell-state marker networks, per-contrast differential networks and
-GO-Elite terms.
+`prepare_assets.py` collects the artifacts a bundle lacks: the MarkerFinder heatmap
+matrix, fastComm scores, per-cell-state marker networks, per-contrast differential
+networks and GO-Elite terms.
+
+## Every viewer input is required
+
+`prepare_assets.py` ends with a completeness report. Each input is present, or the
+operator waived it with a named flag. A build that satisfies neither prints `MISSING` and
+returns exit code 2.
+
+| Viewer input | Where it comes from | Flag that waives it |
+| --- | --- | --- |
+| Explore / MarkerHeatmap | `*_fold_matrix.npz` beside `--markers-tsv` | `--no-marker-heatmap` |
+| Explore / MarkerNetwork | the redundant marker table | `--skip-networks` |
+| Explore / Cell communication | `--fastcomm-dir`, or `<root>/fastComm/<id>/` | `--no-fastcomm` |
+| Differential / Network | `--diff-networks-from` | `--skip-networks` |
+| Differential / GO Terms | `--goelite-from` | `--no-goelite` |
+
+The gate answers a real failure. Before 2026-08-12 the marker heatmap needed `--marker-gct`
+and cell communication needed `--fastcomm-dir`. A build that omitted both flags still
+returned 0, and the COPD `assets_v3` and `assets_v4` builds did omit both. The viewer then
+served an Explore tab with no marker heatmap and no cell communication, and no log said so.
+
+**The marker heatmap now comes from MarkerFinder itself.**
+`generate_marker_heatmap_from_adata` writes the npz at marker_heatmap_h5ad.py:1113, through
+`_write_heatmap_cache`. That npz holds the four arrays `_get_marker_heatmap_cache_entry`
+reads (webapp/app.py:1294): `matrix`, `row_ids`, `col_ids`, `col_barcodes`. flask/pipeline.py:1527
+registers that same file as `marker_analysis["heatmap_cache"]`.
+`find_markerfinder_heatmap_cache` globs `*_fold_matrix.npz` beside the marker table, so a
+standard MarkerFinder run needs no flag. `--marker-gct` remains only for a project whose
+npz is gone.
+
+## The Study tab reads the bundle's own study id
+
+`study_ids_for_dataset` (scalable_app.py) resolves one LungMAP study id per bundle, most
+specific source first:
+
+1. `study_id` in the asset manifest, from `prepare_assets.py --study-id`
+2. `scalable_viewer.study_id` in the bundle metadata, from `precompute.py --study-id`
+3. `LUNGMAP_STUDY_IDS`, the deployment-wide override
+4. nothing, and the Study tab reports that no source names an id
+
+The manifest wins because a manifest rebuild costs minutes and a bundle rebuild costs
+hours. Step 4 never guesses. Until 2026-08-12 the module carried the default
+`lmdata:LMEX0000004416`, and every bundle inherited it. The COPD bundle therefore served
+the Study tab of a different study, "Lipidomics Imaging of Human Postnatal Lung in Health
+and Bronchopulmonary Dysplasia". The COPD record is `lmdata:LMEX0000009416`. One default
+cannot be right for two datasets, so there is no default now.
+
+**A fastComm run must match the bundle.** `verify_fastcomm_matches_bundle` compares the
+run's `summary.json` against the bundle: same state key, same cell count, and no cell state
+that the bundle does not carry. The check reports, and does not fail, a state the bundle
+carries and fastComm skipped, because `--min-cells` drops a small state. `--allow-stale-fastcomm`
+ships a mismatch on purpose. The check answers a second real failure: the COPD run under
+`scalable_viewer/fastComm/COPD-metacells/` scored 161,432 cells of `COPD_metacells.deid.h5ad`,
+while `bundles_v3` serves 123,076 cells of `COPD_metacells.metasample.h5ad`. Both carry 39
+cell states, so no number on the page would have looked wrong.
 
 `server.py` below still exists. `scalable_app` mounts it at `/fast`, so the binary and
 memory-mapped endpoints stay available and lose no speed.
