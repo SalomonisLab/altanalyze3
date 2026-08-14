@@ -888,9 +888,10 @@ def generate_marker_heatmap_from_adata(
         raise KeyError(f"Layer '{layer}' not found in adata.layers.")
 
     resolve_cluster_started = time.perf_counter()
-    clusters = adata.obs[cluster_key].astype(str)
+    raw_clusters = adata.obs[cluster_key]
     lineage_order = _coerce_lineage_order(adata.uns.get("lineage_order", None))
-    cluster_order = _resolve_cluster_order(clusters, lineage_order)
+    cluster_order = _resolve_cluster_order(raw_clusters, lineage_order)
+    clusters = raw_clusters.astype(str)
     print(f"[INFO] Resolved {len(cluster_order)} clusters.")
     _log_step_timing(
         "marker_heatmap.resolve_cluster_order",

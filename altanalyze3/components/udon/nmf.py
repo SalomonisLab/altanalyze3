@@ -66,7 +66,7 @@ Main steps in the run_nmf function:
 '''
 
 
-def run_nmf(df, rank, n_run=5):
+def run_nmf(df, rank, n_run=5, assignment_normalization=None):
     """n_run: number of NMF restarts. Default 5 -- the original pyudon stability default
     (the developer kept multiple runs to keep clustering stable). seed='nndsvd' is a
     deterministic init, so n_run=1 is a validated faster opt-in (run1-vs-run2 ARI=1.000).
@@ -78,26 +78,42 @@ def run_nmf(df, rank, n_run=5):
 
     # sd cannot be 0 across all rows/cols? ##what does nimfa snmf do when some columns or even rows are all 0s? ## see source for their checks
     # enter try statement here
-    w = None
     try:
         nmf = nimfa.Snmf(mat_t, seed="nndsvd", rank=int(rank), max_iter=20, n_run=int(n_run),
                          track_factor=False)
         nmf_fit = nmf()
         w = nmf_fit.basis()
+    except KeyboardInterrupt:
+        raise
     except ValueError:
         w = mat  # this needs to change -- how are errors handled?
 
-    finally:
-        nmf_matrix = pd.DataFrame(w.transpose(), columns=df.columns)
+    nmf_matrix = pd.DataFrame(w.transpose(), columns=df.columns)
 
-    nmf_clusters = binarize_nmf(w)
+    nmf_clusters = binarize_nmf(w, normalization=assignment_normalization)
     nmf_clusters.index = df.columns
 
     return nmf_matrix, nmf_clusters
 
 
-def binarize_nmf(w):
-    w = w.transpose()
+def binarize_nmf(w, normalization=None):
+    w = np.asarray(w).transpose()
+    if normalization:
+        method = str(normalization).lower()
+        if method == "rowmax":
+            denom = np.maximum(w.max(axis=1, keepdims=True), 1e-12)
+            w = w / denom
+        elif method == "rowsum":
+            denom = np.maximum(w.sum(axis=1, keepdims=True), 1e-12)
+            w = w / denom
+        elif method == "zscore":
+            denom = np.maximum(w.std(axis=1, keepdims=True), 1e-12)
+            w = (w - w.mean(axis=1, keepdims=True)) / denom
+        elif method == "quantile95":
+            denom = np.maximum(np.quantile(w, 0.95, axis=1, keepdims=True), 1e-12)
+            w = w / denom
+        elif method not in {"raw", "none"}:
+            raise ValueError(f"Unsupported NMF assignment normalization: {normalization}")
     # components = w.shape[0]  # this is number of rows/components
     samples = w.shape[1]  # number of columns/samples
 

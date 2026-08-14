@@ -14,7 +14,7 @@ def generate_train_data(fold_matrix_with_mf_genes, groups):
     pseudobulk_dict = {}
 
     # Iterate over selected cell types
-    for cell_type in tqdm(selected_cell_types, desc="generating train data using centroids"):
+    for cell_type in selected_cell_types:
         # Filter cells based on cell type
         selected_cells = groups.index[groups['cluster'] == cell_type]
 
@@ -58,4 +58,3 @@ def classify(train, fold_matrix_with_mf_genes, groups):
     final_clusters = final_clusters[keep].sort_values('cluster')
 
     return final_clusters
-

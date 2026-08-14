@@ -84,7 +84,8 @@ def scale_final_marker_heatmap(final_marker_heatmap):
     return final_marker_heatmap_scaled
 
 
-def marker_finder_wrapper(input_df, groups, top_n=60, rho_threshold=0.2, marker_finder_rho=0.3):
+def marker_finder_wrapper(input_df, groups, top_n=60, rho_threshold=0.2, marker_finder_rho=0.3,
+                          min_markers_per_cluster=3):
 
     # get unique markers
     markers_df_og = unique_marker_finder(input_df, groups)
@@ -94,8 +95,10 @@ def marker_finder_wrapper(input_df, groups, top_n=60, rho_threshold=0.2, marker_
     # count number of markers above rho_threshold per cluster
     markers_df = markers_df[markers_df['pearson_r'] >= rho_threshold]
 
-    # clusters with fewer than two markers above the supplied rho threshold are excluded
-    markers_df = markers_df.groupby('top_cluster').filter(lambda x: len(x) >= 3)
+    # clusters with too few markers above the supplied rho threshold are excluded.
+    # Legacy RNA defaults used 3 here. Small feature panels such as ADT need a
+    # lower configurable floor, while still requiring definitive markers.
+    markers_df = markers_df.groupby('top_cluster').filter(lambda x: len(x) >= int(min_markers_per_cluster))
 
     # get Top n correlated marker for each cluster
     markers_df = markers_df.groupby('top_cluster').head(top_n)
