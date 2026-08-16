@@ -24,9 +24,6 @@ def determine_nmf_ranks(df, small_feature=False, rel_threshold=0.1, max_rank=30)
     muTW = (np.sqrt(g - 1) + np.sqrt(c)) ** 2.0
     sigmaTW = (np.sqrt(g - 1) + np.sqrt(c)) * (1.0 / np.sqrt(g - 1) + 1.0 / np.sqrt(c)) ** (1.0 / 3.0)
 
-    # Compute the covariance matrix
-    sigmaHat = np.dot(Xt, X)
-
     # Calculate the threshold boundary
     boundary = 3.273 * sigmaTW + muTW
     print(boundary)
@@ -34,6 +31,20 @@ def determine_nmf_ranks(df, small_feature=False, rel_threshold=0.1, max_rank=30)
     # sigmaHat = Xt @ X is a symmetric Gram matrix, so eigh gives the SAME (real)
     # eigenvalues as eig but is far faster and numerically stable -- LA.eig on a
     # samples x samples matrix is O(n^3) and was the full-scale bottleneck.
+    #
+    # Xt @ X (c x c) and X @ Xt (g x g) share their ENTIRE non-zero spectrum; the
+    # larger Gram matrix only pads with |c - g| exact zeros. Zeros never clear the
+    # positive Tracy-Widom boundary, so counting eigenvalues above `boundary` on the
+    # SMALLER Gram matrix returns an identical k. On genes x cells input with
+    # c >> g (e.g. 2,773 x 15,000) this replaces a 15,000^2 matrix (1.8 GB, O(c^3)
+    # eigh) with a 2,773^2 matrix (62 MB, O(g^3)) -- the ICGS2-era Guide3 matrix had
+    # few columns, so the original orientation was never the bottleneck it is here.
+    # The muTW/sigmaTW/boundary formulas above are UNCHANGED and still use the
+    # original (n=rows, p=cols) convention.
+    if c > g:
+        sigmaHat = np.dot(X, Xt)   # g x g
+    else:
+        sigmaHat = np.dot(Xt, X)   # c x c
     w = LA.eigh(sigmaHat)[0]
 
     if not small_feature:
@@ -72,21 +83,66 @@ def run_nmf(df, rank, n_run=5, assignment_normalization=None):
     deterministic init, so n_run=1 is a validated faster opt-in (run1-vs-run2 ARI=1.000).
     Override globally without threading args via the env var UDON_NMF_RUNS (e.g. =1 for speed)."""
     import os
+    import scipy.sparse as _sp
     n_run = int(os.environ.get("UDON_NMF_RUNS", n_run))
-    mat = df.to_numpy()
-    mat_t = mat.transpose()
+    engine = str(os.environ.get("UDON_NMF_ENGINE", "sklearn")).lower()
 
-    # sd cannot be 0 across all rows/cols? ##what does nimfa snmf do when some columns or even rows are all 0s? ## see source for their checks
-    # enter try statement here
-    try:
-        nmf = nimfa.Snmf(mat_t, seed="nndsvd", rank=int(rank), max_iter=20, n_run=int(n_run),
-                         track_factor=False)
-        nmf_fit = nmf()
-        w = nmf_fit.basis()
-    except KeyboardInterrupt:
-        raise
-    except ValueError:
-        w = mat  # this needs to change -- how are errors handled?
+    # Build the cells x features matrix WITHOUT a dense float64 round trip. nimfa's
+    # SNMF/L active-set solver cost ~281 s per iteration at rank 128 on 15,000 x 2,773
+    # and densifies everything; sklearn's NMF is a Cython coordinate-descent solver that
+    # accepts scipy sparse directly and runs float32.
+    if _sp.issparse(getattr(df, "values", None)) or _sp.issparse(df):
+        mat_t = (df.values if hasattr(df, "values") else df).T.tocsr()
+        columns = df.columns
+    else:
+        arr = df.to_numpy(dtype=np.float32, copy=False)
+        mat_t = np.ascontiguousarray(arr.T)
+        columns = df.columns
+        del arr
+    # Single-cell input is ~90% zeros; CSR cuts memory and lets CD skip the zeros.
+    if not _sp.issparse(mat_t):
+        density = float(np.count_nonzero(mat_t)) / max(1, mat_t.size)
+        if density < 0.5:
+            mat_t = _sp.csr_matrix(mat_t)
+    np.clip(mat_t.data if _sp.issparse(mat_t) else mat_t, 0, None,
+            out=(mat_t.data if _sp.issparse(mat_t) else mat_t))
+
+    w = None
+    if engine == "sklearn":
+        try:
+            from sklearn.decomposition import NMF as _SkNMF
+            best_err = None
+            for _run in range(max(1, int(n_run))):
+                model = _SkNMF(
+                    n_components=int(rank),
+                    init="nndsvd",          # deterministic, matches the previous seed
+                    solver="cd",            # Cython coordinate descent
+                    beta_loss="frobenius",
+                    tol=1e-4,
+                    max_iter=200,
+                    random_state=42 + _run,
+                )
+                w_run = model.fit_transform(mat_t)   # cells x rank
+                if best_err is None or model.reconstruction_err_ < best_err:
+                    best_err, w = model.reconstruction_err_, w_run
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            print(f"[UDON NMF] sklearn engine failed ({type(exc).__name__}: {exc}); falling back to nimfa")
+            w = None
+
+    if w is None:
+        dense_t = mat_t.toarray() if _sp.issparse(mat_t) else mat_t
+        try:
+            nmf = nimfa.Snmf(dense_t, seed="nndsvd", rank=int(rank), max_iter=20, n_run=int(n_run),
+                             track_factor=False)
+            nmf_fit = nmf()
+            w = nmf_fit.basis()
+        except KeyboardInterrupt:
+            raise
+        except ValueError:
+            w = df.to_numpy()  # this needs to change -- how are errors handled?
+    w = np.asarray(w)
 
     nmf_matrix = pd.DataFrame(w.transpose(), columns=df.columns)
 

@@ -39,9 +39,12 @@ try:
 except Exception as _e:
     run_iso2function = _missing_subcommand("sclr-iso2func", _e)
 try:
-    from altanalyze3.components.snaf.cli import run_snaf, run_snaf_ts, run_snaf_b, run_snaf_precompute_control
+    from altanalyze3.components.snaf.cli import (run_snaf, run_snaf_ts, run_snaf_b,
+                                                 run_snaf_precompute_control,
+                                                 run_snaf_build_surface_db)
 except Exception as _e:
-    run_snaf = run_snaf_ts = run_snaf_b = run_snaf_precompute_control = _missing_subcommand("snaf", _e)
+    run_snaf = run_snaf_ts = run_snaf_b = run_snaf_precompute_control = \
+        run_snaf_build_surface_db = _missing_subcommand("snaf", _e)
 from altanalyze3.utilities.io import (
     get_indexed_references,
     is_bam_indexed
@@ -614,14 +617,15 @@ class ArgsParser():
         snaf_b_parser = subparsers.add_parser(
             "snaf-b",
             parents=[parent_parser],
-            help="SNAF surface/B-antigen pipeline: membrane-protein neojunctions -> ORF recovery -> transmembrane topology (pure-python tmhmm.py) -> novelty vs UniProt -> stringency-gated candidates. Needs --db_dir and --freq_path (from a prior `snaf` run)."
+            help="SNAF surface/B-antigen pipeline: surface-gene neojunctions -> ORF recovery -> transmembrane topology (pure-python tmhmm.py) -> novelty vs UniProt -> stringency-gated candidates. Needs --db_dir; runs standalone (no SNAF-T, no HLA) when --freq_path is omitted."
         )
         snaf_b_parser.set_defaults(func=run_snaf_b)
         snaf_b_parser.add_argument("--juncounts", required=True, type=str, help="Junction-count matrix (TSV; rows=junction UIDs, cols=tumor samples)")
         snaf_b_parser.add_argument("--db_dir", required=True, type=str, help="SNAF reference dir containing Alt91_db/ and controls/")
-        snaf_b_parser.add_argument("--freq_path", required=True, type=str, help="T-antigen frequency table from a prior `snaf` run (frequency_stage0_verbosity1_uid_gene_symbol_coord_mean_mle.txt)")
+        snaf_b_parser.add_argument("--freq_path", default=None, type=str, help="T-antigen frequency table from a prior `snaf` run (frequency_stage0_verbosity1_uid_gene_symbol_coord_mean_mle.txt). OPTIONAL: omit it and SNAF-B derives the equivalent table over its membrane neojunctions, so no SNAF-T run and no HLA types are needed.")
+        snaf_b_parser.add_argument("--surface_db", default=None, type=str, help="Custom cell-surface gene database REPLACING the built-in Alt91_db surfaceome: a directory from `snaf-build-surface-db`, or a bare gene table with an Ensembl-gene-ID column. Genes with no reference protein are excluded and counted.")
         snaf_b_parser.add_argument("--mode", default="short_read", choices=["short_read", "long_read", "find_full_length"], help="Surface prediction mode. Default: short_read")
-        snaf_b_parser.add_argument("--validation_gtf", default=None, type=str, help="Long-read/EST GTF (e.g. SQANTI) enabling stringency-4/5 support gates; omit for stringency-3-only (fully offline)")
+        snaf_b_parser.add_argument("--validation_gtf", default=None, type=str, help="Long-read/EST GTF or GFF, plain or gzipped (e.g. SQANTI, or a long-read combined.gff.gz) enabling stringency-4/5 support gates; omit for stringency-3-only (fully offline)")
         snaf_b_parser.add_argument("--no_tmhmm", action="store_true", help="Disable the transmembrane-topology gate (otherwise pure-python tmhmm.py is used)")
         snaf_b_parser.add_argument("--tmhmm_path", default=None, type=str, help="Path to a legacy TMHMM 2.0c binary (Linux); if unset, the pure-python tmhmm.py is used")
         snaf_b_parser.add_argument("--n_stride", default=2, type=int, help="ORF-check stride. Default: 2")
@@ -640,7 +644,25 @@ class ArgsParser():
         snaf_b_parser.add_argument("--tumor_cutoff", default=20, type=int, help="prevalance: tumor count cutoff. Default: 20")
         snaf_b_parser.add_argument("--normal_prevalance_cutoff", default=0.01, type=float, help="prevalance: max normal fraction. Default: 0.01")
         snaf_b_parser.add_argument("--tumor_prevalance_cutoff", default=0.1, type=float, help="prevalance: min tumor fraction. Default: 0.1")
+        snaf_b_parser.add_argument("--max_bayests_percentile", default=0.9, type=float, help="Drop sifted neojunctions whose precomputed BayesTS percentile exceeds this (0-1; lower=more tumor-specific). DEFAULT 0.9 (BayesTS filtering ON); auto-skips when the control has no BayesTS. Pass 1.0 (or a value >=1) to disable.")
         self.add_common_arguments(snaf_b_parser)
+
+        # SNAF-B surface database builder: format a user surfaceome list (e.g. SURFY) into the
+        # whitelist + reference-protein pair that SNAF-B needs.
+        snaf_sdb_parser = subparsers.add_parser(
+            "snaf-build-surface-db",
+            parents=[parent_parser],
+            help="Format a user cell-surface gene list (e.g. SURFY) into a SNAF-B surface database: the gene whitelist plus the reference protein sequences SNAF-B compares novel ORFs against. Feed the result to `snaf-b --surface_db`."
+        )
+        snaf_sdb_parser.set_defaults(func=run_snaf_build_surface_db)
+        snaf_sdb_parser.add_argument("--gene_table", required=True, type=str, help="User surfaceome list: any TSV/CSV with a column of Ensembl gene IDs (a symbol column is used for labels). CRLF and a header row are handled.")
+        snaf_sdb_parser.add_argument("--db_dir", required=True, type=str, help="SNAF reference dir containing Alt91_db/ (supplies the built-in reference sequences and the Ensembl-91 gene models)")
+        snaf_sdb_parser.add_argument("--output", required=True, type=str, help="Directory to write the surface database into (surface_genes.txt, surface_reference.fasta, surface_db_params.json)")
+        snaf_sdb_parser.add_argument("--uniprot_dir", default=None, type=str, help="AltAnalyze UniProt dir (e.g. .../EnsMart100/uniprot/Hs) with Hs_Ensembl-UniProt.txt + uniprot_sequence.txt. Without it, listed genes that have no built-in reference protein are excluded (and counted) instead of being built.")
+        snaf_sdb_parser.add_argument("--mode", default="replace", choices=["replace", "union"], help="replace: the database is exactly the user's list (default). union: the user's list plus the built-in Alt91_db surfaceome.")
+        snaf_sdb_parser.add_argument("--name", default=None, type=str, help="Label recorded in surface_db_params.json")
+        snaf_sdb_parser.add_argument("--download_ref", action="store_true", help="If the reference bundle is missing under --db_dir, download it (~2.7 GB) instead of erroring")
+        self.add_common_arguments(snaf_sdb_parser, exclude=["output"])
 
         # SNAF precompute-control: build the small per-junction control-stats table ONCE
         # (mean/std/mle/normal_prevalence + BayesTS sigma/percentile) so subsequent runs never

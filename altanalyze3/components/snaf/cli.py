@@ -35,14 +35,52 @@ logger = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- helpers
-def _read_junction_matrix(path):
+def _read_count_matrix(path, label='junction matrix'):
+    """Read an AltAnalyze junction-count matrix, compressed or not, and report what it lost.
+
+    * Compression is inferred from the extension, so `.txt`, `.txt.gz`, `.zip`, `.bz2`,
+      `.xz` and `.zst` all work -- a cohort matrix can stay in the archive it shipped in.
+    * A row whose field count exceeds the header's is skipped rather than aborting the
+      whole read, and a row with too few fields is padded with NaN by the parser; both
+      kinds are counted and reported here, never dropped in silence.
+    """
     import pandas as pd
     import numpy as np
-    df = pd.read_csv(path, sep='\t', index_col=0)
+    kw = {'sep': '\t', 'index_col': 0}
+    if str(path).endswith('.zip'):
+        # pandas only reads a single-member zip; say so plainly instead of failing deep
+        import zipfile
+        with zipfile.ZipFile(path) as zf:
+            members = [n for n in zf.namelist() if not n.endswith('/')]
+        if len(members) != 1:
+            raise ValueError('{}: a zipped count matrix must hold exactly one file, {} has '
+                             '{}: {}'.format(label, path, len(members), members[:5]))
+    try:
+        df = pd.read_csv(path, on_bad_lines='warn', **kw)
+    except TypeError:                      # pandas < 1.3
+        df = pd.read_csv(path, error_bad_lines=False, warn_bad_lines=True, **kw)
+    n_read = df.shape[0]
+    bad = df.isna().any(axis=1)
+    n_bad = int(bad.sum())
+    if n_bad:
+        logger.warning('%s %s: %d / %d rows carry a missing value (a short or corrupt line) '
+                       'and are dropped; the first are %s', label, path, n_bad, n_read,
+                       list(df.index[bad][:5]))
+        df = df.loc[~bad, :]
     # AltAnalyze junction UIDs sometimes carry a trailing '=...'; strip and dedup
     df.index = [str(item).split('=')[0] for item in df.index]
-    df = df.loc[np.logical_not(df.index.duplicated()), :]
+    dup = df.index.duplicated()
+    n_dup = int(np.count_nonzero(dup))
+    if n_dup:
+        logger.warning('%s %s: %d / %d rows are duplicate UIDs after stripping the coordinate '
+                       'suffix; keeping the first of each', label, path, n_dup, df.shape[0])
+    df = df.loc[np.logical_not(dup), :]
+    logger.info('%s %s: %d rows x %d samples', label, path, df.shape[0], df.shape[1])
     return df
+
+
+def _read_junction_matrix(path):
+    return _read_count_matrix(path, label='junction matrix')
 
 
 def _read_hla(path, samples):
@@ -75,18 +113,21 @@ def _require_file(path, flag):
 
 
 def _load_add_control(spec):
-    """--add_control 'name=path.txt,name2=path.h5ad' -> {name: DataFrame|AnnData}."""
+    """--add_control 'name=path.txt,name2=path.h5ad' -> {name: DataFrame|AnnData}.
+
+    Text controls go through _read_count_matrix, so they may be gzipped/zipped and a
+    corrupt row is reported and dropped instead of aborting the run."""
     if not spec:
         return None
-    import pandas as pd
     import anndata as ad
     out = {}
     for item in spec.split(','):
         name, path = item.split('=', 1)
+        _require_file(path, "--add_control '{}'".format(name))
         if path.endswith('.h5ad'):
             out[name] = ad.read_h5ad(path)
         else:
-            out[name] = pd.read_csv(path, sep='\t', index_col=0)
+            out[name] = _read_count_matrix(path, label="control '{}'".format(name))
     return out
 
 
@@ -233,6 +274,71 @@ def run_snaf_precompute_control(args):
     return path
 
 
+def _derive_surface_frequency_table(jcmq, uids, outdir):
+    """Write the frequency table SNAF-B needs WITHOUT running the T-antigen pipeline.
+
+    SNAF-B's `report_candidates` reads exactly three things out of the SNAF-T table: the
+    uid (from the 'uid,uid' index), `tumor_specificity_mean` and `tumor_specificity_mle`.
+    None of them come from MHC binding -- they are the sifting condition matrix and the
+    control-side tumor specificity, both already computed by the time SNAF-B has its
+    membrane tuples. So this builds the same table over the membrane neojunctions using
+    the SAME functions the T pipeline uses (`stage0_compatible_results`'s per-junction
+    expressed-sample logic, then `enhance_frequency_table`), rather than approximating it.
+
+    SCOPE: the rows cover the membrane neojunctions only (SNAF-T's stage-0 table covers
+    every neojunction). That is complete for SNAF-B, whose candidates are a subset of the
+    membrane set, and is stated in the file name.
+    """
+    import pandas as pd
+    from altanalyze3.components.snaf.snaf import enhance_frequency_table
+
+    cond = jcmq.cond_df
+    keep = [u for u in uids if u in cond.index]
+    missing = len(uids) - len(keep)
+    if missing:
+        logger.warning('%d / %d membrane neojunctions are absent from cond_df and are not in '
+                       'the derived frequency table', missing, len(uids))
+    sub = cond.loc[keep]
+    records = []
+    for index, series in sub.iterrows():
+        samples = series.loc[series].index.tolist()
+        records.append((index, samples, len(samples)))
+    df = pd.DataFrame.from_records(records, columns=['junction', 'samples', 'n_sample'])
+    df = df.set_index(keys='junction').sort_values(by='n_sample', ascending=False)
+    raw = os.path.join(outdir, 'frequency_surface_stage0.txt')
+    df.to_csv(raw, sep='\t')
+    df = pd.read_csv(raw, sep='\t', index_col=0)
+    df.index = [','.join([item, item]) for item in df.index]
+    uid_path = os.path.join(outdir, 'frequency_surface_stage0_verbosity1_uid.txt')
+    df.to_csv(uid_path, sep='\t')
+    df = pd.read_csv(uid_path, sep='\t', index_col=0)
+    name = 'frequency_surface_stage0_verbosity1_uid_gene_symbol_coord_mean_mle.txt'
+    enhance_frequency_table(df, True, True, outdir, name)
+    out = os.path.join(outdir, name)
+    logger.info('derived SNAF-B frequency table (%d membrane neojunctions) -> %s', len(keep), out)
+    return out
+
+
+# --------------------------------------------------------------------------- snaf-build-surface-db
+def run_snaf_build_surface_db(args):
+    """Format a user surfaceome gene list into a SNAF-B surface database."""
+    from altanalyze3.components.snaf.surface.surface_db import build_surface_db
+    import json
+    _require_file(args.gene_table, '--gene_table')
+    from altanalyze3.components.snaf.reference import ensure_reference
+    root = ensure_reference(str(args.db_dir), gtex_mode='count',
+                            download=getattr(args, 'download_ref', False))
+    uniprot_dir = str(args.uniprot_dir) if getattr(args, 'uniprot_dir', None) else None
+    if uniprot_dir and not os.path.isdir(uniprot_dir):
+        raise FileNotFoundError('--uniprot_dir not found: {}'.format(uniprot_dir))
+    outdir, params = build_surface_db(
+        gene_table=str(args.gene_table), db_dir=root, outdir=str(args.output),
+        uniprot_dir=uniprot_dir, mode=args.mode, name=getattr(args, 'name', None))
+    print(json.dumps(params['counts'], indent=2))
+    print('SNAF-B surface database written to {}'.format(os.path.abspath(outdir)))
+    return outdir
+
+
 # --------------------------------------------------------------------------- snaf-b (surface / B-antigen)
 def run_snaf_b(args):
     """SNAF surface / B-antigen pipeline entry.
@@ -242,10 +348,13 @@ def run_snaf_b(args):
     genome FASTA when given. Any missing optional dependency (tmhmm.py, mygene) is noted
     and the pipeline proceeds with the remaining steps.
 
-    Needs --db_dir (Alt91_db + controls) and --freq_path (the frequency table from a prior
-    `altanalyze3 snaf` run). --validation_gtf (e.g. a long-read SQANTI GTF) enables the
+    Needs --db_dir (Alt91_db + controls). --freq_path (the frequency table from a prior
+    `altanalyze3 snaf` run) is optional: when omitted, the equivalent table is derived here
+    over the membrane neojunctions, so SNAF-B runs WITHOUT SNAF-T and without HLA types.
+    --validation_gtf (e.g. a long-read SQANTI GTF, plain or gzipped) enables the
     stringency-4/5 EST/long-read support gates; without it, stringency-3 candidates are
-    still produced fully offline.
+    still produced fully offline. --surface_db replaces the built-in Alt91_db surfaceome
+    whitelist with a user database (e.g. SURFY).
     """
     _ensure_fork_safety()
     from altanalyze3.components import snaf
@@ -255,7 +364,11 @@ def run_snaf_b(args):
     outdir = str(args.output)
     os.makedirs(outdir, exist_ok=True)
     _require_file(args.juncounts, '--juncounts')
-    freq_path = _require_file(args.freq_path, '--freq_path')
+    freq_path = _require_file(args.freq_path, '--freq_path') \
+        if getattr(args, 'freq_path', None) else None
+    surface_db = str(args.surface_db) if getattr(args, 'surface_db', None) else None
+    if surface_db is not None and not os.path.exists(surface_db):
+        raise FileNotFoundError('--surface_db not found: {}'.format(surface_db))
     validation_gtf = str(args.validation_gtf) if getattr(args, 'validation_gtf', None) else None
     if validation_gtf:
         _require_file(validation_gtf, '--validation_gtf')
@@ -282,13 +395,26 @@ def run_snaf_b(args):
         tumor_prevalance_cutoff=args.tumor_prevalance_cutoff, add_control=add_control,
         genome_fasta=genome_fasta, gtex_db=gtex_db, download_ref=getattr(args, 'download_ref', False),
         control_stats_path=(str(args.control_stats) if getattr(args, 'control_stats', None) else None))
-    surface.initialize(db_dir=root)
+    surface.initialize(db_dir=root, surface_db=surface_db)
 
-    membrane_tuples = snaf.JunctionCountMatrixQuery.get_membrane_tuples(
-        df, add_control=add_control, not_in_db=args.not_in_db, outdir=outdir,
+    membrane_tuples, jcmq = snaf.JunctionCountMatrixQuery.get_membrane_tuples(
+        df, return_jcmq=True, add_control=add_control, not_in_db=args.not_in_db, outdir=outdir,
         filter_mode=args.filter_mode, cores=args.cpus,
-        min_samples=getattr(args, 'min_samples', 1))
-    logger.info("membrane neojunctions: %d", len(membrane_tuples))
+        min_samples=getattr(args, 'min_samples', 1),
+        max_bayests_percentile=getattr(args, 'max_bayests_percentile', None))
+    logger.info("neojunctions passing sifting: %d | on a surface gene: %d",
+                len(jcmq.valid), len(membrane_tuples))
+    if not membrane_tuples:
+        raise RuntimeError(
+            'no neojunction fell on a surface gene: {} junctions passed sifting but none is in '
+            'the surface database ({}). Check --surface_db and the junction UID gene ids.'.format(
+                len(jcmq.valid), surface_db or 'built-in Alt91_db surfaceome'))
+
+    if freq_path is None:
+        logger.warning('no --freq_path given: deriving the frequency table from this run '
+                       '(SNAF-T is not required for SNAF-B)')
+        freq_path = _derive_surface_frequency_table(
+            jcmq, [t[0] for t in membrane_tuples], outdir)
 
     # short_read/find_full_length: validation_gtf feeds the str4/5 support gate in
     # generate_full_results. long_read: the gtf is the primary transcript source in run().

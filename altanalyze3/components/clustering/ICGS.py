@@ -2,8 +2,10 @@
 """ICGS3 sparse single-cell clustering and marker discovery.
 
 ICGS3 is the AltAnalyze3 replacement path for the legacy dense/HOPACH-based
-ICGS2 workflow.  This first implementation keeps the matrix sparse through
-import, QC, feature selection, PCA/neighbors/Leiden clustering, and MarkerFinder.
+ICGS2 workflow.  The official path keeps the matrix sparse through import, QC,
+RNA gene filtering, ICGS2-style Louvain/PageRank downsampling, UDON feature
+selection, MarkerFinder, and chunked SVM scoring wherever the underlying
+algorithm allows it.
 It deliberately reuses validated AltAnalyze3 components:
 
   - cellHarmony-lite import/QC semantics for h5ad, 10x h5, and mtx inputs
@@ -59,19 +61,24 @@ class ICGS3Config:
     modality: str = "rna"
     layer: Optional[str] = None
     input_normalized: bool = False
+    normalized_decimals: int = -1
     min_genes: Optional[int] = 500
     min_cells: Optional[int] = 5
     min_counts: Optional[int] = 1000
-    mito_percent: Optional[float] = 10.0
+    mito_percent: Optional[float] = 30.0
     target_cells: Optional[int] = None
     pagerank_cells: int = 5000
     louvain_downsample_cutoff: int = 15000
-    pre_pagerank_cells: int = 10000
+    pre_pagerank_cells: int = 0
+    downsample_var_genes: int = 500
+    retention_audit_obs: Optional[str] = "HLCA,TGEN-IPF"
     downsample_key: Optional[str] = None
     max_cells_per_group: Optional[int] = None
     random_state: int = 0
     n_top_features: int = 3000
-    n_pcs: int = 50
+    max_nmf_variable_genes: int = 0
+    n_pcs: int = 0
+    max_auto_pcs: int = 50
     n_neighbors: int = 30
     leiden_resolution: float = 0.8
     batch_correction: str = "none"
@@ -84,20 +91,27 @@ class ICGS3Config:
     cluster_key: str = "ICGS3_cluster"
     presvm_cluster_key: str = "ICGS3_NMF_cluster"
     marker_top_n: int = 60
-    marker_rho: float = 0.2
-    marker_min_per_cluster: int = 3
+    marker_rho: float = 0.3
+    marker_min_per_cluster: int = 2
     marker_direction: str = "up"
     rank: Optional[int] = None
     nmf_assignment_normalization: str = "auto"
     nmf_k_multiplier: float = 2.0
-    max_auto_nmf_k: int = 30
+    max_auto_nmf_k: Optional[int] = None
+    nmf_runs: int = 1
+    markerfinder_all_genes: bool = True
     rank_rel_threshold: float = 0.1
     min_group_size: int = 3
     svm_min_decision_score: float = 0.0
+    svm_reclassify_all_cells: bool = True
+    svm_chunk_size: int = 50000
     species: str = "Hs"
     biomarker_file: Optional[str] = None
     heatmap_cells_per_cluster: int = 0
     write_heatmap_expression_tsv: bool = False
+    heatmap_covariates: Optional[str] = None
+    heatmap_goelite_terms: bool = False
+    heatmap_goelite_max_terms: int = 30
     umap_feature_mode: str = "markerfinder"
     umap_covariates: Optional[str] = None
     write_h5ad: bool = True
@@ -154,6 +168,7 @@ def cli_equivalent(config: ICGS3Config) -> str:
         cmd.append("--input-normalized")
     for flag, value in (
         ("--min-genes", config.min_genes),
+        ("--normalized-decimals", config.normalized_decimals),
         ("--min-cells", config.min_cells),
         ("--min-counts", config.min_counts),
         ("--mito-percent", config.mito_percent),
@@ -161,10 +176,14 @@ def cli_equivalent(config: ICGS3Config) -> str:
         ("--pagerank-cells", config.pagerank_cells),
         ("--louvain-downsample-cutoff", config.louvain_downsample_cutoff),
         ("--pre-pagerank-cells", config.pre_pagerank_cells),
+        ("--downsample-var-genes", config.downsample_var_genes),
+        ("--retention-audit-obs", config.retention_audit_obs),
         ("--max-cells-per-group", config.max_cells_per_group),
         ("--random-state", config.random_state),
         ("--n-top-features", config.n_top_features),
+        ("--max-nmf-variable-genes", config.max_nmf_variable_genes),
         ("--n-pcs", config.n_pcs),
+        ("--max-auto-pcs", config.max_auto_pcs),
         ("--n-neighbors", config.n_neighbors),
         ("--leiden-resolution", config.leiden_resolution),
         ("--batch-correction", config.batch_correction),
@@ -178,17 +197,22 @@ def cli_equivalent(config: ICGS3Config) -> str:
         ("--marker-min-per-cluster", config.marker_min_per_cluster),
         ("--nmf-k", config.rank),
         ("--nmf-assignment-normalization", config.nmf_assignment_normalization),
-        ("--nmf-k-multiplier", config.nmf_k_multiplier),
         ("--max-auto-nmf-k", config.max_auto_nmf_k),
+        ("--nmf-runs", config.nmf_runs),
         ("--rank-rel-threshold", config.rank_rel_threshold),
         ("--min-group-size", config.min_group_size),
         ("--svm-min-decision-score", config.svm_min_decision_score),
+        ("--svm-chunk-size", config.svm_chunk_size),
         ("--heatmap-cells-per-cluster", config.heatmap_cells_per_cluster),
+        ("--heatmap-covariates", config.heatmap_covariates),
+        ("--heatmap-goelite-max-terms", config.heatmap_goelite_max_terms),
     ):
         if value is not None:
             cmd.extend([flag, value])
     if config.downsample_key:
         cmd.extend(["--downsample-key", config.downsample_key])
+    if not config.svm_reclassify_all_cells:
+        cmd.append("--no-svm-reclassify-all-cells")
     if config.batch_adjust_expression:
         cmd.append("--batch-adjust-expression")
     cmd.extend(["--cluster-key", config.cluster_key, "--marker-direction", config.marker_direction, "--species", config.species])
@@ -196,6 +220,8 @@ def cli_equivalent(config: ICGS3Config) -> str:
         cmd.extend(["--biomarker-file", config.biomarker_file])
     if config.write_heatmap_expression_tsv:
         cmd.append("--write-heatmap-expression-tsv")
+    if config.heatmap_goelite_terms:
+        cmd.append("--heatmap-goelite-terms")
     cmd.extend(["--umap-feature-mode", config.umap_feature_mode])
     if config.umap_covariates:
         cmd.extend(["--umap-covariates", config.umap_covariates])
@@ -396,7 +422,7 @@ def apply_modality_defaults(config: ICGS3Config) -> ICGS3Config:
             config.min_genes = 0
         if config.min_counts == 1000:
             config.min_counts = 0
-        if config.mito_percent == 10.0:
+        if config.mito_percent == 30.0:
             config.mito_percent = None
         if config.n_top_features == 3000:
             config.n_top_features = 0
@@ -597,89 +623,477 @@ def apply_expression_batch_adjustment(adata: ad.AnnData, config: ICGS3Config, ou
     return adjusted
 
 
-def compute_sparse_graph(adata: ad.AnnData, config: ICGS3Config, *, n_pcs: Optional[int] = None) -> ad.AnnData:
+def _select_elbow_n_pcs(variance_ratio: Sequence[float], *, min_pcs: int = 5) -> int:
+    values = np.asarray(variance_ratio, dtype=float)
+    if values.size <= 2:
+        return max(1, int(values.size))
+    x = np.arange(values.size, dtype=float)
+    y = values
+    start = np.array([x[0], y[0]], dtype=float)
+    end = np.array([x[-1], y[-1]], dtype=float)
+    line = end - start
+    denom = np.linalg.norm(line)
+    if denom <= 0:
+        selected = int(np.argmax(values < (values[0] * 0.1)) + 1) if np.any(values < (values[0] * 0.1)) else values.size
+    else:
+        points = np.column_stack([x, y])
+        distances = np.abs(np.cross(line, start - points)) / denom
+        selected = int(np.argmax(distances) + 1)
+    selected = max(int(min_pcs), selected)
+    return min(selected, values.size)
+
+
+def _resolve_graph_n_pcs(adata: ad.AnnData, config: ICGS3Config, *, requested: Optional[int] = None) -> Tuple[int, int, bool]:
+    max_allowed = max(1, min(adata.n_obs - 1, adata.n_vars - 1))
+    explicit = requested if requested is not None else config.n_pcs
+    if explicit and int(explicit) > 0:
+        n = min(int(explicit), max_allowed)
+        return n, n, False
+    candidate = min(max(2, int(config.max_auto_pcs)), max_allowed)
+    return candidate, candidate, True
+
+
+def compute_sparse_graph(
+    adata: ad.AnnData,
+    config: ICGS3Config,
+    *,
+    n_pcs: Optional[int] = None,
+    use_pca: bool = True,
+) -> ad.AnnData:
     graph_adata = adata.copy()
-    max_pcs = max(2, min(int(n_pcs or config.n_pcs), graph_adata.n_obs - 1, graph_adata.n_vars - 1))
-    sc.pp.pca(graph_adata, n_comps=max_pcs, svd_solver="arpack")
-    rep = apply_batch_corrected_pca(graph_adata, config, n_pcs=max_pcs)
     neighbor_kwargs = {
         "n_neighbors": min(config.n_neighbors, max(2, graph_adata.n_obs - 1)),
         "method": "gauss",
     }
-    if rep:
-        neighbor_kwargs["use_rep"] = rep
+    if use_pca:
+        pca_comps, selected_pcs, auto_pcs = _resolve_graph_n_pcs(graph_adata, config, requested=n_pcs)
+        sc.pp.pca(graph_adata, n_comps=pca_comps, svd_solver="arpack")
+        if auto_pcs:
+            selected_pcs = _select_elbow_n_pcs(graph_adata.uns["pca"]["variance_ratio"], min_pcs=min(5, pca_comps))
+            selected_pcs = max(1, min(int(selected_pcs), pca_comps))
+            graph_adata.obsm["X_pca_full"] = graph_adata.obsm["X_pca"].copy()
+            graph_adata.obsm["X_pca"] = graph_adata.obsm["X_pca"][:, :selected_pcs].copy()
+            _log(f"automatic PC selection: elbow selected {selected_pcs}/{pca_comps} PCs")
+        rep = apply_batch_corrected_pca(graph_adata, config, n_pcs=selected_pcs)
+        if rep:
+            neighbor_kwargs["use_rep"] = rep
+        else:
+            neighbor_kwargs["n_pcs"] = selected_pcs
+        graph_meta = {
+            "n_pcs": int(selected_pcs),
+            "pca_computed": int(pca_comps),
+            "pc_selection": "elbow" if auto_pcs else "explicit",
+            "representation": rep or "X_pca",
+        }
     else:
-        neighbor_kwargs["n_pcs"] = max_pcs
+        neighbor_kwargs["use_rep"] = "X"
+        graph_meta = {
+            "n_pcs": 0,
+            "pca_computed": 0,
+            "pc_selection": "none",
+            "representation": "X",
+        }
+        _log("graph construction for downsampling uses sparse expression directly (no PCA/PC selection)")
     sc.pp.neighbors(graph_adata, **neighbor_kwargs)
     graph_adata.uns["icgs3_graph"] = {
-        "n_pcs": int(max_pcs),
+        **graph_meta,
         "n_neighbors": int(min(config.n_neighbors, max(2, graph_adata.n_obs - 1))),
-        "representation": rep or "X_pca",
         "batch_correction": str(config.batch_correction or "none").lower(),
         "batch_key": _batch_keys(config),
     }
     return graph_adata
 
 
-def pagerank_downsample_adata(adata: ad.AnnData, config: ICGS3Config) -> Tuple[ad.AnnData, pd.DataFrame]:
-    """ICGS2-style graph/PageRank downsampling.
+def _sparse_distance_to_centroid(X, positions: np.ndarray) -> np.ndarray:
+    sub = X[positions]
+    if sp.issparse(sub):
+        sub = sub.tocsr()
+        center = np.asarray(sub.mean(axis=0)).ravel()
+        center_norm = float(np.dot(center, center))
+        row_norm = np.asarray(sub.multiply(sub).sum(axis=1)).ravel()
+        dot = np.asarray(sub @ center).ravel()
+        return row_norm + center_norm - (2.0 * dot)
+    sub = np.asarray(sub, dtype=np.float32)
+    center = sub.mean(axis=0)
+    diff = sub - center
+    return np.einsum("ij,ij->i", diff, diff)
 
-    For very large matrices, first pick central cells from low-resolution Leiden
-    communities, then PageRank the reduced graph and keep the top cells.
+
+def _icgs2_hgvfinder_adata(adata: ad.AnnData, num_var_genes: int) -> ad.AnnData:
+    """ICGS2 hgvfinder equivalent: top dispersion genes with >5 unique values."""
+    if num_var_genes is None or int(num_var_genes) <= 0 or adata.n_vars <= int(num_var_genes):
+        _log(f"ICGS2 hgvfinder: using all {adata.n_vars} features for downsampling")
+        return adata.copy()
+    X = adata.X.tocsr() if sp.issparse(adata.X) else np.asarray(adata.X)
+    means = np.asarray(X.mean(axis=0)).ravel()
+    if sp.issparse(X):
+        sq_means = np.asarray(X.multiply(X).mean(axis=0)).ravel()
+        variances = sq_means - means**2
+        unique_counts = []
+        csc = X.tocsc()
+        n_obs = X.shape[0]
+        for j in range(X.shape[1]):
+            values = csc[:, j].data
+            unique_counts.append(len(np.unique(values)) + (1 if values.size < n_obs else 0))
+        unique_counts = np.asarray(unique_counts)
+    else:
+        variances = np.var(X, axis=0)
+        unique_counts = np.asarray([len(set(X[:, j].tolist())) for j in range(X.shape[1])])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        dispersion = np.divide(variances, means, out=np.zeros_like(variances, dtype=float), where=means != 0)
+    keepable = np.where((unique_counts > 5) & np.isfinite(dispersion))[0]
+    if keepable.size == 0:
+        keepable = np.arange(adata.n_vars)
+    order = keepable[np.argsort(dispersion[keepable])[::-1]]
+    keep_idx = order[: min(int(num_var_genes), order.size)]
+    _log(f"ICGS2 hgvfinder: selected {len(keep_idx)}/{adata.n_vars} dispersion features for downsampling")
+    return adata[:, keep_idx].copy()
+
+
+def _annoy_neighbor_graph(matrix: np.ndarray, *, n_neighbors: int = 10, n_trees: int = 100, metric: str = "euclidean"):
+    from annoy import AnnoyIndex
+    import networkx as nx
+
+    matrix = np.asarray(matrix, dtype=np.float32)
+    n_cells, n_features = matrix.shape
+    _log(f"Annoy graph build start: {n_cells} cells x {n_features} features, k={n_neighbors}, trees={n_trees}, metric={metric}")
+    index = AnnoyIndex(n_features, metric=metric)
+    for i in range(n_cells):
+        index.add_item(i, matrix[i])
+        if (i + 1) % 10000 == 0:
+            _log(f"Annoy indexed {i + 1}/{n_cells} cells")
+    index.build(int(n_trees))
+    _log("Annoy index built; collecting nearest-neighbor graph")
+    adjacency = {}
+    k = min(int(n_neighbors), n_cells)
+    for i in range(n_cells):
+        adjacency[i] = index.get_nns_by_item(i, k)
+        if (i + 1) % 10000 == 0:
+            _log(f"Annoy neighbors collected for {i + 1}/{n_cells} cells")
+    return nx.from_dict_of_lists(adjacency), adjacency
+
+
+def _adata_dense_cells_by_features(adata: ad.AnnData) -> np.ndarray:
+    X = adata.X
+    return X.toarray().astype(np.float32, copy=False) if sp.issparse(X) else np.asarray(X, dtype=np.float32)
+
+
+def _mean_pairwise_euclidean_sums(matrix: np.ndarray, positions: Sequence[int]) -> np.ndarray:
+    from sklearn.metrics import pairwise_distances_chunked
+
+    positions = np.asarray(positions, dtype=int)
+    sub = np.asarray(matrix[positions], dtype=np.float32)
+    sums = np.zeros(sub.shape[0], dtype=float)
+    start = 0
+    for chunk in pairwise_distances_chunked(sub, metric="euclidean", working_memory=512):
+        stop = start + chunk.shape[0]
+        sums[start:stop] = np.asarray(chunk.sum(axis=1)).ravel()
+        start = stop
+    return sums / max(sub.shape[0], 1)
+
+
+def _icgs2_community_sampling(
+    adata_hvg: ad.AnnData,
+    downsample_cutoff: int,
+    pre_pagerank_cells: int = 0,
+) -> Tuple[List[str], pd.DataFrame]:
+    """ICGS2 community_sampling equivalent using Annoy k=10 and Louvain level 0."""
+    try:
+        import community
+    except Exception as exc:
+        raise ImportError("ICGS2-compatible community sampling requires python-louvain.") from exc
+
+    matrix = _adata_dense_cells_by_features(adata_hvg)
+    G, _ = _annoy_neighbor_graph(matrix, n_neighbors=10, n_trees=100, metric="euclidean")
+    _log("ICGS2 community sampling: running Louvain dendrogram and using level 0 partition")
+    dendrogram = community.generate_dendrogram(G)
+    partition = community.partition_at_level(dendrogram, 0)
+    communities: dict = {}
+    for node, group in partition.items():
+        communities.setdefault(group, []).append(int(node))
+    _log(f"ICGS2 community sampling: identified {len(communities)} level-0 Louvain communities")
+    downsample_limit = int(pre_pagerank_cells) if int(pre_pagerank_cells or 0) > 0 else int(downsample_cutoff) * 4
+    downsample_limit = max(int(downsample_cutoff), int(downsample_limit))
+    per_community = max(1, int(downsample_limit / max(len(communities), 1)))
+    _log(
+        "ICGS2 community sampling: "
+        f"pre-PageRank target={downsample_limit}; selecting up to {per_community} "
+        "medoid-proximal cells per community"
+    )
+    selected_pos: List[int] = []
+    rows = []
+    for idx, (group, positions) in enumerate(communities.items(), start=1):
+        positions = list(positions)
+        k = min(per_community, len(positions))
+        dist = _mean_pairwise_euclidean_sums(matrix, positions)
+        order = np.argsort(dist)[:k]
+        chosen = [positions[i] for i in order]
+        selected_pos.extend(chosen)
+        for pos in chosen:
+            rows.append(
+                {
+                    "barcode": str(adata_hvg.obs_names[pos]),
+                    "precommunity": str(group),
+                    "preselected": True,
+                    "icgs2_community_size": len(positions),
+                }
+            )
+        if idx % 25 == 0 or idx == len(communities):
+            _log(f"ICGS2 community sampling: processed {idx}/{len(communities)} communities; selected {len(selected_pos)} cells")
+    selected_pos = sorted(set(selected_pos))
+    selected = adata_hvg.obs_names[selected_pos].astype(str).tolist()
+    return selected, pd.DataFrame(rows)
+
+
+def _icgs2_caldist(matrix: np.ndarray, current: int, keys: Iterable[int], keylist: Sequence[int]) -> int:
+    visited = set(int(k) for k in keylist)
+    candidates = [int(k) for k in keys if int(k) != int(current) and int(k) not in visited]
+    if not candidates:
+        remaining = [int(k) for k in keys if int(k) not in set(keylist)]
+        if not remaining:
+            return int(current)
+        return remaining[0]
+    diff = matrix[candidates] - matrix[int(current)]
+    dist = np.einsum("ij,ij->i", diff, diff)
+    return candidates[int(np.argmin(dist))]
+
+
+def _icgs2_order_roots(matrix: np.ndarray, roots: Sequence[int]) -> List[int]:
+    """Greedy nearest-root ordering equivalent to repeated caldist calls.
+
+    ICGS2 uses this order only for presentation/sample order after PageRank has
+    selected cells. Precomputing root-root distances preserves the greedy rule
+    while avoiding repeated Python scans over thousands of roots.
     """
+    roots = [int(r) for r in roots]
+    if len(roots) <= 1:
+        return roots
+    root_matrix = np.asarray(matrix[roots], dtype=np.float32)
+    try:
+        from sklearn.metrics import pairwise_distances
+
+        D = pairwise_distances(root_matrix, metric="euclidean", n_jobs=1)
+        np.fill_diagonal(D, np.inf)
+        ordered_idx = [0]
+        remaining = np.ones(len(roots), dtype=bool)
+        remaining[0] = False
+        while len(ordered_idx) < len(roots):
+            row = D[ordered_idx[-1]].copy()
+            row[~remaining] = np.inf
+            nxt = int(np.argmin(row))
+            if not np.isfinite(row[nxt]):
+                nxt = int(np.flatnonzero(remaining)[0])
+            ordered_idx.append(nxt)
+            remaining[nxt] = False
+        return [roots[i] for i in ordered_idx]
+    except Exception:
+        keylist = [roots[0]]
+        root_set = set(roots)
+        while len(keylist) < len(roots):
+            keylist.append(_icgs2_caldist(matrix, keylist[-1], root_set, keylist))
+        return keylist
+
+
+def _icgs2_pagerank_sampling_once(adata_hvg: ad.AnnData, downsample_cutoff: int) -> Tuple[List[str], pd.DataFrame]:
+    import networkx as nx
+
+    matrix = _adata_dense_cells_by_features(adata_hvg)
+    n = matrix.shape[0]
+    downsample_limit = int(downsample_cutoff) * 4
+    sampled_names: List[str] = []
+    rows = []
+    for start in range(0, n, downsample_limit):
+        stop = min(start + downsample_limit, n)
+        _log(f"ICGS2 PageRank sampling chunk: cells {start + 1}-{stop} of {n}")
+        chunk = matrix[start:stop]
+        G, adjacency = _annoy_neighbor_graph(chunk, n_neighbors=10, n_trees=100, metric="angular")
+        _log("ICGS2 PageRank sampling: computing networkx PageRank")
+        pagerank = nx.pagerank(G)
+        ranked = sorted(pagerank.items(), key=lambda item: item[1], reverse=True)
+        keep_local = [int(node) for node, _ in ranked[: min(int(downsample_cutoff), len(ranked))]]
+        _log(f"ICGS2 PageRank sampling: retained {len(keep_local)} top PageRank cells before neighbor grouping")
+        keep_set = set(keep_local)
+        grouped = []
+        grouped_set = set()
+        groups = {}
+        for key in keep_local:
+            if len(grouped) >= len(keep_local):
+                break
+            if key not in grouped_set:
+                groups[key] = []
+                grouped.append(key)
+                grouped_set.add(key)
+                for neighbor in adjacency.get(key, []):
+                    if neighbor not in grouped_set and neighbor in keep_set:
+                        groups[key].append(neighbor)
+                        grouped.append(neighbor)
+                        grouped_set.add(neighbor)
+            else:
+                for root, members in groups.items():
+                    if key in members:
+                        for neighbor in adjacency.get(key, []):
+                            if neighbor not in grouped_set and neighbor in keep_set:
+                                groups[root].append(neighbor)
+                                grouped.append(neighbor)
+                                grouped_set.add(neighbor)
+        if not groups:
+            continue
+        _log(f"ICGS2 PageRank sampling: grouped {sum(len(v) for v in groups.values()) + len(groups)} cells under {len(groups)} roots")
+        keylist = _icgs2_order_roots(chunk, list(groups.keys()))
+        for key in keylist:
+            global_pos = start + key
+            sampled_names.append(str(adata_hvg.obs_names[global_pos]))
+            rows.append(
+                {
+                    "barcode": str(adata_hvg.obs_names[global_pos]),
+                    "pagerank": float(pagerank.get(key, 0.0)),
+                    "selected": True,
+                    "icgs2_chunk_start": start,
+                    "icgs2_root": True,
+                }
+            )
+            for member in groups.get(key, []):
+                global_member = start + int(member)
+                sampled_names.append(str(adata_hvg.obs_names[global_member]))
+                rows.append(
+                    {
+                        "barcode": str(adata_hvg.obs_names[global_member]),
+                        "pagerank": float(pagerank.get(int(member), 0.0)),
+                        "selected": True,
+                        "icgs2_chunk_start": start,
+                        "icgs2_root": False,
+                    }
+                )
+        _log(f"ICGS2 PageRank sampling chunk complete: selected {len(sampled_names)} cumulative cells")
+    ordered = []
+    selected_set = set(sampled_names)
+    for name in adata_hvg.obs_names.astype(str):
+        if name in selected_set:
+            ordered.append(str(name))
+    return ordered, pd.DataFrame(rows)
+
+
+def _icgs2_pagerank_sampling(adata_hvg: ad.AnnData, downsample_cutoff: int) -> Tuple[List[str], pd.DataFrame]:
+    selected, rows = _icgs2_pagerank_sampling_once(adata_hvg, downsample_cutoff)
+    all_rows = [rows]
+    iteration = 1
+    while len(selected) > int(downsample_cutoff):
+        iteration += 1
+        _log(f"ICGS2 PageRank recursive pass {iteration}: {len(selected)} cells remain above cutoff {downsample_cutoff}")
+        filtered = adata_hvg[selected].copy()
+        selected, rows = _icgs2_pagerank_sampling_once(filtered, downsample_cutoff)
+        all_rows.append(rows)
+    return selected, pd.concat(all_rows, axis=0, ignore_index=True) if all_rows else pd.DataFrame()
+
+
+def pagerank_downsample_adata(adata: ad.AnnData, config: ICGS3Config) -> Tuple[ad.AnnData, pd.DataFrame]:
+    """ICGS2 graph/PageRank downsampling protocol.
+
+    RNA inputs must already be restricted to the unsupervised ICGS gene space:
+    protein-coding genes only, excluding mitochondrial, ribosomal, sex-linked and
+    other RNASeq.py nuisance genes. Enforce that here as well as in the top-level
+    workflow so direct API use cannot select the 500 dispersion genes from an
+    invalid RNA feature universe.
+    """
+    if config.modality.lower() == "rna" and "ICGS_unsupervised_gene_filter" not in adata.var:
+        _log("RNA downsampling guard: applying protein-coding/nuisance filter before selecting dispersion genes")
+        adata = apply_rna_unsupervised_gene_filter(adata, config, outdir=None)
     if config.pagerank_cells <= 0 or adata.n_obs <= config.pagerank_cells:
         return adata.copy(), pd.DataFrame({"barcode": adata.obs_names, "selected": True})
 
     work = adata
-    pre_rows = []
+    score_frames = []
+    hvg = _icgs2_hgvfinder_adata(adata, int(config.downsample_var_genes))
     if adata.n_obs > int(config.louvain_downsample_cutoff):
-        graph_pre = compute_sparse_graph(adata, config)
-        pre_key = "ICGS3_precommunity"
-        pre_resolution = max(0.3, float(config.leiden_resolution))
-        sc.tl.leiden(graph_pre, resolution=pre_resolution, key_added=pre_key)
-        coords = graph_pre.obsm["X_pca"]
-        groups = graph_pre.obs[pre_key].astype(str)
-        per_group = max(1, int(np.ceil(float(config.pre_pagerank_cells) / max(groups.nunique(), 1))))
-        keep = []
-        for group, idx in groups.groupby(groups).groups.items():
-            positions = graph_pre.obs_names.get_indexer(list(idx))
-            sub = coords[positions]
-            center = sub.mean(axis=0)
-            dist = np.linalg.norm(sub - center, axis=1)
-            order = np.argsort(dist)[: min(per_group, len(dist))]
-            selected = graph_pre.obs_names[positions[order]].tolist()
-            keep.extend(selected)
-            for barcode in selected:
-                pre_rows.append({"barcode": barcode, "precommunity": group, "preselected": True})
+        keep, community_rows = _icgs2_community_sampling(
+            hvg,
+            int(config.pagerank_cells),
+            pre_pagerank_cells=int(config.pre_pagerank_cells or 0),
+        )
+        score_frames.append(community_rows)
         keep = sorted(set(keep), key=lambda x: adata.obs_names.get_loc(x))
         work = adata[keep].copy()
-        _log(f"pre-PageRank community downsample: {adata.n_obs} -> {work.n_obs} using {groups.nunique()} Leiden neighborhoods (resolution={pre_resolution:g})")
-
-    graph = compute_sparse_graph(work, config)
-    try:
-        import networkx as nx
-    except Exception as exc:
-        raise ImportError("ICGS3 PageRank downsampling requires networkx.") from exc
-    connectivities = graph.obsp["connectivities"].tocsr()
-    G = nx.from_scipy_sparse_array(connectivities)
-    scores = nx.pagerank(G, weight="weight")
-    score_values = np.array([scores.get(i, 0.0) for i in range(graph.n_obs)])
-    order = np.argsort(score_values)[::-1]
-    keep_n = min(int(config.pagerank_cells), graph.n_obs)
-    selected_pos = order[:keep_n]
-    selected = graph.obs_names[selected_pos].tolist()
-    selected = sorted(selected, key=lambda x: adata.obs_names.get_loc(x))
-    score_df = pd.DataFrame(
-        {
-            "barcode": graph.obs_names.astype(str),
-            "pagerank": score_values,
-            "selected": graph.obs_names.isin(selected),
-        }
-    ).sort_values("pagerank", ascending=False)
-    if pre_rows:
-        score_df = score_df.merge(pd.DataFrame(pre_rows), on="barcode", how="left")
-    _log(f"PageRank downsample: {work.n_obs} -> {len(selected)}")
+        _log(f"ICGS2 community sampling: {adata.n_obs} -> {work.n_obs} cells using Annoy k=10 and Louvain level 0")
+        hvg = _icgs2_hgvfinder_adata(work, int(config.downsample_var_genes))
+    selected, pagerank_rows = _icgs2_pagerank_sampling(hvg, int(config.pagerank_cells))
+    score_frames.append(pagerank_rows)
+    selected = sorted(set(selected), key=lambda x: adata.obs_names.get_loc(x))
+    score_df = pd.concat(score_frames, axis=0, ignore_index=True) if score_frames else pd.DataFrame()
+    if not score_df.empty:
+        score_df["selected_final"] = score_df["barcode"].astype(str).isin(selected)
+    _log(f"ICGS2 PageRank sampling: {work.n_obs} -> {len(selected)} cells")
     return adata[selected].copy(), score_df
+
+
+def write_retention_audit(
+    *,
+    full: ad.AnnData,
+    candidates: ad.AnnData,
+    sampled: ad.AnnData,
+    final_clusters: Optional[pd.DataFrame],
+    config: ICGS3Config,
+    outdir: str,
+) -> pd.DataFrame:
+    columns = [c.strip() for c in str(config.retention_audit_obs or "").split(",") if c.strip()]
+    columns = [c for c in columns if c in full.obs]
+    if not columns:
+        return pd.DataFrame()
+    candidate_names = set(candidates.obs_names.astype(str))
+    sampled_names = set(sampled.obs_names.astype(str))
+    final_names = set(final_clusters.index.astype(str)) if final_clusters is not None else set()
+    rows = []
+    for col in columns:
+        labels = full.obs[col].astype(str)
+        counts = labels.value_counts(dropna=False)
+        rare_labels = counts[(counts > 20) & (counts < 1000)]
+        for label, total in rare_labels.items():
+            cells = set(labels.index[labels == label].astype(str))
+            candidate_n = len(cells & candidate_names)
+            sampled_n = len(cells & sampled_names)
+            final_n = len(cells & final_names) if final_clusters is not None else np.nan
+            rows.append(
+                {
+                    "obs_column": col,
+                    "annotation": label,
+                    "post_qc_cells": int(total),
+                    "sampling_candidate_cells": int(candidate_n),
+                    "pagerank_louvain_sampled_cells": int(sampled_n),
+                    "final_svm_retained_cells": final_n,
+                    "candidate_below_20": bool(candidate_n < 20),
+                    "sampled_below_20": bool(sampled_n < 20),
+                    "final_below_20": bool(final_clusters is not None and final_n < 20),
+                }
+            )
+    audit = pd.DataFrame(rows)
+    if audit.empty:
+        return audit
+    audit = audit.sort_values(["obs_column", "post_qc_cells", "annotation"], kind="mergesort")
+    path = os.path.join(outdir, "sNMF", "icgs3_rare_population_retention_audit.tsv")
+    audit.to_csv(path, sep="\t", index=False)
+    failures = audit[audit["sampled_below_20"]]
+    if not failures.empty:
+        _log(
+            f"rare-population retention audit: {failures.shape[0]} populations with >20 and <1000 "
+            f"post-QC cells have <20 cells after PageRank/Louvain sampling; see {path}"
+        )
+    else:
+        _log(f"rare-population retention audit: all audited >20/<1000 populations retained >=20 sampled cells; see {path}")
+    return audit
+
+
+def round_normalized_expression(adata: ad.AnnData, decimals: Optional[int]) -> ad.AnnData:
+    if decimals is None or int(decimals) < 0:
+        return adata
+    decimals = int(decimals)
+    if sp.issparse(adata.X):
+        adata.X = adata.X.tocsr(copy=True)
+        adata.X.data = np.round(adata.X.data, decimals=decimals).astype(np.float32, copy=False)
+        adata.X.eliminate_zeros()
+    else:
+        adata.X = np.round(np.asarray(adata.X, dtype=np.float32), decimals=decimals)
+    adata.uns["icgs3_normalized_decimals"] = decimals
+    _log(f"normalized expression rounded to {decimals} decimal places")
+    return adata
 
 
 def prepare_expression(adata: ad.AnnData, config: ICGS3Config) -> ad.AnnData:
@@ -698,6 +1112,8 @@ def prepare_expression(adata: ad.AnnData, config: ICGS3Config) -> ad.AnnData:
         adata.uns["icgs3_normalization"] = "log1p(CP10K)"
     else:
         adata.uns["icgs3_normalization"] = "input treated as normalized"
+    _ensure_sparse_csr(adata)
+    adata = round_normalized_expression(adata, config.normalized_decimals)
     _ensure_sparse_csr(adata)
     return adata
 
@@ -732,9 +1148,23 @@ def _adata_to_dense_df(adata: ad.AnnData, genes: Sequence[str], cells: Optional[
     valid_genes = gene_idx >= 0
     if np.any(cell_idx < 0) or not np.any(valid_genes):
         raise ValueError("Could not align cells/genes for ICGS3 matrix conversion.")
-    X = adata.X[cell_idx, :][:, gene_idx[valid_genes]]
-    values = X.toarray() if sp.issparse(X) else np.asarray(X)
-    return pd.DataFrame(values.T, index=pd.Index(genes)[valid_genes].astype(str), columns=cells)
+    # Slice rows and columns in ONE indexing pass. The previous chained form
+    # adata.X[cell_idx, :][:, gene_idx] materialised a full-width intermediate
+    # (all vars for the selected cells) before narrowing to the wanted genes,
+    # roughly doubling peak memory on the sampled matrix.
+    keep_gene_idx = gene_idx[valid_genes]
+    if sp.issparse(adata.X):
+        X = adata.X[cell_idx, :].tocsc()[:, keep_gene_idx]
+        values = X.toarray().astype(np.float32, copy=False)
+    else:
+        values = np.asarray(adata.X[np.ix_(cell_idx, keep_gene_idx)], dtype=np.float32)
+    # np.asfortranarray on the transpose keeps the genes x cells DataFrame from
+    # triggering a second full copy inside the pandas block manager.
+    return pd.DataFrame(
+        np.asfortranarray(values.T),
+        index=pd.Index(genes)[valid_genes].astype(str),
+        columns=cells,
+    )
 
 
 def _select_icgs3_features(adata: ad.AnnData, config: ICGS3Config) -> pd.Index:
@@ -743,20 +1173,66 @@ def _select_icgs3_features(adata: ad.AnnData, config: ICGS3Config) -> pd.Index:
     _add_udon_path()
     import fast_feature_selection as FFS
 
-    expr = _adata_to_dense_df(adata, adata.var_names)
     pc = None
     pc_path = os.path.join(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "udon")), "ProteinCoding-Hs-Mm.txt")
     if os.path.exists(pc_path):
         pc = load_protein_coding_genes(pc_path)
     keep = legacy_rnaseq_gene_filter(adata, protein_coding_genes=pc, species=config.species)
-    filtered = expr.loc[pd.Index(adata.var_names.astype(str))[keep]]
-    _log(f"RNASeq.py-compatible gene filter for NMF feature selection: {expr.shape[0]} -> {filtered.shape[0]} features")
+    if int(np.sum(keep)) == 0:
+        keep = legacy_rnaseq_gene_filter(adata, protein_coding_genes=None, species=config.species)
+        _log(
+            "RNA protein-coding lookup matched 0 features for UDON feature selection; "
+            f"using nuisance-filter-only feature universe ({int(np.sum(keep))} features)"
+        )
+    # Densify ONLY the retained genes. The previous form densified every var first
+    # and then took a .loc subset, holding two dense copies of the sampled matrix
+    # at once (15,000 cells x 18,100 genes float32 = 1.09 GB each) when the full
+    # gene universe is never used beyond this filter. The filtered gene set and
+    # its values are identical either way.
+    all_vars = pd.Index(adata.var_names.astype(str))
+    filtered = _adata_to_dense_df(adata, all_vars[keep])
+    _log(f"RNASeq.py-compatible gene filter for NMF feature selection: {all_vars.size} -> {filtered.shape[0]} features")
     fs = FFS.fast_feature_selection(filtered, None, apply_gene_name_filter=False, do_pca=False)
     genes = pd.Index(fs["correlated_genes"])
-    if len(genes) < max(10, min(config.n_top_features, 100)):
-        adata = select_features(adata, config.n_top_features)
-        genes = pd.Index(adata.var_names[adata.var["icgs3_feature"].values])
+    udon_hvg = pd.Index(fs["udon_hvg"])
+    min_required = max(10, int(config.rank or 0) * 2)
+    if len(genes) < min_required and len(udon_hvg) > len(genes):
+        prior = len(genes)
+        genes = udon_hvg
+        _log(
+            "UDON intercorrelation feature selection returned too few genes for stable NMF "
+            f"({prior}); using UDON variance-selected genes ({len(genes)} features)"
+        )
+    if len(genes) == 0:
+        raise ValueError("UDON feature selection returned no RNA features for NMF.")
+    max_genes = int(config.max_nmf_variable_genes or 0)
+    if max_genes > 0 and len(genes) > max_genes:
+        ranked = _rank_features_by_sparse_dispersion(adata, genes)
+        genes = pd.Index(ranked[:max_genes])
+        _log(f"Capped UDON NMF variable features by sparse dispersion rank: {len(ranked)} -> {len(genes)}")
     return genes
+
+
+def _rank_features_by_sparse_dispersion(adata: ad.AnnData, genes: Sequence[str]) -> List[str]:
+    gene_index = pd.Index(adata.var_names.astype(str))
+    positions = gene_index.get_indexer(pd.Index(genes).astype(str))
+    valid = positions >= 0
+    if not np.any(valid):
+        return list(pd.Index(genes).astype(str))
+    names = pd.Index(genes).astype(str)[valid].to_numpy()
+    X = adata.X[:, positions[valid]]
+    if sp.issparse(X):
+        X = X.tocsr()
+        means = np.asarray(X.mean(axis=0)).ravel()
+        second = np.asarray(X.multiply(X).mean(axis=0)).ravel()
+    else:
+        arr = np.asarray(X, dtype=np.float32)
+        means = arr.mean(axis=0)
+        second = np.square(arr).mean(axis=0)
+    variances = np.maximum(second - np.square(means), 0)
+    dispersion = variances / np.maximum(means, 1e-8)
+    order = np.argsort(np.nan_to_num(dispersion, nan=-np.inf, posinf=-np.inf))[::-1]
+    return names[order].tolist()
 
 
 def load_protein_coding_genes(path: Optional[str] = None) -> set:
@@ -781,14 +1257,20 @@ def apply_rna_unsupervised_gene_filter(adata: ad.AnnData, config: ICGS3Config, o
     before = adata.n_vars
     after = int(np.sum(keep))
     if after == 0:
-        _log("RNA unsupervised gene filter retained 0 features; keeping all genes to avoid an empty matrix")
-        return adata
+        keep = legacy_rnaseq_gene_filter(adata, protein_coding_genes=None, species=config.species)
+        after = int(np.sum(keep))
+        _log(
+            "RNA protein-coding lookup matched 0 features; falling back to RNASeq.py nuisance-gene "
+            f"filter only ({before} -> {after} features)"
+        )
+    if after == 0:
+        raise ValueError("RNA unsupervised gene filtering retained 0 features.")
     filtered = adata[:, keep].copy()
     filtered.var["ICGS_unsupervised_gene_filter"] = True
     _ensure_sparse_csr(filtered)
     _log(
         f"RNA unsupervised gene filter before graph/PageRank/NMF: {before} -> {after} features "
-        f"(protein-coding lower-case symbol/id match; removed RPL/RPS, MT-, dotted, GM, XIS/TSI, RSP, HLA, *Y)"
+        f"(protein-coding lower-case symbol/id match when available; removed RPL/RPS, MT-, dotted, GM, XIS/TSI, RSP, HLA, *Y)"
     )
     if outdir:
         pd.DataFrame({"feature": filtered.var_names.astype(str)}).to_csv(
@@ -803,6 +1285,27 @@ def _feature_selection_label(config: ICGS3Config, n_features: int, n_total: int)
     if config.modality.lower() in {"adt", "grn", "metabolite", "lipid", "psi"}:
         return f"{config.modality} panel features ({n_features}/{n_total}; no RNA gene-symbol filter)"
     return f"RNASeq.py nuisance/protein-coding filter + UDON fast_feature_selection ({n_features}/{n_total})"
+
+
+def _resolve_auto_nmf_rank(udon_estimated_rank: int, config: ICGS3Config) -> Tuple[int, int, Optional[int]]:
+    candidate_rank = max(2, int(udon_estimated_rank))
+    max_auto_rank = int(config.max_auto_nmf_k) if config.max_auto_nmf_k is not None else None
+    final_rank = min(candidate_rank, max_auto_rank) if max_auto_rank is not None else candidate_rank
+    return candidate_rank, final_rank, max_auto_rank
+
+
+def estimate_udon_nmf_rank(expr_sampled: pd.DataFrame, config: ICGS3Config) -> int:
+    """ICGS2/UDON auto-rank estimator.
+
+    AltAnalyze2 ICGS2 estimateK returns k from a Tracy-Widom eigenvalue boundary,
+    then runs NMF at rank k*2. UDON's determine_nmf_ranks implements that same
+    behavior and already returns the multiplied rank. Do not substitute graph
+    clustering here without explicit protocol approval.
+    """
+    _add_udon_path()
+    from nmf import determine_nmf_ranks
+
+    return max(2, int(determine_nmf_ranks(expr_sampled, small_feature=False)))
 
 
 def legacy_rnaseq_gene_filter(
@@ -876,31 +1379,36 @@ def run_nmf_marker_svm(sampled: ad.AnnData, full: ad.AnnData, config: ICGS3Confi
     rank = config.rank
     rank_rows = []
     if rank is None:
-        initial_k = estimate_initial_expression_populations(sampled, expr_sampled, config)
-        candidate_rank = max(2, int(np.ceil(initial_k * float(config.nmf_k_multiplier))))
-        rank = min(candidate_rank, int(config.max_auto_nmf_k))
+        udon_rank = estimate_udon_nmf_rank(expr_sampled, config)
+        candidate_rank, rank, max_auto_rank = _resolve_auto_nmf_rank(udon_rank, config)
         rank_rows.append(
             {
                 "mode": "auto",
-                "initial_populations": initial_k,
-                "nmf_k_multiplier": float(config.nmf_k_multiplier),
+                "estimator": "UDON/ICGS2 Tracy-Widom eigenvalue rank",
+                "udon_estimated_rank": int(udon_rank),
+                "initial_populations": np.nan,
+                "nmf_k_multiplier": np.nan,
                 "candidate_rank": candidate_rank,
-                "max_auto_nmf_k": int(config.max_auto_nmf_k),
+                "max_auto_nmf_k": max_auto_rank,
                 "final_rank": int(rank),
             }
         )
+        cap_text = str(max_auto_rank) if max_auto_rank is not None else "none"
         _log(
-            f"auto NMF k: initial populations={initial_k}, multiplier={config.nmf_k_multiplier:g}, "
-            f"candidate={candidate_rank}, max_auto_nmf_k={config.max_auto_nmf_k} -> rank={rank}"
+            "auto NMF k: UDON/ICGS2 Tracy-Widom eigenvalue estimator "
+            f"returned rank={udon_rank}, max_auto_nmf_k={cap_text} -> rank={rank}"
         )
     else:
+        max_auto_rank = int(config.max_auto_nmf_k) if config.max_auto_nmf_k is not None else None
         rank_rows.append(
             {
                 "mode": "manual",
+                "estimator": "manual override",
+                "udon_estimated_rank": np.nan,
                 "initial_populations": np.nan,
-                "nmf_k_multiplier": float(config.nmf_k_multiplier),
+                "nmf_k_multiplier": np.nan,
                 "candidate_rank": np.nan,
-                "max_auto_nmf_k": int(config.max_auto_nmf_k),
+                "max_auto_nmf_k": max_auto_rank,
                 "final_rank": int(rank),
             }
         )
@@ -919,9 +1427,14 @@ def run_nmf_marker_svm(sampled: ad.AnnData, full: ad.AnnData, config: ICGS3Confi
         assignment_label = assignment_norm
     _log(
         f"running UDON NMF rank={rank} on {expr_sampled.shape[1]} sampled cells x {expr_sampled.shape[0]} features "
-        f"(assignment_normalization={assignment_label})"
+        f"(assignment_normalization={assignment_label}, n_run={int(config.nmf_runs)})"
     )
-    _, nmf_clusters = run_nmf(expr_sampled, rank=rank, assignment_normalization=assignment_norm_arg)
+    _, nmf_clusters = run_nmf(
+        expr_sampled,
+        rank=rank,
+        n_run=int(config.nmf_runs),
+        assignment_normalization=assignment_norm_arg,
+    )
     nmf_clusters.index = expr_sampled.columns
     nmf_clusters["cluster"] = ["P" + str(x) for x in nmf_clusters["cluster"].astype(int)]
     keep_counts = nmf_clusters["cluster"].value_counts()
@@ -930,8 +1443,38 @@ def run_nmf_marker_svm(sampled: ad.AnnData, full: ad.AnnData, config: ICGS3Confi
     _log(f"pre-SVM NMF clusters after min_group_size>{config.min_group_size}: {nmf_clusters['cluster'].nunique()} clusters across {nmf_clusters.shape[0]} sampled cells")
     nmf_clusters.to_csv(os.path.join(snmf_dir, "icgs3_nmf_presvm_sampled_clusters.tsv"), sep="\t")
 
+    # ICGS2 fidelity: MarkerFinder scores the FULL filtered expression matrix, not the
+    # NMF guide genes. AltAnalyze2 NMF_Analysis.py:147 copies filteredInputExpFile to
+    # exp.NMF-MarkerFinder.txt and ICGS_NMF.py:1027 runs MarkerFinder on that file.
+    # Restricting the pool to the ~2.8k NMF features starves the cluster-fitness gate
+    # (ICGS_NMF.py:639 requires >=2 markers above rho) and rejects clusters that ICGS2
+    # would keep. Set --markerfinder-nmf-genes-only to restore the narrow pool.
+    # Applies to EVERY modality: MarkerFinder scores the full measured feature space,
+    # never the NMF guide features. adata is already reduced to that space upstream --
+    # for RNA that reduction additionally keeps only protein-coding features and drops
+    # RPL/RPS, MT-, HLA, XIST/TSIX and *Y (legacy_rnaseq_gene_filter); for ADT, PSI,
+    # GRN, metabolite and lipid the panel is used whole with no such filter.
+    use_all_genes = bool(config.markerfinder_all_genes)
+    if use_all_genes:
+        marker_pool = _adata_to_dense_df(sampled, sampled.var_names)
+        extra = (
+            " -- protein-coding, minus RPL/RPS, MT-, HLA, XIST/TSIX and *Y"
+            if config.modality.lower() == "rna"
+            else " -- full feature panel (no protein-coding filter for this modality)"
+        )
+        _log(
+            f"MarkerFinder feature pool (ICGS2-faithful): {marker_pool.shape[0]} features{extra} "
+            f"(NMF guide-feature pool was {expr_sampled.shape[0]})"
+        )
+    else:
+        marker_pool = expr_sampled
+        _log(
+            f"MarkerFinder feature pool restricted to {marker_pool.shape[0]} NMF guide features "
+            "(--markerfinder-nmf-genes-only)"
+        )
+
     markers_all, markers_top, heat = marker_finder_wrapper(
-        input_df=expr_sampled[nmf_clusters.index].T,
+        input_df=marker_pool[nmf_clusters.index].T,
         groups=nmf_clusters,
         top_n=config.marker_top_n,
         rho_threshold=config.marker_rho,
@@ -945,17 +1488,40 @@ def run_nmf_marker_svm(sampled: ad.AnnData, full: ad.AnnData, config: ICGS3Confi
     if nmf_robust["cluster"].nunique() < 2:
         raise ValueError("ICGS3 found fewer than two marker-robust NMF clusters. Lower marker thresholds or inspect input normalization.")
 
-    expr_markers_sampled = expr_sampled.loc[markers_top["marker"].drop_duplicates(), nmf_robust.index]
+    # SVM still trains on marker genes only (ICGS2 NMF-SVM behaviour); those markers are
+    # now drawn from the full pool, so take their values from that pool.
+    expr_markers_sampled = marker_pool.loc[markers_top["marker"].drop_duplicates(), nmf_robust.index]
+    del marker_pool
     centroids = generate_train_data(expr_markers_sampled, nmf_robust).dropna(axis=0)
-    expr_full_markers = _adata_to_dense_df(full, centroids.index)
-    final_clusters = classify_with_scores(
-        train=centroids,
-        expression=expr_full_markers,
-        cluster_key=config.cluster_key,
-        min_decision_score=float(config.svm_min_decision_score),
-    )
+    svm_target = full if bool(config.svm_reclassify_all_cells) else sampled
+    target_label = "all post-QC cells" if bool(config.svm_reclassify_all_cells) else "PageRank/Louvain sampled cells only"
+    _log(f"SVM reclassification target: {target_label} ({svm_target.n_obs} cells)")
+    if bool(config.svm_reclassify_all_cells):
+        final_clusters = classify_adata_with_scores_chunked(
+            train=centroids,
+            adata=svm_target,
+            genes=centroids.index,
+            cluster_key=config.cluster_key,
+            min_decision_score=float(config.svm_min_decision_score),
+            chunk_size=int(config.svm_chunk_size),
+        )
+    else:
+        expr_sampled_markers_for_svm = _adata_to_dense_df(svm_target, centroids.index)
+        final_clusters = classify_with_scores(
+            train=centroids,
+            expression=expr_sampled_markers_for_svm,
+            cluster_key=config.cluster_key,
+            min_decision_score=float(config.svm_min_decision_score),
+        )
     final_clusters.to_csv(os.path.join(snmf_dir, "icgs3_svm_reclassification_scores.tsv"), sep="\t")
 
+    # Second MarkerFinder pass, on the same ICGS2-faithful pool. Previously this scored
+    # only centroids.index (the first-pass markers), an even narrower pool than the NMF
+    # guide genes, so the final cluster-fitness gate could never rescue a cluster whose
+    # markers lie outside that set.
+    post_svm_pool = svm_target.var_names if use_all_genes else centroids.index
+    expr_full_markers = _adata_to_dense_df(svm_target, post_svm_pool, cells=final_clusters.index)
+    _log(f"post-SVM MarkerFinder gene pool: {expr_full_markers.shape[0]} genes")
     markers_all2, markers_top2, heat2 = marker_finder_wrapper(
         input_df=expr_full_markers[final_clusters.index].T,
         groups=pd.DataFrame({"cluster": final_clusters[config.cluster_key]}, index=final_clusters.index),
@@ -981,23 +1547,6 @@ def run_nmf_marker_svm(sampled: ad.AnnData, full: ad.AnnData, config: ICGS3Confi
     heat2.to_csv(os.path.join(marker_dir, "icgs3_marker_heatmap_altanalyze_format.tsv"), sep="\t")
     centroids.to_csv(os.path.join(snmf_dir, "icgs3_svm_centroids.tsv"), sep="\t")
     return final_clusters, markers_top2, heat2
-
-
-def estimate_initial_expression_populations(sampled: ad.AnnData, expr_sampled: pd.DataFrame, config: ICGS3Config) -> int:
-    """Estimate a starting population count before NMF, then NMF rank is k*multiplier."""
-    try:
-        obs = sampled.obs.reindex(expr_sampled.columns).copy()
-        graph = ad.AnnData(X=sp.csr_matrix(expr_sampled.T.values), obs=obs, var=pd.DataFrame(index=expr_sampled.index))
-        graph = compute_sparse_graph(graph, config, n_pcs=min(config.n_pcs, expr_sampled.shape[0] - 1))
-        key = "initial_expression_cluster"
-        sc.tl.leiden(graph, resolution=max(0.3, float(config.leiden_resolution)), key_added=key)
-        n = int(graph.obs[key].astype(str).nunique())
-        return max(n, 2)
-    except Exception as exc:
-        _log(f"initial population estimate failed ({exc}); falling back to UDON rank estimator")
-        from nmf import determine_nmf_ranks
-
-        return max(2, int(determine_nmf_ranks(expr_sampled, small_feature=config.modality.lower() in {"adt", "grn", "metabolite", "lipid", "psi"})))
 
 
 def order_and_renumber_final_clusters(
@@ -1109,6 +1658,90 @@ def classify_with_scores(
     return out
 
 
+def _classification_frame_from_scores(
+    *,
+    classes: Sequence[object],
+    scores,
+    index: Sequence[str],
+    cluster_key: str,
+    min_decision_score: float,
+) -> pd.DataFrame:
+    if np.ndim(scores) == 1:
+        score_values = np.asarray(scores, dtype=float)
+        pred = np.where(score_values > 0, classes[1], classes[0])
+        win_score = np.abs(score_values)
+        raw_margin = score_values
+    else:
+        score_array = np.asarray(scores, dtype=float)
+        best = np.argmax(score_array, axis=1)
+        pred = np.asarray(classes)[best]
+        win_score = score_array[np.arange(score_array.shape[0]), best]
+        raw_margin = win_score
+    pred = pd.Series(pred, index=index, dtype=str).str.replace("^U", "", regex=True)
+    win_score = pd.Series(np.asarray(win_score, dtype=float), index=index)
+    raw_margin = pd.Series(np.asarray(raw_margin, dtype=float), index=index)
+    keep = win_score > float(min_decision_score)
+    return pd.DataFrame(
+        {
+            cluster_key: pred.loc[keep],
+            "svm_score": win_score.loc[keep],
+            "svm_margin": raw_margin.loc[keep],
+        },
+        index=win_score.index[keep],
+    )
+
+
+def classify_adata_with_scores_chunked(
+    *,
+    train: pd.DataFrame,
+    adata: ad.AnnData,
+    genes: Sequence[str],
+    cluster_key: str,
+    min_decision_score: float = 0.0,
+    chunk_size: int = 50000,
+) -> pd.DataFrame:
+    """Linear SVM reclassification without materializing all cells as one dense matrix."""
+    from sklearn.svm import LinearSVC
+
+    gene_index = adata.var_names.get_indexer(pd.Index(genes).astype(str))
+    valid = gene_index >= 0
+    if not np.any(valid):
+        raise ValueError("Could not align SVM centroid genes to AnnData features.")
+    train_aligned = train.loc[pd.Index(genes)[valid].astype(str)]
+    clf = LinearSVC(random_state=42, dual=False, max_iter=50000)
+    clf.fit(train_aligned.T, y=train_aligned.columns)
+    idx = gene_index[valid]
+    chunk_size = max(1, int(chunk_size))
+    frames = []
+    dropped = 0
+    for start in range(0, adata.n_obs, chunk_size):
+        end = min(start + chunk_size, adata.n_obs)
+        X = adata.X[start:end, :][:, idx]
+        values = X.toarray().astype(np.float32, copy=False) if sp.issparse(X) else np.asarray(X, dtype=np.float32)
+        names = adata.obs_names[start:end].astype(str).tolist()
+        chunk = pd.DataFrame(values, index=names, columns=train_aligned.index)
+        scores = clf.decision_function(chunk)
+        frame = _classification_frame_from_scores(
+            classes=clf.classes_,
+            scores=scores,
+            index=names,
+            cluster_key=cluster_key,
+            min_decision_score=min_decision_score,
+        )
+        dropped += (end - start) - frame.shape[0]
+        frames.append(frame)
+    if dropped:
+        _log(
+            f"linear SVM: excluding {dropped} cells with winning decision score <= "
+            f"{float(min_decision_score):.3g}"
+        )
+    if not frames:
+        return pd.DataFrame(columns=[cluster_key, "svm_score", "svm_margin"])
+    out = pd.concat(frames, axis=0)
+    out = out.sort_values([cluster_key, "svm_score"], ascending=[True, False], kind="mergesort")
+    return out
+
+
 def _import_umap_with_local_retry():
     try:
         import umap
@@ -1161,12 +1794,11 @@ def compute_umap_outputs(
         features = features[features.isin(adata.var_names.astype(str))]
         if _batch_correction_applies(config, "umap") and str(config.batch_correction or "none").lower() == "harmony":
             graph_source = adata[:, features].copy() if len(features) > 0 else adata.copy()
-            n_pcs = min(config.n_pcs, max(2, graph_source.n_vars - 1))
             _log(
                 f"running Harmony-corrected UMAP on {graph_source.n_vars} {source_label} "
                 f"via PCA/neighbors (batch key={config.batch_key})"
             )
-            graph = compute_sparse_graph(graph_source, config, n_pcs=n_pcs)
+            graph = compute_sparse_graph(graph_source, config)
             _copy_graph_slots(graph, adata)
             try:
                 umap = _import_umap_with_local_retry()
@@ -1389,16 +2021,70 @@ def write_umap_plots(adata: ad.AnnData, config: ICGS3Config, outdir: str) -> Non
                 )
 
 
+def _heatmap_covariates(config: ICGS3Config) -> List[str]:
+    requested = [c.strip() for c in str(config.heatmap_covariates or "").split(",") if c.strip()]
+    return list(dict.fromkeys(requested))
+
+
+def _load_goelite_heatmap_terms(outdir: str, config: ICGS3Config) -> dict:
+    if not config.heatmap_goelite_terms:
+        return {}
+    path = os.path.join(outdir, "GO-Elite", "icgs3_biomarker_enrichment.tsv")
+    if not os.path.exists(path):
+        _log(f"heatmap GO-Elite terms requested but enrichment file is missing: {path}")
+        return {}
+    try:
+        df = pd.read_csv(path, sep="\t")
+    except Exception as exc:
+        _log(f"heatmap GO-Elite terms skipped; failed reading {path}: {exc}")
+        return {}
+    needed = {"cluster", "term_name", "p_value"}
+    if df.empty or not needed.issubset(df.columns):
+        _log("heatmap GO-Elite terms skipped; enrichment table lacks cluster/term_name/p_value columns")
+        return {}
+    df = df.copy()
+    df["cluster"] = df["cluster"].astype(str)
+    df["term_name"] = df["term_name"].astype(str)
+    df["p_value"] = pd.to_numeric(df["p_value"], errors="coerce")
+    if "fdr" in df.columns:
+        df["sort_fdr"] = pd.to_numeric(df["fdr"], errors="coerce")
+    else:
+        df["sort_fdr"] = np.nan
+    df = df.dropna(subset=["p_value"]).sort_values(["cluster", "sort_fdr", "p_value", "term_name"], na_position="last")
+    terms = {}
+    max_terms = max(1, int(config.heatmap_goelite_max_terms or 30))
+    for cluster, sub in df.groupby("cluster", sort=False):
+        rows = []
+        seen = set()
+        for _, row in sub.iterrows():
+            term = str(row["term_name"]).strip()
+            if not term or term in seen:
+                continue
+            seen.add(term)
+            rows.append((term, float(row["p_value"])))
+            if len(rows) >= max_terms:
+                break
+        if rows:
+            terms[str(cluster)] = rows
+    _log(f"heatmap GO-Elite term labels: {sum(len(v) for v in terms.values())} terms across {len(terms)} clusters")
+    return terms
+
+
 def run_canonical_heatmap(adata: ad.AnnData, config: ICGS3Config, outdir: str) -> dict:
     from altanalyze3.components.visualization.marker_heatmap_h5ad import generate_marker_heatmap_from_adata
 
     marker_dir = os.path.join(outdir, "MarkerFinder")
     os.makedirs(marker_dir, exist_ok=True)
+    covariates = [c for c in _heatmap_covariates(config) if c in adata.obs]
+    missing_covariates = [c for c in _heatmap_covariates(config) if c not in adata.obs]
+    if missing_covariates:
+        _log(f"heatmap covariates not found in adata.obs: {', '.join(missing_covariates)}")
+    go_terms = _load_goelite_heatmap_terms(outdir, config)
     return generate_marker_heatmap_from_adata(
         adata,
         cluster_key=config.cluster_key,
         out=os.path.join(marker_dir, "icgs3_marker_heatmap.pdf"),
-        top_n=max(1, min(10, config.marker_top_n)),
+        top_n=max(1, int(config.marker_top_n)),
         markers_tsv=os.path.join(marker_dir, "icgs3_marker_heatmap_markers.tsv"),
         heatmap_tsv=os.path.join(marker_dir, "icgs3_marker_heatmap_fold_matrix.tsv"),
         heatmap_column_tsv=os.path.join(marker_dir, "icgs3_marker_heatmap_exp_matrix.tsv") if config.write_heatmap_expression_tsv else None,
@@ -1408,6 +2094,9 @@ def run_canonical_heatmap(adata: ad.AnnData, config: ICGS3Config, outdir: str) -
         seed=config.random_state,
         species={"Hs": "human", "Mm": "mouse"}.get(config.species, config.species),
         write_expression_tsv=config.write_heatmap_expression_tsv,
+        covariate_columns=covariates,
+        go_terms=go_terms,
+        go_terms_max=config.heatmap_goelite_max_terms,
     )
 
 
@@ -1547,6 +2236,11 @@ def _run_icgs3_logged(config: ICGS3Config, outdir: str, log_path: str, start_tim
     _log(f"log file: {log_path}")
     _log(f"cli equivalent: {cli_equivalent(config)}")
     _log(f"parameters: {json.dumps(asdict(config), sort_keys=True)}")
+    if float(config.nmf_k_multiplier) != 2.0:
+        _log(
+            "deprecated parameter ignored: --nmf-k-multiplier is retained for CLI compatibility, "
+            "but automatic rank uses the UDON/ICGS2 Tracy-Widom estimator directly"
+        )
     Path(os.path.join(outdir, "icgs3_config.json")).write_text(json.dumps(asdict(config), indent=2), encoding="utf-8")
 
     t = time.time()
@@ -1585,9 +2279,25 @@ def _run_icgs3_logged(config: ICGS3Config, outdir: str, log_path: str, start_tim
     sampled, pagerank_scores = pagerank_downsample_adata(adata_for_sampling, config)
     pagerank_scores.to_csv(os.path.join(outdir, "sNMF", "icgs3_pagerank_downsampling.tsv"), sep="\t", index=False)
     _log(f"downsampling summary: retained {sampled.n_obs} sampled cells for NMF from {adata_for_sampling.n_obs} candidates")
+    write_retention_audit(
+        full=analysis_adata,
+        candidates=adata_for_sampling,
+        sampled=sampled,
+        final_clusters=None,
+        config=config,
+        outdir=outdir,
+    )
     t = step_time("PageRank/Louvain downsampling", t)
 
     final_clusters, markers, _ = run_nmf_marker_svm(sampled, analysis_adata, config, outdir)
+    write_retention_audit(
+        full=analysis_adata,
+        candidates=adata_for_sampling,
+        sampled=sampled,
+        final_clusters=final_clusters,
+        config=config,
+        outdir=outdir,
+    )
     adata.obs[config.cluster_key] = pd.Series(final_clusters[config.cluster_key], index=final_clusters.index).reindex(adata.obs_names)
     adata.obs["ICGS3_SVM_score"] = pd.Series(final_clusters["svm_score"], index=final_clusters.index).reindex(adata.obs_names)
     adata.obs["ICGS3_SVM_margin"] = pd.Series(final_clusters["svm_margin"], index=final_clusters.index).reindex(adata.obs_names)
@@ -1670,19 +2380,43 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--modality", default="rna", choices=["rna", "adt", "grn", "metabolite", "lipid", "psi"])
     parser.add_argument("--layer", default=None)
     parser.add_argument("--input-normalized", action="store_true", help="Treat X/layer as already normalized; skip CP10K log1p.")
+    parser.add_argument(
+        "--normalized-decimals",
+        type=int,
+        default=-1,
+        help="Optionally round normalized expression values using sparse-safe operations; negative disables. Disabled by default because rounding is not a compute-speed optimization.",
+    )
     parser.add_argument("--min-genes", type=int, default=500)
     parser.add_argument("--min-cells", type=int, default=5)
     parser.add_argument("--min-counts", type=int, default=1000)
-    parser.add_argument("--mito-percent", type=float, default=10.0)
+    parser.add_argument("--mito-percent", type=float, default=30.0)
     parser.add_argument("--target-cells", type=int, default=0, help="Optional memory-guard cap before PageRank; 0 disables.")
     parser.add_argument("--pagerank-cells", type=int, default=5000)
     parser.add_argument("--louvain-downsample-cutoff", type=int, default=15000)
-    parser.add_argument("--pre-pagerank-cells", type=int, default=10000)
+    parser.add_argument(
+        "--pre-pagerank-cells",
+        type=int,
+        default=0,
+        help="Optional Louvain pre-reduction target before PageRank; 0 uses ICGS2 default of --pagerank-cells * 4.",
+    )
+    parser.add_argument("--downsample-var-genes", type=int, default=500, help="ICGS2 hgvfinder variable genes used for Louvain/PageRank downsampling.")
+    parser.add_argument(
+        "--retention-audit-obs",
+        default="HLCA,TGEN-IPF",
+        help="Comma-delimited obs columns audited for rare-population retention through sampling and SVM; empty disables.",
+    )
     parser.add_argument("--downsample-key", default=None, help="obs column for stratified downsampling.")
     parser.add_argument("--max-cells-per-group", type=int, default=None)
     parser.add_argument("--random-state", type=int, default=0)
     parser.add_argument("--n-top-features", type=int, default=3000)
-    parser.add_argument("--n-pcs", type=int, default=50)
+    parser.add_argument(
+        "--max-nmf-variable-genes",
+        type=int,
+        default=0,
+        help="Optional cap on UDON-selected RNA features used for NMF; 0 keeps all UDON-selected features.",
+    )
+    parser.add_argument("--n-pcs", type=int, default=0, help="PCs for graph construction; 0 uses automatic elbow selection.")
+    parser.add_argument("--max-auto-pcs", type=int, default=50, help="Maximum PCs computed before automatic elbow selection.")
     parser.add_argument("--n-neighbors", type=int, default=30)
     parser.add_argument("--leiden-resolution", type=float, default=0.8)
     parser.add_argument(
@@ -1731,8 +2465,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--cluster-key", default="ICGS3_cluster")
     parser.add_argument("--marker-top-n", type=int, default=60)
-    parser.add_argument("--marker-rho", type=float, default=0.2)
-    parser.add_argument("--marker-min-per-cluster", type=int, default=3)
+    parser.add_argument("--marker-rho", type=float, default=0.3)
+    parser.add_argument("--marker-min-per-cluster", type=int, default=2)
     parser.add_argument("--marker-direction", choices=["up", "down", "both"], default="up")
     parser.add_argument("--rank", "--nmf-k", dest="rank", type=int, default=None, help="Override auto-estimated sparse-NMF rank.")
     parser.add_argument(
@@ -1741,8 +2475,39 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="auto",
         help="Normalize SNMF component loadings before assigning cells to their winning component. Auto uses rowsum for ADT/small-feature modalities.",
     )
-    parser.add_argument("--nmf-k-multiplier", type=float, default=2.0, help="Auto NMF rank multiplier applied to initial expression-cluster count.")
-    parser.add_argument("--max-auto-nmf-k", type=int, default=30, help="Maximum automatically selected NMF rank; explicit --nmf-k can exceed this.")
+    parser.add_argument(
+        "--nmf-k-multiplier",
+        type=float,
+        default=2.0,
+        help="Deprecated compatibility option; automatic rank now uses the UDON/ICGS2 Tracy-Widom estimator directly.",
+    )
+    parser.add_argument(
+        "--max-auto-nmf-k",
+        type=int,
+        default=None,
+        help="Optional maximum automatically selected NMF rank. By default, auto rank is not artificially capped; explicit --nmf-k can exceed this.",
+    )
+    parser.add_argument(
+        "--nmf-runs",
+        type=int,
+        default=1,
+        help=(
+            "Number of SNMF restarts. UDON run_nmf uses seed='nndsvd', a DETERMINISTIC "
+            "initialization, so every restart converges to the same factorization and "
+            "n_run>1 only multiplies runtime (UDON records run1-vs-run2 ARI=1.000). "
+            "Default 1. Raise only if you switch to a stochastic seed."
+        ),
+    )
+    parser.add_argument(
+        "--markerfinder-nmf-genes-only",
+        action="store_true",
+        help=(
+            "Restrict MarkerFinder to the NMF guide genes. Default (off) matches ICGS2, "
+            "which runs MarkerFinder on the full filtered expression matrix "
+            "(protein-coding; RPL/RPS, MT-, HLA, XIST/TSIX and *Y removed). The narrow "
+            "pool starves the cluster-fitness gate and rejects clusters ICGS2 would keep."
+        ),
+    )
     parser.add_argument("--rank-rel-threshold", type=float, default=0.1, help="UDON-compatible relative threshold retained for rank reporting/compatibility.")
     parser.add_argument("--min-group-size", type=int, default=3)
     parser.add_argument(
@@ -1750,6 +2515,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.0,
         help="Minimum winning linear SVM decision score for final cell retention; ICGS2 default is >0.",
+    )
+    parser.add_argument(
+        "--svm-chunk-size",
+        type=int,
+        default=50000,
+        help="Number of cells scored per chunk during all-cell SVM reclassification.",
+    )
+    svm_group = parser.add_mutually_exclusive_group()
+    svm_group.add_argument(
+        "--svm-reclassify-all-cells",
+        "--svm_reclassify_all_cells",
+        dest="svm_reclassify_all_cells",
+        action="store_true",
+        default=True,
+        help="Classify all post-QC cells against surviving NMF/SVM centroids after downsampled NMF training.",
+    )
+    svm_group.add_argument(
+        "--no-svm-reclassify-all-cells",
+        "--svm_reclassify_all_cells_FALSE",
+        dest="svm_reclassify_all_cells",
+        action="store_false",
+        help="Testing mode: classify only the sampled cells used for NMF.",
     )
     parser.add_argument("--species", default="Hs", choices=["Hs", "Mm", "human", "mouse"])
     parser.add_argument("--biomarker-file", default=None)
@@ -1760,6 +2547,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Cells to display per cluster in the final heatmap; 0 uses all cells (ICGS2-style final output).",
     )
     parser.add_argument("--write-heatmap-expression-tsv", action="store_true", help="Write the large all-cell heatmap expression matrix TSV.")
+    parser.add_argument(
+        "--heatmap-covariates",
+        default=None,
+        help="Comma-delimited obs columns to render as compact bottom covariate bars in the MarkerFinder heatmap.",
+    )
+    parser.add_argument(
+        "--heatmap-goelite-terms",
+        action="store_true",
+        help="Render top GO-Elite/BioMarkers enrichment terms on the left side of the MarkerFinder heatmap.",
+    )
+    parser.add_argument(
+        "--heatmap-goelite-max-terms",
+        type=int,
+        default=30,
+        help="Maximum GO-Elite terms considered per cluster block for MarkerFinder heatmap labels.",
+    )
     parser.add_argument(
         "--umap-feature-mode",
         choices=["markerfinder", "variable", "pca"],
@@ -1780,6 +2583,7 @@ def main(argv: Optional[Sequence[str]] = None) -> ICGS3Result:
         modality=args.modality,
         layer=args.layer,
         input_normalized=args.input_normalized,
+        normalized_decimals=args.normalized_decimals,
         min_genes=args.min_genes,
         min_cells=args.min_cells,
         min_counts=args.min_counts,
@@ -1788,11 +2592,15 @@ def main(argv: Optional[Sequence[str]] = None) -> ICGS3Result:
         pagerank_cells=args.pagerank_cells,
         louvain_downsample_cutoff=args.louvain_downsample_cutoff,
         pre_pagerank_cells=args.pre_pagerank_cells,
+        downsample_var_genes=args.downsample_var_genes,
+        retention_audit_obs=args.retention_audit_obs,
         downsample_key=args.downsample_key,
         max_cells_per_group=args.max_cells_per_group,
         random_state=args.random_state,
         n_top_features=args.n_top_features,
+        max_nmf_variable_genes=args.max_nmf_variable_genes,
         n_pcs=args.n_pcs,
+        max_auto_pcs=args.max_auto_pcs,
         n_neighbors=args.n_neighbors,
         leiden_resolution=args.leiden_resolution,
         batch_correction=args.batch_correction,
@@ -1811,13 +2619,20 @@ def main(argv: Optional[Sequence[str]] = None) -> ICGS3Result:
         nmf_assignment_normalization=args.nmf_assignment_normalization,
         nmf_k_multiplier=args.nmf_k_multiplier,
         max_auto_nmf_k=args.max_auto_nmf_k,
+        nmf_runs=args.nmf_runs,
+        markerfinder_all_genes=not args.markerfinder_nmf_genes_only,
         rank_rel_threshold=args.rank_rel_threshold,
         min_group_size=args.min_group_size,
         svm_min_decision_score=args.svm_min_decision_score,
+        svm_reclassify_all_cells=args.svm_reclassify_all_cells,
+        svm_chunk_size=args.svm_chunk_size,
         species={"human": "Hs", "mouse": "Mm"}.get(args.species, args.species),
         biomarker_file=args.biomarker_file,
         heatmap_cells_per_cluster=args.heatmap_cells_per_cluster,
         write_heatmap_expression_tsv=args.write_heatmap_expression_tsv,
+        heatmap_covariates=args.heatmap_covariates,
+        heatmap_goelite_terms=args.heatmap_goelite_terms,
+        heatmap_goelite_max_terms=args.heatmap_goelite_max_terms,
         umap_feature_mode=args.umap_feature_mode,
         umap_covariates=args.umap_covariates,
         write_h5ad=not args.no_h5ad,

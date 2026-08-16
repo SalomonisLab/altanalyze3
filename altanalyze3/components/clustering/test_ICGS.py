@@ -6,12 +6,19 @@ from anndata import AnnData
 from altanalyze3.components.clustering.ICGS import (
     ICGS3Config,
     apply_expression_batch_adjustment,
+    build_arg_parser,
+    classify_adata_with_scores_chunked,
+    classify_with_scores,
+    cli_equivalent,
     compute_sparse_graph,
     _batch_keys,
     _expression_batch_keys,
     legacy_rnaseq_gene_filter,
+    pagerank_downsample_adata,
+    prepare_expression,
     read_inputs,
     run_icgs3,
+    write_retention_audit,
 )
 
 
@@ -124,6 +131,39 @@ def test_read_single_h5ad_preserves_existing_sample_metadata(tmp_path):
     assert loaded.obs_names.tolist() == ["cell1", "cell2", "cell3", "cell4"]
 
 
+def test_prepare_expression_rounds_normalized_sparse_values_to_four_decimals():
+    X = sp.csr_matrix(np.array([[0.123456, 1.987654], [0.0, 2.222229]], dtype=float))
+    adata = AnnData(X=X.copy(), obs=pd.DataFrame(index=["c1", "c2"]), var=pd.DataFrame(index=["g1", "g2"]))
+    out = prepare_expression(
+        adata,
+        ICGS3Config(
+            input_paths=["dummy.h5ad"],
+            output_dir="/tmp/icgs3_test",
+            input_normalized=True,
+            normalized_decimals=4,
+        ),
+    )
+    assert sp.issparse(out.X)
+    np.testing.assert_allclose(out.X.toarray(), np.array([[0.1235, 1.9877], [0.0, 2.2222]], dtype=np.float32))
+    np.testing.assert_allclose(out.layers["counts"].toarray(), X.toarray())
+    assert out.uns["icgs3_normalized_decimals"] == 4
+
+
+def test_prepare_expression_does_not_round_by_default():
+    X = sp.csr_matrix(np.array([[0.123456, 1.987654]], dtype=float))
+    adata = AnnData(X=X.copy(), obs=pd.DataFrame(index=["c1"]), var=pd.DataFrame(index=["g1", "g2"]))
+    out = prepare_expression(
+        adata,
+        ICGS3Config(
+            input_paths=["dummy.h5ad"],
+            output_dir="/tmp/icgs3_test",
+            input_normalized=True,
+        ),
+    )
+    np.testing.assert_allclose(out.X.toarray(), X.toarray())
+    assert "icgs3_normalized_decimals" not in out.uns
+
+
 def test_harmony_batch_correction_replaces_graph_pcs():
     try:
         import harmonypy  # noqa: F401
@@ -156,6 +196,106 @@ def test_harmony_batch_correction_replaces_graph_pcs():
     assert "X_pca_uncorrected" in graph.obsm
     assert graph.uns["icgs3_graph"]["representation"] == "X_pca_harmony"
     assert "connectivities" in graph.obsp
+
+
+def test_automatic_pc_selection_records_elbow_metadata():
+    rng = np.random.default_rng(11)
+    X = rng.normal(0, 1, size=(50, 20))
+    X[:25, :4] += 3
+    adata = AnnData(
+        X=sp.csr_matrix(X),
+        obs=pd.DataFrame(index=[f"cell{i}" for i in range(50)]),
+        var=pd.DataFrame(index=[f"gene{i}" for i in range(20)]),
+    )
+    graph = compute_sparse_graph(
+        adata,
+        ICGS3Config(
+            input_paths=["dummy.h5ad"],
+            output_dir="/tmp/icgs3_test",
+            n_pcs=0,
+            max_auto_pcs=12,
+            n_neighbors=8,
+        ),
+    )
+    assert graph.uns["icgs3_graph"]["pc_selection"] == "elbow"
+    assert 1 <= graph.uns["icgs3_graph"]["n_pcs"] <= 12
+    assert graph.uns["icgs3_graph"]["pca_computed"] == 12
+
+
+def test_downsampling_graph_can_use_sparse_expression_without_pca():
+    rng = np.random.default_rng(12)
+    X = rng.poisson(0.2, size=(40, 15)).astype(float)
+    adata = AnnData(
+        X=sp.csr_matrix(X),
+        obs=pd.DataFrame(index=[f"cell{i}" for i in range(40)]),
+        var=pd.DataFrame(index=[f"gene{i}" for i in range(15)]),
+    )
+    graph = compute_sparse_graph(
+        adata,
+        ICGS3Config(input_paths=["dummy.h5ad"], output_dir="/tmp/icgs3_test", n_neighbors=6),
+        use_pca=False,
+    )
+    assert graph.uns["icgs3_graph"]["representation"] == "X"
+    assert graph.uns["icgs3_graph"]["pc_selection"] == "none"
+    assert graph.uns["icgs3_graph"]["n_pcs"] == 0
+    assert "X_pca" not in graph.obsm
+    assert "connectivities" in graph.obsp
+
+
+def test_pagerank_downsample_uses_icgs2_annoy_louvain_fields():
+    rng = np.random.default_rng(13)
+    X = rng.normal(0, 1, size=(45, 18)).astype(float)
+    X[:15, :4] += 3
+    X[15:30, 4:8] += 3
+    X[30:, 8:12] += 3
+    adata = AnnData(
+        X=sp.csr_matrix(X),
+        obs=pd.DataFrame(index=[f"cell{i}" for i in range(45)]),
+        var=pd.DataFrame(index=[f"gene{i}" for i in range(18)]),
+    )
+    sampled, scores = pagerank_downsample_adata(
+        adata,
+        ICGS3Config(
+            input_paths=["dummy.h5ad"],
+            output_dir="/tmp/icgs3_test",
+            pagerank_cells=12,
+            louvain_downsample_cutoff=20,
+            downsample_var_genes=10,
+        ),
+    )
+    assert sampled.n_obs <= 12
+    assert "precommunity" in scores.columns
+    assert "icgs2_community_size" in scores.columns
+    assert "icgs2_chunk_start" in scores.columns
+    assert "pagerank" in scores.columns
+
+
+def test_rna_pagerank_downsample_filters_gene_space_before_dispersion_selection():
+    rng = np.random.default_rng(31)
+    genes = ["ACTB", "CD34", "RPL10", "RPS3", "MT-CO1", "DDX3Y", "HLA-A", "A.B"]
+    X = rng.poisson(1.0, size=(30, len(genes))).astype(float)
+    X[:, genes.index("RPL10")] += np.arange(30) * 10.0
+    adata = AnnData(
+        X=sp.csr_matrix(X),
+        obs=pd.DataFrame(index=[f"cell{i}" for i in range(30)]),
+        var=pd.DataFrame({"gene_symbols": genes}, index=genes),
+    )
+    sampled, _ = pagerank_downsample_adata(
+        adata,
+        ICGS3Config(
+            input_paths=["dummy.h5ad"],
+            output_dir="/tmp/icgs3_test",
+            modality="rna",
+            species="Hs",
+            pagerank_cells=12,
+            louvain_downsample_cutoff=1000,
+            downsample_var_genes=2,
+        ),
+    )
+    assert sampled.var_names.tolist() == ["ACTB", "CD34"]
+    assert "RPL10" not in sampled.var_names
+    assert "MT-CO1" not in sampled.var_names
+    assert "DDX3Y" not in sampled.var_names
 
 
 def test_expression_batch_adjustment_is_nonnegative_and_batch_centered(tmp_path):
@@ -226,3 +366,170 @@ def test_nmf_rowsum_assignment_normalization_balances_component_scale():
     rowsum = binarize_nmf(w, normalization="rowsum")["cluster"].tolist()
     assert raw == [0, 0, 0]
     assert rowsum == [0, 1, 2]
+
+
+def test_marker_heatmap_annotations_render(tmp_path):
+    from altanalyze3.components.visualization.marker_heatmap_h5ad import _plot_heatmap
+
+    heatmap = pd.DataFrame(
+        np.array(
+            [
+                [2.0, 1.5, -0.5, -1.0],
+                [1.8, 1.2, -0.8, -1.2],
+                [-1.0, -0.8, 1.4, 2.0],
+                [-1.2, -0.4, 1.2, 1.8],
+            ]
+        ),
+        index=["CD3", "CD4", "CD19", "MS4A1"],
+        columns=["cell1", "cell2", "cell3", "cell4"],
+    )
+    covariates = pd.DataFrame(
+        {
+            "TissueGroup": ["BoneMarrow", "Thymus", "BoneMarrow", "Thymus"],
+            "Library": ["L1", "L1", "L2", "L2"],
+        },
+        index=heatmap.columns,
+    )
+    out = tmp_path / "annotated_heatmap.pdf"
+    _plot_heatmap(
+        heatmap,
+        str(out),
+        [("C1", 2), ("C2", 2)],
+        ["C1", "C2"],
+        ["C1", "C1", "C2", "C2"],
+        ["C1", "C1", "C2", "C2"],
+        covariate_df=covariates,
+        go_terms={"C1": [("T cell activation", 0.001)], "C2": [("B cell receptor signaling", 0.002)]},
+        go_terms_max=2,
+    )
+    assert out.exists()
+    assert out.with_suffix(".svg").exists()
+
+
+def test_marker_heatmap_covariate_category_limit_and_palettes():
+    from altanalyze3.components.visualization.marker_heatmap_h5ad import (
+        _build_covariate_track,
+        _filter_covariate_columns_for_heatmap,
+    )
+
+    cells = [f"cell{i}" for i in range(13)]
+    obs = pd.DataFrame(
+        {
+            "small": ["A", "B"] * 6 + ["A"],
+            "large": [f"L{i}" for i in range(13)],
+        },
+        index=cells,
+    )
+    retained, skipped = _filter_covariate_columns_for_heatmap(obs, cells, ["small", "large"])
+    assert retained == ["small"]
+    assert skipped == [("large", 13)]
+
+    _, legends = _build_covariate_track(obs.loc[cells[:4], ["small", "large"]])
+    assert legends["small"]["colors"]["A"] != legends["large"]["colors"]["L0"]
+
+
+def test_auto_nmf_rank_uses_udon_rank_without_default_cap():
+    from altanalyze3.components.clustering.ICGS import _resolve_auto_nmf_rank
+
+    config = ICGS3Config(input_paths=["dummy.h5ad"], output_dir="/tmp/icgs3_test")
+    candidate, rank, cap = _resolve_auto_nmf_rank(38, config)
+    assert candidate == 38
+    assert rank == 38
+    assert cap is None
+
+    config.max_auto_nmf_k = 30
+    candidate, rank, cap = _resolve_auto_nmf_rank(38, config)
+    assert candidate == 38
+    assert rank == 30
+    assert cap == 30
+
+
+def test_svm_reclassify_all_cells_cli_default_and_false_alias():
+    parser = build_arg_parser()
+    args = parser.parse_args(["--input", "dummy.h5ad", "--output-dir", "/tmp/icgs3_test"])
+    assert args.svm_reclassify_all_cells is True
+
+    args = parser.parse_args(
+        ["--input", "dummy.h5ad", "--output-dir", "/tmp/icgs3_test", "--no-svm-reclassify-all-cells"]
+    )
+    assert args.svm_reclassify_all_cells is False
+
+    config = ICGS3Config(input_paths=["dummy.h5ad"], output_dir="/tmp/icgs3_test", svm_reclassify_all_cells=False)
+    assert "--no-svm-reclassify-all-cells" in cli_equivalent(config)
+
+
+def test_default_mito_percent_is_30():
+    parser = build_arg_parser()
+    args = parser.parse_args(["--input", "dummy.h5ad", "--output-dir", "/tmp/icgs3_test"])
+    assert args.mito_percent == 30.0
+    assert ICGS3Config(input_paths=["dummy.h5ad"], output_dir="/tmp/icgs3_test").mito_percent == 30.0
+    assert args.marker_rho == 0.3
+    assert args.marker_min_per_cluster == 2
+    assert args.pre_pagerank_cells == 0
+
+
+def test_chunked_sparse_svm_matches_dense_classifier():
+    genes = ["g1", "g2", "g3"]
+    train = pd.DataFrame(
+        {
+            "P1": [3.0, 0.1, 0.0],
+            "P2": [0.0, 0.2, 3.0],
+        },
+        index=genes,
+    )
+    X = np.array(
+        [
+            [4.0, 0.0, 0.0],
+            [3.5, 0.1, 0.0],
+            [0.0, 0.0, 4.0],
+            [0.1, 0.0, 3.5],
+        ]
+    )
+    cells = [f"cell{i}" for i in range(X.shape[0])]
+    adata = AnnData(
+        X=sp.csr_matrix(X),
+        obs=pd.DataFrame(index=cells),
+        var=pd.DataFrame(index=genes),
+    )
+    dense = classify_with_scores(
+        train=train,
+        expression=pd.DataFrame(X.T, index=genes, columns=cells),
+        cluster_key="cluster",
+        min_decision_score=0.0,
+    )
+    chunked = classify_adata_with_scores_chunked(
+        train=train,
+        adata=adata,
+        genes=genes,
+        cluster_key="cluster",
+        min_decision_score=0.0,
+        chunk_size=2,
+    )
+    pd.testing.assert_series_equal(dense["cluster"], chunked["cluster"])
+    np.testing.assert_allclose(dense["svm_score"].values, chunked["svm_score"].values)
+
+
+def test_retention_audit_flags_rare_population_loss(tmp_path):
+    obs = pd.DataFrame(
+        {"HLCA": ["rare"] * 30 + ["common"] * 70},
+        index=[f"cell{i}" for i in range(100)],
+    )
+    var = pd.DataFrame(index=["gene1", "gene2"])
+    full = AnnData(X=sp.csr_matrix(np.ones((100, 2))), obs=obs, var=var)
+    candidates = full.copy()
+    sampled = full[[f"cell{i}" for i in range(10)] + [f"cell{i}" for i in range(30, 70)]].copy()
+    outdir = tmp_path / "icgs3"
+    (outdir / "sNMF").mkdir(parents=True)
+    audit = write_retention_audit(
+        full=full,
+        candidates=candidates,
+        sampled=sampled,
+        final_clusters=None,
+        config=ICGS3Config(input_paths=["dummy.h5ad"], output_dir=str(outdir), retention_audit_obs="HLCA"),
+        outdir=str(outdir),
+    )
+    rare = audit[audit["annotation"] == "rare"].iloc[0]
+    assert rare["post_qc_cells"] == 30
+    assert rare["pagerank_louvain_sampled_cells"] == 10
+    assert bool(rare["sampled_below_20"])
+    assert (outdir / "sNMF" / "icgs3_rare_population_retention_audit.tsv").exists()

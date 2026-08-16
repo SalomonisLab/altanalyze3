@@ -21,8 +21,9 @@ import matplotlib.pyplot as plt
 
 plt.rcParams['axes.linewidth'] = 0.5
 plt.rcParams['pdf.fonttype'] = 42
+plt.rcParams['pdf.compression'] = 0
 plt.rcParams['font.family'] = 'sans-serif'
-plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
+plt.rcParams['font.sans-serif'] = ['Arial', 'Helvetica', 'DejaVu Sans']
 plt.rcParams['figure.facecolor'] = 'white'
 
 warnings.filterwarnings(
@@ -557,19 +558,304 @@ def _axis_label_fontsize(label_count, axis):
     return 3
 
 
-def _plot_heatmap(heatmap_df, output_path, cluster_counts, cluster_order, column_clusters, row_clusters):
+def _format_heatmap_pvalue(pvalue):
+    try:
+        pval = float(pvalue)
+    except Exception:
+        return "p=NA"
+    if pval < 1e-3:
+        return "p={:.1e}".format(pval)
+    return "p={:.3f}".format(pval)
+
+
+def _category_color_map(categories, cmap_name="tab20"):
+    cmap = plt.get_cmap(cmap_name, max(1, len(categories)))
+    return {str(cat): tuple(cmap(i)[:3]) for i, cat in enumerate(categories)}
+
+
+def _covariate_palette_name(index):
+    palettes = [
+        "tab20",
+        "Set3",
+        "Paired",
+        "Dark2",
+        "Accent",
+        "Pastel1",
+        "Pastel2",
+        "Set2",
+        "tab20b",
+        "tab20c",
+    ]
+    return palettes[int(index) % len(palettes)]
+
+
+def _covariate_categories(values):
+    series = pd.Series(values).astype(str)
+    if pd.api.types.is_categorical_dtype(values):
+        present = set(series)
+        return [str(c) for c in values.cat.categories if str(c) in present]
+    return [str(c) for c in pd.unique(series)]
+
+
+def _build_covariate_track(covariate_df):
+    if covariate_df is None or covariate_df.empty:
+        return None, {}
+    rows = []
+    legends = {}
+    for idx, col in enumerate(covariate_df.columns):
+        values = covariate_df[col].astype(str)
+        categories = _covariate_categories(covariate_df[col])
+        color_map = _category_color_map(categories, cmap_name=_covariate_palette_name(idx))
+        rows.append([color_map.get(str(v), (0.8, 0.8, 0.8)) for v in values])
+        legends[str(col)] = {
+            "categories": categories,
+            "colors": color_map,
+        }
+    return np.asarray(rows, dtype=float), legends
+
+
+def _filter_covariate_columns_for_heatmap(obs, ordered_cells, covariate_columns, max_categories=12):
+    retained = []
+    skipped = []
+    for covariate in covariate_columns:
+        categories = _covariate_categories(obs.loc[ordered_cells, covariate])
+        if len(categories) > int(max_categories):
+            skipped.append((covariate, len(categories)))
+        else:
+            retained.append(covariate)
+    return retained, skipped
+
+
+def _draw_go_term_labels(fig, ax_terms, ax, row_clusters, go_terms, row_color_map, max_terms):
+    if ax_terms is None or not go_terms:
+        return
+    ax_terms.set_xlim(0, 1)
+    ax_terms.set_ylim(ax.get_ylim())
+    ax_terms.set_xticks([])
+    ax_terms.set_yticks([])
+    ax_terms.axis("off")
+    ax_terms.patch.set_alpha(0.0)
+
+    cluster_ranges = []
+    current = None
+    start = 0
+    for idx, cluster in enumerate(row_clusters):
+        cluster = str(cluster)
+        if cluster != current:
+            if current is not None:
+                cluster_ranges.append((current, start, idx))
+            current = cluster
+            start = idx
+    if current is not None:
+        cluster_ranges.append((current, start, len(row_clusters)))
+
+    fig.canvas.draw()
+    axis_height_px = ax.get_window_extent().height
+    row_height_px = axis_height_px / max(1, len(row_clusters))
+    term_font_size = 6
+    term_spacing_px = max(10.0, term_font_size * fig.dpi / 72.0 * 3.0)
+    gene_scale = max(1.0, len(row_clusters) / 600.0)
+    min_rows_per_term = max(1.0, term_spacing_px / max(1.0, row_height_px)) * gene_scale
+
+    entries = []
+    for cluster, start, end in cluster_ranges:
+        terms = go_terms.get(str(cluster), []) or []
+        block_height = max(1, end - start)
+        slot_count = max(1, int(block_height / max(1.0, min_rows_per_term)))
+        limit = min(len(terms), slot_count)
+        if max_terms:
+            limit = min(limit, int(max_terms))
+        entries.append(
+            {
+                "cluster": str(cluster),
+                "start": start,
+                "end": end,
+                "block_height": block_height,
+                "terms": terms[:limit],
+                "positions": [],
+            }
+        )
+
+    def compute_positions(entry):
+        terms = entry["terms"]
+        if not terms:
+            entry["positions"] = []
+            return
+        block_height = max(1, entry["end"] - entry["start"])
+        available_rows = max(1.0, block_height - 1)
+        total_height = (len(terms) - 1) * min_rows_per_term if len(terms) > 1 else 0.0
+        total_height = min(total_height, available_rows)
+        top_offset = max(0.0, (available_rows - total_height) / 2.0)
+        start_y = entry["start"] + 0.5 + top_offset
+        positions = []
+        for i in range(len(terms)):
+            y = start_y + i * min_rows_per_term
+            if y > entry["end"] - 0.5:
+                break
+            positions.append(y)
+        entry["positions"] = positions
+
+    for entry in entries:
+        compute_positions(entry)
+
+    # Resolve collisions between adjacent cluster blocks, but NEVER prune a block to
+    # zero terms. The previous loop dropped the last term from whichever block was
+    # taller, with `prev` winning every tie. When all blocks are the same height --
+    # the normal case, since each cluster contributes the same top_n markers -- the
+    # tie always fell on `prev`, so each block in turn was stripped to empty and only
+    # the final cluster kept a label. On the 42-cluster Adams run that rendered 1 of
+    # 42 GO-Elite labels. Keeping a floor of one term per block preserves the intended
+    # one-label-per-cluster minimum; a lone label is centred in its own block by
+    # compute_positions, so it stays inside that cluster's rows.
+    def _n_terms(entry):
+        return len(entry["terms"])
+
+    for idx in range(1, len(entries)):
+        prev = entries[idx - 1]
+        curr = entries[idx]
+        while prev["positions"] and curr["positions"]:
+            if (curr["positions"][0] - prev["positions"][-1]) >= min_rows_per_term:
+                break
+            # Prune from the block that still has the most terms; stop once both are
+            # down to their last label.
+            if _n_terms(prev) <= 1 and _n_terms(curr) <= 1:
+                break
+            if _n_terms(prev) >= _n_terms(curr):
+                prev["terms"] = prev["terms"][:-1]
+                compute_positions(prev)
+            else:
+                curr["terms"] = curr["terms"][:-1]
+                compute_positions(curr)
+
+    for entry in entries:
+        color = row_color_map.get(str(entry["cluster"]), "blue")
+        for y, item in zip(entry["positions"], entry["terms"]):
+            if isinstance(item, (tuple, list)) and len(item) >= 2:
+                label = "{} {}".format(str(item[0]), _format_heatmap_pvalue(item[1]))
+            else:
+                label = str(item)
+            ax_terms.text(
+                0.995,
+                y,
+                label,
+                transform=ax_terms.get_yaxis_transform(),
+                ha="right",
+                va="center",
+                fontsize=term_font_size,
+                color=color,
+                clip_on=False,
+            )
+
+
+def _draw_covariate_legends(fig, covariate_legends, rect=(0.255, 0.078, 0.690, 0.115)):
+    if not covariate_legends:
+        return
+    import matplotlib.patches as mpatches
+    from matplotlib.font_manager import FontProperties
+    from matplotlib.textpath import TextPath
+
+    ax_leg = fig.add_axes(rect)
+    ax_leg.set_xlim(0, 1)
+    ax_leg.set_ylim(0, 1)
+    ax_leg.axis("off")
+    fig.canvas.draw()
+    axis_width_pt = max(1.0, ax_leg.get_window_extent().width * 72.0 / fig.dpi)
+    legend_font = FontProperties(family=plt.rcParams.get("font.family", "sans-serif"), size=8)
+
+    def text_width_axes(label):
+        if not str(label):
+            return 0.0
+        return TextPath((0, 0), str(label), prop=legend_font).get_extents().width / axis_width_pt
+
+    max_x = 1.0
+    title_x = 0.245
+    item_start_x = 0.275
+    sw = 0.022
+    sh = 0.115
+    row_h = 0.190
+    for row_idx, (covariate, info) in enumerate(covariate_legends.items()):
+        y_center = 0.82 - row_idx * row_h
+        if y_center < 0.02:
+            break
+        ax_leg.text(
+            title_x,
+            y_center,
+            str(covariate),
+            fontsize=8,
+            ha="right",
+            va="center",
+            weight="bold",
+            transform=ax_leg.transAxes,
+        )
+        x = item_start_x
+        categories = list(info["categories"])
+        remaining_width = max(0.05, max_x - item_start_x)
+        raw_widths = []
+        for cat in categories:
+            label = str(cat)
+            raw_widths.append(sw + 0.010 + text_width_axes(label) + 0.030)
+        width_scale = min(1.0, remaining_width / max(remaining_width, sum(raw_widths)))
+        min_gap = 0.010
+        for cat, raw_item_w in zip(categories, raw_widths):
+            label = str(cat)
+            item_w = raw_item_w * width_scale
+            if x + sw + min_gap > max_x:
+                break
+            patch = mpatches.Rectangle(
+                (x, y_center - sh / 2.0),
+                sw,
+                sh,
+                transform=ax_leg.transAxes,
+                color=info["colors"][label],
+                linewidth=0.25,
+                clip_on=False,
+            )
+            ax_leg.add_patch(patch)
+            ax_leg.text(x + sw + min_gap, y_center, label, fontsize=8, ha="left", va="center", transform=ax_leg.transAxes)
+            x += item_w
+
+
+def _plot_heatmap(
+    heatmap_df,
+    output_path,
+    cluster_counts,
+    cluster_order,
+    column_clusters,
+    row_clusters,
+    covariate_df=None,
+    go_terms=None,
+    go_terms_max=30,
+):
     if heatmap_df.empty:
         raise ValueError("Heatmap dataframe is empty.")
 
     from mpl_toolkits.axes_grid1 import make_axes_locatable
-    from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
-    fixed_width = 8.3
-    fixed_height = 8.5
-    fig, ax = plt.subplots(figsize=(fixed_width, fixed_height))
-    # right margin widened ~0.8" (≈20 chars) so long row labels (e.g. isoform IDs) are not clipped;
-    # plot area is preserved by the matching figure-width increase.
-    fig.subplots_adjust(left=0.08, right=0.80, top=0.82, bottom=0.08)
+    show_go_terms = bool(go_terms)
+    covariate_track, covariate_legends = _build_covariate_track(covariate_df)
+
+    fixed_width = 10.8 if show_go_terms else 8.3
+    fixed_height = 9.0 if covariate_track is not None else 8.5
+    if show_go_terms:
+        fig = plt.figure(figsize=(fixed_width, fixed_height))
+        gs = fig.add_gridspec(
+            1,
+            3,
+            width_ratios=[0.35, 0.50, 0.15],
+            wspace=0.0,
+            left=0.06,
+            right=0.98,
+            top=0.82,
+            bottom=0.27 if covariate_track is not None else 0.10,
+        )
+        ax_terms = fig.add_subplot(gs[0, 0])
+        ax = fig.add_subplot(gs[0, 1], sharey=ax_terms)
+        ax_labels = fig.add_subplot(gs[0, 2], sharey=ax)
+    else:
+        fig, ax = plt.subplots(figsize=(fixed_width, fixed_height))
+        fig.subplots_adjust(left=0.08, right=0.80, top=0.82, bottom=0.27 if covariate_track is not None else 0.08)
+        ax_terms = None
+        ax_labels = None
 
     contrast = float(os.environ.get("MARKER_HEATMAP_CONTRAST", "1.0"))
     if contrast <= 0:
@@ -614,23 +900,16 @@ def _plot_heatmap(heatmap_df, output_path, cluster_counts, cluster_order, column
     ax.tick_params(axis="x", bottom=False, top=True, labelbottom=False, labeltop=True, length=0, pad=7.5)
 
     gene_fontsize = _axis_label_fontsize(heatmap_df.shape[0], axis="y")
-    if heatmap_df.shape[0] > 120:
-        y_positions = []
-        y_labels = []
-        prior_cluster = None
-        for idx, (label, cluster) in enumerate(zip(heatmap_df.index, row_clusters)):
-            cluster = str(cluster)
-            if cluster != prior_cluster:
-                y_positions.append(idx)
-                y_labels.append(label)
-                prior_cluster = cluster
+    y_positions = np.arange(heatmap_df.shape[0])
+    y_labels = heatmap_df.index
+    if ax_labels is None:
+        ax.set_yticks(y_positions)
+        ax.set_yticklabels(y_labels, fontsize=gene_fontsize)
+        ax.yaxis.tick_right()
+        ax.tick_params(axis="y", left=False, right=True, labelleft=False, labelright=True, pad=1)
     else:
-        y_positions = np.arange(heatmap_df.shape[0])
-        y_labels = heatmap_df.index
-    ax.set_yticks(y_positions)
-    ax.set_yticklabels(y_labels, fontsize=gene_fontsize)
-    ax.yaxis.tick_right()
-    ax.tick_params(axis="y", left=False, right=True, labelleft=False, labelright=True, pad=1)
+        ax.set_yticks([])
+        ax.tick_params(axis="y", left=False, right=False, labelleft=False, labelright=False)
 
     for boundary in boundaries:
         ax.axvline(boundary, color="white", linewidth=0.5)
@@ -638,16 +917,6 @@ def _plot_heatmap(heatmap_df, output_path, cluster_counts, cluster_order, column
     divider = make_axes_locatable(ax)
     ax_top = divider.append_axes("top", size="1.125%", pad=0.02)
     ax_left = divider.append_axes("left", size="1.5%", pad=0.02)
-    cax = inset_axes(
-        ax,
-        width="35%",
-        height="3%",
-        loc="lower center",
-        bbox_to_anchor=(0.0, -0.06, 1.0, 1.0),
-        bbox_transform=ax.transAxes,
-        borderpad=0,
-    )
-
     col_ids = np.array([cluster_to_id[c] for c in column_clusters], dtype=int)[None, :]
     row_ids = np.array([cluster_to_id[c] for c in row_clusters], dtype=int)[:, None]
 
@@ -661,9 +930,78 @@ def _plot_heatmap(heatmap_df, output_path, cluster_counts, cluster_order, column
     ax_left.set_yticks([])
     ax_left.set_xlabel("")
 
+    if covariate_track is not None:
+        cov_rows = int(covariate_track.shape[0])
+        ax_cov = divider.append_axes("bottom", size=f"{max(4.0, cov_rows * 2.0)}%", pad=0.040)
+        ax_cov.imshow(covariate_track, aspect="auto", interpolation="nearest")
+        ax_cov.set_xticks([])
+        ax_cov.set_yticks([])
+        for idx, name in enumerate(covariate_df.columns):
+            ax_cov.text(
+                -0.006,
+                idx,
+                str(name),
+                transform=ax_cov.get_yaxis_transform(),
+                ha="right",
+                va="center",
+                fontsize=7,
+                weight="bold",
+                clip_on=False,
+            )
+        ax_cov.tick_params(axis="y", length=0)
+        for spine in ax_cov.spines.values():
+            spine.set_visible(False)
+        ax_cov.set_facecolor("none")
+        for boundary in boundaries:
+            ax_cov.axvline(boundary, color="white", linewidth=0.35)
+        for row_boundary in np.arange(0.5, cov_rows - 0.5 + 1e-9, 1.0):
+            ax_cov.axhline(row_boundary, color="white", linewidth=0.35)
+        _draw_covariate_legends(fig, covariate_legends)
+        cbar_anchor_ax = ax_cov
+    else:
+        cbar_anchor_ax = ax
+
+    if ax_terms is not None and ax_labels is not None:
+        fig.canvas.draw()
+        heatmap_bbox = ax.get_position()
+        ax_terms.set_position([ax_terms.get_position().x0, heatmap_bbox.y0, ax_terms.get_position().width, heatmap_bbox.height])
+        ax_labels.set_position([ax_labels.get_position().x0, heatmap_bbox.y0, ax_labels.get_position().width, heatmap_bbox.height])
+        ax_labels.set_xlim(0, 1)
+        ax_labels.set_ylim(ax.get_ylim())
+        ax_labels.set_xticks([])
+        ax_labels.set_yticks([])
+        ax_labels.axis("off")
+        ax_labels.patch.set_alpha(0.0)
+
+        fig.canvas.draw()
+        row_height_px = ax_labels.get_window_extent().height / max(1, heatmap_df.shape[0])
+        row_height_pt = row_height_px * 72.0 / fig.dpi
+        fitted_gene_fontsize = max(2.5, min(gene_fontsize, row_height_pt * 0.80))
+        for pos, gene in enumerate(heatmap_df.index.astype(str)):
+            ax_labels.text(
+                0.02,
+                pos,
+                gene,
+                transform=ax_labels.get_yaxis_transform(),
+                ha="left",
+                va="center",
+                fontsize=fitted_gene_fontsize,
+                fontstyle="italic",
+                clip_on=False,
+            )
+        _draw_go_term_labels(fig, ax_terms, ax, row_clusters, go_terms, cluster_colors, go_terms_max)
+
+    fig.canvas.draw()
+    heatmap_bbox = ax.get_position()
+    anchor_bbox = cbar_anchor_ax.get_position()
+    cbar_width = heatmap_bbox.width * 0.35
+    cbar_height = 0.012
+    cbar_x = heatmap_bbox.x0 + (heatmap_bbox.width - cbar_width) / 2.0
+    cbar_y = max(0.02, anchor_bbox.y0 - (0.026 if covariate_track is not None else 0.055))
+    cax = fig.add_axes([cbar_x, cbar_y, cbar_width, cbar_height])
     cbar = fig.colorbar(im, cax=cax, orientation="horizontal")
     cbar.ax.set_xlim(vmin, vmax)
-    cbar.set_label("Norm Exp (z-score)")
+    cbar.set_label("Norm Exp (z-score)", fontsize=8, labelpad=2)
     cbar.set_ticks([])
     cbar.ax.text(-0.08, 0.5, f"{vmin:.0f}", ha="right", va="center", transform=cbar.ax.transAxes)
     cbar.ax.text(1.08, 0.5, f"{vmax:.0f}", ha="left", va="center", transform=cbar.ax.transAxes)
@@ -683,14 +1021,14 @@ def _save_figure(fig, output_path):
     SVG is reported rather than raised.
     """
     written = [output_path]
-    fig.savefig(output_path)
+    fig.savefig(output_path, facecolor="white", transparent=False)
     base, ext = os.path.splitext(output_path)
     svg_path = base + ".svg"
     if ext.lower() != ".svg":
         prior = plt.rcParams.get("svg.fonttype")
         try:
             plt.rcParams["svg.fonttype"] = "none"      # keep text editable
-            fig.savefig(svg_path)
+            fig.savefig(svg_path, facecolor="white", transparent=False)
             written.append(svg_path)
             print(f"Saved marker heatmap SVG to: {svg_path}")
         except Exception as exc:                        # never lose the primary figure over the SVG
@@ -848,6 +1186,9 @@ def generate_marker_heatmap_from_adata(
     write_expression_tsv=True,
     write_heatmap_cache=True,
     pval_threshold=0.001,
+    covariate_columns=None,
+    go_terms=None,
+    go_terms_max=30,
 ):
     total_started = time.perf_counter()
     timings = {}
@@ -1022,9 +1363,40 @@ def generate_marker_heatmap_from_adata(
 
     column_clusters = adata_plot.obs[cluster_key].astype(str).loc[ordered_cells].tolist()
     row_clusters = selected.set_index("gene").loc[heatmap_df.index, "cluster"].astype(str).tolist()
+    covariate_df = None
+    if covariate_columns:
+        covariate_columns = [str(c).strip() for c in covariate_columns if str(c).strip()]
+        covariate_columns = [c for c in dict.fromkeys(covariate_columns) if c in adata_plot.obs]
+        if covariate_columns:
+            retained_covariates, skipped_covariates = _filter_covariate_columns_for_heatmap(
+                adata_plot.obs,
+                ordered_cells,
+                covariate_columns,
+                max_categories=12,
+            )
+            if skipped_covariates:
+                skipped_text = ", ".join(f"{name} ({count})" for name, count in skipped_covariates)
+                print(f"[INFO] Skipping heatmap covariates with >12 displayed categories: {skipped_text}")
+            if retained_covariates:
+                covariate_df = adata_plot.obs.loc[ordered_cells, retained_covariates].copy()
+                print(f"[INFO] Rendering heatmap covariate bars: {', '.join(retained_covariates)}")
+            else:
+                print("[INFO] No requested heatmap covariates passed the <=12 category display limit.")
+        else:
+            print("[INFO] No requested heatmap covariates were present in adata.obs.")
     print("[INFO] Rendering heatmap.")
     render_heatmap_started = time.perf_counter()
-    _plot_heatmap(heatmap_df, out, cluster_counts, cluster_order, column_clusters, row_clusters)
+    _plot_heatmap(
+        heatmap_df,
+        out,
+        cluster_counts,
+        cluster_order,
+        column_clusters,
+        row_clusters,
+        covariate_df=covariate_df,
+        go_terms=go_terms,
+        go_terms_max=go_terms_max,
+    )
     _log_step_timing(
         "marker_heatmap.render_heatmap_pdf",
         render_heatmap_started,
@@ -1362,6 +1734,11 @@ def main():
         action="store_true",
         help="Skip writing the compressed heatmap cache NPZ.",
     )
+    parser.add_argument(
+        "--heatmap-covariates",
+        default=None,
+        help="Comma-delimited h5ad obs columns to render as compact bottom covariate bars.",
+    )
     parser.add_argument("--seed", type=int, default=0, help="Random seed for cell sampling.")
     args = parser.parse_args()
 
@@ -1470,6 +1847,7 @@ def main():
             write_heatmap_tsv=not args.skip_expression_tsv,
             write_expression_tsv=not args.skip_expression_tsv,
             write_heatmap_cache=not args.skip_heatmap_cache,
+            covariate_columns=[c.strip() for c in str(args.heatmap_covariates or "").split(",") if c.strip()],
         )
         timings = outputs.get("timings", {}) if isinstance(outputs, dict) else {}
         if timings:

@@ -442,15 +442,18 @@ class JunctionCountMatrixQuery():
 
 
     @staticmethod
-    def get_membrane_tuples(df,**kwargs):
+    def get_membrane_tuples(df,return_jcmq=False,**kwargs):
         '''
         this function is used by SurfaceAntigen pipeline to filter out splicing evnets that are not tumor-specific and also compute
         useful informations for each membrane protein.
 
         :param df: pandas dataframe, the junction count matrix
+        :param return_jcmq: bool, also return the JunctionCountMatrixQuery that was built here.
+            SNAF-B needs its cond_df to write its own frequency table when no SNAF-T table is
+            supplied; returning the existing object avoids sifting the cohort a second time.
         :param **kwargs: will be passed to __init__ of JunctionCountMatrixQuery class function
 
-        :return membrane_tuples: a list, in which each item is a tuple (uid,mean_gtex,df_gtex,ed,freq). 
+        :return membrane_tuples: a list, in which each item is a tuple (uid,mean_gtex,df_gtex,ed,freq).
 
             * uid: the uid of the splicing evnet
             * mean_gtex: the mean raw read count across GTEx
@@ -473,6 +476,8 @@ class JunctionCountMatrixQuery():
             mean_gtex, df_gtex = tumor_specificity(uid,method='mean',return_df=True)
             ed, freq = jcmq.get_neojunction_info(uid)
             membrane_tuples.append((uid,mean_gtex,df_gtex,ed,freq))
+        if return_jcmq:
+            return membrane_tuples, jcmq
         return membrane_tuples
 
     @staticmethod

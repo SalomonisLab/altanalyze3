@@ -31,10 +31,14 @@ _MEMBRANE_FOUNDATION_VERSION = 2   # v2: only dict_fa is subset (with lazy full-
                                    # gene (trans-splicing fusion partners), not just membrane ones.
 
 
-def _foundation_path(db_dir):
+def _foundation_path(db_dir, signature=None):
     '''Where the precomputed SNAF-B membrane FASTA subset lives. Default: in the Alt91_db dir;
-    overridable via SNAF_INDEX_DIR when the reference dir is read-only/shared.'''
-    base = 'snaf_b_membrane_foundation.pkl'
+    overridable via SNAF_INDEX_DIR when the reference dir is read-only/shared.
+
+    `signature` keys the cache to a custom surface database: the subset depends on WHICH
+    genes are surface genes, so a SURFY run and a built-in run must not share one pickle.'''
+    base = 'snaf_b_membrane_foundation.pkl' if not signature else \
+        'snaf_b_membrane_foundation.{}.pkl'.format(signature)
     d = os.environ.get('SNAF_INDEX_DIR')
     if d:
         os.makedirs(d, exist_ok=True)
@@ -66,13 +70,16 @@ class _FoundationFa(dict):
         raise KeyError(key)
 
 
-def build_membrane_foundation(db_dir, out_path=None, force=False, _fa=None):
+def build_membrane_foundation(db_dir, out_path=None, force=False, _fa=None, membrane=None):
     '''Precompute the membrane-gene SEQUENCE subset of the ~2 GB gene FASTA (dict_fa) -- the only
     big reference. dict_exonCoords/df_exonlist/dict_biotype are small (~1.5 s) and load FULL at
     runtime because SNAF-B can reference non-membrane genes (trans-splicing partners); the
     subset here is wrapped at runtime with a lazy full-load fallback so those still resolve.
     Built ONCE; surface.initialize auto-loads it. Atomic write, idempotent (rebuilds on a
-    version bump).'''
+    version bump).
+
+    `membrane` overrides the gene set to subset on (a custom surface database); when None the
+    built-in Alt91_db membrane proteins are used, exactly as before.'''
     out_path = out_path or _foundation_path(db_dir)
     if (not force) and os.path.exists(out_path):
         try:
@@ -82,7 +89,8 @@ def build_membrane_foundation(db_dir, out_path=None, force=False, _fa=None):
         except Exception:
             pass   # unreadable / wrong version -> rebuild
     alt = os.path.join(db_dir, 'Alt91_db')
-    membrane = set(read_uniprot_seq(os.path.join(alt, 'uniprot_isoform_enhance.fasta')).keys())
+    if membrane is None:
+        membrane = set(read_uniprot_seq(os.path.join(alt, 'uniprot_isoform_enhance.fasta')).keys())
     fa = _fa if _fa is not None else fasta_to_dict(os.path.join(alt, 'Hs_gene-seq-2000_flank.fa'))
     obj = {'version': _MEMBRANE_FOUNDATION_VERSION, 'membrane': membrane,
            'dict_fa': {g: v for g, v in fa.items() if g in membrane}}
@@ -93,7 +101,7 @@ def build_membrane_foundation(db_dir, out_path=None, force=False, _fa=None):
     return out_path
 
 
-def initialize(db_dir, use_foundation='auto', foundation_path=None):
+def initialize(db_dir, use_foundation='auto', foundation_path=None, surface_db=None):
     '''
     setting up additional global variables for running B antigen program
 
@@ -101,11 +109,18 @@ def initialize(db_dir, use_foundation='auto', foundation_path=None):
     :param use_foundation: 'auto' (default) serves gene sequences (dict_fa) from the precomputed
                            membrane subset with a lazy full-load fallback; False forces the full
                            2 GB FASTA into memory.
+    :param surface_db: optional path to a custom cell-surface gene database -- either a
+                       directory written by `altanalyze3 snaf-build-surface-db` or a bare gene
+                       table with an Ensembl-gene-ID column. It REPLACES the built-in
+                       Alt91_db surfaceome (both the whitelist and the reference protein
+                       sequences). Genes it lists with no reference protein are excluded and
+                       counted, because SNAF-B cannot score a gene it cannot compare against.
 
     Examples::
 
         from snaf import surface
         surface.initialize(db_dir=db_dir)
+        surface.initialize(db_dir=db_dir, surface_db='/path/to/SURFY_surface_db')
 
     '''
     global df_exonlist
@@ -115,13 +130,32 @@ def initialize(db_dir, use_foundation='auto', foundation_path=None):
     global df_membrane_proteins
     global dict_uni_fa
     global df_topology
+    global surface_db_info
     print('{} {} starting surface antigen initialization'.format(date.today(),datetime.now().strftime('%H:%M:%S')))
     alt = os.path.join(db_dir, 'Alt91_db')
     fasta_path = os.path.join(alt, 'Hs_gene-seq-2000_flank.fa')
+    builtin_fa_path = os.path.join(alt, 'uniprot_isoform_enhance.fasta')
     # Small references -- ALWAYS loaded FULL: SNAF-B can reference ANY gene (trans-splicing
     # fusion partners), so these must not be restricted to membrane genes.
-    df_membrane_proteins = pd.read_csv(os.path.join(alt, 'human_membrane_proteins_acc2ens.txt'), sep='\t', index_col=0)
-    dict_uni_fa = read_uniprot_seq(os.path.join(alt, 'uniprot_isoform_enhance.fasta'))
+    surface_db_info = None
+    if surface_db is None:
+        df_membrane_proteins = pd.read_csv(os.path.join(alt, 'human_membrane_proteins_acc2ens.txt'), sep='\t', index_col=0)
+        dict_uni_fa = read_uniprot_seq(builtin_fa_path)
+    else:
+        from .surface_db import load_surface_db
+        surface_db_info = load_surface_db(surface_db, builtin_fasta=builtin_fa_path)
+        dict_uni_fa = {g: dict(v) for g, v in surface_db_info['fasta'].items()}
+        # is_membrane_protein reads df_membrane_proteins['Ens']; give it exactly the genes
+        # the custom database supports, so both gates agree.
+        df_membrane_proteins = pd.DataFrame(
+            {'Ens': sorted(surface_db_info['genes'])},
+            index=['{}_surface_db'.format(g) for g in sorted(surface_db_info['genes'])])
+        n_builtin = len(read_uniprot_seq(builtin_fa_path))
+        print('{} {} SNAF-B surface database: {} | usable genes {} (built-in was {}) | '
+              'reference sequences {} | stats {}'.format(
+                  date.today(), datetime.now().strftime('%H:%M:%S'), surface_db_info['path'],
+                  len(surface_db_info['genes']), n_builtin,
+                  surface_db_info['stats'].get('reference_sequences'), surface_db_info['stats']))
     df_topology = pd.read_csv(os.path.join(alt, 'ENSP_topology.txt'), sep='\t')
     df_exonlist = pd.read_csv(os.path.join(alt, 'mRNA-ExonIDs.txt'), sep='\t', header=None, names=['EnsGID', 'EnsTID', 'EnsPID', 'Exons'])
     dict_exonCoords = exonCoords_to_dict(os.path.join(alt, 'Hs_Ensembl_exon_add_col.txt'))
@@ -129,7 +163,8 @@ def initialize(db_dir, use_foundation='auto', foundation_path=None):
     # The 2 GB gene FASTA (dict_fa) is the only big reference: serve the membrane subset from the
     # foundation and lazily full-load on a miss (fusion partners). No foundation -> full load +
     # build it for next time.
-    fpath = foundation_path or _foundation_path(db_dir)
+    _sig = surface_db_info['signature'] if surface_db_info is not None else None
+    fpath = foundation_path or _foundation_path(db_dir, signature=_sig)
     if use_foundation is not False and os.path.exists(fpath):
         try:
             with open(fpath, 'rb') as f:
@@ -144,7 +179,8 @@ def initialize(db_dir, use_foundation='auto', foundation_path=None):
     dict_fa = fasta_to_dict(fasta_path)   # full 2GB load
     if use_foundation is not False:
         try:
-            build_membrane_foundation(db_dir, fpath, _fa=dict_fa)
+            build_membrane_foundation(db_dir, fpath, _fa=dict_fa,
+                                      membrane=(set(dict_uni_fa) if surface_db_info is not None else None))
             print('SNAF-B: cached membrane FASTA foundation for future runs -> {}'.format(fpath))
         except Exception as e:
             logger.warning('could not cache membrane foundation (%s)', e)
@@ -866,13 +902,119 @@ def _gtf_index_path(gtf):
     return str(gtf) + '.snaf_gtf_index.pkl'
 
 
+_GTF_ID_RE = re.compile(r'transcript_id[ =]"?([^";]+)"?')
+
+
+def _gtf_open(gtf):
+    '''Open a GTF/GFF that may be gzipped. Long-read catalogs are routinely distributed as
+    .gz (e.g. combined.gff.gz), and the original parser only handled plain text.'''
+    if str(gtf).endswith('.gz'):
+        import gzip as _gz
+        return _gz.open(gtf, 'rt')
+    return open(gtf, 'r')
+
+
+def _gtf_layout(gtf, probe=2000):
+    '''Which line comes first within a transcript block: the `transcript` line or its `exon`
+    lines? Returns 'transcript_first' (the classic GTF layout the streaming parser needs) or
+    'exon_first'. Files with no `transcript` line at all also return 'exon_first'.'''
+    with _gtf_open(gtf) as f:
+        for i, line in enumerate(f):
+            if i >= probe:
+                break
+            if not line.strip() or line.startswith('#'):
+                continue
+            parts = line.rstrip('\n').split('\t')
+            if len(parts) < 9:
+                continue
+            if parts[2] == 'transcript':
+                return 'transcript_first'
+            if parts[2] == 'exon':
+                return 'exon_first'
+    return 'exon_first'
+
+
+def _parse_gtf_grouped(gtf):
+    '''Layout-independent parser: group features by (chrom, strand, transcript_id) instead of
+    relying on `transcript` preceding its exons. Needed for long-read GFFs that emit the exons
+    first (combined.gff.gz) -- the streaming parser below raises UnboundLocalError on those.
+    Output has the same shape as _parse_gtf_raw: {chrom:{strand:[[attrs,(s,e),...],...]}},
+    transcripts in first-appearance order, exons in file order.'''
+    order = []
+    blocks = {}
+    n_no_id = 0
+    with _gtf_open(gtf) as f:
+        for line in f:
+            if not line.strip() or line.startswith('#'):
+                continue
+            parts = line.rstrip('\n').split('\t')
+            if len(parts) < 9:
+                continue
+            chrom, _source, typ, start, end, _score, strand, _phase, attrs = parts[:9]
+            if typ not in ('transcript', 'exon'):
+                continue
+            m = _GTF_ID_RE.search(attrs)
+            if m is None:
+                n_no_id += 1
+                continue
+            key = (chrom, strand, m.group(1))
+            blk = blocks.get(key)
+            if blk is None:
+                blk = blocks[key] = {'attrs': attrs, 'exons': []}
+                order.append(key)
+            if typ == 'transcript':
+                blk['attrs'] = attrs          # prefer the transcript line's attributes
+            else:
+                blk['exons'].append((int(start), int(end)))
+    if n_no_id:
+        logger.warning('SNAF-B GTF %s: %d feature lines carried no transcript_id and were '
+                       'skipped', gtf, n_no_id)
+    gtf_dict = {}
+    n_tx = n_resorted = 0
+    n_resorted_minus = 0
+    for chrom, strand, _tid in order:
+        blk = blocks[(chrom, strand, _tid)]
+        exons = blk['exons']
+        if not exons:
+            continue
+        starts = [e[0] for e in exons]
+        if starts != sorted(starts):
+            # is_support_by_est_or_long_read reads transcript[-1][-1] as the transcript end
+            # and walks the exons in stored order, so exons MUST be ascending on both strands
+            # -- which is what a SQANTI GTF gives. Catalogs that merge Ensembl records store
+            # minus-strand exons in transcription order (descending), so put them back in
+            # ascending order here and report how many needed it.
+            exons = sorted(exons)
+            n_resorted += 1
+            if strand == '-':
+                n_resorted_minus += 1
+        gtf_dict.setdefault(chrom, {'+': [], '-': []}).setdefault(strand, []).append(
+            [blk['attrs']] + exons)
+        n_tx += 1
+    if n_resorted:
+        logger.warning('SNAF-B GTF %s: %d / %d transcripts (%d on the minus strand) stored '
+                       'their exons out of ascending genomic order and were re-sorted '
+                       'ascending, the order the long-read support query requires',
+                       gtf, n_resorted, n_tx, n_resorted_minus)
+    logger.info('SNAF-B GTF %s parsed (grouped layout): %d transcripts over %d contigs',
+                gtf, n_tx, len(gtf_dict))
+    return gtf_dict
+
+
 def _parse_gtf_raw(gtf):
     '''Parse a GTF into {chrom:{'+':[transcript,...],'-':[...]}} where each transcript is
-    [attrs,(start,end),(start,end),...]. Identical structure/order to the original parser.'''
+    [attrs,(start,end),(start,end),...]. Identical structure/order to the original parser.
+
+    Dispatches to _parse_gtf_grouped when the file does not use the classic
+    transcript-then-exons layout; the streaming path below is byte-for-byte the original.'''
+    if _gtf_layout(gtf) == 'exon_first':
+        return _parse_gtf_grouped(gtf)
     gtf_dict = {}
-    with open(gtf,'r') as f:
+    with _gtf_open(gtf) as f:
         transcript = -1  # index of the last-processed transcript
         for line in f:
+            if not line.strip() or line.startswith('#'):
+                continue
             if transcript > -1:
                 lchrom, lsource, ltyp, lstart, lend, lscore, lstrand, lphase, lattrs = chrom, source, typ, start, end, score, strand, phase, attrs
             chrom, source, typ, start, end, score, strand, phase, attrs = line.rstrip('\n').split('\t')
