@@ -414,6 +414,9 @@ class JunctionCountMatrixQuery():
                     cs = _ag.obs
             except Exception:
                 pass
+        if mbp is not None and (cs is None or 'bayests_percentile' not in getattr(cs, 'columns', [])):
+            print('WARNING: --max_bayests_percentile={} was requested but NO BayesTS scores are '
+                  'available for this control; the filter is NOT applied.'.format(mbp))
         if cs is not None and mbp is not None and len(self.valid) > 0 and 'bayests_percentile' in cs.columns:
             pct = cs['bayests_percentile'].reindex(self.valid).values
             keepmask = ~np.isfinite(pct) | (pct <= mbp)
@@ -442,12 +445,17 @@ class JunctionCountMatrixQuery():
 
 
     @staticmethod
-    def get_membrane_tuples(df,return_jcmq=False,**kwargs):
+    def get_membrane_tuples(df,return_jcmq=False,allow_trans_splicing=False,
+                            trans_splicing_gtf=None,**kwargs):
         '''
         this function is used by SurfaceAntigen pipeline to filter out splicing evnets that are not tumor-specific and also compute
         useful informations for each membrane protein.
 
         :param df: pandas dataframe, the junction count matrix
+        :param allow_trans_splicing: bool, also keep a trans-spliced junction whose PARTNER
+            gene is the surface gene, provided trans_splicing_gtf contains a full-length
+            isoform joining exactly those two sites. Default False = original behaviour.
+        :param trans_splicing_gtf: the long-read/EST GTF supplying that evidence.
         :param return_jcmq: bool, also return the JunctionCountMatrixQuery that was built here.
             SNAF-B needs its cond_df to write its own frequency table when no SNAF-T table is
             supplied; returning the existing object avoids sifting the cohort a second time.
@@ -470,7 +478,9 @@ class JunctionCountMatrixQuery():
         jcmq = JunctionCountMatrixQuery(junction_count_matrix=df,**kwargs)
         print(jcmq)
         neojunctions = jcmq.valid
-        membrane_uid = filter_to_membrane_protein(neojunctions)
+        membrane_uid = filter_to_membrane_protein(
+            neojunctions, allow_trans_splicing=allow_trans_splicing,
+            gtf=trans_splicing_gtf)
         membrane_tuples = []
         for uid in membrane_uid:
             mean_gtex, df_gtex = tumor_specificity(uid,method='mean',return_df=True)
@@ -1784,9 +1794,38 @@ def enhance_frequency_table(df,remove_quote=True,save=True,outdir='',name=None):
     df = add_tumor_specificity_frequency_table(df,'mean',False)
     print('adding tumor specificity MLE score')
     df = add_tumor_specificity_frequency_table(df,'mle',False)
+    print('adding BayesTS tumor specificity (bundled GTEx + Tabula Sapiens, precomputed)')
+    df = add_bayests_frequency_table(df)
     if save:
         df.to_csv(os.path.join(outdir,name),sep='\t')
     return df
+
+def add_bayests_frequency_table(df):
+    """Add BayesTS sigma and percentile to a frequency table, from the bundled references.
+
+    These are read from the precomputed GTEx and Tabula Sapiens tables that ship with SNAF
+    -- nothing is recomputed. Lower sigma / lower percentile == more tumor-specific. A
+    junction absent from both references gets NaN, which means "never seen in these normal
+    references", i.e. maximally tumor-specific; it is NOT zero and must not be read as one.
+
+    :param df: frequency table whose index is 'uid,uid'
+    :return df: same table with 'bayests_sigma' and 'bayests_percentile' appended
+    """
+    from .control_stats import load_bundled_bayests
+    uid_list = [item.split(',')[1] for item in df.index]
+    bt = load_bundled_bayests(uids=set(uid_list))
+    if bt is None or bt.shape[0] == 0:
+        logger.warning('no bundled BayesTS reference available; bayests columns left empty')
+        df['bayests_sigma'] = np.nan
+        df['bayests_percentile'] = np.nan
+        return df
+    df['bayests_sigma'] = bt['bayests_sigma'].reindex(uid_list).values
+    df['bayests_percentile'] = bt['bayests_percentile'].reindex(uid_list).values
+    n = int(np.isfinite(df['bayests_percentile'].values).sum())
+    print('  BayesTS scored {} / {} junctions ({} absent from both references, kept as '
+          'maximally tumor-specific)'.format(n, df.shape[0], df.shape[0] - n))
+    return df
+
 
 def add_coord_frequency_table(df,remove_quote=True):
     '''

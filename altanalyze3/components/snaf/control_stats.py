@@ -40,6 +40,117 @@ def default_stats_path(control_h5ad):
     return base + '.snaf_stats.tsv.gz'
 
 
+# --------------------------------------------------------------------------- bundled BayesTS
+# BayesTS is expensive (hours of pyro SVI) and its answer depends only on the REFERENCE
+# cohort, never on the tumour cohort being analysed. So the finished per-junction scores for
+# the two standard normal references ship with SNAF and are loaded directly -- SNAF must
+# never recompute them. Built by BayesTS/build_bundled_bayests.py; see BayesTS/README.md.
+BAYESTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'BayesTS')
+
+BUNDLED_BAYESTS = {
+    'gtex':          'GTEx_BayesTS.tsv.gz',            # 2,476,734 junctions, 2,629 samples / 51 tissues
+    'tabulasapiens': 'TabulaSapiens_BayesTS.tsv.gz',   # 2,852,713 junctions, 762 pseudobulks / 112 cell types
+}
+
+# Both references are used by default. A junction must look tumour-specific in EVERY
+# reference to survive, so the scores are combined by taking the MAXIMUM percentile: broad
+# expression in either normal cohort disqualifies it. That is the conservative direction --
+# it can only reject candidates, never invent them.
+DEFAULT_BAYESTS_REFERENCES = ('gtex', 'tabulasapiens')
+
+
+def bundled_bayests_path(name):
+    """Absolute path of a bundled BayesTS table, or None when it is not installed."""
+    fn = BUNDLED_BAYESTS.get(str(name).lower())
+    if fn is None:
+        raise KeyError('unknown BayesTS reference {!r}; known: {}'.format(
+            name, sorted(BUNDLED_BAYESTS)))
+    p = os.path.join(BAYESTS_DIR, fn)
+    return p if os.path.exists(p) else None
+
+
+def load_bundled_bayests_per_reference(references=DEFAULT_BAYESTS_REFERENCES, uids=None):
+    """{reference_name: DataFrame(bayests_sigma, bayests_percentile)} -- kept SEPARATE.
+
+    Use this, not load_bundled_bayests, whenever the answer will be interpreted. GTEx and
+    Tabula Sapiens measure different normal populations: a junction silent in GTEx bulk
+    tissue but expressed across Tabula Sapiens cell types is a different candidate from the
+    reverse, and collapsing them to one number destroys exactly that distinction.
+    """
+    out = OrderedDict()
+    want = set(uids) if uids is not None else None
+    for name in references:
+        try:
+            path = bundled_bayests_path(name)
+        except KeyError:
+            logger.warning('unknown BayesTS reference %r; skipped', name)
+            continue
+        if path is None:
+            logger.warning('bundled BayesTS reference %r is not installed under %s; skipped',
+                           name, BAYESTS_DIR)
+            continue
+        df = pd.read_csv(path, sep='\t', index_col=0)
+        df = df.loc[~df.index.duplicated()]
+        if want is not None:
+            df = df.loc[df.index.intersection(want)]
+        logger.warning('BayesTS reference %s: %d junctions loaded from %s (no recomputation)',
+                       name, df.shape[0], os.path.basename(path))
+        out[name] = df
+    return out
+
+
+def load_bundled_bayests(references=DEFAULT_BAYESTS_REFERENCES, uids=None):
+    """Per-junction BayesTS sigma/percentile from the bundled references.
+
+    :param references: which bundled references to combine.
+    :param uids: restrict to these junction UIDs (the cohort's tested set) so only the
+        intersecting rows are held -- the tables are ~2.5-2.9M rows each.
+    NOTE: this COMBINES references into one number (max percentile) and is only a
+    convenience for a single go/no-go filter. For anything that will be interpreted, use
+    load_bundled_bayests_per_reference so each normal cohort stays visible.
+
+    :return: DataFrame indexed by UID with 'bayests_sigma' and 'bayests_percentile',
+        or None when no bundled table is installed. A junction present in only some
+        references is scored on those; a junction absent from all is simply not in the
+        result, and callers must treat "absent" as maximally tumour-specific (never as 0).
+    """
+    frames = []
+    used = []
+    want = set(uids) if uids is not None else None
+    for name in references:
+        try:
+            path = bundled_bayests_path(name)
+        except KeyError:
+            logger.warning('unknown BayesTS reference %r; skipped', name)
+            continue
+        if path is None:
+            logger.warning('bundled BayesTS reference %r is not installed under %s; skipped',
+                           name, BAYESTS_DIR)
+            continue
+        df = pd.read_csv(path, sep='\t', index_col=0)
+        df = df.loc[~df.index.duplicated()]
+        if want is not None:
+            df = df.loc[df.index.intersection(want)]
+        logger.warning('BayesTS reference %s: %d junctions loaded from %s (no recomputation)',
+                       name, df.shape[0], os.path.basename(path))
+        frames.append(df)
+        used.append(name)
+    if not frames:
+        return None
+    if len(frames) == 1:
+        out = frames[0]
+    else:
+        # maximum percentile across references = least tumour-specific verdict wins
+        out = pd.concat(frames, axis=1, keys=used)
+        pct = out.xs('bayests_percentile', axis=1, level=1).max(axis=1, skipna=True)
+        sig = out.xs('bayests_sigma', axis=1, level=1).max(axis=1, skipna=True)
+        out = pd.DataFrame({'bayests_sigma': sig, 'bayests_percentile': pct})
+    logger.warning('BayesTS combined over %s: %d junctions (percentile = max across '
+                   'references, so broad expression in ANY normal cohort disqualifies)',
+                   '+'.join(used), out.shape[0])
+    return out
+
+
 def load_control_stats(path):
     """Load a stats table (indexed by junction UID); returns None if absent."""
     if path is None or not os.path.exists(path):

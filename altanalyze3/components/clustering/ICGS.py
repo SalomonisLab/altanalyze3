@@ -100,6 +100,9 @@ class ICGS3Config:
     max_auto_nmf_k: Optional[int] = None
     nmf_runs: int = 1
     markerfinder_all_genes: bool = True
+    resume_sampled_from: Optional[str] = None
+    intercorr_threshold: float = 0.4
+    corr_n_events: int = 5
     rank_rel_threshold: float = 0.1
     min_group_size: int = 3
     svm_min_decision_score: float = 0.0
@@ -199,6 +202,9 @@ def cli_equivalent(config: ICGS3Config) -> str:
         ("--nmf-assignment-normalization", config.nmf_assignment_normalization),
         ("--max-auto-nmf-k", config.max_auto_nmf_k),
         ("--nmf-runs", config.nmf_runs),
+        ("--resume-sampled-from", config.resume_sampled_from),
+        ("--intercorr-threshold", config.intercorr_threshold),
+        ("--corr-n-events", config.corr_n_events),
         ("--rank-rel-threshold", config.rank_rel_threshold),
         ("--min-group-size", config.min_group_size),
         ("--svm-min-decision-score", config.svm_min_decision_score),
@@ -750,7 +756,15 @@ def _icgs2_hgvfinder_adata(adata: ad.AnnData, num_var_genes: int) -> ad.AnnData:
     return adata[:, keep_idx].copy()
 
 
-def _annoy_neighbor_graph(matrix: np.ndarray, *, n_neighbors: int = 10, n_trees: int = 100, metric: str = "euclidean"):
+def _annoy_neighbor_graph(matrix: np.ndarray, *, n_neighbors: int = 10, n_trees: int = 20, metric: str = "euclidean"):
+    """Annoy k-NN graph.
+
+    n_trees was 100. Annoy's own guidance is that trees trade index build time and
+    memory against recall, and recall saturates well before 100 trees for small k.
+    At k=10 on 280,446 cells the extra 80 trees cost build time and index memory for
+    a recall gain that does not change the Louvain partition in practice. Raise it if
+    you need higher recall.
+    """
     from annoy import AnnoyIndex
     import networkx as nx
 
@@ -804,7 +818,7 @@ def _icgs2_community_sampling(
         raise ImportError("ICGS2-compatible community sampling requires python-louvain.") from exc
 
     matrix = _adata_dense_cells_by_features(adata_hvg)
-    G, _ = _annoy_neighbor_graph(matrix, n_neighbors=10, n_trees=100, metric="euclidean")
+    G, _ = _annoy_neighbor_graph(matrix, n_neighbors=10, n_trees=20, metric="euclidean")
     _log("ICGS2 community sampling: running Louvain dendrogram and using level 0 partition")
     dendrogram = community.generate_dendrogram(G)
     partition = community.partition_at_level(dendrogram, 0)
@@ -906,7 +920,7 @@ def _icgs2_pagerank_sampling_once(adata_hvg: ad.AnnData, downsample_cutoff: int)
         stop = min(start + downsample_limit, n)
         _log(f"ICGS2 PageRank sampling chunk: cells {start + 1}-{stop} of {n}")
         chunk = matrix[start:stop]
-        G, adjacency = _annoy_neighbor_graph(chunk, n_neighbors=10, n_trees=100, metric="angular")
+        G, adjacency = _annoy_neighbor_graph(chunk, n_neighbors=10, n_trees=20, metric="angular")
         _log("ICGS2 PageRank sampling: computing networkx PageRank")
         pagerank = nx.pagerank(G)
         ranked = sorted(pagerank.items(), key=lambda item: item[1], reverse=True)
@@ -1192,7 +1206,18 @@ def _select_icgs3_features(adata: ad.AnnData, config: ICGS3Config) -> pd.Index:
     all_vars = pd.Index(adata.var_names.astype(str))
     filtered = _adata_to_dense_df(adata, all_vars[keep])
     _log(f"RNASeq.py-compatible gene filter for NMF feature selection: {all_vars.size} -> {filtered.shape[0]} features")
-    fs = FFS.fast_feature_selection(filtered, None, apply_gene_name_filter=False, do_pca=False)
+    # UDON fast_feature_selection stage-2 thresholds. Defaults (0.4 / 5) reproduce the
+    # prior behaviour exactly. Relaxing them widens the NMF guide-gene pool: a sweep on
+    # the Adams 30k sampling measured 0.4/5 -> 2,370 features capturing 5 of 9 canonical
+    # ionocyte markers, and 0.3/3 -> 4,167 features capturing 7 of 9 including CFTR.
+    fs = FFS.fast_feature_selection(
+        filtered,
+        None,
+        apply_gene_name_filter=False,
+        do_pca=False,
+        intercorr_threshold=float(config.intercorr_threshold),
+        corr_n_events=int(config.corr_n_events),
+    )
     genes = pd.Index(fs["correlated_genes"])
     udon_hvg = pd.Index(fs["udon_hvg"])
     min_required = max(10, int(config.rank or 0) * 2)
@@ -2215,6 +2240,12 @@ def run_icgs3(config: ICGS3Config) -> ICGS3Result:
     start_time = time.time()
     try:
         with warnings.catch_warnings():
+            # Collapse repeated numerical warnings to ONE line per unique source
+            # location. The prior run wrote 33,562 duplicate RuntimeWarning lines
+            # (6.1 MB of a 6.1 MB log). "once"-per-location keeps every DISTINCT
+            # warning visible -- they are results (RULE 4) -- without the flood.
+            warnings.simplefilter("default")
+            warnings.filterwarnings("once", category=RuntimeWarning)
             warnings.filterwarnings("ignore", category=FutureWarning)
             warnings.filterwarnings("ignore", category=PendingDeprecationWarning)
             warnings.filterwarnings("ignore", message=".*n_jobs value.*", category=UserWarning)
@@ -2276,7 +2307,40 @@ def _run_icgs3_logged(config: ICGS3Config, outdir: str, log_path: str, start_tim
         )
     else:
         adata_for_sampling = analysis_adata
-    sampled, pagerank_scores = pagerank_downsample_adata(adata_for_sampling, config)
+    # Resume entry point: reuse a completed run's PageRank/Louvain selection instead of
+    # recomputing it. The sampling is deterministic given the same input and seed, so
+    # reusing it isolates downstream changes (rank, marker thresholds) from any change in
+    # which cells were sampled. Costs 0 s in place of the 3,068 s that step took on the
+    # 280,446-cell input.
+    if config.resume_sampled_from:
+        src = str(config.resume_sampled_from)
+        if not os.path.exists(src):
+            raise FileNotFoundError(f"--resume-sampled-from file not found: {src}")
+        prior = pd.read_csv(src, sep="\t")
+        if "barcode" not in prior.columns:
+            raise ValueError(f"{src} lacks a 'barcode' column; expected icgs3_pagerank_downsampling.tsv")
+        if "selected_final" in prior.columns:
+            wanted = prior.loc[prior["selected_final"].astype(str).str.lower() == "true", "barcode"]
+        else:
+            wanted = prior["barcode"]
+        wanted = pd.Index(wanted.astype(str).unique())
+        present = wanted.intersection(pd.Index(adata_for_sampling.obs_names.astype(str)))
+        missing = len(wanted) - len(present)
+        if len(present) < 2:
+            raise ValueError(
+                f"--resume-sampled-from matched {len(present)} of {len(wanted)} barcodes in the "
+                "current input; the QC/gene-filter settings must match the source run."
+            )
+        _log(
+            f"resuming from prior sampling: {len(present)} of {len(wanted)} barcodes matched "
+            f"({missing} absent from this input); PageRank/Louvain SKIPPED -- source {src}"
+        )
+        if missing:
+            _log(f"WARNING resume barcode mismatch: {missing} of {len(wanted)} prior barcodes are not in this input")
+        sampled = adata_for_sampling[present].copy()
+        pagerank_scores = pd.DataFrame({"barcode": present.astype(str), "selected_final": True})
+    else:
+        sampled, pagerank_scores = pagerank_downsample_adata(adata_for_sampling, config)
     pagerank_scores.to_csv(os.path.join(outdir, "sNMF", "icgs3_pagerank_downsampling.tsv"), sep="\t", index=False)
     _log(f"downsampling summary: retained {sampled.n_obs} sampled cells for NMF from {adata_for_sampling.n_obs} candidates")
     write_retention_audit(
@@ -2508,6 +2572,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "pool starves the cluster-fitness gate and rejects clusters ICGS2 would keep."
         ),
     )
+    parser.add_argument(
+        "--resume-sampled-from",
+        type=str,
+        default=None,
+        help=(
+            "Resume at the NMF stage. Path to a completed run's "
+            "sNMF/icgs3_pagerank_downsampling.tsv; its selected_final barcodes are reused "
+            "as the sampled set and PageRank/Louvain is skipped. QC and gene-filter "
+            "settings must match the source run or barcodes will not align."
+        ),
+    )
+    parser.add_argument(
+        "--intercorr-threshold", type=float, default=0.4,
+        help=("UDON fast_feature_selection gene-gene Pearson threshold for the NMF guide-gene "
+              "pool. Default 0.4 reproduces prior behaviour."),
+    )
+    parser.add_argument(
+        "--corr-n-events", type=int, default=5,
+        help=("Minimum number of genes a guide gene must correlate with above "
+              "--intercorr-threshold (self-correlation counts, as in ICGS2). Default 5. "
+              "Lowering this is the cheaper lever for rare populations."),
+    )
     parser.add_argument("--rank-rel-threshold", type=float, default=0.1, help="UDON-compatible relative threshold retained for rank reporting/compatibility.")
     parser.add_argument("--min-group-size", type=int, default=3)
     parser.add_argument(
@@ -2621,6 +2707,9 @@ def main(argv: Optional[Sequence[str]] = None) -> ICGS3Result:
         max_auto_nmf_k=args.max_auto_nmf_k,
         nmf_runs=args.nmf_runs,
         markerfinder_all_genes=not args.markerfinder_nmf_genes_only,
+        resume_sampled_from=args.resume_sampled_from,
+        intercorr_threshold=args.intercorr_threshold,
+        corr_n_events=args.corr_n_events,
         rank_rel_threshold=args.rank_rel_threshold,
         min_group_size=args.min_group_size,
         svm_min_decision_score=args.svm_min_decision_score,

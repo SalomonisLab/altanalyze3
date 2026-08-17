@@ -9,8 +9,15 @@ from numpy import linalg as LA
 def determine_nmf_ranks(df, small_feature=False, rel_threshold=0.1, max_rank=30):
     # "To estimate the rank of the matrix (i.e. clusters) for SNMF, the ICGS Guide3 matrix is z-score normalized and its eigenvalues are calculated."
 
-    # Convert X to a numpy array
-    X = np.array(df)
+    # Convert X to a numpy array.
+    # Cast to float64 BEFORE scaling. ICGS3 hands this a float32 matrix, and sklearn's
+    # scale() then warns "Dataset may contain too large values ... you may need to
+    # prescale" and "standard deviation is probably very close to 0" -- both are float32
+    # precision losses in the variance pass, not properties of the data. float64 is the
+    # accumulation precision scale() assumes; this does not alter the intended math, and
+    # zero-variance features are deliberately NOT dropped because g feeds the muTW /
+    # sigmaTW boundary and removing them would change k.
+    X = np.asarray(df, dtype=np.float64)
     g = float(X.shape[0])  # Number of rows/genes
     c = float(X.shape[1])  # Number of columns/pseudobulks
     print(g)

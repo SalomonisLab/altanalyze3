@@ -1060,6 +1060,7 @@ def build_gtf_index(gtf, index_path=None, force=False):
 # per-(chrom,strand) sorted transcript-start arrays, keyed by abspath -> used by the support
 # query to bisect to the candidate range instead of scanning from index 0.
 _GTF_STARTS_CACHE = {}
+gtf_dict = None     # parsed validation GTF; set by run()/prewarm_support_cache/filter_to_membrane_protein
 gtf_starts = None   # module global set alongside gtf_dict; enables the bisect fast-path below
 
 
@@ -1237,12 +1238,33 @@ def report_candidates(pickle_path,candidates_path,validation_path,freq_df_path,m
         freq_df['uid'] = [item.split(',')[1] for item in freq_df.index]
         uid_2_ts_mean = pd.Series(index=freq_df['uid'].values,data=freq_df['tumor_specificity_mean'].values).to_dict()
         uid_2_ts_mle = pd.Series(index=freq_df['uid'].values,data=freq_df['tumor_specificity_mle'].values).to_dict()
+        # BayesTS comes from the bundled precomputed references via the frequency table; a
+        # junction absent from every reference has no score, which means "never seen in normal"
+        # (maximally tumor-specific) and is reported as blank, never as 0.
+        if 'bayests_sigma' in freq_df.columns:
+            uid_2_bt_sigma = pd.Series(index=freq_df['uid'].values,data=freq_df['bayests_sigma'].values).to_dict()
+            uid_2_bt_pct = pd.Series(index=freq_df['uid'].values,data=freq_df['bayests_percentile'].values).to_dict()
+        else:
+            logger.warning('frequency table %s has no BayesTS columns; candidate reports will '
+                           'leave bayests_sigma/bayests_percentile blank', freq_df_path)
+            uid_2_bt_sigma = {}; uid_2_bt_pct = {}
+
+        def _bt(uid):
+            import math as _m
+            out = []
+            for d in (uid_2_bt_sigma, uid_2_bt_pct):
+                v = d.get(uid)
+                try:
+                    out.append('' if v is None or (isinstance(v, float) and _m.isnan(v)) else str(v))
+                except TypeError:
+                    out.append('')
+            return out
         collect_uid = _run_dash_prioritizer_return_events(candidates)
         collect_gene = _run_dash_prioritizer_return_gene(candidates)
         candidate_count = 0
         if mode == 'short_read':
             with open(os.path.join(outdir,name),'w') as f3, open(validation_path,'r') as f4:
-                f3.write('Candidate_id\tNeoJunction\tmode\tevidence\tmRNA_sequence\tpeptide_sequence\tgene_symbol\tcohort_frequency\ttumor_specificity_mean\ttumor_specificity_mle\tvalidation\n')
+                f3.write('Candidate_id\tNeoJunction\tmode\tevidence\tmRNA_sequence\tpeptide_sequence\tgene_symbol\tcohort_frequency\ttumor_specificity_mean\ttumor_specificity_mle\tbayests_sigma\tbayests_percentile\tvalidation\n')
                 lines = f4.readlines()
                 for uid,gene,line in tqdm(zip(collect_uid,collect_gene,lines),total=len(collect_uid)):
                     ts_mean = uid_2_ts_mean[uid]
@@ -1259,11 +1281,12 @@ def report_candidates(pickle_path,candidates_path,validation_path,freq_df_path,m
                         orfp_sequence = sa.orfp[value_index]
                         evidence = df_certain.loc[df_certain['index']==value_index,:]['EnsTID'].values[0]
                         candidate_count += 1
-                        stream = 'candidate{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(candidate_count,uid,mode,evidence,orft_sequence,orfp_sequence,gene,sa.freq,ts_mean,ts_mle,line.rstrip('\n'))
+                        _bts, _btp = _bt(uid)
+                        stream = 'candidate{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(candidate_count,uid,mode,evidence,orft_sequence,orfp_sequence,gene,sa.freq,ts_mean,ts_mle,_bts,_btp,line.rstrip('\n'))
                         f3.write(stream)
         elif mode == 'long_read':
             with open(os.path.join(outdir,name),'w') as f3, open(validation_path,'r') as f4:
-                f3.write('Candidate_id\tNeoJunction\tmode\tevidence\tmRNA_sequence\tpeptide_sequence\tgene_symbol\tcohort_frequency\ttumor_specificity_mean\ttumor_specificity_mle\tvalidation\n')
+                f3.write('Candidate_id\tNeoJunction\tmode\tevidence\tmRNA_sequence\tpeptide_sequence\tgene_symbol\tcohort_frequency\ttumor_specificity_mean\ttumor_specificity_mle\tbayests_sigma\tbayests_percentile\tvalidation\n')
                 lines = f4.readlines()
                 for uid,gene,line in tqdm(zip(collect_uid,collect_gene,lines),total=len(collect_uid)):
                     ts_mean = uid_2_ts_mean[uid]
@@ -1276,7 +1299,8 @@ def report_candidates(pickle_path,candidates_path,validation_path,freq_df_path,m
                         orfp_sequence = sa.orfp[value_index]
                         evidence = sa.full_length_attrs[value_index]
                         candidate_count += 1
-                        stream = 'candidate{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(candidate_count,uid,mode,evidence,orft_sequence,orfp_sequence,gene,sa.freq,ts_mean,ts_mle,line.rstrip('\n'))
+                        _bts, _btp = _bt(uid)
+                        stream = 'candidate{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(candidate_count,uid,mode,evidence,orft_sequence,orfp_sequence,gene,sa.freq,ts_mean,ts_mle,_bts,_btp,line.rstrip('\n'))
                         f3.write(stream)        
 
 
@@ -1439,7 +1463,7 @@ def _eval_sa_for_generate(sa, strigency, style, overlap_extracellular):
     inline loop body (is_support is the expensive GTF-validation step being parallelized).'''
     if len(sa.comments) > 0:
         return ('further', str(sa))
-    ensg = sa.uid.split(':')[0]
+    ensg = reference_gene(sa.uid)
     ref_seq = list(dict_uni_fa[ensg].items())[0][1]
     valid_indices = []
     sends = []
@@ -1621,13 +1645,140 @@ def get_exon_sequence(exon,ensgid):
     attrs = dict_exonCoords[ensgid][exon]
     return query_from_dict_fa(attrs[2],attrs[3],ensgid,attrs[1])
 
-def filter_to_membrane_protein(lis):
-    filtered_lis = []
+_ENSG_RE = re.compile(r'ENSG\d+')
+
+
+def uid_genes(uid):
+    """Every Ensembl gene named by a junction UID, in order.
+
+    A trans-spliced junction names TWO genes, e.g.
+    ``ENSG00000113209:E2.1_141137356-ENSG00000113211:E1.4_141152066``. Everything that
+    reads ``uid.split(':')[0]`` sees only the first."""
+    return _ENSG_RE.findall(uid)
+
+
+def reference_gene(uid):
+    """The gene whose reference protein SNAF-B should compare this junction against:
+    the first gene of the UID that actually has one. For a normal junction that is the
+    only gene, so behaviour is unchanged; for a trans-spliced junction admitted on its
+    PARTNER, it is the partner -- otherwise the reference lookup would KeyError on a
+    first gene that has no surface protein."""
+    genes = uid_genes(uid)
+    for g in genes:
+        if g in dict_uni_fa:
+            return g
+    return genes[0] if genes else uid.split(':')[0]
+
+
+def junction_has_transcript_support(uid):
+    """True iff a transcript in the loaded validation GTF contains this junction as an
+    adjacent exon-exon boundary -- i.e. a full-length isoform matching the junction exists.
+
+    This is the geometry half of is_support_by_est_or_long_read, without the ORF identity
+    test, so it answers "does a full-length isoform join these two sites" and nothing more.
+    Requires gtf_dict to be loaded.
+
+    LIMITATION: gtf_dict is keyed by (chromosome, strand), so a trans-spliced junction whose
+    partner sits on another chromosome or the opposite strand can never be matched here and
+    returns False. Same-locus read-through events, which are the common case, are matched.
+    """
+    if globals().get('gtf_dict') is None:
+        return False
+    coord = uid_to_coord(uid)
+    if 'unknown' in coord:
+        return False
+    try:
+        start_coord, end_coord = coord.split(':')[1].split('(')[0].split('-')
+        start_coord, end_coord = int(start_coord), int(end_coord)
+    except (ValueError, IndexError):
+        return False
+    ensg = uid.split(':')[0]
+    values = dict_exonCoords.get(ensg)
+    if not values:
+        return False
+    attrs = values[list(values.keys())[0]]
+    chrom, strand = attrs[0], attrs[1]
+    try:
+        transcripts = gtf_dict[chrom][strand]
+    except KeyError:
+        return False
+    _starts = gtf_starts.get(chrom, {}).get(strand) if gtf_starts is not None else None
+    if _starts is not None:
+        import bisect as _bisect
+        hi = _bisect.bisect_right(_starts, start_coord)
+        candidates = [transcripts[i] for i in range(hi)
+                      if _starts[i] < start_coord and int(transcripts[i][-1][-1]) > end_coord]
+    else:
+        candidates = []
+        for t in transcripts:
+            if int(t[1][0]) > start_coord:
+                break
+            if int(t[1][0]) < start_coord and int(t[-1][-1]) > end_coord:
+                candidates.append(t)
+    for cand in candidates:
+        sites = []
+        for exon in cand[1:]:
+            sites.extend([int(x) for x in exon])
+        try:
+            si = sites.index(start_coord)
+            ei = sites.index(end_coord)
+        except ValueError:
+            continue
+        if ei == si + 1:
+            return True
+    return False
+
+
+def filter_to_membrane_protein(lis, allow_trans_splicing=False, gtf=None):
+    """Keep the junctions that can encode a surface protein.
+
+    Default (allow_trans_splicing=False): a junction is kept when its FIRST gene has a
+    reference surface protein -- the original behaviour, unchanged.
+
+    With allow_trans_splicing=True: a trans-spliced junction whose first gene is not a
+    surface gene is ALSO kept when (a) one of its partner genes is a surface gene, and
+    (b) `gtf` contains a full-length isoform joining exactly those two sites. Requirement
+    (b) is the point: trans-splicing is admitted on long-read evidence, never on the UID
+    alone. Every count is reported.
+    """
+    global gtf_dict, gtf_starts
     all_membrane = set(dict_uni_fa.keys())
+    if allow_trans_splicing and gtf is not None and globals().get('gtf_dict') is None:
+        gtf_dict = process_est_or_long_read_with_id(gtf)
+        gtf_starts = _GTF_STARTS_CACHE.get(os.path.abspath(gtf)) \
+            if isinstance(gtf, str) and os.path.exists(gtf) else None
+
+    filtered_lis = []
+    n_direct = n_trans_candidate = n_trans_kept = n_trans_unsupported = 0
     for uid in lis:
-        ensgid = uid.split(':')[0]
-        if ensgid in all_membrane:
+        genes = uid_genes(uid) or [uid.split(':')[0]]
+        if genes[0] in all_membrane:
             filtered_lis.append(uid)
+            n_direct += 1
+            continue
+        if not allow_trans_splicing or len(genes) < 2:
+            continue
+        if not any(g in all_membrane for g in genes[1:]):
+            continue
+        n_trans_candidate += 1
+        if gtf is None:
+            continue
+        if junction_has_transcript_support(uid):
+            filtered_lis.append(uid)
+            n_trans_kept += 1
+        else:
+            n_trans_unsupported += 1
+
+    if allow_trans_splicing:
+        logger.warning(
+            'trans-splicing: %d junctions kept on the first gene; %d had ONLY a partner '
+            'surface gene, of which %d had a matching full-length isoform in the GTF and '
+            'were kept, %d had none and were dropped. Total kept: %d',
+            n_direct, n_trans_candidate, n_trans_kept, n_trans_unsupported, len(filtered_lis))
+        if gtf is None and n_trans_candidate:
+            logger.warning('trans-splicing was requested but no validation GTF was given, so '
+                           'no trans-spliced junction can be supported; all %d were dropped.',
+                           n_trans_candidate)
     return filtered_lis
 
 
@@ -1646,11 +1797,10 @@ class SurfaceAntigen(object):
                 raise Exception('This event will not encode a surface protein')
 
     def is_membrane_protein(self):
-        ensgid = self.uid.split(':')[0]
-        if ensgid in set(df_membrane_proteins['Ens'].tolist()):
-            return True
-        else:
-            return False
+        # every gene of the UID: a trans-spliced junction admitted on its partner must not
+        # then be rejected here for its first gene.
+        allowed = set(df_membrane_proteins['Ens'].tolist())
+        return any(g in allowed for g in (uid_genes(self.uid) or [self.uid.split(':')[0]]))
 
     def __str__(self):
         print_str = 'uid:{}\n'.format(self.uid)

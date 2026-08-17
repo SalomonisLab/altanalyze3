@@ -398,7 +398,10 @@ def run_snaf_b(args):
     surface.initialize(db_dir=root, surface_db=surface_db)
 
     membrane_tuples, jcmq = snaf.JunctionCountMatrixQuery.get_membrane_tuples(
-        df, return_jcmq=True, add_control=add_control, not_in_db=args.not_in_db, outdir=outdir,
+        df, return_jcmq=True,
+        allow_trans_splicing=getattr(args, 'allow_trans_splicing', False),
+        trans_splicing_gtf=validation_gtf,
+        add_control=add_control, not_in_db=args.not_in_db, outdir=outdir,
         filter_mode=args.filter_mode, cores=args.cpus,
         min_samples=getattr(args, 'min_samples', 1),
         max_bayests_percentile=getattr(args, 'max_bayests_percentile', None))

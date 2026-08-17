@@ -134,6 +134,30 @@ def gtex_configuration(df,gtex_db,t_min_arg,n_max_arg,normal_cutoff_arg,tumor_cu
         adata.var['total_count'] = np.asarray(adata.X.sum(axis=0)).ravel() / 1e6
 
 
+    # ---- BayesTS: always available, never recomputed -----------------------------------
+    # The bundled per-junction scores for GTEx and Tabula Sapiens ship with SNAF, so the
+    # BayesTS tumour-specificity filter works in EVERY configuration -- including the
+    # add_control path above, which skips the summary table and therefore used to leave
+    # adata_gtex without a 'bayests_percentile' column, silently disabling
+    # --max_bayests_percentile. Attaching it here costs one indexed read of a ~50 MB table.
+    if 'bayests_percentile' not in adata_gtex.obs.columns:
+        try:
+            from .control_stats import load_bundled_bayests
+            _bt = load_bundled_bayests(uids=set(adata_gtex.obs_names))
+            if _bt is not None and _bt.shape[0] > 0:
+                adata_gtex.obs['bayests_sigma'] = _bt['bayests_sigma'].reindex(adata_gtex.obs_names).values
+                adata_gtex.obs['bayests_percentile'] = _bt['bayests_percentile'].reindex(adata_gtex.obs_names).values
+                _n = int(np.isfinite(adata_gtex.obs['bayests_percentile'].values).sum())
+                print('BayesTS scores attached from the bundled references: {} / {} control '
+                      'junctions scored (junctions with no BayesTS score are treated as '
+                      'maximally tumor-specific and are KEPT)'.format(_n, adata_gtex.n_obs))
+            else:
+                logger.warning('No bundled BayesTS reference was loaded; '
+                               '--max_bayests_percentile will have NO effect this run.')
+        except Exception as _e:
+            logger.warning('Could not attach bundled BayesTS scores (%s); '
+                           '--max_bayests_percentile will have NO effect this run.', _e)
+
     t_min = t_min_arg
     n_max = n_max_arg
     normal_cutoff = normal_cutoff_arg

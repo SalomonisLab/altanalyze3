@@ -626,6 +626,7 @@ class ArgsParser():
         snaf_b_parser.add_argument("--surface_db", default=None, type=str, help="Custom cell-surface gene database REPLACING the built-in Alt91_db surfaceome: a directory from `snaf-build-surface-db`, or a bare gene table with an Ensembl-gene-ID column. Genes with no reference protein are excluded and counted.")
         snaf_b_parser.add_argument("--mode", default="short_read", choices=["short_read", "long_read", "find_full_length"], help="Surface prediction mode. Default: short_read")
         snaf_b_parser.add_argument("--validation_gtf", default=None, type=str, help="Long-read/EST GTF or GFF, plain or gzipped (e.g. SQANTI, or a long-read combined.gff.gz) enabling stringency-4/5 support gates; omit for stringency-3-only (fully offline)")
+        snaf_b_parser.add_argument("--allow_trans_splicing", action="store_true", help="Also keep trans-spliced junctions whose PARTNER gene is the surface gene, but ONLY when --validation_gtf contains a full-length isoform joining exactly those two sites. Off by default. Cross-chromosome partners cannot be supported by the GTF index and are never admitted.")
         snaf_b_parser.add_argument("--no_tmhmm", action="store_true", help="Disable the transmembrane-topology gate (otherwise pure-python tmhmm.py is used)")
         snaf_b_parser.add_argument("--tmhmm_path", default=None, type=str, help="Path to a legacy TMHMM 2.0c binary (Linux); if unset, the pure-python tmhmm.py is used")
         snaf_b_parser.add_argument("--n_stride", default=2, type=int, help="ORF-check stride. Default: 2")

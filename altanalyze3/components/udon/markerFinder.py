@@ -16,20 +16,33 @@ def unique_marker_finder(input_df, groups):
     # convert nmf_clusters to list object
     nmf_clusters_list = groups['cluster'].tolist()
 
-    # ensure fold matrix has the same columns as rows/index of nmf_clusters
-    fold_matrix = input_df.loc[groups.index, :]
+    # ensure fold matrix has the same columns as rows/index of nmf_clusters.
+    # Skip the reindex when the order already matches -- .loc copies the whole
+    # cells x genes frame (2.17 GB at 30,000 x 18,100 float32) even when it is a no-op.
+    if len(groups.index) == len(input_df.index) and input_df.index.equals(pd.Index(groups.index)):
+        fold_matrix = input_df
+    else:
+        fold_matrix = input_df.loc[groups.index, :]
 
     corr_df, p_val_df = marker_finder(input_df=fold_matrix, groups=nmf_clusters_list)
 
     # find the top n markers for each cluster
-    top_cluster = corr_df.idxmax(axis=1)  # top cluster for each marker
-    top_r = corr_df.max(axis=1)  # top r value for each marker
+    corr_arr = corr_df.to_numpy()
+    best_col = np.argmax(corr_arr, axis=1)
+    rows = np.arange(corr_arr.shape[0])
+    top_r_vals = corr_arr[rows, best_col]
+    top_cluster_vals = np.asarray(corr_df.columns)[best_col]
+
+    # Gather the matching p-value by position. The previous form was a Python loop of
+    # per-element .loc lookups, one per feature -- with the full gene pool that is
+    # ~18,100 label-based lookups per MarkerFinder pass, twice per run.
+    p_vals = p_val_df.to_numpy()[rows, best_col]
 
     # Assign each marker to its top scoring cluster
-    markers_df = pd.DataFrame({"marker": top_cluster.index.values,
-                               "top_cluster": top_cluster.values,
-                               "pearson_r": top_r.values,
-                               "p_value": [p_val_df.loc[i, j] for i, j in zip(top_cluster.index.values, top_cluster.values)]})
+    markers_df = pd.DataFrame({"marker": corr_df.index.values,
+                               "top_cluster": top_cluster_vals,
+                               "pearson_r": top_r_vals,
+                               "p_value": p_vals})
 
     # NUMERIC (natural) cluster order: P0,P1,...,P10 not lexicographic P0,P1,P10,...
     import re as _re
@@ -144,18 +157,40 @@ def marker_finder(input_df, groups):
     degrees_f = input_df.shape[0] - 2
     r_df = pearson_corr_df_to_df(input_df, ideal_vectors)
     r_df = r_df.dropna()
-    t_df = r_df * np.sqrt(degrees_f) / np.sqrt(1 - (r_df ** 2))
-    # version-agnostic elementwise p-value (DataFrame.map added in pandas 2.1; applymap deprecated)
-    p_vals = t.sf(np.abs(t_df.to_numpy()), df=degrees_f) * 2
-    p_df = pd.DataFrame(p_vals, index=t_df.index, columns=t_df.columns)
+    # r == +/-1 makes 1 - r^2 zero and the t statistic infinite. Clip strictly inside
+    # (-1, 1) so the divide is defined; sf of a huge |t| is 0 either way, so the p-value
+    # is unchanged. This removes the RuntimeWarning storm rather than hiding it.
+    r_arr = r_df.to_numpy(dtype=np.float64)
+    r_safe = np.clip(r_arr, -1.0 + 1e-12, 1.0 - 1e-12)
+    t_arr = r_safe * np.sqrt(degrees_f) / np.sqrt(1.0 - r_safe ** 2)
+    p_vals = t.sf(np.abs(t_arr), df=degrees_f) * 2
+    p_df = pd.DataFrame(p_vals, index=r_df.index, columns=r_df.columns)
     return r_df, p_df
 
 
 # Computes pearson correlation coefficient for pairwise columns to columns
-# of input DataFrames
+# of input DataFrames.
+#
+# Rewritten to run in float32 numpy rather than pandas. The pandas form built two
+# full-size centred copies of df1 (cells x genes) and then a genes x clusters
+# denominator via Series.apply, a Python-level loop. With the ICGS2-faithful gene
+# pool df1 is 30,000 x 18,100, so each copy is 2.17 GB. Centring in place on a single
+# float32 array removes one copy and halves the other. The arithmetic is identical.
 def pearson_corr_df_to_df(df1, df2):
-    norm1 = df1 - df1.mean(axis=0)
-    norm2 = df2 - df2.mean(axis=0)
-    sqsum1 = (norm1**2).sum(axis=0)
-    sqsum2 = (norm2**2).sum(axis=0)
-    return (norm1.T @ norm2) / np.sqrt(sqsum1.apply(lambda x: x*sqsum2))
+    cols1 = df1.columns
+    cols2 = df2.columns
+    a = np.asarray(df1.to_numpy(dtype=np.float32, copy=True))
+    b = np.asarray(df2.to_numpy(dtype=np.float32, copy=True))
+    a -= a.mean(axis=0, dtype=np.float32)
+    b -= b.mean(axis=0, dtype=np.float32)
+    sq1 = np.einsum("ij,ij->j", a, a)
+    sq2 = np.einsum("ij,ij->j", b, b)
+    num = a.T @ b
+    denom = np.sqrt(np.outer(sq1, sq2))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        r = num / denom
+    # A zero-variance feature or group yields denom == 0 -> undefined correlation.
+    # Leave it NaN so marker_finder's dropna removes it, rather than letting a filled
+    # value rank as a real marker.
+    r[~np.isfinite(r)] = np.nan
+    return pd.DataFrame(r, index=cols1, columns=cols2)

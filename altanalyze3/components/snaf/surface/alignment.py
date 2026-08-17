@@ -9,7 +9,15 @@ import logging
 logger = logging.getLogger(__name__)
 
 def alignment_to_uniprot(orf,uid,dict_uni_fa,tmhmm=False,software_path=None):
+    # first gene of the UID that has a reference protein -- for a trans-spliced junction
+    # admitted on its partner, that is the partner.
     ensgid = uid.split(':')[0]
+    if ensgid not in dict_uni_fa:
+        import re as _re
+        for _g in _re.findall(r'ENSG\d+', uid):
+            if _g in dict_uni_fa:
+                ensgid = _g
+                break
     isoforms = dict_uni_fa[ensgid]  # {acc1:seq,acc1-2:seq}
     results = []
     for o in orf:
