@@ -21,6 +21,7 @@ before the expensive translation/binding steps.
 """
 import os
 import logging
+from collections import OrderedDict
 import numpy as np
 import pandas as pd
 from scipy.sparse import issparse
@@ -207,7 +208,7 @@ def _bayes_batch_worker(payload):
     result is identical to the serial path. torch is imported HERE (not in the parent) so there
     is no torch-after-fork hazard; threads are capped to avoid N_workers x cores oversubscription.'''
     import os as _os
-    batch, mode, epoch, threads = payload
+    batch, mode, epoch, threads, min_sample = payload
     try:
         import torch; torch.set_num_threads(max(1, threads))
     except Exception:
@@ -216,13 +217,13 @@ def _bayes_batch_worker(payload):
         _os.environ[_v] = str(max(1, threads))
     from . import bayests
     sig = bayests.compute_bayests_sigma(_BAYES_ADATA[batch, :].to_memory(), uids=batch,
-                                        mode=mode, epoch=epoch)
+                                        mode=mode, epoch=epoch, min_sample=min_sample)
     return sig['mean_sigma']
 
 
 def precompute_control_stats(control_h5ad, out_path=None, cutoff=5, bayes_mode='XY',
                              bayes_epoch=2000, bayes_batch=50000, compute_bayes=True,
-                             bayes_uids=None, bayes_cores=None):
+                             bayes_uids=None, bayes_cores=None, bayes_min_sample=10):
     """Read a control h5ad once and write the per-junction stats table. One-time job.
 
     bayes_uids: if given, compute BayesTS ONLY for these junctions (the cohort's tested set,
@@ -265,14 +266,15 @@ def precompute_control_stats(control_h5ad, out_path=None, cutoff=5, bayes_mode='
         if ctx is None or n_workers == 1:
             for i, batch in enumerate(batches):
                 sig = bayests.compute_bayests_sigma(adata[batch, :].to_memory(), uids=batch,
-                                                    mode=bayes_mode, epoch=bayes_epoch)
+                                                    mode=bayes_mode, epoch=bayes_epoch,
+                                                    min_sample=bayes_min_sample)
                 sigmas.loc[sig.index] = sig['mean_sigma'].values
                 logger.warning('  BayesTS %d/%d junctions (serial)', min((i + 1) * bayes_batch, len(uids)), len(uids))
         else:
             threads = max(1, n_cpu // n_workers)   # total threads ~= cores, no oversubscription
             global _BAYES_ADATA
             _BAYES_ADATA = adata                    # fork children inherit this (copy-on-write)
-            payloads = [(b, bayes_mode, bayes_epoch, threads) for b in batches]
+            payloads = [(b, bayes_mode, bayes_epoch, threads, bayes_min_sample) for b in batches]
             logger.warning('BayesTS: %d batches across %d workers (%d threads each)', len(batches), n_workers, threads)
             try:
                 pool = ctx.Pool(processes=n_workers)

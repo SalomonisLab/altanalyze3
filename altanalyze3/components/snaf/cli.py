@@ -269,7 +269,8 @@ def run_snaf_precompute_control(args):
         str(args.control_h5ad), out_path=out, cutoff=args.normal_cutoff,
         bayes_mode=args.bayes_mode, bayes_epoch=args.bayes_epoch,
         bayes_batch=args.bayes_batch, compute_bayes=(not args.no_bayes), bayes_uids=bayes_uids,
-        bayes_cores=getattr(args, 'bayes_cores', None))
+        bayes_cores=getattr(args, 'bayes_cores', None),
+        bayes_min_sample=getattr(args, 'bayes_min_sample', 10))
     print('SNAF control-stats table written to {}'.format(path))
     return path
 

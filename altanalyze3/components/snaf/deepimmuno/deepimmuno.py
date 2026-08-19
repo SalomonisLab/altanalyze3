@@ -6,10 +6,19 @@ Program to run deepimmuno-cnn
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 import warnings
-warnings.filterwarnings('ignore')
 import logging
-logger = logging.getLogger()   # this is a singleton, all .tf .keras logger will pass the info to this module level rootlogger
-logger.setLevel(level=logging.ERROR)
+# DEFECT 4 -- these two lines used to be `warnings.filterwarnings('ignore')` and
+# `logging.getLogger().setLevel(logging.ERROR)`. Both act on a process-wide singleton, so
+# merely IMPORTING this module silenced every Python warning and every WARNING/INFO log
+# record in the whole program, whether or not DeepImmuno was ever called. That hid two
+# classes of result: the numerical warnings a library raises when a statistic is unreliable,
+# and the per-stage counts the surrounding pipeline logs. In the ExNeoEpitope run it emptied
+# step 2's gate summary out of the captured log.
+# The intent was to quiet TensorFlow. That is what these lines now do, and nothing else.
+for _mod in ('tensorflow', 'keras', 'tf_keras', 'absl', 'h5py'):
+    logging.getLogger(_mod).setLevel(logging.ERROR)
+    warnings.filterwarnings('ignore', module=_mod)
+logger = logging.getLogger('tensorflow')
 import tensorflow as tf
 tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
 # DeepImmuno's model was trained/saved with the Keras 2 API (TF-checkpoint format).

@@ -340,11 +340,16 @@ def _plot_marker_heatmap(
     ax_col.set_ylabel("")
     ax_col.set_xlabel("")
 
+    # Z-scored rows rarely reach +/-3, so a +/-3 scale wastes most of the colour range and
+    # flattens real contrast. +/-1.5 is the default; MARKER_HEATMAP_RANGE overrides it.
+    _half = float(os.environ.get("MARKER_HEATMAP_RANGE", "1.5"))
+    if _half <= 0:
+        _half = 1.5
     sns.heatmap(
         heatmap_df,
         cmap=BLUE_BLACK_YELLOW,
-        vmin=-3,
-        vmax=3,
+        vmin=-_half,
+        vmax=_half,
         ax=ax_heatmap,
         xticklabels=False,
         yticklabels=False,

@@ -129,6 +129,40 @@ def build_parser():
     p.add_argument('--assess-pruned', action='store_true')
     p.add_argument('--viewer-cluster', action='store_true')
     p.add_argument('--viewer-heterogeneity', action='store_true')
+    a = p.add_mutually_exclusive_group()
+    a.add_argument('--annotate', dest='annotate', action='store_true', default=True,
+                   help='After pruning, run MarkerFinder on the pruned clusters, name every '
+                        'cluster by GO-Elite BioMarkers cell-state enrichment, order the '
+                        'centroids with HOPACH, and redraw MarkerFinder in that order. On by '
+                        'default. Writes obs["cluster_name"], obs["hopach_cluster"] and '
+                        'uns["lineage_order"], and an antibody-only heatmap when the object '
+                        'carries AB_ features.')
+    a.add_argument('--no-annotate', dest='annotate', action='store_false',
+                   help='Stop after pruning, as the pipeline did before this step became a '
+                        'default. obs["pruned"] is then the last output.')
+    p.add_argument('--annotate-lead', default=None, metavar='OBS_COLUMN',
+                   help='obs column holding a trusted annotation, e.g. a published cell type '
+                        'that also competes in --query. Its dominant label then names the '
+                        'cluster and the enriched term becomes the fallback.')
+    p.add_argument('--annotate-top-n', type=int, default=60,
+                   help='Markers per cluster for both MarkerFinder passes.')
+    p.add_argument('--annotate-cells-per-cluster', type=int, default=100,
+                   help='Cells drawn per cluster in the heatmaps.')
+    p.add_argument('--annotate-hopach-distance', default='cor',
+                   choices=['cor', 'abscor', 'cosangle', 'abscosangle', 'euclid', 'manhattan'],
+                   help='HOPACH distance over the cluster centroids.')
+    p.add_argument('--annotate-max-fdr', type=float, default=1e-5,
+                   help='Reject a cell-state term at a worse FDR than this and name the cluster '
+                        'from its strongest marker instead. The enrichment always returns its '
+                        'best term, however weak, which invents cell types. Measured over 79 '
+                        'clusters: every term 0.05 accepted and 1e-5 rejected overlapped by only '
+                        '2-8 of about 36-60 markers.')
+    p.add_argument('--annotate-min-overlap', type=int, default=5,
+                   help='Reject a cell-state term overlapping the cluster markers by fewer genes '
+                        'than this, however small its FDR.')
+    p.add_argument('--annotate-biomarker-file', default=None,
+                   help='Override the GO-Elite BioMarkers table. Defaults to the EnsMart72 table '
+                        'for --species.')
     g = p.add_mutually_exclusive_group()
     g.add_argument('--enrichment', dest='enrichment', action='store_true', default=False,
                    help='Add the artifact enrichr/GSEA annotation of marker genes. Off by '
@@ -257,16 +291,68 @@ def main(argv=None):
                    assess_pruned=args.assess_pruned,
                    viewer_cluster=args.viewer_cluster,
                    viewer_heterogeneity=args.viewer_heterogeneity)
-    params['wall_seconds'] = time.perf_counter() - t0
     params['n_pruned_clusters'] = int(sctri.adata.obs['pruned'].nunique())
+
+    # Steps 4-6, on by default. lazy_run stops at obs['pruned'], which names a source cluster and
+    # no biology. annotate_pruned_clusters runs MarkerFinder, names each cluster by GO-Elite
+    # BioMarkers cell-state enrichment, orders the centroids with HOPACH and redraws MarkerFinder
+    # in that order. A failure here must not destroy the pruning result the run already earned, so
+    # the error is recorded and re-raised only after sctriangulate.h5ad and run_parameters.json
+    # are on disk.
+    params['annotate'] = bool(args.annotate)
+    annotate_error = None
+    if args.annotate:
+        from .annotate import annotate_pruned_clusters
+        try:
+            summary = annotate_pruned_clusters(
+                sctri.adata,
+                outdir=args.outdir,
+                cluster_key='pruned',
+                species=args.species,
+                top_n=args.annotate_top_n,
+                cells_per_cluster=args.annotate_cells_per_cluster,
+                layer=args.layer,
+                lead_annotation=args.annotate_lead,
+                biomarker_file=args.annotate_biomarker_file,
+                enrichment_max_fdr=args.annotate_max_fdr,
+                enrichment_min_overlap=args.annotate_min_overlap,
+                hopach_distance=args.annotate_hopach_distance,
+                covariate_columns=query,
+            )
+            params['annotate_summary'] = {
+                'n_named_clusters': len(summary['names']),
+                'hopach_k': summary['hopach_k'],
+                'hopach_mss': summary['hopach_mss'],
+                'hopach_distance': args.annotate_hopach_distance,
+                'lead_annotation': args.annotate_lead,
+                'cluster_table': summary['cluster_table'],
+                'name_source_counts': {
+                    src: sum(1 for v in summary['name_source'].values() if v == src)
+                    for src in sorted(set(summary['name_source'].values()))
+                },
+            }
+            sctri.adata.write(os.path.join(args.outdir, 'sctriangulate.h5ad'))
+        except Exception as exc:  # recorded, re-raised below; never silently swallowed
+            annotate_error = exc
+            params['annotate_error'] = '{}: {}'.format(type(exc).__name__, exc)
+            print('[annotate] FAILED: {}: {}'.format(type(exc).__name__, exc))
+            print('[annotate] the pruning result is intact; rerun with --no-annotate to skip '
+                  'this stage, or fix the cause and rerun.')
+
+    params['wall_seconds'] = time.perf_counter() - t0
 
     with open(os.path.join(args.outdir, 'run_parameters.json'), 'w') as f:
         json.dump(params, f, indent=1)
 
     print('\nfinished in {:.1f} s'.format(params['wall_seconds']))
     print('pruned clusters: {}'.format(params['n_pruned_clusters']))
+    if args.annotate and annotate_error is None:
+        print('named clusters: {} in {} HOPACH groups'.format(
+            params['annotate_summary']['n_named_clusters'], params['annotate_summary']['hopach_k']))
     print('outputs in: {}'.format(os.path.abspath(args.outdir)))
     print('parameters: {}'.format(os.path.join(os.path.abspath(args.outdir), 'run_parameters.json')))
+    if annotate_error is not None:
+        raise annotate_error
 
 
 if __name__ == '__main__':

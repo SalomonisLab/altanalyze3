@@ -681,6 +681,7 @@ class ArgsParser():
         snaf_pc_parser.add_argument("--bayes_epoch", default=2000, type=int, help="BayesTS SVI steps. Default: 2000")
         snaf_pc_parser.add_argument("--bayes_batch", default=50000, type=int, help="BayesTS junctions per batched joint run (bounds memory). Default: 50000")
         snaf_pc_parser.add_argument("--bayes_cores", default=None, type=int, help="Parallel workers for the (independent, identical-result) BayesTS batches. Default: cpu_count-2. Set 1 to force serial. Bit-identical to serial; ~Nx faster.")
+        snaf_pc_parser.add_argument("--bayes_min_sample", default=10, type=int, help="Minimum samples a group must have to contribute to the BayesTS tissue-distribution (X) modality. Default 10 suits GTEx (51 tissues) and Tabula Sapiens (112 cell types); lower it for a custom control whose groups are smaller, e.g. 3 for sorted marrow populations.")
         snaf_pc_parser.add_argument("--no_bayes", action="store_true", help="Skip BayesTS (write only mean/std/mle/normal_prevalence)")
         snaf_pc_parser.add_argument("--bayes_juncounts", default=None, type=str, help="Restrict BayesTS to the junctions in this cohort count matrix (intersected with the control). ~50x faster than all-GTEx; percentile ranks tumor-specificity among the tested cohort. Basic stats (mean/mle/prevalence) are still written for ALL control junctions.")
         self.add_common_arguments(snaf_pc_parser)

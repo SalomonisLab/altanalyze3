@@ -91,8 +91,8 @@ class ICGS3Config:
     cluster_key: str = "ICGS3_cluster"
     presvm_cluster_key: str = "ICGS3_NMF_cluster"
     marker_top_n: int = 60
-    marker_rho: float = 0.3
-    marker_min_per_cluster: int = 2
+    marker_rho: Optional[float] = None
+    marker_min_per_cluster: Optional[int] = None
     marker_direction: str = "up"
     rank: Optional[int] = None
     nmf_assignment_normalization: str = "auto"
@@ -422,7 +422,14 @@ def apply_qc(
 
 
 def apply_modality_defaults(config: ICGS3Config) -> ICGS3Config:
-    """Avoid RNA-specific QC defaults for small non-RNA panels such as ADT."""
+    """Avoid RNA-specific QC and marker defaults for small non-RNA panels such as ADT.
+
+    marker_rho and marker_min_per_cluster stay None until this function runs, so an
+    explicit user value is distinguishable from an unset one. An earlier version instead
+    compared them against the literal defaults of the day (3 and 0.2). Those defaults later
+    became 2 and 0.3, which turned the ADT branch into dead code: every ADT run then used
+    the RNA gate of rho 0.3, and the gate rejected ADT clusters that carry real markers.
+    """
     if config.modality.lower() in {"adt", "grn", "metabolite", "lipid", "psi"}:
         if config.min_genes == 500:
             config.min_genes = 0
@@ -432,10 +439,10 @@ def apply_modality_defaults(config: ICGS3Config) -> ICGS3Config:
             config.mito_percent = None
         if config.n_top_features == 3000:
             config.n_top_features = 0
-        if config.marker_min_per_cluster == 3 and config.modality.lower() == "adt":
-            config.marker_min_per_cluster = 1
-        if config.marker_rho == 0.2 and config.modality.lower() == "adt":
-            config.marker_rho = 0.15
+    if config.marker_rho is None:
+        config.marker_rho = 0.15 if config.modality.lower() == "adt" else 0.3
+    if config.marker_min_per_cluster is None:
+        config.marker_min_per_cluster = 1 if config.modality.lower() == "adt" else 2
     return config
 
 
@@ -1555,10 +1562,34 @@ def run_nmf_marker_svm(sampled: ad.AnnData, full: ad.AnnData, config: ICGS3Confi
         marker_finder_rho=config.marker_rho,
         min_markers_per_cluster=config.marker_min_per_cluster,
     )
+    # ICGS2 fidelity FIX (2026-08-18). This pass selects MARKER GENES; it must not delete cells.
+    # ICGS_NMF.py:1134-1141 runs markerFinder.analyzeData after Classify, then
+    #   markergrps, markerlst = sortFile(allgenesfile, rho_cutoff, name)
+    #   ### To plot the heatmap, use the MarkerFinder genes (function pulls those genes out)
+    #   ExpandSampleClusters.filterRows(EventAnnot, ...-markers.txt, filterDB=markerlst)
+    # filterRows filters ROWS of the expression matrix, that is genes. `name`, the cluster set,
+    # is never revised after the SVM, and no cell is ever dropped there.
+    # This code previously ran
+    #     final_clusters = final_clusters[final_clusters[cluster_key].isin(robust2)]
+    # on a table indexed by BARCODE, so a cluster failing the second marker pass took all of its
+    # cells with it. On a mouse thymus run that deleted 4,575 of 18,388 cells (24.9%) in two
+    # clusters, P48 (4,375) and P16 (200). The cluster-fitness gate that ICGS2 does apply already
+    # ran BEFORE the SVM (see `robust` above), where it costs no cell because the SVM reassigns.
+    # marker_finder_wrapper already enforces min_markers_per_cluster on markers_top2
+    # (markerFinder.py:115), so the old markers_top2 filter below was a no-op.
     counts2 = markers_top2["top_cluster"].value_counts()
-    robust2 = counts2[counts2 >= int(config.marker_min_per_cluster)].index
-    final_clusters = final_clusters[final_clusters[config.cluster_key].isin(robust2)]
-    markers_top2 = markers_top2[markers_top2["top_cluster"].isin(robust2)]
+    starved = [
+        str(c) for c in pd.unique(final_clusters[config.cluster_key].astype(str))
+        if int(counts2.get(c, 0)) < int(config.marker_min_per_cluster)
+    ]
+    if starved:
+        n_cells = int(final_clusters[config.cluster_key].astype(str).isin(starved).sum())
+        _log(
+            f"post-SVM marker pass: {len(starved)} cluster(s) own fewer than "
+            f"{config.marker_min_per_cluster} markers at rho >= {config.marker_rho} "
+            f"({', '.join(starved[:8])}). ICGS2 keeps them and their {n_cells} cells; they "
+            f"contribute no marker row to the heatmap."
+        )
     final_clusters, markers_top2, markers_all2 = order_and_renumber_final_clusters(
         final_clusters,
         markers_top2,
@@ -2529,8 +2560,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--cluster-key", default="ICGS3_cluster")
     parser.add_argument("--marker-top-n", type=int, default=60)
-    parser.add_argument("--marker-rho", type=float, default=0.3)
-    parser.add_argument("--marker-min-per-cluster", type=int, default=2)
+    parser.add_argument(
+        "--marker-rho",
+        type=float,
+        default=None,
+        help="MarkerFinder Pearson rho a cluster must reach to survive the marker gate. "
+             "Unset resolves by modality: 0.15 for adt, 0.3 otherwise.",
+    )
+    parser.add_argument(
+        "--marker-min-per-cluster",
+        type=int,
+        default=None,
+        help="Markers at or above --marker-rho a cluster must own to survive the marker gate. "
+             "Unset resolves by modality: 1 for adt, 2 otherwise.",
+    )
     parser.add_argument("--marker-direction", choices=["up", "down", "both"], default="up")
     parser.add_argument("--rank", "--nmf-k", dest="rank", type=int, default=None, help="Override auto-estimated sparse-NMF rank.")
     parser.add_argument(

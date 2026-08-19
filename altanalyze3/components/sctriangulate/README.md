@@ -100,6 +100,82 @@ what it did in `run_parameters.json`.
 
 The tables below measure every one of these.
 
+## Steps 4 to 6 after pruning, on by default
+
+`lazy_run` stops at `obs['pruned']`. Those labels name a source cluster, such as
+`ICGS3_RNA@C3`, and no biology. Every reader then repeated the same three steps by hand.
+`annotate.py` runs them, and the CLI runs it by default.
+
+| Step | What runs | Which altanalyze3 function |
+| --- | --- | --- |
+| 4 | MarkerFinder on the pruned clusters, 60 markers and 100 displayed cells per cluster | `visualization.marker_heatmap_h5ad.generate_marker_heatmap_from_adata` |
+| 5 | Cell-state naming by GO-Elite BioMarkers gene-set enrichment | `clustering.ICGS.biomarker_enrichment`, `clustering.ICGS.clean_biomarker_prediction_labels` |
+| 6 | HOPACH over the cluster centroids, then MarkerFinder again in that order | `clustering.hopach.hopach` |
+
+Nothing in `annotate.py` reimplements a method. Each step calls the function the matching CLI
+calls, with the same arguments.
+
+New outputs under `--outdir`:
+
+```
+MarkerFinder/pruned/               step 4: markers, redundant markers, fold matrix, centroids, heatmap
+GO-Elite/                          step 5: enrichment table and the cell-state prediction per cluster
+hopach/hopach_centroid_clusters.tsv    step 6: order, group and name source per cluster
+hopach/hopach_ordered_centroids.tsv    centroids, columns in HOPACH order, columns renamed
+MarkerFinder/hopach_ordered/       step 6: the heatmap redrawn in HOPACH order
+MarkerFinder/hopach_ordered_ADT/   the same over AB_ features alone, when the object carries them
+```
+
+New `obs` and `uns`: `obs['cluster_name']`, `obs['hopach_cluster']`, `uns['lineage_order']`
+(which `marker_heatmap_h5ad._resolve_cluster_order` reads) and `uns['sctriangulate_annotation']`.
+
+Turn the whole stage off with `--no-annotate`, which restores the earlier behaviour exactly:
+the run then writes no `cluster_name` and stops at `obs['pruned']`.
+
+### Naming, and the two gates that stop it inventing a cell type
+
+`biomarker_enrichment` returns the single best term per cluster whether or not the term means
+anything. Two gates drop a weak term, and the cluster then takes its strongest marker as a name,
+such as `Zim3-high (streets_celltype@Mature_cycling)`.
+
+| Gate | Default | Why that value |
+| --- | --- | --- |
+| `--annotate-max-fdr` | `1e-5` | Measured over the 79 clusters of three runs on one mouse thymus dataset. Best-term FDR ran from 2.1e-71 to 5.3e-02. Every term that FDR 0.05 accepted and 1e-5 rejected, 18 of them, overlapped by only 2 to 8 of about 36 to 60 markers. FDR 0.05 keeps 78 of 79 clusters; 1e-5 keeps 60 of 79. |
+| `--annotate-min-overlap` | `5` | An overlap of 2 genes names nothing, however small its FDR. |
+
+Without the gates the same dataset produced `Retina Rheaume et al.` at FDR 0.027 and
+`Marrow Oligodendrocyte` at FDR 0.049 as cluster names.
+
+`--annotate-lead OBS_COLUMN` lets a curated annotation lead instead, for example a published cell
+type that also competes in `--query`. Its dominant label then names the cluster and the enriched
+term becomes the fallback. A dominant label that means "no call", such as `unassigned`, never
+names a cluster; see `UNINFORMATIVE_LEAD_LABELS`.
+
+### Validation
+
+Measured 2026-08-17 against a hand-run of the same three steps on a mouse thymus CITE-seq
+dataset, 13,210 cells by 15,495 features, 30 pruned clusters from four annotations.
+
+| Check | Result |
+| --- | --- |
+| Step-4 marker table against the hand run | 1,749 of 1,749 rows, identical `(cluster, gene)` index, `Fold`, `Query Exp`, `Ref Exp` and `FDR p-value` differ by 0.0 |
+| Step-4 centroid matrix | shape and columns identical, max absolute difference 0.0 |
+| Step-6 HOPACH order and group membership | identical, k = 11, MSS = 0.3949 reproduced |
+| End to end through the CLI | `pruned` labels identical on 13,210 of 13,210 cells |
+| `--no-annotate` | writes no `cluster_name`, same 30 pruned clusters |
+| Tests | 9 new in `tests/test_annotate.py`; 69 of 69 sctriangulate tests pass |
+
+Scripts: `27_validate_annotate_default.py`, `28_validate_annotate_default_paths.py` and
+`29_e2e_scTriangulate_annotate_default.sh` under
+`/Users/saljh8/Dropbox/Collaborations/Grimes/Thymus/Streets-CITE/scripts`.
+
+### One dependency carries a known defect
+
+`clustering/hopach.py` fails 2 of its own 3 tests at commit `2f93c2b`, before and after this
+change. On the toy two-cluster dataset in `test_hopach.py` it returns k = 4 with sizes 1, 2, 1, 2
+where the test expects k = 2. The ORDER stays correct, and step 6 uses the order, so the heatmap
+is unaffected. `obs['hopach_cluster']` may over-split. I did not touch `hopach.py`.
+
 ## Headline result
 
 I ran both versions through `lazy_run`, the documented top-level entry point, on the demo
@@ -911,3 +987,4 @@ Each entry names the script that measured it. Dates give the day the work landed
 | 2026-08-08 | `--prefilter-markers` wired to the CLI; `--downsample`, `--prefilter-cells`, `--subsample-seed` added | Shared whitelist 1.86x smaller than independent draws at 100k cells; cap above every cluster reproduces the full run exactly | `downsample_validate.py`, `test_downsample.py` |
 | 2026-08-08 | Reviewed ten proposed memory changes; applied three, refuted two, deferred two | Demo peak 269.3 to 192.8 MB, sim 8k 520.5 to 193.3 MB, every label identical | `copy_avoidance_probe.py`, `three_changes_validate.py`, `three_changes_ablation.py` |
 | 2026-08-08 | `--keep-layers`; unused layers freed by default | Verified three ways on a file carrying `counts` and `spliced` | printed CLI output, `run_parameters.json` |
+| 2026-08-17 | Steps 4 to 6 (MarkerFinder, cell-state enrichment naming, HOPACH order) added as a post-pruning default; `--no-annotate` restores the old behaviour | Reproduces a hand run exactly: 1,749 of 1,749 markers identical, HOPACH k=11 MSS 0.3949, 13,210 of 13,210 pruned labels identical | `27_validate_annotate_default.py`, `28_validate_annotate_default_paths.py`, `29_e2e_scTriangulate_annotate_default.sh`, `test_annotate.py` |

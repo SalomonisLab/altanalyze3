@@ -73,17 +73,27 @@ def load_domain_locations(translation_path,uniprot_coordinates_path,uniprot_dict
             ensembl_protein,aa_start,aa_stop,start,stop,name,interpro_id,domain = line.strip().split('\t')
             if ensembl_protein in protein_translation_db:
                 gene = protein_translation_db[ensembl_protein]
+                # DEFECT 1 -- Hs_FeatureCoordinate.txt lists the same feature once per
+                # UniProt isoform row, so one helix arrived 2-14 times. tm_count and
+                # tm_ref_count then counted the same peptide repeatedly, and any consumer
+                # that partitions a protein by these intervals double-counted the helix.
+                # DEFECT 2 -- tm_seq was assigned inside `if gene in uniprot_dict` but
+                # appended outside it, so a gene with no UniProt sequence inherited the
+                # PREVIOUS gene's helix peptide. Both are fixed below; behaviour is
+                # otherwise unchanged.
                 if 'TOPO_DOM-Extracell' in domain:
-                    try: extracellular_domain_db[gene].append([int(start),int(stop)])
-                    except: extracellular_domain_db[gene] = [[int(start),int(stop)]]
+                    iv = [int(start),int(stop)]
+                    if iv not in extracellular_domain_db.setdefault(gene,[]):
+                        extracellular_domain_db[gene].append(iv)
                 if 'TRANSMEM-Helica' in domain:
-                    try: transmembrane_domain_db[gene].append([int(start),int(stop)])
-                    except: transmembrane_domain_db[gene] = [[int(start),int(stop)]]
+                    iv = [int(start),int(stop)]
+                    if iv not in transmembrane_domain_db.setdefault(gene,[]):
+                        transmembrane_domain_db[gene].append(iv)
                     if gene in uniprot_dict:
                         prot_sequence = uniprot_dict[gene]
                         tm_seq = prot_sequence[int(aa_start):int(aa_stop)]
-                    try: transmembrane_domain_seq_db[gene].append(tm_seq)
-                    except: transmembrane_domain_seq_db[gene] = [tm_seq]
+                        if tm_seq and tm_seq not in transmembrane_domain_seq_db.setdefault(gene,[]):
+                            transmembrane_domain_seq_db[gene].append(tm_seq)
 
     #### Need to add code to import uniprot protein sequences for transmembranes for a TM sequence check in the predicted isoforms
     return extracellular_domain_db, transmembrane_domain_db, transmembrane_domain_seq_db
@@ -277,17 +287,47 @@ with open(orf_sequences_file, "r") as orf_handle, open(output_file, "w") as out_
                 if gene_id in transcript_associations:
                     for transcript_structure, assoc_transcript_id, strand in transcript_associations[gene_id]:
                         #print ([[transcript_id,assoc_transcript_id,junction_name,strand]]);sys.exit()
-                        if transcript_id == assoc_transcript_id and junction_name in transcript_structure:
+                        # DEFECT 3 -- the ORF FASTA keys a KINNEX isoform by its bare
+                        # numeric id (">21863493 ;CDS;gene_id:ENSG..."), while
+                        # transcript_associations.txt appends the sample that isoform was
+                        # seen in ("21863493.AML-14_CITE_GEX"). A literal equality test can
+                        # therefore only ever match the bare-Ensembl minority: on the
+                        # pediatric-AML run it returned 3,581 rows out of 11,030 junctions
+                        # instead of 65,337 rows over 9,856 junctions. Compare the numeric
+                        # base; an ENST id carries no suffix in this file and passes through
+                        # unchanged.
+                        assoc_base = (assoc_transcript_id.split('.')[0]
+                                      if assoc_transcript_id[:1].isdigit() else assoc_transcript_id)
+                        if transcript_id == assoc_base and junction_name in transcript_structure:
                             # Extract junction sequence from genome
+                            # DEFECT 4 -- the strand comes from column 2 of
+                            # transcript_associations.txt, and the KINNEX-5 build writes '.'
+                            # there for every row. `strand == "+"` was therefore never true,
+                            # so EVERY junction sequence was reverse-complemented. On the
+                            # pediatric-AML run that made 55,529 of 65,337 rows report
+                            # 'Not Found' and left unique_peptide_seq empty on 57,682 of
+                            # them -- including the LAT positive control. The 9,808 'Found'
+                            # rows were the minus-strand genes, right by accident.
+                            # Both orientations are now built. A declared strand still
+                            # decides; an undeclared one is resolved against the ORF itself,
+                            # and falls back to the plus-strand form when neither is present
+                            # (a junction in an untranslated region, which is exactly how a
+                            # neojunction adds a terminal extension).
+                            plus_seq = (genome[chrom][start - 10:start]        # 10 nt before
+                                        + genome[chrom][end-1:end-1 + 10])     # 10 nt after
+                            minus_seq = reverse_complement(
+                                genome[chrom][end - 10:end]
+                                + genome[chrom][start-1:start-1 + 10])
                             if strand == "+":
-                                left_flank = genome[chrom][start - 10:start]  # 10 nt before the junction
-                                right_flank = genome[chrom][end-1:end-1 + 10]  # 10 nt after the junction
-                                junction_seq = left_flank + right_flank
+                                junction_seq = plus_seq
+                            elif strand == "-":
+                                junction_seq = minus_seq
+                            elif plus_seq in sequence:
+                                junction_seq = plus_seq
+                            elif minus_seq in sequence:
+                                junction_seq = minus_seq
                             else:
-                                # For the negative strand, reverse-complement and swap left/right logic
-                                left_flank = genome[chrom][start-1:start-1 + 10]  # 10 nt after the junction
-                                right_flank = genome[chrom][end - 10:end]  # 10 nt before the junction
-                                junction_seq = reverse_complement(right_flank+left_flank)
+                                junction_seq = plus_seq
                             if source_name == 'ENSG00000137571:E11.1-E12.1':
                                 if 'ENSX' in transcript_id:
                                     print (left_flank,right_flank,junction_seq)

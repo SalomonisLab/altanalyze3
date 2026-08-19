@@ -131,19 +131,25 @@ def _models():
     def model_X_Y(X, Y, weights, ebayes_beta_y, train, w_x, w_y, prior_alpha, prior_beta):
         constant = torch.tensor(25., device=device)
         X = X / constant
-        subsample_size = 10
+        # pyro requires subsample_size <= the plate's full size. The tissue plate is only as
+        # large as the number of qualifying tissues, which is 51 for GTEx and 112 for Tabula
+        # Sapiens but can be 2 for a small custom control -- clamping each plate to its own
+        # size is what lets BayesTS run on those. No effect when the plate is >= 10, so the
+        # bundled GTEx and Tabula Sapiens references are unchanged.
+        ss_x = min(10, t)
+        ss_y = min(10, s)
         sigma = pyro.sample('sigma', dist.Beta(torch.tensor(prior_alpha, device=device), torch.tensor(prior_beta, device=device)).expand([n]).to_event(1))
         beta_y = pyro.sample('beta_y', dist.Gamma(torch.tensor(ebayes_beta_y, device=device), torch.tensor(1., device=device)))
         beta_x = pyro.sample('beta_x', dist.Gamma(torch.tensor(25., device=device), torch.tensor(1., device=device)))
         total = pyro.sample('total', dist.Binomial(torch.tensor(50., device=device), weights).expand([t]).to_event(1))
         scaled_X = torch.round(X * total.unsqueeze(-1))
         if train:
-            with pyro.poutine.scale(scale=w_x), pyro.plate('data_X', t, subsample_size=subsample_size) as ind:
+            with pyro.poutine.scale(scale=w_x), pyro.plate('data_X', t, subsample_size=ss_x) as ind:
                 ind = ind.to(device=device)
-                pyro.sample('c', dist.Poisson(beta_x * sigma).expand([subsample_size, n]).to_event(1), obs=scaled_X.index_select(0, ind))
-            with pyro.poutine.scale(scale=w_y), pyro.plate('data_Y', s, subsample_size=subsample_size) as ind:
+                pyro.sample('c', dist.Poisson(beta_x * sigma).expand([ss_x, n]).to_event(1), obs=scaled_X.index_select(0, ind))
+            with pyro.poutine.scale(scale=w_y), pyro.plate('data_Y', s, subsample_size=ss_y) as ind:
                 ind = ind.to(device=device)
-                pyro.sample('nc', dist.LogNormal(beta_y * sigma, 0.5).expand([subsample_size, n]).to_event(1), obs=Y.index_select(0, ind))
+                pyro.sample('nc', dist.LogNormal(beta_y * sigma, 0.5).expand([ss_y, n]).to_event(1), obs=Y.index_select(0, ind))
         else:
             with pyro.poutine.scale(scale=w_x), pyro.plate('data_X', t):
                 pyro.sample('c', dist.Poisson(beta_x * sigma).expand([t, n]).to_event(1), obs=scaled_X)
@@ -162,15 +168,15 @@ def _models():
     def model_X(X, weights, train, prior_alpha, prior_beta):
         constant = torch.tensor(25., device=device)
         X = X / constant
-        subsample_size = 10
+        ss_x = min(10, t)   # clamp to the plate size; see model_X_Y
         sigma = pyro.sample('sigma', dist.Beta(torch.tensor(prior_alpha, device=device), torch.tensor(prior_beta, device=device)).expand([n]).to_event(1))
         beta_x = pyro.sample('beta_x', dist.Gamma(torch.tensor(25., device=device), torch.tensor(1., device=device)))
         total = pyro.sample('total', dist.Binomial(torch.tensor(50., device=device), weights).expand([t]).to_event(1))
         scaled_X = torch.round(X * total.unsqueeze(-1))
         if train:
-            with pyro.poutine.scale(scale=1), pyro.plate('data_X', t, subsample_size=subsample_size) as ind:
+            with pyro.poutine.scale(scale=1), pyro.plate('data_X', t, subsample_size=ss_x) as ind:
                 ind = ind.to(device=device)
-                pyro.sample('c', dist.Poisson(beta_x * sigma).expand([subsample_size, n]).to_event(1), obs=scaled_X.index_select(0, ind))
+                pyro.sample('c', dist.Poisson(beta_x * sigma).expand([ss_x, n]).to_event(1), obs=scaled_X.index_select(0, ind))
         else:
             with pyro.poutine.scale(scale=1), pyro.plate('data_X', t):
                 pyro.sample('c', dist.Poisson(beta_x * sigma).expand([t, n]).to_event(1), obs=scaled_X)
@@ -184,13 +190,13 @@ def _models():
         return {'sigma': sigma}
 
     def model_Y(Y, ebayes_beta_y, train, prior_alpha, prior_beta):
-        subsample_size = 10
+        ss_y = min(10, s)   # clamp to the plate size; see model_X_Y
         sigma = pyro.sample('sigma', dist.Beta(torch.tensor(prior_alpha, device=device), torch.tensor(prior_beta, device=device)).expand([n]).to_event(1))
         beta_y = pyro.sample('beta_y', dist.Gamma(torch.tensor(ebayes_beta_y, device=device), torch.tensor(1., device=device)))
         if train:
-            with pyro.poutine.scale(scale=1), pyro.plate('data_Y', s, subsample_size=subsample_size) as ind:
+            with pyro.poutine.scale(scale=1), pyro.plate('data_Y', s, subsample_size=ss_y) as ind:
                 ind = ind.to(device=device)
-                pyro.sample('nc', dist.LogNormal(beta_y * sigma, 0.5).expand([subsample_size, n]).to_event(1), obs=Y.index_select(0, ind))
+                pyro.sample('nc', dist.LogNormal(beta_y * sigma, 0.5).expand([ss_y, n]).to_event(1), obs=Y.index_select(0, ind))
         else:
             with pyro.poutine.scale(scale=1), pyro.plate('data_Y', s):
                 pyro.sample('nc', dist.LogNormal(beta_y * sigma, 0.5).expand([s, n]).to_event(1), obs=Y)

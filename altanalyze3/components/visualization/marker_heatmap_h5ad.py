@@ -860,7 +860,13 @@ def _plot_heatmap(
     contrast = float(os.environ.get("MARKER_HEATMAP_CONTRAST", "1.0"))
     if contrast <= 0:
         contrast = 1.0
-    vmin, vmax = -3.0 / contrast, 3.0 / contrast
+    # Row-median-centred log2 values almost never reach +/-3, so a +/-3 scale wastes most of
+    # the colour range and washes real differences out. +/-1.5 is the default; override with
+    # MARKER_HEATMAP_RANGE (a single number, the half-range) or MARKER_HEATMAP_CONTRAST.
+    half_range = float(os.environ.get("MARKER_HEATMAP_RANGE", "1.5"))
+    if half_range <= 0:
+        half_range = 1.5
+    vmin, vmax = -half_range / contrast, half_range / contrast
     norm = TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax)
     im = ax.imshow(
         heatmap_df.values,
@@ -1003,8 +1009,9 @@ def _plot_heatmap(
     cbar.ax.set_xlim(vmin, vmax)
     cbar.set_label("Norm Exp (z-score)", fontsize=8, labelpad=2)
     cbar.set_ticks([])
-    cbar.ax.text(-0.08, 0.5, f"{vmin:.0f}", ha="right", va="center", transform=cbar.ax.transAxes)
-    cbar.ax.text(1.08, 0.5, f"{vmax:.0f}", ha="left", va="center", transform=cbar.ax.transAxes)
+    # :g not :.0f -- the default half-range is 1.5, which :.0f would print as "-2"/"2"
+    cbar.ax.text(-0.08, 0.5, f"{vmin:g}", ha="right", va="center", transform=cbar.ax.transAxes)
+    cbar.ax.text(1.08, 0.5, f"{vmax:g}", ha="left", va="center", transform=cbar.ax.transAxes)
 
     _save_figure(fig, output_path)
     plt.close(fig)

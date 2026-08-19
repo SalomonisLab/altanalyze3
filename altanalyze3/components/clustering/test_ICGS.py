@@ -6,6 +6,7 @@ from anndata import AnnData
 from altanalyze3.components.clustering.ICGS import (
     ICGS3Config,
     apply_expression_batch_adjustment,
+    apply_modality_defaults,
     build_arg_parser,
     classify_adata_with_scores_chunked,
     classify_with_scores,
@@ -463,9 +464,62 @@ def test_default_mito_percent_is_30():
     args = parser.parse_args(["--input", "dummy.h5ad", "--output-dir", "/tmp/icgs3_test"])
     assert args.mito_percent == 30.0
     assert ICGS3Config(input_paths=["dummy.h5ad"], output_dir="/tmp/icgs3_test").mito_percent == 30.0
-    assert args.marker_rho == 0.3
-    assert args.marker_min_per_cluster == 2
     assert args.pre_pagerank_cells == 0
+    # The marker gate carries no parser-level default; apply_modality_defaults resolves it.
+    # test_marker_gate_defaults_resolve_by_modality asserts the resolved values.
+    assert args.marker_rho is None
+    assert args.marker_min_per_cluster is None
+
+
+def test_marker_gate_defaults_resolve_by_modality():
+    """RNA keeps rho 0.3 / 2 markers; ADT gets the relaxed 0.15 / 1 gate; users still win.
+
+    The superseded implementation detected an unset value by comparing against the literal
+    defaults of the day, so a later default change silently disabled the ADT gate.
+    """
+    rna = apply_modality_defaults(
+        ICGS3Config(input_paths=["dummy.h5ad"], output_dir="/tmp/icgs3_test", modality="rna")
+    )
+    assert rna.marker_rho == 0.3
+    assert rna.marker_min_per_cluster == 2
+
+    adt = apply_modality_defaults(
+        ICGS3Config(input_paths=["dummy.h5ad"], output_dir="/tmp/icgs3_test", modality="adt")
+    )
+    assert adt.marker_rho == 0.15
+    assert adt.marker_min_per_cluster == 1
+    assert adt.min_genes == 0
+    assert adt.min_counts == 0
+    assert adt.mito_percent is None
+    assert adt.n_top_features == 0
+
+    explicit = apply_modality_defaults(
+        ICGS3Config(
+            input_paths=["dummy.h5ad"],
+            output_dir="/tmp/icgs3_test",
+            modality="adt",
+            marker_rho=0.4,
+            marker_min_per_cluster=5,
+        )
+    )
+    assert explicit.marker_rho == 0.4
+    assert explicit.marker_min_per_cluster == 5
+
+    parser = build_arg_parser()
+    args = parser.parse_args(
+        ["--input", "dummy.h5ad", "--output-dir", "/tmp/icgs3_test", "--modality", "adt", "--marker-rho", "0.25"]
+    )
+    resolved = apply_modality_defaults(
+        ICGS3Config(
+            input_paths=list(args.input),
+            output_dir=args.output_dir,
+            modality=args.modality,
+            marker_rho=args.marker_rho,
+            marker_min_per_cluster=args.marker_min_per_cluster,
+        )
+    )
+    assert resolved.marker_rho == 0.25
+    assert resolved.marker_min_per_cluster == 1
 
 
 def test_chunked_sparse_svm_matches_dense_classifier():
