@@ -5,6 +5,28 @@
       "label": "Human",
       "references": [
         {
+          "id": "hs_lung_cellref_reference",
+          "label": "LungMAP CellRef v1.1 (Guo 2023)",
+          "states_tsv": "references/Human/Lung/CellRef/Hs-CellRef.txt",
+          "reference_clusters_tsv": "references/Human/Lung/CellRef/Hs-CellRef_clusters.tsv",
+          "reference_coords_tsv": "references/Human/Lung/CellRef/Hs-CellRef_umap.tsv",
+          "cluster_key": "celltype_level3",
+          "impute_modalities": [
+            "lipids",
+            "grn"
+          ],
+          "ambient_options": [
+            "default"
+          ],
+          "impute_config": {
+            "grn": {
+              "bundle_path": "../../rna2grn/rna2grn_lung_bundle.pkl.gz",
+              "expression_scale": "linear",
+              "pseudobulk_statistic": "mean_over_cells_of_log1p_cp10k"
+            }
+          }
+        },
+        {
           "id": "hs_bm_reference",
           "label": "Bone marrow CITE-Seq (Zhang 2024)",
           "states_tsv": "references/Human/BoneMarrow/Zhang-2024/Hs-MarrowAtlas-L3M.txt",
@@ -44,20 +66,6 @@
           ]
         },
         {
-          "id": "hs_lung_cellref_reference",
-          "label": "LungMAP CellRef v1.1 (Guo 2023)",
-          "states_tsv": "references/Human/Lung/CellRef/Hs-CellRef.txt",
-          "reference_clusters_tsv": "references/Human/Lung/CellRef/Hs-CellRef_clusters.tsv",
-          "reference_coords_tsv": "references/Human/Lung/CellRef/Hs-CellRef_umap.tsv",
-          "cluster_key": "celltype_level3",
-          "impute_modalities": [
-            "lipids"
-          ],
-          "ambient_options": [
-            "default"
-          ]
-        },
-        {
           "id": "hs_lung_hlca_reference",
           "label": "Lung HLCA (Sikkema 2023)",
           "states_tsv": "references/Human/Lung/HLCA/Hs-Lung-HLCA.txt",
@@ -65,11 +73,19 @@
           "reference_coords_tsv": "references/Human/Lung/HLCA/Hs-Lung-HLCA_umap.tsv",
           "cluster_key": "HLCA",
           "impute_modalities": [
-            "lipids"
+            "lipids",
+            "grn"
           ],
           "ambient_options": [
             "default"
-          ]
+          ],
+          "impute_config": {
+            "grn": {
+              "bundle_path": "../../rna2grn/rna2grn_lung_bundle.pkl.gz",
+              "expression_scale": "linear",
+              "pseudobulk_statistic": "mean_over_cells_of_log1p_cp10k"
+            }
+          }
         },
         {
           "id": "hs_lung_natri_reference",
@@ -79,11 +95,19 @@
           "reference_coords_tsv": "references/Human/Lung/Natri-2024/Hs-Lung-IPF-Natri_umap.tsv",
           "cluster_key": "TGEN-IPF",
           "impute_modalities": [
-            "lipids"
+            "lipids",
+            "grn"
           ],
           "ambient_options": [
             "default"
-          ]
+          ],
+          "impute_config": {
+            "grn": {
+              "bundle_path": "../../rna2grn/rna2grn_lung_bundle.pkl.gz",
+              "expression_scale": "linear",
+              "pseudobulk_statistic": "mean_over_cells_of_log1p_cp10k"
+            }
+          }
         },
         {
           "id": "hs_lung_bpd_sun_reference",
@@ -93,11 +117,19 @@
           "reference_coords_tsv": "references/Human/Lung/BPD-Sun/Hs-BPD_Sun_umap.tsv",
           "cluster_key": "cell type",
           "impute_modalities": [
-            "lipids"
+            "lipids",
+            "grn"
           ],
           "ambient_options": [
             "default"
-          ]
+          ],
+          "impute_config": {
+            "grn": {
+              "bundle_path": "../../rna2grn/rna2grn_lung_bundle.pkl.gz",
+              "expression_scale": "linear",
+              "pseudobulk_statistic": "mean_over_cells_of_log1p_cp10k"
+            }
+          }
         }
       ]
     },
@@ -105,6 +137,17 @@
       "id": "mouse",
       "label": "Mouse",
       "references": [
+        {
+          "id": "mm_lung_cellref_reference",
+          "label": "LungMAP CellRef v1.0",
+          "states_tsv": "references/Mouse/Lung/CellRef/Mm-CellRef.txt",
+          "reference_clusters_tsv": "references/Mouse/Lung/CellRef/Mm-CellRef_clusters.tsv",
+          "reference_coords_tsv": "references/Mouse/Lung/CellRef/Mm-CellRef_umap.tsv",
+          "cluster_key": "celltype_level3",
+          "ambient_options": [
+            "default"
+          ]
+        },
         {
           "id": "mm_bm_reference",
           "label": "Bone marrow CITE-Seq (Ferchen 2025)",
@@ -122,17 +165,6 @@
               "log_base": "e"
             }
           },
-          "ambient_options": [
-            "default"
-          ]
-        },
-        {
-          "id": "mm_lung_cellref_reference",
-          "label": "LungMAP CellRef v1.0",
-          "states_tsv": "references/Mouse/Lung/CellRef/Mm-CellRef.txt",
-          "reference_clusters_tsv": "references/Mouse/Lung/CellRef/Mm-CellRef_clusters.tsv",
-          "reference_coords_tsv": "references/Mouse/Lung/CellRef/Mm-CellRef_umap.tsv",
-          "cluster_key": "celltype_level3",
           "ambient_options": [
             "default"
           ]

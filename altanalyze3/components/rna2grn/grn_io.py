@@ -178,3 +178,79 @@ def match_columns(
             unmatched.append(col)
     table = pd.DataFrame(rows)
     return MatchResult(table=table, unmatched=unmatched, control_columns=control_cols)
+
+
+# ---------------------------------------------------------------------------
+# Lung (LungMAP IPF/control) reference
+# ---------------------------------------------------------------------------
+# The lung GRN file uses a different column grammar from the leukemia file:
+#     "<Group>.<CellState>"   e.g. "Control.AT1", "IPF.KRT5-_KRT17"
+# and the paired pseudobulk matrix keys columns as
+#     "<CellState>|<Group>"   e.g. "AT1|Control", "KRT5-/KRT17+|IPF"
+# The GRN writer mangles the cell-state name: it drops "+", then replaces " "
+# and "/" with "_". ``mangle_cellstate`` reproduces that mangling exactly, so the
+# match is an equality test on the mangled key, not a fuzzy suffix search.
+
+LUNG_GROUPS = ("Control", "IPF")
+
+
+def mangle_cellstate(cell_state: str) -> str:
+    """Reproduce the lung GRN writer's cell-state name mangling.
+
+    ``"Secretory - SCGB1A1+/MUC5B+"`` -> ``"Secretory_-_SCGB1A1_MUC5B"``
+    """
+    return str(cell_state).replace("+", "").replace(" ", "_").replace("/", "_")
+
+
+def lung_pseudobulk_key(cell_state: str, group: str) -> str:
+    """The GRN column name a ``"<CellState>|<Group>"`` pseudobulk maps to."""
+    return f"{group}.{mangle_cellstate(cell_state)}"
+
+
+def match_lung_columns(
+    grn_columns: Sequence[str],
+    rna_pseudobulks: Sequence[str],
+    groups: Sequence[str] = LUNG_GROUPS,
+) -> MatchResult:
+    """Match lung GRN columns to ``"<CellState>|<Group>"`` pseudobulk columns.
+
+    Returns a MatchResult whose table carries one row per matched GRN column with
+    ``rna_sample`` = the group (Control / IPF) and ``cell_state`` = the original,
+    un-mangled cell-state name from the RNA matrix.
+    """
+    gset = set(str(g) for g in groups)
+    key_to_pb: Dict[str, List[str]] = {}
+    pb_meta: Dict[str, Tuple[str, str]] = {}
+    for pb in rna_pseudobulks:
+        pb = str(pb)
+        if "|" not in pb:
+            continue
+        cs, grp = pb.rsplit("|", 1)
+        if grp not in gset:
+            continue
+        key_to_pb.setdefault(lung_pseudobulk_key(cs, grp), []).append(pb)
+        pb_meta[pb] = (cs, grp)
+
+    collisions = {k: v for k, v in key_to_pb.items() if len(v) > 1}
+    if collisions:
+        raise ValueError(
+            "lung cell-state mangling is not injective; colliding GRN keys: "
+            f"{ {k: v for k, v in list(collisions.items())[:5]} }"
+        )
+
+    rows: List[dict] = []
+    unmatched: List[str] = []
+    for col in grn_columns:
+        col = str(col)
+        hits = key_to_pb.get(col)
+        if not hits:
+            unmatched.append(col)
+            continue
+        pb = hits[0]
+        cs, grp = pb_meta[pb]
+        rows.append(
+            dict(grn_column=col, sample_token=grp, cell_state=cs,
+                 rna_sample=grp, rna_pseudobulk=pb, group=grp)
+        )
+    return MatchResult(table=pd.DataFrame(rows), unmatched=unmatched,
+                       control_columns=[])

@@ -133,8 +133,74 @@ tfa = b.tf_activity(res.predictions)
 res = b.predict_from_10x_h5("filtered_feature_bc_matrix.h5", groupby="cellharmony_label")
 ```
 
-CLI (`python -m altanalyze3.components.rna2grn.cli`): `model-info`, `predict-csv`,
-`predict-h5ad`, `predict-10x`.
+CLI (`python -m altanalyze3.components.rna2grn.cli`): `list-references`,
+`model-info`, `predict-csv`, `predict-h5ad`, `predict-10x`.
+
+## References (tissue-specific bundles)
+
+The module ships one bundle per atlas. `leukemia` stays the default, so callers
+that pass nothing keep their previous behaviour (verified bit-identical).
+
+| reference | tissue | edges | TFs | training pseudobulks | bundle |
+|---|---|---|---|---|---|
+| `leukemia` (default) | human bone marrow / AML | 7,486 | 217 | 341 | `rna2grn_bundle.pkl.gz` (0.47 MB) |
+| `lung` | human lung, LungMAP IPF vs control | 57,307 | 221 | 39 | `rna2grn_lung_bundle.pkl.gz` (3.93 MB) |
+
+```python
+b = Rna2GrnBundle.load(reference="lung")      # or load_bundle(reference="lung")
+Rna2GrnBundle.load("/path/to/custom.pkl.gz")  # explicit path still works
+```
+```bash
+python -m altanalyze3.components.rna2grn.cli list-references
+python -m altanalyze3.components.rna2grn.cli model-info --reference lung
+```
+Passing `--bundle` and `--reference` together raises `ValueError` rather than
+silently preferring one.
+
+### The lung reference
+
+Built from 39 measured GRN columns matched 39/39 to `<CellState>|<Group>` pseudobulks
+(221/221 TFs and 4,984/4,984 targets present in the RNA, so 57,307/57,307 edges are
+usable). **No internal validation** — all 39 pseudobulks train the model, by request.
+
+Its pseudobulks are the **mean over cells of `log1p(CP10k)`**, not the leukemia
+reference's `log1p(CP10k of summed counts)`. Same family, different statistic, so
+pass `normalized=True` (or CLI `--normalized`); the counts path emits a
+`RuntimeWarning` for this reference instead of silently shifting the input space.
+
+Accuracy over 39 pseudobulks x 57,307 edges — resubstitution is the requested
+configuration, leave-one-pseudobulk-out is an added honest counterpart:
+
+| metric | resubstitution | leave-one-out |
+|---|---|---|
+| R² vs global mean | 0.887 | 0.839 |
+| profile r (median / min) | 0.940 / 0.872 | 0.907 / 0.792 |
+| per-edge r (median) | 0.941 | 0.916 |
+| mean absolute error | 0.084 | 0.097 |
+
+### Pseudobulk statistic (how inference must form its input)
+
+A bundle declares in `metadata["pseudobulk_statistic"]` how its training pseudobulks
+were formed, and `predict_from_adata` honours that declaration by default:
+
+| statistic | meaning | bundle |
+|---|---|---|
+| `sum_counts` (default when a bundle declares nothing) | sum the group's counts, then CP10k + log1p | `leukemia` |
+| `mean_over_cells_of_log1p_cp10k` | average the group's already CP10k+log1p rows | `lung` |
+
+```python
+b.predict_from_adata(adata, groupby="pb", layer=None)          # uses the bundle's own statistic
+b.predict_from_adata(adata, groupby="pb", layer="counts",
+                     pseudobulk_statistic="sum_counts")        # explicit override
+```
+Sending a count matrix down the mean-of-log path raises `ValueError` rather than
+averaging counts as if they were log values.
+
+Caveats specific to this reference: 39 rows fit 4 parameters per edge; each
+pseudobulk pools all donors of a group, so there is no donor-level replication and a
+"differential" is a magnitude, not a test; the model predicts 46/85 lung pseudobulks that have no measured
+GRN, so no training row matches them. Full report:
+`/Users/saljh8/Dropbox/LungMAP/GRN/rna2grn/README.md`.
 
 ## Caveats
 
@@ -154,3 +220,7 @@ Dev scripts in `dev/`: `inspect_data`, `build_dataset`, `diagnostics`,
 `benchmark_loso` (kNN-era), `benchmark_differential`, `perturbation_test`,
 `validate_differential_tf`, `make_figures`. Rebuild the bundle:
 `training.build_bundle(dataset_npz, out_path, ridge_lambda=1.0)`.
+
+Lung reference: `dev/build_lung_reference.py` (dataset + bundle) and
+`dev/validate_lung_reference.py` (checks A–E). Both take absolute-path flags and
+default to the LungMAP inputs.

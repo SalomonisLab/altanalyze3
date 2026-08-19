@@ -568,12 +568,23 @@ def _build_imputed_grn_adata(query_adata, reference_entry, cluster_obs_col=None)
     cfg = _reference_impute_config(reference_entry, "grn")
     bundle_path = cfg.get("bundle_path")
     bundle = load_rna2grn_bundle(bundle_path) if bundle_path else load_rna2grn_bundle()
+    # Build the pseudobulk the way THIS bundle was trained, not one fixed way. The
+    # leukemia bundle declares nothing -> "sum_counts" -> layers['counts'] summed then
+    # CP10k+log1p (unchanged behaviour). The lung bundle declares
+    # "mean_over_cells_of_log1p_cp10k" -> average query_adata.X, which cellHarmony_lite
+    # already normalized to CP10k+log1p per cell, so the input matches training exactly.
+    pb_stat = str(cfg.get("pseudobulk_statistic")
+                  or getattr(bundle, "pseudobulk_statistic", "sum_counts"))
+    if pb_stat == "mean_over_cells_of_log1p_cp10k":
+        layer = None
+    else:
+        layer = "counts" if "counts" in getattr(query_adata, "layers", {}) else None
     key = _pseudobulk_group_key(query_adata.obs, cluster_obs_col)
-    layer = "counts" if "counts" in getattr(query_adata, "layers", {}) else None
     added = "_pb_group" not in query_adata.obs.columns
     query_adata.obs["_pb_group"] = key.values
     try:
-        gres = bundle.predict_from_adata(query_adata, groupby="_pb_group", layer=layer)
+        gres = bundle.predict_from_adata(query_adata, groupby="_pb_group", layer=layer,
+                                         pseudobulk_statistic=pb_stat)
     finally:
         if added and "_pb_group" in query_adata.obs.columns:
             del query_adata.obs["_pb_group"]
@@ -587,6 +598,11 @@ def _build_imputed_grn_adata(query_adata, reference_entry, cluster_obs_col=None)
     summary["n_edges"] = int(edges.shape[1])
     summary["n_tfs"] = int(tf_df.shape[1])
     summary["n_pseudobulks"] = int(edges.shape[0])
+    summary["pseudobulk_statistic"] = pb_stat
+    for meta_key in ("reference", "tissue"):
+        value = (getattr(bundle, "metadata", {}) or {}).get(meta_key)
+        if value:
+            summary[f"grn_{meta_key}"] = str(value)
     return tf_adata, edges_adata, summary
 
 

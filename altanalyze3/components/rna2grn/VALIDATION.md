@@ -232,6 +232,100 @@ in-distribution Test A.
 
 ---
 
+## 9b. Lung reference (LungMAP IPF/control)
+
+Scope: this section covers ONLY the `lung` bundle. Sections 1–9 and 10–11 describe the
+`leukemia` (default) bundle. The multi-reference change leaves that bundle **bit-identical** (6 × 7,486 = 44,916 values compared, 0 differences,
+across `load()`, `reference="leukemia"`, an explicit path, and `load_bundle()`).
+
+Code: [`grn_io.py`](grn_io.py) (`mangle_cellstate`, `match_lung_columns`),
+[`dev/build_lung_reference.py`](dev/build_lung_reference.py),
+[`dev/validate_lung_reference.py`](dev/validate_lung_reference.py). Report:
+`/Users/saljh8/Dropbox/LungMAP/GRN/rna2grn/validation/validation_report.json` (status PASS).
+
+**Inputs** (read-only, neither modified):
+`/Users/saljh8/Dropbox/LungMAP/GRN/TF_to_Gene_connection_scores_log10-NOT_ordered_clusters_ALL_GENES-threshold-1.txt`
+(57,307 edges × 39 columns, mtime 2026-08-18 21:45:43) and
+`/Users/saljh8/Dropbox/LungMAP/code/ILD/AltAnalyze-create-cH-reference/ExpressionInput/exp.pseudobulks-IPF-control.txt`
+(33,538 genes × 85 pseudobulks, mtime 2025-11-06 18:49:26).
+
+**Matching.** GRN columns are `<Group>.<CellState>`; pseudobulks are `<CellState>|<Group>`.
+The GRN writer drops `+` then maps ` ` and `/` to `_`; `mangle_cellstate` reproduces that
+exactly, so matching is string equality, **not** fuzzy suffix search, and a
+non-injective mangling raises. **39/39 GRN columns matched (100 %)**; 0 unmatched;
+46/85 pseudobulks have no GRN column and are not training rows. Coverage: **221/221 TFs**,
+**4,984/4,984 targets**, **57,307/57,307 edges (100 %)**, 5,095 feature genes, 27 cell
+states, 14/39 Control + 25/39 IPF rows.
+
+**Normalization.** `pseudobulk_only.py:37` averages `log1p(CP10k)` over cells (layer built
+by `normalize.py:79-88`), so the lung X is a **mean-of-log**, whereas the leukemia X is
+**log-of-summed-counts**. The builder writes the matrix to `dataset.npz` unchanged, records the statistic as
+`pseudobulk_statistic`, and `_warn_if_counts_path` raises a `RuntimeWarning` when a caller
+feeds counts to this reference. Nothing is silently converted.
+
+**Fit.** `training.build_bundle` unchanged, `ridge_lambda = 1.0`, **all 39 pseudobulks,
+no holdout** (requested). Bundle 3.93 MB.
+
+**Checks (all PASS).**
+
+| check | result |
+|---|---|
+| A edge order == GRN file row order (bundle and dataset), metadata alignment, feature space, finiteness, non-negativity | 11/11 PASS |
+| B1 public API on the dataset matrix == `model.predict` | max abs diff **0.000e+00** (tol 1e-9) |
+| B2 public API re-reading the text file at float64 | max abs diff **1.76e-07** (tol 1e-5; float32 storage, `max\|X_text − X_npz\| = 2.2e-07`) |
+| D core cross-check: `evaluate._Edges` reproduces the shipped fit | max abs diff **4.4e-16** (tol 1e-9) |
+| E `RuntimeWarning` on the counts path | fires |
+
+**Accuracy** (39 pseudobulks × 57,307 edges). Column C is the requested configuration and
+is optimistic by construction. Column D is an **addition** that changed no shipped file.
+
+| metric | C resubstitution | D leave-one-pseudobulk-out |
+|---|---|---|
+| R² vs global mean | 0.887 | 0.839 |
+| profile r median / min | 0.940 / 0.872 | 0.907 / 0.792 |
+| per-edge r median | 0.941 | 0.916 |
+| mean absolute error | 0.084 | 0.097 |
+| predicted / true mean | 0.281 / 0.267 | — |
+
+**Deployment in scALABLE (cellHarmony-web).** All four human lung references expose the
+`grn` modality and point at this bundle
+(`altanalyze3/components/cellHarmony/flask/reference_config.json`). The pipeline builds
+the query pseudobulk with the statistic the bundle declares, so the lung path averages
+`query_adata.X`, which `cellHarmony_lite.py:554-556` already normalized to CP10k+log1p per
+cell. Measured on 12,000 real lung cells from
+`/Users/saljh8/Dropbox/LungMAP/code/ILD/output_file_with_umap.h5ad` (43 cell states, 90
+samples, 1,563 pseudobulks): the builder's pseudobulk equals the training formula
+(`pseudobulk_only.py:37`) to **max abs diff 1.9e-06** (float32 h5ad storage). The marrow
+GRN path stays on `sum_counts` and is **bit-identical** across 8,983,200 values. Report:
+`/Users/saljh8/Dropbox/LungMAP/GRN/rna2grn/validation/impute_modalities_report.json`
+(status PASS), script
+[`../cellHarmony/flask/dev/validate_impute_modalities.py`](../cellHarmony/flask/dev/validate_impute_modalities.py).
+
+**Training-column provenance (partly unverified).** I reproduced the file column
+`AT1|Control` two ways from
+`/Users/saljh8/Dropbox/LungMAP/code/ILD/output_file_with_umap.h5ad`: a mean over
+per-sample pseudobulks reaches **r = 0.99850**, a pooled cell mean reaches **r = 0.99710**.
+Neither matches exactly. The residual most likely comes from the curated sample roster
+(`pseudobulk_metadata_manual_annotation_1_by_Sample_Name-ILD53-removed.txt`). I have not
+verified that roster. I have settled the statistic family. I have not settled the exact sample list.
+
+**Limitations specific to the lung reference.**
+
+1. **39 training rows** fit 4 parameters per edge. The leukemia reference has 341.
+2. **No donor replication.** Each pseudobulk pools every donor in its group, so a
+   Control-vs-IPF difference is a magnitude, not a significance test.
+3. **46/85 pseudobulks have no measured GRN.** No training row matches those 46 profiles,
+   and this report can check none of them against a truth value.
+4. **Profile r carries the same high structural floor** flagged in §7 for leukemia; the
+   0.94 resubstitution figure is not evidence of sample-specific accuracy.
+5. **No perturbation test.** Nobody has run the §9 in-silico regulon perturbation test or
+   the §8 differential-TF test on lung. I have not verified that this reference
+   localizes a perturbed TF.
+6. **No cross-reference test.** Do not predict lung pseudobulks with the leukemia bundle,
+   or the reverse. The two edge sets and the two input statistics differ.
+
+---
+
 ## 10. Limitations
 
 1. **One protocol-mismatched control class.** AML (3′) vs Multiome/TEA controls → a ~5×

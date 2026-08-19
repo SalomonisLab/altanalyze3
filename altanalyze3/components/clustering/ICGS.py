@@ -117,6 +117,7 @@ class ICGS3Config:
     heatmap_goelite_max_terms: int = 30
     umap_feature_mode: str = "markerfinder"
     umap_covariates: Optional[str] = None
+    umap_genes: Optional[str] = None
     write_h5ad: bool = True
     generate_umap: bool = True
 
@@ -231,6 +232,8 @@ def cli_equivalent(config: ICGS3Config) -> str:
     cmd.extend(["--umap-feature-mode", config.umap_feature_mode])
     if config.umap_covariates:
         cmd.extend(["--umap-covariates", config.umap_covariates])
+    if config.umap_genes:
+        cmd.extend(["--umap-genes", config.umap_genes])
     if not config.write_h5ad:
         cmd.append("--no-h5ad")
     if not config.generate_umap:
@@ -2052,6 +2055,79 @@ def write_umap_plots(adata: ad.AnnData, config: ICGS3Config, outdir: str) -> Non
         fig.savefig(path, dpi=300)
         plt.close(fig)
 
+    #: Continuous gene-expression UMAP. The layering is the point: cells are sorted by
+    #: expression and drawn lowest first, so the highest-expressing cells land on top and
+    #: are never hidden by the non-expressing background. Drawing in the object's own row
+    #: order buries the signal under whichever cells happen to come last.
+    #:
+    #: Rendering defaults, fixed here so every ICGS3 run matches:
+    #:   ramp        white #FFFFFF to red #FF0000
+    #:   dot size    half the categorical diameter, 2.1107 points
+    #:   outline     none
+    #:   raster      none; circles are inline vector ellipses and the colour ramp is
+    #:               256 filled rectangles, because fig.colorbar emits a raster image
+    GENE_UMAP_RAMP = ("#FFFFFF", "#FF0000")
+    GENE_UMAP_DOT_SCALE = 0.5
+    GENE_UMAP_RAMP_STEPS = 256
+
+    def draw_continuous_gene(gene: str, path: str, *, title: Optional[str] = None) -> bool:
+        from matplotlib.collections import EllipseCollection
+        from matplotlib.colors import LinearSegmentedColormap, Normalize
+        from matplotlib.patches import Rectangle
+
+        if gene not in adata.var_names:
+            _log(f"UMAP gene overlay skipped; {gene} is absent from var_names")
+            return False
+        column = adata[:, gene].X
+        values = np.asarray(column.todense()).ravel() if hasattr(column, "todense") else np.asarray(column).ravel()
+        values = np.asarray(values, dtype=float)
+
+        cmap = LinearSegmentedColormap.from_list("icgs3_white_red", list(GENE_UMAP_RAMP))
+        vmax = float(np.nanmax(values)) if np.isfinite(values).any() and np.nanmax(values) > 0 else 1.0
+        norm = Normalize(vmin=0.0, vmax=vmax)
+
+        order = np.argsort(values, kind="mergesort")   # lowest first, highest drawn last
+        diameter = float(2.0 * np.sqrt(point_size(coords_all.shape[0]) / np.pi)) * GENE_UMAP_DOT_SCALE
+
+        fig = plt.figure(figsize=(8.0, 8.4))
+        ax = fig.add_axes([0.10, 0.22, 0.86, 0.70])
+        ax.add_collection(EllipseCollection(
+            widths=diameter, heights=diameter, angles=0.0, units="points",
+            offsets=coords_all[order], offset_transform=ax.transData,
+            facecolors=cmap(norm(values[order])), edgecolors="none",
+            linewidths=0.0, rasterized=False,
+        ))
+        ax.set_xlabel("UMAP_1")
+        ax.set_ylabel("UMAP_2")
+        ax.set_title(title or f"{gene} expression")
+        ax.set_xlim(global_xlim)
+        ax.set_ylim(global_ylim)
+        ax.set_aspect("equal", adjustable="box")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+        cax = fig.add_axes([0.35, 0.11, 0.30, 0.022])
+        edges = np.linspace(0.0, vmax, GENE_UMAP_RAMP_STEPS + 1)
+        for i in range(GENE_UMAP_RAMP_STEPS):
+            cax.add_patch(Rectangle(
+                (edges[i], 0.0), edges[i + 1] - edges[i], 1.0,
+                facecolor=cmap(norm(0.5 * (edges[i] + edges[i + 1]))),
+                edgecolor="none", linewidth=0.0, rasterized=False,
+            ))
+        cax.set_xlim(0.0, vmax)
+        cax.set_ylim(0.0, 1.0)
+        cax.set_yticks([])
+        cax.tick_params(labelsize=7, length=2, width=0.5)
+        for side in ("top", "right", "left", "bottom"):
+            cax.spines[side].set_linewidth(0.5)
+            cax.spines[side].set_edgecolor("#000000")
+        cax.set_xlabel(gene, fontsize=8)
+
+        fig.savefig(path)
+        plt.close(fig)
+        _log(f"UMAP gene overlay {gene}: {int((values > 0).sum())} of {values.size} cells above zero -> {path}")
+        return True
+
     draw_categorical(config.cluster_key, os.path.join(umap_dir, "icgs3_umap_clusters.pdf"), label_centers=True, title="ICGS3 clusters")
     draw_categorical(
         "ICGS3_cell_state_prediction",
@@ -2059,6 +2135,10 @@ def write_umap_plots(adata: ad.AnnData, config: ICGS3Config, outdir: str) -> Non
         label_centers=True,
         title="ICGS3 cell-state predictions",
     )
+    genes = [g.strip() for g in str(config.umap_genes or "").split(",") if g.strip()]
+    for gene in dict.fromkeys(genes):
+        draw_continuous_gene(gene, os.path.join(umap_dir, f"icgs3_umap_gene_{safe_name(gene)}.pdf"))
+
     covariates = [c.strip() for c in str(config.umap_covariates or "").split(",") if c.strip()]
     for covariate in covariates:
         draw_categorical(covariate, os.path.join(umap_dir, f"icgs3_umap_{safe_name(covariate)}.pdf"), title=covariate)
@@ -2699,6 +2779,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Use final MarkerFinder features, UDON/variable features, or PCA for UMAP.",
     )
     parser.add_argument("--umap-covariates", default=None, help="Comma-delimited obs columns for additional UMAP PDFs.")
+    parser.add_argument(
+        "--umap-genes",
+        default=None,
+        help="Comma-delimited genes drawn as continuous expression UMAPs, one PDF per gene. "
+             "Cells are drawn lowest expression first and highest last, so the highest sit on top.",
+    )
     parser.add_argument("--no-h5ad", action="store_true")
     parser.add_argument("--no-umap", action="store_true")
     return parser
@@ -2767,6 +2853,7 @@ def main(argv: Optional[Sequence[str]] = None) -> ICGS3Result:
         heatmap_goelite_max_terms=args.heatmap_goelite_max_terms,
         umap_feature_mode=args.umap_feature_mode,
         umap_covariates=args.umap_covariates,
+        umap_genes=args.umap_genes,
         write_h5ad=not args.no_h5ad,
         generate_umap=not args.no_umap,
     )

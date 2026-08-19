@@ -495,6 +495,18 @@ def _build_marker_centroids_from_aggregates(genes, cluster_order, aggregates):
         return pd.DataFrame()
 
     cluster_gene_sums = sums.reindex(index=ordered_clusters, columns=genes, fill_value=0.0).to_numpy(dtype=float)
+    # The centroid is a pseudobulk CPM: log2(cluster_sum / cluster_total * 10000 + 1). The
+    # formula is defined only for non-negative counts. Summing mean-centred or z-scored values
+    # gives negative cluster totals, and log2 of the resulting negative ratio is NaN, which
+    # would write a silently unusable cellHarmony reference.
+    if np.any(cluster_gene_sums < 0):
+        n_neg = int((cluster_gene_sums < 0).sum())
+        raise ValueError(
+            "Centroid matrix cannot be built from mean-centred or z-scored input: "
+            "%d of %d cluster x gene sums are negative. The centroid step needs raw counts "
+            "(it applies its own log2 CPM). Point --layer at a counts matrix."
+            % (n_neg, cluster_gene_sums.size)
+        )
     totals = cluster_gene_sums.sum(axis=1, keepdims=True)
     normalized = np.zeros_like(cluster_gene_sums, dtype=float)
     valid = totals[:, 0] > 0
@@ -1065,11 +1077,25 @@ def _load_marker_finder():
             ) from exc
 
 
-def _markerfinder_stats(adata, cluster_key, use_raw, layer):
+def _markerfinder_stats(adata, cluster_key, use_raw, layer, scale_data=False,
+                        scale_factor=None, validate_scaling=True):
+    """MarkerFinder correlations for a cells x genes matrix.
+
+    ``validate_scaling`` defaults to True. MarkerFinder correlates each gene against a 0/1
+    cluster indicator, which is sensitive to per-cell sequencing depth, so raw counts and
+    log1p-without-normalization layers give markers ranked partly by cell depth.
+    """
     marker_finder = _load_marker_finder()
     matrix, gene_names = _get_expression_matrix(adata, use_raw, layer)
     clusters = adata.obs[cluster_key].astype(str).tolist()
-    r_df, p_df = marker_finder.marker_finder(matrix, clusters, gene_names=gene_names)
+    r_df, p_df = marker_finder.marker_finder(
+        matrix,
+        clusters,
+        gene_names=gene_names,
+        scale_data=scale_data,
+        scale_factor=scale_factor,
+        validate_scaling=validate_scaling,
+    )
     return p_df, r_df
 
 
@@ -1183,6 +1209,9 @@ def generate_marker_heatmap_from_adata(
     method="wilcoxon",
     use_raw=False,
     layer=None,
+    scale_data=False,
+    scale_factor=None,
+    validate_scaling=True,
     cells_per_cluster=50,
     seed=0,
     export_networks=False,
@@ -1255,7 +1284,11 @@ def generate_marker_heatmap_from_adata(
     marker_core_started = time.perf_counter()
     if marker_method == "markerfinder":
         print(f"[INFO] Running markerFinder using {'raw' if use_raw else (layer or 'X')} matrix.")
-        pvals, effect_df = _markerfinder_stats(adata, cluster_key, use_raw, layer)
+        pvals, effect_df = _markerfinder_stats(
+            adata, cluster_key, use_raw, layer,
+            scale_data=scale_data, scale_factor=scale_factor,
+            validate_scaling=validate_scaling,
+        )
         fdr_df = pvals.apply(_bh_fdr, axis=0)
     else:
         n_genes = adata.raw.n_vars if use_raw and adata.raw is not None else adata.n_vars
@@ -1699,6 +1732,29 @@ def main():
     parser.add_argument("--use-raw", action="store_true", help="Use adata.raw for DE and heatmap.")
     parser.add_argument("--layer", default=None, help="Layer to use for DE and heatmap.")
     parser.add_argument(
+        "--scale-data",
+        action="store_true",
+        help=(
+            "Depth-normalize raw counts before MarkerFinder: "
+            "log2(counts / total_counts_per_cell * scale_factor + 1). Required when .X or the "
+            "chosen --layer holds raw counts."
+        ),
+    )
+    parser.add_argument(
+        "--scale-factor",
+        type=float,
+        default=None,
+        help=(
+            "Scale factor for --scale-data. Default: the median cell total, matching scanpy "
+            "normalize_total(). Keep the default for targeted panels (Xenium, CosMx, MERFISH)."
+        ),
+    )
+    parser.add_argument(
+        "--no-scaling-check",
+        action="store_true",
+        help="Skip the MarkerFinder input-scaling check (not recommended).",
+    )
+    parser.add_argument(
         "--cells-per-cluster",
         type=int,
         default=50,
@@ -1845,6 +1901,9 @@ def main():
             method=args.method,
             use_raw=args.use_raw,
             layer=layer,
+            scale_data=args.scale_data,
+            scale_factor=args.scale_factor,
+            validate_scaling=not args.no_scaling_check,
             cells_per_cluster=args.cells_per_cluster,
             seed=args.seed,
             export_networks=args.export_networks,

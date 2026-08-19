@@ -130,14 +130,264 @@ def _build_cluster_indicator(groups: Sequence[str]) -> Tuple[sparse.csr_matrix, 
     return indicator, categories
 
 
+class MarkerFinderInputError(ValueError):
+    """Raised when a cells x genes matrix is not on the scale MarkerFinder requires."""
+
+
+# exp(60) is 1.1e26, well below the float64 overflow near exp(709). A value above this ceiling
+# means the input was never log-transformed, so the inverse-log candidate is skipped instead of
+# being evaluated into an overflow and an inf-minus-inf NaN.
+_LOG_INVERSE_CEILING = 60.0
+
+_SCALING_REMEDY = (
+    "MarkerFinder correlates each gene against a 0/1 cluster indicator. That statistic is "
+    "invariant to per-gene rescaling and sensitive to per-cell sequencing depth, so the input "
+    "must be depth-normalized as log2(counts / total_counts_per_cell * scale_factor + 1). "
+    "Pass raw counts together with scale_data=True (CLI: --scale-data) to let MarkerFinder "
+    "apply that transform, or supply an already depth-normalized matrix."
+)
+
+
+def _sampled_rows(matrix, sample_rows, seed):
+    n_rows, n_cols = matrix.shape
+    if n_rows == 0:
+        raise MarkerFinderInputError("Expression matrix has no rows.")
+    if sample_rows is not None and not sparse.issparse(matrix):
+        # Cap a dense sample at ~20M entries (160 MB float64) so a transcriptome-wide
+        # matrix cannot blow up the diagnostic.
+        sample_rows = min(int(sample_rows), max(1000, 20_000_000 // max(1, n_cols)))
+    if sample_rows is None or n_rows <= sample_rows:
+        return np.arange(n_rows)
+    rng = np.random.default_rng(seed)
+    return np.sort(rng.choice(n_rows, int(sample_rows), replace=False))
+
+
+def _cell_totals(block, transform):
+    """Row sums of ``transform(block)``. Both inverse transforms map 0 to 0, so the sparse
+    branch touches only the stored values and never densifies."""
+    if sparse.issparse(block):
+        if transform is None:
+            return np.asarray(block.sum(axis=1)).ravel()
+        tmp = block.copy()
+        tmp.data = transform(tmp.data)
+        return np.asarray(tmp.sum(axis=1)).ravel()
+    return (block if transform is None else transform(block)).sum(axis=1)
+
+
+def detect_input_scaling(matrix, *, sample_rows=20000, seed=0, tol=1e-3):
+    """Classify the scaling of a cells x genes matrix.
+
+    Returns a dict carrying ``status``, ``transform`` and the diagnostics behind the call.
+    Status values:
+
+    ``ok``                 depth-normalized and log-transformed; MarkerFinder can use it
+    ``linear_normalized``  depth-normalized but not log-transformed
+    ``counts``             raw integer counts
+    ``prescaled``          mean-centred or z-scored (negative values present)
+    ``unknown``            not depth-normalized and not raw counts
+
+    The test inverts each candidate log transform and asks whether the cell totals become
+    constant. A depth-normalized matrix puts every cell on one total, so its coefficient of
+    variation falls to zero.
+    """
+    row_idx = _sampled_rows(matrix, sample_rows, seed)
+    block = matrix.tocsr()[row_idx, :] if sparse.issparse(matrix) else np.asarray(matrix, dtype=np.float64)[row_idx, :]
+
+    keep = np.asarray(_cell_totals(block, None)).ravel() != 0
+    n_empty = int((~keep).sum())
+    block = block[keep]
+    if block.shape[0] == 0:
+        raise MarkerFinderInputError("Every sampled cell is empty; cannot determine input scaling.")
+
+    n_entries = float(block.shape[0] * block.shape[1])
+    if sparse.issparse(block):
+        values = block.data
+        n_zero = n_entries - block.nnz
+    else:
+        values = block.ravel()
+        n_zero = float((values == 0).sum())
+    lo = float(min(values.min(), 0.0)) if n_zero else float(values.min())
+    hi = float(max(values.max(), 0.0)) if n_zero else float(values.max())
+
+    report = {
+        "n_cells_sampled": int(block.shape[0]),
+        "n_cells_empty_skipped": n_empty,
+        "min": lo,
+        "max": hi,
+        "frac_negative": float((values < 0).sum() / n_entries),
+        "frac_integer": float(((values == np.round(values)).sum() + n_zero) / n_entries),
+    }
+
+    if report["frac_negative"] > 0:
+        report["status"] = "prescaled"
+        report["transform"] = "mean-centred or z-scored"
+        return report
+
+    candidates = {"identity": None}
+    if hi <= _LOG_INVERSE_CEILING:
+        candidates["natural-log"] = np.expm1
+        candidates["log2"] = lambda x: np.exp2(x) - 1.0
+
+    best_name, best_cv = None, np.inf
+    for name, transform in candidates.items():
+        # float64, and divide by the mean BEFORE taking the standard deviation. Inverting a
+        # natural log of raw counts produces totals near 1e23; squaring those inside a float32
+        # variance overflows, which silently turned the diagnostic into NaN.
+        totals = np.asarray(_cell_totals(block, transform), dtype=np.float64)
+        mean_total = float(np.mean(totals))
+        if not np.isfinite(mean_total) or mean_total <= 0:
+            cv = np.inf
+        else:
+            cv = float(np.std(totals / mean_total))
+        report["cv_cell_total[%s]" % name] = cv
+        if cv < best_cv:
+            best_name, best_cv = name, cv
+
+    report["best_transform"] = best_name
+    report["cv_cell_total"] = best_cv
+
+    if best_cv < tol:
+        if best_name == "identity":
+            report["status"] = "linear_normalized"
+            report["transform"] = "depth-normalized, not log-transformed"
+        else:
+            report["status"] = "ok"
+            report["transform"] = "depth-normalized, %s" % best_name
+        return report
+
+    if report["frac_integer"] == 1.0:
+        report["status"] = "counts"
+        report["transform"] = "raw integer counts"
+        return report
+
+    report["status"] = "unknown"
+    report["transform"] = "not depth-normalized"
+    return report
+
+
+def scale_expression_matrix(matrix, *, scale_factor=None):
+    """Apply ``log2(counts / total_counts_per_cell * scale_factor + 1)``.
+
+    ``scale_factor`` defaults to the median cell total, which matches the scanpy
+    ``normalize_total()`` default. A hard-coded 10000 suits a transcriptome but not a targeted
+    panel: on a 343-probe Xenium panel whose cells hold a median of 63 counts, 10000 is 159x the
+    median total, and the transform then collapses towards a binary detected / not-detected
+    matrix (Pearson 0.9877 against binary, against 0.8694 at the median).
+
+    Returns ``(scaled_matrix, info)``.
+    """
+    is_sparse = sparse.issparse(matrix)
+    work = matrix.tocsr().astype(np.float64) if is_sparse else np.asarray(matrix, dtype=np.float64).copy()
+
+    totals = np.asarray(work.sum(axis=1)).ravel()
+    positive = totals > 0
+    if not np.any(positive):
+        raise MarkerFinderInputError("Every cell total is zero; cannot depth-normalize.")
+
+    if scale_factor is None:
+        scale_factor = float(np.median(totals[positive]))
+        source = "median cell total"
+    else:
+        scale_factor = float(scale_factor)
+        source = "user-supplied"
+    if not np.isfinite(scale_factor) or scale_factor <= 0:
+        raise MarkerFinderInputError("scale_factor must be positive and finite, got %r." % (scale_factor,))
+
+    inverse = np.zeros_like(totals, dtype=np.float64)
+    inverse[positive] = scale_factor / totals[positive]
+
+    if is_sparse:
+        work = sparse.diags(inverse).dot(work).tocsr()
+        work.data = np.log2(work.data + 1.0)
+    else:
+        work *= inverse[:, None]
+        np.log2(work + 1.0, out=work)
+
+    info = {
+        "scale_factor": scale_factor,
+        "scale_factor_source": source,
+        "median_cell_total": float(np.median(totals[positive])),
+        "n_cells_zero_total": int((~positive).sum()),
+    }
+    return work, info
+
+
+def _format_scaling_report(report):
+    keys = ("status", "transform", "n_cells_sampled", "min", "max", "frac_negative",
+            "frac_integer", "best_transform", "cv_cell_total")
+    return "; ".join("%s=%r" % (k, report[k]) for k in keys if k in report)
+
+
+def enforce_input_scaling(matrix, *, scale_data=False, scale_factor=None, verbose=True):
+    """Check the scaling of a cells x genes matrix and, when asked, repair it.
+
+    Returns ``(matrix, report)``. Raises :class:`MarkerFinderInputError` when the matrix is
+    unusable and ``scale_data`` cannot repair it.
+    """
+    report = detect_input_scaling(matrix)
+    status = report["status"]
+
+    if not scale_data:
+        if status == "ok":
+            return matrix, report
+        raise MarkerFinderInputError(
+            "MarkerFinder input rejected: %s.\n  Diagnostics: %s\n  %s"
+            % (report["transform"], _format_scaling_report(report), _SCALING_REMEDY)
+        )
+
+    if status == "ok":
+        if verbose:
+            print("[MarkerFinder] Input is already %s; --scale-data ignored." % report["transform"])
+        return matrix, report
+
+    if status in ("prescaled", "unknown"):
+        raise MarkerFinderInputError(
+            "MarkerFinder cannot scale this input: %s.\n  Diagnostics: %s\n"
+            "  Depth normalization needs the raw counts. A mean-centred, z-scored or "
+            "already-log-transformed-without-normalization matrix no longer carries them "
+            "(for example a layer holding log1p(counts) rather than counts). Supply raw counts."
+            % (report["transform"], _format_scaling_report(report))
+        )
+
+    scaled, info = scale_expression_matrix(matrix, scale_factor=scale_factor)
+    report["applied_scaling"] = info
+    if verbose:
+        print(
+            "[MarkerFinder] Input was %s. Applied log2(counts/total * %.6g + 1) "
+            "(scale factor from %s; median cell total %.6g)."
+            % (report["transform"], info["scale_factor"], info["scale_factor_source"],
+               info["median_cell_total"])
+        )
+    return scaled, report
+
+
 def marker_finder(
     expression_matrix: sparse.spmatrix,
     groups: Sequence[str],
     gene_names: Optional[Sequence[str]] = None,
+    *,
+    scale_data: bool = False,
+    scale_factor: Optional[float] = None,
+    validate_scaling: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Point-biserial Pearson r between every feature and every group indicator.
+
+    ``validate_scaling`` defaults to False so that pseudobulk and bulk callers (UDON fold
+    matrices, iterative MarkerFinder sample x feature panels) keep working unchanged. The
+    cells x genes entry points switch it on, because only there does per-cell sequencing depth
+    confound the statistic.
+    """
     if not sparse.issparse(expression_matrix):
         expression_matrix = sparse.csr_matrix(expression_matrix)
     else:
+        expression_matrix = expression_matrix.tocsr()
+
+    if validate_scaling or scale_data:
+        expression_matrix, _scaling_report = enforce_input_scaling(
+            expression_matrix, scale_data=scale_data, scale_factor=scale_factor
+        )
+        if not sparse.issparse(expression_matrix):
+            expression_matrix = sparse.csr_matrix(expression_matrix)
         expression_matrix = expression_matrix.tocsr()
 
     n_cells, n_genes = expression_matrix.shape
@@ -392,6 +642,9 @@ def find_markers_from_adata(
     output_dir: Optional[str] = None,
     layer: Optional[str] = None,
     use_raw: bool = False,
+    scale_data: bool = False,
+    scale_factor: Optional[float] = None,
+    validate_scaling: bool = False,
     n_markers: int = 60,
     direction: MarkerDirection = "up",
     rho_threshold: float = 0.2,
@@ -413,6 +666,12 @@ def find_markers_from_adata(
     expression_matrix = expression_matrix[cell_indexer, :]
     obs_names = obs_names[cell_indexer]
     clusters = clusters.loc[obs_names]
+
+    if validate_scaling or scale_data:
+        # Scale once here, so the marker correlations and the heatmap read the same matrix.
+        expression_matrix, _scaling_report = enforce_input_scaling(
+            expression_matrix, scale_data=scale_data, scale_factor=scale_factor
+        )
 
     r_df, p_df = marker_finder(expression_matrix, clusters.tolist(), gene_names=var_names)
     markers_df = _select_unique_markers(
@@ -459,8 +718,16 @@ def run_marker_finder_on_file(
     h5ad_path: str,
     cluster_key: str,
     output_dir: str,
+    *,
+    validate_scaling: bool = True,
     **kwargs,
 ) -> MarkerOutputs:
+    """Run MarkerFinder on a .h5ad.
+
+    ``validate_scaling`` defaults to True because a .h5ad here holds cells x genes, where
+    per-cell sequencing depth confounds the correlation. Pass ``scale_data=True`` to have
+    MarkerFinder depth-normalize raw counts itself.
+    """
     import anndata as ad
 
     adata = ad.read_h5ad(h5ad_path)
@@ -468,6 +735,7 @@ def run_marker_finder_on_file(
         adata,
         cluster_key=cluster_key,
         output_dir=output_dir,
+        validate_scaling=validate_scaling,
         **kwargs,
     )
 
@@ -553,6 +821,30 @@ def build_arg_parser():
         help="Name of adata.uns entry that stores the preferred cluster order.",
     )
     parser.add_argument("--heatmap-filename", default="marker_heatmap.pdf", help="Output figure filename.")
+    parser.add_argument(
+        "--scale-data",
+        action="store_true",
+        help=(
+            "Depth-normalize raw counts before running MarkerFinder: "
+            "log2(counts / total_counts_per_cell * scale_factor + 1). Required when the input "
+            "holds raw counts (h5ad mode)."
+        ),
+    )
+    parser.add_argument(
+        "--scale-factor",
+        type=float,
+        default=None,
+        help=(
+            "Scale factor for --scale-data. Default: the median cell total, matching scanpy "
+            "normalize_total(). Use the default for targeted panels (Xenium, CosMx, MERFISH); "
+            "a fixed 10000 over-scales a shallow panel and collapses it toward a binary matrix."
+        ),
+    )
+    parser.add_argument(
+        "--no-scaling-check",
+        action="store_true",
+        help="Skip the input-scaling check in h5ad mode (not recommended).",
+    )
     parser.add_argument("--markers-tsv", default="marker_genes.tsv", help="Output TSV for markers.")
     parser.add_argument("--heatmap-tsv", default="marker_heatmap.tsv", help="Output TSV for the heatmap matrix.")
     return parser
@@ -571,7 +863,9 @@ def main():
         run_marker_finder_on_matrix(args.matrix, args.groups, features_as_rows=not args.samples_as_rows, **common)
     elif args.h5ad:
         run_marker_finder_on_file(args.h5ad, cluster_key=args.cluster_key, layer=args.layer,
-                                  use_raw=args.use_raw, lineage_order_key=args.lineage_order_key, **common)
+                                  use_raw=args.use_raw, lineage_order_key=args.lineage_order_key,
+                                  scale_data=args.scale_data, scale_factor=args.scale_factor,
+                                  validate_scaling=not args.no_scaling_check, **common)
     else:
         parser.error("provide either --h5ad (with --cluster-key) or --matrix (with --groups)")
 
