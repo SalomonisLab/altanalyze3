@@ -48,6 +48,66 @@ class Tee:
         return "utf-8"
 
 
+def assess_expression_scale(adata, *, random_state=0):
+    """Classify what adata.X and layers['counts'] hold, and decide what to skip.
+
+    Uses the same classifier ICGS3 uses, so both programs read a matrix the same way:
+      counts              integers -> QC thresholds and log normalization both apply
+      log                 already depth-normalized and log-transformed -> do neither again
+      linear_non_integer  model output such as TotalVI -> do not treat as sequencing depth
+      centered            z-scored or residualised -> unusable for count-based steps
+
+    Returns a decision dict. Never raises; the caller decides what to do.
+    """
+    from altanalyze3.components.clustering.ICGS import infer_expression_scale
+
+    cached = getattr(adata, "uns", {}).get("cellharmony_expression_scale")
+    if cached is not None:
+        return cached
+
+    reports = {"X": infer_expression_scale(adata.X, name="X", random_state=random_state)}
+    if "counts" in getattr(adata, "layers", {}):
+        reports["counts"] = infer_expression_scale(
+            adata.layers["counts"], name="layers['counts']", random_state=random_state
+        )
+    for r in reports.values():
+        if r["verdict"] == "empty":
+            print(f"[scale] {r['name']} holds no nonzero values")
+            continue
+        print(f"[scale] {r['name']} looks like {r['verdict'].upper()} -- {r['reason']} "
+              f"(min {r['min']:.4g}, 99th pct {r['q99']:.4g}, max {r['max']:.4g}, "
+              f"{100 * r['frac_integer']:.1f}% integer)")
+
+    x_verdict = reports["X"]["verdict"]
+    counts_verdict = reports.get("counts", {}).get("verdict")
+    already_scaled = x_verdict == "log"
+    decision = {
+        "reports": reports,
+        "x_verdict": x_verdict,
+        "counts_verdict": counts_verdict,
+        "skip_normalization": already_scaled or x_verdict in ("linear_non_integer", "centered"),
+        "skip_qc": already_scaled,
+    }
+    if already_scaled:
+        print("[scale] X is already depth-normalized and log-transformed. Skipping QC filtering, "
+              "scaling and log normalization; cellHarmony will work with the matrix as it stands.")
+        if counts_verdict == "counts":
+            print("[scale] NOTE layers['counts'] holds real counts, so count-based QC remains "
+                  "possible. It is skipped because the input is already scaled.")
+    elif x_verdict == "linear_non_integer":
+        print("[scale] X holds linear non-integer values, for example TotalVI denoised "
+              "expression. Skipping normalization, because per-cell depth is already removed. "
+              "QC thresholds still run and should be read as approximate.")
+    elif x_verdict == "centered":
+        print("[scale] WARNING X looks z-scored or residualised. Skipping normalization. "
+              "Count-based QC on this matrix is meaningless.")
+    try:
+        adata.uns["cellharmony_expression_scale"] = decision
+    except Exception:
+        pass
+    return decision
+
+
 def normalize_adata(adata, show_progress=False):
     """Log-normalize the AnnData object in-place."""
     if show_progress:
@@ -78,6 +138,46 @@ def ensure_category_palette(adata, column):
         palette = [mcolors.to_hex(cmap(i)) for i in range(num_cats)]
     adata.uns[f"{column}_colors"] = palette
 
+def attach_secondary_feature_ids(adata, source_path):
+    """Retain the Ensembl ID alongside the gene symbol for provenance.
+
+    SoupX writes its matrix through DropletUtils::write10xCounts, whose genes.tsv is
+    symbol/symbol, so the Ensembl column is gone before scanpy sees it and var['gene_ids']
+    ends up holding the symbol. The Cell Ranger features.tsv that DOES carry Ensembl IDs sits
+    beside it and is row-for-row identical (R make.unique() on its symbols reproduces the
+    soupX names exactly), so the ID is recoverable by row position.
+
+    Sets adata.var['ensembl_id'] when a sibling features file with real Ensembl IDs and a
+    matching row count is found. Leaves the object untouched otherwise. Never drops features.
+    """
+    import gzip as _gzip
+    n = adata.n_vars
+    base = source_path if os.path.isdir(source_path) else os.path.dirname(source_path)
+    cands = []
+    for d in (base, os.path.join(base, os.pardir, "filtered_feature_bc_matrix"),
+              os.path.join(base, os.pardir, "raw_feature_bc_matrix")):
+        for fn in ("features.tsv.gz", "features.tsv", "genes.tsv.gz", "genes.tsv"):
+            cands.append(os.path.normpath(os.path.join(d, fn)))
+    for c in cands:
+        if not os.path.exists(c):
+            continue
+        try:
+            op = _gzip.open(c, "rt") if c.endswith(".gz") else open(c)
+            with op as fh:
+                rows = [ln.rstrip("\n").split("\t") for ln in fh if ln.strip()]
+        except Exception:
+            continue
+        if len(rows) != n or not rows or len(rows[0]) < 2:
+            continue
+        ids = [r[0] for r in rows]
+        if sum(1 for x in ids[:200] if x.startswith("ENS")) < 100:
+            continue                      # symbol/symbol file: carries no secondary ID
+        adata.var["ensembl_id"] = ids
+        adata.uns["secondary_feature_id_source"] = c
+        print("[features] retained Ensembl IDs for %d features from %s" % (n, c))
+        return True
+    return False
+
 def combine_and_align_h5(
     h5_files, 
     cellharmony_ref,
@@ -86,7 +186,7 @@ def combine_and_align_h5(
     export_cptt=False,
     export_h5ad=False,
     min_genes=500,
-    min_cells=5,
+    min_cells=None,   # never exclude features (user directive 2026-08-27)
     min_counts=1000,
     mit_percent=10,
     generate_umap=False,
@@ -114,6 +214,7 @@ def combine_and_align_h5(
     concat_batch_size=50,
     verbose_import=False,
     return_adata=False,
+    reference_genes_only=False,
 ):
     start_time = time.time()
     output_dir = os.path.abspath(output_dir)
@@ -203,13 +304,63 @@ def combine_and_align_h5(
         translation_map = load_gene_translation(gene_translation_file)
 
 
+    def _apply_ambient_correction(adata_combined):
+        """Run ambient RNA correction when the caller asked for it.
+
+        This body used to sit inline inside the multi-h5 input branch only, so
+        --ambient_correct_cutoff was accepted and then silently ignored for --h5ad input.
+        A run looked normal and produced uncorrected counts. Both input paths now call this.
+        """
+        if ambient_correct_cutoff is None:
+            return adata_combined
+        ambient_dir = os.path.join(output_dir, "ambient")
+        os.makedirs(ambient_dir, exist_ok=True)
+        try:
+            from altanalyze3.components.ambient_rna import ambient_subtract
+        except ImportError as exc:
+            raise RuntimeError(
+                "Ambient RNA correction requested (--ambient_correct_cutoff) but the "
+                "ambient_subtract module is unavailable."
+            ) from exc
+
+        library_col = "Library" if "Library" in adata_combined.obs.columns else (
+            "sample" if "sample" in adata_combined.obs.columns else None)
+        if library_col is None:
+            adata_combined.obs["Library"] = "Library_1"
+            library_col = "Library"
+
+        ambient_rho = str(ambient_correct_cutoff).strip()
+        print(f"[INFO] Running ambient RNA correction (rho={ambient_rho})...")
+        corrected = ambient_subtract.process_anndata(
+            adata_combined,
+            rho=ambient_rho,
+            library_col=library_col,
+            outdir=Path(ambient_dir),
+            write_individual=False,
+            write_merged=False,
+            merged_filename="ambient_corrected_merged.h5ad",
+        )
+        if corrected is None:
+            raise RuntimeError("Ambient RNA correction did not return a corrected AnnData object.")
+        corrected.var_names_make_unique()
+        print(f"[INFO] Ambient RNA correction complete. Corrected adata shape: "
+              f"{corrected.shape} (cells x genes)")
+        return corrected
+
     if h5ad_file is not None:
-        adata_combined = sc.read_h5ad(h5ad_file)
+        if reference_genes_only:
+            adata_combined = _read_h5ad_reference_genes(h5ad_file, cellharmony_ref)
+        else:
+            adata_combined = sc.read_h5ad(h5ad_file)
         apply_gene_translation(adata_combined, translation_map, os.path.basename(h5ad_file))
         adata_combined.var_names_make_unique()
         print(f"reimported adata shape: {adata_combined.shape} (cells x genes)")
-        print("...performing QC")
-        adata_combined = _apply_qc_filters(adata_combined)
+        adata_combined = _apply_ambient_correction(adata_combined)
+        if assess_expression_scale(adata_combined)["skip_qc"]:
+            print("...skipping QC: input is already scaled and log-transformed")
+        else:
+            print("...performing QC")
+            adata_combined = _apply_qc_filters(adata_combined)
     else:
         if concat_batch_size and not concat_on_disk:
             print("[warn] --concat_batch_size ignored unless --concat_on_disk is set.")
@@ -279,6 +430,7 @@ def combine_and_align_h5(
                     sample_name = os.path.basename(prefix)
                 try:
                     adata_local = sc.read_10x_mtx(tmp_path, var_names='gene_symbols')
+                    attach_secondary_feature_ids(adata_local, path)
                 except Exception:
                     from scipy.io import mmread
                     from anndata import AnnData 
@@ -448,40 +600,12 @@ def combine_and_align_h5(
             _log_step("completed in-memory concat", elapsed=time.time() - concat_start)
         print(f"adata shape: {adata_combined.shape} (cells x genes)")
 
-        if ambient_correct_cutoff is not None:
-            ambient_dir = os.path.join(output_dir, "ambient")
-            os.makedirs(ambient_dir, exist_ok=True)
-            try:
-                from altanalyze3.components.ambient_rna import ambient_subtract
-            except ImportError as exc:
-                raise RuntimeError(
-                    "Ambient RNA correction requested (--ambient_correct_cutoff) but the ambient_subtract module "
-                    "is unavailable."
-                ) from exc
+        adata_combined = _apply_ambient_correction(adata_combined)
 
-            library_col = "Library" if "Library" in adata_combined.obs.columns else ("sample" if "sample" in adata_combined.obs.columns else None)
-            if library_col is None:
-                adata_combined.obs["Library"] = "Library_1"
-                library_col = "Library"
-
-            ambient_rho = str(ambient_correct_cutoff).strip()
-            print(f"[INFO] Running ambient RNA correction (rho={ambient_rho})...")
-            corrected = ambient_subtract.process_anndata(
-                adata_combined,
-                rho=ambient_rho,
-                library_col=library_col,
-                outdir=Path(ambient_dir),
-                write_individual=False,
-                write_merged=False,
-                merged_filename="ambient_corrected_merged.h5ad",
-            )
-            if corrected is None:
-                raise RuntimeError("Ambient RNA correction did not return a corrected AnnData object.")
-            adata_combined = corrected
-            adata_combined.var_names_make_unique()
-            print(f"[INFO] Ambient RNA correction complete. Corrected adata shape: {adata_combined.shape} (cells x genes)")
-
-        adata_combined = _apply_qc_filters(adata_combined)
+        if assess_expression_scale(adata_combined)["skip_qc"]:
+            print("[qc] skipped: input is already scaled and log-transformed")
+        else:
+            adata_combined = _apply_qc_filters(adata_combined)
 
     original_cell_adata = None
     metacell_membership = None
@@ -551,9 +675,19 @@ def combine_and_align_h5(
         cell_to_metacell_map = membership_df[['cell_barcode', 'metacell_id']].set_index('cell_barcode')['metacell_id']
 
     # retain the original counts in the h5ad in the new counts slot
-    adata_combined.layers["counts"] = adata_combined.X.copy()
+    _scale = assess_expression_scale(adata_combined)
+    if _scale["x_verdict"] == "counts" or "counts" in adata_combined.layers:
+        # only store X as "counts" when X really holds counts; otherwise a log matrix would be
+        # labelled counts and every count-based step downstream would silently read log values
+        if "counts" not in adata_combined.layers:
+            adata_combined.layers["counts"] = adata_combined.X.copy()
+    else:
+        print(f"[scale] not writing layers['counts'] from X: X looks like {_scale['x_verdict'].upper()}")
 
-    normalize_adata(adata_combined, show_progress=True)
+    if _scale["skip_normalization"]:
+        print("[scale] skipping normalize_total and log1p")
+    else:
+        normalize_adata(adata_combined, show_progress=True)
     metacell_aligned_adata = adata_combined.copy() if metacell_align else None
 
     if export_h5ad:
@@ -683,8 +817,13 @@ def combine_and_align_h5(
         cell_to_metacell_map = cell_metacell_lookup
 
         adata_combined = original_cell_adata[match_df["CellBarcode"]].copy()
-        adata_combined.layers["counts"] = adata_combined.X.copy()
-        normalize_adata(adata_combined, show_progress=False)
+        _scale2 = assess_expression_scale(adata_combined)
+        if _scale2["x_verdict"] == "counts" and "counts" not in adata_combined.layers:
+            adata_combined.layers["counts"] = adata_combined.X.copy()
+        if _scale2["skip_normalization"]:
+            print("[scale] skipping normalize_total and log1p")
+        else:
+            normalize_adata(adata_combined, show_progress=False)
 
         marker_genes = reference_df.index
         adata_filtered, genes_present, _ = subset_to_reference_genes(adata_combined, marker_genes)
@@ -722,6 +861,16 @@ def combine_and_align_h5(
 
     if generate_umap:
         try:
+            # umap-learn imports umap.parametric_umap, which imports TensorFlow, whose
+            # dtypes.py calls np.dtypes. numpy adds that attribute at 2.0, so on numpy 1.x the
+            # import raises AttributeError and the whole UMAP step is skipped. An empty namespace
+            # makes TensorFlow's hasattr check return False, which is the answer it expects on an
+            # older numpy. Nothing else reads np.dtypes here.
+            import types as _types
+            if not hasattr(np, "dtypes"):
+                np.dtypes = _types.SimpleNamespace()
+                print("[umap] numpy %s predates np.dtypes; added an empty namespace so "
+                      "umap-learn can import" % np.__version__)
             os.chdir(output_dir)
 
             def downsample_cells_per_group(adata, groupby, max_cells=50):
@@ -763,6 +912,17 @@ def combine_and_align_h5(
             adata_combined.obs['UMAP-X'] = coords[:, 0]
             adata_combined.obs['UMAP-Y'] = coords[:, 1]
             adata_combined.obsm['X_umap'] = coords
+
+            # Write the coordinates as text, so a UMAP can be redrawn or joined to the
+            # barcode-to-state table without reopening an h5ad.
+            _umap_path = os.path.join(output_dir, "umap_coordinates.txt")
+            pd.DataFrame({
+                "barcode": adata_combined.obs_names.astype(str),
+                "UMAP-X": coords[:, 0],
+                "UMAP-Y": coords[:, 1],
+                ref_name: adata_combined.obs[ref_name].astype(str).values,
+            }).to_csv(_umap_path, sep="\t", index=False)
+            print(f"[umap] wrote {len(coords):,} coordinates -> {_umap_path}")
 
             ensure_category_palette(adata_combined, ref_name)
             sc.pl.umap(adata_combined, color=ref_name, 
@@ -918,6 +1078,45 @@ def combine_and_align_h5(
     if return_adata:
         return ordered_match_df, adata_combined
     return ordered_match_df
+
+def _read_h5ad_reference_genes(h5ad_file, cellharmony_ref):
+    """Read only the reference genes of an h5ad, so a 20 GB file never enters memory whole.
+
+    Alignment uses the genes the reference and the query share, so every other column is read and
+    discarded. This opens the file backed, takes the column indices of the reference genes, and
+    materialises that slice alone. A 1.7 million cell file restricted to 4,495 genes costs about a
+    hundredth of the full matrix.
+
+    obs is carried in full, because the barcodes are the output. var is carried for the kept genes.
+    layers are dropped: the caller works on X, and a counts layer would double the cost.
+    """
+    import anndata as ad
+    import h5py as _h5py
+    import numpy as _np
+    import pandas as _pd
+    import scipy.sparse as _sp
+
+    ref_genes = _pd.read_csv(cellharmony_ref, sep="\t", index_col=0, usecols=[0])
+    want = set(str(g) for g in ref_genes.index)
+    with _h5py.File(h5ad_file, "r") as handle:
+        key = handle["var"].attrs.get("_index", "_index")
+        key = key.decode() if isinstance(key, bytes) else str(key)
+        var_names = _np.array([x.decode() if isinstance(x, bytes) else x
+                               for x in handle["var"][key][:]])
+    keep = _np.where(_np.isin(var_names, list(want)))[0]
+    if keep.size == 0:
+        raise ValueError("no reference gene is present in %s" % h5ad_file)
+    backed = ad.read_h5ad(h5ad_file, backed="r")
+    print("[mem] reading %s restricted to %d of %d genes present in the reference"
+          % (os.path.basename(h5ad_file), keep.size, var_names.size))
+    X = backed[:, keep].to_memory().X
+    if _sp.issparse(X):
+        X = X.tocsr()
+    out = ad.AnnData(X=X, obs=backed.obs.copy(),
+                     var=backed.var.iloc[keep].copy())
+    backed.file.close()
+    return out
+
 
 def load_gene_translation(translation_path):
     """Load a two-column gene translation file (e.g., Ensembl → Symbol)."""
@@ -1225,7 +1424,7 @@ if __name__ == '__main__':
     parser.add_argument('--cptt', action='store_true', help='export a dense tsv for ref gene normalized exp')
     parser.add_argument('--export_h5ad', action='store_true', help='export an h5ad with all counts and normalized exp')
     parser.add_argument('--min_genes', type=int, default=200, help='min_genes for scanpy QC')
-    parser.add_argument('--min_cells', type=int, default=3, help='min_cells for scanpy QC')
+    parser.add_argument('--min_cells', type=int, default=None, help='min_cells gene filter; default None = never exclude features')
     parser.add_argument('--min_counts', type=int, default=500, help='min_counts for scanpy QC')
     parser.add_argument('--mit_percent', type=int, default=10, help='mit_percent for scanpy QC')
     parser.add_argument('--generate_umap', action='store_true', help='generate UMAP and marker analysis')
@@ -1236,6 +1435,10 @@ if __name__ == '__main__':
     parser.add_argument('--alignment_mode', type=str, default="cosine", help='Alignment mode: "cosine" or "classic"')
     parser.add_argument('--align_cutoff', type=float, default=None, help='Exclude cells with AlignmentScore below this threshold (default: include all)')
     parser.add_argument("--gene_translation",type=str, default=None, help='Optional two-column TSV mapping file (e.g. Ensembl→Symbol) for gene ID translation')
+    parser.add_argument('--reference_genes_only', action='store_true',
+                        help='Read only the genes present in the reference from --h5ad. Alignment '
+                             'uses the shared genes anyway, so this avoids loading a large matrix '
+                             'in full. Drops layers.')
     parser.add_argument('--metacell-align', action='store_true', help='Aggregate cells into metacells prior to alignment')
     parser.add_argument('--metacell-target-size', type=int, default=50, help='Target number of cells per metacell')
     parser.add_argument('--metacell-min-size', type=int, default=25, help='Minimum cells per metacell')
@@ -1323,6 +1526,7 @@ if __name__ == '__main__':
         combine_and_align_h5(
             h5_files=h5_files,
             h5ad_file=h5ad_file,
+            reference_genes_only=args.reference_genes_only,
             cellharmony_ref=cellharmony_ref,
             output_dir=output_dir,
             export_cptt=export_cptt,

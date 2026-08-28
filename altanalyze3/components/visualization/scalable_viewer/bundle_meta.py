@@ -309,6 +309,29 @@ def _norm_label(value: str) -> str:
     return "".join(ch for ch in str(value).lower() if ch.isalnum())
 
 
+def _label_tokens(value: str) -> Tuple[str, ...]:
+    """Lower-case words of a label, split on every non-alphanumeric character.
+
+    `_norm_label` deletes the separators, which makes `GOLD_I_II`, `GOLD I, II`
+    and `GOLD III` all read as `goldiii`. The GOLD IV contrast then matched
+    GOLD III as its control group and the viewer compared the wrong donors.
+    Keeping the separators as word boundaries tells the two apart -
+    ('gold','i','ii') against ('gold','iii') - while still equating the
+    spellings `_norm_label` was written for: `no_cancer` and `no cancer` both
+    give ('no','cancer'), and `non-COPD` gives ('non','copd') either way.
+    """
+    word, words = "", []
+    for ch in str(value).lower():
+        if ch.isalnum():
+            word += ch
+        elif word:
+            words.append(word)
+            word = ""
+    if word:
+        words.append(word)
+    return tuple(words)
+
+
 def _contrast_group_field(ds, comparison, categorical: Dict[str, List[str]]
                           ) -> Tuple[str, str, str]:
     """(covariate field, case value, control value) for one precomputed contrast.
@@ -317,15 +340,22 @@ def _contrast_group_field(ds, comparison, categorical: Dict[str, List[str]]
     not always spell the covariate value exactly - `cancer_vs_no_cancer` writes
     `no_cancer` where obs holds `no cancer` - so matching ignores case, spaces,
     underscores and hyphens, and the covariate's own spelling is returned.
+
+    Matching is tried on word tuples first and on the older squashed spelling
+    only if that finds nothing, because squashing separators confuses Roman
+    numerals - see `_label_tokens`.
     """
     if not comparison:
         return "", "", ""
     case, control = _contrast_labels(comparison)
-    case_key, control_key = _norm_label(case), _norm_label(control)
-    for field, cats in categorical.items():
-        keys = {_norm_label(c): c for c in cats}
-        if case_key in keys and control_key in keys and case_key != control_key:
-            return field, keys[case_key], keys[control_key]
+    for key_of in (_label_tokens, _norm_label):
+        case_key, control_key = key_of(case), key_of(control)
+        if case_key == control_key:
+            continue
+        for field, cats in categorical.items():
+            keys = {key_of(c): c for c in cats}
+            if case_key in keys and control_key in keys:
+                return field, keys[case_key], keys[control_key]
     return "", "", ""
 
 

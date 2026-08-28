@@ -937,7 +937,10 @@ select:disabled {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 12px;
+  gap: 8px;
+  /* .panel-head adds 14px below the head. The controls sit directly above the
+     figure, so the figure started 14px lower for no reason. */
+  margin-bottom: 4px;
 }
 
 .panel-head-topline {
@@ -959,18 +962,65 @@ select:disabled {
   max-width: 240px;
 }
 
+/* Three columns of a full-width panel are ~500px each, so a 220px select left
+   ~280px empty beside it and five controls needed two rows. Tracks the width of
+   a control pack every visible control onto one row. */
 .viz-controls-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  /* .panel-head-stack centres its items. The level list is 173px tall and the
+     selects are 63px, so the selects floated in the middle of a tall row with
+     ~55px of blank above and below each one. */
+  align-items: start;
+  gap: 8px 10px;
+}
+
+/* `select[multiple]` above gives every multi-select a 156px floor, which set the
+   height of the whole control row. A floor beats a ceiling in CSS, so the floor
+   is removed here and the `size` attribute sets the height. The list scrolls to
+   every level.
+   The bottom padding is 0 because the browser paints scrolled rows through the
+   padding, so a 10px bottom padding showed a fourth row cut in half. */
+.viz-controls-grid select[multiple] {
+  min-height: 0;
+  padding-top: 8px;
+  padding-bottom: 0;
+  overflow-y: auto;
 }
 
 .viz-controls-grid .inline-field {
   min-width: 0;
 }
 
+/* Two controls read badly in one track: the level list holds long cell-state
+   names and the gene box takes a pasted column. Both get two tracks, which
+   still leaves every visible control on a single row at full width. */
+@media (min-width: 760px) {
+  #viz1-groups-field,
+  #viz2-groups-field,
+  #viz1-geneset-field,
+  #viz2-geneset-field {
+    grid-column: span 2;
+  }
+}
+
+/* Annotation 1 / Values and Annotation 2 / Values shared one row instead of a
+   full-width row each. The heading keeps the whole width. */
 .viz-filter-stack {
-  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 16px;
+}
+
+.viz-filter-stack > .field-group-label {
+  grid-column: 1 / -1;
+}
+
+/* The Windows label sat above its select, which made the top row 63px tall for
+   one control. A row puts the label beside it. */
+#viz-window-count-field {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
 }
 
 .inline-field {
@@ -1177,3 +1227,34 @@ select:disabled {
     margin-left: 0;
   }
 }
+
+/* --- Window count, gene set and Chat ------------------------------------ */
+/* One window: the results grid drops to a single column and panel 2 is taken
+   out of the layout, so panel 1 spans the full width. */
+#baseline-results-view.single-window {
+  grid-template-columns: minmax(0, 1fr);
+}
+#baseline-results-view.single-window > .panel:nth-of-type(2) {
+  display: none;
+}
+
+#viz1-geneset, #viz2-geneset {
+  width: 100%;
+  /* A 200px floor overflowed the grid track on a narrow panel. The two tracks
+     the field spans already keep the box wide enough to paste into. */
+  min-width: 0;
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  resize: vertical;
+}
+
+.chat-ask { display: flex; gap: 8px; align-items: flex-start; margin: 8px 0; }
+.chat-ask textarea { flex: 1; font: 13px/1.4 inherit; resize: vertical; min-height: 44px; }
+.chat-examples { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 10px; font-size: 12px; }
+.chat-examples .ghost-btn { font-size: 11px; padding: 3px 8px; }
+.chat-views { display: flex; gap: 6px; margin: 8px 0; }
+.chat-views .ghost-btn.active { font-weight: 600; text-decoration: underline; }
+#chat-plot { min-height: 320px; }
+#chat-table { max-height: 420px; overflow: auto; }
+#chat-table table { width: 100%; border-collapse: collapse; font-size: 12px; }
+#chat-table th, #chat-table td { text-align: left; padding: 3px 8px; border-bottom: 1px solid #e6e6e6; white-space: nowrap; }
+#chat-table thead th { position: sticky; top: 0; background: #fff; }

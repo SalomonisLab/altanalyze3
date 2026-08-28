@@ -12,6 +12,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.collections import EllipseCollection
+from matplotlib.colors import to_rgba
 from matplotlib import transforms as mtransforms
 from matplotlib.ticker import LogFormatterMathtext
 import numpy as np
@@ -125,6 +127,41 @@ def _select_goelite_labels(
     return labels
 
 
+GOELITE_DOT_ELITE = "#1F19C7"            # selected by GO-Elite and positively significant
+GOELITE_DOT_SIGNIFICANT = "#A8C4EE"      # significant (p<=0.05, z>2) but not elected
+GOELITE_DOT_NOT_SIGNIFICANT = "#D1D5DB"  # everything else
+
+
+def _add_dots(ax, subset, hex_color: str, diameter_pt: float, *, zorder: int) -> None:
+    """Draw dots as inline vector circles with no stroke and no transparency group.
+
+    ax.scatter writes a PathCollection whose per-marker alpha becomes a PDF transparency
+    group, and Illustrator shows each group as an empty clipping box around the dot with no
+    fill and no stroke. Fully opaque colours remove the group, and EllipseCollection in point
+    units keeps every dot a real circle rather than a rasterised stamp.
+    """
+    if subset is None or subset.empty:
+        return
+    offsets = np.column_stack(
+        (subset["z_score"].to_numpy(dtype=float), subset["fdr_plot"].to_numpy(dtype=float))
+    )
+    n = offsets.shape[0]
+    collection = EllipseCollection(
+        widths=np.full(n, float(diameter_pt)),
+        heights=np.full(n, float(diameter_pt)),
+        angles=np.zeros(n),
+        units="points",
+        offsets=offsets,
+        offset_transform=ax.transData,
+        facecolors=to_rgba(hex_color, 1.0),   # opaque: no PDF transparency group
+        edgecolors="none",
+        linewidths=0.0,
+        zorder=zorder,
+    )
+    collection.set_alpha(None)
+    ax.add_collection(collection)
+
+
 def write_goelite_scatter_pdf(
     frame: pd.DataFrame,
     out_path: str | Path,
@@ -143,9 +180,10 @@ def write_goelite_scatter_pdf(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     plt.rcParams["pdf.fonttype"] = 42
+    plt.rcParams["ps.fonttype"] = 42
     plt.rcParams["svg.fonttype"] = "none"
     plt.rcParams["font.family"] = "sans-serif"
-    plt.rcParams["font.sans-serif"] = ["DejaVu Sans"]
+    plt.rcParams["font.sans-serif"] = ["Arial", "Helvetica", "DejaVu Sans"]
     plt.rcParams["axes.linewidth"] = 0.8
     logging.getLogger("fontTools").setLevel(logging.ERROR)
     logging.getLogger("fontTools.subset").setLevel(logging.ERROR)
@@ -165,26 +203,14 @@ def write_goelite_scatter_pdf(
             background = pop_df.loc[~pop_df["is_selected_positive_sig"]]
 
             fig, ax = plt.subplots(figsize=(9.2, 7.8))
-            if not background.empty:
-                ax.scatter(
-                    background["z_score"].to_numpy(dtype=float),
-                    background["fdr_plot"].to_numpy(dtype=float),
-                    s=42,
-                    c="#d1d5db",
-                    alpha=0.95,
-                    linewidths=0,
-                    zorder=2,
-                )
-            if not positive.empty:
-                ax.scatter(
-                    positive["z_score"].to_numpy(dtype=float),
-                    positive["fdr_plot"].to_numpy(dtype=float),
-                    s=48,
-                    c="#1f19c7",
-                    alpha=0.98,
-                    linewidths=0,
-                    zorder=3,
-                )
+            # Three tiers, not two. A term that clears p<=0.05 and z>2 but that GO-Elite did not
+            # elect is significant, so it must not share the grey of the non-significant cloud.
+            elite = pop_df.loc[pop_df["is_selected_positive_sig"]]
+            sig_not_elite = pop_df.loc[pop_df["is_positive_sig"] & ~pop_df["is_selected_positive_sig"]]
+            not_sig = pop_df.loc[~pop_df["is_positive_sig"]]
+            _add_dots(ax, not_sig, GOELITE_DOT_NOT_SIGNIFICANT, 6.5, zorder=2)
+            _add_dots(ax, sig_not_elite, GOELITE_DOT_SIGNIFICANT, 7.0, zorder=3)
+            _add_dots(ax, elite, GOELITE_DOT_ELITE, 7.4, zorder=4)
             # Term labels are drawn AFTER the axis limits/scale are final (see
             # below) so each dot->term leader can be a single straight 2-point
             # Line2D rather than a FancyArrowPatch (which exports to PDF as a
@@ -199,7 +225,7 @@ def write_goelite_scatter_pdf(
             ax.set_xlim(x_min, x_max)
             ax.set_ylim(y_min, 1.0)
             ax.set_title(f"{title_prefix}: {population}")
-            ax.axvline(0.0, color="#111827", linewidth=1.2, alpha=0.95, zorder=1)
+            ax.axvline(0.0, color="#111827", linewidth=1.2, zorder=1)  # opaque: no ExtGState
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
             ax.spines["left"].set_visible(False)
@@ -226,7 +252,6 @@ def write_goelite_scatter_pdf(
                     [zx, x1], [fy, y1],
                     color=str(label["label_color"]),
                     linewidth=1.0,
-                    alpha=0.9,
                     solid_capstyle="butt",
                     zorder=4,
                 )

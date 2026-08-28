@@ -13,7 +13,8 @@ from anndata import AnnData
 from pandas.errors import PerformanceWarning
 import scanpy as sc
 from scipy import sparse
-from matplotlib.colors import LinearSegmentedColormap, ListedColormap, TwoSlopeNorm
+from matplotlib.colors import LinearSegmentedColormap, ListedColormap, TwoSlopeNorm, to_rgb, to_rgba
+from matplotlib.patches import Rectangle
 from altanalyze3.components.visualization import NetPerspective
 
 matplotlib.use("Agg")
@@ -21,7 +22,11 @@ import matplotlib.pyplot as plt
 
 plt.rcParams['axes.linewidth'] = 0.5
 plt.rcParams['pdf.fonttype'] = 42
-plt.rcParams['pdf.compression'] = 0
+# Compression 0 wrote every rasterized image as raw RGB: no /Filter, no predictor, so a
+# 2925 x 3619 heatmap cost 31.8 MB of the 33 MB file. Any non-zero level makes matplotlib
+# emit FlateDecode with PNG Predictor 10, the same encoding that keeps the sibling SVG near
+# 1 MB. Text stays text because pdf.fonttype 42 is set above and is independent of this.
+plt.rcParams['pdf.compression'] = int(os.environ.get("MARKER_HEATMAP_PDF_COMPRESSION", "9"))
 plt.rcParams['font.family'] = 'sans-serif'
 plt.rcParams['font.sans-serif'] = ['Arial', 'Helvetica', 'DejaVu Sans']
 plt.rcParams['figure.facecolor'] = 'white'
@@ -66,17 +71,207 @@ def _log_step_timing(label, started_at, timings=None, key=None):
 
 
 def _write_heatmap_cache(cache_path, heatmap_df, row_clusters, column_clusters, ordered_cells):
+    """Save the plotted fold matrix as an h5ad.
+
+    Earlier versions wrote `np.savez_compressed`. An h5ad holds the same numbers plus named
+    obs and var frames, so scanpy, anndata and every other standard reader open the cache
+    directly. `_read_heatmap_cache` still reads a `.npz` written before this change.
+    """
     matrix = np.asarray(heatmap_df.to_numpy(), dtype=np.float32)
-    row_ids = np.asarray([f"{c}:{g}" for c, g in zip(row_clusters, heatmap_df.index.tolist())], dtype=str)
-    col_ids = np.asarray([f"{c}:{b}" for c, b in zip(column_clusters, ordered_cells)], dtype=str)
-    col_barcodes = np.asarray([str(barcode) for barcode in ordered_cells], dtype=str)
-    np.savez_compressed(
-        cache_path,
-        matrix=matrix,
-        row_ids=row_ids,
-        col_ids=col_ids,
-        col_barcodes=col_barcodes,
+    genes = [str(gene) for gene in heatmap_df.index.tolist()]
+    barcodes = [str(barcode) for barcode in ordered_cells]
+    if matrix.shape != (len(genes), len(barcodes)):
+        raise ValueError(
+            f"Heatmap cache matrix is {matrix.shape} but names {len(genes)} genes and "
+            f"{len(barcodes)} cells."
+        )
+    obs = pd.DataFrame(
+        {
+            "cluster": [str(cluster) for cluster in column_clusters],
+            "col_id": [f"{c}:{b}" for c, b in zip(column_clusters, barcodes)],
+        },
+        index=pd.Index(barcodes, name="barcode"),
     )
+    var = pd.DataFrame(
+        {
+            "cluster": [str(cluster) for cluster in row_clusters],
+            "gene": genes,
+        },
+        index=pd.Index([f"{c}:{g}" for c, g in zip(row_clusters, genes)], name="row_id"),
+    )
+    cache = AnnData(X=np.ascontiguousarray(matrix.T), obs=obs, var=var)
+    cache.uns["marker_heatmap_cache"] = {
+        "format": "marker_heatmap_fold_matrix",
+        "version": 1,
+        "orientation": "cells x markers; transpose for the plotted matrix",
+    }
+    try:
+        cache.write_h5ad(cache_path, compression="lzf")
+    except Exception:
+        cache.write_h5ad(cache_path, compression="gzip")
+
+
+def _read_heatmap_cache(cache_path):
+    """Rebuild the plotting inputs that `_write_heatmap_cache` saved.
+
+    The cache stores the finished fold matrix, so a completed MarkerFinder result re-renders in
+    seconds. This function recomputes nothing. The matrix, the gene order, the cell order and both
+    cluster vectors come off disk exactly as the original run wrote them, which is what makes a
+    re-render a faithful copy of that run rather than a second analysis of the same data.
+    """
+    if str(cache_path).lower().endswith(".npz"):
+        # Caches written before the h5ad format landed. Kept so a finished run still re-renders.
+        with np.load(cache_path, allow_pickle=False) as payload:
+            for key in ("matrix", "row_ids", "col_ids", "col_barcodes"):
+                if key not in payload:
+                    raise ValueError(f"Heatmap cache {cache_path} is missing '{key}'.")
+            matrix = np.asarray(payload["matrix"], dtype=np.float32)
+            row_ids = [str(x) for x in payload["row_ids"]]
+            col_ids = [str(x) for x in payload["col_ids"]]
+            col_barcodes = [str(x) for x in payload["col_barcodes"]]
+        row_clusters = [entry.partition(":")[0] for entry in row_ids]
+        genes = [entry.partition(":")[2] for entry in row_ids]
+        column_clusters = [entry.partition(":")[0] for entry in col_ids]
+    else:
+        cache = sc.read_h5ad(cache_path)
+        for frame, column in (("var", "gene"), ("var", "cluster"), ("obs", "cluster")):
+            if column not in getattr(cache, frame).columns:
+                raise ValueError(f"Heatmap cache {cache_path} is missing {frame}['{column}'].")
+        stored = cache.X
+        stored = stored.toarray() if sparse.issparse(stored) else np.asarray(stored)
+        matrix = np.asarray(stored, dtype=np.float32).T
+        genes = [str(gene) for gene in cache.var["gene"].tolist()]
+        row_clusters = [str(cluster) for cluster in cache.var["cluster"].tolist()]
+        col_barcodes = [str(barcode) for barcode in cache.obs_names.tolist()]
+        column_clusters = [str(cluster) for cluster in cache.obs["cluster"].tolist()]
+
+    if matrix.shape != (len(genes), len(col_barcodes)):
+        raise ValueError(
+            f"Heatmap cache {cache_path} is inconsistent: matrix is {matrix.shape} but it names "
+            f"{len(genes)} rows and {len(col_barcodes)} columns."
+        )
+    if len(column_clusters) != len(col_barcodes):
+        raise ValueError(
+            f"Heatmap cache {cache_path} names {len(column_clusters)} column clusters for "
+            f"{len(col_barcodes)} columns."
+        )
+
+    heatmap_df = pd.DataFrame(matrix, index=genes, columns=col_barcodes)
+
+    # The cache is written in plotted order, so each cluster occupies one contiguous block.
+    # Counting consecutive runs reproduces the exact block boundaries the original figure drew.
+    cluster_counts = []
+    for cluster in column_clusters:
+        if cluster_counts and cluster_counts[-1][0] == cluster:
+            cluster_counts[-1][1] += 1
+        else:
+            cluster_counts.append([cluster, 1])
+    cluster_counts = [(cluster, count) for cluster, count in cluster_counts]
+    cluster_order = list(dict.fromkeys(column_clusters))
+
+    return heatmap_df, row_clusters, column_clusters, cluster_order, cluster_counts
+
+
+def _goelite_terms_for_cache(cache_path, run_dir=None, max_terms=30):
+    """Load the GO-Elite term labels that belong to a saved heatmap cache.
+
+    ICGS3 writes the cache to `<run>/MarkerFinder/` and the enrichment table to `<run>/GO-Elite/`,
+    so the run directory is the cache's grandparent. This reuses ICGS3's own loader, which means
+    the terms, their ordering and the per-cluster cap match what a full run draws.
+    """
+    if run_dir is None:
+        run_dir = os.path.dirname(os.path.dirname(os.path.abspath(cache_path)))
+    enrichment = os.path.join(run_dir, "GO-Elite", "icgs3_biomarker_enrichment.tsv")
+    if not os.path.exists(enrichment):
+        print(f"[INFO] No GO-Elite enrichment found at {enrichment}; drawing without term labels.")
+        return {}
+    try:
+        from altanalyze3.components.clustering.ICGS import ICGS3Config, _load_goelite_heatmap_terms
+    except Exception as exc:
+        print(f"[WARN] Could not import the ICGS3 GO-Elite loader: {exc}")
+        return {}
+    config = ICGS3Config(input_paths=[], output_dir=run_dir)
+    config.heatmap_goelite_terms = True
+    config.heatmap_goelite_max_terms = max_terms
+    return _load_goelite_heatmap_terms(run_dir, config)
+
+
+def _covariates_for_cache(h5ad_path, ordered_cells, covariate_columns):
+    """Pull covariate bars for a cache re-render out of the source h5ad.
+
+    The cache stores the plotted cell order but not the cell metadata, so covariate bars need the
+    h5ad the run started from. Cells are taken in cache order, so the bars line up with the columns.
+    """
+    if not h5ad_path or not covariate_columns:
+        return None
+    if not os.path.exists(h5ad_path):
+        print(f"[WARN] Covariate source h5ad not found: {h5ad_path}")
+        return None
+    import anndata as ad_mod
+
+    adata = ad_mod.read_h5ad(h5ad_path, backed="r")
+    obs = adata.obs
+    wanted = [str(c).strip() for c in covariate_columns if str(c).strip()]
+    wanted = [c for c in dict.fromkeys(wanted) if c in obs]
+    if not wanted:
+        print("[INFO] None of the requested covariates are present in the source h5ad obs.")
+        return None
+    missing = [c for c in ordered_cells if c not in obs.index]
+    if missing:
+        print(f"[WARN] {len(missing)} of {len(ordered_cells)} plotted cells are absent from "
+              f"{h5ad_path}; skipping covariate bars.")
+        return None
+    retained, skipped = _filter_covariate_columns_for_heatmap(obs, ordered_cells, wanted,
+                                                             max_categories=12)
+    if skipped:
+        skipped_text = ", ".join(f"{name} ({count})" for name, count in skipped)
+        print(f"[INFO] Skipping heatmap covariates with >12 displayed categories: {skipped_text}")
+    if not retained:
+        return None
+    print(f"[INFO] Rendering heatmap covariate bars: {', '.join(retained)}")
+    return obs.loc[ordered_cells, retained].copy()
+
+
+def render_heatmap_from_cache(cache_path, output_path, covariate_df=None, go_terms=None,
+                              go_terms_max=30, run_dir=None, covariate_h5ad=None,
+                              covariate_columns=None, load_go_terms=True):
+    """Redraw a saved heatmap cache with the current plotting code.
+
+    Use this to change how a finished result is drawn -- resolution, colour range, labels --
+    without rerunning clustering or MarkerFinder. GO-Elite term labels load automatically from the
+    run directory beside the cache. Returns the path written.
+    """
+    if not os.path.exists(cache_path):
+        raise FileNotFoundError(f"Heatmap cache not found: {cache_path}")
+    (heatmap_df, row_clusters, column_clusters,
+     cluster_order, cluster_counts) = _read_heatmap_cache(cache_path)
+    print(f"Loaded heatmap cache: {heatmap_df.shape[0]} markers x {heatmap_df.shape[1]} cells, "
+          f"{len(cluster_order)} clusters")
+
+    if go_terms is None and load_go_terms:
+        go_terms = _goelite_terms_for_cache(cache_path, run_dir=run_dir, max_terms=go_terms_max)
+    if go_terms:
+        print(f"[INFO] GO-Elite term labels: {sum(len(v) for v in go_terms.values())} terms across "
+              f"{len(go_terms)} clusters")
+    if covariate_df is None:
+        covariate_df = _covariates_for_cache(covariate_h5ad, list(heatmap_df.columns),
+                                             covariate_columns)
+
+    out_dir = os.path.dirname(os.path.abspath(output_path))
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    _plot_heatmap(
+        heatmap_df,
+        output_path,
+        cluster_counts,
+        cluster_order,
+        column_clusters,
+        row_clusters,
+        covariate_df=covariate_df,
+        go_terms=go_terms,
+        go_terms_max=go_terms_max,
+    )
+    return output_path
 
 
 
@@ -331,7 +526,16 @@ def _prepare_marker_stats_aggregates(adata, cluster_key, genes, use_raw, layer):
     }
 
 
-def _compute_marker_stats(adata, cluster_key, markers_df, fdr_df, use_raw, layer, aggregates=None):
+def _compute_marker_stats(adata, cluster_key, markers_df, fdr_df, use_raw, layer, aggregates=None,
+                          effect_column=None):
+    """Marker statistics for the output TSV.
+
+    ``effect_column`` names the column that carries ``markers_df["effect"]`` into the output.
+    The caller passes "rho" only for ``--marker-method markerfinder``, where the effect is the
+    point-biserial Pearson r that MarkerFinder ranks on (markerFinder.py:393). The scanpy path
+    puts logfoldchanges in the same slot, so it passes None and the column stays absent.
+    Adding the column changes no gene, no row and no existing column.
+    """
     if markers_df.empty:
         return pd.DataFrame(columns=["Gene", "Fold", "Query Exp", "Ref Exp", "FDR p-value", "cluster"])
 
@@ -388,16 +592,19 @@ def _compute_marker_stats(adata, cluster_key, markers_df, fdr_df, use_raw, layer
             fdr_values = fdr_dedup.to_numpy(dtype=float)
             fdr[fdr_valid] = fdr_values[fdr_row[fdr_valid], fdr_col[fdr_valid]]
 
-    out = pd.DataFrame(
-        {
-            "Gene": marker_genes,
-            "Fold": fold,
-            "Query Exp": query_mean,
-            "Ref Exp": ref_mean,
-            "FDR p-value": fdr,
-            "cluster": marker_clusters,
-        }
-    )
+    columns = {
+        "Gene": marker_genes,
+        "Fold": fold,
+        "Query Exp": query_mean,
+        "Ref Exp": ref_mean,
+        "FDR p-value": fdr,
+        "cluster": marker_clusters,
+    }
+    if effect_column and "effect" in markers_df.columns:
+        effect = pd.to_numeric(markers_df["effect"], errors="coerce").to_numpy(dtype=float)
+        # _select_unique_markers fills a missing effect with -inf; report that as empty, not -inf.
+        columns[effect_column] = np.where(np.isfinite(effect), effect, np.nan)
+    out = pd.DataFrame(columns)
     out = out.loc[np.isfinite(out["Query Exp"].to_numpy(dtype=float))].reset_index(drop=True)
     return out
 
@@ -531,8 +738,13 @@ def _strip_marker_cluster_prefix(value):
 
 
 def _cluster_color_map(cluster_order):
-    palette = plt.get_cmap("tab20")
-    colors = [palette(i % palette.N) for i in range(len(cluster_order))]
+    # `palette(i % palette.N)` wrapped every 20 clusters, so cluster 1 and cluster 21 drew in
+    # one colour on the heatmap cluster bar. palettes.categorical_colors keeps every colour
+    # distinct into the hundreds; see visualization/palettes.py.
+    from altanalyze3.components.visualization.palettes import categorical_colors
+
+    hex_colors = categorical_colors(len(cluster_order))
+    colors = [to_rgba(c) for c in hex_colors]
     return {cluster: colors[i] for i, cluster in enumerate(cluster_order)}, ListedColormap(colors)
 
 
@@ -581,8 +793,14 @@ def _format_heatmap_pvalue(pvalue):
 
 
 def _category_color_map(categories, cmap_name="tab20"):
-    cmap = plt.get_cmap(cmap_name, max(1, len(categories)))
-    return {str(cat): tuple(cmap(i)[:3]) for i, cat in enumerate(categories)}
+    # cmap_name stays in the signature for callers that pass it, but a named matplotlib map
+    # cannot supply more than its own colour count. Build the covariate colours the same way
+    # the cluster bar does, so a 25-library covariate bar no longer repeats 5 colours.
+    from altanalyze3.components.visualization.palettes import categorical_colors
+
+    cats = [str(cat) for cat in categories]
+    hex_colors = categorical_colors(len(cats))
+    return {cat: to_rgb(hex_colors[i]) for i, cat in enumerate(cats)}
 
 
 def _covariate_palette_name(index):
@@ -610,20 +828,96 @@ def _covariate_categories(values):
 
 
 def _build_covariate_track(covariate_df):
+    """Return integer category codes, one colormap covering them, and the legends.
+
+    This function used to return an (n_covariates, n_cells, 3) RGB float image. Matplotlib's
+    Agg resampler mishandles that array. With a single covariate it must upsample 1 input row
+    to the full bar height while downsampling the cells to the raster width, and it writes the
+    data into output row 0 and floods every other row with one colour. The BPD run of
+    2026-08-23 drew author_disease as 100% 'control' across 236,620 cells for that reason:
+    scanline 0 of the rendered bar held the correct 43.8/23.3/22.0/10.9 split and the other
+    552 of 553 scanlines held flat pink.
+
+    Integer codes plus a ListedColormap take the same path as the ax_top cluster bar, which
+    renders 20 distinct colours correctly at the same width in the same figure.
+    """
     if covariate_df is None or covariate_df.empty:
-        return None, {}
-    rows = []
+        return None, None, {}
+    n_cells = int(covariate_df.shape[0])
+    n_covariates = int(covariate_df.shape[1])
+    codes = np.zeros((n_covariates, n_cells), dtype=int)
+    colors = []
     legends = {}
     for idx, col in enumerate(covariate_df.columns):
         values = covariate_df[col].astype(str)
         categories = _covariate_categories(covariate_df[col])
         color_map = _category_color_map(categories, cmap_name=_covariate_palette_name(idx))
-        rows.append([color_map.get(str(v), (0.8, 0.8, 0.8)) for v in values])
+        lookup = {}
+        for category in categories:
+            lookup[str(category)] = len(colors)
+            colors.append(color_map[str(category)])
+        unknown_code = len(colors)
+        colors.append((0.8, 0.8, 0.8))
+        codes[idx] = [lookup.get(str(value), unknown_code) for value in values]
         legends[str(col)] = {
             "categories": categories,
             "colors": color_map,
         }
-    return np.asarray(rows, dtype=float), legends
+    if codes.shape != (n_covariates, n_cells):
+        raise ValueError(
+            f"Covariate track is {codes.shape} but the frame holds {n_covariates} covariates "
+            f"and {n_cells} cells."
+        )
+    return codes, ListedColormap(colors), legends
+
+
+def _draw_covariate_bars(ax, codes, colors, max_spans=1500):
+    """Draw each covariate bar as filled rectangles, one per run of one category.
+
+    imshow cannot draw this bar. Matplotlib rasterizes a thin wide image into the PDF and writes
+    the data into output row 0 only, then floods every other row with a single value. Measured on
+    the BPD run of 2026-08-23: 1 of 553 rendered scanlines held the correct author_disease split
+    of 43.8/23.3/22.0/10.9 and the other 552 held flat pink, so the bar read as 100% control while
+    the true composition was 43.5% control of 236,620 cells. Row count (1 to 700), interpolation
+    ('none' and 'nearest') and column count (4,096 to 236,620) all reproduce it.
+
+    Rectangles never enter matplotlib's image resampler, so the defect cannot occur. They also
+    stay vector in the PDF, which keeps the bar editable.
+
+    Columns bin to at most `max_spans` spans and each span takes the category of the cell at its
+    centre. The span count is capped at 1,500 so one span stays about 2 printed pixels wide on a
+    600 dpi page. At 4,000 spans a span fell to 0.73 px, isolated spans antialiased away, and only
+    long runs kept an exact colour: control then measured 55.2% of the exactly-coloured pixels
+    against a true 43.5%. Centre sampling is what a correct nearest-neighbour image downsample does, and it keeps
+    the drawn shares unbiased: decimating this run's 236,620 cells to 1,400 and 2,000 spans gave
+    control at 43.4% and 42.5% against a true 43.5%. Two rejected alternatives, both measured on
+    this run: the most frequent category per bin inflated control to 64.9%, and dividing each bin
+    among its categories in proportion produced sub-pixel slivers that antialiased into blends, so
+    only 719 pixels of the bar held any exact category colour.
+    """
+    n_rows, n_cells = codes.shape
+    n_spans = int(min(int(max_spans), n_cells))
+    if n_spans <= 0:
+        raise ValueError("Covariate bar needs at least one cell to draw.")
+    edges = np.linspace(0, n_cells, n_spans + 1).astype(int)
+    centres = np.clip((edges[:-1] + edges[1:]) // 2, 0, n_cells - 1)
+    ax.set_xlim(-0.5, n_cells - 0.5)
+    ax.set_ylim(n_rows - 0.5, -0.5)
+    drawn = 0
+    for row in range(n_rows):
+        spans = np.asarray(codes[row], dtype=int)[centres]
+        start = 0
+        for index in range(1, n_spans + 1):
+            if index == n_spans or spans[index] != spans[start]:
+                left = float(edges[start]) - 0.5
+                right = float(edges[index]) - 0.5
+                ax.add_patch(Rectangle(
+                    (left, row - 0.5), max(right - left, 1.0), 1.0,
+                    facecolor=colors[int(spans[start])], edgecolor="none", linewidth=0,
+                ))
+                drawn += 1
+                start = index
+    return drawn
 
 
 def _filter_covariate_columns_for_heatmap(obs, ordered_cells, covariate_columns, max_categories=12):
@@ -844,10 +1138,21 @@ def _plot_heatmap(
     from mpl_toolkits.axes_grid1 import make_axes_locatable
 
     show_go_terms = bool(go_terms)
-    covariate_track, covariate_legends = _build_covariate_track(covariate_df)
+    covariate_track, covariate_cmap, covariate_legends = _build_covariate_track(covariate_df)
 
     fixed_width = 10.8 if show_go_terms else 8.3
-    fixed_height = 9.0 if covariate_track is not None else 8.5
+
+    # Covariate bars and their legends need room under the heatmap. Taking that room out of the
+    # heatmap shortened it by 19% (6.12 in -> 4.95 in) and squeezed the GO-Elite term labels until
+    # they overlapped. Growing the page instead keeps the heatmap exactly as tall as it is with no
+    # covariates, so the term labels read the same either way. These are inches, and the fractions
+    # they produce reproduce the previous layout exactly when no covariate bars are drawn.
+    axes_top = 0.82
+    heatmap_height_in = 6.12 if show_go_terms else 6.29
+    below_axes_in = 2.43 if covariate_track is not None else (0.85 if show_go_terms else 0.68)
+    fixed_height = (heatmap_height_in + below_axes_in) / axes_top
+    bottom_frac = below_axes_in / fixed_height
+
     if show_go_terms:
         fig = plt.figure(figsize=(fixed_width, fixed_height))
         gs = fig.add_gridspec(
@@ -857,15 +1162,15 @@ def _plot_heatmap(
             wspace=0.0,
             left=0.06,
             right=0.98,
-            top=0.82,
-            bottom=0.27 if covariate_track is not None else 0.10,
+            top=axes_top,
+            bottom=bottom_frac,
         )
         ax_terms = fig.add_subplot(gs[0, 0])
         ax = fig.add_subplot(gs[0, 1], sharey=ax_terms)
         ax_labels = fig.add_subplot(gs[0, 2], sharey=ax)
     else:
         fig, ax = plt.subplots(figsize=(fixed_width, fixed_height))
-        fig.subplots_adjust(left=0.08, right=0.80, top=0.82, bottom=0.27 if covariate_track is not None else 0.08)
+        fig.subplots_adjust(left=0.08, right=0.80, top=axes_top, bottom=bottom_frac)
         ax_terms = None
         ax_labels = None
 
@@ -887,6 +1192,12 @@ def _plot_heatmap(
         norm=norm,
         interpolation="none",
     )
+    # Same protocol as fastCNV.py:1140. Without it matplotlib embeds one image pixel per
+    # matrix cell: a 289,066-cell heatmap wrote a 289066 x 1160 image, 335 million pixels,
+    # into a 1,007 MB PDF. set_rasterized re-renders this artist through the raster backend
+    # at the save dpi, so the stamp is sized to the page. Text, axes, labels, the colour bar
+    # and the legends stay vector.
+    im.set_rasterized(_heatmap_rasterize())
 
     cluster_colors, cluster_cmap = _cluster_color_map(cluster_order)
     cluster_to_id = {cluster: idx for idx, cluster in enumerate(cluster_order)}
@@ -938,12 +1249,14 @@ def _plot_heatmap(
     col_ids = np.array([cluster_to_id[c] for c in column_clusters], dtype=int)[None, :]
     row_ids = np.array([cluster_to_id[c] for c in row_clusters], dtype=int)[:, None]
 
-    ax_top.imshow(col_ids, aspect="auto", cmap=cluster_cmap, interpolation="none")
+    ax_top.imshow(col_ids, aspect="auto", cmap=cluster_cmap,
+                  interpolation="none").set_rasterized(_heatmap_rasterize())
     ax_top.set_xticks([])
     ax_top.set_yticks([])
     ax_top.set_ylabel("")
 
-    ax_left.imshow(row_ids, aspect="auto", cmap=cluster_cmap, interpolation="none")
+    ax_left.imshow(row_ids, aspect="auto", cmap=cluster_cmap,
+                   interpolation="none").set_rasterized(_heatmap_rasterize())
     ax_left.set_xticks([])
     ax_left.set_yticks([])
     ax_left.set_xlabel("")
@@ -951,7 +1264,8 @@ def _plot_heatmap(
     if covariate_track is not None:
         cov_rows = int(covariate_track.shape[0])
         ax_cov = divider.append_axes("bottom", size=f"{max(4.0, cov_rows * 2.0)}%", pad=0.040)
-        ax_cov.imshow(covariate_track, aspect="auto", interpolation="nearest")
+        _draw_covariate_bars(ax_cov, covariate_track, list(covariate_cmap.colors))
+        ax_cov.set_aspect("auto")
         ax_cov.set_xticks([])
         ax_cov.set_yticks([])
         for idx, name in enumerate(covariate_df.columns):
@@ -974,7 +1288,13 @@ def _plot_heatmap(
             ax_cov.axvline(boundary, color="white", linewidth=0.35)
         for row_boundary in np.arange(0.5, cov_rows - 0.5 + 1e-9, 1.0):
             ax_cov.axhline(row_boundary, color="white", linewidth=0.35)
-        _draw_covariate_legends(fig, covariate_legends)
+        # The default rect is a fraction of a 9.0 in page. Convert to the same absolute inches
+        # so a taller page does not stretch the legend block away from the covariate bars.
+        _draw_covariate_legends(
+            fig,
+            covariate_legends,
+            rect=(0.255, 0.702 / fixed_height, 0.690, 1.035 / fixed_height),
+        )
         cbar_anchor_ax = ax_cov
     else:
         cbar_anchor_ax = ax
@@ -1029,7 +1349,34 @@ def _plot_heatmap(
     plt.close(fig)
 
 
-def _save_figure(fig, output_path):
+def _heatmap_rasterize():
+    """Whether the heatmap image and cluster strips go through the raster backend.
+
+    True, the default, re-renders them through the raster backend at the save dpi. At the default
+    2400 dpi a 27,997-cell heatmap draws 11,700 image columns and 13,835 rows, so every marker row
+    gets about 6 pixels of height instead of the single pixel it gets at full matrix resolution.
+    False keeps matplotlib's own behaviour, one image pixel per matrix cell: exact per cell, but
+    one pixel per marker row. Override with MARKER_HEATMAP_RASTERIZE=0.
+    """
+    return os.environ.get("MARKER_HEATMAP_RASTERIZE", "1").strip().lower() not in ("0", "false", "no")
+
+
+def _heatmap_dpi():
+    """Raster resolution for the heatmap stamp, in dots per inch.
+
+    Only the heatmap image and the cluster strips rasterize; every label, axis and legend stays
+    vector at any setting. Raising this sharpens the image and grows the file roughly with the
+    square of the value. The default is 2400, which held a 27,997-cell UPenn heatmap to 4.1 MB
+    with PDF compression on. Override with MARKER_HEATMAP_DPI or the --dpi flag.
+    """
+    try:
+        dpi = float(os.environ.get("MARKER_HEATMAP_DPI", "2400"))
+    except (TypeError, ValueError):
+        return 2400.0
+    return dpi if dpi > 0 else 2400.0
+
+
+def _save_figure(fig, output_path, dpi=None):
     """Write the heatmap to `output_path` AND to a sibling `.svg`, always.
 
     Illustrator opens the SVG with the text still text, because `svg.fonttype='none'` keeps glyphs
@@ -1040,14 +1387,15 @@ def _save_figure(fig, output_path):
     SVG is reported rather than raised.
     """
     written = [output_path]
-    fig.savefig(output_path, facecolor="white", transparent=False)
+    dpi = float(dpi) if dpi else _heatmap_dpi()
+    fig.savefig(output_path, facecolor="white", transparent=False, dpi=dpi)
     base, ext = os.path.splitext(output_path)
     svg_path = base + ".svg"
     if ext.lower() != ".svg":
         prior = plt.rcParams.get("svg.fonttype")
         try:
             plt.rcParams["svg.fonttype"] = "none"      # keep text editable
-            fig.savefig(svg_path, facecolor="white", transparent=False)
+            fig.savefig(svg_path, facecolor="white", transparent=False, dpi=dpi)
             written.append(svg_path)
             print(f"Saved marker heatmap SVG to: {svg_path}")
         except Exception as exc:                        # never lose the primary figure over the SVG
@@ -1218,7 +1566,7 @@ def generate_marker_heatmap_from_adata(
     network_top_n=1000,
     network_jobs=1,
     species=None,
-    write_heatmap_tsv=True,
+    write_heatmap_tsv=False,
     write_expression_tsv=True,
     write_heatmap_cache=True,
     pval_threshold=0.001,
@@ -1243,7 +1591,7 @@ def generate_marker_heatmap_from_adata(
         else None
     )
     heatmap_cache = (
-        heatmap_cache or os.path.join(out_dir, f"{base_name}_fold_matrix.npz")
+        heatmap_cache or os.path.join(out_dir, f"{base_name}_fold_matrix.h5ad")
         if write_heatmap_cache
         else None
     )
@@ -1479,6 +1827,7 @@ def generate_marker_heatmap_from_adata(
         use_raw,
         layer,
         aggregates=stats_aggregates,
+        effect_column="rho" if marker_method == "markerfinder" else None,
     )
     _log_step_timing(
         "marker_heatmap.compute_marker_stats_unique",
@@ -1505,6 +1854,7 @@ def generate_marker_heatmap_from_adata(
         use_raw,
         layer,
         aggregates=stats_aggregates,
+        effect_column="rho" if marker_method == "markerfinder" else None,
     )
     _log_step_timing(
         "marker_heatmap.compute_marker_stats_redundant",
@@ -1694,6 +2044,14 @@ def main():
     input_group = parser.add_mutually_exclusive_group(required=True)
     input_group.add_argument("--h5ad", help="Input h5ad file.")
     input_group.add_argument(
+        "--render-from-cache",
+        help=(
+            "Path to a saved *_fold_matrix.h5ad (or legacy .npz) heatmap cache. Redraws that finished result with "
+            "the current plotting code in seconds. Nothing is reclustered and MarkerFinder does "
+            "not run again."
+        ),
+    )
+    input_group.add_argument(
         "--matrix-tsv",
         help="Log2-normalized expression matrix TSV with genes as rows and cells as columns.",
     )
@@ -1715,6 +2073,58 @@ def main():
     )
     parser.add_argument("--top-n", type=int, default=5, help="Markers per cluster (default 5).")
     parser.add_argument("--out", default="marker_heatmap.pdf", help="Output figure path.")
+    parser.add_argument(
+        "--covariate-h5ad",
+        default=None,
+        help=(
+            "h5ad supplying obs for the covariate bars during --render-from-cache. The cache "
+            "stores the plotted cell order but not the cell metadata. Defaults to "
+            "icgs3_result.h5ad in the run directory when that file exists."
+        ),
+    )
+    parser.add_argument(
+        "--run-dir",
+        default=None,
+        help=(
+            "ICGS3 run directory holding GO-Elite/icgs3_biomarker_enrichment.tsv, used with "
+            "--render-from-cache. Defaults to the cache file's parent run directory."
+        ),
+    )
+    parser.add_argument(
+        "--no-go-terms",
+        action="store_true",
+        help="Draw a cache re-render without the GO-Elite enrichment term labels.",
+    )
+    parser.add_argument(
+        "--go-terms-max",
+        type=int,
+        default=30,
+        help="Maximum GO-Elite terms labelled per cluster (default 30).",
+    )
+    parser.add_argument(
+        "--no-rasterize",
+        action="store_true",
+        help=(
+            "Embed the heatmap at full matrix resolution, one image pixel per cell, instead of "
+            "re-rendering it at --dpi."
+        ),
+    )
+    parser.add_argument(
+        "--rasterize",
+        action="store_true",
+        help=(
+            "Re-render the heatmap image through the raster backend at --dpi. This is the default."
+        ),
+    )
+    parser.add_argument(
+        "--dpi",
+        type=float,
+        default=None,
+        help=(
+            "Raster resolution of the heatmap image in dots per inch (default 2400, or "
+            "MARKER_HEATMAP_DPI). Labels, axes and legends stay vector at every setting."
+        ),
+    )
     parser.add_argument("--markers-tsv", default=None, help="Output TSV for marker statistics.")
     parser.add_argument("--heatmap-tsv", default=None, help="Output TSV for the row-scaled heatmap matrix.")
     parser.add_argument(
@@ -1805,6 +2215,35 @@ def main():
     parser.add_argument("--seed", type=int, default=0, help="Random seed for cell sampling.")
     args = parser.parse_args()
 
+    if args.render_from_cache:
+        if args.dpi:
+            os.environ["MARKER_HEATMAP_DPI"] = str(args.dpi)
+        if args.no_rasterize:
+            os.environ["MARKER_HEATMAP_RASTERIZE"] = "0"
+        elif args.rasterize:
+            os.environ["MARKER_HEATMAP_RASTERIZE"] = "1"
+        covariate_columns = None
+        if getattr(args, "heatmap_covariates", None):
+            covariate_columns = [c.strip() for c in str(args.heatmap_covariates).split(",") if c.strip()]
+        if covariate_columns and not args.covariate_h5ad:
+            guess_dir = args.run_dir or os.path.dirname(
+                os.path.dirname(os.path.abspath(args.render_from_cache)))
+            guess = os.path.join(guess_dir, "icgs3_result.h5ad")
+            if os.path.exists(guess):
+                args.covariate_h5ad = guess
+                print(f"[INFO] Using {guess} for covariate bars.")
+        written = render_heatmap_from_cache(
+            args.render_from_cache,
+            args.out,
+            go_terms_max=getattr(args, "go_terms_max", 30) or 30,
+            run_dir=args.run_dir,
+            covariate_h5ad=args.covariate_h5ad,
+            covariate_columns=covariate_columns,
+            load_go_terms=not args.no_go_terms,
+        )
+        print(f"Saved marker heatmap to: {written}")
+        return
+
     out_dir = os.path.dirname(args.out) or "."
     logs_dir = os.path.join(out_dir, "logs")
     os.makedirs(logs_dir, exist_ok=True)
@@ -1822,7 +2261,7 @@ def main():
         else None
     )
     heatmap_cache = (
-        args.heatmap_cache or os.path.join(out_dir, f"{base_name}_fold_matrix.npz")
+        args.heatmap_cache or os.path.join(out_dir, f"{base_name}_fold_matrix.h5ad")
         if not args.skip_heatmap_cache
         else None
     )
@@ -1848,7 +2287,7 @@ def main():
         if heatmap_column_tsv:
             print(f"[INFO] Heatmap TSV (expression matrix): {heatmap_column_tsv}")
         if heatmap_cache:
-            print(f"[INFO] Heatmap cache (npz): {heatmap_cache}")
+            print(f"[INFO] Heatmap cache (h5ad): {heatmap_cache}")
         print(f"[INFO] Centroid TSV: {centroids_tsv}")
 
         layer = args.layer

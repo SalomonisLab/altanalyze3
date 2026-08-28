@@ -164,6 +164,161 @@ def _predictions_from_enrichment(
     return out
 
 
+def _benjamini_hochberg(pvalues: np.ndarray) -> np.ndarray:
+    """Return BH-adjusted p-values for a 1-D array. Order and length are preserved."""
+    p = np.asarray(pvalues, dtype=float)
+    n = p.size
+    if n == 0:
+        return p
+    order = np.argsort(p, kind="mergesort")
+    ranked = p[order] * n / (np.arange(n) + 1.0)
+    ranked = np.minimum.accumulate(ranked[::-1])[::-1]
+    out = np.empty(n, dtype=float)
+    out[order] = np.minimum(ranked, 1.0)
+    return out
+
+
+def lead_enrichment_table(
+    labels_in: pd.Series,
+    obs: pd.DataFrame,
+    lead_columns: Sequence[str],
+    *,
+    clusters: Sequence[str],
+) -> pd.DataFrame:
+    """Score every (cluster, reference label) barcode overlap with a hypergeometric test.
+
+    One test per cluster and reference label. ``a`` is the number of barcodes the cluster and
+    the reference label share. The null draws ``len(cluster)`` barcodes from the ``N`` annotated
+    barcodes without replacement, so the right-tail probability of seeing ``a`` or more is
+    ``hypergeom.sf(a - 1, N, n_label, n_cluster)``. ``fold_enrichment`` is the observed share of
+    the cluster over the reference label's share of all barcodes. Benjamini-Hochberg runs once
+    over every test of every reference column, so the two references compete on one scale.
+    """
+    from scipy.stats import hypergeom
+
+    rows = []
+    for column in lead_columns:
+        values = obs[column].astype(str)
+        annotated = ~values.str.strip().str.lower().isin(UNINFORMATIVE_LEAD_LABELS)
+        total = int(annotated.sum())
+        if total == 0:
+            continue
+        label_counts = values[annotated].value_counts()
+        for cluster in clusters:
+            in_cluster = (labels_in == cluster) & annotated
+            n_cluster = int(in_cluster.sum())
+            if n_cluster == 0:
+                continue
+            observed = values[in_cluster].value_counts()
+            for label, overlap in observed.items():
+                n_label = int(label_counts[label])
+                overlap = int(overlap)
+                pvalue = float(hypergeom.sf(overlap - 1, total, n_label, n_cluster))
+                expected = n_cluster * n_label / total
+                rows.append({
+                    "cluster": cluster,
+                    "reference": column,
+                    "reference_label": label,
+                    "overlap": overlap,
+                    "n_cluster": n_cluster,
+                    "n_reference_label": n_label,
+                    "n_annotated": total,
+                    "expected_overlap": expected,
+                    "fold_enrichment": (overlap / expected) if expected > 0 else np.inf,
+                    "fraction_of_cluster": overlap / n_cluster,
+                    "pvalue": pvalue,
+                })
+    table = pd.DataFrame(rows)
+    if table.empty:
+        return table
+    table["FDR"] = _benjamini_hochberg(table["pvalue"].to_numpy())
+    return table.sort_values(
+        ["cluster", "FDR", "fold_enrichment", "overlap"],
+        ascending=[True, True, False, False], kind="mergesort",
+    ).reset_index(drop=True)
+
+
+def _predictions_from_lead_enrichment(
+    table: pd.DataFrame,
+    clusters: Sequence[str],
+    *,
+    max_fdr: float,
+    min_overlap: int,
+    log,
+) -> Dict[str, Dict[str, object]]:
+    """Pick, per cluster, the single best-enriched reference label across every reference."""
+    picks: Dict[str, Dict[str, object]] = {}
+    if table.empty:
+        return picks
+    rejected = 0
+    for cluster in clusters:
+        sub = table[table["cluster"] == cluster]
+        if sub.empty:
+            continue
+        best = sub.iloc[0]
+        if float(best["FDR"]) > max_fdr or int(best["overlap"]) < min_overlap:
+            rejected += 1
+            continue
+        picks[str(cluster)] = {
+            "label": _sanitize(str(best["reference_label"])),
+            "reference": str(best["reference"]),
+            "FDR": float(best["FDR"]),
+            "fold_enrichment": float(best["fold_enrichment"]),
+            "overlap": int(best["overlap"]),
+            "fraction_of_cluster": float(best["fraction_of_cluster"]),
+        }
+    if rejected:
+        log(f"[annotate] {rejected} of {len(clusters)} clusters reach no reference label at "
+            f"FDR <= {max_fdr:g} and overlap >= {min_overlap}; those take the enriched term instead")
+    by_reference = pd.Series([v["reference"] for v in picks.values()], dtype=object).value_counts().to_dict()
+    if by_reference:
+        log("[annotate] winning reference per cluster: "
+            + ", ".join(f"{k}={v}" for k, v in sorted(by_reference.items())))
+    return picks
+
+
+def _resolve_marker_validate_scaling(adata, adt_prefix: str, layer, use_raw: bool, log) -> bool:
+    """Decide whether MarkerFinder's whole-matrix depth-normalization guard can run.
+
+    MarkerFinder correlates each feature against a 0/1 cluster indicator, a statistic that per-cell
+    sequencing depth confounds, so ``detect_input_scaling`` refuses any matrix whose cell totals
+    are not constant after inverting a log. A CITE-seq object fails that test for a reason the
+    guard does not cover: the antibody block carries no sequencing depth and is normalized on its
+    own scale, so appending it moves each cell total by the cell's antibody load. Measured on this
+    thymus object, 195 antibody columns beside 32,346 RNA columns lift the coefficient of variation
+    of the cell totals from about 0 to 0.017, seventeen times the 1e-3 tolerance.
+
+    So the guard is switched off only when the RNA block ALONE passes it. When the RNA block fails,
+    the guard stays on and MarkerFinder refuses the matrix, which is the correct outcome.
+    """
+    from ..cellHarmony.markerFinder import detect_input_scaling, _format_scaling_report
+
+    names = np.asarray([str(v) for v in adata.var_names])
+    is_adt = np.char.startswith(names, adt_prefix)
+    if not is_adt.any():
+        return True
+
+    if use_raw and adata.raw is not None:
+        matrix = adata.raw.X
+    elif layer:
+        matrix = adata.layers[layer]
+    else:
+        matrix = adata.X
+    rna_report = detect_input_scaling(matrix[:, ~is_adt])
+    full_report = detect_input_scaling(matrix)
+    if rna_report["status"] == "ok" and full_report["status"] != "ok":
+        log(f"[annotate] MarkerFinder scaling guard: the {int(is_adt.sum())} '{adt_prefix}' "
+            f"features put the whole matrix at {_format_scaling_report(full_report)}, but the "
+            f"{int((~is_adt).sum())} RNA features alone are {rna_report['transform']} "
+            f"(cv {rna_report['cv_cell_total']:.2g}). The antibody block carries no sequencing "
+            f"depth, so the whole-matrix check is switched off for this run.")
+        return False
+    if rna_report["status"] != "ok":
+        log(f"[annotate] MarkerFinder scaling guard stays ON: the RNA features are "
+            f"{rna_report['transform']} ({_format_scaling_report(rna_report)})")
+    return True
+
+
 def _fallback_label(cluster: str, markers: pd.DataFrame, adt_prefix: str) -> str:
     """Name a cluster from its strongest marker when enrichment gives nothing."""
     grp = markers[markers["cluster"] == cluster]
@@ -189,6 +344,9 @@ def annotate_pruned_clusters(
     use_raw: bool = False,
     covariate_columns: Optional[Sequence[str]] = None,
     lead_annotation: Optional[str] = None,
+    lead_mode: str = "dominant",
+    lead_max_fdr: float = 0.05,
+    lead_min_overlap: int = 10,
     biomarker_file: Optional[str] = None,
     enrichment_max_fdr: float = 1e-5,
     enrichment_min_overlap: int = 5,
@@ -249,6 +407,7 @@ def annotate_pruned_clusters(
         f"across {n_cells} cells, top {top_n} per cluster, {cells_per_cluster} cells shown")
 
     covariates = [c for c in (covariate_columns or []) if c in adata.obs.columns]
+    validate_scaling = _resolve_marker_validate_scaling(adata, adt_prefix, layer, use_raw, log)
     step4 = generate_marker_heatmap_from_adata(
         adata,
         cluster_key=cluster_key,
@@ -261,6 +420,7 @@ def annotate_pruned_clusters(
         seed=seed,
         species=species,
         covariate_columns=covariates,
+        validate_scaling=validate_scaling,
     )
 
     markers = pd.read_csv(step4["markers_tsv"], sep="\t")
@@ -283,26 +443,57 @@ def annotate_pruned_clusters(
     )
 
     lead: Dict[str, str] = {}
+    lead_detail: Dict[str, Dict[str, object]] = {}
+    lead_columns: List[str] = []
+    lead_table_path: Optional[str] = None
     if lead_annotation:
-        if lead_annotation not in adata.obs.columns:
+        lead_columns = [c.strip() for c in str(lead_annotation).split(",") if c.strip()]
+        missing = [c for c in lead_columns if c not in adata.obs.columns]
+        if missing:
             raise KeyError(
-                f"lead_annotation '{lead_annotation}' is not an obs column. "
+                f"lead_annotation {missing} are not obs columns. "
                 f"Available: {', '.join(map(str, adata.obs.columns))}"
             )
-        log(f"[annotate] naming led by obs['{lead_annotation}']; the enriched term is the fallback")
-        skipped = 0
-        for cluster in clusters_in:
-            sub = adata.obs.loc[labels_in == cluster, lead_annotation].astype(str)
-            if not len(sub):
-                continue
-            label = _sanitize(sub.value_counts().index[0])
-            if label.strip().lower() in UNINFORMATIVE_LEAD_LABELS:
-                skipped += 1
-                continue
-            lead[cluster] = label
-        if skipped:
-            log(f"[annotate] {skipped} of {len(clusters_in)} clusters have an uninformative "
-                f"dominant '{lead_annotation}' label; those take the enriched term instead")
+        if lead_mode not in ("dominant", "enrichment"):
+            raise ValueError(f"lead_mode must be 'dominant' or 'enrichment'; got '{lead_mode}'")
+        if lead_mode == "dominant":
+            if len(lead_columns) != 1:
+                raise ValueError(
+                    "lead_mode 'dominant' takes exactly one obs column; "
+                    f"got {len(lead_columns)}. Use lead_mode 'enrichment' to let several compete."
+                )
+            column = lead_columns[0]
+            log(f"[annotate] naming led by the dominant obs['{column}'] label; "
+                "the enriched term is the fallback")
+            skipped = 0
+            for cluster in clusters_in:
+                sub = adata.obs.loc[labels_in == cluster, column].astype(str)
+                if not len(sub):
+                    continue
+                label = _sanitize(sub.value_counts().index[0])
+                if label.strip().lower() in UNINFORMATIVE_LEAD_LABELS:
+                    skipped += 1
+                    continue
+                lead[cluster] = label
+                lead_detail[cluster] = {"label": label, "reference": column, "mode": "dominant"}
+            if skipped:
+                log(f"[annotate] {skipped} of {len(clusters_in)} clusters have an uninformative "
+                    f"dominant '{column}' label; those take the enriched term instead")
+        else:
+            log(f"[annotate] naming led by barcode-overlap enrichment over "
+                f"{', '.join(lead_columns)}; hypergeometric, BH over every test, "
+                f"accept at FDR <= {lead_max_fdr:g} and overlap >= {lead_min_overlap}")
+            lead_table = lead_enrichment_table(
+                labels_in, adata.obs, lead_columns, clusters=clusters_in)
+            lead_table_path = os.path.join(hopach_dir, "lead_reference_enrichment.tsv")
+            lead_table.to_csv(lead_table_path, sep="\t", index=False, float_format="%.6g")
+            log(f"[annotate] {len(lead_table)} cluster-by-reference-label tests -> {lead_table_path}")
+            picks = _predictions_from_lead_enrichment(
+                lead_table, clusters_in,
+                max_fdr=lead_max_fdr, min_overlap=lead_min_overlap, log=log)
+            for cluster, detail in picks.items():
+                lead[cluster] = str(detail["label"])
+                lead_detail[cluster] = dict(detail, mode="enrichment")
 
     names: Dict[str, str] = {}
     source: Dict[str, str] = {}
@@ -355,6 +546,14 @@ def annotate_pruned_clusters(
         "name_source": [source[c] for c in ordered],
         "n_cells": [int((labels_in == c).sum()) for c in ordered],
     })
+    if lead_detail:
+        table["lead_reference"] = [lead_detail.get(c, {}).get("reference", "") for c in ordered]
+        table["lead_FDR"] = [lead_detail.get(c, {}).get("FDR", np.nan) for c in ordered]
+        table["lead_fold_enrichment"] = [
+            lead_detail.get(c, {}).get("fold_enrichment", np.nan) for c in ordered]
+        table["lead_overlap"] = [lead_detail.get(c, {}).get("overlap", np.nan) for c in ordered]
+        table["lead_fraction_of_cluster"] = [
+            lead_detail.get(c, {}).get("fraction_of_cluster", np.nan) for c in ordered]
     if int(table["n_cells"].sum()) != n_cells:
         raise ValueError(f"cluster sizes sum to {int(table['n_cells'].sum())}, expected {n_cells}")
     table_path = os.path.join(hopach_dir, "hopach_centroid_clusters.tsv")
@@ -374,6 +573,9 @@ def annotate_pruned_clusters(
     adata.uns["sctriangulate_annotation"] = json.dumps({
         "cluster_key": cluster_key, "species": species, "top_n": top_n,
         "cells_per_cluster": cells_per_cluster, "lead_annotation": lead_annotation,
+        "lead_mode": lead_mode, "lead_columns": lead_columns,
+        "lead_max_fdr": lead_max_fdr, "lead_min_overlap": lead_min_overlap,
+        "lead_table": lead_table_path,
         "enrichment_max_fdr": enrichment_max_fdr,
         "enrichment_min_overlap": enrichment_min_overlap,
         "hopach": {"distance": hopach_distance, "kmax": hopach_kmax, "kmin": hopach_kmin,
@@ -396,6 +598,7 @@ def annotate_pruned_clusters(
         seed=seed,
         species=species,
         covariate_columns=ordered_covariates,
+        validate_scaling=validate_scaling,
     )
 
     adt_outputs = None
@@ -420,6 +623,7 @@ def annotate_pruned_clusters(
             seed=seed,
             species=species,
             covariate_columns=ordered_covariates,
+            validate_scaling=validate_scaling,
         )
 
     log(f"[annotate] wrote {table_path}")

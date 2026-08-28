@@ -3,9 +3,12 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
 import re
 import shutil
 import threading
+import time
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -97,6 +100,10 @@ class ApproximateUMAPRequest(BaseModel):
     output_pdf: Optional[str] = None
     save_updated_h5ad: bool = False
     verbose: bool = False
+
+
+class ChatRequest(BaseModel):
+    question: str = ""
 
 
 class ClientLogRequest(BaseModel):
@@ -1291,17 +1298,24 @@ def _get_marker_heatmap_cache_entry(app: FastAPI, meta: Dict, modality: str = "r
         tsv_path = expression_tsv_path
 
     if cache_path and cache_path.exists():
-        with np.load(cache_path, allow_pickle=False) as npz_data:
-            matrix = np.asarray(npz_data["matrix"], dtype=np.float32)
-            row_ids = np.asarray(npz_data["row_ids"], dtype=str)
-            col_ids = np.asarray(npz_data["col_ids"], dtype=str)
-            if "col_barcodes" in npz_data:
-                col_barcodes = np.asarray(npz_data["col_barcodes"], dtype=str)
-            else:
-                col_barcodes = np.asarray(
-                    [value.split(":", 1)[1] if ":" in value else value for value in col_ids],
-                    dtype=str,
-                )
+        # The fold-matrix cache moved from .npz to .h5ad, at
+        # visualization/marker_heatmap_h5ad.py:73. np.load cannot open an HDF5
+        # file, so every MarkerHeatmap request raised
+        # "Cannot load file containing pickled data when allow_pickle=False".
+        # `_read_heatmap_cache` is the writer's own reader and it opens both
+        # formats, so this calls it rather than parsing the cache a second way.
+        # The import sits here because that module loads scanpy, which would add
+        # seconds to app start-up for a view many jobs never open.
+        from altanalyze3.components.visualization.marker_heatmap_h5ad import _read_heatmap_cache
+
+        heatmap_df, row_clusters, column_clusters, _, _ = _read_heatmap_cache(cache_path)
+        matrix = np.asarray(heatmap_df.to_numpy(), dtype=np.float32)
+        col_barcodes = heatmap_df.columns.astype(str).to_numpy()
+        genes = heatmap_df.index.astype(str).to_numpy()
+        # The ids the .npz held were "cluster:gene" and "cluster:barcode". They
+        # are rebuilt here so every reader downstream sees what it saw before.
+        row_ids = np.asarray([f"{c}:{g}" for c, g in zip(row_clusters, genes)], dtype=str)
+        col_ids = np.asarray([f"{c}:{b}" for c, b in zip(column_clusters, col_barcodes)], dtype=str)
         entry = {
             "signature": cache_signature,
             "modality": normalized_modality,
@@ -1508,6 +1522,7 @@ def _get_expression_cache(app: FastAPI, meta: Dict, modality: str = "rna") -> Di
             "sample_labels": sample_labels,
             "umap_x": umap_x,
             "umap_y": umap_y,
+            "obsm_keys": _obsm_embedding_keys(adata),
             "obs_filter_values": obs_filter_values,
             "display_filters_meta": {
                 "fields": filter_fields,
@@ -3297,19 +3312,419 @@ def _get_differential_artifact(meta: Dict, key: str) -> Path:
     return path
 
 
+def _obsm_embedding_keys(adata) -> List[str]:
+    """The obsm entries that can be drawn as a 2-D map, in the h5ad's own order.
+
+    An entry needs at least two columns; the first two are plotted. PCA and
+    scVI latent spaces qualify as much as a UMAP does, so nothing is filtered on
+    the name - a dataset that stores `X_umap_harmony`, `X_tsne` or `X_scvi` gets
+    all of them.
+    """
+    keys = []
+    for key in getattr(adata, "obsm", {}) or {}:
+        try:
+            matrix = adata.obsm[key]
+            if getattr(matrix, "ndim", 0) == 2 and matrix.shape[1] >= 2:
+                keys.append(str(key))
+        except Exception:  # noqa: BLE001 - an unreadable entry is simply not offered
+            continue
+    return keys
+
+
+def _numeric_obs_columns(cache: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The numeric obs columns a panel may plot on an axis.
+
+    ShinyCell lets a reader put any numeric cell annotation on an axis, so a
+    stored `UMAP_1`/`UMAP_2` pair, a pseudotime, a module score or a QC measure
+    all work. Counts live in X, not in obs, so nothing here is expression. A
+    boolean column is a category, not a measurement, and is left out. So is a
+    column with no finite value, which would draw an empty panel.
+    """
+    adata = cache["adata"]
+    out = []
+    for name in adata.obs.columns:
+        series = adata.obs[name]
+        if pd.api.types.is_bool_dtype(series) or not pd.api.types.is_numeric_dtype(series):
+            continue
+        values = pd.to_numeric(series, errors="coerce").to_numpy(dtype=float)
+        finite = np.isfinite(values)
+        if not finite.any():
+            continue
+        out.append({
+            "field": str(name),
+            "n_finite": int(finite.sum()),
+            "n_missing": int(values.size - finite.sum()),
+            "n_unique": int(np.unique(values[finite]).size),
+            "min": float(values[finite].min()),
+            "max": float(values[finite].max()),
+        })
+    return out
+
+
+def _axis_values(cache: Dict[str, Any], field: str) -> Optional[np.ndarray]:
+    """One numeric obs column as floats, or None when it cannot serve as an axis."""
+    column = str(field or "").strip()
+    if not column:
+        return None
+    adata = cache["adata"]
+    if column not in adata.obs.columns:
+        return None
+    series = adata.obs[column]
+    if pd.api.types.is_bool_dtype(series) or not pd.api.types.is_numeric_dtype(series):
+        return None
+    values = pd.to_numeric(series, errors="coerce").to_numpy(dtype=float)
+    return values if np.isfinite(values).any() else None
+
+
+def _umap_coordinate_options(cache: Dict[str, Any]) -> List[Dict[str, str]]:
+    """The coordinate sets a UMAP panel may be drawn on.
+
+    The first entry is the cellHarmony projection, which is what the panel has
+    always drawn: the coordinates the alignment wrote, read from the job's
+    `umap_coordinates` artifact.
+    """
+    options = [{"key": "", "label": "cellHarmony UMAP"}]
+    for key in cache.get("obsm_keys", []) or []:
+        options.append({"key": str(key), "label": str(key)})
+    return options
+
+
+def _coordinates_for_key(cache: Dict[str, Any], coords_key: str = "") -> tuple:
+    """(x, y, resolved key). An unknown key falls back to the cellHarmony one."""
+    key = str(coords_key or "").strip()
+    if not key:
+        return cache["umap_x"], cache["umap_y"], ""
+    adata = cache["adata"]
+    obsm = getattr(adata, "obsm", {}) or {}
+    if key not in obsm:
+        return cache["umap_x"], cache["umap_y"], ""
+    matrix = np.asarray(obsm[key])
+    if matrix.ndim != 2 or matrix.shape[1] < 2:
+        return cache["umap_x"], cache["umap_y"], ""
+    return (np.asarray(matrix[:, 0], dtype=float),
+            np.asarray(matrix[:, 1], dtype=float), key)
+
+
+def _labels_for_color_by(cache: Dict[str, Any], color_by: str = "") -> tuple:
+    """(per-cell labels, resolved column). Empty means the cellHarmony states."""
+    column = str(color_by or "").strip()
+    if not column or column == str(cache["cluster_key"]):
+        return cache["populations"], ""
+    adata = cache["adata"]
+    if column not in adata.obs.columns:
+        return cache["populations"], ""
+    values = (adata.obs[column].astype(str).str.strip()
+              .replace({"nan": "", "None": ""}).to_numpy(dtype=str))
+    return values, column
+
+
+#: Where a chat question is read into one supported query. The model runs in the
+#: LungMAP site process; this app holds none of its own. Override with
+#: CELLHARMONY_ASSISTANT_URL when the site is not on the same host.
+CHAT_ASSISTANT_URL = os.environ.get(
+    "CELLHARMONY_ASSISTANT_URL", "http://127.0.0.1:8001/api/assistant/viewer-intent")
+
+#: The router speaks protocol names. These are answered by the executors below.
+_CHAT_PROTOCOL_ALIAS = {
+    "cell_identity": "markers",
+    "state_comparison": "compare",
+    "expression_lookup": "expression",
+    "state_contrast": "differential",
+    "donor_heterogeneity": "differential",
+    "patient_stratification": "differential",
+    "most_affected_state": "differential",
+    "shared_vs_state_specific": "differential",
+    "contrast_specificity": "differential",
+    "pathway_program": "goelite",
+    "regulatory_driver": "network",
+    "communication_rewiring": "ccc",
+}
+
+#: Protocols with a specification but no executor here. Naming the gap is the
+#: point: answering one of these with a neighbouring analysis would report a
+#: different statistic under the question the user asked.
+_CHAT_NOT_YET = {
+    "severity_gradient": "a Spearman correlation of per-donor pseudobulk against a clinical variable",
+    "dose_response": "a monotonic trend test across ordered stages",
+    "composition_shift": "per-donor cell-count composition",
+    "coexpression_module": "per-donor co-expression around a seed gene",
+    "annotation_concordance": "a cross-tabulation of the two annotations",
+}
+
+
+def _chat_states_by_size(cache: Dict[str, Any]) -> List[tuple]:
+    """(state, n cells), largest first. Used to name states in the examples."""
+    values, counts = np.unique(np.asarray(cache["populations"], dtype=str), return_counts=True)
+    order = np.argsort(-counts)
+    return [(str(values[i]), int(counts[i])) for i in order]
+
+
+def _chat_contrast(meta: Dict) -> Dict[str, str]:
+    """The one comparison this job has run, or empty when none has."""
+    differential = meta.get("differential") or {}
+    if str(differential.get("status") or "").lower() != "completed":
+        return {}
+    config = differential.get("config") or {}
+    case = str(config.get("case_label") or "Group 1").strip()
+    control = str(config.get("control_label") or "Group 2").strip()
+    return {"case": case, "control": control, "label": f"{case} versus {control}"}
+
+
+def _chat_marker_table(meta: Dict, modality: str = "rna") -> pd.DataFrame:
+    """The marker table cellHarmony wrote, or an empty frame."""
+    marker_analysis = _modality_marker_analysis(meta, modality) or {}
+    path = Path(str(marker_analysis.get("markers_tsv", "")).strip())
+    if not path.exists():
+        return pd.DataFrame()
+    frame = pd.read_csv(path, sep="\t")
+    if "cluster" not in frame.columns or "Gene" not in frame.columns:
+        return pd.DataFrame()
+    frame["cluster"] = frame["cluster"].astype(str)
+    frame["Gene"] = frame["Gene"].astype(str)
+    return frame
+
+
+def _chat_computed_markers(cache: Dict[str, Any], state: str, limit: int) -> List[Dict[str, Any]]:
+    """One-versus-rest markers for a state the marker table does not cover.
+
+    The gap between a gene's mean inside the state and its mean everywhere else.
+    Labelled `computed one-vs-rest` in the answer, because a stored fold change
+    and this gap are not the same statistic.
+    """
+    adata = cache["adata"]
+    values_of = np.asarray(cache["populations"], dtype=str)
+    inside = values_of == str(state)
+    if not inside.any():
+        return []
+    X = adata.X
+    rows = np.nonzero(inside)[0]
+    indicator = sp.csr_matrix((np.ones(rows.size, dtype=np.float64),
+                               (np.zeros(rows.size, dtype=np.int64), rows)),
+                              shape=(1, X.shape[0]))
+    sums = indicator @ X
+    sums = np.asarray(sums.todense() if sp.issparse(sums) else sums, dtype=np.float64).ravel()
+    total = np.asarray(X.sum(axis=0), dtype=np.float64).ravel()
+    n_inside = float(rows.size)
+    gap = (sums / max(n_inside, 1.0)) - ((total - sums) / max(float(X.shape[0]) - n_inside, 1.0))
+    var_names = [str(v) for v in cache["var_names"]]
+    out = []
+    for row in np.argsort(-gap)[:limit]:
+        if gap[int(row)] <= 0:
+            break
+        out.append({"gene": var_names[int(row)], "cluster": str(state),
+                    "fold": round(float(gap[int(row)]), 4), "p": None,
+                    "source": "computed one-vs-rest"})
+    return out
+
+
+def _chat_markers_for_states(app: FastAPI, meta: Dict, cache: Dict[str, Any],
+                             states: List[str], limit: int = 25) -> List[Dict[str, Any]]:
+    """Marker genes for these states, from the marker table where it covers them."""
+    wanted = [str(s) for s in states if s]
+    if not wanted:
+        return []
+    frame = _chat_marker_table(meta)
+    rows: List[Dict[str, Any]] = []
+    covered = set()
+    if not frame.empty:
+        subset = frame.loc[frame["cluster"].isin(wanted)].copy()
+        # Not "_p" / "_fold": itertuples renames any column starting with an
+        # underscore to a positional name, and the attribute then does not exist.
+        if "FDR p-value" in subset.columns:
+            subset["rank_p"] = pd.to_numeric(subset["FDR p-value"], errors="coerce")
+        else:
+            subset["rank_p"] = np.nan
+        subset["rank_fold"] = pd.to_numeric(subset.get("Fold"), errors="coerce")
+        subset = subset.sort_values(["rank_p", "rank_fold"], ascending=[True, False])
+        for row in subset.itertuples():
+            rows.append({"gene": str(row.Gene), "cluster": str(row.cluster),
+                         "fold": float(row.rank_fold) if _is_finite_number(row.rank_fold) else 0.0,
+                         "p": float(row.rank_p) if _is_finite_number(row.rank_p) else None,
+                         "source": "marker table"})
+            covered.add(str(row.cluster))
+    per_state = max(1, limit // max(1, len(wanted)))
+    for state in wanted:
+        if state not in covered:
+            rows.extend(_chat_computed_markers(cache, state, per_state))
+    return rows[:limit]
+
+
+def _chat_examples(app: FastAPI, meta: Dict) -> Dict[str, Any]:
+    """Example questions built from this job's own reference and cell states.
+
+    A bone-marrow job gets bone-marrow states, a lung job gets lung states, and
+    a comparison is only offered when the job has actually run one. An example
+    naming a cell state the dataset does not hold would fail the moment it was
+    clicked.
+    """
+    reference_id = str(meta.get("reference") or "")
+    tissue = ""
+    if "lung" in reference_id.lower():
+        tissue = "lung"
+    elif "_bm" in reference_id.lower() or "marrow" in reference_id.lower():
+        tissue = "bone marrow"
+    try:
+        reference_label = str(_reference_entry_for_meta(meta).get("label") or reference_id)
+    except Exception:  # noqa: BLE001 - the registry may not hold this reference any more
+        reference_label = reference_id
+
+    try:
+        cache = _get_expression_cache(app, meta)
+    except Exception:  # noqa: BLE001 - a job whose h5ad is gone still opens the tab
+        return {"tissue": tissue, "reference": reference_label, "examples": [],
+                "placeholder": "e.g. What are the best marker genes of this cell state?"}
+
+    sizes = _chat_states_by_size(cache)
+    states = [state for state, _ in sizes if state and state.lower() not in ("nan", "none")]
+    first = states[0] if states else ""
+    second = states[1] if len(states) > 1 else ""
+    markers = _chat_markers_for_states(app, meta, cache, [first] if first else [], 6)
+    genes = [str(row["gene"]) for row in markers][:2]
+
+    examples: List[str] = []
+    if first:
+        examples.append(f"What are the best marker genes of {first} cells?")
+    if first and second:
+        examples.append(f"What distinguishes {first} from {second} cells?")
+    if genes:
+        examples.append(f"Where is {genes[0]} expressed?")
+    if len(genes) > 1:
+        examples.append(f"Which cell states express {genes[1]}?")
+    contrast = _chat_contrast(meta)
+    if contrast and first:
+        examples.append(f"Which genes are significant in {contrast['case']} versus "
+                        f"{contrast['control']} in {first} cells?")
+        examples.append(f"Which cell type is most affected in {contrast['case']} versus "
+                        f"{contrast['control']}?")
+    return {"tissue": tissue, "reference": reference_label,
+            "cluster_key": str(cache["cluster_key"]),
+            "n_states": len(states), "has_contrast": bool(contrast),
+            "examples": examples,
+            "placeholder": (f"e.g. What are the best marker genes of {first} cells?"
+                            if first else "e.g. What are the best marker genes of this cell state?")}
+
+
+def _chat_states_in_question(question: str, states: List[str]) -> List[str]:
+    """The cell states this sentence actually names, in the order it names them.
+
+    The router matches a state name anywhere in the sentence, so "pre-aceNKP"
+    also reports "aceNKP" and a two-state question came back comparing a state
+    with itself. A match that sits inside a longer match is dropped here, which
+    leaves the states the reader wrote.
+    """
+    text = str(question or "").lower()
+    spans = []
+    for state in sorted([str(s) for s in states if s], key=len, reverse=True):
+        needle = state.lower()
+        start = 0
+        while True:
+            at = text.find(needle, start)
+            if at < 0:
+                break
+            if not any(begin <= at and at + len(needle) <= end for begin, end, _ in spans):
+                spans.append((at, at + len(needle), state))
+            start = at + 1
+    spans.sort()
+    out: List[str] = []
+    for _, _, state in spans:
+        if state not in out:
+            out.append(state)
+    return out
+
+
+#: Words that are also gene symbols in some annotations. The question scan below
+#: only runs when the router found no gene, and these would turn an ordinary
+#: sentence into a gene lookup.
+_CHAT_GENE_STOPWORDS = {
+    "and", "are", "can", "cell", "cells", "for", "gene", "genes", "has", "how",
+    "impact", "many", "max", "most", "not", "rest", "set", "she", "state",
+    "states", "the", "was", "what", "when", "where", "which", "who", "why",
+}
+
+
+def _chat_genes_in_question(question: str, cache: Dict[str, Any]) -> List[str]:
+    """Genes this sentence names, matched against the dataset's own gene list.
+
+    The router returns an empty gene list for a plain sentence such as "Where is
+    Cdca3 expressed?". Nothing is invented here: a token is only taken when the
+    dataset holds a gene of that name.
+    """
+    index = {}
+    for name in cache.get("var_names", []):
+        index.setdefault(str(name).lower(), str(name))
+    out: List[str] = []
+    for token in re.findall(r"[A-Za-z0-9_.\-]{3,}", str(question or "")):
+        key = token.lower()
+        if key in _CHAT_GENE_STOPWORDS:
+            continue
+        name = index.get(key)
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+def _chat_read_question(question: str, cache: Dict[str, Any], meta: Dict) -> Dict[str, Any]:
+    """Ask the assistant which supported query this sentence means.
+
+    The model sees the question and the names in this dataset. It never sees the
+    data, so it cannot invent a number: it chooses the reading, and the executors
+    below compute the answer from the job's own files.
+    """
+    contrast = _chat_contrast(meta)
+    payload = json.dumps({
+        "question": question,
+        "states": [state for state, _ in _chat_states_by_size(cache)],
+        "contrasts": [contrast["label"]] if contrast else [],
+        "covariates": [entry["field"] for entry in _groupable_columns(cache)],
+        "modalities": [str(entry.get("id")) for entry
+                       in ((meta.get("modalities") or {}).get("available") or [])] or ["rna"],
+    }).encode()
+
+    last_error = None
+    for attempt in (1, 2):
+        try:
+            request = urllib.request.Request(
+                CHAT_ASSISTANT_URL, data=payload,
+                headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(request, timeout=120) as response:
+                return json.loads(response.read().decode())
+        except Exception as exc:  # noqa: BLE001 - the site may be down
+            last_error = exc
+            if attempt == 1:
+                time.sleep(0.25)
+    raise HTTPException(
+        status_code=503,
+        detail=(f"the assistant at {CHAT_ASSISTANT_URL} did not answer ({last_error}). "
+                "cellHarmony web holds no model of its own."))
+
+
 def _build_umap_payload(
     app: FastAPI,
     meta: Dict,
     modality: str = "rna",
     display_filters: Optional[List[tuple[str, List[str]]]] = None,
+    color_by: str = "",
+    coords_key: str = "",
+    x_field: str = "",
+    y_field: str = "",
 ) -> Dict[str, List[Dict]]:
     cache_entry = _get_expression_cache(app, meta, modality=modality)
     obs_names = cache_entry["obs_names"]
-    populations = cache_entry["populations"]
+    populations, resolved_color_by = _labels_for_color_by(cache_entry, color_by)
     sample_field = str(cache_entry.get("sample_field") or "").strip()
     sample_labels = cache_entry.get("sample_labels")
-    umap_x = cache_entry["umap_x"]
-    umap_y = cache_entry["umap_y"]
+    umap_x, umap_y, resolved_coords = _coordinates_for_key(cache_entry, coords_key)
+    # A pair of numeric obs columns replaces the embedding outright. Both have to
+    # resolve: one axis alone would silently mix a metadata value against a UMAP
+    # coordinate, which reads as a map and is not one.
+    axis_x = _axis_values(cache_entry, x_field)
+    axis_y = _axis_values(cache_entry, y_field)
+    resolved_x, resolved_y = "", ""
+    if axis_x is not None and axis_y is not None:
+        umap_x, umap_y = axis_x, axis_y
+        resolved_x, resolved_y = str(x_field).strip(), str(y_field).strip()
+        resolved_coords = ""
+    axes_source = "obs" if resolved_x else ("obsm" if resolved_coords else "cellharmony")
     display_mask = _apply_display_filter_mask(cache_entry, display_filters)
 
     query_points = [
@@ -3331,8 +3746,13 @@ def _build_umap_payload(
         if keep and _is_finite_number(x) and _is_finite_number(y)
     ]
 
+    # The reference atlas is drawn behind the query only while both choices are
+    # the default. Another obs column has no counterpart in the reference, and a
+    # second embedding is a different coordinate space, so an overlay there would
+    # put the reference cells in positions that mean nothing.
     reference_points = []
-    ref_adata = _load_reference_adata(app, meta)
+    ref_adata = (None if (resolved_color_by or resolved_coords or resolved_x)
+                 else _load_reference_adata(app, meta))
     if ref_adata is not None:
         ref_cluster_key = meta.get("reference_cluster_key") or meta.get("cluster_key")
         coords = ref_adata.obsm["X_umap"]
@@ -3348,7 +3768,25 @@ def _build_umap_payload(
                     "y": float(y),
                 }
             )
-    return {"reference": reference_points, "query": query_points, "sample_field": sample_field}
+    # How many cells the panel could not place. A metadata axis is often
+    # recorded for part of the dataset only, and a silently shorter plot would
+    # read as a real absence of cells.
+    n_kept = int(np.count_nonzero(np.asarray(display_mask, dtype=bool)))
+    return {"reference": reference_points, "query": query_points,
+            "sample_field": sample_field,
+            "color_by": resolved_color_by,
+            "color_label": resolved_color_by or str(cache_entry["cluster_key"]),
+            "coords_key": resolved_coords,
+            "coords_label": resolved_coords or "cellHarmony UMAP",
+            "axes_source": axes_source,
+            "x_field": resolved_x,
+            "y_field": resolved_y,
+            "x_label": resolved_x or "UMAP 1",
+            "y_label": resolved_y or "UMAP 2",
+            "n_cells_selected": n_kept,
+            "n_points_drawn": len(query_points),
+            "n_dropped_no_coordinate": max(0, n_kept - len(query_points)),
+            "reference_hidden": bool(resolved_color_by or resolved_coords or resolved_x)}
 
 
 def _reference_entry_for_meta(meta: Dict) -> Dict:
@@ -3450,13 +3888,364 @@ def _build_reference_expression_payload(app: FastAPI, meta: Dict, gene: str) -> 
     }
 
 
+def split_gene_list(text: str) -> List[str]:
+    """Gene symbols out of whatever a user pasted.
+
+    A column copied out of Excel arrives newline separated, a row tab separated,
+    and people also type commas, spaces and semicolons. Splitting on commas alone
+    turned "SFTPC AGER" into one symbol of that name and found nothing.
+    Duplicates are dropped and order is kept, so a figure reads in the order the
+    genes were listed.
+    """
+    parts = re.split(r"[\s,;|]+", str(text or ""))
+    seen, out = set(), []
+    for part in parts:
+        gene = part.strip().strip('"').strip("'")
+        if gene and gene not in seen:
+            seen.add(gene)
+            out.append(gene)
+    return out
+
+
+def _gene_rows(cache: Dict[str, Any], wanted: List[str]) -> tuple:
+    """Row index of each requested gene, and the ones this dataset lacks."""
+    var_names = cache["var_names"]
+    index = {str(name): i for i, name in enumerate(var_names)}
+    upper = {str(name).upper(): i for i, name in enumerate(var_names)}
+    rows, labels, missing = [], [], []
+    for gene in wanted:
+        row = index.get(gene, upper.get(gene.upper()))
+        if row is None:
+            missing.append(gene)
+        else:
+            rows.append(row)
+            labels.append(gene)
+    return rows, labels, missing
+
+
+def _dense_column(adata, row: int) -> np.ndarray:
+    """One gene's values for every cell, dense."""
+    column = adata.X[:, row]
+    if sp.issparse(column):
+        return np.asarray(column.todense()).ravel()
+    return np.asarray(column).ravel()
+
+
+def _default_marker_genes(cache: Dict[str, Any], group_by: str = "",
+                          limit: int = 12) -> List[str]:
+    """One marker gene per group, used when the user gives no gene set.
+
+    Picked as the gene with the largest gap between its mean inside a group and
+    its mean everywhere else, over a sample of genes. That is a plain
+    one-versus-rest contrast, not a stored marker table, so it works for any
+    grouping variable the user switches to, not only cell state.
+    """
+    adata = cache["adata"]
+    _, groups, values_of = _group_axis(cache, group_by)
+    var_names = [str(v) for v in cache["var_names"]]
+    if not groups or not var_names:
+        return []
+    groups = list(groups[:limit])
+
+    # One pass over the matrix, not one column slice per (gene, group). The
+    # previous version sliced `adata.X[:, row]` inside a nested loop: on a
+    # 2,797-cell CSR matrix that is 7.7 ms per slice, 4,764 sampled genes x 12
+    # groups = 57,168 slices, measured at 7.3 minutes for one figure. The
+    # endpoint held the event loop for all of it, so every other panel in the
+    # app froze. An indicator matrix multiplied into X gives the same sums for
+    # every gene at once, and it reads every gene rather than a sample of them.
+    X = adata.X
+    n_cells, n_genes = X.shape
+    index = {g: i for i, g in enumerate(groups)}
+    codes = pd.Series(values_of).map(index).fillna(-1).to_numpy(dtype=np.int64)
+    inside_any = codes >= 0
+    if not inside_any.any():
+        return []
+    rows = np.nonzero(inside_any)[0]
+    indicator = sp.csr_matrix(
+        (np.ones(rows.size, dtype=np.float64), (codes[rows], rows)),
+        shape=(len(groups), n_cells))
+    sums = indicator @ X
+    sums = np.asarray(sums.todense() if sp.issparse(sums) else sums, dtype=np.float64)
+    counts = np.bincount(codes[rows], minlength=len(groups)).astype(np.float64)
+    # The contrast is against every other cell in the dataset, which is what the
+    # previous `values[~inside]` measured, so the statistic is unchanged.
+    total = np.asarray(X.sum(axis=0), dtype=np.float64).ravel()
+    inside_mean = sums / np.maximum(counts[:, None], 1.0)
+    outside_mean = (total[None, :] - sums) / np.maximum(float(n_cells) - counts[:, None], 1.0)
+    gap = inside_mean - outside_mean
+
+    chosen, seen = [], set()
+    for position, group in enumerate(groups):
+        if counts[position] <= 0:
+            continue
+        for row in np.argsort(-gap[position])[:200]:
+            if gap[position][int(row)] <= 0:
+                break
+            name = var_names[int(row)]
+            if name in seen:
+                continue
+            seen.add(name)
+            chosen.append(name)
+            break
+    return chosen
+
+
+def _subset_mask(cache: Dict[str, Any], subset_by: str = "",
+                 subset_values: Optional[List[str]] = None) -> Optional[np.ndarray]:
+    """Which cells a figure is restricted to, or None for all of them.
+
+    This is what makes a cell-state-specific contrast possible. Grouping by
+    copd_status alone contrasts COPD against control over every cell in the
+    atlas, which mixes 39 cell types together. Restricting to AT2 first and then
+    grouping by copd_status asks the question the user meant: within AT2, what
+    differs between disease and control.
+    """
+    if not subset_by or not subset_values:
+        return None
+    adata = cache["adata"]
+    if subset_by not in adata.obs.columns:
+        return None
+    values = adata.obs[subset_by].astype(str).to_numpy()
+    keep = set(str(v) for v in subset_values)
+    mask = np.isin(values, list(keep))
+    return mask if mask.any() else None
+
+
+def _group_axis(cache: Dict[str, Any], group_by: str = "") -> tuple:
+    """The obs column the DotPlot and CombPlot group their columns by.
+
+    Cell state is the default. Choosing another variable regroups the whole
+    figure by that variable's categories, so the same genes can be read across
+    disease, sex or assay instead of across cell types. The categories keep the
+    dataset's own order when the column is categorical, which is the centroid
+    order for cell state.
+    """
+    adata = cache["adata"]
+    cluster_key = str(cache["cluster_key"])
+    column = str(group_by or "").strip() or cluster_key
+    if column not in adata.obs.columns:
+        column = cluster_key
+    series = adata.obs[column]
+    if str(series.dtype) == "category":
+        groups = [str(c) for c in series.cat.categories]
+    elif column == cluster_key and len(cache.get("populations", [])):
+        # `populations` is a numpy array. `array or []` calls bool() on it and
+        # raises "truth value of an array ... is ambiguous", which took down
+        # every DotPlot and CombPlot request.
+        groups = list(dict.fromkeys(str(s) for s in cache["populations"]))
+    else:
+        groups = sorted({str(v) for v in series.astype(str).to_numpy()})
+    return column, groups, series.astype(str).to_numpy()
+
+
+def _groupable_columns(cache: Dict[str, Any], max_categories: int = 60) -> List[Dict[str, Any]]:
+    """The obs columns a user may group or filter by.
+
+    Only categorical-like columns with a workable number of levels are offered.
+    A per-cell numeric column such as n_counts has one level per cell and would
+    draw a column per cell, so it is left out.
+    """
+    adata = cache["adata"]
+    out = []
+    for name in adata.obs.columns:
+        series = adata.obs[name]
+        if str(series.dtype) == "category":
+            levels = [str(c) for c in series.cat.categories]
+        elif series.dtype == object or str(series.dtype).startswith(("bool", "str")):
+            levels = sorted({str(v) for v in series.astype(str).to_numpy()})
+        else:
+            continue
+        if 1 < len(levels) <= max_categories:
+            out.append({"field": str(name), "values": levels, "n": len(levels)})
+    return out
+
+
+def _gene_state_stats(cache: Dict[str, Any], wanted: List[str],
+                      group_by: str = "", keep_groups: Optional[List[str]] = None,
+                      subset_by: str = "",
+                      subset_values: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Mean expression and detected fraction of each gene in each group.
+
+    Groups are cell states by default. `group_by` regroups by any other
+    categorical variable, and `keep_groups` restricts the figure to the groups
+    the user selected, which is how the cell-state filter narrows the plot.
+    """
+    adata = cache["adata"]
+    column, groups, values_of = _group_axis(cache, group_by)
+    if keep_groups:
+        chosen = [g for g in groups if g in set(keep_groups)]
+        groups = chosen or groups
+    restrict = _subset_mask(cache, subset_by, subset_values)
+    rows, labels, missing = _gene_rows(cache, wanted)
+    masks = [(values_of == group) for group in groups]
+    if restrict is not None:
+        masks = [m & restrict for m in masks]
+    counts = [int(m.sum()) for m in masks]
+    mean, frac = [], []
+    for row in rows:
+        column_values = _dense_column(adata, row)
+        mean.append([float(column_values[m].mean()) if n else 0.0
+                     for m, n in zip(masks, counts)])
+        frac.append([float((column_values[m] > 0).mean()) if n else 0.0
+                     for m, n in zip(masks, counts)])
+    return {"genes": labels, "states": groups, "groups": groups,
+            "group_by": column, "group_label": column,
+            "subset_by": subset_by or "", "subset_values": list(subset_values or []),
+            "state_n": counts, "mean": mean, "frac": frac,
+            "colors": _state_colors(cache, groups),
+            "n_requested": len(wanted), "n_returned": len(labels),
+            "n_missing": len(missing), "missing": missing}
+
+def _gene_donor_state_means(cache: Dict[str, Any], wanted: List[str],
+                            min_cells: int, group_by: str = "",
+                            keep_groups: Optional[List[str]] = None,
+                            subset_by: str = "",
+                            subset_values: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Per-donor pseudobulk of each gene, within each group.
+
+    One column per (group, donor). Groups are cell states by default; `group_by`
+    regroups by any other categorical variable and `keep_groups` restricts the
+    figure to the selected groups.
+    """
+    adata = cache["adata"]
+    donor_field = cache.get("sample_field") or ""
+    if not donor_field or donor_field not in adata.obs.columns:
+        for candidate in ("meta_sample", "donor", "Donor", "Library", "sample", "pool"):
+            if candidate in adata.obs.columns:
+                donor_field = candidate
+                break
+    if not donor_field or donor_field not in adata.obs.columns:
+        return {"error": "this dataset records no donor column"}
+
+    column, groups, values_of = _group_axis(cache, group_by)
+    if keep_groups:
+        chosen = [g for g in groups if g in set(keep_groups)]
+        groups = chosen or groups
+    donor_of = adata.obs[donor_field].astype(str).to_numpy()
+    donors = sorted(set(donor_of))
+    group_index = {g: i for i, g in enumerate(groups)}
+    donor_index = {d: i for i, d in enumerate(donors)}
+
+    restrict = _subset_mask(cache, subset_by, subset_values)
+    codes = np.array([group_index.get(v, -1) for v in values_of], dtype=np.int64)
+    if restrict is not None:
+        codes = np.where(restrict, codes, -1)
+    donor_codes = np.array([donor_index[d] for d in donor_of], dtype=np.int64)
+    group_id = codes * len(donors) + donor_codes
+    valid = codes >= 0
+    n_groups = len(groups) * len(donors)
+    per_group = np.bincount(group_id[valid], minlength=n_groups)
+    keep = np.nonzero(per_group >= min_cells)[0]
+    dropped = int(np.count_nonzero((per_group > 0) & (per_group < min_cells)))
+    if not keep.size:
+        return {"error": f"no donor contributes {min_cells} or more cells to a group"}
+
+    columns = [{"group": groups[int(g) // len(donors)],
+                "state": groups[int(g) // len(donors)],
+                "donor": donors[int(g) % len(donors)],
+                "n_cells": int(per_group[int(g)])} for g in keep]
+    colors = _state_colors(cache, [c["group"] for c in columns])
+
+    rows, labels, missing = _gene_rows(cache, wanted)
+    series = []
+    for row in rows:
+        column_values = _dense_column(adata, row)
+        sums = np.zeros(n_groups, dtype=np.float64)
+        np.add.at(sums, group_id[valid], column_values[valid])
+        means = np.where(per_group > 0, sums / np.maximum(per_group, 1), 0.0)
+        series.append([round(float(v), 5) for v in means[keep]])
+
+    return {"genes": labels, "values": series, "columns": columns, "colors": colors,
+            "states": groups, "groups": groups,
+            "subset_by": subset_by or "", "subset_values": list(subset_values or []),
+            "group_by": column, "group_label": column, "donor_key": donor_field,
+            "n_donors": len(donors), "n_states": len(groups),
+            "n_columns": len(columns), "n_groups_dropped": dropped,
+            "n_requested": len(wanted), "n_returned": len(labels),
+            "n_missing": len(missing), "missing": missing}
+
+#: The 12 Paired colours the Explore panel already uses for cell states, as hex.
+#: Kept identical to PAIRED_COLOR_STOPS in static/app.js so a state is the same
+#: colour whichever side of the app drew it.
+_PAIRED_HEX = [
+    "#A6CEE3", "#1F78B4", "#B2DF8A", "#33A02C", "#FB9A99", "#E31A1C",
+    "#FDBF6F", "#FF7F00", "#CAB2D6", "#6A3D9A", "#FFFF99", "#B15928",
+]
+
+
+def _state_colors(cache: Dict[str, Any], states: List[str]) -> List[str]:
+    """The colour each cell state is drawn in, falling back to a neutral grey.
+
+    `adata.uns[f"{cluster_key}_colors"]` holds one colour per cell-state
+    CATEGORY. Two defects lived in the previous version. It read
+    `cache["populations"]`, which is one label per CELL, so the length test
+    never matched and every state came back grey. And it wrote
+    `cache.get("populations") or []`, which calls bool() on a numpy array and
+    raises, so both gene-set figures returned HTTP 500 on every request.
+    """
+    adata = cache["adata"]
+    cluster_key = cache["cluster_key"]
+    stored = adata.uns.get(f"{cluster_key}_colors")
+    order = _state_order(cache)
+    lookup = {}
+    if stored is not None and len(stored) == len(order):
+        lookup = {s: str(c) for s, c in zip(order, stored)}
+    else:
+        # cellHarmony output h5ads carry no `<cluster_key>_colors`, so every bar
+        # of the CombPlot came back grey and its state blocks were unreadable.
+        # The fallback is the same Paired palette the front end draws cell states
+        # with, assigned by position in the dataset's own state order, so a state
+        # keeps one colour across every figure.
+        lookup = {state: _PAIRED_HEX[index % len(_PAIRED_HEX)]
+                  for index, state in enumerate(order)}
+    return [lookup.get(s, "#BBBBBB") for s in states]
+
+
+def _state_order(cache: Dict[str, Any]) -> List[str]:
+    """The cell-state categories, in the dataset's own order.
+
+    The categorical order is the centroid order every other figure reads, so a
+    dataset that stores the column as a plain string column keeps first-seen
+    order rather than being re-sorted alphabetically here.
+    """
+    adata = cache["adata"]
+    cluster_key = str(cache["cluster_key"])
+    series = adata.obs[cluster_key] if cluster_key in adata.obs.columns else None
+    if series is not None and str(series.dtype) == "category":
+        return [str(c) for c in series.cat.categories]
+    return list(dict.fromkeys(str(s) for s in cache.get("populations", [])))
+
+
+
+def _as_int(value: Any, fallback: int, low: int, high: int) -> int:
+    """An int within bounds, whatever arrived.
+
+    A route called directly rather than through FastAPI receives its own
+    `Query(...)` default object, and int() on that raises. Anything that will
+    not convert falls back rather than breaking the request.
+    """
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = fallback
+    return max(low, min(number, high))
+
+
 def _build_expression_payload(
     app: FastAPI,
     meta: Dict,
     gene: str,
     modality: str = "rna",
     display_filters: Optional[List[tuple[str, List[str]]]] = None,
+    violin_limit: int = 10,
 ) -> Dict:
+    """`violin_limit` is how many cell states the violin plot draws.
+
+    Ten fits the half-width panel the two-window layout gives. With one window
+    the panel is twice as wide, so the viewer asks for more and the plot uses
+    the space instead of leaving it empty.
+    """
     def _expression_global_range(raw_values: np.ndarray) -> tuple[float, float]:
         finite = np.asarray(raw_values, dtype=float)
         finite = finite[np.isfinite(finite)]
@@ -3509,7 +4298,7 @@ def _build_expression_payload(
                         "mean": float(np.mean(finite_values)) if len(finite_values) else 0.0,
                     }
                 )
-            violin_data = sorted(violin_data, key=lambda x: x["mean"], reverse=True)[:10]
+            violin_data = sorted(violin_data, key=lambda x: x["mean"], reverse=True)[:violin_limit]
 
             return {
                 "gene": fallback_gene,
@@ -3561,7 +4350,7 @@ def _build_expression_payload(
                 "mean": float(np.mean(finite_values)) if len(finite_values) else 0.0,
             }
         )
-    violin_data = sorted(violin_data, key=lambda x: x["mean"], reverse=True)[:10]
+    violin_data = sorted(violin_data, key=lambda x: x["mean"], reverse=True)[:violin_limit]
 
     return {
         "gene": resolved_gene,
@@ -4346,7 +5135,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         return JSONResponse(_load_reference_registry(app))
 
     @app.get("/api/meta/reference-preview")
-    async def reference_preview(species: str = Query(...), reference: str = Query(...)):
+    def reference_preview(species: str = Query(...), reference: str = Query(...)):
         return JSONResponse(_build_reference_preview_payload(app, species, reference))
 
     @app.post("/api/jobs")
@@ -4561,13 +5350,17 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         return JSONResponse(_build_differential_payload(app, job_id, updated, root_path=app.state.root_path))
 
     @app.get("/api/jobs/{job_id}/umap")
-    async def umap(
+    def umap(
         job_id: str,
         modality: str = Query("rna"),
         filter1_field: Optional[str] = Query(None),
         filter1_values: List[str] = Query([]),
         filter2_field: Optional[str] = Query(None),
         filter2_values: List[str] = Query([]),
+        color_by: str = Query(""),
+        coords: str = Query(""),
+        x_field: str = Query(""),
+        y_field: str = Query(""),
     ):
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
@@ -4575,7 +5368,10 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         meta = store.get_job(job_id)
         display_filters = _display_filter_specs(filter1_field, filter1_values, filter2_field, filter2_values)
         try:
-            return JSONResponse(_build_umap_payload(app, meta, modality=modality, display_filters=display_filters))
+            return JSONResponse(_build_umap_payload(
+                app, meta, modality=modality, display_filters=display_filters,
+                color_by=color_by, coords_key=coords,
+                x_field=x_field, y_field=y_field))
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
         except ValueError as exc:
@@ -4590,6 +5386,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         filter1_values: List[str] = Query([]),
         filter2_field: Optional[str] = Query(None),
         filter2_values: List[str] = Query([]),
+        violin_limit: int = Query(10),
     ):
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
@@ -4597,7 +5394,12 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         meta = store.get_job(job_id)
         display_filters = _display_filter_specs(filter1_field, filter1_values, filter2_field, filter2_values)
         try:
-            return JSONResponse(_build_expression_payload(app, meta, gene, modality=modality, display_filters=display_filters))
+            return JSONResponse(_build_expression_payload(
+                app, meta, gene, modality=modality, display_filters=display_filters,
+                # Coerced defensively: this route is also called directly by
+                # the scALABLE viewer's wrapper, where an unpassed argument
+                # arrives as a FastAPI Query object rather than an int.
+                violin_limit=_as_int(violin_limit, 10, 1, 80)))
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
         except KeyError as exc:
@@ -4606,7 +5408,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             raise HTTPException(status_code=500, detail=str(exc))
 
     @app.get("/api/jobs/{job_id}/marker/network")
-    async def marker_network(job_id: str, population: str = Query(...), modality: str = Query("rna")):
+    def marker_network(job_id: str, population: str = Query(...), modality: str = Query("rna")):
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
@@ -4619,7 +5421,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             raise HTTPException(status_code=500, detail=str(exc))
 
     @app.get("/api/jobs/{job_id}/grn/network")
-    async def grn_network(
+    def grn_network(
         job_id: str,
         genes: List[str] = Query(default=[]),
         sample: str = Query(default=""),
@@ -4644,7 +5446,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             raise HTTPException(status_code=500, detail=str(exc))
 
     @app.get("/api/jobs/{job_id}/fastcomm/network")
-    async def fastcomm_network(
+    def fastcomm_network(
         job_id: str,
         population: str = Query(""),
         direction: str = Query("incoming"),
@@ -4662,7 +5464,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             raise HTTPException(status_code=500, detail=str(exc))
 
     @app.get("/api/jobs/{job_id}/fastcomm/plot")
-    async def fastcomm_plot(
+    def fastcomm_plot(
         job_id: str,
         population: str = Query(""),
         plot_type: str = Query("focused_incoming"),
@@ -4696,7 +5498,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             raise HTTPException(status_code=500, detail=str(exc))
 
     @app.get("/api/jobs/{job_id}/genes")
-    async def job_genes(job_id: str, modality: str = Query("rna")):
+    def job_genes(job_id: str, modality: str = Query("rna")):
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
@@ -4708,8 +5510,83 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=500, detail=str(exc))
 
+    @app.get("/api/jobs/{job_id}/dotplot")
+    def dotplot(job_id: str, genes: str = Query(""), modality: str = Query("rna"),
+                      group_by: str = Query(""), groups: List[str] = Query([]),
+                      subset_by: str = Query(""), subset_values: List[str] = Query([])):
+        """Mean expression and detected fraction per (gene, cell state).
+
+        Colour and dot size for the DotPlot. Cell states are returned in the
+        dataset's own order, which is the centroid ordering, so the figure reads
+        the same way as every other plot in the tool.
+        """
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        cache = _get_expression_cache(app, store.get_job(job_id), modality=modality)
+        wanted = split_gene_list(genes) or _default_marker_genes(cache, group_by)
+        if not wanted:
+            raise HTTPException(status_code=400, detail="Give at least one gene.")
+        payload = _gene_state_stats(cache, wanted, group_by, list(groups),
+                                    subset_by, list(subset_values))
+        if not payload["genes"]:
+            raise HTTPException(
+                status_code=404,
+                detail=f"none of the {len(wanted)} requested genes are in this dataset")
+        return JSONResponse(payload)
+
+    @app.get("/api/jobs/{job_id}/combplot")
+    def combplot(job_id: str, genes: str = Query(""), modality: str = Query("rna"),
+                       min_cells: int = Query(5),
+                       group_by: str = Query(""), groups: List[str] = Query([]),
+                      subset_by: str = Query(""), subset_values: List[str] = Query([])):
+        """Per-donor pseudobulk for each gene, grouped by cell state.
+
+        One bar per (cell state, donor). Cell-level bars would number as many as
+        the dataset has cells and would hide the donor-to-donor spread the figure
+        exists to show. A donor contributing fewer than `min_cells` cells to a
+        state is left out rather than drawn from almost nothing.
+        """
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        cache = _get_expression_cache(app, store.get_job(job_id), modality=modality)
+        # Blank means the marker gene of every group, the same default the
+        # DotPlot uses, so switching between the two keeps the same gene set.
+        wanted = split_gene_list(genes) or _default_marker_genes(cache, group_by)
+        if not wanted:
+            raise HTTPException(status_code=400, detail="Give at least one gene.")
+        payload = _gene_donor_state_means(cache, wanted, max(1, int(min_cells)),
+                                          group_by, list(groups),
+                                          subset_by, list(subset_values))
+        if payload.get("error"):
+            raise HTTPException(status_code=404, detail=payload["error"])
+        return JSONResponse(payload)
+
+
+    @app.get("/api/jobs/{job_id}/plot-variables")
+    def plot_variables(job_id: str, modality: str = Query("rna")):
+        """The variables the DotPlot and CombPlot may group or filter by.
+
+        Only categorical columns with a workable number of levels; a per-cell
+        numeric column would draw one column per cell.
+        """
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        cache = _get_expression_cache(app, store.get_job(job_id), modality=modality)
+        variables = _groupable_columns(cache)
+        return JSONResponse({"cluster_key": str(cache["cluster_key"]),
+                             "variables": variables,
+                             # The UMAP panel colours by any of the same columns,
+                             # draws on any 2-D embedding the h5ad carries, and
+                             # takes any pair of numeric obs columns as axes.
+                             "color_variables": variables,
+                             "coords": _umap_coordinate_options(cache),
+                             "numeric_variables": _numeric_obs_columns(cache)})
+
     @app.get("/api/jobs/{job_id}/display-filters")
-    async def job_display_filters(job_id: str, modality: str = Query("rna")):
+    def job_display_filters(job_id: str, modality: str = Query("rna")):
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
@@ -4722,7 +5599,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             raise HTTPException(status_code=500, detail=str(exc))
 
     @app.get("/api/jobs/{job_id}/umap/pdf")
-    async def umap_pdf(
+    def umap_pdf(
         job_id: str,
         mode: str = Query("relative"),
         modality: str = Query("rna"),
@@ -4750,7 +5627,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         )
 
     @app.get("/api/jobs/{job_id}/expression/pdf")
-    async def expression_pdf(
+    def expression_pdf(
         job_id: str,
         gene: str = Query(...),
         mode: str = Query("umap"),
@@ -4790,8 +5667,224 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             store.append_log(job_id, f"[client] {message}")
         return JSONResponse({"ok": True})
 
+    @app.get("/api/jobs/{job_id}/chat-examples")
+    def chat_examples(job_id: str):
+        """Example questions for THIS job, named after its own cell states.
+
+        The Chat tab shipped eight fixed lung sentences, so a bone-marrow job
+        offered AT2 and COPD examples that its data cannot answer.
+        """
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        return JSONResponse(_chat_examples(app, store.get_job(job_id)))
+
+    @app.post("/api/jobs/{job_id}/chat")
+    def chat(job_id: str, payload: ChatRequest):
+        """Answer one question about this job, with numbers from this job.
+
+        Two steps, deliberately separated. The assistant reads the sentence into
+        one supported query and sees no data. This route then runs that query
+        against the job's own files. So the model chooses the question and the
+        data answers it; no number here comes from the model.
+        """
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        meta = store.get_job(job_id)
+        question = str(payload.question or "").strip()
+        if not question:
+            raise HTTPException(status_code=400, detail="question is required")
+
+        cache = _get_expression_cache(app, meta)
+        reading = _chat_read_question(question, cache, meta)
+        intent = str(reading.get("intent") or "")
+        state = str(reading.get("cell_state") or "")
+        state2 = str(reading.get("cell_state_2") or "")
+        genes = [str(g) for g in (reading.get("genes") or []) if str(g).strip()]
+        states = [s for s, _ in _chat_states_by_size(cache)]
+        contrast = _chat_contrast(meta)
+
+        # The router reads the sentence with a keyword matcher that overlaps
+        # state names and drops gene names. Both are repaired against the names
+        # this job actually holds, and the repaired reading is returned so the
+        # answer says which state and which gene it used.
+        named = _chat_states_in_question(question, states)
+        if named:
+            if state not in named:
+                state = named[0]
+            if state2 and state2 not in named:
+                state2 = next((s for s in named if s != state), "")
+            if not state2 and len(named) > 1:
+                state2 = next((s for s in named if s != state), "")
+        if not genes:
+            genes = _chat_genes_in_question(question, cache)
+        reading = dict(reading)
+        reading["cell_state"] = state
+        reading["cell_state_2"] = state2
+        reading["genes"] = genes
+        result: Dict[str, Any] = {"question": question, "reading": reading, "intent": intent}
+
+        if intent == "clarify" and genes and not state:
+            # The router's keyword matcher returns `clarify` for a plain sentence
+            # such as "Which cell states express Mki67?". The question names a
+            # gene this dataset holds, so the reading is stated and answered
+            # rather than bounced back as a question.
+            intent = "expression"
+            result["intent"] = intent
+            result["status"] = "read_from_question"
+
+        if intent == "clarify":
+            result["answer"] = (
+                f"I need to know {reading.get('missing') or 'a little more'}. "
+                f"This dataset has {len(states)} cell states and "
+                f"{1 if contrast else 0} completed comparison(s).")
+            result["choices"] = {"states": states,
+                                 "contrasts": [contrast["label"]] if contrast else []}
+            return JSONResponse(result)
+
+        if intent == "unsupported":
+            result["answer"] = (
+                "I can answer four things about this dataset: the marker genes of a "
+                "cell state, genes differing between two groups within a cell state, "
+                "where named genes are expressed, and what separates two cell states.")
+            return JSONResponse(result)
+
+        if intent in _CHAT_NOT_YET:
+            result["answer"] = (
+                f"That is the {intent} protocol. It needs {_CHAT_NOT_YET[intent]}, which "
+                "cellHarmony web does not compute yet, so I am not going to answer it "
+                "with a different analysis.")
+            result["status"] = "not_implemented"
+            return JSONResponse(result)
+
+        if intent in ("regulatory_driver", "communication_rewiring", "pathway_program"):
+            label = {"regulatory_driver": "marker and differential networks",
+                     "communication_rewiring": "cell communication",
+                     "pathway_program": "GO Terms"}[intent]
+            tab = "Explore" if intent == "communication_rewiring" else "Differential"
+            result["answer"] = (
+                f"That is the {intent} protocol, answered by this job's {label} results "
+                f"for {state or 'the selected cell state'}. Open the {tab} tab for the "
+                "figure; the chat does not inline it.")
+            result["status"] = "use_existing_view"
+            result["plot"] = {"kind": "network"}
+            return JSONResponse(result)
+
+        intent = _CHAT_PROTOCOL_ALIAS.get(intent, intent)
+
+        if intent == "markers":
+            if state and state not in states:
+                result["answer"] = (f"{state} is not a cell state in this dataset. "
+                                    f"It holds {len(states)}: {', '.join(states[:8])}"
+                                    + (" ..." if len(states) > 8 else "."))
+                result["status"] = "not_found"
+                return JSONResponse(result)
+            rows = _chat_markers_for_states(app, meta, cache, [state or states[0]], 25)
+            sources = sorted({str(row["source"]) for row in rows})
+            result["answer"] = (f"{len(rows)} top marker genes of {state or states[0]}, "
+                                f"from the {' and '.join(sources) or 'marker'} analysis.")
+            result["table"] = {
+                "columns": ["gene", "cluster", "fold", "p", "source"],
+                "rows": [[r["gene"], r["cluster"], round(float(r["fold"]), 4), r["p"], r["source"]]
+                         for r in rows]}
+            result["plot"] = {"kind": "dotplot", "genes": [r["gene"] for r in rows[:12]]}
+            return JSONResponse(result)
+
+        if intent == "compare":
+            pair = [s for s in (state, state2) if s]
+            if len(pair) < 2:
+                result["answer"] = "Name two cell states to compare."
+                result["status"] = "clarify"
+                return JSONResponse(result)
+            rows = _chat_markers_for_states(app, meta, cache, pair, 30)
+            result["answer"] = f"Marker genes separating {pair[0]} and {pair[1]}."
+            result["table"] = {
+                "columns": ["gene", "cluster", "fold", "p", "source"],
+                "rows": [[r["gene"], r["cluster"], round(float(r["fold"]), 4), r["p"], r["source"]]
+                         for r in rows]}
+            result["plot"] = {"kind": "dotplot", "genes": [r["gene"] for r in rows[:12]]}
+            return JSONResponse(result)
+
+        if intent == "expression":
+            if not genes:
+                result["answer"] = "Name at least one gene."
+                result["status"] = "clarify"
+                return JSONResponse(result)
+            stats = _gene_state_stats(cache, genes)
+            found = stats["genes"]
+            if not found:
+                result["answer"] = f"None of {', '.join(genes)} are in this dataset."
+                result["status"] = "not_found"
+                return JSONResponse(result)
+            table_rows = []
+            for row_index, gene in enumerate(found):
+                means = np.asarray(stats["mean"][row_index], dtype=float)
+                for column in np.argsort(-means)[:5]:
+                    table_rows.append([gene, stats["states"][int(column)],
+                                       round(float(means[int(column)]), 3),
+                                       round(float(stats["frac"][row_index][int(column)]), 3)])
+            missing = stats["missing"]
+            result["answer"] = (
+                f"Highest-expressing cell states for {', '.join(found)}, by mean expression "
+                f"across the {len(stats['states'])} states of this dataset."
+                + (f" Not in this dataset: {', '.join(missing)}." if missing else "")
+                + (" Read as an expression lookup because the question names a gene this "
+                   "dataset holds." if result.get("status") == "read_from_question" else ""))
+            result["table"] = {"columns": ["gene", "cell state", "mean", "fraction"],
+                               "rows": table_rows}
+            result["plot"] = {"kind": "dotplot", "genes": found}
+            return JSONResponse(result)
+
+        if intent == "differential":
+            if not contrast:
+                result["answer"] = (
+                    "This job has not run a differential comparison yet. Open the "
+                    "Differential tab, choose the two sample groups and run it; then this "
+                    "question has an answer. I am not substituting a marker analysis for it.")
+                result["status"] = "not_run"
+                return JSONResponse(result)
+            try:
+                detail = _get_differential_detail_table(app, meta)
+            except (FileNotFoundError, ValueError) as exc:
+                result["answer"] = f"The differential result is unavailable ({exc})."
+                result["status"] = "not_available"
+                return JSONResponse(result)
+            covered = sorted(set(detail["population"].astype(str)))
+            subset = detail.loc[detail["population"].astype(str) == state] if state else detail
+            if state and subset.empty:
+                result["answer"] = (
+                    f"{contrast['label']} is not computed for {state}. It covers "
+                    f"{len(covered)} of the {len(states)} cell states in this dataset. "
+                    "This is missing data, not an absence of change.")
+                result["status"] = "not_covered"
+                result["table"] = {"columns": ["cell state covered"], "rows": [[s] for s in covered]}
+                return JSONResponse(result)
+            frame = subset.copy()
+            frame["fdr"] = pd.to_numeric(frame.get("fdr"), errors="coerce")
+            frame["log2fc"] = pd.to_numeric(frame.get("log2fc"), errors="coerce")
+            frame["pval"] = pd.to_numeric(frame.get("pval"), errors="coerce")
+            frame = frame.dropna(subset=["log2fc"]).sort_values(["fdr", "pval"])
+            top = frame.head(25)
+            result["answer"] = (
+                f"Top genes for {contrast['label']}" + (f" in {state}" if state else "")
+                + f", from this job's cellHarmony-differential result "
+                  f"({len(frame)} genes reported{' in ' + state if state else ''}).")
+            result["table"] = {
+                "columns": ["gene", "population", "log2fc", "fdr", "pval"],
+                "rows": [[str(row.gene), str(row.population),
+                          float(row.log2fc),
+                          float(row.fdr) if _is_finite_number(row.fdr) else None,
+                          float(row.pval) if _is_finite_number(row.pval) else None]
+                         for row in top.itertuples()]}
+            result["plot"] = {"kind": "volcano"}
+            return JSONResponse(result)
+
+        result["answer"] = "I did not understand that."
+        return JSONResponse(result)
+
     @app.api_route("/api/jobs/{job_id}/marker/heatmap.tsv", methods=["GET", "HEAD", "OPTIONS"])
-    async def marker_heatmap_tsv(
+    def marker_heatmap_tsv(
         job_id: str,
         request: Request,
         modality: str = Query("rna"),
@@ -4872,7 +5965,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         )
 
     @app.get("/jobs/{job_id}/marker/heatmap/viewer", response_class=HTMLResponse)
-    async def marker_heatmap_viewer(request: Request, job_id: str):
+    def marker_heatmap_viewer(request: Request, job_id: str):
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
@@ -4900,7 +5993,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             raise
 
     @app.get("/api/jobs/{job_id}/marker/heatmap.pdf")
-    async def marker_heatmap_pdf(
+    def marker_heatmap_pdf(
         job_id: str,
         modality: str = Query("rna"),
         filter1_field: Optional[str] = Query(None),
@@ -4934,7 +6027,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         )
 
     @app.get("/api/jobs/{job_id}/marker/network/pdf")
-    async def marker_network_pdf(job_id: str, population: str = Query(...), modality: str = Query("rna")):
+    def marker_network_pdf(job_id: str, population: str = Query(...), modality: str = Query("rna")):
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
@@ -5045,7 +6138,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         return FileResponse(path, filename=path.name, media_type=media_type)
 
     @app.get("/api/jobs/{job_id}/differential/interactive/heatmap")
-    async def differential_heatmap_data(job_id: str, population: str = Query(...)):
+    def differential_heatmap_data(job_id: str, population: str = Query(...)):
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
@@ -5053,7 +6146,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         return JSONResponse(_build_differential_heatmap_payload(app, meta, population))
 
     @app.get("/api/jobs/{job_id}/differential/interactive/volcano")
-    async def differential_volcano_data(job_id: str, population: str = Query(...)):
+    def differential_volcano_data(job_id: str, population: str = Query(...)):
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
@@ -5061,7 +6154,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         return JSONResponse(_build_differential_volcano_payload(app, meta, population))
 
     @app.get("/api/jobs/{job_id}/differential/interactive/go")
-    async def differential_go_data(job_id: str, population: str = Query(...)):
+    def differential_go_data(job_id: str, population: str = Query(...)):
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
@@ -5069,7 +6162,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         return JSONResponse(_build_differential_go_payload(app, meta, population))
 
     @app.get("/api/jobs/{job_id}/differential/interactive/network")
-    async def differential_network_data(job_id: str, population: str = Query(...)):
+    def differential_network_data(job_id: str, population: str = Query(...)):
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
@@ -5077,7 +6170,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         return JSONResponse(_build_differential_network_payload(app, meta, population, root_path=app.state.root_path))
 
     @app.get("/api/jobs/{job_id}/differential/interactive/table")
-    async def differential_table_data(job_id: str, population: str = Query(...)):
+    def differential_table_data(job_id: str, population: str = Query(...)):
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
@@ -5088,7 +6181,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         return JSONResponse(_build_differential_cell_communication_table_payload(app, meta, population))
 
     @app.get("/api/jobs/{job_id}/differential/interactive/gene")
-    async def differential_gene_data(
+    def differential_gene_data(
         job_id: str,
         population: str = Query(...),
         gene: str = Query(...),
@@ -5101,7 +6194,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         return JSONResponse(_build_differential_gene_detail_payload(app, meta, population, gene, feature=feature))
 
     @app.get("/api/jobs/{job_id}/differential/interactive/gene/pdf")
-    async def differential_gene_pdf(
+    def differential_gene_pdf(
         job_id: str,
         population: str = Query(...),
         gene: str = Query(...),
@@ -5123,7 +6216,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         )
 
     @app.get("/api/jobs/{job_id}/differential/interactive/pdf")
-    async def differential_rendered_pdf(job_id: str, mode: str = Query(...), population: str = Query(...)):
+    def differential_rendered_pdf(job_id: str, mode: str = Query(...), population: str = Query(...)):
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")

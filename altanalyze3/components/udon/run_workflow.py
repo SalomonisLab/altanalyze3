@@ -57,6 +57,14 @@ def main():
     ap.add_argument("--species", default="Hs")
     ap.add_argument("--no-gene-filter", action="store_true")
     ap.add_argument("--fast", action="store_true", help="vectorized feature selection (NMF n_run unchanged)")
+    # pass-throughs to run_udon_pseudobulk so the documented entry point can express a control
+    # design the built-in sex+platform matcher cannot (added 2026-08-27)
+    ap.add_argument("--min-cells", type=int, default=None,
+                    help="drop pseudobulks built from fewer than this many cells (run_udon_pseudobulk default 5)")
+    ap.add_argument("--control-mode", default="matched", choices=["matched", "annotation", "collective"],
+                    help="how controls are chosen; 'annotation' reads a precomputed pairing")
+    ap.add_argument("--control-annotation", default=None,
+                    help="TSV of disease_sample -> controls, required when --control-mode annotation")
     args = ap.parse_args()
 
     outdir = os.path.abspath(args.outdir)
@@ -76,7 +84,11 @@ def main():
     udon_out = os.path.join(outdir, "udon")
     cmd1 = [PY, "run_udon_pseudobulk.py", "--pseudobulk", args.pseudobulk, "--counts-pseudobulk", args.counts,
             "--sample-metadata", args.sample_metadata, "--output-dir", udon_out,
-            "--species", args.species, "--control-mode", "matched"]
+            "--species", args.species, "--control-mode", args.control_mode]
+    if args.control_annotation:
+        cmd1 += ["--control-annotation", os.path.abspath(args.control_annotation)]
+    if args.min_cells is not None:
+        cmd1 += ["--min-cells", str(args.min_cells)]
     if args.cell_type:
         cmd1 += ["--cell-type", args.cell_type]
     if args.no_gene_filter:

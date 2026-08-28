@@ -58,7 +58,16 @@ const BASE_VISUALIZATION_MODES = [
   { value: "frequency", label: "Cell frequency" },
   { value: "expression_umap", label: "UMAP" },
   { value: "violin", label: "Violin" },
+  { value: "dotplot", label: "DotPlot" },
+  { value: "combplot", label: "CombPlot" },
 ];
+
+// DotPlot and CombPlot take a list of genes rather than one symbol, so they show
+// the gene-set box instead of the single-molecule input.
+const GENE_SET_MODES = new Set(["dotplot", "combplot"]);
+
+// The Coordinates entry that means "not an embedding: use two obs columns".
+const OBS_AXES_KEY = "__obs__";
 const PAIRED_COLOR_STOPS = [
   [0.0, [0.6509804129600525, 0.8078431487083435, 0.8901960849761963]],
   [0.09090909090909091, [0.12156862765550613, 0.47058823704719543, 0.7058823704719543]],
@@ -145,6 +154,7 @@ async function ensureExploreResultsReady(jobId, statusData = null) {
     }
     exploreResultsReadyJobId = normalizedJobId;
     exploreResultsPendingJobId = null;
+    void loadChatExamples(normalizedJobId);
     updateWorkflowPanels(referenceRerunPending ? "uploaded" : currentJobStatus);
     if (!referenceRerunPending && statusData) {
       document.getElementById("qc-cell-status").textContent = buildQcCellSummary(statusData);
@@ -906,6 +916,32 @@ function updateExpressionModeOptions() {
     const defaultMode = VISUALIZATION_DEFAULT_MODE[panelKey] || "cluster";
     modeSelect.value = modes.some((mode) => mode.value === currentMode) ? currentMode : defaultMode;
     const mode = modeSelect.value;
+
+    // Gene-set plot types swap the single-molecule input for the paste box, and
+    // only the CombPlot carries a per-donor minimum.
+    const geneSetField = document.getElementById(panelElementId(panelKey, "geneset-field"));
+    const combMinField = document.getElementById(panelElementId(panelKey, "combmin-field"));
+    const wantsGeneSet = GENE_SET_MODES.has(mode);
+    if (geneSetField) geneSetField.classList.toggle("hidden", !wantsGeneSet);
+    const groupByField = document.getElementById(panelElementId(panelKey, "groupby-field"));
+    const groupsField = document.getElementById(panelElementId(panelKey, "groups-field"));
+    if (groupByField) groupByField.classList.toggle("hidden", !wantsGeneSet);
+    if (groupsField) groupsField.classList.toggle("hidden", !wantsGeneSet);
+    if (wantsGeneSet) refreshGroupControls(panelKey);
+    if (combMinField) combMinField.classList.toggle("hidden", mode !== "combplot");
+    if (wantsGeneSet) geneField.classList.add("hidden");
+
+    // The UMAP cell-type view colours cells by the cellHarmony assignment and
+    // draws them on the cellHarmony projection. Both may be swapped for any
+    // categorical obs column and any 2-D embedding the h5ad carries. The other
+    // plot types have no such choice, so the two lists stay hidden there.
+    const wantsUmapOptions = mode === "cluster";
+    const colorByField = document.getElementById(panelElementId(panelKey, "colorby-field"));
+    const coordsField = document.getElementById(panelElementId(panelKey, "coords-field"));
+    if (colorByField) colorByField.classList.toggle("hidden", !wantsUmapOptions);
+    if (coordsField) coordsField.classList.toggle("hidden", !wantsUmapOptions);
+    if (wantsUmapOptions) refreshUmapOptions(panelKey);
+    syncUmapAxisFields(panelKey);
 
     const modalityLabel = modalityField.querySelector("span");
     modalitySelect.innerHTML = "";
@@ -1674,6 +1710,9 @@ document.addEventListener("DOMContentLoaded", () => {
   updateDifferentialUi(null);
   updateResetDataButton();
   loadReferencePreview();
+  initWindowCount();
+  initGeneSetBoxes();
+  initChatTab();
 });
 
 function initSpeciesSelect() {
@@ -4985,10 +5024,60 @@ async function loadVisualizationPanel(panelKey) {
   if (!jobId || !mode) {
     return;
   }
+
+  // Gene-set plot types fetch their own payload and draw it here, so they do not
+  // travel through the single-molecule expression path below.
+  if (GENE_SET_MODES.has(mode)) {
+    const genes = panelGeneSet(panelKey);
+    const params = new URLSearchParams();
+    if (genes.length) {
+      params.set("genes", genes.join(","));
+    }
+    if (mode === "combplot") {
+      params.set("min_cells", String(panelCombMinCells(panelKey)));
+    }
+    // "Filter data to display" restricts these plots too, not only the UMAP and
+    // violin. Without this the DotPlot and CombPlot ignored both annotation rows.
+    appendGeneSetSubsetParams(params, panelKey);
+    // Group by, and which levels to show. This call was lost in an edit, so
+    // `group_by` stopped being sent and the plot silently stayed on cell state
+    // however the control was set.
+    appendGeneSetGroupParams(params, panelKey);
+    const query = params.toString() ? `?${params.toString()}` : "";
+    try {
+      const response = await fetch(apiPath(`/api/jobs/${jobId}/${mode}${query}`));
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || `${mode} failed`);
+      panelPlotData[panelKey] = { source: mode, payload };
+    } catch (err) {
+      panelPlotData[panelKey] = { source: "error", payload: { message: err.message } };
+    }
+    renderVisualizationPanel(panelKey);
+    return;
+  }
   try {
     if (isUmapMode(mode)) {
       const params = getDisplayFilterParams(panelKey);
       params.set("modality", modality);
+      // Only the cell-type view offers these. "UMAP broad" draws reference
+      // against query, and the reference is hidden whenever either choice is
+      // off-default, which would leave that view with nothing to contrast.
+      if (mode === "cluster") {
+        const colorBy = getPanelSelectValue(panelKey, "colorby");
+        const coordsKey = getPanelSelectValue(panelKey, "coords");
+        if (colorBy) params.set("color_by", colorBy);
+        if (coordsKey === OBS_AXES_KEY) {
+          // Two obs columns replace the embedding, so no coords key is sent.
+          const xField = getPanelSelectValue(panelKey, "xfield");
+          const yField = getPanelSelectValue(panelKey, "yfield");
+          if (xField && yField) {
+            params.set("x_field", xField);
+            params.set("y_field", yField);
+          }
+        } else if (coordsKey) {
+          params.set("coords", coordsKey);
+        }
+      }
       const suffix = params.toString() ? `?${params.toString()}` : "";
       const resp = await fetch(apiPath(`/jobs/${jobId}/umap${suffix}`));
       const data = await parseApiResponse(resp);
@@ -5084,6 +5173,9 @@ async function loadVisualizationPanel(panelKey) {
       const params = getDisplayFilterParams(panelKey);
       params.set("gene", gene);
       params.set("modality", modality);
+        // One window is twice as wide, so the violin plot draws more cell states
+        // rather than leaving the extra space empty.
+        params.set("violin_limit", singleWindowActive() ? "30" : "10");
       const resp = await fetch(apiPath(`/jobs/${jobId}/expression?${params.toString()}`));
       const data = await parseApiResponse(resp);
       if (!resp.ok) {
@@ -5130,6 +5222,28 @@ function renderVisualizationMessage(panelKey, message, title = "Visualization un
       },
     ],
   }, { displayModeBar: false });
+}
+
+/* The caption under a UMAP panel. It names the colour column and the embedding
+ * whenever they are not the cellHarmony defaults, and says why the reference
+ * atlas is missing, which otherwise reads as a drawing fault. */
+function setUmapPanelSummary(panelKey, umapData) {
+  const parts = [];
+  const filters = getDisplayFilterSummary(panelKey);
+  if (filters) parts.push(`Display only: ${filters}`);
+  if (umapData && umapData.reference_hidden) {
+    parts.push(`Colored by ${umapData.color_label}`);
+    parts.push(umapData.axes_source === "obs"
+      ? `Axes: ${umapData.x_label} against ${umapData.y_label}`
+      : `Coordinates: ${umapData.coords_label}`);
+    parts.push("Reference atlas hidden: it carries neither this annotation nor these coordinates");
+  }
+  // Cells the panel could not place. Silence here would read as an absence of
+  // cells rather than an absence of a recorded value.
+  if (umapData && Number(umapData.n_dropped_no_coordinate) > 0) {
+    parts.push(`${umapData.n_dropped_no_coordinate} of ${umapData.n_cells_selected} cells not drawn: no value on both axes`);
+  }
+  if (parts.length) setPanelSummary(panelKey, parts.join(" | "));
 }
 
 function renderPanelUmap(panelKey, umapData, mode, dotScale) {
@@ -5279,6 +5393,7 @@ function renderPanelUmap(panelKey, umapData, mode, dotScale) {
     Plotly.newPlot(panelPlotId(panelKey), traces, layout);
     return;
   }
+  setUmapPanelSummary(panelKey, umapData);
   const populations = buildStableUmapPopulationOrder(umapData);
   const colorMap = buildReferencePreviewColorMap(populations);
   const labelPoints = relaxReferencePreviewLabels(
@@ -5323,7 +5438,16 @@ function renderPanelUmap(panelKey, umapData, mode, dotScale) {
     bgcolor: "rgba(255,255,255,0)",
     opacity: 1,
   }));
-  Object.assign(layout, buildSquareUmapAxes(umapData.query, 0.06));
+  if (umapData.axes_source === "obs") {
+    // A UMAP hides its tick labels because the numbers mean nothing. A metadata
+    // axis is the opposite: the value is the point of the plot, so it is
+    // labelled and its ticks are shown.
+    layout.xaxis = { title: { text: umapData.x_label, font: { size: 12 } }, showgrid: false, zeroline: false };
+    layout.yaxis = { title: { text: umapData.y_label, font: { size: 12 } }, showgrid: false, zeroline: false };
+    layout.margin = { t: 20, l: 60, r: 20, b: 55 };
+  } else {
+    Object.assign(layout, buildSquareUmapAxes(umapData.query, 0.06));
+  }
   Plotly.newPlot(panelPlotId(panelKey), traces, layout);
 }
 
@@ -5489,6 +5613,18 @@ function renderPanelExpression(panelKey, expressionData, mode, dotScale) {
 function renderVisualizationPanel(panelKey) {
   const mode = getPanelSelectValue(panelKey, "mode");
   const data = panelPlotData[panelKey];
+
+  // Gene-set figures are drawn from their own payload, not the expression one.
+  if (GENE_SET_MODES.has(mode)) {
+    if (!data || data.source === "error") {
+      renderVisualizationMessage(panelKey,
+        (data && data.payload && data.payload.message) || "Enter a gene set to draw this plot.");
+      return;
+    }
+    if (mode === "combplot") renderCombPlotFigure(panelPlotId(panelKey), data.payload || {});
+    else renderDotPlotFigure(panelPlotId(panelKey), data.payload || {});
+    return;
+  }
   const dotScale = getPlotDotScale();
   if (!data) {
     renderVisualizationMessage(panelKey, "Complete an alignment to visualize results.");
@@ -5757,4 +5893,1291 @@ function syncExplorerWorkspace(preferredTab = null) {
   if (!hasBaseline && !hasDifferential && activeExplorerTab === "explore") {
       setExplorerTab("run");
   }
+}
+
+/* ---------------------------------------------------------------------------
+ * Window count, gene-set plot types and the Chat tab.
+ *
+ * These are scALABLE features, not viewer overrides: the upload workflow and any
+ * precomputed bundle get the same controls from this file.
+ * ------------------------------------------------------------------------ */
+
+/* Windows = 2 | 1. The results grid is two equal columns, so a plot that runs
+ * across every cell state has half the page. Choosing 1 hides panel 2 and lets
+ * panel 1 span the full width. Panel 2 is hidden, never reset, so its plot and
+ * its settings are unchanged when the count goes back to 2. */
+/* Whether the results grid is currently showing a single window. */
+function singleWindowActive() {
+  const view = document.getElementById("baseline-results-view");
+  return Boolean(view && view.classList.contains("single-window"));
+}
+
+function applyWindowCount(count) {
+  const view = document.getElementById("baseline-results-view");
+  if (!view) return;
+  view.classList.toggle("single-window", count === 1);
+  // A Plotly figure is drawn to the width the panel had, so both panels are
+  // redrawn at the new one.
+  if (typeof renderVisualizationPanel === "function") {
+    renderVisualizationPanel("viz1");
+    if (count === 2) renderVisualizationPanel("viz2");
+  }
+}
+
+function initWindowCount() {
+  const select = document.getElementById("viz-window-count");
+  if (!select || select.dataset.wired === "1") return;
+  select.dataset.wired = "1";
+  select.addEventListener("change", () => {
+    applyWindowCount(Number(select.value) === 1 ? 1 : 2);
+  });
+}
+
+/* Gene symbols out of whatever the user pasted: an Excel column arrives newline
+ * separated, a row tab separated, and people also type commas and spaces.
+ * Duplicates are dropped and order is kept, so the plot reads in the order the
+ * genes were listed. */
+function parseGeneSet(text) {
+  const seen = new Set();
+  const out = [];
+  String(text || "").split(/[\s,;|]+/).forEach((part) => {
+    const gene = part.trim().replace(/^["']|["']$/g, "");
+    if (gene && !seen.has(gene)) { seen.add(gene); out.push(gene); }
+  });
+  return out;
+}
+
+function panelGeneSet(panelKey) {
+  const box = document.getElementById(panelElementId(panelKey, "geneset"));
+  return parseGeneSet(box ? box.value : "");
+}
+
+function panelCombMinCells(panelKey) {
+  const select = document.getElementById(panelElementId(panelKey, "combmin"));
+  const value = Number(select && select.value);
+  return Number.isFinite(value) && value > 0 ? value : 5;
+}
+
+function initGeneSetBoxes() {
+  VISUALIZATION_PANELS.forEach((panelKey) => {
+    const box = document.getElementById(panelElementId(panelKey, "geneset"));
+    const min = document.getElementById(panelElementId(panelKey, "combmin"));
+    if (box && box.dataset.wired !== "1") {
+      box.dataset.wired = "1";
+      let timer = null;
+      box.addEventListener("input", () => {
+        window.clearTimeout(timer);
+        timer = window.setTimeout(() => loadVisualizationPanel(panelKey), 600);
+      });
+    }
+    if (min && min.dataset.wired !== "1") {
+      min.dataset.wired = "1";
+      min.addEventListener("change", () => loadVisualizationPanel(panelKey));
+    }
+  });
+}
+
+/* The Chat tab.
+ *
+ * The question goes to /api/jobs/{id}/chat. That route asks the LungMAP
+ * assistant to read the sentence into one of a few supported queries, then runs
+ * the query here and returns real numbers. The model never sees the data, so
+ * nothing on this panel is a generated statistic.
+ */
+let chatLastResult = null;
+
+function initChatTab() {
+  const send = document.getElementById("chat-send");
+  if (!send || send.dataset.wired === "1") return;
+  send.dataset.wired = "1";
+  send.addEventListener("click", askChat);
+
+  const box = document.getElementById("chat-question");
+  if (box) {
+    box.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); askChat(); }
+    });
+  }
+  document.querySelectorAll(".chat-example").forEach((example) => {
+    example.addEventListener("click", () => {
+      document.getElementById("chat-question").value = example.textContent;
+      askChat();
+    });
+  });
+  const views = document.getElementById("chat-views");
+  if (views) {
+    views.querySelectorAll("button").forEach((view) => {
+      view.addEventListener("click", () => {
+        views.querySelectorAll("button").forEach((b) => b.classList.remove("active"));
+        view.classList.add("active");
+        const wantsPlot = view.dataset.view === "plot";
+        document.getElementById("chat-plot").classList.toggle("hidden", !wantsPlot);
+        document.getElementById("chat-table").classList.toggle("hidden", wantsPlot);
+        if (wantsPlot) drawChatPlot();
+      });
+    });
+  }
+}
+
+/* The Chat examples, built by the server from this job's reference and its own
+ * cell states. The tab shipped eight fixed lung sentences, so a bone-marrow job
+ * offered AT2 and COPD questions that its data cannot answer. */
+async function loadChatExamples(jobId) {
+  const host = document.getElementById("chat-examples");
+  const box = document.getElementById("chat-question");
+  if (!host || !jobId) return;
+  try {
+    const response = await fetch(apiPath(`/jobs/${jobId}/chat-examples`));
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || "examples unavailable");
+    host.innerHTML = "";
+    const label = document.createElement("span");
+    label.textContent = data.reference ? `Try (${data.reference}):` : "Try:";
+    host.appendChild(label);
+    (data.examples || []).forEach((question) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "ghost-btn chat-example";
+      button.textContent = question;
+      button.addEventListener("click", () => {
+        box.value = question;
+        askChat();
+      });
+      host.appendChild(button);
+    });
+    if (box && data.placeholder) box.placeholder = data.placeholder;
+  } catch (err) {
+    console.warn("chat examples unavailable:", err);
+  }
+}
+
+async function askChat() {
+  const question = String(document.getElementById("chat-question").value || "").trim();
+  const jobIdField = document.getElementById("results-job-id");
+  const jobId = jobIdField ? jobIdField.value.trim() : "";
+  const status = document.getElementById("chat-status");
+  if (!question) return;
+  if (!jobId) { status.textContent = "Load a dataset first."; return; }
+  status.textContent = "Working...";
+  document.getElementById("chat-answer").innerHTML = "";
+  document.getElementById("chat-table").innerHTML = "";
+  try {
+    const response = await fetch(apiPath(`/api/jobs/${jobId}/chat`), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || `chat failed (${response.status})`);
+    chatLastResult = data;
+    renderChatAnswer(data);
+    status.textContent = "";
+  } catch (err) {
+    status.textContent = err.message;
+  }
+}
+
+function renderChatAnswer(data) {
+  const reading = data.reading || {};
+  const bits = [];
+  if (reading.cell_state) bits.push(`cell state <b>${reading.cell_state}</b>`);
+  if (reading.cell_state_2) bits.push(`and <b>${reading.cell_state_2}</b>`);
+  if (reading.contrast) bits.push(`comparison <b>${reading.contrast}</b>`);
+  if ((reading.genes || []).length) bits.push(`genes <b>${reading.genes.join(", ")}</b>`);
+  document.getElementById("chat-answer").innerHTML =
+    `<p>${data.answer || ""}</p><p class="panel-copy">Read as <b>${data.intent}</b>`
+    + (bits.length ? `, ${bits.join(", ")}.` : ".") + "</p>";
+
+  // Follow-up questions: each is answerable by this dataset, so a click never
+  // lands on a protocol with no recipe.
+  const followHost = document.getElementById("chat-followups");
+  if (followHost) {
+    followHost.innerHTML = "";
+    (data.follow_ups || []).forEach((question, index) => {
+      if (index === 0) {
+        const label = document.createElement("span");
+        label.textContent = "Next:";
+        followHost.appendChild(label);
+      }
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "ghost-btn chat-example";
+      button.textContent = question;
+      button.addEventListener("click", () => {
+        document.getElementById("chat-question").value = question;
+        askChat();
+      });
+      followHost.appendChild(button);
+    });
+  }
+
+  const table = data.table;
+  const views = document.getElementById("chat-views");
+  if (!table || !(table.rows || []).length) { views.classList.add("hidden"); return; }
+  views.classList.remove("hidden");
+  const columns = table.columns || Object.keys(table.rows[0] || {}).slice(0, 8);
+  const head = columns.map((c) => `<th>${c}</th>`).join("");
+  const body = table.rows.slice(0, 50).map((row) => {
+    const cells = Array.isArray(row) ? row : columns.map((c) => row[c]);
+    return "<tr>" + cells.map((v) => `<td>${formatChatCell(v)}</td>`).join("") + "</tr>";
+  }).join("");
+  document.getElementById("chat-table").innerHTML =
+    `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+  document.getElementById("chat-table").classList.remove("hidden");
+  document.getElementById("chat-plot").classList.add("hidden");
+  views.querySelectorAll("button").forEach((b, i) => b.classList.toggle("active", i === 0));
+}
+
+function formatChatCell(value) {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "number") {
+    if (value !== 0 && Math.abs(value) < 0.001) return value.toExponential(2);
+    return String(Math.round(value * 1000) / 1000);
+  }
+  return String(value);
+}
+
+/* The plot view reuses the DotPlot the Explore tab draws, so a chat answer can
+ * never introduce a figure the rest of the tool does not produce. */
+
+/* DotPlot: one dot per (gene, cell state). Colour is the mean of the expression
+ * layer, size is the fraction of cells in which the gene is detected. Cell
+ * states run in the dataset's canonical order, the centroid ordering, so this
+ * figure reads the same way as every other plot in the tool. */
+function renderDotPlotFigure(hostId, payload) {
+  const genes = payload.genes || [];
+  const states = payload.states || [];
+  const mean = payload.mean || [];
+  const frac = payload.frac || [];
+  const host = document.getElementById(hostId);
+  if (!host) return;
+  if (!genes.length || !states.length) {
+    host.innerHTML = "<span class=\"warn\">No genes to draw.</span>";
+    return;
+  }
+  // scALABLE writes plain HTML into this div for its status messages. Plotly
+  // still believes it owns the container after that, and the redraw comes back
+  // blank, so the container is released first.
+  try { Plotly.purge(hostId); } catch (err) { /* nothing drawn there yet */ }
+  let maxMean = 0;
+  mean.forEach((row) => row.forEach((v) => { if (v > maxMean) maxMean = v; }));
+  const x = [], y = [], size = [], color = [], text = [];
+  genes.forEach((gene, gi) => {
+    states.forEach((state, si) => {
+      x.push(si);
+      y.push(gi);
+      const f = (frac[gi] || [])[si] || 0;
+      const m = (mean[gi] || [])[si] || 0;
+      size.push(4 + f * 18);
+      color.push(m);
+      text.push(`${gene}<br>${state}<br>mean ${m.toFixed(3)}<br>detected ${(f * 100).toFixed(0)}%`);
+    });
+  });
+  Plotly.react(hostId, [{
+    type: "scatter", mode: "markers", x, y, text, hoverinfo: "text",
+    marker: {
+      size, color,
+      // White at no expression through to red at the highest mean, so an
+      // unexpressed gene reads as absent rather than as a pale colour.
+      colorscale: [[0, "#FFFFFF"], [0.5, "#F4A582"], [1, "#B2182B"]],
+      cmin: 0, cmax: maxMean || 1,
+      colorbar: { title: { text: "mean", side: "right" }, thickness: 10 },
+      line: { width: 0 },
+    },
+  }], {
+    margin: { l: 110, r: 10, t: 10, b: 150 },
+    xaxis: {
+      tickvals: states.map((_, i) => i), ticktext: states,
+      tickangle: -90, tickfont: { size: 9 }, showgrid: false,
+      range: [-0.6, states.length - 0.4],
+    },
+    yaxis: {
+      tickvals: genes.map((_, i) => i), ticktext: genes,
+      tickfont: { size: 10 }, showgrid: false, range: [-0.6, genes.length - 0.4],
+    },
+    height: Math.max(240, 22 * genes.length + 170),
+  }, { responsive: true, displaylogo: false });
+}
+
+/* CombPlot: one bar per donor per cell state, one row per gene.
+ *
+ * Bars are coloured by cell state and run in canonical order, so a block of one
+ * colour is a state and its width is the number of donors that contributed
+ * cells to it. Values are per-donor pseudobulk, not per cell: cell-level bars
+ * would number in the hundreds of thousands and would hide the donor-to-donor
+ * spread this figure exists to show. Hovering a bar names the donor and the
+ * state and gives the cell count behind the mean. */
+
+/* CombPlot: one bar per donor per group, one row per gene.
+ *
+ * Layout is explicit subplot domains, not a Plotly `grid`. Combining a grid
+ * with per-trace axis assignments collapsed every gene after the first onto one
+ * subplot, so only one row was ever drawn.
+ *
+ * The top strip is the legend: one coloured block per group, labelled, in the
+ * same order and the same colours as the bars beneath it. Reading down a column
+ * gives that donor's value for each gene in the set.
+ *
+ * Values are per-donor pseudobulk. Cell-level bars would number as many as the
+ * dataset has cells and would bury the donor-to-donor spread this figure exists
+ * to show.
+ */
+function renderCombPlotFigure(hostId, payload) {
+  const genes = payload.genes || [];
+  const columns = payload.columns || [];
+  const values = payload.values || [];
+  const colors = payload.colors || [];
+  const groupLabel = payload.group_label || "cell state";
+  const host = document.getElementById(hostId);
+  if (!host) return;
+  if (!genes.length || !columns.length) {
+    host.innerHTML = "<span class=\"warn\">No donor groups to draw.</span>";
+    return;
+  }
+
+  try { Plotly.purge(hostId); } catch (err) { /* nothing drawn there yet */ }
+  const nCols = columns.length;
+  const x = columns.map((_, i) => i);
+  const hover = columns.map((c) =>
+    `${c.donor}<br>${c.group}<br>${c.n_cells} cell${c.n_cells === 1 ? "" : "s"}`);
+
+  // Where each group's block of donors starts and ends, for the strip and ticks.
+  const firstAt = new Map(), lastAt = new Map();
+  columns.forEach((c, i) => {
+    if (!firstAt.has(c.group)) firstAt.set(c.group, i);
+    lastAt.set(c.group, i);
+  });
+  const blocks = [];
+  firstAt.forEach((from, group) => {
+    const to = lastAt.get(group);
+    blocks.push({ group, center: (from + to) / 2, span: to - from + 1 });
+  });
+  blocks.sort((a, b) => a.center - b.center);
+
+  /* The annotation bands under the gene rows: one band per covariate LEVEL,
+   * with a mark on every column that carries that level. The server sends one
+   * value per column per covariate, so a level with no column draws no band. */
+  const trackTable = payload.tracks || {};
+  const trackLevels = payload.track_levels || {};
+  const trackNames = payload.track_names || Object.keys(trackTable);
+  const trackRows = [];
+  trackNames.forEach((name) => {
+    const perColumn = trackTable[name] || [];
+    if (perColumn.length !== nCols) return;
+    const levels = trackLevels[name] || Array.from(new Set(perColumn));
+    levels.forEach((level) => {
+      const at = [];
+      for (let i = 0; i < nCols; i += 1) if (perColumn[i] === level) at.push(i);
+      if (at.length) {
+        trackRows.push({ name, level, at, label: `${name}: ${level === "" ? "unrecorded" : level}` });
+      }
+    });
+  });
+
+  /* Left margin has to hold the longest band label, which is longer than any
+   * gene name. Measured from the character count rather than guessed, so a
+   * bundle with longer level names still fits. */
+  const labelChars = trackRows.reduce((m, r) => Math.max(m, r.label.length), 0);
+  const marginL = Math.min(190, Math.max(84, Math.round(labelChars * 4.7) + 40));
+  const marginR = 14;
+
+  /* Which state names get a label. With 39 states over one panel the -45 degree
+   * labels collide wherever a state holds few donors, so labels are placed
+   * widest-block-first and a name is skipped when its block centre falls within
+   * MIN_LABEL_PX of a name already placed. Wide blocks therefore keep their
+   * label and narrow ones lose it; every column still names its state on hover,
+   * both on the colour strip and on every bar. */
+  const plotW = Math.max(240, (host.clientWidth || 1000) - marginL - marginR);
+  const pxPerColumn = plotW / Math.max(1, nCols);
+  const MIN_LABEL_PX = 16;
+  const centrePx = blocks.map((b) => (b.center + 0.5) * pxPerColumn);
+  const byWidth = blocks.map((_, i) => i)
+    .sort((a, b) => (blocks[b].span - blocks[a].span) || (a - b));
+  const placed = [];
+  byWidth.forEach((i) => {
+    if (placed.every((j) => Math.abs(centrePx[i] - centrePx[j]) >= MIN_LABEL_PX)) placed.push(i);
+  });
+  placed.sort((a, b) => a - b);
+  const tickvals = placed.map((i) => blocks[i].center);
+  const ticktext = placed.map((i) => blocks[i].group);
+
+  /* Vertical budget in pixels, converted to axis domains, so a row keeps the
+   * same height whatever the gene count. Top to bottom: the colour strip, one
+   * row per gene, then the annotation bands. */
+  const STRIP_PX = 16, GENE_PX = 88, GAP_PX = 10, TRACK_PX = 11;
+  const bodyPx = STRIP_PX + genes.length * GENE_PX + trackRows.length * TRACK_PX
+    + GAP_PX * (genes.length + (trackRows.length ? 1 : 0));
+  /* The top margin is exactly the height the rotated labels need. The figure
+   * used a fixed 96 px, which left the names floating over empty space. */
+  const longest = ticktext.reduce((m, t) => Math.max(m, t.length), 0);
+  const marginT = Math.min(150, Math.max(16, Math.round(longest * 5.4 * 0.7071) + 8));
+  const marginB = 42;
+
+  const frac = (px) => px / bodyPx;
+  const traces = [];
+  const layout = {
+    showlegend: false, bargap: 0, hovermode: "closest",
+    margin: { l: marginL, r: marginR, t: marginT, b: marginB },
+    height: Math.round(bodyPx + marginT + marginB),
+  };
+
+  /* The colour strip: one cell per column, coloured by its group. It sits on
+   * yaxis, a name Plotly accepts. The earlier code called it "ystrip", which is
+   * not a legal axis id, so the strip fell back onto the default axis and the
+   * label axis anchored to nothing. */
+  let top = 1;
+  // The strip is one rectangle per group block, not per column: a run of the
+  // same colour is a single mark. 1324 bars become 24 on this dataset.
+  const sx = [], sw = [], scolor = [], stext = [];
+  let blockFrom = 0;
+  columns.forEach((c, i) => {
+    if (i === columns.length - 1 || columns[i + 1].group !== c.group) {
+      const span = i - blockFrom + 1;
+      sx.push((blockFrom + i) / 2);
+      sw.push(span);
+      scolor.push(colors[blockFrom]);
+      stext.push(`${c.group}<br>${span} donor group${span === 1 ? "" : "s"}`);
+      blockFrom = i + 1;
+    }
+  });
+  traces.push({
+    type: "bar", x: sx, y: sx.map(() => 1), width: sw,
+    marker: { color: scolor, line: { width: 0 } },
+    text: stext, hoverinfo: "text",
+    xaxis: "x", yaxis: "y",
+  });
+  layout.yaxis = {
+    domain: [top - frac(STRIP_PX), top], range: [0, 1], autorange: false,
+    showticklabels: false, showgrid: false, zeroline: false, fixedrange: true,
+  };
+  top -= frac(STRIP_PX);
+
+  // The state names, on their own axis anchored to the top of the strip, so
+  // they sit against the colours they annotate.
+  layout.xaxis2 = {
+    overlaying: "x", side: "top", anchor: "y",
+    tickvals, ticktext, tickangle: -45, tickfont: { size: 9 },
+    showgrid: false, zeroline: false, showline: false, ticks: "",
+    range: [-0.5, nCols - 0.5], fixedrange: true,
+  };
+  traces.push({
+    type: "scatter", mode: "markers", x: tickvals, y: tickvals.map(() => 1),
+    marker: { opacity: 0 }, hoverinfo: "skip",
+    xaxis: "x2", yaxis: "y", showlegend: false,
+  });
+
+  genes.forEach((gene, gi) => {
+    top -= frac(GAP_PX);
+    const axis = `y${gi + 2}`;
+    traces.push({
+      type: "bar", x, y: values[gi], width: 1,
+      marker: { color: colors, line: { width: 0 } },
+      text: hover, hoverinfo: "text+y",
+      xaxis: "x", yaxis: axis,
+    });
+    layout[`yaxis${gi + 2}`] = {
+      domain: [Math.max(0, top - frac(GENE_PX)), top],
+      title: { text: gene, font: { size: 11 } },
+      rangemode: "tozero", zeroline: true, showgrid: false,
+      tickfont: { size: 9 },
+    };
+    top -= frac(GENE_PX);
+  });
+
+  /* One band per level, drawn as bars rather than a heatmap: a Plotly heatmap
+   * exports as a raster image, and these figures have to stay vector. Every
+   * mark is a rectangle in the SVG. */
+  const trackAxis = `y${genes.length + 2}`;
+  if (trackRows.length) {
+    top -= frac(GAP_PX);
+    // One bar per contiguous run, not one per column. On this dataset the
+    // covariate marks fall from 5,296 to 611, 88.5% fewer, because a level
+    // almost always occupies a stretch of neighbouring donors. The figure is
+    // identical; only the number of SVG rectangles changes.
+    const tx = [], ty = [], tbase = [], ttext = [], twidth = [];
+    trackRows.forEach((row, k) => {
+      const floorAt = trackRows.length - 1 - k;   // first covariate on top
+      let runStart = null, previous = null;
+      const flush = () => {
+        if (runStart === null) return;
+        const span = previous - runStart + 1;
+        tx.push((runStart + previous) / 2);
+        ty.push(0.82);
+        tbase.push(floorAt + 0.09);
+        twidth.push(span);
+        ttext.push(`${row.label}<br>${span} donor group${span === 1 ? "" : "s"}`);
+        runStart = null;
+      };
+      row.at.forEach((i) => {
+        if (previous !== null && i === previous + 1) { previous = i; return; }
+        flush();
+        runStart = i;
+        previous = i;
+      });
+      flush();
+    });
+    traces.push({
+      type: "bar", x: tx, y: ty, base: tbase, width: twidth,
+      marker: { color: "#2B2B2B", line: { width: 0 } },
+      text: ttext, hoverinfo: "text",
+      xaxis: "x", yaxis: trackAxis,
+    });
+    layout[`yaxis${genes.length + 2}`] = {
+      domain: [Math.max(0, top - frac(trackRows.length * TRACK_PX)), top],
+      range: [0, trackRows.length], autorange: false,
+      tickvals: trackRows.map((_, k) => trackRows.length - 1 - k + 0.5),
+      ticktext: trackRows.map((r) => r.label),
+      tickfont: { size: 8 }, ticks: "", showgrid: false, zeroline: false,
+      fixedrange: true,
+    };
+  }
+
+  const dropped = blocks.length - placed.length;
+  const note = dropped > 0
+    ? `; ${dropped} of ${blocks.length} state names hidden where blocks are too narrow to label`
+    : "";
+  layout.xaxis = {
+    domain: [0, 1], anchor: trackRows.length ? trackAxis : `y${genes.length + 1}`,
+    showticklabels: false, showgrid: false,
+    zeroline: false, range: [-0.5, nCols - 0.5], fixedrange: true,
+    title: { text: `${nCols} donor groups, ordered by ${groupLabel}${note}`,
+             font: { size: 10 } },
+  };
+  Plotly.react(hostId, traces, layout, { responsive: true, displaylogo: false });
+}
+
+/* Group-by and level filtering for the DotPlot and CombPlot.
+ *
+ * The variables offered come from /plot-variables, which lists only the
+ * categorical columns with a workable number of levels. The whole obs table
+ * would include per-cell numerics such as n_counts, and grouping by one of
+ * those would draw a column per cell.
+ */
+let plotVariablesCache = null;
+
+async function loadPlotVariables(jobId) {
+  if (plotVariablesCache && plotVariablesCache.jobId === jobId) return plotVariablesCache;
+  // apiPath honours CELLHARMONY_ROOT_PATH; a bare path 404s wherever the app
+  // is mounted under a prefix, which is how the Group by list stayed empty.
+  const response = await fetch(apiPath(`/api/jobs/${jobId}/plot-variables`));
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || "plot variables unavailable");
+  plotVariablesCache = { jobId, ...data };
+  return plotVariablesCache;
+}
+
+async function refreshGroupControls(panelKey) {
+  const jobField = document.getElementById("results-job-id");
+  const jobId = jobField ? jobField.value.trim() : "";
+  const groupBy = document.getElementById(panelElementId(panelKey, "groupby"));
+  const groups = document.getElementById(panelElementId(panelKey, "groups"));
+  if (!jobId || !groupBy || !groups) return;
+  let info;
+  try {
+    info = await loadPlotVariables(jobId);
+  } catch (err) {
+    // Swallowing this left an empty Group by select with nothing said, so the
+    // control looked broken rather than unavailable.
+    console.warn("plot variables unavailable:", err);
+    groupBy.innerHTML = '<option value="">unavailable</option>';
+    return;
+  }
+
+  if (!groupBy.options.length) {
+    info.variables.forEach((variable) => {
+      const option = document.createElement("option");
+      option.value = variable.field;
+      option.textContent = `${variable.field} (${variable.n})`;
+      groupBy.appendChild(option);
+    });
+    groupBy.value = info.cluster_key;
+    groupBy.addEventListener("change", () => {
+      fillGroupLevels(panelKey, info);
+      loadVisualizationPanel(panelKey);
+    });
+    groups.addEventListener("change", () => loadVisualizationPanel(panelKey));
+  }
+  fillGroupLevels(panelKey, info);
+}
+
+/* The levels of the chosen variable. Nothing is selected to start with, which
+ * the server reads as "every level", so the plot opens complete. */
+function fillGroupLevels(panelKey, info) {
+  const groupBy = document.getElementById(panelElementId(panelKey, "groupby"));
+  const groups = document.getElementById(panelElementId(panelKey, "groups"));
+  if (!groupBy || !groups) return;
+  const variable = info.variables.find((v) => v.field === groupBy.value);
+  groups.innerHTML = "";
+  (variable ? variable.values : []).forEach((level) => {
+    const option = document.createElement("option");
+    option.value = level;
+    option.textContent = level;
+    groups.appendChild(option);
+  });
+}
+
+/* The Color by and Coordinates lists for the UMAP cell-type view.
+ *
+ * Both come from /plot-variables, which offers the categorical obs columns with
+ * a workable number of levels and every obsm entry with two or more columns. The
+ * empty value is the default in each list: the cellHarmony cell-state assignment
+ * and the cellHarmony projection, which is what the panel drew before.
+ */
+async function refreshUmapOptions(panelKey) {
+  const jobId = getResultsJobId();
+  const colorBy = document.getElementById(panelElementId(panelKey, "colorby"));
+  const coords = document.getElementById(panelElementId(panelKey, "coords"));
+  if (!jobId || !colorBy || !coords) return;
+  if (colorBy.dataset.jobId === jobId && coords.dataset.jobId === jobId) return;
+  let info;
+  try {
+    info = await loadPlotVariables(jobId);
+  } catch (err) {
+    // Say it rather than leaving two empty lists that look broken.
+    console.warn("UMAP options unavailable:", err);
+    colorBy.innerHTML = '<option value="">unavailable</option>';
+    coords.innerHTML = '<option value="">unavailable</option>';
+    return;
+  }
+
+  const previousColor = colorBy.value;
+  colorBy.innerHTML = "";
+  const clusterOption = document.createElement("option");
+  clusterOption.value = "";
+  clusterOption.textContent = `${info.cluster_key} (cellHarmony)`;
+  colorBy.appendChild(clusterOption);
+  (info.color_variables || info.variables || []).forEach((variable) => {
+    if (String(variable.field) === String(info.cluster_key)) return;
+    const option = document.createElement("option");
+    option.value = variable.field;
+    option.textContent = `${variable.field} (${variable.n})`;
+    colorBy.appendChild(option);
+  });
+  colorBy.value = Array.from(colorBy.options).some((o) => o.value === previousColor) ? previousColor : "";
+  colorBy.dataset.jobId = jobId;
+
+  const previousCoords = coords.value;
+  coords.innerHTML = "";
+  const coordOptions = (info.coords || []).length ? info.coords : [{ key: "", label: "cellHarmony UMAP" }];
+  const numeric = info.numeric_variables || [];
+  // Two numeric annotations are the minimum for a pair of axes.
+  const coordEntries = numeric.length > 1
+    ? coordOptions.concat([{ key: OBS_AXES_KEY, label: "obs columns (pick X and Y)" }])
+    : coordOptions;
+  coordEntries.forEach((entry) => {
+    const option = document.createElement("option");
+    option.value = entry.key || "";
+    option.textContent = entry.label || entry.key || "cellHarmony UMAP";
+    coords.appendChild(option);
+  });
+  coords.value = Array.from(coords.options).some((o) => o.value === previousCoords) ? previousCoords : "";
+  coords.dataset.jobId = jobId;
+
+  // The axis lists. A field shows its range and how many cells carry a value,
+  // because a metadata column recorded for part of the dataset draws a panel
+  // with fewer cells than the UMAP has.
+  const axisSelects = [
+    [document.getElementById(panelElementId(panelKey, "xfield")), 0],
+    [document.getElementById(panelElementId(panelKey, "yfield")), 1],
+  ];
+  axisSelects.forEach(([select, defaultIndex]) => {
+    if (!select) return;
+    const previous = select.value;
+    select.innerHTML = "";
+    numeric.forEach((entry) => {
+      const option = document.createElement("option");
+      option.value = entry.field;
+      const missing = Number(entry.n_missing) > 0 ? `, ${entry.n_missing} without a value` : "";
+      option.textContent = `${entry.field} (${formatAxisNumber(entry.min)} to ${formatAxisNumber(entry.max)}${missing})`;
+      select.appendChild(option);
+    });
+    if (Array.from(select.options).some((o) => o.value === previous)) {
+      select.value = previous;
+    } else if (numeric[defaultIndex]) {
+      select.value = numeric[defaultIndex].field;
+    }
+    select.dataset.jobId = jobId;
+    if (select.dataset.wired !== "1") {
+      select.dataset.wired = "1";
+      select.addEventListener("change", () => loadVisualizationPanel(panelKey));
+    }
+  });
+
+  if (colorBy.dataset.wired !== "1") {
+    colorBy.dataset.wired = "1";
+    colorBy.addEventListener("change", () => loadVisualizationPanel(panelKey));
+  }
+  if (coords.dataset.wired !== "1") {
+    coords.dataset.wired = "1";
+    coords.addEventListener("change", () => {
+      syncUmapAxisFields(panelKey);
+      loadVisualizationPanel(panelKey);
+    });
+  }
+  syncUmapAxisFields(panelKey);
+}
+
+/* The X and Y lists belong to the "obs columns" coordinate choice alone, so they
+ * stay hidden while the panel draws an embedding. */
+function syncUmapAxisFields(panelKey) {
+  const mode = getPanelSelectValue(panelKey, "mode");
+  const usingObsAxes = mode === "cluster" && getPanelSelectValue(panelKey, "coords") === OBS_AXES_KEY;
+  ["xfield-field", "yfield-field"].forEach((suffix) => {
+    const field = document.getElementById(panelElementId(panelKey, suffix));
+    if (field) field.classList.toggle("hidden", !usingObsAxes);
+  });
+}
+
+/* Axis ranges read as numbers a person can compare, not as 17 decimal places. */
+function formatAxisNumber(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "?";
+  if (Math.abs(number) >= 1000 || (number !== 0 && Math.abs(number) < 0.01)) {
+    return number.toExponential(1);
+  }
+  return String(Math.round(number * 100) / 100);
+}
+
+function appendGeneSetGroupParams(params, panelKey) {
+  const groupBy = document.getElementById(panelElementId(panelKey, "groupby"));
+  const groups = document.getElementById(panelElementId(panelKey, "groups"));
+  if (groupBy && groupBy.value) params.set("group_by", groupBy.value);
+  if (groups) {
+    Array.from(groups.selectedOptions).forEach((option) => {
+      params.append("groups", option.value);
+    });
+  }
+}
+
+
+function panelGroupParams(panelKey) {
+  const groupBy = document.getElementById(panelElementId(panelKey, "groupby"));
+  const groups = document.getElementById(panelElementId(panelKey, "groups"));
+  const parts = [];
+  if (groupBy && groupBy.value) parts.push(`group_by=${encodeURIComponent(groupBy.value)}`);
+  if (groups) {
+    Array.from(groups.selectedOptions).forEach((option) => {
+      parts.push(`groups=${encodeURIComponent(option.value)}`);
+    });
+  }
+  return parts.join("&");
+}
+
+/* Draw the figure for the current chat answer.
+ *
+ * Two defects this replaces. The container was cleared with innerHTML = "",
+ * which removes the nodes but leaves Plotly believing the div is still its own,
+ * so the next Plotly.react drew nothing and the panel came back blank on the
+ * second visit. Plotly.purge is the supported way to release a container.
+ *
+ * And a differential answer asked for a volcano, which nothing here drew, so
+ * that example reported "no plot" however many times it was asked.
+ */
+async function drawChatPlot() {
+  const result = chatLastResult || {};
+  const spec = result.plot;
+  const host = document.getElementById("chat-plot");
+  if (!host) return;
+
+  // Release the container before reusing it, or the second draw is blank.
+  try { Plotly.purge("chat-plot"); } catch (err) { /* never drawn yet */ }
+  host.innerHTML = "";
+
+  if (!spec) {
+    host.innerHTML = "<span class=\"warn\">This answer has no figure; the table holds the result.</span>";
+    return;
+  }
+  const jobId = document.getElementById("results-job-id").value.trim();
+
+  if (spec.kind === "volcano") {
+    drawChatVolcano(host, result);
+    return;
+  }
+  // A CombPlot answer: severity_gradient, coexpression_module and dose_response
+  // all return one. Without this the panel said "no figure" for three of the
+  // protocols that do the most work.
+  if (spec.kind === "combplot" && (spec.genes || []).length) {
+    try {
+      const bits = [`genes=${encodeURIComponent(spec.genes.join(","))}`, "min_cells=5"];
+      if (spec.group_by) bits.push(`group_by=${encodeURIComponent(spec.group_by)}`);
+      const response = await fetch(apiPath(`/api/jobs/${jobId}/combplot?${bits.join("&")}`));
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "combplot failed");
+      renderCombPlotFigure("chat-plot", data);
+    } catch (err) {
+      host.innerHTML = `<span class="warn">${err.message}</span>`;
+    }
+    return;
+  }
+  // A bar chart or a heatmap is drawn from the table the answer already
+  // carries, so neither needs a second request.
+  if (spec.kind === "gradient") { drawChatGradient(spec); return; }
+  if (spec.kind === "frequency") { drawChatFrequency(spec); return; }
+  if (spec.kind === "signature") { drawChatSignature(spec); return; }
+  if (spec.kind === "barchart") { drawChatBars(result, spec); return; }
+  if (spec.kind === "heatmap") { drawChatHeatmap(result); return; }
+  if (spec.kind === "dotplot" && (spec.genes || []).length) {
+    try {
+      const response = await fetch(
+        apiPath(`/api/jobs/${jobId}/dotplot?genes=${encodeURIComponent(spec.genes.join(","))}`));
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "dotplot failed");
+      renderDotPlotFigure("chat-plot", data);
+    } catch (err) {
+      host.innerHTML = `<span class="warn">${err.message}</span>`;
+    }
+    return;
+  }
+  host.innerHTML = "<span class=\"warn\">This answer has no figure; the table holds the result.</span>";
+}
+
+/* A volcano drawn from the differential table the answer already carries, so it
+ * shows exactly the rows the table shows and needs no second request. */
+function drawChatVolcano(host, result) {
+  const rows = ((result.table || {}).rows) || [];
+  if (!rows.length) {
+    host.innerHTML = "<span class=\"warn\">No differential rows to plot.</span>";
+    return;
+  }
+  const get = (row, name) => (Array.isArray(row)
+    ? row[((result.table.columns || []).indexOf(name))] : row[name]);
+  const x = [], y = [], text = [], color = [];
+  rows.forEach((row) => {
+    const fc = Number(get(row, "log2fc"));
+    const fdr = Number(get(row, "fdr"));
+    if (!Number.isFinite(fc)) return;
+    // A reported FDR of 0 is below the smallest float the table stores, so it is
+    // drawn at the top of the axis rather than dropped.
+    const safe = Number.isFinite(fdr) && fdr > 0 ? fdr : Number.MIN_VALUE;
+    x.push(fc);
+    y.push(-Math.log10(safe));
+    text.push(`${get(row, "gene")}<br>log2FC ${fc.toFixed(3)}<br>FDR ${fdr.toExponential(2)}`);
+    color.push(fc >= 0 ? "#B2182B" : "#2166AC");
+  });
+  Plotly.newPlot("chat-plot", [{
+    type: "scatter", mode: "markers", x, y, text, hoverinfo: "text",
+    marker: { size: 16, color, opacity: 0.85, line: { width: 1, color: "#FFFFFF" } },
+  }], {
+    margin: { l: 60, r: 20, t: 20, b: 50 },
+    xaxis: { title: { text: "log2 fold change", font: { size: 11 } }, zeroline: true },
+    yaxis: { title: { text: "-log10 FDR", font: { size: 11 } } },
+    height: 360, showlegend: false,
+  }, { responsive: true, displaylogo: false });
+}
+
+/* The "Filter data to display" rows, translated for the DotPlot and CombPlot.
+ *
+ * Annotation 1 and Annotation 2 each name one obs column and one level of it.
+ * The two gene-set routes read them as subset_by/subset_values and
+ * subset2_by/subset2_values, and keep only the cells that satisfy both.
+ *
+ * A level goes across whole. preGOLD2 carries the level "I,II", so splitting a
+ * value on a comma here would ask the server for two levels that do not exist
+ * and the plot would come back unfiltered. URLSearchParams encodes the comma.
+ *
+ * "All" is the empty value, and an empty field or value adds no parameter, so a
+ * panel nobody has filtered sends the request it sent before.
+ */
+function appendGeneSetSubsetParams(params, panelKey) {
+  [[1, "subset"], [2, "subset2"]].forEach(([index, prefix]) => {
+    const fieldSelect = document.getElementById(panelElementId(panelKey, `filter${index}-field`));
+    const valueSelect = document.getElementById(panelElementId(panelKey, `filter${index}-values`));
+    if (!fieldSelect || !valueSelect) {
+      return;
+    }
+    const field = String(fieldSelect.value || "").trim();
+    const value = String(valueSelect.value || "");
+    if (!field || !value) {
+      return;
+    }
+    params.set(`${prefix}_by`, field);
+    params.append(`${prefix}_values`, value);
+  });
+  return params;
+}
+
+/* A bar chart from the answer's own table: the last numeric column is the
+ * value, the first column is the label. Used by composition_shift, where the
+ * value is a log2 ratio and the sign matters. */
+
+/* A heatmap from the answer's table, drawn as rectangles rather than a Plotly
+ * heatmap trace: a heatmap trace exports as a raster image, and these figures
+ * have to stay vector. Used by annotation_concordance, where the value is the
+ * fraction of a cell state carrying each label of the second annotation. */
+function drawChatHeatmap(result) {
+  const table = result.table || {};
+  const rows = table.rows || [];
+  const columns = table.columns || [];
+  if (!rows.length) {
+    document.getElementById("chat-plot").innerHTML =
+      "<span class=\"warn\">No rows to plot.</span>";
+    return;
+  }
+  const get = (row, i) => (Array.isArray(row) ? row[i] : row[columns[i]]);
+  const yLabels = [...new Set(rows.map((r) => String(get(r, 0))))];
+  const xLabels = [...new Set(rows.map((r) => String(get(r, 1))))];
+  const valueAt = columns.length - 1;
+  let maximum = 0;
+  rows.forEach((r) => { maximum = Math.max(maximum, Number(get(r, valueAt)) || 0); });
+
+  const shapes = [], hx = [], hy = [], htext = [];
+  rows.forEach((r) => {
+    const yi = yLabels.indexOf(String(get(r, 0)));
+    const xi = xLabels.indexOf(String(get(r, 1)));
+    const value = Number(get(r, valueAt)) || 0;
+    const strength = maximum > 0 ? value / maximum : 0;
+    // White at zero through to red at the maximum, the same ramp the DotPlot uses.
+    const channel = Math.round(255 - strength * (255 - 178));
+    shapes.push({
+      type: "rect", xref: "x", yref: "y",
+      x0: xi - 0.5, x1: xi + 0.5, y0: yi - 0.5, y1: yi + 0.5,
+      fillcolor: `rgb(${channel > 178 ? 255 : 178}, ${channel}, ${channel})`,
+      line: { width: 0.4, color: "#E6E6E6" }, layer: "below",
+    });
+    hx.push(xi); hy.push(yi);
+    htext.push(`${get(r, 0)}<br>${get(r, 1)}<br>${columns[valueAt]}: ${value}`);
+  });
+  Plotly.newPlot("chat-plot", [{
+    type: "scatter", mode: "markers", x: hx, y: hy,
+    marker: { size: 18, opacity: 0 }, text: htext, hoverinfo: "text",
+  }], {
+    shapes,
+    margin: { l: 200, r: 20, t: 20, b: 150 },
+    xaxis: { tickvals: xLabels.map((_, i) => i), ticktext: xLabels,
+             tickangle: -45, tickfont: { size: 9 }, range: [-0.5, xLabels.length - 0.5],
+             showgrid: false, zeroline: false },
+    yaxis: { tickvals: yLabels.map((_, i) => i), ticktext: yLabels,
+             tickfont: { size: 9 }, range: [-0.5, yLabels.length - 0.5],
+             showgrid: false, zeroline: false },
+    height: Math.max(280, 22 * yLabels.length + 180), showlegend: false,
+  }, { responsive: true, displaylogo: false });
+}
+
+/* The figure for an association that came from a statistical test.
+ *
+ * One panel per gene. Each point is one donor: the clinical variable across,
+ * that donor's pseudobulk level of the gene up, and the fitted line through
+ * them. The slope and R-squared are printed on the panel, because a rank
+ * correlation alone can be high while the gene barely moves.
+ *
+ * This replaces a CombPlot, which drew all 39 cell states for a correlation
+ * computed inside one of them. Only the donors contributing to that one cell
+ * state appear here, which is what the question asked about.
+ */
+function drawChatGradient(spec) {
+  const host = document.getElementById("chat-plot");
+  const points = spec.points || {};
+  const genes = Object.keys(points);
+  if (!host) return;
+  if (!genes.length) {
+    host.innerHTML = "<span class=\"warn\">No per-donor points to plot.</span>";
+    return;
+  }
+  const columns = Math.min(3, genes.length);
+  const rows = Math.ceil(genes.length / columns);
+  const traces = [];
+  const layout = {
+    showlegend: false,
+    margin: { l: 56, r: 16, t: 44, b: 52 },
+    height: Math.max(280, rows * 210 + 60),
+    annotations: [],
+    grid: { rows, columns, pattern: "independent",
+            xgap: 0.16, ygap: 0.3 },
+  };
+  genes.forEach((gene, index) => {
+    const entry = points[gene];
+    const axis = index === 0 ? "" : String(index + 1);
+    traces.push({
+      type: "scatter", mode: "markers",
+      x: entry.x, y: entry.y,
+      marker: { size: 9, color: "#2166AC", opacity: 0.7,
+                line: { width: 0.5, color: "#FFFFFF" } },
+      text: (spec.donors || []).map((d, i) =>
+        `${d}<br>${spec.covariate}: ${entry.x[i]}<br>${gene}: ${entry.y[i]}`),
+      hoverinfo: "text",
+      xaxis: `x${axis}`, yaxis: `y${axis}`,
+    });
+    // The fitted line, as two points: a straight line is one 2-point path.
+    const lo = Math.min(...entry.x), hi = Math.max(...entry.x);
+    traces.push({
+      type: "scatter", mode: "lines",
+      x: [lo, hi],
+      y: [entry.slope * lo + entry.intercept, entry.slope * hi + entry.intercept],
+      line: { color: "#B2182B", width: 2 }, hoverinfo: "skip",
+      xaxis: `x${axis}`, yaxis: `y${axis}`,
+    });
+    layout[`xaxis${axis}`] = {
+      title: { text: spec.covariate, font: { size: 10 } }, tickfont: { size: 9 },
+      zeroline: false,
+    };
+    layout[`yaxis${axis}`] = {
+      title: { text: gene, font: { size: 11 } }, tickfont: { size: 9 },
+      zeroline: false, rangemode: "tozero",
+    };
+    layout.annotations.push({
+      text: `rho ${entry.rho}  slope ${entry.slope}  R² ${entry.r2}`,
+      xref: `x${axis} domain`, yref: `y${axis} domain`,
+      x: 0, y: 1.14, showarrow: false,
+      font: { size: 9, color: "#555555" }, xanchor: "left",
+    });
+  });
+  Plotly.newPlot("chat-plot", traces, layout,
+                 { responsive: true, displaylogo: false });
+}
+
+/* Cell frequency, two groups side by side.
+ *
+ * One pair of bars per cell state: each group's mean share of a donor's own
+ * cells. A log ratio on its own cannot say whether a state is common in both
+ * groups or rare in both, and that is usually the first thing worth knowing.
+ * A state whose rank test clears 0.05 is marked.
+ */
+
+/* Who carries a signature: genes down, donors across, ordered by score.
+ *
+ * Each cell is a gene's standardised level in one donor, drawn as a rectangle
+ * so the figure stays vector; a Plotly heatmap trace exports as a raster. Above
+ * the matrix sits each donor's aggregate score and a band naming their group,
+ * so a signature carried by a subset shows as colour collecting at one end
+ * rather than spreading across the ranking.
+ */
+function drawChatSignature(spec) {
+  const host = document.getElementById("chat-plot");
+  const genes = spec.genes || [];
+  const donors = spec.donors || [];
+  const z = spec.z || [];
+  if (!host) return;
+  if (!genes.length || !donors.length) {
+    host.innerHTML = "<span class=\"warn\">No signature to plot.</span>";
+    return;
+  }
+  const groups = spec.groups || [];
+  const levels = [...new Set(groups.filter(Boolean))];
+  const groupColour = ["#B2182B", "#2166AC", "#4D9221", "#9970AB"];
+
+  // Colour scale: blue low, white at the mean, red high, clipped at +/- 2 SD.
+  const shapes = [];
+  const clip = 2;
+  z.forEach((row, gi) => {
+    row.forEach((value, di) => {
+      const t = Math.max(-1, Math.min(1, value / clip));
+      const colour = t >= 0
+        ? `rgb(${Math.round(255 - t * 77)}, ${Math.round(255 - t * 231)}, ${Math.round(255 - t * 212)})`
+        : `rgb(${Math.round(255 + t * 222)}, ${Math.round(255 + t * 152)}, ${Math.round(255 + t * 60)})`;
+      shapes.push({
+        type: "rect", xref: "x", yref: "y",
+        x0: di - 0.5, x1: di + 0.5, y0: gi - 0.5, y1: gi + 0.5,
+        fillcolor: colour, line: { width: 0 }, layer: "below",
+      });
+    });
+  });
+  // The group band, one rectangle per donor, on its own axis above the matrix.
+  groups.forEach((group, di) => {
+    const index = Math.max(0, levels.indexOf(group));
+    shapes.push({
+      type: "rect", xref: "x", yref: "paper",
+      x0: di - 0.5, x1: di + 0.5, y0: 1.0, y1: 1.03,
+      fillcolor: groupColour[index % groupColour.length], line: { width: 0 },
+    });
+  });
+
+  const traces = [{
+    // The aggregate score, on its own axis above the matrix.
+    type: "scatter", mode: "markers", x: donors.map((_, i) => i), y: spec.score || [],
+    marker: { size: 5, color: "#333333" },
+    text: donors.map((d, i) => `${d}<br>${groups[i] || ""}<br>score ${(spec.score || [])[i]}`),
+    hoverinfo: "text", xaxis: "x", yaxis: "y2",
+  }, {
+    // Invisible points carrying the per-cell hover for the matrix.
+    type: "scatter", mode: "markers",
+    x: [].concat(...z.map((row, gi) => row.map((_, di) => di))),
+    y: [].concat(...z.map((row, gi) => row.map(() => gi))),
+    marker: { size: 6, opacity: 0 },
+    text: [].concat(...z.map((row, gi) => row.map((v, di) =>
+      `${genes[gi]}<br>${donors[di]}<br>z ${v}`))),
+    hoverinfo: "text", xaxis: "x", yaxis: "y",
+  }];
+
+  Plotly.newPlot("chat-plot", traces, {
+    shapes, showlegend: false,
+    margin: { l: 110, r: 16, t: 58, b: 30 },
+    height: Math.max(360, 13 * genes.length + 190),
+    xaxis: { domain: [0, 1], showticklabels: false, showgrid: false, zeroline: false,
+             range: [-0.5, donors.length - 0.5],
+             title: { text: `${donors.length} donors, ordered by signature score`,
+                      font: { size: 10 } } },
+    yaxis: { domain: [0, 0.76], tickvals: genes.map((_, i) => i), ticktext: genes,
+             tickfont: { size: 8 }, showgrid: false, zeroline: false,
+             range: [-0.5, genes.length - 0.5], autorange: "reversed" },
+    yaxis2: { domain: [0.82, 1.0], title: { text: "score", font: { size: 10 } },
+              tickfont: { size: 8 }, showgrid: false, zeroline: true, anchor: "x" },
+    annotations: levels.map((level, i) => ({
+      text: level, xref: "paper", yref: "paper",
+      x: i * 0.16, y: 1.075, showarrow: false, xanchor: "left",
+      font: { size: 9, color: groupColour[i % groupColour.length] },
+    })).concat([{
+      text: `top ${spec.n_up} up, then the down genes`,
+      xref: "paper", yref: "paper", x: 1, y: 1.075, showarrow: false,
+      xanchor: "right", font: { size: 9, color: "#555555" },
+    }]),
+  }, { responsive: true, displaylogo: false });
+}
+
+/* A bar chart from the answer's own table.
+ *
+ * The column to plot is named by the answer (`value_column`), because guessing
+ * the rightmost column drew nothing for GO terms, whose last column is a gene
+ * list. Where no column is named, the rightmost one that actually parses as a
+ * number is used, and if none does the panel says so rather than drawing empty
+ * axes.
+ */
+function drawChatBars(result, spec) {
+  const host = document.getElementById("chat-plot");
+  const table = result.table || {};
+  const rows = table.rows || [];
+  const columns = table.columns || [];
+  if (!rows.length) {
+    host.innerHTML = "<span class=\"warn\">No rows to plot.</span>";
+    return;
+  }
+  const at = (row, index) => (Array.isArray(row) ? row[index] : row[columns[index]]);
+  const numeric = (index) => rows.every((r) => Number.isFinite(Number(at(r, index))));
+
+  let valueAt = columns.indexOf((spec || {}).value_column);
+  if (valueAt < 0 || !numeric(valueAt)) {
+    valueAt = -1;
+    for (let i = columns.length - 1; i >= 1; i -= 1) {
+      if (numeric(i)) { valueAt = i; break; }
+    }
+  }
+  if (valueAt < 0) {
+    host.innerHTML = "<span class=\"warn\">No numeric column to plot; the table holds the result.</span>";
+    return;
+  }
+  let labelAt = columns.indexOf((spec || {}).label_column);
+  if (labelAt < 0) labelAt = 0;
+  const signAt = columns.indexOf((spec || {}).sign_column);
+
+  const labels = rows.map((r) => String(at(r, labelAt)));
+  const values = rows.map((r) => Number(at(r, valueAt)));
+  // A direction column decides the colour when the value itself is unsigned:
+  // a GO Z score is always positive, but the term may be up or down.
+  const colours = rows.map((r, i) => {
+    if (signAt >= 0) {
+      return String(at(r, signAt)).toLowerCase().startsWith("d") ? "#2166AC" : "#B2182B";
+    }
+    return values[i] >= 0 ? "#B2182B" : "#2166AC";
+  });
+
+  Plotly.newPlot("chat-plot", [{
+    type: "bar", orientation: "h", x: values, y: labels,
+    marker: { color: colours, line: { width: 0 } },
+    hovertemplate: `%{y}<br>${columns[valueAt]}: %{x}<extra></extra>`,
+  }], {
+    margin: { l: 240, r: 20, t: 20, b: 48 },
+    xaxis: { title: { text: columns[valueAt], font: { size: 11 } }, zeroline: true },
+    yaxis: { automargin: true, tickfont: { size: 9 },
+             categoryorder: "array", categoryarray: labels.slice().reverse() },
+    height: Math.max(280, 22 * labels.length + 90), showlegend: false,
+  }, { responsive: true, displaylogo: false });
+}
+
+/* Cell frequency, two groups per cell type.
+ *
+ * A pair of bars per cell state, sky blue for the reference group and light red
+ * for the case group, so the same cell type is read side by side. Each bar
+ * carries the standard error of its mean and every donor as a jittered point,
+ * because a mean over 141 donors and a mean over 4 are indistinguishable
+ * otherwise, and the spread is usually the thing worth seeing.
+ *
+ * Points are drawn as inline vector circles; nothing here rasterises.
+ */
+function drawChatFrequency(spec) {
+  const host = document.getElementById("chat-plot");
+  const states = spec.states || [];
+  if (!host) return;
+  if (!states.length) {
+    host.innerHTML = "<span class=\"warn\">No cell states to plot.</span>";
+    return;
+  }
+  const groups = spec.groups || ["group 1", "group 2"];
+  const counts = spec.n_donors || [0, 0];
+  const pvals = spec.p || [];
+
+  // The server orders the groups reference first, taking the control side from
+  // the contrast's own control_label, so the first series is always the
+  // reference. An earlier version re-guessed it here with a regex for
+  // control/non/healthy, which matched nothing in "GOLD I, II" against
+  // "GOLD IV" and painted the milder stage red.
+  const SKY = "#87CEEB";        // reference group, drawn first
+  const LIGHT_RED = "#F08080";  // case group
+  const colourA = SKY;
+  const colourB = LIGHT_RED;
+
+  // Widest first, so the comparison worth making is at the left.
+  const LIMIT = 14;
+  const shown = states.slice(0, LIMIT);
+  const hidden = states.length - shown.length;
+  const labels = shown.map((s, i) => (pvals[i] < 0.05 ? `${s} *` : s));
+
+  const traces = [
+    { type: "bar", name: `${groups[0]} (${counts[0]})`, x: labels,
+      y: (spec.a || []).slice(0, shown.length),
+      error_y: { type: "data", array: (spec.a_sem || []).slice(0, shown.length),
+                 visible: true, color: "#555555", thickness: 1, width: 3 },
+      marker: { color: colourA, line: { color: "#4F4F4F", width: 0.6 } },
+      offsetgroup: "a",
+      hovertemplate: `%{x}<br>${groups[0]}: %{y:.5f}<extra></extra>` },
+    { type: "bar", name: `${groups[1]} (${counts[1]})`, x: labels,
+      y: (spec.b || []).slice(0, shown.length),
+      error_y: { type: "data", array: (spec.b_sem || []).slice(0, shown.length),
+                 visible: true, color: "#555555", thickness: 1, width: 3 },
+      marker: { color: colourB, line: { color: "#4F4F4F", width: 0.6 } },
+      offsetgroup: "b",
+      hovertemplate: `%{x}<br>${groups[1]}: %{y:.5f}<extra></extra>` },
+  ];
+
+  // One point per donor, jittered inside its own bar. A deterministic offset,
+  // not a random one, so the figure is identical every time it is drawn.
+  const jitter = (n, index) => (n <= 1 ? 0 : ((index / (n - 1)) - 0.5) * 0.26);
+  [["a_points", -0.2, groups[0]], ["b_points", 0.2, groups[1]]].forEach(
+    ([key, shift, name]) => {
+      const px = [], py = [], ptext = [];
+      (spec[key] || []).slice(0, shown.length).forEach((values, si) => {
+        (values || []).forEach((value, di) => {
+          px.push(si + shift + jitter(values.length, di));
+          py.push(value);
+          ptext.push(`${shown[si]}<br>${name}<br>${value}`);
+        });
+      });
+      traces.push({
+        type: "scatter", mode: "markers", x: px, y: py,
+        marker: { size: 4, color: "#2F2F2F", opacity: 0.45,
+                  line: { width: 0 } },
+        text: ptext, hoverinfo: "text", showlegend: false,
+        xaxis: "x2", yaxis: "y",
+      });
+    });
+
+  Plotly.newPlot("chat-plot", traces, {
+    barmode: "group", bargap: 0.3, bargroupgap: 0.08,
+    margin: { l: 74, r: 20, t: 54, b: 168 },
+    xaxis: { tickvals: labels.map((_, i) => i), ticktext: labels,
+             tickangle: -45, tickfont: { size: 9 }, showgrid: false,
+             range: [-0.6, shown.length - 0.4] },
+    // A second x-axis on the same range carries the donor points, so their
+    // numeric positions are not snapped to the category centres.
+    xaxis2: { overlaying: "x", range: [-0.6, shown.length - 0.4],
+              showticklabels: false, showgrid: false, zeroline: false },
+    yaxis: { title: { text: "share of a donor's cells", font: { size: 11 } },
+             tickfont: { size: 9 }, rangemode: "tozero" },
+    height: 460,
+    legend: { orientation: "h", y: 1.1, x: 0 },
+    annotations: [{
+      text: `each point is one donor  ·  bars are mean ± SEM  ·  * rank test below 0.05`
+            + (hidden > 0 ? `  ·  ${shown.length} of ${states.length} states shown` : ""),
+      xref: "paper", yref: "paper", x: 1, y: 1.1, showarrow: false,
+      xanchor: "right", font: { size: 9, color: "#555555" },
+    }],
+  }, { responsive: true, displaylogo: false });
 }

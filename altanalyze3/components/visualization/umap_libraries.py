@@ -67,9 +67,15 @@ def compute_umap_limits(coords):
 # COLOR HANDLING
 # ===========================================================
 def make_color_map(categories, cmap_name="tab20"):
+    # cmap_name stays in the signature for callers that pass it. A named matplotlib map
+    # cannot supply more colours than it holds, and resampling it makes adjacent categories
+    # collide. Paired is the house default for UMAP colours; palettes.paired_colors returns
+    # its 12 colours directly and interpolates between the same anchors above 12.
+    from altanalyze3.components.visualization.palettes import paired_colors
+
     cats = list(categories)
-    cmap = plt.cm.get_cmap(cmap_name, len(cats))
-    return {c: cmap(i) for i, c in enumerate(cats)}
+    hex_colors = paired_colors(len(cats))
+    return {c: mcolors.to_rgba(hex_colors[i]) for i, c in enumerate(cats)}
 
 
 def export_color_map(color_map, out_tsv, label):

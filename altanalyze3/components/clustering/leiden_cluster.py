@@ -45,6 +45,27 @@ class Tee:
         for stream in self.streams:
             stream.flush()
 
+    def close(self):
+        """Flush, but never close the wrapped streams.
+
+        logging.shutdown runs at exit and calls close() on every handler stream. absl attaches
+        such a handler, so a run without this method ends in
+        ``AttributeError: 'Tee' object has no attribute 'close'`` printed after every output
+        file is already written. Closing the real streams here would instead break the caller's
+        stdout, so this only flushes.
+        """
+        self.flush()
+
+    @property
+    def closed(self):
+        return False
+
+    def writable(self):
+        return True
+
+    def isatty(self):
+        return False
+
     @property
     def encoding(self):
         for stream in self.streams:
@@ -53,15 +74,86 @@ class Tee:
         return "utf-8"
 
 
-def normalize_adata(adata, show_progress=False):
-    """Log-normalize the AnnData object in-place."""
+NORMALIZATION_MODES = ("cp10k-log1p", "log1p", "none")
+
+
+def _ensure_umap_importable():
+    """Import umap the way the rest of altanalyze3 does on this environment.
+
+    umap-learn 0.5.7 imports the optional ``parametric_umap``, which imports tensorflow.
+    tensorflow 2.x on numpy 1.23 raises AttributeError (``np.dtypes``), and umap's own
+    ``except ImportError`` does not catch it, so ``sc.pp.neighbors`` dies. Forcing an
+    ImportError makes umap take its documented "Tensorflow not installed" path. No installed
+    file is modified. The same guard sits at
+    ``altanalyze3/components/visualization/scalable_viewer/precompute.py:262`` and
+    ``altanalyze3/components/clustering/ICGS.py:4210``.
+    """
+    try:
+        import umap  # noqa: F401
+        return
+    except Exception:
+        for mod in [m for m in sys.modules if m == "umap" or m.startswith("umap.")]:
+            del sys.modules[mod]
+        sys.modules.setdefault("tensorflow", None)
+        import umap  # noqa: F401,E402
+        print("[INFO] umap imported with tensorflow blocked (ParametricUMAP unavailable)")
+
+
+def normalize_adata(adata, show_progress=False, mode="cp10k-log1p"):
+    """Normalize the AnnData object in-place.
+
+    ``cp10k-log1p`` is the RNA path: ``normalize_total(1e4)`` then ``log1p``. ``log1p`` skips
+    the depth step, which a small antibody panel needs -- CP10K over 195 proteins forces every
+    cell's whole panel to one constant total and deletes the staining-depth signal. ``none``
+    leaves a matrix that already carries the wanted scale untouched.
+    """
+    mode = str(mode).lower()
+    if mode not in NORMALIZATION_MODES:
+        raise ValueError(f"Unknown normalization '{mode}'; choose from {', '.join(NORMALIZATION_MODES)}")
+    if mode == "none":
+        print("[INFO] normalization=none: the input matrix is used as it is")
+        return
+    steps = 2 if mode == "cp10k-log1p" else 1
     if show_progress:
-        with tqdm(total=2, desc="Normalization steps") as pbar:
-            sc.pp.normalize_total(adata, target_sum=1e4); pbar.update(1)
+        with tqdm(total=steps, desc="Normalization steps") as pbar:
+            if mode == "cp10k-log1p":
+                sc.pp.normalize_total(adata, target_sum=1e4); pbar.update(1)
             sc.pp.log1p(adata); pbar.update(1)
     else:
-        sc.pp.normalize_total(adata, target_sum=1e4)
+        if mode == "cp10k-log1p":
+            sc.pp.normalize_total(adata, target_sum=1e4)
         sc.pp.log1p(adata)
+    print(f"[INFO] normalization={mode}")
+
+
+def select_features_and_pca(adata, *, skip_hvg=False, n_pcs=50, label="cell"):
+    """Pick the clustering features, scale them and run PCA. Returns the reduced object.
+
+    ``skip_hvg`` keeps every feature. A dispersion-binned highly-variable call needs many
+    features to estimate a mean-variance trend, so a 195-plex antibody panel must skip it.
+    ``n_pcs`` is clipped to one below the smaller matrix dimension, which PCA requires.
+    """
+    if skip_hvg:
+        print(f"[{label}] skip_hvg: all {adata.n_vars} features enter PCA")
+    else:
+        sc.pp.highly_variable_genes(adata, min_mean=0.0125, max_mean=3, min_disp=0.5)
+        n_hvg = int(adata.var["highly_variable"].sum())
+        if n_hvg < 2:
+            raise ValueError(
+                f"highly_variable_genes selected {n_hvg} of {adata.n_vars} features. "
+                "Pass --skip-hvg for a small panel."
+            )
+        adata = adata[:, adata.var.highly_variable].copy()
+        print(f"[{label}] highly variable features: {n_hvg}")
+    sc.pp.scale(adata, max_value=10)
+    n_comps = int(min(n_pcs, adata.n_obs - 1, adata.n_vars - 1))
+    if n_comps < 2:
+        raise ValueError(f"PCA needs at least 2 components; the matrix allows {n_comps}")
+    if n_comps != n_pcs:
+        print(f"[{label}] n_pcs clipped from {n_pcs} to {n_comps} by the matrix shape "
+              f"({adata.n_obs} x {adata.n_vars})")
+    sc.pp.pca(adata, n_comps=n_comps)
+    return adata
 
 
 def save_marker_genes(adata, groupby, output_file):
@@ -156,8 +248,20 @@ def combine_and_cluster(
     metacell_random_replacement=False,
     metacell_random_state=0,
     ambient_correct_cutoff=None,
+    resolution=0.5,
+    normalization="cp10k-log1p",
+    skip_hvg=False,
+    n_pcs=50,
 ):
+    resolution = float(resolution)
+    if resolution <= 0:
+        raise ValueError(f"--resolution must be positive; got {resolution}")
+    if str(normalization).lower() not in NORMALIZATION_MODES:
+        raise ValueError(
+            f"Unknown normalization '{normalization}'; choose from {', '.join(NORMALIZATION_MODES)}"
+        )
     start_time = time.time()
+    _ensure_umap_importable()
     os.makedirs(output_dir, exist_ok=True)
 
     translation_map = None
@@ -407,7 +511,7 @@ def combine_and_cluster(
 
     adata_combined.layers["counts"] = adata_combined.X.copy()
 
-    normalize_adata(adata_combined, show_progress=True)
+    normalize_adata(adata_combined, show_progress=True, mode=normalization)
     metacell_aligned_adata = adata_combined.copy() if metacell_align else None
 
     if export_h5ad:
@@ -417,15 +521,13 @@ def combine_and_cluster(
     os.chdir(output_dir)
     if metacell_align:
         adata_unsup_metacell = metacell_aligned_adata.copy()
-        sc.pp.highly_variable_genes(adata_unsup_metacell, min_mean=0.0125, max_mean=3, min_disp=0.5)
-        adata_unsup_metacell = adata_unsup_metacell[:, adata_unsup_metacell.var.highly_variable].copy()
-        sc.pp.scale(adata_unsup_metacell, max_value=10)
-        sc.pp.pca(adata_unsup_metacell, n_comps=50)
+        adata_unsup_metacell = select_features_and_pca(
+            adata_unsup_metacell, skip_hvg=skip_hvg, n_pcs=n_pcs, label="metacell")
         sc.pp.neighbors(adata_unsup_metacell)
         if generate_umap:
             sc.tl.umap(adata_unsup_metacell)
-        sc.tl.leiden(adata_unsup_metacell, flavor="leidenalg")
-        print('[metacell] unsupervised clustering performed on metacells')
+        sc.tl.leiden(adata_unsup_metacell, flavor="leidenalg", resolution=resolution)
+        print(f'[metacell] unsupervised clustering performed on metacells (resolution={resolution})')
         ensure_category_palette(adata_unsup_metacell, 'leiden')
 
         pd.DataFrame({
@@ -444,10 +546,8 @@ def combine_and_cluster(
         adata_combined.obs['scanpy-leiden'] = pd.Series(cell_clusters, index=adata_combined.obs_names).astype(str)
 
         adata_unsup_cells = adata_combined.copy()
-        sc.pp.highly_variable_genes(adata_unsup_cells, min_mean=0.0125, max_mean=3, min_disp=0.5)
-        adata_unsup_cells = adata_unsup_cells[:, adata_unsup_cells.var.highly_variable].copy()
-        sc.pp.scale(adata_unsup_cells, max_value=10)
-        sc.pp.pca(adata_unsup_cells, n_comps=50)
+        adata_unsup_cells = select_features_and_pca(
+            adata_unsup_cells, skip_hvg=skip_hvg, n_pcs=n_pcs, label="cell")
         sc.pp.neighbors(adata_unsup_cells)
         if generate_umap:
             sc.tl.umap(adata_unsup_cells)
@@ -491,17 +591,15 @@ def combine_and_cluster(
         adata_unsup = adata_unsup_cells
     else:
         adata_unsup = adata_combined.copy()
-        sc.pp.highly_variable_genes(adata_unsup, min_mean=0.0125, max_mean=3, min_disp=0.5)
-        adata_unsup = adata_unsup[:, adata_unsup.var.highly_variable].copy()
-        sc.pp.scale(adata_unsup, max_value=10)
-        sc.pp.pca(adata_unsup, n_comps=50)
+        adata_unsup = select_features_and_pca(
+            adata_unsup, skip_hvg=skip_hvg, n_pcs=n_pcs, label="cell")
         sc.pp.neighbors(adata_unsup)
         if generate_umap:
             sc.tl.umap(adata_unsup)
-        sc.tl.leiden(adata_unsup, flavor="leidenalg", resolution=0.5)
+        sc.tl.leiden(adata_unsup, flavor="leidenalg", resolution=resolution)
         n_clusters = adata_unsup.obs['leiden'].nunique()
         n_cells = adata_unsup.n_obs
-        print(f"[cell] Unsupervised clustering completed: {n_clusters} clusters from {n_cells} cells (resolution=0.5)")
+        print(f"[cell] Unsupervised clustering completed: {n_clusters} clusters from {n_cells} cells (resolution={resolution})")
         print('[cell] unsupervised clustering performed on individual cells')
 
         sc.tl.rank_genes_groups(adata_unsup, groupby='leiden', method='wilcoxon', use_raw=False)
@@ -587,6 +685,22 @@ if __name__ == '__main__':
     parser.add_argument('--metacell-random-replacement', action='store_true', help='Sample cells with replacement for random metacells')
     parser.add_argument('--metacell-random-state', type=int, default=0, help='Random state for metacell construction')
     parser.add_argument('--ambient_correct_cutoff', type=float, default=None, help='Apply SoupX ambient RNA correction with the specified contamination fraction (rho).')
+    parser.add_argument('--resolution', type=float, default=0.5,
+                        help='Leiden resolution. Higher values give more clusters. Default 0.5, '
+                             'the value this module used before the flag existed.')
+    parser.add_argument('--normalization', type=str, default='cp10k-log1p',
+                        choices=list(NORMALIZATION_MODES),
+                        help="Expression normalization before clustering. cp10k-log1p is the RNA "
+                             "path. log1p omits the depth step, which a small antibody panel needs: "
+                             "CP10K over 195 proteins forces every cell's whole panel to one "
+                             "constant total. none uses the matrix as it is.")
+    parser.add_argument('--skip-hvg', action='store_true',
+                        help='Send every feature to PCA instead of the dispersion-binned '
+                             'highly-variable subset. Required for a small antibody panel, where '
+                             'the mean-variance trend has too few features to estimate.')
+    parser.add_argument('--n-pcs', type=int, default=50,
+                        help='Principal components for the neighbour graph. Clipped to one below '
+                             'the smaller matrix dimension. Default 50.')
 
     args = parser.parse_args()
 
@@ -638,6 +752,10 @@ if __name__ == '__main__':
             metacell_random_replacement=args.metacell_random_replacement,
             metacell_random_state=args.metacell_random_state,
             ambient_correct_cutoff=args.ambient_correct_cutoff,
+            resolution=args.resolution,
+            normalization=args.normalization,
+            skip_hvg=args.skip_hvg,
+            n_pcs=args.n_pcs,
         )
     finally:
         sys.stdout.flush()

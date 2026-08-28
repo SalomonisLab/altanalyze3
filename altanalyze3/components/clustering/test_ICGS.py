@@ -1,12 +1,21 @@
 import numpy as np
 import pandas as pd
+import pytest
 import scipy.sparse as sp
 from anndata import AnnData
 
 from altanalyze3.components.clustering.ICGS import (
+    ADT_OCCUPANCY_KEY,
+    ADT_OCCUPANCY_STATUS_KEY,
     ICGS3Config,
+    apply_adt_occupancy_filter,
     apply_expression_batch_adjustment,
     apply_modality_defaults,
+    compute_adt_occupancy,
+    estimate_udon_nmf_rank,
+    resolve_normalization,
+    resolve_small_feature_rank,
+    _trim_occupancy_within_groups,
     build_arg_parser,
     classify_adata_with_scores_chunked,
     classify_with_scores,
@@ -472,7 +481,7 @@ def test_default_mito_percent_is_30():
 
 
 def test_marker_gate_defaults_resolve_by_modality():
-    """RNA keeps rho 0.3 / 2 markers; ADT gets the relaxed 0.15 / 1 gate; users still win.
+    """RNA keeps rho 0.3 / 2 markers; ADT gets the 0.25 / 1 gate; users still win.
 
     The superseded implementation detected an unset value by comparing against the literal
     defaults of the day, so a later default change silently disabled the ADT gate.
@@ -486,7 +495,7 @@ def test_marker_gate_defaults_resolve_by_modality():
     adt = apply_modality_defaults(
         ICGS3Config(input_paths=["dummy.h5ad"], output_dir="/tmp/icgs3_test", modality="adt")
     )
-    assert adt.marker_rho == 0.15
+    assert adt.marker_rho == 0.25
     assert adt.marker_min_per_cluster == 1
     assert adt.min_genes == 0
     assert adt.min_counts == 0
@@ -587,3 +596,273 @@ def test_retention_audit_flags_rare_population_loss(tmp_path):
     assert rare["pagerank_louvain_sampled_cells"] == 10
     assert bool(rare["sampled_below_20"])
     assert (outdir / "sNMF" / "icgs3_rare_population_retention_audit.tsv").exists()
+
+
+# ---------------------------------------------------------------------------
+# ADT occupancy filter (AltAnalyze2 removeCellsWithHighADTOccupancy)
+# ---------------------------------------------------------------------------
+
+
+def _legacy_occupancy(values: np.ndarray, sd_multiplier: float = 1.0) -> np.ndarray:
+    """Direct transcription of AltAnalyze2 clustering.py:10973-10986.
+
+    values is features x cells, exactly the orientation the legacy function read from the
+    ADT value file. statistics.stdev there is the SAMPLE standard deviation, so ddof=1.
+    """
+    marks = []
+    for adt_vector in values:
+        stdev = float(np.std(adt_vector, ddof=1))
+        avg = float(np.mean(adt_vector))
+        threshold = avg + sd_multiplier * stdev
+        marks.append([1 if v > threshold else 0 for v in adt_vector])
+    return np.asarray(marks).transpose().sum(axis=1)
+
+
+def _adt_adata(values_cells_by_features: np.ndarray, sparse: bool = True):
+    n_obs, n_vars = values_cells_by_features.shape
+    X = sp.csr_matrix(values_cells_by_features) if sparse else values_cells_by_features.astype(np.float32)
+    return AnnData(
+        X=X,
+        obs=pd.DataFrame(index=[f"cell{i}" for i in range(n_obs)]),
+        var=pd.DataFrame(index=[f"ADT{j}" for j in range(n_vars)]),
+    )
+
+
+def _occupancy_config(**kwargs):
+    base = dict(input_paths=["dummy.h5ad"], output_dir="/tmp/icgs3_test", modality="adt")
+    base.update(kwargs)
+    return ICGS3Config(**base)
+
+
+def test_adt_occupancy_matches_legacy_binarization():
+    """compute_adt_occupancy must equal the legacy mean+1SD mark count, cell for cell."""
+    rng = np.random.default_rng(0)
+    values = rng.gamma(shape=2.0, scale=5.0, size=(400, 24)).astype(np.float64)
+    adata = _adt_adata(values, sparse=True)
+    out = compute_adt_occupancy(adata, _occupancy_config(), stage="test")
+    expected = _legacy_occupancy(values.T, sd_multiplier=1.0)
+    np.testing.assert_array_equal(out.obs[ADT_OCCUPANCY_KEY].to_numpy(), expected)
+    assert int(out.uns["icgs3_adt_occupancy"]["cells"]) == 400
+    assert int(out.uns["icgs3_adt_occupancy"]["features"]) == 24
+
+
+def test_adt_occupancy_sparse_and_dense_paths_agree():
+    """The sparse-nonzero path and the dense-block path must return identical scores."""
+    rng = np.random.default_rng(1)
+    values = rng.gamma(shape=1.5, scale=3.0, size=(250, 16))
+    values[values < 1.0] = 0.0  # force real sparsity; the two paths must still agree
+    sparse_out = compute_adt_occupancy(_adt_adata(values, sparse=True), _occupancy_config(), stage="sparse")
+    dense_out = compute_adt_occupancy(_adt_adata(values, sparse=False), _occupancy_config(), stage="dense")
+    np.testing.assert_array_equal(
+        sparse_out.obs[ADT_OCCUPANCY_KEY].to_numpy(),
+        dense_out.obs[ADT_OCCUPANCY_KEY].to_numpy(),
+    )
+    np.testing.assert_array_equal(
+        sparse_out.obs[ADT_OCCUPANCY_KEY].to_numpy(),
+        _legacy_occupancy(values.T),
+    )
+
+
+def test_occupancy_trim_removes_both_tails_inside_each_group():
+    """20 percent per tail, computed inside the group, not across the whole matrix."""
+    # Group A occupancies 0..49, group B occupancies 100..149. A global percentile would
+    # delete all of A's low cells and all of B's high cells; a per-group trim must not.
+    barcodes = [f"c{i}" for i in range(100)]
+    occupancy = pd.Series(list(range(50)) + list(range(100, 150)), index=barcodes, dtype=float)
+    groups = pd.Series(["A"] * 50 + ["B"] * 50, index=barcodes)
+    keep_mask, removed, summary = _trim_occupancy_within_groups(
+        occupancy, groups, percent=20.0, min_group=10
+    )
+    assert int(keep_mask.sum()) == 60, "50 cells per group, 10 removed per tail, 30 kept each"
+    assert removed.shape[0] == 40
+    for group in ("A", "B"):
+        sub = removed[removed["broad_group"] == group]
+        assert int((sub[ADT_OCCUPANCY_STATUS_KEY] == "removed_understained").sum()) == 10
+        assert int((sub[ADT_OCCUPANCY_STATUS_KEY] == "removed_overstained").sum()) == 10
+    # The retained cells of each group are its middle 60 percent, by that group's own range.
+    kept = set(np.asarray(barcodes)[keep_mask])
+    assert kept.issuperset({f"c{i}" for i in range(10, 40)})
+    assert kept.issuperset({f"c{i}" for i in range(60, 90)})
+    assert kept.isdisjoint({f"c{i}" for i in range(10)})
+    assert kept.isdisjoint({f"c{i}" for i in range(90, 100)})
+    assert summary.shape[0] == 2
+    assert list(summary["n_kept"]) == [30, 30]
+
+
+def test_occupancy_trim_keeps_small_group_that_legacy_emptied():
+    """AltAnalyze2 scores[int(l*p):-1*int(l*p)] is scores[0:0] when int(l*p) is 0.
+
+    A 4-cell group at 20 percent gives int(4*0.2)=0, so the legacy slice returned the EMPTY
+    list and deleted the whole group. ICGS3 must keep it and label it.
+    """
+    barcodes = [f"s{i}" for i in range(4)]
+    occupancy = pd.Series([1.0, 2.0, 3.0, 40.0], index=barcodes)
+    groups = pd.Series(["small"] * 4, index=barcodes)
+    legacy_slice = list(range(4))[int(4 * 0.2): -1 * int(4 * 0.2)]
+    assert legacy_slice == [], "the legacy expression really does empty this group"
+    keep_mask, removed, summary = _trim_occupancy_within_groups(
+        occupancy, groups, percent=20.0, min_group=2
+    )
+    assert int(keep_mask.sum()) == 4
+    assert removed.empty
+    assert bool(summary["kept_whole_group"].iloc[0]) is True
+
+
+def test_occupancy_trim_is_deterministic_under_ties():
+    """Equal occupancies must resolve the same way on every run."""
+    barcodes = [f"t{i}" for i in range(20)]
+    occupancy = pd.Series([5.0] * 20, index=barcodes)
+    groups = pd.Series(["g"] * 20, index=barcodes)
+    first = _trim_occupancy_within_groups(occupancy, groups, percent=20.0, min_group=5)[0]
+    second = _trim_occupancy_within_groups(occupancy, groups, percent=20.0, min_group=5)[0]
+    np.testing.assert_array_equal(first, second)
+    assert int(first.sum()) == 12
+
+
+def test_occupancy_percent_out_of_range_is_rejected():
+    occupancy = pd.Series([1.0, 2.0], index=["a", "b"])
+    groups = pd.Series(["g", "g"], index=["a", "b"])
+    with pytest.raises(ValueError, match="adt-occupancy-percent"):
+        _trim_occupancy_within_groups(occupancy, groups, percent=50.0, min_group=1)
+
+
+def test_normalization_resolves_by_modality_and_honours_legacy_flag():
+    adt = apply_modality_defaults(_occupancy_config())
+    rna = ICGS3Config(input_paths=["d.h5ad"], output_dir="/tmp/icgs3_test", modality="rna")
+    assert resolve_normalization(adt) == "log1p"
+    assert resolve_normalization(rna) == "cp10k-log1p"
+    assert resolve_normalization(_occupancy_config(input_normalized=True)) == "none"
+    assert resolve_normalization(_occupancy_config(normalization="cp10k-log1p")) == "cp10k-log1p"
+    with pytest.raises(ValueError, match="conflicts"):
+        resolve_normalization(_occupancy_config(input_normalized=True, normalization="log1p"))
+
+
+def test_log1p_normalization_skips_library_size_rescaling():
+    values = np.array([[1.0, 9.0], [4.0, 4.0]], dtype=np.float64)
+    out = prepare_expression(_adt_adata(values), _occupancy_config(normalization="log1p"))
+    np.testing.assert_allclose(out.X.toarray(), np.log1p(values).astype(np.float32), rtol=1e-6)
+    assert out.uns["icgs3_normalization_mode"] == "log1p"
+    # CP10K would have forced both rows to the same total; log1p alone must not.
+    cp10k = prepare_expression(_adt_adata(values), _occupancy_config(normalization="cp10k-log1p"))
+    assert not np.allclose(cp10k.X.toarray(), out.X.toarray())
+
+
+def test_log1p_normalization_rejects_negative_values():
+    values = np.array([[-1.0, 2.0], [3.0, 4.0]], dtype=np.float64)
+    with pytest.raises(ValueError, match="log1p"):
+        prepare_expression(_adt_adata(values, sparse=False), _occupancy_config(normalization="log1p"))
+
+
+def test_small_feature_rank_branch_resolves_by_modality():
+    """rank_rel_threshold existed as a dead CLI parameter; it must now reach the estimator."""
+    assert resolve_small_feature_rank(_occupancy_config()) is True
+    assert resolve_small_feature_rank(
+        ICGS3Config(input_paths=["d.h5ad"], output_dir="/tmp/icgs3_test", modality="rna")
+    ) is False
+    assert resolve_small_feature_rank(_occupancy_config(small_feature_rank="false")) is False
+    assert resolve_small_feature_rank(
+        ICGS3Config(input_paths=["d.h5ad"], output_dir="/tmp/icgs3_test",
+                    modality="rna", small_feature_rank="true")
+    ) is True
+
+
+def test_estimate_udon_nmf_rank_forwards_small_feature_and_rel_threshold(monkeypatch):
+    """rank_rel_threshold was declared, echoed by cli_equivalent, and read by nothing.
+
+    determine_nmf_ranks uses it ONLY inside its small_feature branch, and ICGS.py:2073 passed
+    small_feature=False for every modality, so no run ever reached that branch and the
+    parameter was dead. Capturing the call proves both values now arrive, and that ADT turns
+    the branch on while RNA leaves it off.
+    """
+    from altanalyze3.components.clustering.ICGS import _add_udon_path
+
+    _add_udon_path()
+    import nmf as udon_nmf
+
+    captured = {}
+
+    def fake_determine_nmf_ranks(df, small_feature=False, rel_threshold=0.1, max_rank=30):
+        captured["small_feature"] = small_feature
+        captured["rel_threshold"] = rel_threshold
+        return 7
+
+    monkeypatch.setattr(udon_nmf, "determine_nmf_ranks", fake_determine_nmf_ranks)
+    expr = pd.DataFrame(np.ones((3, 4)), index=list("abc"), columns=list("wxyz"))
+
+    rank = estimate_udon_nmf_rank(expr, _occupancy_config(rank_rel_threshold=0.42))
+    assert rank == 7
+    assert captured["small_feature"] is True, "ADT must reach the small_feature branch"
+    assert captured["rel_threshold"] == 0.42, "--rank-rel-threshold must reach the estimator"
+
+    estimate_udon_nmf_rank(
+        expr,
+        ICGS3Config(input_paths=["d.h5ad"], output_dir="/tmp/icgs3_test", modality="rna",
+                    rank_rel_threshold=0.42),
+    )
+    assert captured["small_feature"] is False, "RNA must stay on the Tracy-Widom boundary"
+
+
+def test_adt_occupancy_filter_end_to_end_removes_cells_from_every_output(tmp_path):
+    """A removed cell must reach no NMF, MarkerFinder or SVM step and appear in no output.
+
+    The matrix carries three real ADT blocks plus two planted technical populations: cells
+    stained high for the whole panel and cells stained low for the whole panel. Both must be
+    gone from the cluster table and from the returned AnnData, not merely flagged.
+    """
+    rng = np.random.default_rng(11)
+    n_per_block, n_features = 120, 20
+    blocks = []
+    for b in range(3):
+        values = rng.gamma(2.0, 2.0, size=(n_per_block, n_features))
+        values[:, b * 5:(b + 1) * 5] += rng.gamma(6.0, 4.0, size=(n_per_block, 5))
+        blocks.append(values)
+    values = np.vstack(blocks)
+    names = [f"cell{i}" for i in range(values.shape[0])]
+    # 30 over-stained and 30 under-stained cells, spread across the three blocks.
+    over = np.arange(0, 90, 3)[:30]
+    under = np.arange(1, 90, 3)[:30]
+    values[over] *= 12.0
+    values[under] *= 0.02
+    adata = AnnData(
+        X=sp.csr_matrix(values.astype(np.float32)),
+        obs=pd.DataFrame(index=names),
+        var=pd.DataFrame(index=[f"ADT{j}" for j in range(n_features)]),
+    )
+    path = tmp_path / "adt.h5ad"
+    adata.write_h5ad(path)
+
+    result = run_icgs3(
+        ICGS3Config(
+            input_paths=[str(path)],
+            output_dir=str(tmp_path / "out"),
+            modality="adt",
+            normalization="log1p",
+            adt_occupancy_filter=True,
+            adt_occupancy_percent=20.0,
+            adt_occupancy_scale="input",
+            adt_occupancy_scope="all",
+            adt_occupancy_min_group=5,
+            generate_umap=False,
+            write_h5ad=False,
+        )
+    )
+
+    removed_path = tmp_path / "out" / "sNMF" / "icgs3_adt_occupancy_removed_cells.tsv"
+    summary_path = tmp_path / "out" / "sNMF" / "icgs3_adt_occupancy_group_summary.tsv"
+    assert removed_path.exists() and summary_path.exists()
+    removed = pd.read_csv(removed_path, sep="\t")
+    assert removed.shape[0] > 0, "the filter removed nothing on a matrix with planted outliers"
+
+    removed_barcodes = set(removed["barcode"].astype(str))
+    surviving = set(result.adata.obs_names.astype(str))
+    assert removed_barcodes.isdisjoint(surviving), "a removed cell survived into the AnnData"
+    assert removed_barcodes.isdisjoint(set(result.clusters.index.astype(str))), \
+        "a removed cell received a cluster"
+    assert len(surviving) + len(removed_barcodes) == values.shape[0]
+
+    # Both technical tails must be caught, not just one.
+    over_names = {names[i] for i in over}
+    under_names = {names[i] for i in under}
+    assert len(removed_barcodes & over_names) > 0, "no over-stained cell was removed"
+    assert len(removed_barcodes & under_names) > 0, "no under-stained cell was removed"
+    assert set(removed[ADT_OCCUPANCY_STATUS_KEY]) <= {"removed_overstained", "removed_understained"}

@@ -355,6 +355,35 @@
     SV.dotSizePatchInstalled = true;
   }
 
+  /* Windows = 2 | 1.
+   *
+   * The Explore results grid is two equal columns, so a plot that runs across
+   * every cell state gets half the page. Choosing 1 hides the second panel and
+   * gives the first the whole width. The second panel keeps its state while
+   * hidden and comes back unchanged, so nothing the user set up is lost.
+   *
+   * The select sits on panel 1's topline, beside Dot size. Panel 2 does not
+   * carry one: the count governs both panels, and two controls that set the
+   * same value disagree the moment a user touches one of them.
+   */
+
+
+  /* The Chat tab, to the right of Differential.
+   *
+   * The question goes to /api/jobs/{id}/chat, which asks the LungMAP site to
+   * read the sentence and then answers it from this bundle. Nothing on this
+   * page is generated text pretending to be a measurement: the sentence above
+   * the results says what was run, and every number below comes from the
+   * bundle's own tables.
+   */
+
+
+
+
+
+  /* The plot view reuses the DotPlot the Explore tab draws, so the chat cannot
+   * invent a figure type the viewer does not otherwise produce. */
+
   function buildDatasetSelector() {
     const host = document.querySelector(".hero-links");
     if (!host || el("sv-dataset")) return;
@@ -424,122 +453,47 @@
 
   // ------------------------------------------------------------------ dot plot
 
-  function installDotPlotMode() {
-    if (typeof BASE_VISUALIZATION_MODES === "undefined") return;
-    if (BASE_VISUALIZATION_MODES.some((mode) => mode.value === "dotplot")) return;
-    BASE_VISUALIZATION_MODES.push({ value: "dotplot", label: "DotPlot" });
 
-    // The DotPlot takes a free-text gene list. Blank means "top marker of every cell
-    // state", so the box is cleared whenever the panel switches into DotPlot and the
-    // gene field is shown, which scALABLE hides for non-gene modes.
-    const originalModeOptions = window.updateExpressionModeOptions;
-    window.updateExpressionModeOptions = function () {
-      originalModeOptions();
-      ["viz1", "viz2"].forEach((panelKey) => {
-        const modeSelect = el(panelElementId(panelKey, "mode"));
-        const geneField = el(panelElementId(panelKey, "gene-field"));
-        const geneInput = el(panelElementId(panelKey, "gene-query"));
-        if (!modeSelect || !geneField || !geneInput) return;
-        if (modeSelect.value !== "dotplot") return;
-        geneField.classList.remove("hidden");
-        geneInput.placeholder = "blank = top marker of every cell state";
-        const label = geneField.querySelector("span");
-        if (label) label.textContent = "Genes (comma separated)";
-        if (geneInput.dataset.svDotplot !== "1") {
-          geneInput.value = "";
-          geneInput.dataset.svDotplot = "1";
-        }
-      });
-      ["viz1", "viz2"].forEach((panelKey) => {
-        const modeSelect = el(panelElementId(panelKey, "mode"));
-        const geneInput = el(panelElementId(panelKey, "gene-query"));
-        if (modeSelect && geneInput && modeSelect.value !== "dotplot") {
-          delete geneInput.dataset.svDotplot;
-        }
-      });
-    };
+  /* Smallest number of cells a donor must contribute to a cell state before its
+   * bar is drawn. A donor with one cell in a state produces a mean from that
+   * single cell, which reads as a tall bar built on nothing: at the default of
+   * 1 the loudest SFTPC bars in this atlas are all n=1 groups. The control sits
+   * beside the gene set. */
 
-    const originalLoad = window.loadVisualizationPanel;
-    window.loadVisualizationPanel = async function (panelKey) {
-      const mode = getPanelSelectValue(panelKey, "mode");
-      if (mode !== "dotplot") return originalLoad(panelKey);
-      const jobId = el("results-job-id").value.trim();
-      if (!jobId) return;
-      try {
-        const genes = String(el(panelElementId(panelKey, "gene-query"))?.value || "").trim();
-        const query = genes ? `?genes=${encodeURIComponent(genes)}` : "";
-        const data = await getJson(`/api/jobs/${jobId}/dotplot${query}`);
-        panelPlotData[panelKey] = { source: "dotplot", payload: data };
-        renderVisualizationPanel(panelKey);
-      } catch (err) {
-        panelPlotData[panelKey] = { source: "error", payload: { message: err.message } };
-        renderVisualizationPanel(panelKey);
-      }
-    };
+  /* The minimum-cells select, shown only for the CombPlot. */
 
-    const originalRender = window.renderVisualizationPanel;
-    window.renderVisualizationPanel = function (panelKey) {
-      // getPlotDotScale takes no panel argument (app.js:4525), so record which panel
-      // is rendering before delegating; the per-panel Dot size select reads this.
-      SV.activePanel = panelKey;
-      const mode = getPanelSelectValue(panelKey, "mode");
-      if (mode !== "dotplot") return originalRender(panelKey);
-      const data = panelPlotData[panelKey];
-      if (!data || data.source === "error") return originalRender(panelKey);
-      renderDotPlot(panelKey, data.payload || {});
-    };
-  }
+  /* The CombPlot: one bar per donor per cell state, one row per gene.
+   *
+   * Bars are coloured by cell state and run in the bundle's canonical order, so
+   * a block of colour is one state and its width is the number of donors that
+   * contributed cells to it. Hovering a bar names the donor and the state, and
+   * gives the cell count behind the mean.
+   *
+   * Values are per-donor pseudobulk, not per cell. Cell-level bars would number
+   * 123,076 here and would hide the donor-to-donor spread the plot exists to
+   * show.
+   */
 
-  function renderDotPlot(panelKey, payload) {
-    const genes = payload.genes || [];
-    const states = payload.states || [];
-    const mean = payload.mean || [];
-    const frac = payload.frac || [];
-    const x = [], y = [], size = [], color = [], text = [];
-    let maxMean = 0;
-    mean.forEach((row) => row.forEach((v) => { if (v > maxMean) maxMean = v; }));
-    genes.forEach((gene, gi) => {
-      states.forEach((state, si) => {
-        const m = (mean[gi] || [])[si] || 0;
-        const f = (frac[gi] || [])[si] || 0;
-        x.push(state);
-        y.push(gene);
-        size.push(4 + 18 * f);
-        color.push(m);
-        text.push(`${gene}<br>${state}<br>mean=${m.toFixed(3)}<br>detected=${(100 * f).toFixed(1)}%`
-          + `<br>n=${(payload.state_n || [])[si] || 0} cells`);
-      });
-    });
-    const height = Math.max(420, 22 * genes.length + 220);
-    Plotly.newPlot(panelPlotId(panelKey), [{
-      type: "scattergl",
-      mode: "markers",
-      x, y, text,
-      hovertemplate: "%{text}<extra></extra>",
-      marker: {
-        size, color,
-        // scALABLE's expression ramp (app.py:3869 "expression_grey_red").
-        colorscale: [[0, "#e5e7eb"], [0.15, "#f3f4f6"], [0.35, "#fecaca"],
-                     [0.6, "#f87171"], [1, "#b91c1c"]],
-        cmin: 0, cmax: maxMean || 1,
-        line: { width: 0.4, color: "#475569" },
-        colorbar: { title: { text: "mean", side: "right" }, thickness: 10 },
-      },
-    }], {
-      paper_bgcolor: "rgba(0,0,0,0)",
-      plot_bgcolor: "rgba(255,255,255,0.9)",
-      height,
-      margin: { t: 24, l: 150, r: 30, b: 170 },
-      xaxis: { tickangle: -55, automargin: true, showgrid: true, gridcolor: "#eef2f7" },
-      yaxis: { automargin: true, showgrid: true, gridcolor: "#eef2f7", autorange: "reversed" },
-      hovermode: "closest",
-    });
-    const label = payload.is_default
-      ? `DotPlot: top marker of every cell state (${genes.length} genes x ${states.length} states). `
-        + "Dot size = fraction of cells detected; colour = mean expression."
-      : `DotPlot: ${genes.length} gene(s) x ${states.length} states.`;
-    setPanelSummary(panelKey, label);
-  }
+  /* A gene-set box a spreadsheet column can be pasted into.
+   *
+   * scALABLE's gene field is a one-line <input> built for a single symbol. A
+   * column copied out of Excel arrives newline separated, and a one-line input
+   * flattens it and shows only the first few symbols, so the user cannot see
+   * what they pasted. This puts a <textarea> beside the input, hides the input
+   * without removing it, and keeps the two values in step.
+   *
+   * The input is kept in the DOM and updated on every edit, because scALABLE
+   * reads `#viz1-gene-query` directly in several places; removing it would
+   * break the modes this file does not touch.
+   */
+
+  /* Restore the one-line input when the panel leaves a gene-set mode. */
+
+
+  /* `target` lets a caller draw into somewhere other than the panel's own
+   * plot div. The Chat tab passes its own container so it reuses this exact
+   * figure rather than drawing a second kind of dot plot. */
+
 
   // ------------------------------------------------- violin grouping covariate
   //
@@ -1077,7 +1031,6 @@
     await installStudyTab();
     buildDatasetSelector();
     buildContrastSelector();
-    installDotPlotMode();
     installViolinCovariate();
     const catalog = await getJson("/api/catalog");
     SV.datasets = catalog.datasets || [];

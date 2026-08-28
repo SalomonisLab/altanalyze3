@@ -260,6 +260,26 @@ def detect_input_scaling(matrix, *, sample_rows=20000, seed=0, tol=1e-3):
         report["transform"] = "raw integer counts"
         return report
 
+    if hi > _LOG_INVERSE_CEILING:
+        # Values this large cannot be a log of anything: log1p of a million counts is 13.8, and
+        # the candidate loop above only inverts a log when hi <= _LOG_INVERSE_CEILING. The matrix
+        # is therefore LINEAR and not depth-normalized.
+        #
+        # AltAnalyze3 ambient RNA correction subtracts rho * n_j * b_g from each entry, so its
+        # corrected counts are linear but NOT integer and never satisfy frac_integer == 1.0.
+        # Before this branch they were classified 'unknown' and enforce_input_scaling refused
+        # them even under scale_data=True, which broke every ICGS3 and cellHarmony run that had
+        # ambient correction enabled.
+        #
+        # A log-transformed matrix that was never depth-normalized still falls through to
+        # 'unknown' below and is still refused, because its values sit under the ceiling. That
+        # case cannot be repaired: no counts are recoverable from it. Note that such a matrix
+        # can report best_transform == 'identity', because taking a log compresses depth
+        # variation, so the transform name must NOT be used to make this decision.
+        report["status"] = "counts_like"
+        report["transform"] = "linear non-integer counts, not depth-normalized"
+        return report
+
     report["status"] = "unknown"
     report["transform"] = "not depth-normalized"
     return report
@@ -542,11 +562,14 @@ def _build_heatmap_dataframe(
 
 
 def _assign_group_colors(groups: Sequence[str]) -> Dict[str, str]:
+    # `cm.rainbow(i / n)` sampled one continuous ramp, so the gap between neighbouring groups
+    # shrank as 1/n. Measured at 86 groups the minimum CIE DeltaE was 1.09, under the 2.3
+    # just-noticeable difference, so adjacent cell states drew as one colour. See
+    # visualization/palettes.py for the distance-maximising replacement.
+    from altanalyze3.components.visualization.palettes import categorical_palette
+
     unique_groups = pd.Index(groups).unique()
-    mapping = {}
-    for i, name in enumerate(unique_groups):
-        mapping[name] = to_hex(cm.rainbow(i / max(len(unique_groups), 1)))
-    return mapping
+    return categorical_palette(list(unique_groups))
 
 
 def _plot_marker_heatmap(

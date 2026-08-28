@@ -61,16 +61,17 @@ class ICGS3Config:
     modality: str = "rna"
     layer: Optional[str] = None
     input_normalized: bool = False
+    normalization: str = "auto"
     normalized_decimals: int = -1
     min_genes: Optional[int] = 500
     min_cells: Optional[int] = 5
     min_counts: Optional[int] = 1000
     mito_percent: Optional[float] = 30.0
     target_cells: Optional[int] = None
-    pagerank_cells: int = 5000
-    louvain_downsample_cutoff: int = 15000
+    pagerank_cells: int = 30000
+    louvain_downsample_cutoff: int = 30000
     pre_pagerank_cells: int = 0
-    downsample_var_genes: int = 500
+    downsample_var_genes: int = 3000
     retention_audit_obs: Optional[str] = "HLCA,TGEN-IPF"
     downsample_key: Optional[str] = None
     max_cells_per_group: Optional[int] = None
@@ -80,6 +81,8 @@ class ICGS3Config:
     n_pcs: int = 0
     max_auto_pcs: int = 50
     n_neighbors: int = 30
+    umap_min_dist: float = 0.75
+    umap_n_neighbors: int = 0
     leiden_resolution: float = 0.8
     batch_correction: str = "none"
     batch_key: Optional[str] = None
@@ -101,9 +104,52 @@ class ICGS3Config:
     nmf_runs: int = 1
     markerfinder_all_genes: bool = True
     resume_sampled_from: Optional[str] = None
+    # Path to an icgs3_downsample_features.h5ad written by a previous streamed run. When set,
+    # the streamed read, QC, normalization and variable-feature selection are skipped and that
+    # matrix is loaded instead, so a rerun after a late failure starts at the graph step. The
+    # skipped stage took 596.4 s on a 978,892-cell input and 242.6 s on a 302,922-cell one.
+    resume_downsample_from: Optional[str] = None
     intercorr_threshold: float = 0.4
     corr_n_events: int = 5
+    # Downsampling backends. Defaults reproduce the validated Annoy/pairwise behaviour exactly.
+    # "pynndescent" reads the sparse matrix directly (no dense copy), runs multithreaded, and
+    # measured 0.997 k-NN recall against exact brute force where Annoy measured 0.954.
+    # "centroid" ranks community members by distance to the centroid instead of building the full
+    # pairwise matrix; a 20,000-cell benchmark measured 0.9998 overlap on the cells kept.
+    load_mode: str = "auto"
+    load_memory_fraction: float = 0.25
+    knn_backend: str = "pynndescent"
+    knn_build_neighbors: int = 31
+    # Densify the k-NN input when its dense form fits this many GB. Set to 0.0 to restore the
+    # old sparse path.
+    #
+    # Default changed from 0.0 to 8.0 on 2026-08-22 after a five-arm benchmark on a
+    # 40,000-cell Basil-2022 subsample. The two graph builds fell from 108.2 s and 166.6 s to
+    # 12.0 s and 7.2 s, a factor of 14.3. Downsampling fell from 311.6 s to 55.6 s, and the
+    # whole run fell from 879 s to 603 s, a saving of 276 of 879 s (31.4%). Peak memory fell
+    # from 19.69 GB to 18.42 GB. The dense slab held 0.45 GB against 0.17 GB sparse.
+    #
+    # The clusters did not degrade. Of 58 HLCA populations, 24 held a cluster before and 25
+    # after: none lost, and Neuroendocrine gained, which the sparse arm missed entirely at
+    # 0 of 29 cells. Mean cluster purity rose from 0.823 to 0.847. The 46 to 42 cluster drop
+    # merged redundant splits inside populations rather than removing a cell type.
+    #
+    # -1.0 means auto: the budget becomes half of the free memory measured at the time of the
+    # build. A fixed constant does not work here. A 3,000-feature slab needs 1.73 GiB at
+    # 154,872 cells, 3.39 GiB at 302,922 and 10.94 GiB at 978,892, so any constant small
+    # enough to be safe on a laptop excludes the large inputs this option exists for.
+    knn_dense_max_gb: float = -1.0
+    fast_graph: bool = False
+    medoid_method: str = "centroid"
     rank_rel_threshold: float = 0.1
+    small_feature_rank: str = "auto"
+    # Over-/under-stained cell removal for antibody-derived tags. Off unless requested.
+    adt_occupancy_filter: bool = False
+    adt_occupancy_percent: float = 20.0
+    adt_occupancy_sd: float = 1.0
+    adt_occupancy_scale: str = "input"
+    adt_occupancy_scope: str = "all"
+    adt_occupancy_min_group: int = 10
     min_group_size: int = 3
     svm_min_decision_score: float = 0.0
     svm_reclassify_all_cells: bool = True
@@ -112,14 +158,36 @@ class ICGS3Config:
     biomarker_file: Optional[str] = None
     heatmap_cells_per_cluster: int = 0
     write_heatmap_expression_tsv: bool = False
+    write_heatmap_fold_matrix_tsv: bool = False
+    write_heatmap_altanalyze_tsv: bool = False
     heatmap_covariates: Optional[str] = None
-    heatmap_goelite_terms: bool = False
+    heatmap_goelite_terms: bool = True
     heatmap_goelite_max_terms: int = 30
     umap_feature_mode: str = "markerfinder"
     umap_covariates: Optional[str] = None
     umap_genes: Optional[str] = None
     write_h5ad: bool = True
     generate_umap: bool = True
+
+    def __post_init__(self) -> None:
+        # apply_modality_defaults resolves these too, but only main() calls it. Resolving
+        # here as well means a caller who builds the config directly can never reach
+        # `pearson_r >= None`, which pandas turns into an all-false mask.
+        _resolve_marker_gate(self)
+
+
+def _resolve_marker_gate(config: "ICGS3Config") -> None:
+    """Fill marker_rho and marker_min_per_cluster when a caller left them unset.
+
+    Both stay None until apply_modality_defaults runs, and only main() calls it. A direct
+    API caller therefore evaluated `pearson_r >= None`, which pandas turns into an all-false
+    mask: zero markers, no error. Resolving here closes that path.
+    """
+    modality = str(getattr(config, "modality", "rna")).lower()
+    if getattr(config, "marker_rho", None) is None:
+        config.marker_rho = 0.25 if modality == "adt" else 0.3
+    if getattr(config, "marker_min_per_cluster", None) is None:
+        config.marker_min_per_cluster = 1 if modality == "adt" else 2
 
 
 @dataclass
@@ -170,6 +238,8 @@ def cli_equivalent(config: ICGS3Config) -> str:
         cmd.extend(["--layer", config.layer])
     if config.input_normalized:
         cmd.append("--input-normalized")
+    if config.adt_occupancy_filter:
+        cmd.append("--adt-occupancy-filter")
     for flag, value in (
         ("--min-genes", config.min_genes),
         ("--normalized-decimals", config.normalized_decimals),
@@ -189,6 +259,8 @@ def cli_equivalent(config: ICGS3Config) -> str:
         ("--n-pcs", config.n_pcs),
         ("--max-auto-pcs", config.max_auto_pcs),
         ("--n-neighbors", config.n_neighbors),
+        ("--umap-min-dist", config.umap_min_dist),
+        ("--umap-n-neighbors", config.umap_n_neighbors),
         ("--leiden-resolution", config.leiden_resolution),
         ("--batch-correction", config.batch_correction),
         ("--batch-key", config.batch_key),
@@ -204,9 +276,23 @@ def cli_equivalent(config: ICGS3Config) -> str:
         ("--max-auto-nmf-k", config.max_auto_nmf_k),
         ("--nmf-runs", config.nmf_runs),
         ("--resume-sampled-from", config.resume_sampled_from),
+        ("--resume-downsample-from", config.resume_downsample_from),
         ("--intercorr-threshold", config.intercorr_threshold),
         ("--corr-n-events", config.corr_n_events),
+        ("--load-mode", config.load_mode),
+        ("--load-memory-fraction", config.load_memory_fraction),
+        ("--knn-backend", config.knn_backend),
+        ("--knn-build-neighbors", config.knn_build_neighbors),
+        ("--knn-dense-max-gb", config.knn_dense_max_gb),
+        ("--medoid-method", config.medoid_method),
         ("--rank-rel-threshold", config.rank_rel_threshold),
+        ("--small-feature-rank", config.small_feature_rank),
+        ("--normalization", config.normalization),
+        ("--adt-occupancy-percent", config.adt_occupancy_percent),
+        ("--adt-occupancy-sd", config.adt_occupancy_sd),
+        ("--adt-occupancy-scale", config.adt_occupancy_scale),
+        ("--adt-occupancy-scope", config.adt_occupancy_scope),
+        ("--adt-occupancy-min-group", config.adt_occupancy_min_group),
         ("--min-group-size", config.min_group_size),
         ("--svm-min-decision-score", config.svm_min_decision_score),
         ("--svm-chunk-size", config.svm_chunk_size),
@@ -225,10 +311,14 @@ def cli_equivalent(config: ICGS3Config) -> str:
     cmd.extend(["--cluster-key", config.cluster_key, "--marker-direction", config.marker_direction, "--species", config.species])
     if config.biomarker_file:
         cmd.extend(["--biomarker-file", config.biomarker_file])
+    if config.write_heatmap_altanalyze_tsv:
+        cmd.append("--write-heatmap-altanalyze-tsv")
     if config.write_heatmap_expression_tsv:
         cmd.append("--write-heatmap-expression-tsv")
-    if config.heatmap_goelite_terms:
-        cmd.append("--heatmap-goelite-terms")
+    if config.write_heatmap_fold_matrix_tsv:
+        cmd.append("--write-heatmap-fold-matrix-tsv")
+    if not config.heatmap_goelite_terms:
+        cmd.append("--no-heatmap-goelite-terms")
     cmd.extend(["--umap-feature-mode", config.umap_feature_mode])
     if config.umap_covariates:
         cmd.extend(["--umap-covariates", config.umap_covariates])
@@ -286,6 +376,897 @@ def _feature_paths_for_mtx(path: str) -> Tuple[str, str, str]:
     if not os.path.exists(barcodes):
         raise FileNotFoundError(f"Missing barcodes file for matrix prefix: {prefix}")
     return prefix, barcodes, features
+
+
+# --------------------------------------------------------------------------------------
+# Memory-aware h5ad loading
+#
+# The old loader read X AND every layer in full, then filtered. Peak memory was therefore
+# set by what the file contains rather than by what the analysis needs. On a 2.12M-cell
+# input that was 117 GB before a single step ran.
+#
+# Three changes fix that for every dataset, not one:
+#   1. Read X only. The counts layer is opened, reduced to three numbers per cell in row
+#      blocks, and closed. It is never held whole.
+#   2. Store column indices in the narrowest integer type the gene count allows. A file
+#      written with int64 indices wastes 4 bytes on every nonzero for no benefit.
+#   3. Choose direct or chunked reading from the h5ad header, which costs milliseconds and
+#      reads no data. Small inputs keep the old direct path exactly.
+# --------------------------------------------------------------------------------------
+
+def _h5ad_matrix_estimate(path: str) -> dict:
+    """Bytes each stored matrix would occupy in memory. Reads the header only."""
+    import h5py
+
+    out = {"path": path, "matrices": {}, "total_bytes": 0, "x_bytes": 0, "n_obs": 0, "n_vars": 0}
+    try:
+        with h5py.File(path, "r") as handle:
+            if "X" not in handle:
+                return out
+            shape = handle["X"].attrs.get("shape")
+            if shape is not None:
+                out["n_obs"], out["n_vars"] = int(shape[0]), int(shape[1])
+            targets = {"X": handle["X"]}
+            for name in handle.get("layers", {}):
+                targets[f"layers/{name}"] = handle["layers"][name]
+            for label, grp in targets.items():
+                if not hasattr(grp, "keys") or "data" not in grp:
+                    continue
+                nnz = int(grp["data"].shape[0])
+                per = int(grp["data"].dtype.itemsize) + int(grp["indices"].dtype.itemsize)
+                nbytes = nnz * per + int(grp["indptr"].shape[0]) * int(grp["indptr"].dtype.itemsize)
+                out["matrices"][label] = {"nnz": nnz, "bytes": nbytes,
+                                          "data_dtype": str(grp["data"].dtype),
+                                          "indices_dtype": str(grp["indices"].dtype)}
+                out["total_bytes"] += nbytes
+                if label == "X":
+                    out["x_bytes"] = nbytes
+    except Exception as exc:
+        out["error"] = f"{type(exc).__name__}: {exc}"
+    return out
+
+
+def _available_memory_bytes() -> Optional[int]:
+    try:
+        import psutil
+
+        return int(psutil.virtual_memory().available)
+    except ImportError:
+        pass
+    except Exception as exc:
+        _log(f"psutil memory probe failed ({type(exc).__name__}: {exc})")
+    try:  # macOS and Linux fallback without psutil
+        import subprocess
+
+        if sys.platform == "darwin":
+            page = int(subprocess.check_output(["sysctl", "-n", "hw.pagesize"]).split()[0])
+            stats = subprocess.check_output(["vm_stat"]).decode()
+            # Free plus speculative alone under-reports what macOS can hand back. Inactive and
+            # purgeable pages are reclaimable too. Measured 2026-08-22 on a 64.00 GB machine:
+            # free+speculative gave 24.45 GB where free+speculative+inactive gave 38.26 GB.
+            counts = {"Pages free:": 0, "Pages speculative:": 0,
+                      "Pages inactive:": 0, "Pages purgeable:": 0}
+            for line in stats.splitlines():
+                for key in counts:
+                    if line.startswith(key):
+                        counts[key] = int(line.split()[-1].rstrip("."))
+            return sum(counts.values()) * page
+        with open("/proc/meminfo") as handle:
+            for line in handle:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except Exception:
+        pass
+    return None
+
+
+def _match_index_dtypes(matrix):
+    """Give indices and indptr the same integer dtype.
+
+    scipy 1.14.1 has no sparsetools template for int32 indices beside an int64 indptr, and
+    csr_sort_indices raises "Output dtype not compatible with inputs" on that pair. The COPD
+    run of 2026-08-22 died there after 29 minutes: 2,119,504 cells x 3,000 features with
+    358,637,727 nonzeros, indices int32 and indptr int64. pynndescent calls sort_indices only
+    when a matrix arrives unsorted, which is why the pair stayed hidden until the streamed
+    path produced one.
+
+    int32 whenever the nonzero count fits it, int64 for both otherwise.
+    """
+    if not sp.issparse(matrix) or not hasattr(matrix, "indptr"):
+        return matrix
+    nnz = int(matrix.indptr[-1]) if matrix.indptr.size else 0
+    want = np.int32 if nnz <= np.iinfo(np.int32).max else np.int64
+    if matrix.indices.dtype != want:
+        matrix.indices = matrix.indices.astype(want, copy=False)
+    if matrix.indptr.dtype != want:
+        matrix.indptr = matrix.indptr.astype(want, copy=False)
+    return matrix
+
+
+def _shrink_indices(matrix, n_vars: int):
+    """Use int32 column indices when the gene count fits. Same values, one third less memory."""
+    if not sp.issparse(matrix):
+        return matrix
+    matrix = matrix.tocsr()
+    if n_vars < np.iinfo(np.int32).max and matrix.indices.dtype != np.int32:
+        matrix.indices = matrix.indices.astype(np.int32, copy=False)
+    return _match_index_dtypes(matrix)
+
+
+def _order_by_position(names: Sequence[str], reference: pd.Index) -> List[str]:
+    """Order names by their position in reference, with one vectorised lookup.
+
+    The previous form was sorted(set(names), key=lambda x: reference.get_loc(x)). get_loc
+    returns an integer only when reference is unique; on a duplicated index it returns a
+    boolean mask, so the sort either raises or scans the index once per element. At 978,892
+    cells that second case costs about 9.6e11 comparisons.
+    """
+    if not reference.is_unique:
+        dup = int(pd.Index(reference).duplicated().sum())
+        raise ValueError(
+            f"obs_names holds {dup} duplicate barcodes of {len(reference)}. ICGS3 orders cells "
+            "by position and cannot resolve a duplicate. Make the barcodes unique first.")
+    unique_names = pd.Index(pd.unique(pd.Index(list(names)).astype(str)))
+    positions = reference.astype(str).get_indexer(unique_names)
+    if np.any(positions < 0):
+        missing = int(np.sum(positions < 0))
+        raise ValueError(f"{missing} of {len(unique_names)} barcodes are absent from obs_names")
+    return [str(unique_names[i]) for i in np.argsort(positions, kind="stable")]
+
+
+def _ragged_positions(lo: np.ndarray, lens: np.ndarray) -> np.ndarray:
+    """Row starts plus lengths expanded to the flat entry positions they cover."""
+    total = int(lens.sum())
+    if total == 0:
+        return np.empty(0, dtype=np.int64)
+    starts = np.cumsum(lens) - lens
+    return np.repeat(lo - starts, lens) + np.arange(total, dtype=np.int64)
+
+
+def _row_blocks(lens: np.ndarray, target_block_nnz: int):
+    """Yield (start, stop) row ranges holding about target_block_nnz entries each."""
+    n = lens.size
+    if n == 0:
+        return
+    cum = np.cumsum(lens)
+    pos = 0
+    while pos < n:
+        base = int(cum[pos - 1]) if pos else 0
+        stop = int(np.searchsorted(cum, base + int(target_block_nnz), side="right")) + 1
+        stop = min(max(stop, pos + 1), n)
+        yield pos, stop
+        pos = stop
+
+
+def _csr_column_nnz(matrix, row_mask: Optional[np.ndarray] = None,
+                    target_block_nnz: int = 20_000_000) -> np.ndarray:
+    """Nonzero count per column over row_mask rows, without building the row subset.
+
+    Equivalent to np.bincount(matrix[row_mask].indices, minlength=n_vars), but it never
+    materialises matrix[row_mask].
+    """
+    n_vars = int(matrix.shape[1])
+    if row_mask is None:
+        return np.bincount(matrix.indices, minlength=n_vars)
+    row_mask = np.asarray(row_mask, dtype=bool)
+    if bool(row_mask.all()):
+        return np.bincount(matrix.indices, minlength=n_vars)
+    kept = np.flatnonzero(row_mask)
+    indptr = matrix.indptr.astype(np.int64, copy=False)
+    lo_all = indptr[kept]
+    len_all = indptr[kept + 1] - lo_all
+    counts = np.zeros(n_vars, dtype=np.int64)
+    for start, stop in _row_blocks(len_all, target_block_nnz):
+        src = _ragged_positions(lo_all[start:stop], len_all[start:stop])
+        if src.size:
+            counts += np.bincount(matrix.indices[src], minlength=n_vars)
+    return counts
+
+
+def _csr_compact_inplace(matrix, row_mask: Optional[np.ndarray] = None,
+                         col_mask: Optional[np.ndarray] = None,
+                         target_block_nnz: int = 20_000_000):
+    """Return matrix[row_mask][:, col_mask] by moving entries forward inside matrix's arrays.
+
+    Fancy indexing allocates a second matrix before the first is released, so a 28.5 GB X
+    needs 57 GB. Here the kept entries are moved toward the front of the arrays that already
+    hold them, then the arrays are shrunk. The write cursor can never pass the read cursor
+    because entries are only ever dropped, so the move cannot overwrite unread input. Extra
+    memory is one block, not one matrix.
+
+    The caller must own matrix; it is destroyed in place.
+    """
+    if not sp.isspmatrix_csr(matrix):
+        matrix = matrix.tocsr()
+    n_rows, n_cols = int(matrix.shape[0]), int(matrix.shape[1])
+    data, indices = matrix.data, matrix.indices
+    indptr = matrix.indptr.astype(np.int64, copy=False)
+
+    kept_rows = (np.arange(n_rows, dtype=np.int64) if row_mask is None
+                 else np.flatnonzero(np.asarray(row_mask, dtype=bool)))
+    if col_mask is None:
+        col_remap, n_new_cols = None, n_cols
+    else:
+        col_mask = np.asarray(col_mask, dtype=bool)
+        n_new_cols = int(col_mask.sum())
+        col_remap = np.full(n_cols, -1, dtype=np.int64)
+        col_remap[col_mask] = np.arange(n_new_cols, dtype=np.int64)
+
+    lo_all = indptr[kept_rows]
+    len_all = indptr[kept_rows + 1] - lo_all
+    new_indptr = np.zeros(kept_rows.size + 1, dtype=np.int64)
+
+    # _row_blocks cuts on row boundaries, so when every row is kept a block's entries are one
+    # contiguous range and no source-index array is needed. That case is the column-only subset,
+    # which the gene filter runs on the full matrix.
+    rows_contiguous = row_mask is None or kept_rows.size == n_rows
+
+    write = 0
+    for start, stop in _row_blocks(len_all, target_block_nnz):
+        lens = len_all[start:stop]
+        ends = np.cumsum(lens)
+        starts = ends - lens
+        if rows_contiguous:
+            lo = int(lo_all[start])
+            hi = lo + int(lens.sum())
+            src_data, src_indices = data[lo:hi], indices[lo:hi]
+        else:
+            src = _ragged_positions(lo_all[start:stop], lens)
+            src_data, src_indices = data[src], indices[src]
+        if col_remap is None:
+            new_data, new_cols, per_row = src_data, src_indices, lens
+        else:
+            mapped = col_remap[src_indices] if src_indices.size else np.empty(0, dtype=np.int64)
+            sel = mapped >= 0
+            new_data = src_data[sel]
+            new_cols = mapped[sel]
+            # Cumulative-sum differences rather than np.add.reduceat: reduceat raises when a
+            # trailing row is empty, because its offset then equals the array length.
+            cs = np.concatenate((np.zeros(1, dtype=np.int64), np.cumsum(sel.astype(np.int64))))
+            per_row = cs[ends] - cs[starts]
+        n = int(new_data.size)
+        if n:
+            # new_data/new_cols are already separate buffers whenever anything was dropped, and
+            # when nothing was dropped the destination equals the source, so the move is safe.
+            data[write:write + n] = new_data
+            indices[write:write + n] = new_cols
+        new_indptr[start + 1:stop + 1] = write + np.cumsum(per_row)
+        write += n
+
+    for name, arr in (("data", data), ("indices", indices)):
+        try:
+            arr.resize(write, refcheck=False)
+        except ValueError:
+            # numpy refuses to shrink an array that does not own its buffer. The slice below
+            # still avoids a second full matrix, but the tail stays resident, so say so.
+            held = (arr.size - write) * arr.itemsize / (1024 ** 3)
+            _log(f"compaction could not shrink {name} in place; {held:.2f} GB stays resident")
+    out = sp.csr_matrix((kept_rows.size, n_new_cols), dtype=data.dtype)
+    out.data = data[:write]
+    out.indices = indices[:write]
+    out.indptr = new_indptr
+    return out
+
+
+def _subset_adata_compact(adata: ad.AnnData, row_mask: Optional[np.ndarray] = None,
+                          col_mask: Optional[np.ndarray] = None) -> ad.AnnData:
+    """adata[row_mask, col_mask].copy() without ever holding two full matrices.
+
+    Every matrix is detached first, so anndata subsets a light shell and obs, var, obsm,
+    varm, obsp, varp and uns follow exactly the rules they followed before. Each detached
+    matrix is then compacted in place and reattached.
+    """
+    n_obs, n_vars = int(adata.n_obs), int(adata.n_vars)
+    row_mask = np.ones(n_obs, dtype=bool) if row_mask is None else np.asarray(row_mask, dtype=bool)
+    col_mask = np.ones(n_vars, dtype=bool) if col_mask is None else np.asarray(col_mask, dtype=bool)
+    if bool(row_mask.all()) and bool(col_mask.all()):
+        return adata
+
+    detached = []
+    if adata.X is not None:
+        detached.append((None, adata.X))
+        adata.X = None
+    for name in list(getattr(adata, "layers", {}).keys()):
+        detached.append((name, adata.layers[name]))
+        del adata.layers[name]
+
+    shell = adata[row_mask, col_mask].copy()
+
+    done = {}
+    for name, matrix in detached:
+        key = id(matrix)
+        if key not in done:
+            if sp.issparse(matrix):
+                done[key] = _csr_compact_inplace(matrix, row_mask, col_mask)
+            else:
+                done[key] = np.asarray(matrix)[row_mask][:, col_mask]
+        if name is None:
+            shell.X = done[key]
+        else:
+            shell.layers[name] = done[key]
+    return shell
+
+
+def _counts_qc_stats_chunked(path: str, layer: str, n_obs: int, mito_mask: np.ndarray,
+                             chunk: int = 50000) -> Optional[dict]:
+    """Per-cell total counts, genes detected and mitochondrial fraction, read in row blocks.
+
+    Returns three arrays of length n_obs. The counts matrix is never held whole.
+    """
+    import h5py
+
+    try:
+        with h5py.File(path, "r") as handle:
+            grp = handle["layers"][layer]
+            indptr = grp["indptr"][:]
+            data, indices = grp["data"], grp["indices"]
+            totals = np.zeros(n_obs, dtype=np.float64)
+            detected = np.zeros(n_obs, dtype=np.int64)
+            mito = np.zeros(n_obs, dtype=np.float64)
+            for start in range(0, n_obs, chunk):
+                stop = min(start + chunk, n_obs)
+                lo, hi = int(indptr[start]), int(indptr[stop])
+                if hi <= lo:
+                    continue
+                block_data = data[lo:hi]
+                block_idx = indices[lo:hi]
+                bounds = indptr[start:stop + 1] - lo
+                totals[start:stop] = np.add.reduceat(block_data, bounds[:-1]) * (np.diff(bounds) > 0)
+                detected[start:stop] = np.diff(bounds)
+                if mito_mask is not None and mito_mask.any():
+                    is_mito = mito_mask[block_idx]
+                    mito[start:stop] = np.add.reduceat(block_data * is_mito, bounds[:-1]) * (np.diff(bounds) > 0)
+            return {"total_counts": totals, "n_genes": detected, "mito_counts": mito}
+    except Exception as exc:
+        _log(f"chunked counts scan failed ({type(exc).__name__}: {exc}); falling back to direct load")
+        return None
+
+
+_H5AD_STREAM_TARGET_NNZ = 5_000_000
+
+
+def _h5ad_read_elem():
+    """Return the AnnData element reader available in this environment."""
+    try:
+        from anndata.experimental import read_elem
+        return read_elem
+    except Exception:
+        try:
+            from anndata._io.specs import read_elem
+            return read_elem
+        except Exception as exc:
+            raise ImportError("AnnData does not expose read_elem; streamed h5ad loading is unavailable") from exc
+
+
+def _h5ad_csr_group(handle, name: Optional[str] = None):
+    """Resolve one row-oriented CSR matrix from an h5ad handle."""
+    group = handle["X"] if not name else handle["layers"][name]
+    shape = group.attrs.get("shape")
+    encoding = str(group.attrs.get("encoding-type", ""))
+    if encoding != "csr_matrix" or shape is None or not all(key in group for key in ("data", "indices", "indptr")):
+        label = "X" if not name else f"layers['{name}']"
+        raise ValueError(f"{label} is not CSR; streamed ICGS3 loading requires CSR h5ad storage")
+    return group, (int(shape[0]), int(shape[1]))
+
+
+def _h5ad_metadata(path: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Read only obs and var; X, layers, and graph slots stay on disk."""
+    import h5py
+
+    read_elem = _h5ad_read_elem()
+    with h5py.File(path, "r") as handle:
+        return read_elem(handle["obs"]), read_elem(handle["var"])
+
+
+def _h5ad_probe_scale(path: str, group_name: Optional[str], n_vars: int, sample_rows: int = 2000) -> dict:
+    """Classify a small leading CSR slice without loading the source matrix."""
+    import h5py
+
+    with h5py.File(path, "r") as handle:
+        group, shape = _h5ad_csr_group(handle, group_name)
+        n_probe = min(int(sample_rows), int(shape[0]))
+        indptr = np.asarray(group["indptr"][:n_probe + 1], dtype=np.int64)
+        lo, hi = int(indptr[0]), int(indptr[-1])
+        data = np.asarray(group["data"][lo:hi])
+        indices = np.asarray(group["indices"][lo:hi], dtype=np.int64)
+    matrix = sp.csr_matrix((data, indices, indptr - lo), shape=(n_probe, n_vars))
+    return infer_expression_scale(matrix, name="selected h5ad analysis matrix", sample_cells=n_probe)
+
+
+def _h5ad_row_lengths(indptr: np.ndarray, start: int, stop: int) -> np.ndarray:
+    return np.diff(indptr[start:stop + 1]).astype(np.int64, copy=False)
+
+
+def _h5ad_row_totals(data: np.ndarray, lengths: np.ndarray) -> np.ndarray:
+    """Sum CSR rows without reduceat's empty-row failure mode."""
+    totals = np.zeros(lengths.size, dtype=np.float64)
+    nonempty = lengths > 0
+    if np.any(nonempty):
+        starts = np.cumsum(lengths) - lengths
+        totals[nonempty] = np.add.reduceat(np.asarray(data, dtype=np.float64), starts[nonempty])
+    return totals
+
+
+def _h5ad_transform_entries(values: np.ndarray, row_ids: np.ndarray, row_totals: np.ndarray,
+                            mode: str) -> np.ndarray:
+    """Apply ICGS3's expression scale to one sparse row block."""
+    out = np.asarray(values, dtype=np.float32)
+    if mode in {"cp10k-log1p", "cp10k"}:
+        denom = np.maximum(np.asarray(row_totals, dtype=np.float64)[row_ids], 1.0)
+        out = out.astype(np.float64, copy=False) / denom * 1e4
+        if mode == "cp10k-log1p":
+            out = np.log1p(out)
+        out = np.asarray(out, dtype=np.float32)
+    elif mode == "log1p":
+        out = np.log1p(out.astype(np.float64, copy=False)).astype(np.float32)
+    return out
+
+
+def _h5ad_stream_qc_scale_probe(path: str, group_name: str, n_sample: int = 2_000_000) -> dict:
+    """Is the QC group integer counts? Read a spread of blocks, never the whole array."""
+    import h5py
+
+    with h5py.File(path, "r") as handle:
+        group = handle["layers"][group_name] if group_name in handle.get("layers", {}) else handle[group_name]
+        data = group["data"]
+        total = int(data.shape[0])
+        block = max(1, min(200_000, total))
+        starts = np.linspace(0, max(total - block, 0), 10, dtype=np.int64)
+        seen = 0
+        integral = 0
+        largest = 0.0
+        for start in starts:
+            chunk = np.asarray(data[int(start):int(start) + block], dtype=np.float64)
+            if chunk.size == 0:
+                continue
+            seen += chunk.size
+            integral += int(np.isclose(chunk, np.rint(chunk)).sum())
+            largest = max(largest, float(chunk.max()))
+    return {"n": seen, "integer_fraction": (integral / seen) if seen else 1.0, "max": largest}
+
+
+def _h5ad_stream_row_stats(path: str, group_name: Optional[str], n_obs: int,
+                           mito_mask: np.ndarray, target_nnz: int = _H5AD_STREAM_TARGET_NNZ) -> dict:
+    """Read row QC statistics from a CSR h5ad matrix without constructing AnnData."""
+    import h5py
+
+    totals = np.zeros(n_obs, dtype=np.float64)
+    detected = np.zeros(n_obs, dtype=np.int64)
+    mito = np.zeros(n_obs, dtype=np.float64)
+    with h5py.File(path, "r") as handle:
+        group, shape = _h5ad_csr_group(handle, group_name)
+        indptr = np.asarray(group["indptr"][:], dtype=np.int64)
+        if shape[0] != n_obs:
+            raise ValueError(f"h5ad row count changed while reading {path}")
+        for start, stop in _row_blocks(_h5ad_row_lengths(indptr, 0, n_obs), target_nnz):
+            lengths = _h5ad_row_lengths(indptr, start, stop)
+            lo, hi = int(indptr[start]), int(indptr[stop])
+            data = group["data"][lo:hi]
+            indices = np.asarray(group["indices"][lo:hi], dtype=np.int64)
+            totals[start:stop] = _h5ad_row_totals(data, lengths)
+            detected[start:stop] = lengths
+            if mito_mask is not None and mito_mask.any() and hi > lo:
+                mito[start:stop] = _h5ad_row_totals(np.asarray(data) * mito_mask[indices], lengths)
+    return {"total_counts": totals, "n_genes": detected, "mito_counts": mito}
+
+
+def _h5ad_stream_feature_stats(path: str, group_name: Optional[str], row_keep: np.ndarray,
+                               gene_keep: np.ndarray, mode: str,
+                               target_nnz: int = _H5AD_STREAM_TARGET_NNZ) -> dict:
+    """Compute feature moments and detection counts in row-oriented HDF5 blocks."""
+    import h5py
+
+    row_keep = np.asarray(row_keep, dtype=bool)
+    gene_keep = np.asarray(gene_keep, dtype=bool)
+    n_obs, n_vars = row_keep.size, gene_keep.size
+    sums = np.zeros(n_vars, dtype=np.float64)
+    squares = np.zeros(n_vars, dtype=np.float64)
+    detected = np.zeros(n_vars, dtype=np.int64)
+    with h5py.File(path, "r") as handle:
+        group, shape = _h5ad_csr_group(handle, group_name)
+        indptr = np.asarray(group["indptr"][:], dtype=np.int64)
+        if shape != (n_obs, n_vars):
+            raise ValueError(f"h5ad matrix shape changed while reading {path}: {shape} != {(n_obs, n_vars)}")
+        for start, stop in _row_blocks(_h5ad_row_lengths(indptr, 0, n_obs), target_nnz):
+            lengths = _h5ad_row_lengths(indptr, start, stop)
+            lo, hi = int(indptr[start]), int(indptr[stop])
+            if hi <= lo:
+                continue
+            data = np.asarray(group["data"][lo:hi])
+            indices = np.asarray(group["indices"][lo:hi], dtype=np.int64)
+            row_ids = np.repeat(np.arange(stop - start, dtype=np.int32), lengths)
+            block_totals = _h5ad_row_totals(data, lengths)
+            entry_keep = row_keep[start:stop][row_ids] & gene_keep[indices]
+            if not np.any(entry_keep):
+                continue
+            idx = indices[entry_keep]
+            vals = _h5ad_transform_entries(data[entry_keep], row_ids[entry_keep], block_totals, mode)
+            sums += np.bincount(idx, weights=vals.astype(np.float64), minlength=n_vars)
+            squares += np.bincount(idx, weights=np.square(vals.astype(np.float64)), minlength=n_vars)
+            detected += np.bincount(idx, minlength=n_vars)
+    return {"sum": sums, "sum_sq": squares, "detected": detected}
+
+
+def _h5ad_stream_reduced_matrix(path: str, group_name: Optional[str], row_keep: np.ndarray,
+                                feature_index: np.ndarray, mode: str,
+                                target_nnz: int = _H5AD_STREAM_TARGET_NNZ) -> sp.csr_matrix:
+    """Materialize only post-QC cells and selected features from a CSR h5ad."""
+    import h5py
+
+    row_keep = np.asarray(row_keep, dtype=bool)
+    feature_index = np.asarray(feature_index, dtype=np.int64)
+    n_obs = row_keep.size
+    with h5py.File(path, "r") as handle:
+        group, shape = _h5ad_csr_group(handle, group_name)
+        indptr = np.asarray(group["indptr"][:], dtype=np.int64)
+        if shape[0] != n_obs:
+            raise ValueError(f"h5ad row count changed while reading {path}")
+        remap = np.full(shape[1], -1, dtype=np.int64)
+        remap[feature_index] = np.arange(feature_index.size, dtype=np.int64)
+        kept_rows = np.flatnonzero(row_keep)
+        output_indptr = np.zeros(kept_rows.size + 1, dtype=np.int64)
+        data_parts, index_parts = [], []
+        write_rows = 0
+        for start, stop in _row_blocks(_h5ad_row_lengths(indptr, 0, n_obs), target_nnz):
+            lengths = _h5ad_row_lengths(indptr, start, stop)
+            lo, hi = int(indptr[start]), int(indptr[stop])
+            kept_local = row_keep[start:stop]
+            n_kept = int(kept_local.sum())
+            if hi <= lo:
+                base = output_indptr[write_rows]
+                output_indptr[write_rows + 1:write_rows + n_kept + 1] = base
+                write_rows += n_kept
+                continue
+            data = np.asarray(group["data"][lo:hi])
+            indices = np.asarray(group["indices"][lo:hi], dtype=np.int64)
+            row_ids = np.repeat(np.arange(stop - start, dtype=np.int32), lengths)
+            mapped = remap[indices]
+            entry_keep = kept_local[row_ids] & (mapped >= 0)
+            if np.any(entry_keep):
+                local_rows = row_ids[entry_keep]
+                kept_positions = np.searchsorted(np.flatnonzero(kept_local), local_rows)
+                block_totals = _h5ad_row_totals(data, lengths)
+                values = _h5ad_transform_entries(data[entry_keep], local_rows, block_totals, mode)
+                cols = mapped[entry_keep].astype(np.int32, copy=False)
+                per_row = np.bincount(kept_positions, minlength=n_kept).astype(np.int64, copy=False)
+                data_parts.append(values)
+                index_parts.append(cols)
+            else:
+                per_row = np.zeros(n_kept, dtype=np.int64)
+            output_indptr[write_rows + 1:write_rows + n_kept + 1] = (
+                output_indptr[write_rows] + np.cumsum(per_row)
+            )
+            write_rows += n_kept
+        out = sp.csr_matrix((kept_rows.size, feature_index.size), dtype=np.float32)
+        out.data = np.concatenate(data_parts) if data_parts else np.empty(0, dtype=np.float32)
+        out.indices = np.concatenate(index_parts) if index_parts else np.empty(0, dtype=np.int32)
+        out.indptr = output_indptr
+        return out
+
+
+def _h5ad_stream_supported(path: str, config: "ICGS3Config") -> bool:
+    """Return whether the selected h5ad matrix can be consumed row-wise."""
+    import h5py
+
+    try:
+        with h5py.File(path, "r") as handle:
+            _h5ad_csr_group(handle, config.layer)
+            if config.layer is None and "layers" in handle and "counts" in handle["layers"]:
+                _h5ad_csr_group(handle, "counts")
+        return True
+    except Exception as exc:
+        _log(f"streamed h5ad path unavailable: {type(exc).__name__}: {exc}")
+        return False
+
+
+def _should_stream_h5ad(path: str, config: "ICGS3Config") -> bool:
+    mode = str(config.load_mode).lower()
+    if mode == "direct":
+        return False
+    supported = _h5ad_stream_supported(path, config)
+    if not supported:
+        if mode == "chunked":
+            raise ValueError("--load-mode chunked requires CSR X and CSR selected/counts layers")
+        return False
+    if mode == "chunked":
+        return True
+    estimate = _h5ad_matrix_estimate(path)
+    free = _available_memory_bytes()
+    if free is None or estimate.get("error"):
+        return True
+    return estimate.get("total_bytes", 0) > free * float(config.load_memory_fraction)
+
+
+def build_h5ad_downsample_matrix(path: str, config: "ICGS3Config", *, output_dir: Optional[str] = None) -> ad.AnnData:
+    """Build the all-cell variable-feature matrix used for large-h5ad downsampling."""
+    import h5py
+
+    path = os.path.abspath(path)
+    if not _h5ad_stream_supported(path, config):
+        raise ValueError("build_h5ad_downsample_matrix requires CSR h5ad storage")
+    obs, var = _h5ad_metadata(path)
+    metadata = ad.AnnData(
+        X=sp.csr_matrix((len(obs), len(var)), dtype=np.float32),
+        obs=obs.copy(),
+        var=var.copy(),
+    )
+    metadata.var_names_make_unique()
+    var = metadata.var.copy()
+    var_names = pd.Index(metadata.var_names.astype(str))
+    n_obs, n_vars = len(obs), len(var)
+    if n_obs == 0 or n_vars == 0:
+        raise ValueError(f"h5ad contains no cells or features: {path}")
+    if config.modality.lower() == "rna":
+        filtered = apply_rna_unsupervised_gene_filter(metadata, config, outdir=None)
+        gene_keep = var_names.isin(filtered.var_names.astype(str))
+    else:
+        gene_keep = np.ones(n_vars, dtype=bool)
+
+    mito_mask = np.asarray(var_names.str.upper().str.startswith("MT-"), dtype=bool)
+    qc_group = config.layer
+    with h5py.File(path, "r") as handle:
+        if qc_group is None and "layers" in handle and "counts" in handle["layers"]:
+            qc_group = "counts"
+        _, shape = _h5ad_csr_group(handle, config.layer)
+    qc = _h5ad_stream_row_stats(path, qc_group, n_obs, mito_mask)
+
+    # The non-streamed path calls report_expression_scale, which skips the count-based filters
+    # when layers['counts'] does not hold counts. This path ran before that check and applied
+    # them regardless. On COPD_combined the layer holds log values: 1,280,233 of 2,000,000
+    # sampled values are non-integer and the maximum is 8.4886, so --min-counts compared a
+    # threshold of 1000 against a per-cell sum of log1p values with a median of 3,040.2, and
+    # --mito-percent compared a ratio of log sums. Check the scale here as well.
+    counts_are_counts = True
+    if qc_group is not None:
+        probe = _h5ad_stream_qc_scale_probe(path, qc_group)
+        counts_are_counts = bool(probe["integer_fraction"] >= 0.99)
+        if not counts_are_counts:
+            _log(f"WARNING streamed QC: '{qc_group}' does not hold counts "
+                 f"({100.0 * (1.0 - probe['integer_fraction']):.1f}% of {probe['n']} sampled values "
+                 f"are non-integer, maximum {probe['max']:.4f}). SKIPPING --min-counts and "
+                 f"--mito-percent, which would otherwise read a log scale as sequencing depth. "
+                 f"--min-genes still applies; it counts detected features and does not depend on scale.")
+
+    row_keep = np.ones(n_obs, dtype=bool)
+    if config.min_genes is not None and config.min_genes > 0:
+        row_keep &= qc["n_genes"] >= int(config.min_genes)
+    if config.min_counts is not None and config.min_counts > 0 and counts_are_counts:
+        row_keep &= qc["total_counts"] >= float(config.min_counts)
+    if config.mito_percent is not None and counts_are_counts:
+        pct = np.divide(qc["mito_counts"], np.maximum(qc["total_counts"], 1e-12)) * 100.0
+        row_keep &= pct < float(config.mito_percent)
+    if not np.any(row_keep):
+        raise ValueError("streamed h5ad QC retained no cells")
+
+    mode = resolve_normalization(config)
+    scale = _h5ad_probe_scale(path, config.layer, n_vars)
+    if mode != "none" and scale.get("verdict") in {"log", "centered"}:
+        raise ExpressionScaleError(
+            f"{scale['reason']}. The selected h5ad matrix is already transformed, so the streamed "
+            "path will not normalize it a second time. Re-run with --input-normalized "
+            "--normalization none, or explicitly select a raw-count layer with --layer."
+        )
+    stats = _h5ad_stream_feature_stats(path, config.layer, row_keep, gene_keep, mode)
+    n_kept = int(row_keep.sum())
+    means = stats["sum"] / float(n_kept)
+    variances = np.maximum(stats["sum_sq"] / float(n_kept) - means ** 2, 0.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        dispersion = np.divide(variances, means, out=np.zeros_like(variances), where=means != 0)
+    candidate = gene_keep & (stats["detected"] > 5) & np.isfinite(dispersion)
+    if not np.any(candidate):
+        candidate = gene_keep & np.isfinite(dispersion)
+    order = np.flatnonzero(candidate)[np.argsort(dispersion[candidate])[::-1]]
+    n_features = int(config.downsample_var_genes or 0)
+    if n_features <= 0:
+        n_features = int(candidate.sum())
+    feature_index = order[:min(n_features, order.size)]
+    if feature_index.size == 0:
+        raise ValueError("streamed h5ad feature selection retained no features")
+
+    reduced_x = _h5ad_stream_reduced_matrix(path, config.layer, row_keep, feature_index, mode)
+    reduced = ad.AnnData(
+        X=reduced_x,
+        obs=obs.iloc[np.flatnonzero(row_keep)].copy(),
+        var=var.iloc[feature_index].copy(),
+    )
+    reduced.var["ICGS_unsupervised_gene_filter"] = True
+    reduced.var["icgs3_feature"] = True
+    # run_canonical_heatmap branches on this key to decide what to hand MarkerFinder. Only
+    # prepare_expression set it, and the streamed path never calls prepare_expression, so the
+    # key was absent, every correct branch was skipped, and the heatmap passed a log-scale X
+    # unscaled. MarkerFinder's enforce_input_scaling then rejected the run with
+    # "not depth-normalized" after 1 h 55 m, at the last step. The UPenn run of 2026-08-23
+    # failed exactly there.
+    reduced.uns["icgs3_normalization_mode"] = mode
+    reduced.uns["icgs3_streaming_downsample"] = {
+        "source_h5ad": path,
+        "source_shape": [int(shape[0]), int(shape[1])],
+        "source_layer": config.layer or "X",
+        "qc_cells": int(row_keep.sum()),
+        "source_features": int(n_vars),
+        "selected_features": int(feature_index.size),
+        "normalization": mode,
+        "feature_statistic": "variance_over_mean_on_streamed_rows",
+        "feature_detection_cutoff": 5,
+    }
+    outdir = output_dir or config.output_dir
+    if outdir:
+        os.makedirs(os.path.join(outdir, "sNMF"), exist_ok=True)
+        pd.DataFrame({
+            "feature": reduced.var_names.astype(str),
+            "dispersion": dispersion[feature_index],
+            "detected": stats["detected"][feature_index],
+        }).to_csv(os.path.join(outdir, "sNMF", "icgs3_downsample_variable_features.tsv"), sep="\t", index=False)
+        reduced_path = os.path.join(outdir, "sNMF", "icgs3_downsample_features.h5ad")
+        reduced.uns["icgs3_streaming_downsample"]["reduced_h5ad"] = reduced_path
+        try:
+            reduced.write_h5ad(reduced_path, compression="lzf")
+        except Exception:
+            reduced.write_h5ad(reduced_path, compression="gzip")
+        _log(
+            f"streamed h5ad downsample matrix: {reduced.n_obs} cells x {reduced.n_vars} features; "
+            f"source {n_obs} x {n_vars}; wrote {reduced_path}"
+        )
+    return reduced
+
+
+
+def _read_h5ad_streaming(path: str, est: dict) -> Optional[ad.AnnData]:
+    """Assemble X from disk in entry blocks and leave every other matrix on disk.
+
+    sc.read_h5ad materialises X and every layer before the caller can release anything, so a
+    file holding a 38 GB X and a 38 GB counts layer needs 76 GB before the first filter runs.
+    This reader allocates the finished X once, fills it block by block, and never touches
+    layers, so the peak is the finished X alone. It also narrows the column indices to int32
+    during the read rather than after it.
+
+    The AnnData returned matches what the direct reader produces once the counts layer is
+    released and the indices are narrowed, so no downstream step can tell the two apart.
+    Returns None when the file layout is not one this reader handles, and the caller then
+    falls back to the direct load.
+    """
+    import h5py
+
+    try:
+        from anndata.experimental import read_elem
+    except Exception:
+        try:
+            from anndata._io.specs import read_elem
+        except Exception as exc:
+            _log(f"streaming reader unavailable ({type(exc).__name__}: {exc}); using the "
+                 "direct load, which holds every matrix at once")
+            return None
+
+    try:
+        with h5py.File(path, "r") as handle:
+            if "raw" in handle:
+                return None
+            group = handle.get("X")
+            if group is None or not hasattr(group, "keys") or "data" not in group:
+                return None
+            if str(group.attrs.get("encoding-type", "")) != "csr_matrix":
+                return None
+            shape = group.attrs.get("shape")
+            if shape is None:
+                return None
+            n_obs, n_vars = int(shape[0]), int(shape[1])
+            indptr = np.asarray(group["indptr"][:], dtype=np.int64)
+            nnz = int(indptr[-1])
+            data_src, index_src = group["data"], group["indices"]
+            data = np.empty(nnz, dtype=data_src.dtype)
+            narrow = n_vars <= np.iinfo(np.int32).max
+            indices = np.empty(nnz, dtype=np.int32 if narrow else index_src.dtype)
+            block = 32_000_000
+            read = 0
+            while read < nnz:
+                stop = min(read + block, nnz)
+                data_src.read_direct(data, np.s_[read:stop], np.s_[read:stop])
+                if indices.dtype == index_src.dtype:
+                    index_src.read_direct(indices, np.s_[read:stop], np.s_[read:stop])
+                else:
+                    indices[read:stop] = index_src[read:stop]
+                read = stop
+            obs = read_elem(handle["obs"])
+            var = read_elem(handle["var"])
+            extras = {}
+            for key in ("uns", "obsm", "varm", "obsp", "varp"):
+                if key in handle:
+                    extras[key] = read_elem(handle[key])
+    except Exception as exc:
+        _log(f"streaming X read failed ({type(exc).__name__}: {exc}); falling back to direct load")
+        return None
+
+    matrix = sp.csr_matrix((n_obs, n_vars), dtype=data.dtype)
+    matrix.data = data
+    matrix.indices = indices
+    matrix.indptr = indptr
+    adata = ad.AnnData(X=matrix, obs=obs, var=var, **extras)
+    # read_single_input calls this, so the direct path resolves duplicate gene symbols and
+    # the streaming path did not. A file with duplicates then yielded different features per
+    # load mode.
+    before_unique = adata.n_vars
+    adata.var_names_make_unique()
+    if int(pd.Index(adata.var_names).duplicated().sum()) == 0 and before_unique == adata.n_vars:
+        pass
+    held = (data.nbytes + indices.nbytes + indptr.nbytes) / (1024 ** 3)
+    skipped = sum(v["bytes"] for k, v in est.get("matrices", {}).items() if k != "X") / (1024 ** 3)
+    _log(f"streamed X from disk in {block}-entry blocks: {nnz} nonzero values, {held:.2f} GB held; "
+         f"{skipped:.2f} GB of layers never read")
+    return adata
+
+
+def _read_h5ad_memory_aware(path: str, config: "ICGS3Config") -> Optional[ad.AnnData]:
+    """Load one h5ad, holding only what the analysis needs.
+
+    Returns None when the direct path should be used, so the caller falls through to the
+    original loader and nothing changes for small inputs.
+    """
+    est = _h5ad_matrix_estimate(path)
+    if est.get("error") or not est.get("matrices"):
+        return None
+    GB = 1024 ** 3
+    free = _available_memory_bytes()
+    mode = str(config.load_mode).lower()
+    detail = ", ".join(f"{k} {v['bytes'] / GB:.2f} GB ({v['data_dtype']}/{v['indices_dtype']})"
+                       for k, v in est["matrices"].items())
+    _log(f"input estimate: {est['n_obs']} cells x {est['n_vars']} features; {detail}; "
+         f"all matrices {est['total_bytes'] / GB:.2f} GB, X alone {est['x_bytes'] / GB:.2f} GB; "
+         f"free memory {'unknown' if free is None else f'{free / GB:.2f} GB'}")
+    if mode == "direct":
+        _log("load mode: direct (forced)")
+        return None
+    if mode == "auto":
+        if free is None:
+            # A memory check that cannot measure memory must not claim the matrices fit. The
+            # previous branch logged "all matrices fit" without checking and took the
+            # unbounded load, which is how a 76.10 GB input reached sc.read_h5ad.
+            _log("load mode: chunked (free memory could not be measured; refusing the "
+                 "unbounded load)")
+        else:
+            budget = free * float(config.load_memory_fraction)
+            if est["total_bytes"] <= budget:
+                _log(f"load mode: direct (all matrices {est['total_bytes'] / GB:.2f} GB fit inside "
+                     f"{float(config.load_memory_fraction):.0%} of {free / GB:.2f} GB free)")
+                return None
+        _log(f"load mode: chunked (all matrices exceed "
+             f"{float(config.load_memory_fraction):.0%} of free memory)")
+    else:
+        _log("load mode: chunked (forced)")
+
+    import h5py
+
+    adata = _read_h5ad_streaming(path, est)
+    if adata is None:
+        adata = sc.read_h5ad(path)
+    file_layers = {k.split("/", 1)[1] for k in est.get("matrices", {}) if k.startswith("layers/")}
+    mito_mask = np.asarray(pd.Index(adata.var_names.astype(str)).str.upper().str.startswith("MT-"), dtype=bool)
+    stats = None
+    if "counts" in file_layers:
+        stats = _counts_qc_stats_chunked(path, "counts", adata.n_obs, mito_mask)
+    if stats is not None:
+        adata.obs["icgs3_total_counts"] = stats["total_counts"]
+        adata.obs["icgs3_n_genes"] = stats["n_genes"]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            pct = np.where(stats["total_counts"] > 0,
+                           stats["mito_counts"] / stats["total_counts"] * 100.0, 0.0)
+        adata.obs["pct_counts_mt"] = pct
+        adata.uns["icgs3_counts_stats_precomputed"] = True
+        before = est["matrices"].get("layers/counts", {}).get("bytes", 0)
+        if "counts" in getattr(adata, "layers", {}) and config.layer != "counts":
+            del adata.layers["counts"]
+        _log(f"counts layer reduced to per-cell statistics in row blocks and released "
+             f"({before / GB:.2f} GB not held)")
+    for name in list(getattr(adata, "layers", {}).keys()):
+        if name != "counts" and name != config.layer:
+            _log(f"dropping unused layer '{name}' to save memory")
+            del adata.layers[name]
+    before_x = est["x_bytes"]
+    adata.X = _shrink_indices(adata.X, adata.n_vars)
+    after = adata.X.data.nbytes + adata.X.indices.nbytes + adata.X.indptr.nbytes
+    if after < before_x:
+        _log(f"X column indices narrowed to int32: {before_x / GB:.2f} GB -> {after / GB:.2f} GB")
+    _ensure_sparse_csr(adata)
+    return adata
 
 
 def read_single_input(
@@ -357,7 +1338,11 @@ def read_single_input(
     return adata
 
 
-def read_inputs(input_paths: Sequence[str]) -> ad.AnnData:
+def read_inputs(input_paths: Sequence[str], config: Optional["ICGS3Config"] = None) -> ad.AnnData:
+    if config is not None and len(input_paths) == 1 and str(input_paths[0]).endswith(".h5ad"):
+        adata = _read_h5ad_memory_aware(str(input_paths[0]), config)
+        if adata is not None:
+            return adata
     append_sample = len(input_paths) > 1
     adatas = [read_single_input(p, append_sample_to_barcodes=append_sample) for p in input_paths]
     if len(adatas) == 1:
@@ -377,6 +1362,157 @@ def _qc_matrix(adata: ad.AnnData, layer: Optional[str] = None):
     return adata.X, "X"
 
 
+class ExpressionScaleError(ValueError):
+    """Raised when a matrix holds values ICGS3 must not process as it stands."""
+
+
+# A matrix carries sequencing depth when its per-cell totals vary. Depth normalization removes
+# that variation by construction, so CP10K has a cell-total CV of exactly 0. Measured on
+# GSE220675: raw counts 1.0624, the same counts after AltAnalyze3 ambient correction 1.0265.
+# Ambient correction subtracts a fractional profile, so it destroys integrality (1.0000 ->
+# 0.0169) while leaving depth almost untouched. Integrality therefore cannot decide whether a
+# matrix still carries depth; this threshold sits an order of magnitude below every observed
+# count matrix and an order of magnitude above numerical noise.
+DEPTH_CV_MIN = 0.10
+
+
+def infer_expression_scale(matrix, *, name: str = "matrix", sample_cells: int = 20000,
+                           random_state: int = 0) -> dict:
+    """Classify a cells x genes matrix as counts, log, linear non-integer, or centered.
+
+    Rules, in the user's terms: some values above 50 mean the matrix is NOT log; every value
+    below 20 means it probably IS log. Integrality then separates raw counts from model output
+    such as TotalVI denoised expression, which is linear but not integer.
+
+    Returns a report dict. Never raises. The caller decides what to do with the verdict.
+    """
+    m = matrix.tocsr() if sp.issparse(matrix) else sp.csr_matrix(np.asarray(matrix))
+    n_obs = m.shape[0]
+    rng = np.random.default_rng(random_state)
+    if n_obs > int(sample_cells):
+        rows = np.sort(rng.choice(n_obs, size=int(sample_cells), replace=False))
+        m = m[rows]
+    values = m.data
+    if values.size == 0:
+        return {"name": name, "verdict": "empty", "reason": "no nonzero values", "n_values": 0}
+    vmax = float(values.max())
+    vmin = float(values.min())
+    frac_neg = float((values < 0).mean())
+    frac_int = float(np.isclose(values, np.rint(values)).mean())
+    q99 = float(np.quantile(values, 0.99))
+    totals = np.asarray(m.sum(axis=1), dtype=np.float64).ravel()
+    totals = totals[totals > 0]
+    mean_total = float(np.mean(totals)) if totals.size else 0.0
+    cv_cell_total = float(np.std(totals / mean_total)) if mean_total > 0 else 0.0
+
+    if frac_neg > 0:
+        verdict = "centered"
+        reason = f"{100 * frac_neg:.2f}% of nonzero values are negative, so the matrix looks z-scored or residualised"
+    elif frac_int >= 0.99:
+        # Integrality outranks magnitude. A shallow count matrix can hold a maximum below 20,
+        # and the "everything under 20 means log" rule alone would call it log and abort a valid
+        # run. A log1p matrix is essentially never all-integer, so this test is safe.
+        verdict = "counts"
+        reason = (f"{100 * frac_int:.2f}% of nonzero values are integers (max {vmax:.1f}), "
+                  "and a log transform does not produce integers")
+    elif vmax > 50 and cv_cell_total >= DEPTH_CV_MIN:
+        # Linear, not integer, and the per-cell totals still vary, so the matrix carries
+        # sequencing depth. AltAnalyze3 ambient RNA correction produces exactly this: it
+        # subtracts rho * n_j * b_g, which leaves depth in place but ends integrality.
+        # Before this branch such a matrix was called TotalVI-like denoised expression, no
+        # layers['counts'] was created, the count-based QC filters were disabled, and
+        # run_canonical_heatmap could not take its intended counts path.
+        verdict = "counts"
+        reason = (f"max {vmax:.1f} exceeds 50 and only {100 * frac_int:.2f}% of values are "
+                  f"integers, but the per-cell totals still vary (CV {cv_cell_total:.3f} >= "
+                  f"{DEPTH_CV_MIN}), so the matrix carries sequencing depth. Ambient-corrected "
+                  "counts look like this.")
+    elif vmax > 50:
+        verdict = "linear_non_integer"
+        reason = (f"max {vmax:.1f} exceeds 50, only {100 * frac_int:.2f}% of values are integers, "
+                  f"and the per-cell totals are near constant (CV {cv_cell_total:.3f} < "
+                  f"{DEPTH_CV_MIN}), so depth has already been removed. Model output such as "
+                  "TotalVI denoised expression looks like this.")
+    elif vmax < 20:
+        verdict = "log"
+        reason = f"every value falls below 20 (max {vmax:.3f}), which fits a log transform"
+    else:
+        verdict = "ambiguous"
+        reason = (f"max {vmax:.2f} sits between 20 and 50, so neither rule decides; "
+                  f"{100 * frac_int:.2f}% of values are integers")
+    return {"name": name, "verdict": verdict, "reason": reason, "n_values": int(values.size),
+            "n_cells_sampled": int(m.shape[0]), "min": vmin, "max": vmax, "q99": q99,
+            "frac_integer": round(frac_int, 4), "frac_negative": round(frac_neg, 6),
+            "cv_cell_total": round(cv_cell_total, 4)}
+
+
+def report_expression_scale(adata: ad.AnnData, config: "ICGS3Config") -> dict:
+    """Print what each matrix holds and stop the run when a matrix cannot be used as it stands.
+
+    ICGS3 reads counts for QC (min_counts, mito percent) and reads X for correlations. Neither
+    step inspects its input, so a mislabelled matrix passes through silently. This check makes
+    the content explicit before any step consumes it.
+    """
+    selected_name = f"layers['{config.layer}']" if config.layer else "X"
+    selected_matrix = adata.layers[config.layer] if config.layer else adata.X
+    reports = {"X": infer_expression_scale(selected_matrix, name=selected_name,
+                                             random_state=config.random_state)}
+    if "counts" in getattr(adata, "layers", {}) and config.layer != "counts":
+        reports["counts"] = infer_expression_scale(adata.layers["counts"], name="layers['counts']",
+                                                     random_state=config.random_state)
+    for key, r in reports.items():
+        if r["verdict"] == "empty":
+            _log(f"expression scale check: {r['name']} holds no nonzero values")
+            continue
+        _log(f"expression scale check: {r['name']} looks like {r['verdict'].upper()} -- {r['reason']} "
+             f"(min {r['min']:.4g}, 99th pct {r['q99']:.4g}, max {r['max']:.4g}, "
+             f"{100 * r['frac_integer']:.1f}% integer, n={r['n_values']} nonzero values "
+             f"from {r['n_cells_sampled']} cells)")
+
+    counts = reports.get("counts")
+    counts_usable = counts is None or counts["verdict"] == "counts"
+    if counts is not None and counts["verdict"] in ("log", "centered"):
+        # Do NOT abort. The analysis reads X, not this layer; only the count-based QC filters
+        # read it. Refusing the whole run would block a dataset whose X is perfectly usable.
+        _log(f"WARNING expression scale check: layers['counts'] does not hold counts, it looks "
+             f"like {counts['verdict'].upper()}. {counts['reason']}. ICGS3 will SKIP the "
+             f"count-based QC filters (--min-counts, --mito-percent) because they would be "
+             f"applied to non-count values. Clustering is unaffected; it reads X.")
+    if counts is not None and counts["verdict"] == "linear_non_integer":
+        _log("WARNING expression scale check: layers['counts'] holds linear non-integer values, "
+             "for example TotalVI denoised expression. ICGS3 will NOT treat it as sequencing "
+             "depth. Pass --input-normalized so no further scaling runs, and read every "
+             "count-based QC threshold as approximate.")
+
+    x = reports["X"]
+    if x["verdict"] == "linear_non_integer":
+        if bool(config.input_normalized):
+            _log("WARNING expression scale check: X holds linear non-integer values, for example "
+                 "TotalVI denoised expression, and --input-normalized stops any log transform. "
+                 "MarkerFinder correlates on that linear scale, where high expressors dominate "
+                 "the Pearson statistic. Consider log1p before ICGS3, or drop --input-normalized "
+                 "so ICGS3 logs it here.")
+        else:
+            _log("WARNING expression scale check: X holds linear non-integer values, for example "
+                 "TotalVI denoised expression, and --input-normalized was NOT passed, so ICGS3 "
+                 "will run normalize_total then log1p. The log1p step suits linear expression, "
+                 "but normalize_total re-imposes a depth correction such a model has already "
+                 "removed. Pass --input-normalized if the values are already depth-corrected.")
+    if x["verdict"] == "counts" and bool(config.input_normalized):
+        _log("WARNING expression scale check: X looks like raw counts, yet --input-normalized "
+             "says it is normalized. ICGS3 will skip normalization and correlate raw counts, "
+             "which per-cell depth then confounds. Drop --input-normalized to normalize here.")
+    if x["verdict"] == "log" and not bool(config.input_normalized):
+        raise ExpressionScaleError(
+            "X already looks log-transformed, and --input-normalized was NOT passed, so ICGS3 "
+            "would run normalize_total and log1p on top of an existing log transform. "
+            f"{x['reason']}. Pass --input-normalized."
+        )
+    reports["counts_usable_for_qc"] = bool(counts_usable)
+    adata.uns["icgs3_expression_scale_check"] = reports
+    return reports
+
+
 def apply_qc(
     adata: ad.AnnData,
     *,
@@ -386,40 +1522,79 @@ def apply_qc(
     mito_percent: Optional[float],
     layer: Optional[str] = None,
 ) -> ad.AnnData:
-    """Apply the same core sparse QC filters used by cellHarmony-lite."""
+    """Apply the same core sparse QC filters used by cellHarmony-lite.
+
+    The filters resolve to one row mask and one column mask, applied by a single in-place
+    compaction. The previous version ran a separate `adata[keep].copy()` per filter, so a
+    28.54 GB X needed 57 GB while the old copy was still referenced, and a 978,892-cell input
+    was killed by the macOS memory manager at the third of the four. The masks are computed in
+    the original order against the original matrices, so the result is unchanged.
+
+    One ordering detail is load-bearing. min_counts and mito_percent read per-cell statistics
+    that the loader precomputed in row blocks, and those do not depend on the column filter, so
+    all four masks can combine. Without the precomputed statistics both filters read X *after*
+    the column filter, exactly as before, so the subset then runs in two stages.
+    """
     X, source = _qc_matrix(adata, layer=layer)
     if source != "X":
         _log(f"QC using {source}")
+    check = (adata.uns or {}).get("icgs3_expression_scale_check", {})
+    counts_usable = bool(check.get("counts_usable_for_qc", True))
+    if not counts_usable:
+        _log("QC: skipping --min-counts and --mito-percent; the counts matrix does not hold counts")
+    # When the loader released the counts layer it left the same three statistics in obs, so the
+    # count-based filters read those instead of a matrix that is no longer in memory.
+    precomputed = bool((adata.uns or {}).get("icgs3_counts_stats_precomputed", False))
+    if precomputed:
+        _log("QC: using per-cell counts statistics computed in row blocks at load time")
     X = X.tocsr() if sp.issparse(X) else sp.csr_matrix(X)
 
+    counts_from_obs = bool(precomputed and "icgs3_total_counts" in adata.obs)
+    mito_from_obs = bool(precomputed and "pct_counts_mt" in adata.obs)
+
+    row_keep = np.ones(int(adata.n_obs), dtype=bool)
+    col_keep = np.ones(int(adata.n_vars), dtype=bool)
+
     if min_genes is not None and min_genes > 0:
-        keep = np.diff(X.indptr) >= int(min_genes)
-        adata = adata[keep].copy()
-        X = _qc_matrix(adata, layer=layer)[0].tocsr()
-        _log(f"cells after min_genes {min_genes}: {adata.n_obs}")
+        row_keep = np.diff(X.indptr) >= int(min_genes)
+        _log(f"cells after min_genes {min_genes}: {int(row_keep.sum())}")
 
     if min_cells is not None and min_cells > 0:
-        n_cells = np.bincount(X.indices, minlength=X.shape[1])
-        keep = n_cells >= int(min_cells)
-        adata = adata[:, keep].copy()
-        X = _qc_matrix(adata, layer=layer)[0].tocsr()
-        _log(f"features after min_cells {min_cells}: {adata.n_vars}")
+        n_cells = _csr_column_nnz(X, row_keep)
+        col_keep = n_cells >= int(min_cells)
+        _log(f"features after min_cells {min_cells}: {int(col_keep.sum())}")
 
-    if min_counts is not None and min_counts > 0:
-        counts = np.asarray(X.sum(axis=1)).ravel()
-        keep = counts >= float(min_counts)
-        adata = adata[keep].copy()
-        X = _qc_matrix(adata, layer=layer)[0].tocsr()
-        _log(f"cells after min_counts {min_counts}: {adata.n_obs}")
+    if min_counts is not None and min_counts > 0 and counts_usable and counts_from_obs:
+        counts = np.asarray(adata.obs["icgs3_total_counts"], dtype=float)
+        row_keep = row_keep & (counts >= float(min_counts))
+        _log(f"cells after min_counts {min_counts}: {int(row_keep.sum())}")
 
-    if mito_percent is not None:
-        mito = pd.Index(adata.var_names.astype(str)).str.upper().str.startswith("MT-")
-        if mito.any():
-            mito_counts = np.asarray(X[:, mito].sum(axis=1)).ravel()
-            total_counts = np.maximum(np.asarray(X.sum(axis=1)).ravel(), 1e-12)
-            adata.obs["pct_counts_mt"] = (mito_counts / total_counts) * 100.0
-            adata = adata[adata.obs["pct_counts_mt"].values < float(mito_percent)].copy()
-            _log(f"cells after mito_percent {mito_percent}: {adata.n_obs}")
+    if mito_percent is not None and counts_usable and mito_from_obs:
+        pct = np.asarray(adata.obs["pct_counts_mt"], dtype=float)
+        row_keep = row_keep & (pct < float(mito_percent))
+        _log(f"cells after mito_percent {mito_percent}: {int(row_keep.sum())}")
+
+    # min_counts is per-cell sequencing depth and mito_percent is a per-cell fraction.
+    # Neither may depend on which genes min_cells removed. The old code summed X AFTER the
+    # column filter on the direct path, while the chunked path read totals over every gene,
+    # so the same file with the same flags kept 25,000 of 25,000 cells chunked and 24,999 of
+    # 25,000 direct. Both now read totals over every gene, before any column filter.
+    if not counts_from_obs and counts_usable and (
+            (min_counts is not None and min_counts > 0) or mito_percent is not None):
+        full_totals = np.asarray(X.sum(axis=1)).ravel()
+        if min_counts is not None and min_counts > 0:
+            row_keep = row_keep & (full_totals >= float(min_counts))
+            _log(f"cells after min_counts {min_counts}: {int(row_keep.sum())}")
+        if mito_percent is not None and not mito_from_obs:
+            mito = pd.Index(adata.var_names.astype(str)).str.upper().str.startswith("MT-")
+            if mito.any():
+                mito_counts = np.asarray(X[:, np.asarray(mito)].sum(axis=1)).ravel()
+                pct = (mito_counts / np.maximum(full_totals, 1e-12)) * 100.0
+                adata.obs["pct_counts_mt"] = pct
+                row_keep = row_keep & (pct < float(mito_percent))
+                _log(f"cells after mito_percent {mito_percent}: {int(row_keep.sum())}")
+
+    adata = _subset_adata_compact(adata, row_keep, col_keep)
     _ensure_sparse_csr(adata)
     return adata
 
@@ -443,7 +1618,7 @@ def apply_modality_defaults(config: ICGS3Config) -> ICGS3Config:
         if config.n_top_features == 3000:
             config.n_top_features = 0
     if config.marker_rho is None:
-        config.marker_rho = 0.15 if config.modality.lower() == "adt" else 0.3
+        config.marker_rho = 0.25 if config.modality.lower() == "adt" else 0.3
     if config.marker_min_per_cluster is None:
         config.marker_min_per_cluster = 1 if config.modality.lower() == "adt" else 2
     return config
@@ -474,7 +1649,7 @@ def stratified_downsample_adata(
         n = int(target_cells or adata.n_obs)
         selected = rng.choice(adata.obs_names.values, size=min(n, adata.n_obs), replace=False).tolist()
 
-    selected = sorted(set(selected), key=lambda x: adata.obs_names.get_loc(x))
+    selected = _order_by_position(selected, adata.obs_names)
     _log(f"downsampled cells: {adata.n_obs} -> {len(selected)}")
     return adata[selected].copy()
 
@@ -604,20 +1779,45 @@ def apply_expression_batch_adjustment(adata: ad.AnnData, config: ICGS3Config, ou
         _log(f"expression batch adjustment skipped; keys {keys} define only one group")
         return adata
 
-    X = adata.X.toarray() if sp.issparse(adata.X) else np.asarray(adata.X)
-    X = X.astype(np.float32, copy=True)
-    global_mean = X.mean(axis=0, keepdims=True)
+    # The old code densified every cell (adata.X.toarray()) and then copied it again with
+    # astype(copy=True). At 978,892 x 18,427 float32 the first array alone reaches 72 GB.
+    # Per-batch and global means come from sparse sums, and the shifted rows are built one
+    # block at a time, so no dense matrix of all cells ever exists.
+    source = adata.X.tocsr() if sp.issparse(adata.X) else sp.csr_matrix(adata.X)
+    n_obs, n_vars = int(source.shape[0]), int(source.shape[1])
+    col_sum, _ = _sparse_feature_moments(source)
+    global_mean = (col_sum / float(n_obs)).astype(np.float32)
+
+    batch_mean = np.zeros((0, n_vars), dtype=np.float32)
+    batch_of_row = np.full(n_obs, -1, dtype=np.int64)
     rows = []
-    for batch, idx in combo.groupby(combo).groups.items():
+    means = []
+    for code, (batch, idx) in enumerate(combo.groupby(combo).groups.items()):
         pos = adata.obs_names.get_indexer(list(idx))
-        batch_mean = X[pos].mean(axis=0, keepdims=True)
-        X[pos] = X[pos] - batch_mean + global_mean
+        batch_of_row[pos] = code
+        bsum, _ = _sparse_feature_moments(source, np.asarray(pos, dtype=np.int64))
+        means.append((bsum / float(max(len(pos), 1))).astype(np.float32))
         rows.append({"batch": batch, "cells": int(len(pos))})
-    negative = int(np.sum(X < 0))
-    if negative:
-        X[X < 0] = 0.0
+    batch_mean = np.vstack(means) if means else batch_mean
+    if np.any(batch_of_row < 0):
+        raise ValueError("expression batch adjustment: a cell has no batch label")
+
+    negative = 0
+    blocks = []
+    step = max(1, int(20_000_000 // max(n_vars, 1)))
+    for start in range(0, n_obs, step):
+        stop = min(start + step, n_obs)
+        block = source[start:stop].toarray().astype(np.float32, copy=False)
+        block -= batch_mean[batch_of_row[start:stop]]
+        block += global_mean
+        negative += int(np.sum(block < 0))
+        np.clip(block, 0.0, None, out=block)
+        blocks.append(sp.csr_matrix(block))
+        del block
+    adjusted_X = sp.vstack(blocks, format="csr") if blocks else sp.csr_matrix((0, n_vars))
+    del blocks
     adjusted = adata.copy()
-    adjusted.X = sp.csr_matrix(X)
+    adjusted.X = adjusted_X
     adjusted.uns["icgs3_expression_batch_adjustment"] = {
         "method": "batch_mean_center_global_mean_clip_zero",
         "batch_key": keys,
@@ -739,20 +1939,26 @@ def _icgs2_hgvfinder_adata(adata: ad.AnnData, num_var_genes: int) -> ad.AnnData:
     """ICGS2 hgvfinder equivalent: top dispersion genes with >5 unique values."""
     if num_var_genes is None or int(num_var_genes) <= 0 or adata.n_vars <= int(num_var_genes):
         _log(f"ICGS2 hgvfinder: using all {adata.n_vars} features for downsampling")
+        # The streamed loader has already materialized exactly this feature space. Returning the
+        # same object avoids a second all-cell reduced matrix before the graph is built.
+        if bool((adata.uns or {}).get("icgs3_streaming_downsample")):
+            return adata
         return adata.copy()
     X = adata.X.tocsr() if sp.issparse(adata.X) else np.asarray(adata.X)
-    means = np.asarray(X.mean(axis=0)).ravel()
     if sp.issparse(X):
-        sq_means = np.asarray(X.multiply(X).mean(axis=0)).ravel()
+        # X.multiply(X) built a second full sparse matrix, and X.tocsc() a third. At
+        # 978,892 cells x 18,427 genes with 1.5e9 nonzeros each is about 18 GB, and the pair
+        # exhausted a 64 GB machine: the process stalled in an uninterruptible page-fault
+        # wait with swap 99.3% full. Both quantities come from per-column accumulations
+        # instead, read in blocks. The values are the same.
+        n_obs = int(X.shape[0])
+        col_sum, col_sq_sum = _sparse_feature_moments(X)
+        means = col_sum / float(n_obs)
+        sq_means = col_sq_sum / float(n_obs)
         variances = sq_means - means**2
-        unique_counts = []
-        csc = X.tocsc()
-        n_obs = X.shape[0]
-        for j in range(X.shape[1]):
-            values = csc[:, j].data
-            unique_counts.append(len(np.unique(values)) + (1 if values.size < n_obs else 0))
-        unique_counts = np.asarray(unique_counts)
+        unique_counts = _sparse_unique_value_counts(X)
     else:
+        means = np.asarray(X.mean(axis=0)).ravel()
         variances = np.var(X, axis=0)
         unique_counts = np.asarray([len(set(X[:, j].tolist())) for j in range(X.shape[1])])
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -764,6 +1970,126 @@ def _icgs2_hgvfinder_adata(adata: ad.AnnData, num_var_genes: int) -> ad.AnnData:
     keep_idx = order[: min(int(num_var_genes), order.size)]
     _log(f"ICGS2 hgvfinder: selected {len(keep_idx)}/{adata.n_vars} dispersion features for downsampling")
     return adata[:, keep_idx].copy()
+
+
+def _knn_neighbor_indices(matrix, *, n_neighbors: int = 10, n_trees: int = 20,
+                          metric: str = "euclidean", backend: str = "pynndescent",
+                          build_k: int = 31) -> np.ndarray:
+    """k nearest neighbours as an (n_cells x k) index array, without a graph object.
+
+    Measured on 100,000 cells x 56 features: this k-NN search costs 56.4 s, the adjacency dict
+    0.3 s and nx.from_dict_of_lists 0.8 s. The search dominates; the graph objects do not.
+    Returning indices lets the CSR, the adjacency dict and the networkx graph all be built from
+    one search instead of each caller repeating it.
+
+    The Annoy branch densifies in ROW BLOCKS. Annoy's add_item takes one contiguous dense
+    vector per item, so some densification is required, but the previous code called
+    matrix.toarray() on the whole matrix to feed a loop that consumes one row at a time.
+    """
+    n_cells = int(matrix.shape[0])
+    k = max(1, min(int(n_neighbors), n_cells))
+    if str(backend).lower() == "pynndescent":
+        from pynndescent import NNDescent
+
+        pynn_metric = "cosine" if metric == "angular" else metric
+        k_build = min(max(int(build_k), k + 1), max(n_cells, 2))
+        _log(f"k-NN search start: {n_cells} cells x {matrix.shape[1]} features, k={k}, "
+             f"build_k={k_build}, metric={pynn_metric}, sparse={sp.issparse(matrix)}")
+        t0 = time.time()
+        nbrs = NNDescent(matrix, n_neighbors=k_build, metric=pynn_metric,
+                         n_jobs=-1, verbose=False).neighbor_graph[0]
+        _log(f"k-NN search finished in {time.time() - t0:.1f}s")
+        return np.asarray(nbrs[:, :k], dtype=np.int64)
+
+    from annoy import AnnoyIndex
+
+    n_features = int(matrix.shape[1])
+    _log(f"Annoy graph build start: {n_cells} cells x {n_features} features, k={k}, "
+         f"trees={n_trees}, metric={metric}")
+    index = AnnoyIndex(n_features, metric=metric)
+    block = max(1, int(2_000_000 // max(n_features, 1)))
+    for start in range(0, n_cells, block):
+        stop = min(start + block, n_cells)
+        chunk = matrix[start:stop]
+        chunk = chunk.toarray() if sp.issparse(chunk) else np.asarray(chunk)
+        chunk = np.ascontiguousarray(chunk, dtype=np.float32)
+        for offset in range(stop - start):
+            index.add_item(start + offset, chunk[offset])
+        del chunk
+    index.build(int(n_trees))
+    _log("Annoy index built; collecting nearest-neighbor graph")
+    out = np.empty((n_cells, k), dtype=np.int64)
+    for i in range(n_cells):
+        found = index.get_nns_by_item(i, k)
+        if len(found) < k:
+            found = list(found) + [i] * (k - len(found))
+        out[i] = found
+    return out
+
+
+def _csr_from_knn(nbrs: np.ndarray, n_cells: int):
+    """Symmetric binary adjacency, identical to nx.to_scipy_sparse_array of the same graph.
+
+    networkx builds an UNDIRECTED graph from these lists, so edge (i, j) exists when j is a
+    neighbour of i OR i is a neighbour of j; `maximum` takes that union. to_scipy_sparse_array
+    writes 1 for a self-loop, not 2, so a self-match contributes 1 here as well.
+    """
+    k = int(nbrs.shape[1])
+    rows = np.repeat(np.arange(n_cells, dtype=np.int64), k)
+    cols = np.asarray(nbrs, dtype=np.int64).ravel()
+    data = np.ones(rows.size, dtype=np.float64)
+    A = sp.csr_matrix((data, (rows, cols)), shape=(n_cells, n_cells))
+    A.data[:] = 1.0
+    A = A.maximum(A.T).tocsr()
+    A.data[:] = 1.0
+    return A
+
+
+def _pagerank_csr(A, *, alpha: float = 0.85, max_iter: int = 100, tol: float = 1.0e-6) -> np.ndarray:
+    """PageRank on a CSR adjacency, following networkx _pagerank_scipy exactly.
+
+    networkx.pagerank already delegates to _pagerank_scipy, which converts the graph to a
+    scipy array and runs this same power iteration. Taking the CSR directly skips only the
+    graph construction and the conversion, and the arithmetic is unchanged.
+    """
+    n = int(A.shape[0])
+    if n == 0:
+        return np.zeros(0, dtype=float)
+    S = np.asarray(A.sum(axis=1), dtype=float).ravel()
+    is_dangling = S == 0
+    inv = np.zeros(n, dtype=float)
+    inv[~is_dangling] = 1.0 / S[~is_dangling]
+    W = sp.diags(inv) @ A
+    x = np.full(n, 1.0 / n, dtype=float)
+    p = np.full(n, 1.0 / n, dtype=float)
+    for iteration in range(int(max_iter)):
+        xlast = x
+        x = alpha * (W.T @ x + xlast[is_dangling].sum() * p) + (1.0 - alpha) * p
+        if float(np.abs(x - xlast).sum()) < n * float(tol):
+            return x
+    _log(f"WARNING PageRank power iteration did not converge in {max_iter} iterations "
+         f"(L1 error {float(np.abs(x - xlast).sum()):.3e} against target {n * float(tol):.3e})")
+    return x
+
+
+def _louvain_levels_csr(A, *, seed: int = 0):
+    """Louvain levels from igraph, the C implementation of the same Blondel algorithm.
+
+    Measured on 100,000 cells: python-louvain generate_dendrogram takes 25.0 s where igraph
+    community_multilevel takes 2.3 s, a 10.9x difference. The two are the same algorithm but
+    NOT the same implementation; tie-breaking and node order differ, so the partitions differ
+    (6,472 against 6,614 level-0 groups on that benchmark). This is a behaviour change and it
+    is why --graph-backend defaults to networkx.
+    """
+    import igraph as ig
+
+    upper = sp.triu(A, k=0).tocoo()
+    edges = list(zip(upper.row.tolist(), upper.col.tolist()))
+    graph = ig.Graph(n=int(A.shape[0]), edges=edges, directed=False)
+    graph.simplify(multiple=True, loops=True)
+    ig.set_random_number_generator(np.random.RandomState(int(seed)))
+    levels = graph.community_multilevel(return_levels=True)
+    return [np.asarray(level.membership, dtype=np.int64) for level in levels]
 
 
 def _annoy_neighbor_graph(matrix: np.ndarray, *, n_neighbors: int = 10, n_trees: int = 20, metric: str = "euclidean"):
@@ -797,9 +2123,125 @@ def _annoy_neighbor_graph(matrix: np.ndarray, *, n_neighbors: int = 10, n_trees:
     return nx.from_dict_of_lists(adjacency), adjacency
 
 
+def _pynndescent_neighbor_graph(matrix, *, n_neighbors: int = 10, build_k: int = 31, metric: str = "euclidean",
+                                dense_max_gb: float = 0.0, as_csr: bool = False,
+                                random_state: int = 0):
+    """Alternative k-NN backend with the same contract as _annoy_neighbor_graph.
+
+    Reads sparse input directly, so no dense copy is made, and runs multithreaded through numba.
+    Annoy's get_nns_by_item returns the queried item first; pynndescent does the same, so the
+    adjacency lists carry the identical self-plus-neighbours shape the callers expect.
+
+    Builds with build_k neighbours and trims to n_neighbors. On a 20,000-cell benchmark that
+    reached 0.997 recall against exact brute force, where Annoy at 20 trees reached 0.954.
+    """
+    import networkx as nx
+    from pynndescent import NNDescent
+
+    pynn_metric = "cosine" if metric == "angular" else metric
+    n_cells = matrix.shape[0]
+    k_build = min(max(int(build_k), int(n_neighbors) + 1), max(n_cells, 2))
+    _log(f"pynndescent graph build start: {n_cells} cells x {matrix.shape[1]} features, "
+         f"k={n_neighbors}, build_k={k_build}, metric={pynn_metric}, sparse={sp.issparse(matrix)}")
+    t0 = time.time()
+    work = matrix
+    budget_gb = float(dense_max_gb)
+    if budget_gb < 0.0:
+        free = _available_memory_bytes()
+        budget_gb = 0.0 if free is None else (free * 0.5) / (1024 ** 3)
+        if free is None:
+            _log("k-NN densification skipped: free memory could not be measured")
+    if budget_gb > 0.0 and sp.issparse(matrix):
+        dense_bytes = float(n_cells) * float(matrix.shape[1]) * 4.0
+        if dense_bytes > budget_gb * (1024 ** 3):
+            _log(f"k-NN input left sparse: dense form needs "
+                 f"{dense_bytes / 1024 ** 3:.2f} GB, budget is {budget_gb:.2f} GB")
+        if dense_bytes <= budget_gb * (1024 ** 3):
+            density = 100.0 * matrix.nnz / max(float(n_cells) * float(matrix.shape[1]), 1.0)
+            sparse_gb = (matrix.data.nbytes + matrix.indices.nbytes) / (1024 ** 3)
+            work = np.asarray(matrix.toarray(), dtype=np.float32)
+            _log(f"k-NN input densified for pynndescent: {density:.1f}% dense, "
+                 f"{sparse_gb:.2f} GB sparse -> {dense_bytes / 1024 ** 3:.2f} GB dense")
+    # NNDescent seeds itself randomly when random_state is None, so two runs of the same
+    # input returned different neighbours and therefore different clusters. --random-state
+    # already exists and defaults to 0; it simply never reached this call.
+    if sp.issparse(work):
+        work = _match_index_dtypes(work.tocsr())
+    nbrs = NNDescent(work, n_neighbors=k_build, metric=pynn_metric, n_jobs=-1, verbose=False,
+                     random_state=int(random_state)).neighbor_graph[0]
+    del work
+    k = min(int(n_neighbors), n_cells)
+    _log(f"pynndescent graph built in {time.time() - t0:.1f}s")
+    if as_csr:
+        # A CSR adjacency instead of a dict of lists and an nx.Graph. At 400,870 nodes the
+        # dict and the graph hold millions of Python objects; the CSR holds two arrays.
+        trimmed = np.asarray(nbrs[:, :k], dtype=np.int32)
+        indptr = np.arange(0, trimmed.size + 1, k, dtype=np.int64)
+        csr = sp.csr_matrix((np.ones(trimmed.size, dtype=np.float32), trimmed.ravel(), indptr),
+                            shape=(n_cells, n_cells))
+        return csr, csr
+    adjacency = {i: [int(x) for x in nbrs[i][:k]] for i in range(n_cells)}
+    return nx.from_dict_of_lists(adjacency), adjacency
+
+
+def _neighbor_graph(matrix, *, n_neighbors: int = 10, n_trees: int = 20, metric: str = "euclidean",
+                    dense_max_gb: float = 0.0, as_csr: bool = False, random_state: int = 0,
+                    backend: str = "annoy", build_k: int = 31):
+    """Dispatch to the configured k-NN backend. 'annoy' is the validated default."""
+    if str(backend).lower() == "pynndescent":
+        return _pynndescent_neighbor_graph(matrix, n_neighbors=n_neighbors, build_k=build_k,
+                                           metric=metric, dense_max_gb=dense_max_gb, as_csr=as_csr,
+                                           random_state=random_state)
+    dense = matrix.toarray() if sp.issparse(matrix) else matrix
+    return _annoy_neighbor_graph(np.asarray(dense, dtype=np.float32),
+                                 n_neighbors=n_neighbors, n_trees=n_trees, metric=metric)
+
+
 def _adata_dense_cells_by_features(adata: ad.AnnData) -> np.ndarray:
     X = adata.X
     return X.toarray().astype(np.float32, copy=False) if sp.issparse(X) else np.asarray(X, dtype=np.float32)
+
+
+def _adata_cells_by_features(adata: ad.AnnData, *, allow_sparse: bool = False):
+    """Cells x features matrix. Keeps CSR when the configured backends can consume it."""
+    X = adata.X
+    if allow_sparse and sp.issparse(X):
+        return X.tocsr()
+    return _adata_dense_cells_by_features(adata)
+
+
+def _centroid_distances(matrix, positions: Sequence[int]) -> np.ndarray:
+    """Distance of each community member to the community centroid.
+
+    Ranks cells the same way the pairwise form does while avoiding its O(n_c^2 * d) cost. For
+    squared Euclidean distance the two rankings agree exactly, because the mean squared distance
+    from a cell to every other member equals its squared distance to the centroid plus a constant
+    shared by the whole community. A 20,000-cell benchmark measured 0.9998 overlap on the cells
+    actually kept, and the real run holds sum(n_c^2) = 2.37e9 pairs.
+    """
+    pos = np.asarray(positions, dtype=int)
+    sub = matrix[pos]
+    if sp.issparse(sub):
+        centroid = np.asarray(sub.mean(axis=0)).ravel()
+        sq = np.asarray(sub.multiply(sub).sum(axis=1)).ravel()
+        d2 = sq - 2.0 * np.asarray(sub @ centroid).ravel() + float(centroid @ centroid)
+    else:
+        sub = np.asarray(sub, dtype=np.float32)
+        centroid = sub.mean(axis=0)
+        d2 = ((sub - centroid) ** 2).sum(axis=1)
+    return np.sqrt(np.maximum(d2, 0.0))
+
+
+def _medoid_scores(matrix, positions: Sequence[int], method: str = "pairwise") -> np.ndarray:
+    """Dispatch to the configured medoid ranking. 'pairwise' is the validated default."""
+    if str(method).lower() == "centroid":
+        return _centroid_distances(matrix, positions)
+    pos = np.asarray(positions, dtype=int)
+    sub = matrix[pos]
+    if sp.issparse(sub):
+        sub = sub.toarray()
+    # densify only this community's block, never the whole matrix
+    return _mean_pairwise_euclidean_sums(np.asarray(sub, dtype=np.float32), np.arange(sub.shape[0]))
 
 
 def _mean_pairwise_euclidean_sums(matrix: np.ndarray, positions: Sequence[int]) -> np.ndarray:
@@ -820,6 +2262,11 @@ def _icgs2_community_sampling(
     adata_hvg: ad.AnnData,
     downsample_cutoff: int,
     pre_pagerank_cells: int = 0,
+    knn_backend: str = "annoy",
+    knn_build_neighbors: int = 31,
+    medoid_method: str = "pairwise",
+    knn_dense_max_gb: float = 0.0,
+    random_state: int = 0,
 ) -> Tuple[List[str], pd.DataFrame]:
     """ICGS2 community_sampling equivalent using Annoy k=10 and Louvain level 0."""
     try:
@@ -827,10 +2274,15 @@ def _icgs2_community_sampling(
     except Exception as exc:
         raise ImportError("ICGS2-compatible community sampling requires python-louvain.") from exc
 
-    matrix = _adata_dense_cells_by_features(adata_hvg)
-    G, _ = _annoy_neighbor_graph(matrix, n_neighbors=10, n_trees=20, metric="euclidean")
+    matrix = _adata_cells_by_features(adata_hvg, allow_sparse=str(knn_backend).lower() == "pynndescent")
+    G, _ = _neighbor_graph(matrix, n_neighbors=10, n_trees=20, metric="euclidean",
+                           dense_max_gb=knn_dense_max_gb, random_state=int(random_state),
+                           backend=knn_backend, build_k=knn_build_neighbors)
     _log("ICGS2 community sampling: running Louvain dendrogram and using level 0 partition")
-    dendrogram = community.generate_dendrogram(G)
+    # python-louvain randomises its node order when random_state is None, so two runs of the
+    # same graph gave different communities. ICGS3 already seeds the other Louvain call
+    # (community_louvain.best_partition), so this one was simply missed.
+    dendrogram = community.generate_dendrogram(G, random_state=int(random_state))
     partition = community.partition_at_level(dendrogram, 0)
     communities: dict = {}
     for node, group in partition.items():
@@ -849,7 +2301,7 @@ def _icgs2_community_sampling(
     for idx, (group, positions) in enumerate(communities.items(), start=1):
         positions = list(positions)
         k = min(per_community, len(positions))
-        dist = _mean_pairwise_euclidean_sums(matrix, positions)
+        dist = _medoid_scores(matrix, positions, method=medoid_method)
         order = np.argsort(dist)[:k]
         chosen = [positions[i] for i in order]
         selected_pos.extend(chosen)
@@ -892,7 +2344,8 @@ def _icgs2_order_roots(matrix: np.ndarray, roots: Sequence[int]) -> List[int]:
     roots = [int(r) for r in roots]
     if len(roots) <= 1:
         return roots
-    root_matrix = np.asarray(matrix[roots], dtype=np.float32)
+    _rm = matrix[np.asarray(roots, dtype=int)]
+    root_matrix = np.asarray(_rm.toarray() if sp.issparse(_rm) else _rm, dtype=np.float32)
     try:
         from sklearn.metrics import pairwise_distances
 
@@ -918,10 +2371,13 @@ def _icgs2_order_roots(matrix: np.ndarray, roots: Sequence[int]) -> List[int]:
         return keylist
 
 
-def _icgs2_pagerank_sampling_once(adata_hvg: ad.AnnData, downsample_cutoff: int) -> Tuple[List[str], pd.DataFrame]:
+def _icgs2_pagerank_sampling_once(adata_hvg: ad.AnnData, downsample_cutoff: int,
+                                  knn_backend: str = "annoy",
+                                  knn_build_neighbors: int = 31,
+                                  knn_dense_max_gb: float = 0.0) -> Tuple[List[str], pd.DataFrame]:
     import networkx as nx
 
-    matrix = _adata_dense_cells_by_features(adata_hvg)
+    matrix = _adata_cells_by_features(adata_hvg, allow_sparse=str(knn_backend).lower() == "pynndescent")
     n = matrix.shape[0]
     downsample_limit = int(downsample_cutoff) * 4
     sampled_names: List[str] = []
@@ -930,7 +2386,9 @@ def _icgs2_pagerank_sampling_once(adata_hvg: ad.AnnData, downsample_cutoff: int)
         stop = min(start + downsample_limit, n)
         _log(f"ICGS2 PageRank sampling chunk: cells {start + 1}-{stop} of {n}")
         chunk = matrix[start:stop]
-        G, adjacency = _annoy_neighbor_graph(chunk, n_neighbors=10, n_trees=20, metric="angular")
+        G, adjacency = _neighbor_graph(chunk, n_neighbors=10, n_trees=20, metric="angular",
+                                       dense_max_gb=knn_dense_max_gb,
+                                       backend=knn_backend, build_k=knn_build_neighbors)
         _log("ICGS2 PageRank sampling: computing networkx PageRank")
         pagerank = nx.pagerank(G)
         ranked = sorted(pagerank.items(), key=lambda item: item[1], reverse=True)
@@ -997,15 +2455,23 @@ def _icgs2_pagerank_sampling_once(adata_hvg: ad.AnnData, downsample_cutoff: int)
     return ordered, pd.DataFrame(rows)
 
 
-def _icgs2_pagerank_sampling(adata_hvg: ad.AnnData, downsample_cutoff: int) -> Tuple[List[str], pd.DataFrame]:
-    selected, rows = _icgs2_pagerank_sampling_once(adata_hvg, downsample_cutoff)
+def _icgs2_pagerank_sampling(adata_hvg: ad.AnnData, downsample_cutoff: int,
+                             knn_backend: str = "annoy",
+                             knn_build_neighbors: int = 31,
+                             knn_dense_max_gb: float = 0.0) -> Tuple[List[str], pd.DataFrame]:
+    selected, rows = _icgs2_pagerank_sampling_once(adata_hvg, downsample_cutoff,
+                                                   knn_backend=knn_backend,
+                                                   knn_build_neighbors=knn_build_neighbors,
+                                                   knn_dense_max_gb=knn_dense_max_gb)
     all_rows = [rows]
     iteration = 1
     while len(selected) > int(downsample_cutoff):
         iteration += 1
         _log(f"ICGS2 PageRank recursive pass {iteration}: {len(selected)} cells remain above cutoff {downsample_cutoff}")
         filtered = adata_hvg[selected].copy()
-        selected, rows = _icgs2_pagerank_sampling_once(filtered, downsample_cutoff)
+        selected, rows = _icgs2_pagerank_sampling_once(filtered, downsample_cutoff,
+                                                       knn_backend=knn_backend,
+                                                       knn_build_neighbors=knn_build_neighbors)
         all_rows.append(rows)
     return selected, pd.concat(all_rows, axis=0, ignore_index=True) if all_rows else pd.DataFrame()
 
@@ -1033,20 +2499,410 @@ def pagerank_downsample_adata(adata: ad.AnnData, config: ICGS3Config) -> Tuple[a
             hvg,
             int(config.pagerank_cells),
             pre_pagerank_cells=int(config.pre_pagerank_cells or 0),
+            knn_backend=config.knn_backend,
+            knn_build_neighbors=int(config.knn_build_neighbors),
+            medoid_method=config.medoid_method,
+            knn_dense_max_gb=float(config.knn_dense_max_gb),
+            random_state=int(config.random_state),
         )
         score_frames.append(community_rows)
-        keep = sorted(set(keep), key=lambda x: adata.obs_names.get_loc(x))
+        keep = _order_by_position(keep, adata.obs_names)
         work = adata[keep].copy()
-        _log(f"ICGS2 community sampling: {adata.n_obs} -> {work.n_obs} cells using Annoy k=10 and Louvain level 0")
+        work_cells = int(work.n_obs)
+        _log(f"ICGS2 community sampling: {adata.n_obs} -> {work_cells} cells using Annoy k=10 and Louvain level 0")
+        # The first dispersion subset covered every cell and is finished with. Drop it before
+        # building the second, so the two never sit in memory together.
+        del hvg
         hvg = _icgs2_hgvfinder_adata(work, int(config.downsample_var_genes))
-    selected, pagerank_rows = _icgs2_pagerank_sampling(hvg, int(config.pagerank_cells))
+        # `work` is only read for its cell count from here on.
+        del work
+    else:
+        work_cells = int(work.n_obs)
+    selected, pagerank_rows = _icgs2_pagerank_sampling(
+        hvg, int(config.pagerank_cells),
+        knn_backend=config.knn_backend,
+        knn_build_neighbors=int(config.knn_build_neighbors),
+        knn_dense_max_gb=float(config.knn_dense_max_gb),
+    )
+    del hvg
     score_frames.append(pagerank_rows)
-    selected = sorted(set(selected), key=lambda x: adata.obs_names.get_loc(x))
+    selected = _order_by_position(selected, adata.obs_names)
     score_df = pd.concat(score_frames, axis=0, ignore_index=True) if score_frames else pd.DataFrame()
     if not score_df.empty:
         score_df["selected_final"] = score_df["barcode"].astype(str).isin(selected)
-    _log(f"ICGS2 PageRank sampling: {work.n_obs} -> {len(selected)} cells")
+    _log(f"ICGS2 PageRank sampling: {work_cells} -> {len(selected)} cells")
     return adata[selected].copy(), score_df
+
+
+ADT_OCCUPANCY_KEY = "ICGS3_ADT_occupancy"
+ADT_OCCUPANCY_GROUP_KEY = "ICGS3_ADT_occupancy_group"
+ADT_OCCUPANCY_STATUS_KEY = "ICGS3_ADT_occupancy_status"
+# Nonzeros per sparse block and cells per dense block. Both cap a working buffer at roughly
+# 160 MB in float64, so the scoring pass costs the same whatever the panel width.
+_OCCUPANCY_SPARSE_BLOCK_NNZ = 20_000_000
+_OCCUPANCY_DENSE_BLOCK_VALUES = 20_000_000
+
+
+def _occupancy_column_moments(matrix, n_vars: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Column sum and column sum of squares, never densifying a sparse matrix.
+
+    A CSR block contributes through np.bincount over its column indices, so the pass reads
+    only the stored nonzeros. The dense branch works on row blocks for the same bounded peak.
+    """
+    total = np.zeros(n_vars, dtype=np.float64)
+    total_sq = np.zeros(n_vars, dtype=np.float64)
+    if sp.issparse(matrix):
+        csr = matrix.tocsr()
+        n_obs = int(csr.shape[0])
+        rows_per_block = _sparse_rows_per_block(csr)
+        for start in range(0, n_obs, rows_per_block):
+            stop = min(start + rows_per_block, n_obs)
+            lo, hi = int(csr.indptr[start]), int(csr.indptr[stop])
+            if hi <= lo:
+                continue
+            idx = csr.indices[lo:hi]
+            data = csr.data[lo:hi].astype(np.float64, copy=False)
+            total += np.bincount(idx, weights=data, minlength=n_vars)
+            total_sq += np.bincount(idx, weights=np.square(data), minlength=n_vars)
+        return total, total_sq
+    values = np.asarray(matrix)
+    n_obs = int(values.shape[0])
+    rows_per_block = max(1, int(_OCCUPANCY_DENSE_BLOCK_VALUES // max(n_vars, 1)))
+    for start in range(0, n_obs, rows_per_block):
+        stop = min(start + rows_per_block, n_obs)
+        chunk = values[start:stop].astype(np.float64, copy=False)
+        total += chunk.sum(axis=0)
+        total_sq += np.square(chunk).sum(axis=0)
+    return total, total_sq
+
+
+def _sparse_rows_per_block(csr) -> int:
+    n_obs = int(csr.shape[0])
+    mean_nnz = max(1.0, float(csr.nnz) / max(n_obs, 1))
+    return max(1, min(n_obs, int(_OCCUPANCY_SPARSE_BLOCK_NNZ / mean_nnz)))
+
+
+def _count_features_above(matrix, thresholds: np.ndarray, n_obs: int) -> np.ndarray:
+    """Per-cell count of features whose value exceeds that feature's threshold.
+
+    Every threshold of a non-negative matrix is itself non-negative, so a stored zero can
+    never clear it and the sparse branch reads the nonzeros only. A negative threshold makes
+    the implicit zeros countable, so that case falls back to dense row blocks.
+    """
+    occupancy = np.zeros(n_obs, dtype=np.int32)
+    if sp.issparse(matrix) and float(np.min(thresholds)) >= 0.0:
+        csr = matrix.tocsr()
+        rows_per_block = _sparse_rows_per_block(csr)
+        for start in range(0, n_obs, rows_per_block):
+            stop = min(start + rows_per_block, n_obs)
+            lo, hi = int(csr.indptr[start]), int(csr.indptr[stop])
+            if hi <= lo:
+                continue
+            marked = csr.data[lo:hi] > thresholds[csr.indices[lo:hi]]
+            if not marked.any():
+                continue
+            per_row = np.diff(csr.indptr[start:stop + 1])
+            rows = np.repeat(np.arange(stop - start, dtype=np.int64), per_row)
+            occupancy[start:stop] = np.bincount(rows[marked], minlength=stop - start)
+        return occupancy
+    n_vars = int(thresholds.size)
+    rows_per_block = max(1, int(_OCCUPANCY_DENSE_BLOCK_VALUES // max(n_vars, 1)))
+    for start in range(0, n_obs, rows_per_block):
+        stop = min(start + rows_per_block, n_obs)
+        chunk = matrix[start:stop]
+        chunk = chunk.toarray() if sp.issparse(chunk) else np.asarray(chunk)
+        occupancy[start:stop] = (chunk > thresholds[None, :]).sum(axis=1)
+    return occupancy
+
+
+def compute_adt_occupancy(adata: ad.AnnData, config: ICGS3Config, *, stage: str,
+                          outdir: Optional[str] = None) -> ad.AnnData:
+    """Per-cell ADT occupancy, following AltAnalyze2 removeCellsWithHighADTOccupancy.
+
+    /Users/saljh8/Documents/GitHub/altanalyze/visualization_scripts/clustering.py:10973-10986
+    thresholds each ADT at mean + 1 standard deviation across cells, marks the cells above
+    that threshold, and counts the marks per cell. A cell marked for many ADTs at once is
+    over-stained; a cell marked for none is under-stained.
+
+    The threshold is scale dependent, so the same cell scores differently on linear and on
+    log values. --adt-occupancy-scale input reads the post-QC matrix BEFORE normalization,
+    which is the matrix the legacy function received; analysis reads the matrix ICGS3
+    clusters on. Thresholds come from every post-QC cell, as they did in the legacy
+    function, not from the sampled subset.
+    """
+    n_obs, n_vars = int(adata.n_obs), int(adata.n_vars)
+    if n_obs < 2:
+        raise ValueError(f"ADT occupancy needs at least 2 cells; the matrix holds {n_obs}")
+    if n_vars < 1:
+        raise ValueError("ADT occupancy needs at least 1 feature; the matrix holds 0")
+    total, total_sq = _occupancy_column_moments(adata.X, n_vars)
+    mean = total / float(n_obs)
+    # ddof=1. AltAnalyze2 statistics.stdev is the SAMPLE standard deviation.
+    variance = np.maximum((total_sq - float(n_obs) * np.square(mean)) / float(n_obs - 1), 0.0)
+    stdev = np.sqrt(variance)
+    thresholds = mean + float(config.adt_occupancy_sd) * stdev
+    occupancy = _count_features_above(adata.X, thresholds, n_obs)
+    zero_variance = int(np.sum(stdev <= 0))
+    adata.obs[ADT_OCCUPANCY_KEY] = occupancy
+    adata.uns["icgs3_adt_occupancy"] = {
+        "stage": str(stage),
+        "scale": str(config.adt_occupancy_scale),
+        "sd_multiplier": float(config.adt_occupancy_sd),
+        "features": n_vars,
+        "cells": n_obs,
+        "zero_variance_features": zero_variance,
+        "occupancy_min": int(occupancy.min()),
+        "occupancy_median": float(np.median(occupancy)),
+        "occupancy_max": int(occupancy.max()),
+    }
+    _log(
+        f"ADT occupancy scored at stage '{stage}' on {n_obs} cells x {n_vars} features: "
+        f"threshold = mean + {float(config.adt_occupancy_sd)} SD per feature; occupancy "
+        f"min/median/max = {int(occupancy.min())}/{float(np.median(occupancy)):.1f}/{int(occupancy.max())}"
+    )
+    if zero_variance:
+        _log(
+            f"WARNING ADT occupancy: {zero_variance} of {n_vars} features have zero variance "
+            "and can never be marked"
+        )
+    if outdir:
+        pd.DataFrame(
+            {
+                "feature": adata.var_names.astype(str),
+                "mean": mean,
+                "stdev_ddof1": stdev,
+                "threshold": thresholds,
+            }
+        ).to_csv(os.path.join(outdir, "sNMF", "icgs3_adt_occupancy_thresholds.tsv"), sep="\t", index=False)
+    return adata
+
+
+def _adt_occupancy_broad_groups(sampled: ad.AnnData, config: ICGS3Config) -> pd.Series:
+    """Broad cell groups for the occupancy trim, from Louvain on the PageRank-sampled cells.
+
+    Staining depth differs between real cell types, so a global percentile would delete whole
+    populations that simply carry more or fewer surface proteins. The trim therefore runs
+    inside a group. The graph reuses the ICGS2 downsampling settings, k=10 euclidean through
+    the configured k-NN backend, and takes the modularity-optimal partition rather than
+    level 0, because the trim needs broad groups, not fine communities.
+    """
+    import community as community_louvain
+
+    matrix = _adata_cells_by_features(sampled, allow_sparse=str(config.knn_backend).lower() == "pynndescent")
+    graph, _ = _neighbor_graph(
+        matrix,
+        n_neighbors=10,
+        n_trees=20,
+        metric="euclidean",
+        backend=config.knn_backend,
+        build_k=int(config.knn_build_neighbors),
+    )
+    partition = community_louvain.best_partition(graph, random_state=int(config.random_state))
+    labels = [f"B{int(partition.get(i, -1))}" for i in range(int(sampled.n_obs))]
+    groups = pd.Series(labels, index=pd.Index(sampled.obs_names.astype(str)), name=ADT_OCCUPANCY_GROUP_KEY)
+    sizes = groups.value_counts()
+    _log(
+        f"ADT occupancy broad groups: Louvain modularity partition gave {int(sizes.size)} groups "
+        f"across {int(sampled.n_obs)} PageRank-sampled cells "
+        f"(smallest {int(sizes.min())}, largest {int(sizes.max())})"
+    )
+    return groups
+
+
+def _project_broad_groups(*, sampled: ad.AnnData, groups: pd.Series, target: ad.AnnData,
+                          config: ICGS3Config) -> pd.Series:
+    """Carry the sampled-cell broad groups onto every post-QC cell with the ICGS3 linear SVM.
+
+    --adt-occupancy-scope all trims the whole matrix, so every cell needs a broad group. This
+    reuses the UDON generate_train_data centroids and the chunked LinearSVC that ICGS3 already
+    uses for cluster reclassification, so no dense all-cell matrix is built. The dense frame
+    below covers the SAMPLED cells only, at most --pagerank-cells by the panel width.
+    min_decision_score is -inf so the projection labels every cell; dropping low-confidence
+    cells here would delete them from the run without saying so.
+    """
+    _add_udon_path()
+    from linearSVM import generate_train_data
+
+    expr = _adata_to_dense_df(sampled, sampled.var_names)
+    columns = pd.Index(expr.columns).astype(str)
+    train_groups = pd.DataFrame({"cluster": groups.reindex(columns).values}, index=columns)
+    if train_groups["cluster"].isna().any():
+        raise ValueError("broad-group projection: a sampled cell has no Louvain group label")
+    centroids = generate_train_data(expr, train_groups).dropna(axis=0)
+    del expr
+    frame = classify_adata_with_scores_chunked(
+        train=centroids,
+        adata=target,
+        genes=centroids.index,
+        cluster_key="broad_group",
+        min_decision_score=float("-inf"),
+        chunk_size=int(config.svm_chunk_size),
+    )
+    projected = frame["broad_group"].astype(str).reindex(pd.Index(target.obs_names.astype(str)))
+    missing = int(projected.isna().sum())
+    if missing:
+        raise ValueError(
+            f"broad-group projection returned no label for {missing} of {int(target.n_obs)} cells"
+        )
+    projected.name = ADT_OCCUPANCY_GROUP_KEY
+    _log(
+        f"ADT occupancy broad groups projected from {int(sampled.n_obs)} sampled cells onto "
+        f"{int(target.n_obs)} post-QC cells with the ICGS3 linear SVM "
+        f"({int(projected.nunique())} groups)"
+    )
+    return projected
+
+
+def _trim_occupancy_within_groups(occupancy: pd.Series, groups: pd.Series, *, percent: float,
+                                  min_group: int) -> Tuple[np.ndarray, pd.DataFrame, pd.DataFrame]:
+    """Drop the lowest and highest `percent` of cells by occupancy inside each broad group.
+
+    Returns the keep mask aligned to `groups.index`, one row per REMOVED cell, and one row
+    per group. Writing only the removed cells keeps the artifact small; a kept cell is every
+    barcode the mask retains.
+
+    One whole-array lexsort orders the cells by group, then occupancy, then original row
+    position, and the tails are then marked by arithmetic on the group boundaries. The
+    earlier per-group pandas loop sorted 400,870 barcode STRINGS group by group.
+
+    AltAnalyze2 clustering.py:11007 computes scores[int(l*p):-1*int(l*p)]. When int(l*p) is 0
+    that expression is scores[0:0], the empty list, so a group smaller than 1/p loses EVERY
+    cell. This keeps such a group whole and records it as kept_group_too_small.
+    """
+    fraction = float(percent) / 100.0
+    if not (0.0 <= fraction < 0.5):
+        raise ValueError(
+            f"--adt-occupancy-percent must be >=0 and <50; got {percent} (two tails of "
+            f"{percent}% would remove {2 * percent}% of every group)"
+        )
+    index = pd.Index(groups.index.astype(str))
+    occ = occupancy.reindex(index).to_numpy(dtype=np.float64)
+    if np.isnan(occ).any():
+        raise ValueError(
+            f"ADT occupancy trim: {int(np.isnan(occ).sum())} of {index.size} cells carry no occupancy score"
+        )
+    group_codes, group_names = pd.factorize(np.asarray(groups.astype(str)), sort=True)
+    n = int(index.size)
+    order = np.lexsort((np.arange(n, dtype=np.int64), occ, group_codes))
+    sorted_codes = group_codes[order]
+    starts = np.flatnonzero(np.r_[True, sorted_codes[1:] != sorted_codes[:-1]])
+    sizes = np.diff(np.r_[starts, n]).astype(np.int64)
+    n_trim = np.floor(sizes * fraction).astype(np.int64)
+    too_small = (sizes < int(min_group)) | (n_trim < 1) | ((sizes - 2 * n_trim) < 1)
+    n_trim = np.where(too_small, 0, n_trim)
+    rank = np.arange(n, dtype=np.int64) - np.repeat(starts, sizes)
+    size_per = np.repeat(sizes, sizes)
+    trim_per = np.repeat(n_trim, sizes)
+    small_per = np.repeat(too_small, sizes)
+    status_sorted = np.where(
+        small_per,
+        "kept_group_too_small",
+        np.where(
+            rank < trim_per,
+            "removed_understained",
+            np.where(rank >= (size_per - trim_per), "removed_overstained", "kept"),
+        ),
+    )
+    status = np.empty(n, dtype=object)
+    status[order] = status_sorted
+    removed_mask = np.char.startswith(status_sorted.astype(str), "removed")
+    keep_mask = np.ones(n, dtype=bool)
+    keep_mask[order[removed_mask]] = False
+    removed_positions = order[removed_mask]
+    removed = pd.DataFrame(
+        {
+            "barcode": index[removed_positions].astype(str),
+            "broad_group": np.asarray(group_names)[group_codes[removed_positions]],
+            "occupancy": occ[removed_positions],
+            ADT_OCCUPANCY_STATUS_KEY: status_sorted[removed_mask],
+        }
+    )
+    kept_first = starts + n_trim
+    kept_last = starts + sizes - n_trim - 1
+    summary = pd.DataFrame(
+        {
+            "broad_group": np.asarray(group_names)[sorted_codes[starts]],
+            "group_size": sizes,
+            "trimmed_each_tail": n_trim,
+            "n_removed_understained": np.where(too_small, 0, n_trim),
+            "n_removed_overstained": np.where(too_small, 0, n_trim),
+            "n_kept": sizes - 2 * n_trim,
+            "kept_occupancy_min": occ[order[kept_first]],
+            "kept_occupancy_max": occ[order[kept_last]],
+            "group_occupancy_min": occ[order[starts]],
+            "group_occupancy_max": occ[order[starts + sizes - 1]],
+            "kept_whole_group": too_small,
+        }
+    )
+    return keep_mask, removed, summary
+
+
+def apply_adt_occupancy_filter(*, sampled: ad.AnnData, analysis_adata: ad.AnnData,
+                               config: ICGS3Config, outdir: str) -> Tuple[np.ndarray, pd.DataFrame]:
+    """Remove over- and under-stained cells after PageRank sampling.
+
+    Returns a boolean mask over analysis_adata.obs_names and the removed-cell table. The
+    caller drops the masked-out cells from EVERY downstream step, the linear SVM included, so
+    a removed cell receives no cluster and appears in no output.
+    """
+    if ADT_OCCUPANCY_KEY not in analysis_adata.obs:
+        raise KeyError(
+            f"{ADT_OCCUPANCY_KEY} is absent from obs; compute_adt_occupancy must run before the filter"
+        )
+    scope = str(config.adt_occupancy_scope or "all").lower()
+    if scope not in {"all", "sampled"}:
+        raise ValueError(f"Unknown --adt-occupancy-scope {scope}; choose from all, sampled")
+    groups = _adt_occupancy_broad_groups(sampled, config)
+    all_names = pd.Index(analysis_adata.obs_names.astype(str))
+    if scope == "all" and int(groups.nunique()) < 2:
+        _log(
+            "ADT occupancy filter: Louvain found a single broad group, so the trim runs across "
+            "every cell at once and the SVM projection is skipped"
+        )
+        target_groups = pd.Series("B0", index=all_names, name=ADT_OCCUPANCY_GROUP_KEY)
+    elif scope == "all":
+        target_groups = _project_broad_groups(
+            sampled=sampled, groups=groups, target=analysis_adata, config=config
+        )
+    else:
+        target_groups = groups
+    scored_keep, removed, summary = _trim_occupancy_within_groups(
+        analysis_adata.obs[ADT_OCCUPANCY_KEY],
+        target_groups,
+        percent=float(config.adt_occupancy_percent),
+        min_group=int(config.adt_occupancy_min_group),
+    )
+    if scope == "all":
+        keep_mask = np.asarray(scored_keep, dtype=bool)
+    else:
+        # Only the sampled cells carry a score, so every unscored cell stays.
+        keep_mask = np.asarray(~all_names.isin(set(removed["barcode"].astype(str))), dtype=bool)
+    sampled_names = set(sampled.obs_names.astype(str))
+    removed["sampled_cell"] = removed["barcode"].astype(str).isin(sampled_names)
+    removed.to_csv(os.path.join(outdir, "sNMF", "icgs3_adt_occupancy_removed_cells.tsv"), sep="\t", index=False)
+    summary.to_csv(os.path.join(outdir, "sNMF", "icgs3_adt_occupancy_group_summary.tsv"), sep="\t", index=False)
+    n_total = int(all_names.size)
+    n_removed = int(n_total - int(keep_mask.sum()))
+    n_low = int((removed[ADT_OCCUPANCY_STATUS_KEY] == "removed_understained").sum())
+    n_high = int((removed[ADT_OCCUPANCY_STATUS_KEY] == "removed_overstained").sum())
+    n_small_groups = int(summary["kept_whole_group"].sum())
+    n_sampled_removed = int(removed["sampled_cell"].sum())
+    _log(
+        f"ADT occupancy filter (scope={scope}, {float(config.adt_occupancy_percent)}% per tail, "
+        f"threshold mean + {float(config.adt_occupancy_sd)} SD, scale={config.adt_occupancy_scale}): "
+        f"{int(summary.shape[0])} broad groups; removed {n_removed} of {n_total} post-QC cells "
+        f"({100.0 * n_removed / max(n_total, 1):.1f}%) -- {n_low} under-stained, {n_high} over-stained; "
+        f"{n_sampled_removed} of {int(sampled.n_obs)} PageRank-sampled cells removed"
+    )
+    if n_small_groups:
+        _log(
+            f"ADT occupancy filter: {n_small_groups} of {int(summary.shape[0])} groups sit below "
+            f"--adt-occupancy-min-group {int(config.adt_occupancy_min_group)} or are too small to "
+            "trim; every cell in them is kept"
+        )
+    if n_removed == 0:
+        _log("WARNING ADT occupancy filter removed 0 cells; check --adt-occupancy-percent and group sizes")
+    return keep_mask, removed
 
 
 def write_retention_audit(
@@ -1120,6 +2976,44 @@ def round_normalized_expression(adata: ad.AnnData, decimals: Optional[int]) -> a
     return adata
 
 
+NORMALIZATION_MODES = ("auto", "cp10k-log1p", "cp10k", "log1p", "none")
+
+
+def _matrix_minimum(matrix) -> float:
+    """Smallest value in X, including the implicit zeros of a sparse matrix."""
+    if sp.issparse(matrix):
+        if matrix.nnz == 0:
+            return 0.0
+        data_min = float(matrix.data.min())
+        return data_min if matrix.nnz == int(matrix.shape[0]) * int(matrix.shape[1]) else min(data_min, 0.0)
+    values = np.asarray(matrix)
+    return float(values.min()) if values.size else 0.0
+
+
+def resolve_normalization(config: "ICGS3Config") -> str:
+    """Resolve --normalization, honouring --input-normalized as the legacy spelling of none.
+
+    auto gives log1p for ADT and log1p(CP10K) for every other modality. An ADT panel measures
+    tens of proteins, so CP10K forces the whole panel of each cell to one constant total: a
+    cell that is genuinely high in one abundant protein is then rescaled to read low in all
+    the others. Denoised TotalVI values already carry a depth correction, so the rescale
+    removes real signal. RNA keeps log1p(CP10K), which is unchanged.
+    """
+    mode = str(getattr(config, "normalization", "auto") or "auto").lower()
+    if mode not in NORMALIZATION_MODES:
+        raise ValueError(f"Unknown --normalization {mode}; choose from {list(NORMALIZATION_MODES)}")
+    if bool(config.input_normalized):
+        if mode not in {"auto", "none"}:
+            raise ValueError(
+                f"--input-normalized conflicts with --normalization {mode}. "
+                "--input-normalized is the legacy spelling of --normalization none."
+            )
+        return "none"
+    if mode == "auto":
+        return "log1p" if str(config.modality).lower() == "adt" else "cp10k-log1p"
+    return mode
+
+
 def prepare_expression(adata: ad.AnnData, config: ICGS3Config) -> ad.AnnData:
     if config.layer:
         if config.layer not in adata.layers:
@@ -1128,14 +3022,40 @@ def prepare_expression(adata: ad.AnnData, config: ICGS3Config) -> ad.AnnData:
         _ensure_sparse_csr(adata)
 
     if "counts" not in adata.layers:
-        adata.layers["counts"] = adata.X.copy()
+        # Only call X "counts" when X really holds counts. Storing a log matrix under that name
+        # makes every count-based step downstream read log values without knowing it.
+        x_report = infer_expression_scale(adata.X, name="X", random_state=config.random_state)
+        if x_report["verdict"] == "counts":
+            adata.layers["counts"] = adata.X.copy()
+        else:
+            _log(f"not creating layers['counts'] from X: X looks like "
+                 f"{x_report['verdict'].upper()}, not counts")
 
-    if not config.input_normalized:
+    mode = resolve_normalization(config)
+    if mode in {"cp10k-log1p", "log1p", "cp10k"}:
+        minimum = _matrix_minimum(adata.X)
+        if minimum < 0:
+            raise ValueError(
+                f"--normalization {mode} applies log1p, but the matrix minimum is {minimum:.4g}. "
+                "log1p of a negative value is undefined. Use --normalization none for a matrix "
+                "that is already transformed."
+            )
+    if mode == "cp10k-log1p":
         sc.pp.normalize_total(adata, target_sum=1e4)
         sc.pp.log1p(adata)
         adata.uns["icgs3_normalization"] = "log1p(CP10K)"
+    elif mode == "cp10k":
+        # Depth-normalized and LINEAR. Every cell total becomes 1e4, so MarkerFinder's
+        # detector reports linear_normalized and accepts it with scale_data=True.
+        sc.pp.normalize_total(adata, target_sum=1e4)
+        adata.uns["icgs3_normalization"] = "CP10K linear (depth-normalized, no log)"
+    elif mode == "log1p":
+        sc.pp.log1p(adata)
+        adata.uns["icgs3_normalization"] = "log1p (no library-size rescaling)"
     else:
         adata.uns["icgs3_normalization"] = "input treated as normalized"
+    adata.uns["icgs3_normalization_mode"] = mode
+    _log(f"normalization mode {mode}: {adata.uns['icgs3_normalization']}")
     _ensure_sparse_csr(adata)
     adata = round_normalized_expression(adata, config.normalized_decimals)
     _ensure_sparse_csr(adata)
@@ -1163,6 +3083,405 @@ def _add_udon_path() -> str:
     if udon_dir not in sys.path:
         sys.path.insert(0, udon_dir)
     return udon_dir
+
+
+def _sparse_unique_value_counts(matrix, target_block_nnz: int = 150_000_000) -> np.ndarray:
+    """Distinct nonzero values per column, plus one when the column also holds a zero.
+
+    Same value as len(np.unique(csc[:, j].data)) + (1 if values.size < n_obs else 0) for every
+    column. The previous form built one CSC of the whole matrix, about 18 GB at 978,892 x
+    18,427 with 1.5e9 nonzeros, which exhausted a 64 GB machine.
+
+    Converting a contiguous COLUMN BLOCK keeps the per-column np.unique that measured fast
+    (3.97 s on 30,000 x 33,234) and caps the CSC copy at one block. A lexsort over all
+    nonzeros was tried instead and ran 8.7x slower, 162.1 s against 18.7 s on 25,000 x 30,942,
+    which is what the original comment here warned about.
+    """
+    n_obs, n_vars = int(matrix.shape[0]), int(matrix.shape[1])
+    nnz = int(matrix.data.size)
+    counts = np.zeros(n_vars, dtype=np.int64)
+    if nnz == 0:
+        return counts + 1
+    per_col = max(1.0, float(nnz) / float(max(n_vars, 1)))
+    block = max(1, min(n_vars, int(target_block_nnz / per_col)))
+    for lo in range(0, n_vars, block):
+        hi = min(lo + block, n_vars)
+        sub = matrix[:, lo:hi].tocsc()
+        indptr = sub.indptr
+        data = sub.data
+        for j in range(hi - lo):
+            seg = data[indptr[j]:indptr[j + 1]]
+            counts[lo + j] = np.unique(seg).size + (1 if seg.size < n_obs else 0)
+        del sub, indptr, data
+    return counts
+
+
+def _sparse_feature_moments(matrix, row_index: Optional[np.ndarray] = None,
+                            target_block_nnz: int = 20_000_000):
+    """Per-feature sum and sum of squares over the selected rows, read in row blocks.
+
+    Never builds the row subset. Extra memory is one block.
+    """
+    n_vars = int(matrix.shape[1])
+    indptr = matrix.indptr.astype(np.int64, copy=False)
+    rows = (np.arange(int(matrix.shape[0]), dtype=np.int64) if row_index is None
+            else np.asarray(row_index, dtype=np.int64))
+    lo_all = indptr[rows]
+    len_all = indptr[rows + 1] - lo_all
+    total = np.zeros(n_vars, dtype=np.float64)
+    total_sq = np.zeros(n_vars, dtype=np.float64)
+    contiguous = row_index is None
+    for start, stop in _row_blocks(len_all, target_block_nnz):
+        lens = len_all[start:stop]
+        if contiguous:
+            lo = int(lo_all[start])
+            hi = lo + int(lens.sum())
+            idx = matrix.indices[lo:hi]
+            vals = np.asarray(matrix.data[lo:hi], dtype=np.float64)
+        else:
+            src = _ragged_positions(lo_all[start:stop], lens)
+            if src.size == 0:
+                continue
+            idx = matrix.indices[src]
+            vals = np.asarray(matrix.data[src], dtype=np.float64)
+        total += np.bincount(idx, weights=vals, minlength=n_vars)
+        total_sq += np.bincount(idx, weights=vals * vals, minlength=n_vars)
+    return total, total_sq
+
+
+def _sparse_columns_to_dense(matrix, row_index: np.ndarray, col_index: np.ndarray,
+                             target_block_nnz: int = 20_000_000) -> np.ndarray:
+    """Dense block for the selected rows and columns only, gathered from the sparse matrix.
+
+    Used for the marker genes alone, which number in the low thousands, so the dense block
+    stays small. The full gene pool is never densified.
+    """
+    row_index = np.asarray(row_index, dtype=np.int64)
+    col_index = np.asarray(col_index, dtype=np.int64)
+    remap = np.full(int(matrix.shape[1]), -1, dtype=np.int64)
+    remap[col_index] = np.arange(col_index.size, dtype=np.int64)
+    out = np.zeros((row_index.size, col_index.size), dtype=np.float32)
+    indptr = matrix.indptr.astype(np.int64, copy=False)
+    lo_all = indptr[row_index]
+    len_all = indptr[row_index + 1] - lo_all
+    for start, stop in _row_blocks(len_all, target_block_nnz):
+        lens = len_all[start:stop]
+        src = _ragged_positions(lo_all[start:stop], lens)
+        if src.size == 0:
+            continue
+        cols = remap[matrix.indices[src]]
+        sel = cols >= 0
+        if not np.any(sel):
+            continue
+        rows = np.repeat(np.arange(start, stop, dtype=np.int64), lens)[sel]
+        out[rows, cols[sel]] = matrix.data[src][sel]
+    return out
+
+
+def _csr_select_sparse(matrix, row_index: np.ndarray, col_index: np.ndarray,
+                       target_block_nnz: int = 20_000_000):
+    """Sparse subset of the given rows and columns, gathered without densifying."""
+    row_index = np.asarray(row_index, dtype=np.int64)
+    col_index = np.asarray(col_index, dtype=np.int64)
+    remap = np.full(int(matrix.shape[1]), -1, dtype=np.int64)
+    remap[col_index] = np.arange(col_index.size, dtype=np.int64)
+    indptr_in = matrix.indptr.astype(np.int64, copy=False)
+    lo_all = indptr_in[row_index]
+    len_all = indptr_in[row_index + 1] - lo_all
+    data_parts, col_parts = [], []
+    per_row = np.zeros(row_index.size, dtype=np.int64)
+    for start, stop in _row_blocks(len_all, target_block_nnz):
+        lens = len_all[start:stop]
+        src = _ragged_positions(lo_all[start:stop], lens)
+        if src.size == 0:
+            continue
+        mapped = remap[matrix.indices[src]]
+        sel = mapped >= 0
+        ends = np.cumsum(lens)
+        starts = ends - lens
+        cs = np.concatenate((np.zeros(1, dtype=np.int64), np.cumsum(sel.astype(np.int64))))
+        per_row[start:stop] = cs[ends] - cs[starts]
+        data_parts.append(matrix.data[src][sel])
+        col_parts.append(mapped[sel].astype(np.int32, copy=False))
+    out = sp.csr_matrix((row_index.size, col_index.size), dtype=matrix.data.dtype)
+    out.data = np.concatenate(data_parts) if data_parts else np.empty(0, dtype=matrix.data.dtype)
+    out.indices = np.concatenate(col_parts) if col_parts else np.empty(0, dtype=np.int32)
+    out.indptr = np.concatenate((np.zeros(1, dtype=np.int64), np.cumsum(per_row)))
+    return out
+
+
+def _sparse_row_medians(csr, n_cols: int) -> np.ndarray:
+    """Median of every row, counting the zeros the sparse form does not store."""
+    n_rows = int(csr.shape[0])
+    med = np.zeros(n_rows, dtype=np.float64)
+    indptr = csr.indptr
+    for r in range(n_rows):
+        vals = csr.data[int(indptr[r]):int(indptr[r + 1])]
+        k = int(vals.size)
+        if k == 0:
+            continue
+        stored = np.sort(np.asarray(vals, dtype=np.float64))
+        n_zero = n_cols - k
+        n_neg = int(np.searchsorted(stored, 0.0, side="left"))
+
+        def value_at(i):
+            if i < n_neg:
+                return stored[i]
+            if i < n_neg + n_zero:
+                return 0.0
+            return stored[i - n_zero]
+
+        if n_cols % 2 == 1:
+            med[r] = value_at(n_cols // 2)
+        else:
+            med[r] = 0.5 * (value_at(n_cols // 2 - 1) + value_at(n_cols // 2))
+    return med
+
+
+def _sparse_marker_heatmap(matrix, row_index: np.ndarray, cell_names: pd.Index,
+                           col_index: np.ndarray, marker_names: pd.Index,
+                           row_clusters: Sequence[str], column_clusters: pd.Series) -> dict:
+    """Markers x cells, row-median-centred, held sparse.
+
+    create_final_marker_heatmap densified cells x markers and centred the result in pandas.
+    At 978,892 cells and 1,272 markers that block reaches 4.98 GB, and 86.90% of the values
+    are zero. A marker's median across every cell is almost always 0, so subtracting it
+    leaves the row sparse. Rows whose median is not 0 do become dense, and the count is
+    logged.
+    """
+    import re as _re
+    cells_by_marker = _csr_select_sparse(matrix, row_index, col_index)   # cells x markers
+    heat = cells_by_marker.T.tocsr()                                    # markers x cells
+    del cells_by_marker
+    n_cells = int(heat.shape[1])
+    medians = _sparse_row_medians(heat, n_cells)
+
+    dense_rows = int(np.sum(medians != 0.0))
+    pieces = []
+    for r in range(int(heat.shape[0])):
+        row = heat.getrow(r)
+        if medians[r] == 0.0:
+            pieces.append(row)
+        else:
+            filled = np.full(n_cells, -medians[r], dtype=np.float64)
+            filled[row.indices] += row.data
+            pieces.append(sp.csr_matrix(filled.reshape(1, -1)))
+    centred = sp.vstack(pieces, format="csr") if pieces else heat
+    del pieces, heat
+
+    _num = lambda x: int(_re.search(r"\d+", str(x)).group()) if _re.search(r"\d+", str(x)) else 0
+    cluster_values = np.asarray(column_clusters.astype(str))
+    order = np.argsort([_num(v) for v in cluster_values], kind="stable")
+    centred = centred[:, order]
+    _log(f"marker heatmap built sparse: {centred.shape[0]} markers x {centred.shape[1]} cells, "
+         f"{centred.nnz} nonzero of {centred.shape[0] * centred.shape[1]} "
+         f"({100.0 * centred.nnz / max(centred.shape[0] * centred.shape[1], 1):.1f}%); "
+         f"{dense_rows} of {centred.shape[0]} rows have a nonzero median and are stored full")
+    return {
+        "matrix": centred,
+        "markers": pd.Index(marker_names).astype(str),
+        "cells": pd.Index(np.asarray(cell_names)[order]).astype(str),
+        "row_clusters": np.asarray(row_clusters, dtype=object),
+        "column_clusters": cluster_values[order],
+    }
+
+
+def _sparse_marker_correlations(matrix, row_index: np.ndarray, codes: np.ndarray,
+                                group_names: Sequence[str], feature_names: Sequence[str],
+                                feature_index: np.ndarray) -> pd.DataFrame:
+    """Pearson r of every feature against an idealized one-hot cluster vector, from sparse X.
+
+    Same quantity markerFinder.pearson_corr_df_to_df computes, rearranged so it reads a
+    sparse matrix. That function centres both matrices first, which forces a dense cells x
+    genes copy. Centring is algebraically equivalent to correcting the raw sums afterwards:
+
+        num[g,c] = (sum of x[.,g] over cells of cluster c) - (sum of x[.,g]) * n_c / n
+        sq1[g]   = sum x[.,g]^2 - (sum x[.,g])^2 / n
+        sq2[c]   = n_c - n_c^2 / n
+        r[g,c]   = num / sqrt(sq1 * sq2)
+
+    The dense path accumulates in float32 after centring; this accumulates in float64 and
+    corrects afterwards, so the two agree to float32 precision rather than bit for bit.
+    """
+    n = int(row_index.size)
+    n_vars = int(matrix.shape[1])
+    n_groups = len(group_names)
+    sum_x, sum_x2 = _sparse_feature_moments(matrix, row_index)
+    indicator = sp.csr_matrix(
+        (np.ones(n, dtype=np.float64), (np.asarray(codes, dtype=np.int64), np.asarray(row_index, dtype=np.int64))),
+        shape=(n_groups, int(matrix.shape[0])),
+    )
+    group_sums = np.asarray((indicator @ matrix).toarray(), dtype=np.float64)  # groups x features
+    counts = np.bincount(np.asarray(codes, dtype=np.int64), minlength=n_groups).astype(np.float64)
+
+    feature_index = np.asarray(feature_index, dtype=np.int64)
+    sum_x = sum_x[feature_index]
+    sum_x2 = sum_x2[feature_index]
+    group_sums = group_sums[:, feature_index]
+
+    num = group_sums.T - np.outer(sum_x, counts) / float(n)
+    sq1 = sum_x2 - (sum_x ** 2) / float(n)
+    sq2 = counts - (counts ** 2) / float(n)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        r = num / np.sqrt(np.outer(sq1, sq2))
+    # A zero-variance feature or group leaves the correlation undefined. Keep it NaN so the
+    # caller's dropna removes it, exactly as the dense path does.
+    r[~np.isfinite(r)] = np.nan
+    return pd.DataFrame(r, index=pd.Index(list(feature_names)), columns=pd.Index(list(group_names)))
+
+
+def _sparse_cluster_centroids(adata: ad.AnnData, cells: Sequence[str], groups: pd.DataFrame,
+                              features: Optional[Sequence[str]] = None) -> pd.DataFrame:
+    """Mean expression per cluster over the given features, computed from the sparse matrix.
+
+    Replaces expr_full_markers.loc[:, cells].mean(axis=1) per cluster, which needed the dense
+    genes x cells frame only to take column means.
+    """
+    matrix = adata.X.tocsr() if sp.issparse(adata.X) else sp.csr_matrix(adata.X)
+    cells = pd.Index(pd.Index(cells).astype(str))
+    row_index = adata.obs_names.astype(str).get_indexer(cells)
+    if np.any(row_index < 0):
+        raise ValueError("Could not align cells for sparse cluster centroids.")
+    labels = groups.loc[cells, "cluster"].astype(str).to_numpy()
+    group_names = pd.Index(pd.unique(labels))
+    codes = group_names.get_indexer(labels)
+    indicator = sp.csr_matrix(
+        (np.ones(row_index.size, dtype=np.float64),
+         (np.asarray(codes, dtype=np.int64), np.asarray(row_index, dtype=np.int64))),
+        shape=(len(group_names), int(matrix.shape[0])),
+    )
+    sums = np.asarray((indicator @ matrix).toarray(), dtype=np.float64)
+    counts = np.bincount(np.asarray(codes, dtype=np.int64), minlength=len(group_names)).astype(np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        means = sums / counts[:, None]
+    means[~np.isfinite(means)] = 0.0
+    frame = pd.DataFrame(means, index=group_names, columns=adata.var_names.astype(str))
+    if features is not None:
+        keep = [f for f in pd.Index(pd.Index(features).astype(str)) if f in frame.columns]
+        frame = frame.loc[:, keep]
+    return frame
+
+
+def _sparse_marker_finder_wrapper(adata: ad.AnnData, cells: Sequence[str], features: Sequence[str],
+                                  groups: pd.DataFrame, *, top_n: int, rho_threshold: float,
+                                  marker_finder_rho: float, min_markers_per_cluster: int,
+                                  build_heatmap: bool = True):
+    """Sparse stand-in for markerFinder.marker_finder_wrapper.
+
+    Returns the same three objects the dense wrapper returns. Only the selected marker genes
+    are ever densified, so the peak no longer scales with the full gene pool.
+    """
+    import re as _re
+    from scipy.stats import t as _t
+    from markerFinder import create_final_marker_heatmap
+
+    matrix = adata.X.tocsr() if sp.issparse(adata.X) else sp.csr_matrix(adata.X)
+    cells = pd.Index(pd.Index(cells).astype(str))
+    row_index = adata.obs_names.astype(str).get_indexer(cells)
+    if np.any(row_index < 0):
+        raise ValueError("Could not align cells for the sparse MarkerFinder pass.")
+    feature_names = pd.Index(pd.Index(features).astype(str))
+    feature_index = adata.var_names.astype(str).get_indexer(feature_names)
+    if np.any(feature_index < 0):
+        keep = feature_index >= 0
+        feature_names = feature_names[keep]
+        feature_index = feature_index[keep]
+
+    labels = groups.loc[cells, "cluster"].astype(str).to_numpy()
+    # pd.get_dummies orders its columns by sorted unique label, so np.unique matches it.
+    group_names = np.unique(labels)
+    codes = pd.Index(group_names).get_indexer(labels)
+
+    r_df = _sparse_marker_correlations(matrix, row_index, codes, group_names, feature_names, feature_index)
+    r_df = r_df.dropna()
+    degrees_f = int(row_index.size) - 2
+    r_arr = r_df.to_numpy(dtype=np.float64)
+    r_safe = np.clip(r_arr, -1.0 + 1e-12, 1.0 - 1e-12)
+    t_arr = r_safe * np.sqrt(degrees_f) / np.sqrt(1.0 - r_safe ** 2)
+    p_vals = _t.sf(np.abs(t_arr), df=degrees_f) * 2
+
+    best_col = np.argmax(r_arr, axis=1)
+    rows = np.arange(r_arr.shape[0])
+    markers_df_og = pd.DataFrame({
+        "marker": r_df.index.values,
+        "top_cluster": np.asarray(r_df.columns)[best_col],
+        "pearson_r": r_arr[rows, best_col],
+        "p_value": p_vals[rows, best_col],
+    })
+    _num = lambda x: int(_re.search(r"\d+", str(x)).group()) if _re.search(r"\d+", str(x)) else 0
+    markers_df_og = (markers_df_og.assign(_k=markers_df_og["top_cluster"].map(_num))
+                     .sort_values(by=["_k", "pearson_r"], ascending=[True, False]).drop(columns="_k"))
+    markers_df_og.index = markers_df_og["marker"]
+
+    markers_df = markers_df_og.copy()
+    markers_df = markers_df[markers_df["pearson_r"] >= rho_threshold]
+    markers_df = markers_df.groupby("top_cluster").filter(lambda x: len(x) >= int(min_markers_per_cluster))
+    markers_df = markers_df.groupby("top_cluster").head(top_n)
+    markers_df = markers_df[markers_df["pearson_r"] >= marker_finder_rho]
+
+    selected = pd.Index(markers_df["marker"].astype(str))
+    _log(f"sparse MarkerFinder: scored {r_df.shape[0]} features x {r_df.shape[1]} clusters over "
+         f"{row_index.size} cells with no dense gene-pool matrix; {selected.size} markers selected")
+    if not build_heatmap:
+        # The first pass discards its heatmap. Building it cost a dense markers x cells frame
+        # for nothing.
+        return markers_df_og, markers_df, None
+    selected_index = adata.var_names.astype(str).get_indexer(selected)
+    heat = _sparse_marker_heatmap(
+        matrix, row_index, cells, selected_index, selected,
+        markers_df["top_cluster"].astype(str).to_numpy(),
+        groups.loc[cells, "cluster"])
+    return markers_df_og, markers_df, heat
+
+
+def _write_marker_heatmap_tsv(heat: dict, path: str) -> None:
+    """Rebuild the dense AltAnalyze text layout on request only.
+
+    Nothing in altanalyze3 reads this file. It exists for external AltAnalyze tools, so it
+    stays behind --write-heatmap-altanalyze-tsv and the dense array lives only inside this
+    function.
+    """
+    dense = np.asarray(heat["matrix"].toarray(), dtype=np.float32)
+    frame = pd.DataFrame(dense, index=pd.Index(heat["markers"]).astype(str),
+                         columns=pd.Index(heat["cells"]).astype(str))
+    frame.insert(0, "row_clusters-flat", np.asarray(heat["row_clusters"], dtype=object).astype(str))
+    top = pd.DataFrame([[""] + list(np.asarray(heat["column_clusters"], dtype=object).astype(str))],
+                       index=["column_clusters-flat"], columns=frame.columns)
+    pd.concat([top, frame], axis=0).to_csv(path, sep="\t")
+    _log(f"marker heatmap text layout written on request: {path}")
+
+
+def _write_marker_heatmap_h5ad(heat: dict, path: str) -> None:
+    """Write the marker heatmap matrix as a sparse h5ad rather than a dense text table.
+
+    The AltAnalyze text layout stores two annotation tracks inside the matrix: a
+    'row_clusters-flat' column giving each marker its cluster, and a 'column_clusters-flat'
+    row giving each cell its cluster. Both move to var and obs here, so the h5ad holds
+    everything the text file held.
+
+    Measured on the COVID run of 2026-08-22, 1,272 markers x 282,627 cells: the dense text
+    form reached 2.03 GiB. Sampling 39 of those 1,272 marker rows, every 32nd row across the
+    file, 86.90% of 11,022,414 values are zero. A sparse float32 matrix therefore stores about
+    one seventh of the values the text layout wrote out.
+    """
+    matrix = heat["matrix"].T.tocsr().astype(np.float32)      # cells x markers
+    obs = pd.DataFrame(index=pd.Index(heat["cells"]).astype(str))
+    obs["column_clusters-flat"] = np.asarray(heat["column_clusters"], dtype=object).astype(str)
+    var = pd.DataFrame(index=pd.Index(heat["markers"]).astype(str))
+    var["row_clusters-flat"] = np.asarray(heat["row_clusters"], dtype=object).astype(str)
+    values = matrix
+    out = ad.AnnData(X=matrix, obs=obs, var=var)
+    out.uns["icgs3_marker_heatmap"] = {
+        "orientation": "cells x markers; the AltAnalyze text layout is the transpose",
+        "values": "unscaled, the same values the text layout carried",
+    }
+    out.write_h5ad(path, compression="gzip")
+    cells_x_markers = float(matrix.shape[0]) * float(matrix.shape[1])
+    held = float(matrix.data.nbytes + matrix.indices.nbytes + matrix.indptr.nbytes)
+    _log(f"marker heatmap written sparse: {matrix.shape[0]} cells x {matrix.shape[1]} markers, "
+         f"{matrix.nnz} nonzero of {int(cells_x_markers)} "
+         f"({100.0 * matrix.nnz / max(cells_x_markers, 1):.1f}%), "
+         f"{held / 1024 ** 3:.2f} GB sparse against {cells_x_markers * 4 / 1024 ** 3:.2f} GB dense -> {path}")
 
 
 def _adata_to_dense_df(adata: ad.AnnData, genes: Sequence[str], cells: Optional[Sequence[str]] = None) -> pd.DataFrame:
@@ -1258,14 +3577,20 @@ def _rank_features_by_sparse_dispersion(adata: ad.AnnData, genes: Sequence[str])
     X = adata.X[:, positions[valid]]
     if sp.issparse(X):
         X = X.tocsr()
-        means = np.asarray(X.mean(axis=0)).ravel()
-        second = np.asarray(X.multiply(X).mean(axis=0)).ravel()
+        # Same reason as _icgs2_hgvfinder_adata: X.multiply(X) doubles the sparse matrix.
+        col_sum, col_sq_sum = _sparse_feature_moments(X)
+        means = col_sum / float(X.shape[0])
+        second = col_sq_sum / float(X.shape[0])
     else:
         arr = np.asarray(X, dtype=np.float32)
         means = arr.mean(axis=0)
         second = np.square(arr).mean(axis=0)
     variances = np.maximum(second - np.square(means), 0)
     dispersion = variances / np.maximum(means, 1e-8)
+    undefined = int(np.sum(~np.isfinite(dispersion)))
+    if undefined:
+        _log(f"variable-gene ranking: {undefined} of {dispersion.size} features have an "
+             f"undefined dispersion (zero mean or zero variance) and rank last")
     order = np.argsort(np.nan_to_num(dispersion, nan=-np.inf, posinf=-np.inf))[::-1]
     return names[order].tolist()
 
@@ -1283,8 +3608,15 @@ def load_protein_coding_genes(path: Optional[str] = None) -> set:
     return lowered
 
 
-def apply_rna_unsupervised_gene_filter(adata: ad.AnnData, config: ICGS3Config, outdir: Optional[str] = None) -> ad.AnnData:
-    """Remove non-protein-coding/nuisance RNA genes before graph, PageRank, NMF, and UMAP."""
+def apply_rna_unsupervised_gene_filter(adata: ad.AnnData, config: ICGS3Config, outdir: Optional[str] = None,
+                                       *, reuse_input: bool = False) -> ad.AnnData:
+    """Remove non-protein-coding/nuisance RNA genes before graph, PageRank, NMF, and UMAP.
+
+    reuse_input=True lets this function consume `adata` in place instead of copying it, which
+    halves the peak on a large matrix. Pass it ONLY where the caller drops its own reference
+    to `adata` on return. pagerank_downsample_adata keeps using its `adata` after calling this
+    function, so it must never pass it.
+    """
     if config.modality.lower() != "rna":
         return adata
     pc = load_protein_coding_genes()
@@ -1300,7 +3632,7 @@ def apply_rna_unsupervised_gene_filter(adata: ad.AnnData, config: ICGS3Config, o
         )
     if after == 0:
         raise ValueError("RNA unsupervised gene filtering retained 0 features.")
-    filtered = adata[:, keep].copy()
+    filtered = _subset_adata_compact(adata, None, keep) if reuse_input else adata[:, keep].copy()
     filtered.var["ICGS_unsupervised_gene_filter"] = True
     _ensure_sparse_csr(filtered)
     _log(
@@ -1329,6 +3661,29 @@ def _resolve_auto_nmf_rank(udon_estimated_rank: int, config: ICGS3Config) -> Tup
     return candidate_rank, final_rank, max_auto_rank
 
 
+SMALL_FEATURE_MODALITIES = {"adt", "grn", "metabolite", "lipid", "psi"}
+
+
+def resolve_small_feature_rank(config: "ICGS3Config") -> bool:
+    """Decide whether the UDON rank estimator uses its small_feature branch.
+
+    udon/nmf.py:63-71 documents that branch as written for "few features x many pseudobulks
+    (e.g. imputed ADT panels)", where the Tracy-Widom boundary rises with the feature count
+    until only the one dominant global component clears it and k collapses to 2. ICGS3 called
+    determine_nmf_ranks with small_feature=False for every modality, so no run ever reached
+    that branch, and config.rank_rel_threshold, which exists only to feed it, was never read.
+    auto turns it on for the small-panel modalities and leaves RNA on Tracy-Widom.
+    """
+    mode = str(getattr(config, "small_feature_rank", "auto") or "auto").lower()
+    if mode in {"true", "yes", "on"}:
+        return True
+    if mode in {"false", "no", "off"}:
+        return False
+    if mode != "auto":
+        raise ValueError(f"Unknown --small-feature-rank {mode}; choose from auto, true, false")
+    return str(config.modality).lower() in SMALL_FEATURE_MODALITIES
+
+
 def estimate_udon_nmf_rank(expr_sampled: pd.DataFrame, config: ICGS3Config) -> int:
     """ICGS2/UDON auto-rank estimator.
 
@@ -1340,7 +3695,18 @@ def estimate_udon_nmf_rank(expr_sampled: pd.DataFrame, config: ICGS3Config) -> i
     _add_udon_path()
     from nmf import determine_nmf_ranks
 
-    return max(2, int(determine_nmf_ranks(expr_sampled, small_feature=False)))
+    small_feature = resolve_small_feature_rank(config)
+    rank = int(determine_nmf_ranks(
+        expr_sampled,
+        small_feature=small_feature,
+        rel_threshold=float(config.rank_rel_threshold),
+    ))
+    _log(
+        f"UDON rank estimator: small_feature={small_feature}, "
+        f"rel_threshold={float(config.rank_rel_threshold)}, features={expr_sampled.shape[0]}, "
+        f"cells={expr_sampled.shape[1]} -> rank={rank}"
+    )
+    return max(2, rank)
 
 
 def legacy_rnaseq_gene_filter(
@@ -1489,32 +3855,39 @@ def run_nmf_marker_svm(sampled: ad.AnnData, full: ad.AnnData, config: ICGS3Confi
     # for RNA that reduction additionally keeps only protein-coding features and drops
     # RPL/RPS, MT-, HLA, XIST/TSIX and *Y (legacy_rnaseq_gene_filter); for ADT, PSI,
     # GRN, metabolite and lipid the panel is used whole with no such filter.
+    # The downsampler already returns a sparse AnnData holding every gene and only the
+    # sampled cells. The old code threw that away: _adata_to_dense_df built a dense
+    # features x cells frame (18,427 x 30,000 float32 = 2.2 GB) and marker_pool[...] then
+    # reindexed it into a second 2.2 GB copy. The sparse pass reads the same values.
     use_all_genes = bool(config.markerfinder_all_genes)
     if use_all_genes:
-        marker_pool = _adata_to_dense_df(sampled, sampled.var_names)
+        marker_features = pd.Index(sampled.var_names.astype(str))
         extra = (
             " -- protein-coding, minus RPL/RPS, MT-, HLA, XIST/TSIX and *Y"
             if config.modality.lower() == "rna"
             else " -- full feature panel (no protein-coding filter for this modality)"
         )
         _log(
-            f"MarkerFinder feature pool (ICGS2-faithful): {marker_pool.shape[0]} features{extra} "
+            f"MarkerFinder feature pool (ICGS2-faithful): {marker_features.size} features{extra} "
             f"(NMF guide-feature pool was {expr_sampled.shape[0]})"
         )
     else:
-        marker_pool = expr_sampled
+        marker_features = pd.Index(expr_sampled.index.astype(str))
         _log(
-            f"MarkerFinder feature pool restricted to {marker_pool.shape[0]} NMF guide features "
+            f"MarkerFinder feature pool restricted to {marker_features.size} NMF guide features "
             "(--markerfinder-nmf-genes-only)"
         )
 
-    markers_all, markers_top, heat = marker_finder_wrapper(
-        input_df=marker_pool[nmf_clusters.index].T,
-        groups=nmf_clusters,
+    markers_all, markers_top, heat = _sparse_marker_finder_wrapper(
+        sampled,
+        nmf_clusters.index,
+        marker_features,
+        nmf_clusters,
         top_n=config.marker_top_n,
         rho_threshold=config.marker_rho,
         marker_finder_rho=config.marker_rho,
         min_markers_per_cluster=config.marker_min_per_cluster,
+        build_heatmap=False,
     )
     marker_counts = markers_top["top_cluster"].value_counts()
     robust = marker_counts[marker_counts >= int(config.marker_min_per_cluster)].index
@@ -1525,8 +3898,18 @@ def run_nmf_marker_svm(sampled: ad.AnnData, full: ad.AnnData, config: ICGS3Confi
 
     # SVM still trains on marker genes only (ICGS2 NMF-SVM behaviour); those markers are
     # now drawn from the full pool, so take their values from that pool.
-    expr_markers_sampled = marker_pool.loc[markers_top["marker"].drop_duplicates(), nmf_robust.index]
-    del marker_pool
+    # Only the marker genes are needed here, so gather those columns straight from the
+    # sparse matrix instead of slicing a dense pool that no longer exists.
+    _svm_markers = pd.Index(markers_top["marker"].drop_duplicates().astype(str))
+    _svm_cells = pd.Index(nmf_robust.index.astype(str))
+    _svm_rows = sampled.obs_names.astype(str).get_indexer(_svm_cells)
+    _svm_cols = sampled.var_names.astype(str).get_indexer(_svm_markers)
+    if np.any(_svm_rows < 0) or np.any(_svm_cols < 0):
+        raise ValueError("Could not align SVM training cells or marker genes to the sampled matrix.")
+    _svm_matrix = sampled.X.tocsr() if sp.issparse(sampled.X) else sp.csr_matrix(sampled.X)
+    expr_markers_sampled = pd.DataFrame(
+        _sparse_columns_to_dense(_svm_matrix, _svm_rows, _svm_cols).T,
+        index=_svm_markers, columns=_svm_cells)
     centroids = generate_train_data(expr_markers_sampled, nmf_robust).dropna(axis=0)
     svm_target = full if bool(config.svm_reclassify_all_cells) else sampled
     target_label = "all post-QC cells" if bool(config.svm_reclassify_all_cells) else "PageRank/Louvain sampled cells only"
@@ -1555,16 +3938,24 @@ def run_nmf_marker_svm(sampled: ad.AnnData, full: ad.AnnData, config: ICGS3Confi
     # guide genes, so the final cluster-fitness gate could never rescue a cluster whose
     # markers lie outside that set.
     post_svm_pool = svm_target.var_names if use_all_genes else centroids.index
-    expr_full_markers = _adata_to_dense_df(svm_target, post_svm_pool, cells=final_clusters.index)
-    _log(f"post-SVM MarkerFinder gene pool: {expr_full_markers.shape[0]} genes")
-    markers_all2, markers_top2, heat2 = marker_finder_wrapper(
-        input_df=expr_full_markers[final_clusters.index].T,
-        groups=pd.DataFrame({"cluster": final_clusters[config.cluster_key]}, index=final_clusters.index),
+    _log(f"post-SVM MarkerFinder gene pool: {len(post_svm_pool)} genes")
+    # The dense form of this pass built a genes x cells float32 frame over the WHOLE pool:
+    # 18,572 x 282,627 = 21.0 GB on the COVID run, and the [final_clusters.index].T reindex
+    # doubled it. At 950,000 cells that reaches about 70.6 GB before the reindex. The sparse
+    # pass below computes the same correlations from per-feature and per-cluster sums.
+    post_svm_groups = pd.DataFrame({"cluster": final_clusters[config.cluster_key]},
+                                   index=final_clusters.index)
+    markers_all2, markers_top2, heat2 = _sparse_marker_finder_wrapper(
+        svm_target,
+        final_clusters.index,
+        post_svm_pool,
+        post_svm_groups,
         top_n=config.marker_top_n,
         rho_threshold=config.marker_rho,
         marker_finder_rho=config.marker_rho,
         min_markers_per_cluster=config.marker_min_per_cluster,
     )
+    post_svm_centroids = _sparse_cluster_centroids(svm_target, final_clusters.index, post_svm_groups)
     # ICGS2 fidelity FIX (2026-08-18). This pass selects MARKER GENES; it must not delete cells.
     # ICGS_NMF.py:1134-1141 runs markerFinder.analyzeData after Classify, then
     #   markergrps, markerlst = sortFile(allgenesfile, rho_cutoff, name)
@@ -1597,13 +3988,17 @@ def run_nmf_marker_svm(sampled: ad.AnnData, full: ad.AnnData, config: ICGS3Confi
         final_clusters,
         markers_top2,
         markers_all2,
-        expr_full_markers,
+        None,
         config.cluster_key,
+        cluster_centroids=post_svm_centroids,
     )
     final_clusters.to_csv(os.path.join(snmf_dir, "icgs3_svm_reclassification_scores.final.tsv"), sep="\t")
     markers_all2.to_csv(os.path.join(marker_dir, "icgs3_markers_all_correlations.tsv"), sep="\t")
     markers_top2.to_csv(os.path.join(marker_dir, "icgs3_markers.tsv"), sep="\t", index=False)
-    heat2.to_csv(os.path.join(marker_dir, "icgs3_marker_heatmap_altanalyze_format.tsv"), sep="\t")
+    _write_marker_heatmap_h5ad(heat2, os.path.join(marker_dir, "icgs3_marker_heatmap_altanalyze_format.h5ad"))
+    if config.write_heatmap_altanalyze_tsv:
+        _write_marker_heatmap_tsv(heat2, os.path.join(marker_dir,
+                                  "icgs3_marker_heatmap_altanalyze_format.tsv"))
     centroids.to_csv(os.path.join(snmf_dir, "icgs3_svm_centroids.tsv"), sep="\t")
     return final_clusters, markers_top2, heat2
 
@@ -1612,10 +4007,16 @@ def order_and_renumber_final_clusters(
     final_clusters: pd.DataFrame,
     markers_top: pd.DataFrame,
     markers_all: pd.DataFrame,
-    expr_full_markers: pd.DataFrame,
+    expr_full_markers: Optional[pd.DataFrame],
     cluster_key: str,
+    cluster_centroids: Optional[pd.DataFrame] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Order surviving clusters by centroid similarity and rename C1..Cn."""
+    """Order surviving clusters by centroid similarity and rename C1..Cn.
+
+    cluster_centroids is a clusters x features frame computed from the sparse matrix. When it
+    is given, expr_full_markers is not needed and may be None; the dense genes x cells frame
+    existed only so this function could take per-cluster column means.
+    """
     old_clusters = pd.Index(pd.unique(final_clusters[cluster_key].astype(str)))
     if len(old_clusters) <= 1:
         mapping = {str(c): "C1" for c in old_clusters}
@@ -1625,12 +4026,19 @@ def order_and_renumber_final_clusters(
 
         centroids = []
         for cluster in old_clusters:
-            cells = final_clusters.index[final_clusters[cluster_key].astype(str) == str(cluster)]
-            centroids.append(expr_full_markers.loc[:, cells].mean(axis=1).to_numpy(dtype=float))
+            if cluster_centroids is not None:
+                centroids.append(np.asarray(cluster_centroids.loc[str(cluster)].to_numpy(), dtype=float))
+            else:
+                cells = final_clusters.index[final_clusters[cluster_key].astype(str) == str(cluster)]
+                centroids.append(expr_full_markers.loc[:, cells].mean(axis=1).to_numpy(dtype=float))
         C = np.vstack(centroids)
         try:
             order = leaves_list(linkage(pdist(C, metric="correlation"), method="average"))
-        except Exception:
+        except Exception as exc:
+            # C1..Cn come from this order. An unordered result must not look like an ordered
+            # one, so record the failure in the log and in uns via the caller.
+            _log(f"WARNING cluster ordering failed ({type(exc).__name__}: {exc}); cluster "
+                 f"numbers C1..C{len(old_clusters)} follow input order, not centroid similarity")
             order = np.arange(len(old_clusters))
         ordered = [str(old_clusters[i]) for i in order]
         mapping = {old: f"C{i + 1}" for i, old in enumerate(ordered)}
@@ -1862,10 +4270,12 @@ def compute_umap_outputs(
             try:
                 umap = _import_umap_with_local_retry()
                 coords = graph.obsm["X_pca_harmony"] if "X_pca_harmony" in graph.obsm else graph.obsm["X_pca"]
-                n_neighbors = min(50, max(2, graph.n_obs - 1))
+                # --umap-n-neighbors overrides; 0 keeps the historical cap of 50.
+                _nn = int(config.umap_n_neighbors) or 50
+                n_neighbors = min(_nn, max(2, graph.n_obs - 1))
                 model = umap.UMAP(
                     n_neighbors=n_neighbors,
-                    min_dist=0.75,
+                    min_dist=float(config.umap_min_dist),
                     metric="correlation",
                     random_state=config.random_state,
                 )
@@ -1876,7 +4286,7 @@ def compute_umap_outputs(
                     "n_pcs": int(coords.shape[1]),
                     "batch_key": _batch_keys(config),
                     "n_neighbors": int(n_neighbors),
-                    "min_dist": 0.75,
+                    "min_dist": float(config.umap_min_dist),
                     "metric": "correlation",
                 }
                 if len(features) > 0:
@@ -1903,13 +4313,15 @@ def compute_umap_outputs(
             pd.DataFrame({"feature": features}).to_csv(feature_path, sep="\t", index=False)
             X = adata[:, features].X
             X = X.toarray() if sp.issparse(X) else np.asarray(X)
-            n_neighbors = min(50, max(2, adata.n_obs - 1))
-            _log(f"running final UMAP on {len(features)} {source_label} (metric=correlation, n_neighbors={n_neighbors}, min_dist=0.75)")
+            # --umap-n-neighbors overrides; 0 keeps the historical cap of 50.
+            _nn = int(config.umap_n_neighbors) or 50
+            n_neighbors = min(_nn, max(2, adata.n_obs - 1))
+            _log(f"running final UMAP on {len(features)} {source_label} (metric=correlation, n_neighbors={n_neighbors}, min_dist={float(config.umap_min_dist)})")
             try:
                 umap = _import_umap_with_local_retry()
                 model = umap.UMAP(
                     n_neighbors=n_neighbors,
-                    min_dist=0.75,
+                    min_dist=float(config.umap_min_dist),
                     metric="correlation",
                     random_state=config.random_state,
                 )
@@ -1919,7 +4331,7 @@ def compute_umap_outputs(
                     "n_features": int(len(features)),
                     "feature_file": feature_path,
                     "n_neighbors": int(n_neighbors),
-                    "min_dist": 0.75,
+                    "min_dist": float(config.umap_min_dist),
                     "metric": "correlation",
                 }
             except Exception as exc:
@@ -1977,17 +4389,28 @@ def write_umap_plots(adata: ad.AnnData, config: ICGS3Config, outdir: str) -> Non
         return [str(c) for c in pd.unique(values.astype(str))]
 
     def point_size(n: int) -> float:
-        if n > 60000:
-            return 6.0
-        if n > 30000:
-            return 8.0
-        if n > 10000:
-            return 10.0
-        return 14.0
+        """Marker area in points squared, scaled continuously to the cell count.
+
+        The rule here used to be a four-step staircase whose last step ran from 60,001 cells
+        to infinity, so a 60,001-cell run and a 219,014-cell run both drew at 6.0 points
+        squared and the dense run buried its own structure. Scale by 120000/n instead, the
+        scanpy convention, and clamp both ends. At 191,360 cells that gives 0.63 against the
+        old 6.0, so each mark covers a tenth of the area.
+        """
+        n = max(int(n), 1)
+        return float(np.clip(120000.0 / n, 0.35, 14.0))
 
     def cluster_palette(categories: Sequence[str]) -> dict:
-        cmap = plt.get_cmap("tab20", max(1, len(categories)))
-        return {str(cat): cmap(i) for i, cat in enumerate(categories)}
+        # plt.get_cmap("tab20", N) resamples 20 discrete colours; it never returns more than
+        # 20, and the resampling makes ADJACENT indices collide, so C1/C2/C3 drew in one
+        # colour. Measured on a 46-cluster run: 20 unique colours, 26 colliding pairs,
+        # minimum CIE DeltaE 0.00. See visualization/palettes.py for the replacement.
+        # Paired is the house default for UMAP category colours (set 2026-08-25). It comes
+        # from palettes.paired_palette: the 12 Paired colours up to 12 categories, and an
+        # interpolation across the same 12 anchors above that, so no colour repeats.
+        # palettes.categorical_palette separates more populations if a run ever needs it.
+        from altanalyze3.components.visualization.palettes import paired_palette
+        return paired_palette(categories)
 
     def draw_categorical(
         column: str,
@@ -2040,20 +4463,38 @@ def write_umap_plots(adata: ad.AnnData, config: ICGS3Config, outdir: str) -> Non
         ax.set_aspect("equal", adjustable="box")
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
-        if len(categories) <= 30:
+        # The legend used to switch off above 30 categories, which removed it exactly where a
+        # reader needs it most. Widen the gate and let the layout scale instead. Above the
+        # gate a legend stops being readable at any font size, so the colour key TSV below
+        # carries the mapping.
+        if len(categories) <= 80:
             handles, labels = ax.get_legend_handles_labels()
             if handles:
+                n_lab = len(labels)
                 fig.legend(
                     handles,
                     labels,
                     loc="lower center",
-                    ncol=max(1, min(5, len(labels))),
+                    ncol=max(1, min(8, int(np.ceil(n_lab / 6.0)))),
                     frameon=False,
-                    fontsize=7,
+                    fontsize=7 if n_lab <= 30 else (6 if n_lab <= 50 else 5),
                     markerscale=2.25,
+                    handletextpad=0.4,
+                    columnspacing=1.0,
+                    labelspacing=0.3,
                 )
         fig.savefig(path, dpi=300)
         plt.close(fig)
+        # Always write the colour key beside the figure. A reader can then recover which
+        # colour belongs to which population at any category count.
+        try:
+            key_path = os.path.splitext(path)[0] + "_colors.tsv"
+            with open(key_path, "w") as handle:
+                handle.write("population\tcolor\n")
+                for cat in categories:
+                    handle.write(f"{cat}\t{palette[str(cat)]}\n")
+        except Exception as exc:  # pragma: no cover - the figure itself is already written
+            _log(f"colour key not written for {os.path.basename(path)}: {exc}")
 
     #: Continuous gene-expression UMAP. The layering is the point: cells are sorted by
     #: expression and drawn lowest first, so the highest-expressing cells land on top and
@@ -2216,24 +4657,100 @@ def run_canonical_heatmap(adata: ad.AnnData, config: ICGS3Config, outdir: str) -
     if missing_covariates:
         _log(f"heatmap covariates not found in adata.obs: {', '.join(missing_covariates)}")
     go_terms = _load_goelite_heatmap_terms(outdir, config)
-    return generate_marker_heatmap_from_adata(
-        adata,
-        cluster_key=config.cluster_key,
-        out=os.path.join(marker_dir, "icgs3_marker_heatmap.pdf"),
-        top_n=max(1, int(config.marker_top_n)),
-        markers_tsv=os.path.join(marker_dir, "icgs3_marker_heatmap_markers.tsv"),
-        heatmap_tsv=os.path.join(marker_dir, "icgs3_marker_heatmap_fold_matrix.tsv"),
-        heatmap_column_tsv=os.path.join(marker_dir, "icgs3_marker_heatmap_exp_matrix.tsv") if config.write_heatmap_expression_tsv else None,
-        heatmap_cache=os.path.join(marker_dir, "icgs3_marker_heatmap_fold_matrix.npz"),
-        marker_method="markerfinder",
-        cells_per_cluster=config.heatmap_cells_per_cluster,
-        seed=config.random_state,
-        species={"Hs": "human", "Mm": "mouse"}.get(config.species, config.species),
-        write_expression_tsv=config.write_heatmap_expression_tsv,
-        covariate_columns=covariates,
-        go_terms=go_terms,
-        go_terms_max=config.heatmap_goelite_max_terms,
-    )
+    # MarkerFinder's enforce_input_scaling requires a depth-normalized matrix. adata.X is
+    # depth-normalized over the FULL gene space, but ICGS3 has since dropped genes (min_cells,
+    # then the RNA nuisance/protein-coding filter), so per-cell sums over the surviving genes no
+    # longer match and the check rejects it. Measured on the Adams input: cv_cell_total 0.0000 at
+    # 33,234 genes, 0.0056 after min_cells>=5, 0.0567 at 18,100 genes.
+    # Hand MarkerFinder the raw counts and let it apply its own log2 CPM, which is the remedy the
+    # check itself names. The check stays in force.
+    check = (adata.uns or {}).get("icgs3_expression_scale_check", {})
+    counts_usable = bool(check.get("counts_usable_for_qc", True))
+    layers = getattr(adata, "layers", {})
+    mode = str((adata.uns or {}).get("icgs3_normalization_mode", ""))
+    heatmap_layer = "counts" if ("counts" in layers and counts_usable) else None
+    scale_data = bool(heatmap_layer)
+    temp_layer = None
+    if heatmap_layer:
+        _log("heatmap: passing layers['counts'] with scale_data=True so MarkerFinder applies its own log2 CPM")
+    elif mode == "cp10k":
+        # X is already depth-normalized linear, which the detector reports as
+        # linear_normalized. MarkerFinder applies its own log2(x/total*scale + 1).
+        scale_data = True
+        _log("heatmap: X is CP10K depth-normalized linear; passing it with scale_data=True")
+    elif mode in {"cp10k-log1p", "log1p", "none"}:
+        # MarkerFinder's enforce_input_scaling asks for DEPTH normalization, not merely a log:
+        # markerFinder.py:189-191 inverts each candidate log and requires the cell totals to
+        # become constant. --normalization log1p and --normalization none both leave the matrix
+        # un-normalized, so the detector reports 'unknown' and refuses it. Build the
+        # depth-normalized LINEAR matrix here, which the detector reports as
+        # 'linear_normalized' and accepts, and let MarkerFinder apply its own
+        # log2(x / total * scale_factor + 1). The check stays in force and nothing is bypassed.
+        # This matrix is built at heatmap time and dropped straight after, so the run never
+        # carries a second full matrix.
+        work = adata.X.tocsr(copy=True) if sp.issparse(adata.X) else np.asarray(adata.X, dtype=np.float64).copy()
+        if mode in {"cp10k-log1p", "log1p"}:
+            # expm1 is the exact inverse of the log1p applied in prepare_expression.
+            # cp10k-log1p is the DEFAULT for every RNA run. It had no branch here, so the
+            # default path fell through to the final else, handed MarkerFinder a log-scale X
+            # with scale_data=False, and died at the last step of the run.
+            if sp.issparse(work):
+                work.data = np.expm1(work.data)
+            else:
+                work = np.expm1(work)
+        totals = np.asarray(work.sum(axis=1)).ravel()
+        n_empty = int((totals <= 0).sum())
+        totals[totals <= 0] = 1.0
+        if sp.issparse(work):
+            work = sp.diags(1e4 / totals).dot(work).tocsr()
+        else:
+            work = work * (1e4 / totals)[:, None]
+        adata.layers["icgs3_heatmap_input"] = work
+        heatmap_layer = "icgs3_heatmap_input"
+        temp_layer = heatmap_layer
+        scale_data = True
+        _log(
+            f"heatmap: --normalization {mode} is not depth-normalized, which MarkerFinder "
+            f"requires; passing a CP10K depth-normalized linear matrix with scale_data=True "
+            f"so MarkerFinder applies log2(x/total*scale+1) itself ({n_empty} empty cells)"
+        )
+    elif "counts" in layers:
+        _log("heatmap: layers['counts'] does not hold counts; passing adata.X unscaled instead")
+    else:
+        # Every mode resolve_normalization can return is handled above. Reaching here means the
+        # recorded mode is absent or corrupt. Fail here, where the cause is visible, rather than
+        # inside MarkerFinder's scaling check several hundred lines later.
+        raise ValueError(
+            f"run_canonical_heatmap cannot prepare a MarkerFinder input: "
+            f"icgs3_normalization_mode is {mode!r} and no usable counts layer is present. "
+            f"Expected one of {[m for m in NORMALIZATION_MODES if m != 'auto']}."
+        )
+    try:
+        return generate_marker_heatmap_from_adata(
+            adata,
+            layer=heatmap_layer,
+            scale_data=scale_data,
+            cluster_key=config.cluster_key,
+            out=os.path.join(marker_dir, "icgs3_marker_heatmap.pdf"),
+            top_n=max(1, int(config.marker_top_n)),
+            markers_tsv=os.path.join(marker_dir, "icgs3_marker_heatmap_markers.tsv"),
+            heatmap_tsv=(os.path.join(marker_dir, "icgs3_marker_heatmap_fold_matrix.tsv")
+                         if config.write_heatmap_fold_matrix_tsv else None),
+            heatmap_column_tsv=os.path.join(marker_dir, "icgs3_marker_heatmap_exp_matrix.tsv") if config.write_heatmap_expression_tsv else None,
+            heatmap_cache=os.path.join(marker_dir, "icgs3_marker_heatmap_fold_matrix.h5ad"),
+            marker_method="markerfinder",
+            cells_per_cluster=config.heatmap_cells_per_cluster,
+            seed=config.random_state,
+            species={"Hs": "human", "Mm": "mouse"}.get(config.species, config.species),
+            write_expression_tsv=config.write_heatmap_expression_tsv,
+            write_heatmap_tsv=config.write_heatmap_fold_matrix_tsv,
+            covariate_columns=covariates,
+            go_terms=go_terms,
+            go_terms_max=config.heatmap_goelite_max_terms,
+        )
+    finally:
+        if temp_layer and temp_layer in adata.layers:
+            del adata.layers[temp_layer]
 
 
 def _default_biomarker_file(species: str) -> Optional[str]:
@@ -2383,26 +4900,77 @@ def _run_icgs3_logged(config: ICGS3Config, outdir: str, log_path: str, start_tim
             "deprecated parameter ignored: --nmf-k-multiplier is retained for CLI compatibility, "
             "but automatic rank uses the UDON/ICGS2 Tracy-Widom estimator directly"
         )
+    _log(f"normalization resolved to: {resolve_normalization(config)}")
+    _log(f"NMF rank estimator small_feature branch: {resolve_small_feature_rank(config)}")
+    if config.adt_occupancy_filter:
+        scale = str(config.adt_occupancy_scale or "").lower()
+        if scale not in {"input", "analysis"}:
+            raise ValueError(f"Unknown --adt-occupancy-scale {scale}; choose from input, analysis")
+        if str(config.adt_occupancy_scope or "").lower() not in {"all", "sampled"}:
+            raise ValueError(
+                f"Unknown --adt-occupancy-scope {config.adt_occupancy_scope}; choose from all, sampled"
+            )
+        if not (0.0 <= float(config.adt_occupancy_percent) < 50.0):
+            raise ValueError(
+                f"--adt-occupancy-percent must be >=0 and <50; got {config.adt_occupancy_percent}"
+            )
     Path(os.path.join(outdir, "icgs3_config.json")).write_text(json.dumps(asdict(config), indent=2), encoding="utf-8")
 
     t = time.time()
     _log(f"loading {len(config.input_paths)} input(s)")
-    adata = read_inputs(config.input_paths)
-    _log(f"loaded matrix: {adata.n_obs} cells x {adata.n_vars} features")
-    t = step_time("input loading", t)
-    adata = apply_qc(
-        adata,
-        min_genes=config.min_genes,
-        min_cells=config.min_cells,
-        min_counts=config.min_counts,
-        mito_percent=config.mito_percent,
-        layer=config.layer,
+    resume_reduced = str(config.resume_downsample_from) if config.resume_downsample_from else None
+    if resume_reduced and not os.path.exists(resume_reduced):
+        raise FileNotFoundError(f"--resume-downsample-from file not found: {resume_reduced}")
+    streamed_h5ad = bool(resume_reduced) or (
+        len(config.input_paths) == 1
+        and str(config.input_paths[0]).lower().endswith(".h5ad")
+        and _should_stream_h5ad(str(config.input_paths[0]), config)
     )
-    t = step_time("QC", t)
-    adata = prepare_expression(adata, config)
-    t = step_time("normalization", t)
-    adata = apply_rna_unsupervised_gene_filter(adata, config, outdir=outdir)
-    t = step_time("RNA unsupervised gene filtering", t)
+    if resume_reduced:
+        adata = sc.read_h5ad(resume_reduced)
+        _ensure_sparse_csr(adata)
+        if "icgs3_normalization_mode" not in (adata.uns or {}):
+            # Matrices written before the streamed path recorded this key still need it, or
+            # run_canonical_heatmap cannot select the branch MarkerFinder requires.
+            adata.uns["icgs3_normalization_mode"] = resolve_normalization(config)
+        prior = (adata.uns or {}).get("icgs3_streaming_downsample", {})
+        analysis_adata = adata
+        _log(f"resumed from {resume_reduced}: {adata.n_obs} cells x {adata.n_vars} variable "
+             f"features; skipped the streamed read, QC, normalization and feature selection "
+             f"(source {prior.get('source_shape', 'unknown')}, normalization "
+             f"{adata.uns['icgs3_normalization_mode']})")
+        t = step_time("resume from prior downsample matrix", t)
+    elif streamed_h5ad:
+        # The streamed matrix is already post-QC, normalized, RNA-filtered, and restricted to
+        # the dispersion features used by the ICGS2 graph sampler. No full X AnnData is created.
+        adata = build_h5ad_downsample_matrix(str(config.input_paths[0]), config, output_dir=outdir)
+        analysis_adata = adata
+        _log(f"loaded streamed analysis matrix: {adata.n_obs} cells x {adata.n_vars} variable features")
+        t = step_time("streamed input/QC/normalization/feature selection", t)
+    else:
+        adata = read_inputs(config.input_paths, config)
+        _log(f"loaded matrix: {adata.n_obs} cells x {adata.n_vars} features")
+        report_expression_scale(adata, config)
+        t = step_time("input loading", t)
+        adata = apply_qc(
+            adata,
+            min_genes=config.min_genes,
+            min_cells=config.min_cells,
+            min_counts=config.min_counts,
+            mito_percent=config.mito_percent,
+            layer=config.layer,
+        )
+        t = step_time("QC", t)
+        if config.adt_occupancy_filter and str(config.adt_occupancy_scale).lower() == "input":
+            adata = compute_adt_occupancy(adata, config, stage="post-QC, pre-normalization", outdir=outdir)
+            t = step_time("ADT occupancy scoring", t)
+        adata = prepare_expression(adata, config)
+        t = step_time("normalization", t)
+        if config.adt_occupancy_filter and str(config.adt_occupancy_scale).lower() == "analysis":
+            adata = compute_adt_occupancy(adata, config, stage="post-normalization", outdir=outdir)
+            t = step_time("ADT occupancy scoring", t)
+        adata = apply_rna_unsupervised_gene_filter(adata, config, outdir=outdir, reuse_input=True)
+        t = step_time("RNA unsupervised gene filtering", t)
     analysis_adata = apply_expression_batch_adjustment(adata, config, outdir)
     if analysis_adata is not adata:
         t = step_time("expression batch adjustment", t)
@@ -2454,6 +5022,43 @@ def _run_icgs3_logged(config: ICGS3Config, outdir: str, log_path: str, start_tim
         sampled, pagerank_scores = pagerank_downsample_adata(adata_for_sampling, config)
     pagerank_scores.to_csv(os.path.join(outdir, "sNMF", "icgs3_pagerank_downsampling.tsv"), sep="\t", index=False)
     _log(f"downsampling summary: retained {sampled.n_obs} sampled cells for NMF from {adata_for_sampling.n_obs} candidates")
+    # Close the downsampling timer HERE. Timing the occupancy filter first made its number
+    # swallow the whole PageRank/Louvain step and reported that step as 0.0s.
+    t = step_time("PageRank/Louvain downsampling", t)
+    if config.adt_occupancy_filter:
+        keep_mask, _ = apply_adt_occupancy_filter(
+            sampled=sampled,
+            analysis_adata=analysis_adata,
+            config=config,
+            outdir=outdir,
+        )
+        kept_names = set(pd.Index(analysis_adata.obs_names.astype(str))[keep_mask].tolist())
+        if len(kept_names) < 2:
+            raise ValueError(
+                f"ADT occupancy filter retained {len(kept_names)} cells; lower --adt-occupancy-percent"
+            )
+
+        def _restrict_to_kept(obj: ad.AnnData) -> ad.AnnData:
+            # _subset_adata_compact compacts each matrix in place, so peak memory never holds
+            # the old and the new matrix at once, unlike obj[mask].copy().
+            mask = np.asarray(pd.Index(obj.obs_names.astype(str)).isin(kept_names), dtype=bool)
+            return _subset_adata_compact(obj, mask, None)
+
+        shared_analysis = analysis_adata is adata
+        shared_sampling = adata_for_sampling is analysis_adata
+        n_sampled_before = int(sampled.n_obs)
+        n_full_before = int(analysis_adata.n_obs)
+        analysis_adata = _restrict_to_kept(analysis_adata)
+        adata = analysis_adata if shared_analysis else _restrict_to_kept(adata)
+        adata_for_sampling = analysis_adata if shared_sampling else _restrict_to_kept(adata_for_sampling)
+        sampled = _restrict_to_kept(sampled)
+        _log(
+            f"ADT occupancy filter applied to every downstream step: post-QC cells "
+            f"{n_full_before} -> {int(analysis_adata.n_obs)}; NMF sampled cells "
+            f"{n_sampled_before} -> {int(sampled.n_obs)}. Removed cells enter no NMF, "
+            "MarkerFinder or SVM step and receive no cluster."
+        )
+        t = step_time("ADT occupancy filtering", t)
     write_retention_audit(
         full=analysis_adata,
         candidates=adata_for_sampling,
@@ -2462,7 +5067,7 @@ def _run_icgs3_logged(config: ICGS3Config, outdir: str, log_path: str, start_tim
         config=config,
         outdir=outdir,
     )
-    t = step_time("PageRank/Louvain downsampling", t)
+    t = step_time("rare-population retention audit", t)
 
     final_clusters, markers, _ = run_nmf_marker_svm(sampled, analysis_adata, config, outdir)
     write_retention_audit(
@@ -2478,10 +5083,16 @@ def _run_icgs3_logged(config: ICGS3Config, outdir: str, log_path: str, start_tim
     adata.obs["ICGS3_SVM_margin"] = pd.Series(final_clusters["svm_margin"], index=final_clusters.index).reindex(adata.obs_names)
     adata.obs["ICGS3_original_NMF_cluster"] = pd.Series(final_clusters["ICGS3_original_NMF_cluster"], index=final_clusters.index).reindex(adata.obs_names)
     adata = adata[adata.obs[config.cluster_key].notna()].copy()
-    ordered_barcodes = [bc for bc in final_clusters.index.tolist() if bc in set(adata.obs_names)]
+    # set(adata.obs_names) sat inside the comprehension's condition, so Python rebuilt the whole
+    # set once per barcode. The COVID run of 2026-08-22 paid 282,627 x 282,627 = 79,878,021,129
+    # set insertions here and stayed on this line for over 13 minutes; UPenn at 950,000 cells
+    # would pay 902,500,000,000. Hoisting the set changes no value and no order.
+    obs_name_set = set(adata.obs_names)
+    ordered_barcodes = [bc for bc in final_clusters.index.tolist() if bc in obs_name_set]
     adata = adata[ordered_barcodes].copy()
     cluster_order = [f"C{i + 1}" for i in range(adata.obs[config.cluster_key].astype(str).nunique())]
-    observed_order = [c for c in cluster_order if c in set(adata.obs[config.cluster_key].astype(str))]
+    observed_clusters = set(adata.obs[config.cluster_key].astype(str))
+    observed_order = [c for c in cluster_order if c in observed_clusters]
     adata.obs[config.cluster_key] = pd.Categorical(adata.obs[config.cluster_key].astype(str), categories=observed_order, ordered=True)
     adata.uns["lineage_order"] = observed_order
     adata.obs["icgs3_marker_robust"] = True
@@ -2556,6 +5167,69 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--layer", default=None)
     parser.add_argument("--input-normalized", action="store_true", help="Treat X/layer as already normalized; skip CP10K log1p.")
     parser.add_argument(
+        "--normalization",
+        choices=list(NORMALIZATION_MODES),
+        default="auto",
+        help="Expression normalization. auto uses log1p for adt and log1p(CP10K) for every other "
+             "modality; CP10K over a small protein panel forces each cell's whole panel to one "
+             "constant total. none is the legacy --input-normalized behaviour.",
+    )
+    parser.add_argument(
+        "--small-feature-rank",
+        choices=["auto", "true", "false"],
+        default="auto",
+        help="Use the UDON small_feature branch of the NMF rank estimator, which counts "
+             "structural components by --rank-rel-threshold instead of the Tracy-Widom boundary. "
+             "auto turns it on for adt, grn, metabolite, lipid and psi. The boundary rises with "
+             "the feature count, so a small panel otherwise collapses to rank 2.",
+    )
+    parser.add_argument(
+        "--adt-occupancy-filter",
+        action="store_true",
+        help="Remove over- and under-stained cells after PageRank sampling, following AltAnalyze2 "
+             "removeCellsWithHighADTOccupancy. Each feature is thresholded at mean + "
+             "--adt-occupancy-sd standard deviations, the marks are counted per cell, and the "
+             "extreme tails are dropped inside each broad Louvain group. Removed cells take no "
+             "part in NMF, MarkerFinder or the SVM, and appear in no output.",
+    )
+    parser.add_argument(
+        "--adt-occupancy-percent",
+        type=float,
+        default=20.0,
+        help="Percent of cells removed from EACH tail inside every broad group. 20 removes the "
+             "bottom 20 percent and the top 20 percent, so 40 percent of each group.",
+    )
+    parser.add_argument(
+        "--adt-occupancy-sd",
+        type=float,
+        default=1.0,
+        help="Standard deviations above the per-feature mean that mark a cell as high for that "
+             "feature. AltAnalyze2 clustering.py:10976 uses 1.",
+    )
+    parser.add_argument(
+        "--adt-occupancy-scale",
+        choices=["input", "analysis"],
+        default="input",
+        help="Matrix the occupancy score reads. input is the post-QC matrix before "
+             "normalization, which is what the legacy function received; analysis is the "
+             "normalized matrix ICGS3 clusters on. The mean + SD threshold is scale dependent.",
+    )
+    parser.add_argument(
+        "--adt-occupancy-scope",
+        choices=["all", "sampled"],
+        default="all",
+        help="Cells the trim applies to. all projects the broad groups onto every post-QC cell "
+             "with the ICGS3 linear SVM and trims them all; sampled trims only the "
+             "PageRank-sampled cells and leaves every other cell in place.",
+    )
+    parser.add_argument(
+        "--adt-occupancy-min-group",
+        type=int,
+        default=10,
+        help="Broad groups smaller than this keep every cell. Guards the AltAnalyze2 slice "
+             "scores[int(l*p):-1*int(l*p)], which empties a group when int(l*p) is 0.",
+    )
+    parser.add_argument(
         "--normalized-decimals",
         type=int,
         default=-1,
@@ -2566,15 +5240,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-counts", type=int, default=1000)
     parser.add_argument("--mito-percent", type=float, default=30.0)
     parser.add_argument("--target-cells", type=int, default=0, help="Optional memory-guard cap before PageRank; 0 disables.")
-    parser.add_argument("--pagerank-cells", type=int, default=5000)
-    parser.add_argument("--louvain-downsample-cutoff", type=int, default=15000)
+    parser.add_argument("--pagerank-cells", type=int, default=30000)
+    parser.add_argument("--louvain-downsample-cutoff", type=int, default=30000)
     parser.add_argument(
         "--pre-pagerank-cells",
         type=int,
         default=0,
         help="Optional Louvain pre-reduction target before PageRank; 0 uses ICGS2 default of --pagerank-cells * 4.",
     )
-    parser.add_argument("--downsample-var-genes", type=int, default=500, help="ICGS2 hgvfinder variable genes used for Louvain/PageRank downsampling.")
+    parser.add_argument("--downsample-var-genes", type=int, default=3000, help="ICGS2 hgvfinder variable genes used for Louvain/PageRank downsampling.")
     parser.add_argument(
         "--retention-audit-obs",
         default="HLCA,TGEN-IPF",
@@ -2593,6 +5267,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--n-pcs", type=int, default=0, help="PCs for graph construction; 0 uses automatic elbow selection.")
     parser.add_argument("--max-auto-pcs", type=int, default=50, help="Maximum PCs computed before automatic elbow selection.")
     parser.add_argument("--n-neighbors", type=int, default=30)
+    parser.add_argument(
+        "--umap-min-dist",
+        type=float,
+        default=0.75,
+        help=(
+            "UMAP min_dist for the final embedding (default 0.75). Lower values pack each "
+            "cluster tighter and separate clusters more strongly; umap-learn defaults to 0.1. "
+            "Raise it for a smoother overview, lower it to resolve many clusters."
+        ),
+    )
+    parser.add_argument(
+        "--umap-n-neighbors",
+        type=int,
+        default=0,
+        help=(
+            "UMAP n_neighbors for the final embedding; 0 keeps the value the run computes. "
+            "Smaller values favour local structure and sharpen cluster boundaries."
+        ),
+    )
     parser.add_argument("--leiden-resolution", type=float, default=0.8)
     parser.add_argument(
         "--batch-correction",
@@ -2645,7 +5338,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="MarkerFinder Pearson rho a cluster must reach to survive the marker gate. "
-             "Unset resolves by modality: 0.15 for adt, 0.3 otherwise.",
+             "Unset resolves by modality: 0.25 for adt, 0.3 otherwise. Measured on a 56-plex "
+             "COVID TotalVI panel: 0.25 gave 9 clusters each holding a marker at rho 0.30-0.69, "
+             "0.20 gave 10 but left one cluster with no marker, and 0.15 gave 11 on weak markers.",
     )
     parser.add_argument(
         "--marker-min-per-cluster",
@@ -2696,6 +5391,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--resume-downsample-from",
+        type=str,
+        default=None,
+        help=(
+            "Resume at the graph step. Path to a previous run's "
+            "sNMF/icgs3_downsample_features.h5ad. Skips the streamed read, QC, normalization "
+            "and variable-feature selection, which is the slowest part of a large run."
+        ),
+    )
+    parser.add_argument(
         "--resume-sampled-from",
         type=str,
         default=None,
@@ -2719,6 +5424,35 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--rank-rel-threshold", type=float, default=0.1, help="UDON-compatible relative threshold retained for rank reporting/compatibility.")
     parser.add_argument("--min-group-size", type=int, default=3)
+    parser.add_argument(
+        "--load-mode", choices=["auto", "direct", "chunked"], default="auto",
+        help="How to read the input. 'auto' estimates memory from the h5ad header and picks. "
+             "'direct' always loads X and every layer, the pre-2026-08-21 behaviour. "
+             "'chunked' loads X only and reduces the counts layer to per-cell QC statistics "
+             "in row blocks, so the counts matrix is never held whole.",
+    )
+    parser.add_argument(
+        "--load-memory-fraction", type=float, default=0.25,
+        help="Under 'auto', load directly when the estimate fits inside this fraction of free "
+             "memory. Default 0.25, leaving room for the copies later steps make.",
+    )
+    parser.add_argument(
+        "--knn-backend", choices=["annoy", "pynndescent"], default="pynndescent",
+        help="k-NN backend for PageRank/Louvain downsampling. Default 'pynndescent': reads the "
+             "sparse matrix directly, runs multithreaded, and measured 0.997 recall against exact "
+             "brute force where Annoy measured 0.954. 'annoy' restores the pre-2026-08-19 backend.",
+    )
+    parser.add_argument(
+        "--knn-build-neighbors", type=int, default=31,
+        help="Neighbours pynndescent builds before trimming to k=10. Higher raises recall. "
+             "Ignored when --knn-backend is annoy. Default 31.",
+    )
+    parser.add_argument(
+        "--medoid-method", choices=["pairwise", "centroid"], default="centroid",
+        help="Community medoid ranking. Default 'centroid': ranks by distance to the community "
+             "centroid; a 20,000-cell benchmark measured 0.9998 overlap on the cells kept. "
+             "'pairwise' restores the O(sum(n_c^2)*d) form.",
+    )
     parser.add_argument(
         "--svm-min-decision-score",
         type=float,
@@ -2747,6 +5481,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Testing mode: classify only the sampled cells used for NMF.",
     )
+    parser.add_argument("--knn-dense-max-gb", type=float, default=-1.0,
+                        help="Densify the k-NN input when its dense form fits this many GB. "
+                             "0 keeps the current sparse path. Measured on a 20,000 x 3,000 "
+                             "dispersion slab at 40.4%% density: pynndescent took 196.0 s sparse "
+                             "and 7.7 s dense for 0.043 GB more memory.")
+    parser.add_argument("--fast-graph", action="store_true",
+                        help="Use a CSR adjacency and a CSR PageRank instead of networkx objects.")
     parser.add_argument("--species", default="Hs", choices=["Hs", "Mm", "human", "mouse"])
     parser.add_argument("--biomarker-file", default=None)
     parser.add_argument(
@@ -2756,15 +5497,34 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Cells to display per cluster in the final heatmap; 0 uses all cells (ICGS2-style final output).",
     )
     parser.add_argument("--write-heatmap-expression-tsv", action="store_true", help="Write the large all-cell heatmap expression matrix TSV.")
+    parser.add_argument("--write-heatmap-fold-matrix-tsv", action="store_true",
+                        help="Write the dense per-cell fold matrix as TSV beside the heatmap. "
+                             "Off by default: the BPD run of 2026-08-23 wrote 4,774,461,655 bytes "
+                             "for 236,620 cells and spent 887 s of a 1,019 s heatmap stage doing it, "
+                             "while the h5ad cache holds the same matrix. Earlier versions wrote it "
+                             "unconditionally because this call never passed write_heatmap_tsv.")
+    parser.add_argument("--write-heatmap-altanalyze-tsv", action="store_true",
+                        help="Also write the marker heatmap in the dense AltAnalyze text layout. "
+                             "ICGS3 always writes the sparse h5ad; this adds the large TSV beside it.")
     parser.add_argument(
         "--heatmap-covariates",
         default=None,
         help="Comma-delimited obs columns to render as compact bottom covariate bars in the MarkerFinder heatmap.",
     )
-    parser.add_argument(
+    goelite_terms_group = parser.add_mutually_exclusive_group()
+    goelite_terms_group.add_argument(
         "--heatmap-goelite-terms",
+        dest="heatmap_goelite_terms",
         action="store_true",
-        help="Render top GO-Elite/BioMarkers enrichment terms on the left side of the MarkerFinder heatmap.",
+        default=True,
+        help="Render top GO-Elite/BioMarkers enrichment terms on the left side of the "
+             "MarkerFinder heatmap. On by default.",
+    )
+    goelite_terms_group.add_argument(
+        "--no-heatmap-goelite-terms",
+        dest="heatmap_goelite_terms",
+        action="store_false",
+        help="Do not render GO-Elite/BioMarkers terms on the MarkerFinder heatmap.",
     )
     parser.add_argument(
         "--heatmap-goelite-max-terms",
@@ -2798,6 +5558,14 @@ def main(argv: Optional[Sequence[str]] = None) -> ICGS3Result:
         modality=args.modality,
         layer=args.layer,
         input_normalized=args.input_normalized,
+        normalization=args.normalization,
+        small_feature_rank=args.small_feature_rank,
+        adt_occupancy_filter=args.adt_occupancy_filter,
+        adt_occupancy_percent=args.adt_occupancy_percent,
+        adt_occupancy_sd=args.adt_occupancy_sd,
+        adt_occupancy_scale=args.adt_occupancy_scale,
+        adt_occupancy_scope=args.adt_occupancy_scope,
+        adt_occupancy_min_group=args.adt_occupancy_min_group,
         normalized_decimals=args.normalized_decimals,
         min_genes=args.min_genes,
         min_cells=args.min_cells,
@@ -2817,6 +5585,8 @@ def main(argv: Optional[Sequence[str]] = None) -> ICGS3Result:
         n_pcs=args.n_pcs,
         max_auto_pcs=args.max_auto_pcs,
         n_neighbors=args.n_neighbors,
+        umap_min_dist=args.umap_min_dist,
+        umap_n_neighbors=args.umap_n_neighbors,
         leiden_resolution=args.leiden_resolution,
         batch_correction=args.batch_correction,
         batch_key=args.batch_key,
@@ -2837,8 +5607,16 @@ def main(argv: Optional[Sequence[str]] = None) -> ICGS3Result:
         nmf_runs=args.nmf_runs,
         markerfinder_all_genes=not args.markerfinder_nmf_genes_only,
         resume_sampled_from=args.resume_sampled_from,
+        resume_downsample_from=args.resume_downsample_from,
         intercorr_threshold=args.intercorr_threshold,
         corr_n_events=args.corr_n_events,
+        load_mode=args.load_mode,
+        load_memory_fraction=args.load_memory_fraction,
+        knn_backend=args.knn_backend,
+        knn_build_neighbors=args.knn_build_neighbors,
+        knn_dense_max_gb=args.knn_dense_max_gb,
+        fast_graph=args.fast_graph,
+        medoid_method=args.medoid_method,
         rank_rel_threshold=args.rank_rel_threshold,
         min_group_size=args.min_group_size,
         svm_min_decision_score=args.svm_min_decision_score,
@@ -2848,6 +5626,8 @@ def main(argv: Optional[Sequence[str]] = None) -> ICGS3Result:
         biomarker_file=args.biomarker_file,
         heatmap_cells_per_cluster=args.heatmap_cells_per_cluster,
         write_heatmap_expression_tsv=args.write_heatmap_expression_tsv,
+        write_heatmap_fold_matrix_tsv=args.write_heatmap_fold_matrix_tsv,
+        write_heatmap_altanalyze_tsv=args.write_heatmap_altanalyze_tsv,
         heatmap_covariates=args.heatmap_covariates,
         heatmap_goelite_terms=args.heatmap_goelite_terms,
         heatmap_goelite_max_terms=args.heatmap_goelite_max_terms,

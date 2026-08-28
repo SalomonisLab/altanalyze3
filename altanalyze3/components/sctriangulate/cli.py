@@ -140,10 +140,26 @@ def build_parser():
     a.add_argument('--no-annotate', dest='annotate', action='store_false',
                    help='Stop after pruning, as the pipeline did before this step became a '
                         'default. obs["pruned"] is then the last output.')
-    p.add_argument('--annotate-lead', default=None, metavar='OBS_COLUMN',
-                   help='obs column holding a trusted annotation, e.g. a published cell type '
-                        'that also competes in --query. Its dominant label then names the '
-                        'cluster and the enriched term becomes the fallback.')
+    p.add_argument('--annotate-lead', default=None, metavar='OBS_COLUMNS',
+                   help='Comma-separated obs column(s) holding a trusted annotation, e.g. a '
+                        'published cell type that also competes in --query. The cluster takes '
+                        'its label from these and the enriched GO-Elite term becomes the '
+                        'fallback. --annotate-lead-mode decides how the label is picked; '
+                        'more than one column requires mode "enrichment".')
+    p.add_argument('--annotate-lead-mode', default='dominant',
+                   choices=['dominant', 'enrichment'],
+                   help='dominant takes the most frequent --annotate-lead label in the cluster, '
+                        'which lets a large reference state win a cluster it is not enriched in. '
+                        'enrichment scores every cluster-by-reference-label barcode overlap with '
+                        'a hypergeometric test, BH-corrects over every test of every reference '
+                        'column together, and names the cluster from the single best-enriched '
+                        'label across them. Default: dominant, the behaviour before this flag.')
+    p.add_argument('--annotate-lead-max-fdr', type=float, default=0.05,
+                   help='enrichment mode only: reject a reference label at a worse BH FDR than '
+                        'this and take the GO-Elite term instead. Default 0.05.')
+    p.add_argument('--annotate-lead-min-overlap', type=int, default=10,
+                   help='enrichment mode only: reject a reference label sharing fewer than this '
+                        'many barcodes with the cluster, however small its FDR. Default 10.')
     p.add_argument('--annotate-top-n', type=int, default=60,
                    help='Markers per cluster for both MarkerFinder passes.')
     p.add_argument('--annotate-cells-per-cluster', type=int, default=100,
@@ -313,6 +329,9 @@ def main(argv=None):
                 cells_per_cluster=args.annotate_cells_per_cluster,
                 layer=args.layer,
                 lead_annotation=args.annotate_lead,
+                lead_mode=args.annotate_lead_mode,
+                lead_max_fdr=args.annotate_lead_max_fdr,
+                lead_min_overlap=args.annotate_lead_min_overlap,
                 biomarker_file=args.annotate_biomarker_file,
                 enrichment_max_fdr=args.annotate_max_fdr,
                 enrichment_min_overlap=args.annotate_min_overlap,
@@ -325,6 +344,9 @@ def main(argv=None):
                 'hopach_mss': summary['hopach_mss'],
                 'hopach_distance': args.annotate_hopach_distance,
                 'lead_annotation': args.annotate_lead,
+                'lead_mode': args.annotate_lead_mode,
+                'lead_max_fdr': args.annotate_lead_max_fdr,
+                'lead_min_overlap': args.annotate_lead_min_overlap,
                 'cluster_table': summary['cluster_table'],
                 'name_source_counts': {
                     src: sum(1 for v in summary['name_source'].values() if v == src)

@@ -25,6 +25,7 @@
           <button class="workspace-tab-btn active" type="button" data-tab="run">Run</button>
           <button class="workspace-tab-btn" type="button" data-tab="explore">Explore</button>
           <button class="workspace-tab-btn" type="button" data-tab="differential">Differential</button>
+          <button class="workspace-tab-btn" type="button" data-tab="chat">Chat</button>
         </div>
         <div class="hero-links">
           <a class="docs-link" href="https://github.com/SalomonisLab/altanalyze3/blob/master/altanalyze3/components/cellHarmony/webapp/HOW_TO_USE.md" target="_blank" rel="noopener">How to Use</a>
@@ -171,6 +172,16 @@
                   <div class="panel-head panel-head-column">
                     <div class="panel-head-topline">
                       <h2>Visualization Panel 1</h2>
+                      <!-- Window count. Two equal columns give a plot that spans every cell state
+                           only half the page. Choosing 1 hides panel 2 and lets this one use the
+                           full width; panel 2 keeps its state while hidden. -->
+                      <label class="inline-field compact-inline-field" id="viz-window-count-field">
+                        <span>Windows</span>
+                        <select id="viz-window-count" class="compact-select">
+                          <option value="2" selected>2</option>
+                          <option value="1">1</option>
+                        </select>
+                      </label>
                       <button class="ghost-btn" type="button" id="download-viz1-image-btn">Download PDF</button>
                     </div>
                     <div class="panel-head-stack viz-controls-grid">
@@ -187,6 +198,66 @@
                       <label class="field hidden inline-field compact-inline-field" id="viz1-modality-field">
                         <span>Modality</span>
                         <select id="viz1-modality" class="compact-select"></select>
+                      </label>
+                      <!-- Color by. The UMAP cell-type view colours each cell by its
+                           cellHarmony assignment. Any other categorical column of obs
+                           works as well, so an atlas annotation the uploaded h5ad
+                           already carries can be drawn instead. -->
+                      <label class="field hidden inline-field compact-inline-field" id="viz1-colorby-field">
+                        <span>Color by</span>
+                        <select id="viz1-colorby" class="compact-select"></select>
+                      </label>
+                      <!-- Coordinates. Any 2-D embedding in obsm can replace the
+                           cellHarmony projection. The reference atlas holds different
+                           coordinates, so the app hides it while another embedding or
+                           another colour column is selected. -->
+                      <label class="field hidden inline-field compact-inline-field" id="viz1-coords-field">
+                        <span>Coordinates</span>
+                        <select id="viz1-coords" class="compact-select"></select>
+                      </label>
+                      <!-- Axes. Choosing "obs columns" in Coordinates puts any two
+                           numeric cell annotations on the axes, the way ShinyCell
+                           plots one metadata field against another. Counts live in
+                           the matrix, not in obs, so nothing here is expression. -->
+                      <label class="field hidden inline-field compact-inline-field" id="viz1-xfield-field">
+                        <span>X axis</span>
+                        <select id="viz1-xfield" class="compact-select"></select>
+                      </label>
+                      <label class="field hidden inline-field compact-inline-field" id="viz1-yfield-field">
+                        <span>Y axis</span>
+                        <select id="viz1-yfield" class="compact-select"></select>
+                      </label>
+                      <!-- Group by. The DotPlot and CombPlot lay their columns out along this
+                           variable. Cell state is the default; choosing another shows that
+                           variable in place of cell states. Only variables with a workable
+                           number of levels are offered. -->
+                      <label class="field hidden inline-field compact-inline-field" id="viz1-groupby-field">
+                        <span>Group by</span>
+                        <select id="viz1-groupby" class="compact-select"></select>
+                      </label>
+                      <!-- Which levels to show. Multiple may be selected. -->
+                      <label class="field hidden inline-field compact-inline-field" id="viz1-groups-field">
+                        <span>Show</span>
+                        <select id="viz1-groups" class="compact-select" multiple size="3"></select>
+                      </label>
+                      <!-- Gene set. DotPlot and CombPlot take a list of genes, not one symbol.
+                           A column pasted out of a spreadsheet arrives newline separated, which a
+                           one-line input flattens out of sight. -->
+                      <label class="field hidden inline-field compact-inline-field" id="viz1-geneset-field">
+                        <span>Gene set</span>
+                        <textarea id="viz1-geneset" rows="3" spellcheck="false"
+                          placeholder="paste a gene list &#8212; Excel column, comma, space or newline"></textarea>
+                      </label>
+                      <!-- CombPlot only: a donor contributing one cell to a state yields a mean
+                           from that single cell, which draws as a tall bar built on nothing. -->
+                      <label class="field hidden inline-field compact-inline-field" id="viz1-combmin-field">
+                        <span>Min cells</span>
+                        <select id="viz1-combmin" class="compact-select">
+                          <option value="1">1</option>
+                          <option value="5" selected>5</option>
+                          <option value="10">10</option>
+                          <option value="25">25</option>
+                        </select>
                       </label>
                       <label class="field inline-field compact-inline-field" id="viz1-gene-field">
                         <span>Select molecule</span>
@@ -260,6 +331,66 @@
                       <label class="field hidden inline-field compact-inline-field" id="viz2-modality-field">
                         <span>Modality</span>
                         <select id="viz2-modality" class="compact-select"></select>
+                      </label>
+                      <!-- Color by. The UMAP cell-type view colours each cell by its
+                           cellHarmony assignment. Any other categorical column of obs
+                           works as well, so an atlas annotation the uploaded h5ad
+                           already carries can be drawn instead. -->
+                      <label class="field hidden inline-field compact-inline-field" id="viz2-colorby-field">
+                        <span>Color by</span>
+                        <select id="viz2-colorby" class="compact-select"></select>
+                      </label>
+                      <!-- Coordinates. Any 2-D embedding in obsm can replace the
+                           cellHarmony projection. The reference atlas holds different
+                           coordinates, so the app hides it while another embedding or
+                           another colour column is selected. -->
+                      <label class="field hidden inline-field compact-inline-field" id="viz2-coords-field">
+                        <span>Coordinates</span>
+                        <select id="viz2-coords" class="compact-select"></select>
+                      </label>
+                      <!-- Axes. Choosing "obs columns" in Coordinates puts any two
+                           numeric cell annotations on the axes, the way ShinyCell
+                           plots one metadata field against another. Counts live in
+                           the matrix, not in obs, so nothing here is expression. -->
+                      <label class="field hidden inline-field compact-inline-field" id="viz2-xfield-field">
+                        <span>X axis</span>
+                        <select id="viz2-xfield" class="compact-select"></select>
+                      </label>
+                      <label class="field hidden inline-field compact-inline-field" id="viz2-yfield-field">
+                        <span>Y axis</span>
+                        <select id="viz2-yfield" class="compact-select"></select>
+                      </label>
+                      <!-- Group by. The DotPlot and CombPlot lay their columns out along this
+                           variable. Cell state is the default; choosing another shows that
+                           variable in place of cell states. Only variables with a workable
+                           number of levels are offered. -->
+                      <label class="field hidden inline-field compact-inline-field" id="viz2-groupby-field">
+                        <span>Group by</span>
+                        <select id="viz2-groupby" class="compact-select"></select>
+                      </label>
+                      <!-- Which levels to show. Multiple may be selected. -->
+                      <label class="field hidden inline-field compact-inline-field" id="viz2-groups-field">
+                        <span>Show</span>
+                        <select id="viz2-groups" class="compact-select" multiple size="3"></select>
+                      </label>
+                      <!-- Gene set. DotPlot and CombPlot take a list of genes, not one symbol.
+                           A column pasted out of a spreadsheet arrives newline separated, which a
+                           one-line input flattens out of sight. -->
+                      <label class="field hidden inline-field compact-inline-field" id="viz2-geneset-field">
+                        <span>Gene set</span>
+                        <textarea id="viz2-geneset" rows="3" spellcheck="false"
+                          placeholder="paste a gene list &#8212; Excel column, comma, space or newline"></textarea>
+                      </label>
+                      <!-- CombPlot only: a donor contributing one cell to a state yields a mean
+                           from that single cell, which draws as a tall bar built on nothing. -->
+                      <label class="field hidden inline-field compact-inline-field" id="viz2-combmin-field">
+                        <span>Min cells</span>
+                        <select id="viz2-combmin" class="compact-select">
+                          <option value="1">1</option>
+                          <option value="5" selected>5</option>
+                          <option value="10">10</option>
+                          <option value="25">25</option>
+                        </select>
                       </label>
                       <label class="field inline-field compact-inline-field" id="viz2-gene-field">
                         <span>Select molecule</span>
@@ -435,6 +566,39 @@
               </div>
             </section>
           </div>
+        </section>
+        <!-- Chat. The question is read by the LungMAP assistant, which never sees the
+             data; every number below comes from this job. See app.py /chat. -->
+        <section class="workspace-panel" data-tab-panel="chat">
+          <article class="panel">
+            <div class="panel-head"><h2>Ask about this dataset</h2></div>
+            <p class="panel-copy">
+              Ask a research question about this dataset. Every number below is computed
+              from the data; the model only decides which analysis to run, so it cannot
+              invent a fold change. A question it has no recipe for is refused, and an
+              analysis that lives in another tab is named rather than reprinted.
+            </p>
+            <div class="chat-ask">
+              <textarea id="chat-question" rows="2"
+                placeholder="Load a dataset to see example questions"></textarea>
+              <button class="primary-btn" type="button" id="chat-send">Ask</button>
+            </div>
+            <!-- The examples name this job's own reference and cell states, so a
+                 bone-marrow job never offers a lung question. app.js fills them from
+                 /api/jobs/{id}/chat-examples when the results load. -->
+            <div class="chat-examples" id="chat-examples">
+              <span>Try:</span>
+            </div>
+            <p class="panel-copy" id="chat-status"></p>
+            <div id="chat-answer"></div>
+            <div class="chat-examples" id="chat-followups"></div>
+            <div class="chat-views hidden" id="chat-views">
+              <button type="button" class="ghost-btn active" data-view="table">Table</button>
+              <button type="button" class="ghost-btn" data-view="plot">Plot</button>
+            </div>
+            <div id="chat-table"></div>
+            <div id="chat-plot" class="hidden"></div>
+          </article>
         </section>
       </main>
     </div>

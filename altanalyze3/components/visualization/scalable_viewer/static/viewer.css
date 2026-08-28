@@ -136,3 +136,59 @@
 .sv-file-table{border:1px solid #d7e3ef;border-radius:6px}
 .sv-file-table th{cursor:default}
 .sv-file-table td{white-space:normal}
+
+/* ---------------------------------------------------------------------------
+ * Window count. The Explore results grid is two equal columns, so a wide plot
+ * such as a CombPlot across 39 cell states has half the page to draw in. The
+ * "Windows" select on panel 1 drops the grid to one column and hides panel 2,
+ * and the surviving panel then spans the full width. Nothing is destroyed: the
+ * hidden panel keeps its state and returns when the count goes back to 2.
+ * ------------------------------------------------------------------------ */
+#baseline-results-view.sv-single-window {
+  grid-template-columns: minmax(0, 1fr) !important;
+}
+
+#baseline-results-view.sv-single-window > .panel:nth-of-type(2) {
+  display: none !important;
+}
+
+/* The window select sits on the same flex row as Dot size. */
+.sv-windows {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 12px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* Gene-set box. A spreadsheet column pastes in as several lines, so the field
+ * is a textarea rather than the one-line input scALABLE ships for a single
+ * symbol. The input stays in the DOM, hidden, because scALABLE reads it. */
+.sv-geneset {
+  width: 100%;
+  min-width: 220px;
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  resize: vertical;
+}
+
+/* ---- Chat tab ---------------------------------------------------------- */
+.sv-chat-ask { display: flex; gap: 8px; align-items: flex-start; margin: 8px 0; }
+.sv-chat-ask textarea {
+  flex: 1; font: 13px/1.4 inherit; resize: vertical; min-height: 44px;
+}
+.sv-chat-examples {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  margin-bottom: 10px; font-size: 12px;
+}
+.sv-chat-examples .ghost-btn { font-size: 11px; padding: 3px 8px; }
+.sv-chat-answer { margin: 8px 0; }
+.sv-chat-views { display: flex; gap: 6px; margin: 8px 0; }
+.sv-chat-views .ghost-btn.active { font-weight: 600; text-decoration: underline; }
+#sv-chat-table { max-height: 420px; overflow: auto; }
+#sv-chat-table table { width: 100%; border-collapse: collapse; font-size: 12px; }
+#sv-chat-table th, #sv-chat-table td {
+  text-align: left; padding: 3px 8px; border-bottom: 1px solid #e6e6e6;
+  white-space: nowrap;
+}
+#sv-chat-table thead th { position: sticky; top: 0; background: #fff; }

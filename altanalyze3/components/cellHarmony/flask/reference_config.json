@@ -12,6 +12,7 @@
           "reference_coords_tsv": "references/Human/Lung/CellRef/Hs-CellRef_umap.tsv",
           "cluster_key": "celltype_level3",
           "impute_modalities": [
+            "adt",
             "lipids",
             "grn"
           ],
@@ -23,6 +24,11 @@
               "bundle_path": "../../rna2grn/rna2grn_lung_bundle.pkl.gz",
               "expression_scale": "linear",
               "pseudobulk_statistic": "mean_over_cells_of_log1p_cp10k"
+            },
+            "adt": {
+              "bundle_path": "../../rna2adt/lung/rna2adt_hs_lung_bundle.pkl",
+              "expression_scale": "log1p",
+              "log_base": "e"
             }
           }
         },
@@ -73,6 +79,7 @@
           "reference_coords_tsv": "references/Human/Lung/HLCA/Hs-Lung-HLCA_umap.tsv",
           "cluster_key": "HLCA",
           "impute_modalities": [
+            "adt",
             "lipids",
             "grn"
           ],
@@ -84,6 +91,11 @@
               "bundle_path": "../../rna2grn/rna2grn_lung_bundle.pkl.gz",
               "expression_scale": "linear",
               "pseudobulk_statistic": "mean_over_cells_of_log1p_cp10k"
+            },
+            "adt": {
+              "bundle_path": "../../rna2adt/lung/rna2adt_hs_lung_bundle.pkl",
+              "expression_scale": "log1p",
+              "log_base": "e"
             }
           }
         },
@@ -95,6 +107,7 @@
           "reference_coords_tsv": "references/Human/Lung/Natri-2024/Hs-Lung-IPF-Natri_umap.tsv",
           "cluster_key": "TGEN-IPF",
           "impute_modalities": [
+            "adt",
             "lipids",
             "grn"
           ],
@@ -106,6 +119,11 @@
               "bundle_path": "../../rna2grn/rna2grn_lung_bundle.pkl.gz",
               "expression_scale": "linear",
               "pseudobulk_statistic": "mean_over_cells_of_log1p_cp10k"
+            },
+            "adt": {
+              "bundle_path": "../../rna2adt/lung/rna2adt_hs_lung_bundle.pkl",
+              "expression_scale": "log1p",
+              "log_base": "e"
             }
           }
         },
@@ -117,6 +135,7 @@
           "reference_coords_tsv": "references/Human/Lung/BPD-Sun/Hs-BPD_Sun_umap.tsv",
           "cluster_key": "cell type",
           "impute_modalities": [
+            "adt",
             "lipids",
             "grn"
           ],
@@ -128,6 +147,11 @@
               "bundle_path": "../../rna2grn/rna2grn_lung_bundle.pkl.gz",
               "expression_scale": "linear",
               "pseudobulk_statistic": "mean_over_cells_of_log1p_cp10k"
+            },
+            "adt": {
+              "bundle_path": "../../rna2adt/lung/rna2adt_hs_lung_bundle.pkl",
+              "expression_scale": "log1p",
+              "log_base": "e"
             }
           }
         }

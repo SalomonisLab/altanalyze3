@@ -57,11 +57,13 @@ def run_cellharmony_lite(
     sample_name=None,
     # web defaults (flask/pipeline.py)
     min_genes=200,
-    min_cells=3,
+    min_cells=None,   # never exclude features (user directive 2026-08-27)
     min_counts=500,
     mit_percent=10,
     alignment_mode="cosine",
     min_alignment_score=0.1,
+    reference_genes_only=False,
+    generate_umap=False,
     log=print,
 ):
     """Align one gene-level h5ad to the centroid reference; return the barcode->cluster TSV path.
@@ -103,7 +105,7 @@ def run_cellharmony_lite(
         min_cells=min_cells,
         min_counts=min_counts,
         mit_percent=mit_percent,
-        generate_umap=False,
+        generate_umap=generate_umap,
         save_adata=False,
         unsupervised_cluster=False,
         alignment_mode=alignment_mode,
@@ -111,6 +113,7 @@ def run_cellharmony_lite(
         gene_translation_file=gene_translation_file,
         metacell_align=False,
         return_adata=False,
+        reference_genes_only=reference_genes_only,
     )
 
     assignments_path = os.path.join(output_dir, "cellHarmony_lite_assignments.txt")
