@@ -1,0 +1,40 @@
+{
+  "resources": [
+    {
+      "bytes": 192094,
+      "path": "components/bam/bam2hla/build/signatures_hg38.json.gz",
+      "sha256": "abd0a692cabd73282d36828ae2dc9e6ec9e97f9ba1231dc26a60faefacb7f5e4"
+    },
+    {
+      "bytes": 192101,
+      "path": "components/bam/bam2hla/build/signatures_hg19.json.gz",
+      "sha256": "8a2d5a4edc48d2dfaa31c1d1da265bb82ab744bccfa335bb318e215e5b507b8e"
+    },
+    {
+      "bytes": 59,
+      "path": "components/snaf/deepimmuno/models/cnn_model_331_3_7/checkpoint",
+      "sha256": "ba7ac3757b9a57bdd3e603acb528728d61a9479fe392a7f343330aad23f22c50"
+    },
+    {
+      "bytes": 517339,
+      "path": "components/snaf/deepimmuno/models/cnn_model_331_3_7/variables.data-00000-of-00001",
+      "sha256": "6a8c81c535c2647e3d13917545babb3aacabdc18491f10522cf20966da276941"
+    },
+    {
+      "bytes": 4870,
+      "path": "components/snaf/deepimmuno/models/cnn_model_331_3_7/.index",
+      "sha256": "3ee94283eec3af98f43e59ebd2ae124d8f762d57881e2408175c827e31a3af75"
+    },
+    {
+      "bytes": 4870,
+      "path": "components/snaf/deepimmuno/models/cnn_model_331_3_7/variables.index",
+      "sha256": "3ee94283eec3af98f43e59ebd2ae124d8f762d57881e2408175c827e31a3af75"
+    },
+    {
+      "bytes": 517339,
+      "path": "components/snaf/deepimmuno/models/cnn_model_331_3_7/.data-00000-of-00001",
+      "sha256": "6a8c81c535c2647e3d13917545babb3aacabdc18491f10522cf20966da276941"
+    }
+  ],
+  "schema_version": "1.0"
+}

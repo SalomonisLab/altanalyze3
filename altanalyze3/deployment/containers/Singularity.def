@@ -1,0 +1,9 @@
+Bootstrap: docker
+# Replace with the immutable registry digest after publishing the tested image.
+From: altanalyze3-snaf:0.1.3
+
+%labels
+    Description AltAnalyze3 SNAF; pyNeoQuant is a separate optional image
+
+%runscript
+    exec "$@"

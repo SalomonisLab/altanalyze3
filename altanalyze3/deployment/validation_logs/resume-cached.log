@@ -1,0 +1,10 @@
+Nextflow 26.04.6 is available - Please consider updating your version to it
+N E X T F L O W  ~  version 25.10.0
+Launching `/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/snaf/nextflow/main.nf` [special_wiles] DSL2 - revision: c1ccf71b63
+[5b/995453] Cached process > INDEX_REFERENCE
+[a2/da9861] Cached process > COUNT_JUNCTIONS (S1)
+[fc/5c1f32] Cached process > COUNT_JUNCTIONS (S2)
+[c5/ed7972] Cached process > COUNT_INTRONS (S1)
+[a7/40e96c] Cached process > COUNT_INTRONS (S2)
+[79/0c0229] Cached process > AGGREGATE_COUNTS
+[17/069264] Cached process > FILTER_COUNTS

@@ -1,0 +1,72 @@
+Linting tool /Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/deployment/galaxy/snaf_export.xml
+.. CHECK (TestsNoValid): 1 test(s) found.
+.. INFO (OutputsNumber): 4 outputs found.
+.. INFO (InputsNum): Found 2 input parameters.
+.. CHECK (HelpPresent): Tool contains help section.
+.. CHECK (HelpValidRST): Help contains valid reStructuredText.
+.. CHECK (ToolIDValid): Tool defines an id [altanalyze3_snaf_export].
+.. CHECK (ToolNameValid): Tool defines a name [SNAF export].
+.. CHECK (ToolProfileValid): Tool specifies profile version [24.0].
+.. CHECK (ToolVersionValid): Tool defines a version [0.1.3].
+.. INFO (CommandInfo): Tool contains a command.
+.. CHECK (CitationsFound): Found 1 citations.
+Linting tool /Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/deployment/galaxy/snaf_filter.xml
+.. CHECK (TestsNoValid): 1 test(s) found.
+.. INFO (OutputsNumber): 2 outputs found.
+.. INFO (InputsNum): Found 2 input parameters.
+.. CHECK (HelpPresent): Tool contains help section.
+.. CHECK (HelpValidRST): Help contains valid reStructuredText.
+.. CHECK (ToolIDValid): Tool defines an id [altanalyze3_snaf_filter].
+.. CHECK (ToolNameValid): Tool defines a name [SNAF junction filter].
+.. CHECK (ToolProfileValid): Tool specifies profile version [24.0].
+.. CHECK (ToolVersionValid): Tool defines a version [0.1.3].
+.. INFO (CommandInfo): Tool contains a command.
+.. CHECK (CitationsFound): Found 1 citations.
+Linting tool /Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/deployment/galaxy/snaf_hla.xml
+.. CHECK (TestsNoValid): 1 test(s) found.
+.. INFO (OutputsNumber): 2 outputs found.
+.. INFO (InputsNum): Found 5 input parameters.
+.. CHECK (HelpPresent): Tool contains help section.
+.. CHECK (HelpValidRST): Help contains valid reStructuredText.
+.. CHECK (ToolIDValid): Tool defines an id [altanalyze3_snaf_hla].
+.. CHECK (ToolNameValid): Tool defines a name [SNAF HLA input].
+.. CHECK (ToolProfileValid): Tool specifies profile version [24.0].
+.. CHECK (ToolVersionValid): Tool defines a version [0.1.3].
+.. INFO (CommandInfo): Tool contains a command.
+.. CHECK (CitationsFound): Found 1 citations.
+Linting tool /Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/deployment/galaxy/snaf_merge_ms.xml
+.. CHECK (TestsNoValid): 1 test(s) found.
+.. INFO (OutputsNumber): 1 outputs found.
+.. INFO (InputsNum): Found 3 input parameters.
+.. CHECK (HelpPresent): Tool contains help section.
+.. CHECK (HelpValidRST): Help contains valid reStructuredText.
+.. CHECK (ToolIDValid): Tool defines an id [altanalyze3_snaf_merge_ms].
+.. CHECK (ToolNameValid): Tool defines a name [SNAF MS evidence].
+.. CHECK (ToolProfileValid): Tool specifies profile version [24.0].
+.. CHECK (ToolVersionValid): Tool defines a version [0.1.3].
+.. INFO (CommandInfo): Tool contains a command.
+.. CHECK (CitationsFound): Found 1 citations.
+Linting tool /Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/deployment/galaxy/snaf_predict.xml
+.. CHECK (TestsNoValid): 1 test(s) found.
+.. INFO (OutputsNumber): 3 outputs found.
+.. INFO (InputsNum): Found 4 input parameters.
+.. CHECK (HelpPresent): Tool contains help section.
+.. CHECK (HelpValidRST): Help contains valid reStructuredText.
+.. CHECK (ToolIDValid): Tool defines an id [altanalyze3_snaf_predict].
+.. CHECK (ToolNameValid): Tool defines a name [SNAF T-antigen prediction].
+.. CHECK (ToolProfileValid): Tool specifies profile version [24.0].
+.. CHECK (ToolVersionValid): Tool defines a version [0.1.3].
+.. INFO (CommandInfo): Tool contains a command.
+.. CHECK (CitationsFound): Found 1 citations.
+Linting tool /Users/saljh8/Documents/GitHub/pyNeoQuant/deployment/galaxy/pyneoquant_annotate.xml
+.. CHECK (TestsNoValid): 1 test(s) found.
+.. INFO (OutputsNumber): 2 outputs found.
+.. INFO (InputsNum): Found 4 input parameters.
+.. CHECK (HelpPresent): Tool contains help section.
+.. CHECK (HelpValidRST): Help contains valid reStructuredText.
+.. CHECK (ToolIDValid): Tool defines an id [pyneoquant_annotate].
+.. CHECK (ToolNameValid): Tool defines a name [pyNeoQuant evidence].
+.. CHECK (ToolProfileValid): Tool specifies profile version [24.0].
+.. CHECK (ToolVersionValid): Tool defines a version [0.1.0a1].
+.. INFO (CommandInfo): Tool contains a command.
+.. CHECK (CitationsFound): Found 1 citations.

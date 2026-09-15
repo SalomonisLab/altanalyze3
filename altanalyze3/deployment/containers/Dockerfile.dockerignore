@@ -1,0 +1,7 @@
+**
+!altanalyze3/
+!altanalyze3/deployment/
+!altanalyze3/deployment/containers/
+!altanalyze3/deployment/containers/requirements-linux-*.txt
+!altanalyze3/deployment/containers/wheels/
+!altanalyze3/deployment/containers/wheels/*.whl

@@ -190,3 +190,27 @@ def test_offline_genome_fasta(tmp_path):
 if __name__ == '__main__':
     import sys
     sys.exit(pytest.main([__file__, '-v']))
+
+
+def test_offline_binding_never_downloads(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    class Unavailable:
+        @staticmethod
+        def load():
+            raise FileNotFoundError('missing models')
+    monkeypatch.setitem(sys.modules, 'mhcflurry', SimpleNamespace(Class1PresentationPredictor=Unavailable))
+    monkeypatch.setattr(BD, '_MHCFLURRY_PREDICTOR', None)
+    monkeypatch.setenv('SNAF_OFFLINE', '1')
+    with pytest.raises(RuntimeError, match='offline mode'):
+        BD._load_mhcflurry_predictor()
+
+
+def test_netmhcpan_failure_is_not_an_empty_success(monkeypatch):
+    import subprocess
+    def failing(*args, **kwargs):
+        assert kwargs['check'] is True
+        raise subprocess.CalledProcessError(1, args[0], stderr=b'invalid model')
+    monkeypatch.setattr(BD.subprocess, 'run', failing)
+    with pytest.raises(subprocess.CalledProcessError):
+        BD._run_netMHCpan_once('netMHCpan', 'peptides.txt', 'HLA-A02:01', 9, {'PEPTIDEAA'})

@@ -48,6 +48,7 @@ W = import_module("altanalyze3.components.cellHarmony.webapp.app")
 
 from . import bundle_meta
 from . import data_api as da
+from . import grn_network as gnet
 from .server import create_app as create_fast_app
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -78,13 +79,58 @@ def _load_assets(assets_root: Optional[str], catalog: da.Catalog) -> Dict[str, D
     if not assets_root:
         return out
     for entry in catalog.entries:
-        manifest = Path(assets_root) / entry["id"] / f"{entry['prefix']}_assets.json"
-        if not manifest.is_file():
+        # prepare_assets writes the manifest FLAT, as <assets_root>/<prefix>_assets.json.
+        # This looked only in <assets_root>/<id>/, found nothing, and returned an empty
+        # dict, so every asset-driven feature reported itself unavailable: the marker
+        # heatmap, marker networks, fastComm, GRN networks, and the GO-Elite and network
+        # panels of the Differential tab. The contrast dropdown kept working because
+        # precompute embeds the DEG tables in the bundle rather than the manifest, which
+        # is why the failure looked partial. Both layouts are accepted now.
+        candidates = [
+            Path(assets_root) / f"{entry['prefix']}_assets.json",
+            Path(assets_root) / entry["id"] / f"{entry['prefix']}_assets.json",
+        ]
+        manifest = next((c for c in candidates if c.is_file()), None)
+        if manifest is None:
             continue
         with open(manifest, "r") as fh:
             data = json.load(fh)
-        out[entry["id"]] = data
+        out[entry["id"]] = _absolutise_asset_paths(data)
     return out
+
+
+def _absolutise_asset_paths(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Resolve every relative path in a manifest against the project root.
+
+    prepare_assets writes paths relative to the project it ran in, but the server
+    runs from wherever launchd starts it. `Path(rel).exists()` then answers False
+    and the feature reports itself unavailable: fastComm returned "fastComm scores
+    are unavailable", the marker heatmap returned "Marker heatmap matrix
+    unavailable", and marker networks returned an empty element list. Every one of
+    those files existed.
+
+    `bundle_dir` is absolute, and every other path in the manifest is relative to
+    the project root three levels above it (<root>/scalable_viewer/bundles_*/<id>).
+    A path that already resolves is left alone, so nothing is rewritten twice.
+    """
+    bundle_dir = str(data.get("bundle_dir") or "").strip()
+    if not bundle_dir or not os.path.isabs(bundle_dir):
+        return data
+    root = os.path.abspath(os.path.join(bundle_dir, "..", "..", ".."))
+
+    def fix(value):
+        if isinstance(value, str):
+            if not value or os.path.isabs(value) or os.path.exists(value):
+                return value
+            candidate = os.path.join(root, value)
+            return candidate if os.path.exists(candidate) else value
+        if isinstance(value, dict):
+            return {k: fix(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [fix(v) for v in value]
+        return value
+
+    return fix(data)
 
 
 def create_scalable_app(
@@ -117,6 +163,21 @@ def create_scalable_app(
     for entry in catalog.entries:
         store.ensure(app, entry["id"])
 
+    # Static JS and CSS went out with an ETag and NO Cache-Control. A browser
+    # given that combination applies HEURISTIC caching: it may reuse the file for
+    # a fraction of its age without ever asking the server. Nathan reported the
+    # same two viewer bugs three times while the server was already serving the
+    # fixed files, because his browser kept replaying old JavaScript.
+    # `no-cache` does not disable caching. It requires REVALIDATION, so the ETag
+    # above decides, and a 304 still costs nothing when nothing changed.
+    @app.middleware("http")
+    async def revalidate_static(request, call_next):
+        response = await call_next(request)
+        path = request.url.path
+        if path.endswith((".js", ".css", ".map")) or "/static" in path:
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
+
     app.mount("/viewer-static", StaticFiles(directory=os.path.join(_HERE, "static")),
               name="viewer-static")
     # The original memmap/binary API, unchanged, so the fast path does not regress.
@@ -143,6 +204,9 @@ def create_scalable_app(
     _install_dotplot_routes(app, store, assets)
     _install_combplot_routes(app, store, assets)
     _install_chat_routes(app, store, assets)
+    _install_feature_name_routes(app, store)
+    _install_differential_feature_name_route(app, store)
+    _install_grn_routes(app, store)
     _install_study_route(app, catalog)
     return app
 
@@ -612,12 +676,14 @@ def _install_expression_covariate_routes(app) -> None:
         filter2_field: Optional[str] = Query(None),
         filter2_values: List[str] = Query([]),
         violin_limit: int = Query(10),
+        x_field: str = Query(""),
+        y_field: str = Query(""),
     ):
         token = _VIOLIN_COVARIATE.set(str(covariate or "").strip())
         try:
-            return await json_endpoint(
+            response = await json_endpoint(
                 job_id,
-                gene=gene,
+                gene=_to_feature_key(app, job_id, modality, gene),
                 modality=modality,
                 # Every parameter the wrapped route declares must be passed
                 # explicitly. Calling it directly bypasses FastAPI, so an
@@ -629,7 +695,20 @@ def _install_expression_covariate_routes(app) -> None:
                 filter1_values=filter1_values,
                 filter2_field=filter2_field,
                 filter2_values=filter2_values,
+                # The expression UMAP takes the same coordinate pair as every
+                # other UMAP panel. Omitting them here would silently drop the
+                # reader's choice, the way violin_limit once was.
+                x_field=x_field,
+                y_field=y_field,
             )
+            # THE TITLE NAMES THE FEATURE THE WAY THE READER DOES.
+            #
+            # `_build_expression_payload` sets `gene` to the resolved KEY, so a lipid plot
+            # was titled "CE(18:2) expression" even when the reader picked
+            # "18:2 Cholesterol ester". `resolved_gene` still carries the key, so nothing
+            # that needs the key loses it. A store with no display column returns the key
+            # from `display_of`, which makes this a no-op everywhere else.
+            return _retitle_with_display_name(app, job_id, modality, response)
         finally:
             _VIOLIN_COVARIATE.reset(token)
 
@@ -650,7 +729,7 @@ def _install_expression_covariate_routes(app) -> None:
         try:
             return await pdf_endpoint(
                 job_id,
-                gene=gene,
+                gene=_to_feature_key(app, job_id, modality, gene),
                 mode=mode,
                 modality=modality,
                 filter1_field=filter1_field,
@@ -818,7 +897,12 @@ def _install_differential_select(app, store) -> None:
         block = bundle_meta.build_differential_block(ds, chosen, categorical,
                                                      diff_assets.get(chosen["id"]))
         W._invalidate_differential_cache(app, job_id)
-        store.update_job(job_id, differential=block)
+        # THE NAMES FOLLOW THE CONTRAST. Updating only `differential` left
+        # `feature_display` as it was built on first load, which is empty for RNA, so
+        # switching to the lipid differential kept showing `PE(16:0/22:4)`.
+        store.update_job(job_id, differential=block,
+                         feature_display=bundle_meta.feature_display_map(
+                             ds, str(chosen.get("modality") or "rna")))
         meta = store.get_job(job_id)
         return JSONResponse(W._build_differential_payload(app, job_id, meta, root_path=""))
 
@@ -851,7 +935,7 @@ def _dotplot_default_genes(assets: Dict[str, Any], ds: da.Dataset) -> List[Dict[
     return [{"state": s, "gene": by_state[s]} for s in ds.states if s in by_state]
 
 
-def split_gene_list(text: str) -> List[str]:
+def split_gene_list(text: str, keep_pipe: bool = False, known=None) -> List[str]:
     """Gene symbols out of whatever a user pasted.
 
     A user pastes a column out of Excel, which arrives newline separated, or a
@@ -861,14 +945,47 @@ def split_gene_list(text: str) -> List[str]:
 
     Duplicates are dropped and order is kept, so the plot reads in the order the
     user listed the genes.
+
+    `keep_pipe` stops the vertical bar being a separator. A GRN edge is named
+    `TF|target`, so splitting on the bar turned `TEAD3|MRPL33` into two names that
+    the store does not hold, and the request 404ed.
     """
-    parts = re.split(r"[\s,;|]+", str(text or ""))
+    pattern = r"[\s,;]+" if keep_pipe else r"[\s,;|]+"
     seen, out = set(), []
-    for part in parts:
-        gene = part.strip().strip('"').strip("'")
+
+    def keep(raw: str) -> None:
+        gene = raw.strip().strip('"').strip("'")
         if gene and gene not in seen:
             seen.add(gene)
             out.append(gene)
+
+    # A FEATURE NAME MAY CONTAIN A SPACE, SO A CHUNK IS TRIED WHOLE BEFORE SPLITTING.
+    #
+    # Nathan, 2026-09-08: lipids display as "18:2 Cholesterol ester". Splitting on
+    # whitespace first turned that one name into three tokens and the request 404ed with
+    # "none of the 3 requested genes are in this dataset". Splitting on commas alone is
+    # not the fix either: the docstring above records that `SFTPC AGER` must still resolve
+    # to two genes.
+    #
+    # So the separators a name can never contain -- newline, tab, semicolon, comma, and
+    # the bar unless keep_pipe -- cut the text into chunks, and each chunk is offered to
+    # `known` intact. A chunk that names a real feature is kept whole; one that does not
+    # falls back to whitespace splitting, which is the old behaviour exactly. Without
+    # `known` nothing changes, so every existing caller is unaffected.
+    hard = r"[\n\r\t;,]+" if keep_pipe else r"[\n\r\t;,|]+"
+    for chunk in re.split(hard, str(text or "")):
+        chunk = chunk.strip().strip('"').strip("'")
+        if not chunk:
+            continue
+        if known is not None and " " in chunk:
+            try:
+                if known(chunk) is not None:
+                    keep(chunk)
+                    continue
+            except Exception:                      # a resolver that raises is not a match
+                pass
+        for part in re.split(pattern, chunk):
+            keep(part)
     return out
 
 
@@ -950,13 +1067,32 @@ def _bundle_group_axis(ds, group_by: str = ""):
     return column, [str(v) for v in labels], np.asarray(values, dtype=np.int64), False
 
 
-def _bundle_default_genes(ds, groups) -> List[str]:
+def _feature_source(ds, modality: str = ""):
+    """The store the DotPlot and CombPlot read: the RNA store, or one modality's.
+
+    A `da.ModalityStore` answers `resolve_gene`, `gene_column`, `symbols`, `stats_mean`
+    and `stats_frac` exactly as the Dataset does, so the two plots need no other change.
+    """
+    name = str(modality or "").strip().lower()
+    if not name or name == "rna":
+        return ds
+    try:
+        return ds.modality(name)
+    except (KeyError, FileNotFoundError) as exc:
+        raise HTTPException(404, f"this bundle carries no modality '{name}': {exc}")
+
+
+def _bundle_default_genes(ds, groups, source=None) -> List[str]:
     """One marker gene per group, for a blank gene set.
 
     The bundle ships a marker table keyed by cell state, so that is used when the
     grouping is cell state. Any other variable has no such table, and the top
     markers of the states are still the informative genes to open on.
     """
+    # An imputed modality ships no marker table, so its opening set is its own first
+    # features, in the order the prediction table named them.
+    if source is not None and source is not ds:
+        return list(source.symbols[:12])
     by_group: Dict[str, str] = {}
     for row in ds.markers():
         by_group.setdefault(str(row["cluster"]), str(row["gene"]))
@@ -1030,7 +1166,8 @@ def _install_combplot_routes(app, store, assets: Dict[str, Dict[str, Any]]) -> N
                  min_cells: int = Query(5), group_by: str = Query(""),
                  groups: List[str] = Query([]), subset_by: str = Query(""),
                  subset_values: List[str] = Query([]), subset2_by: str = Query(""),
-                 subset2_values: List[str] = Query([]), tracks: str = Query("")):
+                 subset2_values: List[str] = Query([]), tracks: str = Query(""),
+                 modality: str = Query("")):
         """Per-donor pseudobulk for each gene, grouped by cell state.
 
         One bar per (cell state, donor). The bar is the mean of the gene over
@@ -1053,7 +1190,9 @@ def _install_combplot_routes(app, store, assets: Dict[str, Dict[str, Any]]) -> N
             if wanted_groups:
                 group_names = wanted_groups
         # Blank means the marker gene of every group, matching the DotPlot.
-        wanted = split_gene_list(genes) or _bundle_default_genes(ds, group_names)
+        features = _feature_source(ds, modality)
+        wanted = (split_gene_list(genes, keep_pipe=features.names_have_pipe)
+                  or _bundle_default_genes(ds, group_names, features))
         if not wanted:
             raise HTTPException(400, "give at least one gene")
 
@@ -1111,11 +1250,11 @@ def _install_combplot_routes(app, store, assets: Dict[str, Dict[str, Any]]) -> N
 
         series, labels, missing = [], [], []
         for gene in wanted:
-            row = ds.resolve_gene(gene)
+            row = features.resolve_gene(gene)
             if row is None:
                 missing.append(gene)
                 continue
-            idx, val = ds.gene_column(row)
+            idx, val = features.gene_column(row)
             sums = np.zeros(n_groups, dtype=np.float64)
             if idx.size:
                 cells = idx.astype(np.int64)
@@ -1389,8 +1528,20 @@ def _install_chat_routes(app, store, assets: Dict[str, Dict[str, Any]]) -> None:
             import urllib.request
             covariates = [name for name, info in (ds.covariate_names() or {}).items()
                           if info.get("kind") in ("numeric", "categorical")]
+            # THE ROUTER MUST BE TOLD EVERY MODALITY THIS BUNDLE CARRIES.
+            #
+            # `ds.sv` is the bundle's STORED metadata block, where `modalities` is the raw
+            # manifest keyed by id -- {"adt": {...}, "grn": {...}, "grn_tf": {...}} -- and
+            # carries no "available" key. So `.get("available")` was always None and this
+            # sent ["rna"] for every dataset. The router then had no modality slot to fill,
+            # and no GRN, TF-activity, ADT, lipid or cell-communication question could
+            # route at all. Measured on the COPD-metacells bundle 2026-09-08: the runtime
+            # block holds ['rna','adt','grn','grn_tf','lipid'] and this line sent ['rna'].
+            #
+            # `bundle_meta._modalities_block(ds)` is the runtime shape, {"default", ...,
+            # "available": [...]}, and it is what /api/catalog already serves.
             modalities = [m.get("id") for m in
-                          ((ds.sv.get("modalities") or {}).get("available") or [])] or ["rna"]
+                          (bundle_meta._modalities_block(ds).get("available") or [])] or ["rna"]
             payload = json.dumps({"question": question, "states": ds.states,
                                   "contrasts": contrasts,
                                   # Without these the router cannot fill a
@@ -1536,7 +1687,89 @@ def _install_chat_routes(app, store, assets: Dict[str, Dict[str, Any]]) -> None:
             result["follow_ups"] = _follow_ups(intent, ds, state, covariate, genes)
             return result
 
-        if intent in ("regulatory_driver", "communication_rewiring", "pathway_program"):
+        # --- the two regulatory answers, computed here -----------------------
+        #
+        # Nathan, 2026-09-07: "Both GRN and TF-activity should be able to have separate
+        # types of plots supported in Chat." Before this, `regulatory_driver` fell into the
+        # branch below and told the reader to open the differential-network tab, which
+        # answers a different question with a different feature space.
+        #
+        # WHICH OF THE TWO. A question about a factor's own activity wants the ranked
+        # profile; a question about what a factor regulates wants the graph. The router
+        # names the modality now that it is told the bundle carries one, so `grn_tf` picks
+        # the profile and anything else picks the network.
+        _grn_modality = str(reading.get("modality") or "").strip().lower()
+        if intent in ("tf_activity", "regulator_activity") or (
+                intent == "regulatory_driver" and _grn_modality == "grn_tf"):
+            answer = gnet.tf_activity_profile(
+                ds, cell_state=state,
+                contrast=contrast or (contrasts[0] if contrasts else ""),
+                factors=genes or None, limit=int(reading.get("limit") or 25))
+            result.update(answer)
+            rows = answer.get("rows") or []
+            # `plot` IS A SPEC OBJECT, NOT A NAME. app.js:6924 reads `result.plot` and
+            # dispatches on `spec.kind`; a bare string matches no branch and the panel
+            # prints "This answer has no figure". A ranked activity chart is the bar chart
+            # the chat already draws, so this reuses it rather than adding a renderer.
+            #
+            # ACTIVITY IS UNSIGNED AND ITS DIRECTION IS A SEPARATE COLUMN. A summed
+            # regulatory activity is always positive, so `sign_column` carries the tested
+            # log2 fold change and colours the bar by which way the factor moved.
+            # app.js:7309 documents that exact case for a GO Z score.
+            result["table"] = {
+                "columns": ["factor", "activity", "log2fc", "fdr"],
+                "rows": [[r["factor"], r["activity"], r["log2fc"], r["fdr"]]
+                         for r in rows],
+            }
+            result["plot"] = {"kind": "barchart", "label_column": "factor",
+                              "value_column": "activity", "sign_column": "log2fc"}
+            if not rows:
+                result["answer"] = (answer.get("note")
+                                    or "This bundle carries no regulatory activity.")
+            else:
+                moved = [r for r in rows if r.get("tested")]
+                lead = rows[0]
+                result["answer"] = (
+                    f"In {answer.get('cell_state')}, {lead['factor']} carries the highest "
+                    f"summed regulatory activity of the {answer.get('n_factors')} modelled "
+                    f"factors, {lead['activity']}. "
+                    + (f"{len(moved)} of the {len(rows)} shown changed in "
+                       f"{answer.get('tf_activity_contrast') or 'the comparison'}."
+                       if moved else
+                       "None of the factors shown passed that comparison's own gates, so "
+                       "the ranking is by activity alone."))
+            result["follow_ups"] = _follow_ups(intent, ds, state, covariate, genes)
+            return result
+
+        if intent == "regulatory_driver" and state:
+            answer = gnet.regulator_network(
+                ds, state, contrast=contrast or (contrasts[0] if contrasts else ""),
+                features=genes or None,
+                limit=int(reading.get("limit") or gnet.DEFAULT_LIMIT))
+            result.update(answer)
+            # A SPEC OBJECT, for the same reason as above. `kind: "network"` is new, and
+            # app.js draws it from `result.nodes` and `result.edges`, which this answer
+            # already carries, so no second request is made.
+            result["plot"] = {"kind": "network",
+                              "legend": answer.get("legend") or "",
+                              "edge_score_range": answer.get("edge_score_range")}
+            if not (answer.get("nodes") or []):
+                result["answer"] = answer.get("note") or "No regulator reaches those features."
+            else:
+                result["answer"] = (
+                    f"{answer['n_regulators']} factors reach "
+                    f"{answer['n_targets_reached']} of the {answer['n_targets_requested']} "
+                    f"features through {answer['n_edges_drawn']} edges in {state}. "
+                    f"The edge floor is the {answer['edge_percentile']:.0f}th percentile of "
+                    f"{state}'s own edge scores, {answer['edge_cut']}, and a factor had to "
+                    f"clear {answer['expression_cut']} to be drawn, which dropped "
+                    f"{answer['n_regulators_dropped_as_silent']} silent factors. "
+                    f"{answer['n_factors_with_tested_activity']} factors carry a tested "
+                    f"activity change here.")
+            result["follow_ups"] = _follow_ups(intent, ds, state, covariate, genes)
+            return result
+
+        if intent in ("communication_rewiring", "pathway_program"):
             target = PROTOCOL_ALIAS[intent]
             label = {"network": "differential network",
                      "ccc": "cell-cell communication",
@@ -1695,13 +1928,43 @@ def _install_dotplot_routes(app, store, assets: Dict[str, Dict[str, Any]]) -> No
             levels = [str(v) for v in (info.get("categories") or [])]
             if 1 < len(levels) <= 60:
                 variables.append({"field": name, "values": levels, "n": len(levels)})
-        return {"cluster_key": cluster_key, "variables": variables}
+        # Numeric obs fields, so the UMAP panel can plot ANY pair of float columns as
+        # X and Y. app.js:6733 adds "obs columns (pick X and Y)" once more than one is
+        # offered. Nathan, 2026-09-01: any float-valued obs field qualifies, excluding
+        # counts and scaled counts. A field with a missing value is skipped, because an
+        # axis needs a coordinate for every cell.
+        COUNT_LIKE = ("n_counts", "n_cells", "n_cells_total", "n_genes_detected",
+                      "metacell", "n_donors", "meta_sample_n_donors")
+        numeric_variables = []
+        for name, info in (ds.covariate_names() or {}).items():
+            if info.get("kind") != "numeric":
+                continue
+            if name in COUNT_LIKE or name.endswith("__n_obs"):
+                continue
+            try:
+                if int(float(info.get("n_missing") or 0)) != 0:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            numeric_variables.append({"field": name, "min": info.get("min"),
+                                      "max": info.get("max")})
+        numeric_variables.sort(key=lambda v: v["field"])
+        coords = [{"key": "", "label": "cellHarmony UMAP"}]
+        for key in (ds.sv.get("embeddings") or []):
+            if str(key) in ("X_umap", ""):
+                continue
+            coords.append({"key": str(key),
+                           "label": str(key).replace("X_", "").replace("_", " ")})
+        return {"cluster_key": cluster_key, "variables": variables,
+                "color_variables": variables,
+                "numeric_variables": numeric_variables,
+                "coords": coords}
 
     @app.get("/api/jobs/{job_id}/dotplot")
     def dotplot(job_id: str, genes: str = Query(""), group_by: str = Query(""),
                 groups: List[str] = Query([]), subset_by: str = Query(""),
                 subset_values: List[str] = Query([]), subset2_by: str = Query(""),
-                subset2_values: List[str] = Query([])):
+                subset2_values: List[str] = Query([]), modality: str = Query("")):
         """Mean and detected fraction per (gene, cell state), from the bundle's
         precomputed stats matrices. Default gene set = top marker of every state."""
         ds = store.dataset(job_id)
@@ -1710,29 +1973,36 @@ def _install_dotplot_routes(app, store, assets: Dict[str, Dict[str, Any]]) -> No
             chosen = [g for g in group_names if g in set(groups)]
             if chosen:
                 group_names = chosen
-        pairs = _dotplot_default_genes(assets.get(job_id, {}), ds)
-        requested = split_gene_list(genes)
-        wanted = requested or [p["gene"] for p in pairs]
+        features = _feature_source(ds, modality)
+        pairs = ([] if features is not ds
+                 else _dotplot_default_genes(assets.get(job_id, {}), ds))
+        requested = split_gene_list(genes, keep_pipe=features.names_have_pipe,
+                                    known=features.resolve_gene)
+        wanted = (requested or [p["gene"] for p in pairs]
+                  or _bundle_default_genes(ds, group_names, features))
         rows, missing, labels = [], [], []
         seen = set()
         for gene in wanted:
             if gene in seen:
                 continue
             seen.add(gene)
-            row = ds.resolve_gene(gene)
+            row = features.resolve_gene(gene)
             if row is None:
                 missing.append(gene)
                 continue
             rows.append(row)
-            labels.append(gene)
+            # THE AXIS SHOWS THE READER'S NAME WHATEVER THEY TYPED. A store without a
+            # display column returns the key, so this is a no-op for every other modality.
+            shown = features.display_of(row) if hasattr(features, "display_of") else ""
+            labels.append(shown or gene)
         if not rows:
             raise HTTPException(404, f"none of the {len(wanted)} requested genes are in this dataset")
         restrict = _bundle_subset_masks(ds, subset_by, list(subset_values),
                                         subset2_by, list(subset2_values))
         if restrict is None and is_states and len(group_names) == len(ds.states):
             # Fast path: the bundle already holds the per-state statistics.
-            mean = np.asarray(ds.stats_mean[rows, :], dtype=np.float32).tolist()
-            frac = np.asarray(ds.stats_frac[rows, :], dtype=np.float32).tolist()
+            mean = np.asarray(features.stats_mean[rows, :], dtype=np.float32).tolist()
+            frac = np.asarray(features.stats_frac[rows, :], dtype=np.float32).tolist()
             counts = list(ds.state_n)
         else:
             codes = np.asarray(group_code, dtype=np.int64)
@@ -1746,7 +2016,7 @@ def _install_dotplot_routes(app, store, assets: Dict[str, Dict[str, Any]]) -> No
             mean, frac = [], []
             n_cells = int(per_cell.shape[0])
             for row in rows:
-                idx, val = ds.gene_column(row)
+                idx, val = features.gene_column(row)
                 sums = np.zeros(len(group_names), dtype=np.float64)
                 hits = np.zeros(len(group_names), dtype=np.int64)
                 if idx.size:
@@ -2618,6 +2888,198 @@ def viewer_meta_samples(ds: da.Dataset, column: str = "meta_sample") -> Dict[str
     return {"column": column, "available": True, "n": len(rows), "rows": rows,
             "columns": ["name", "metacells"] + extras,
             "source": os.path.join(ds.paths.bundle_dir, ds.paths.prefix + "_metadata.json")}
+
+
+def _to_feature_key(app, job_id: str, modality: str, gene: str) -> str:
+    """The store's own key for whatever name the reader sent.
+
+    WHY THIS IS NEEDED AND WHY IT IS NOT OPTIONAL. `_build_expression_payload` resolves
+    against `cache_entry["var_names"]`, which holds the KEYS, and an unresolved name does
+    not raise: it SILENTLY FALLS BACK TO FEATURE 0. Measured on this bundle 2026-09-08,
+    `?gene=NOT_A_LIPID_AT_ALL` returned `resolved_gene=CE(18:2)`. So once lipids began
+    showing "18:2 Cholesterol ester", every pick became an unresolved name and every plot
+    drew CE(18:2) -- which is exactly what Nathan reported.
+
+    Translating here, before the shipped route sees it, keeps the fallback untouched for
+    every caller that was already sending a key. A name this cannot resolve is passed
+    through unchanged, so the behaviour for a genuine typo is the old behaviour.
+    """
+    name = str(gene or "").strip()
+    if not name:
+        return gene
+    try:
+        store, _ = W._job_resources(app)
+        ds = store.dataset(job_id)
+        features = _feature_source(ds, modality)
+        if features is ds or not hasattr(features, "display_of"):
+            return gene
+        row = features.resolve_gene(name)
+        if row is None:
+            return gene
+        key = features.symbols[row]
+        return str(key or gene)
+    except Exception:                              # never fail a plot over a lookup
+        return gene
+
+
+def _retitle_with_display_name(app, job_id: str, modality: str, response):
+    """Rewrite an expression payload's `gene` to the name a reader recognises.
+
+    Returns the response untouched unless the modality carries a display column and the
+    resolved feature has a different display name, so every other modality and every
+    bundle built without one behaves exactly as before. A failure to rewrite returns the
+    original payload rather than an error: a title is not worth a 500.
+    """
+    try:
+        body = getattr(response, "body", None)
+        if not body:
+            return response
+        payload = json.loads(body)
+        key = str(payload.get("resolved_gene") or payload.get("gene") or "")
+        if not key:
+            return response
+        # THE INSTALLER FOR THESE ROUTES IS HANDED ONLY `app`.
+        # Taking `store` as an argument raised NameError on every expression request,
+        # RNA included, because _install_expression_covariate_routes captures no store.
+        store, _ = W._job_resources(app)
+        ds = store.dataset(job_id)
+        features = _feature_source(ds, modality)
+        if features is ds or not hasattr(features, "display_of"):
+            return response
+        row = features.resolve_gene(key)
+        if row is None:
+            return response
+        shown = features.display_of(row)
+        if not shown or shown == payload.get("gene"):
+            return response
+        payload["gene"] = shown
+        payload["feature_key"] = key
+        return JSONResponse(payload)
+    except Exception:                              # a title is never worth a failure
+        return response
+
+
+def _install_differential_feature_name_route(app, store) -> None:
+    """The differential detail panel takes the name the volcano shows.
+
+    WHY THIS IS REQUIRED, NOT A POLISH. Once the differential tables render lipids as
+    "18:0/20:4 Phosphatidylcholine", clicking a volcano point sends THAT to
+    `/differential/interactive/gene`, which looks the feature up in the differentials
+    object by KEY and raised
+        KeyError: Gene '18:0/20:4 Phosphatidylcholine' not found in the aligned AnnData
+    So renaming the tables without this breaks every click-through.
+
+    Translated in, relabelled out, exactly as the expression routes are.
+    """
+    from fastapi.routing import APIRoute
+
+    path = "/api/jobs/{job_id}/differential/interactive/gene"
+    original = None
+    for route in list(app.router.routes):
+        if isinstance(route, APIRoute) and route.path == path and "GET" in route.methods:
+            original = route.endpoint
+            break
+    if original is None:
+        return
+    _drop_official_route(app, path)
+
+    @app.get(path)
+    def differential_gene_named(job_id: str, population: str = Query(...),
+                                gene: str = Query(...),
+                                feature: Optional[str] = Query(None)):
+        # build_differential_block records the chosen contrast's modality under
+        # `config`, not at the top of the block.
+        meta = store.get_job(job_id)
+        modality = str(((meta.get("differential") or {}).get("config") or {})
+                       .get("modality") or "rna")
+        key = _to_feature_key(app, job_id, modality, gene)
+        response = original(job_id, population=population, gene=key, feature=feature)
+        return _retitle_with_display_name(app, job_id, modality, response)
+
+
+def _install_feature_name_routes(app, store) -> None:
+    """The feature picker offers the name a reader recognises.
+
+    Nathan, 2026-09-08: lipids must read "18:2 Cholesterol ester" rather than "CE(18:2)",
+    with the abbreviation still searchable.
+
+    WHY THIS REPLACES THE SHIPPED ROUTE RATHER THAN CHANGING THE CACHE. The official
+    `/genes` builds its list from `cache_entry["var_names"]`, and those same strings are
+    the expression cache's lookup keys. Renaming them there would rename the key as well
+    as the label, which is the one thing this change must not do. So the key stays put and
+    only the suggestion list is answered from the bundle's display column.
+
+    A modality with no display column returns exactly what it returned before, because
+    `ModalityStore.display` falls back to the feature name.
+    """
+    _drop_official_route(app, "/api/jobs/{job_id}/genes")
+
+    @app.get("/api/jobs/{job_id}/genes")
+    def job_genes(job_id: str, modality: str = Query("rna")):
+        ds = store.dataset(job_id)
+        features = _feature_source(ds, modality)
+        shown = list(getattr(features, "display", None) or features.symbols)
+        feature_label = "gene"
+        if features is not ds:
+            feature_label = getattr(features, "feature_label", "feature") or "feature"
+        return {"genes": shown,
+                "modality": (modality or "rna").strip().lower() or "rna",
+                "feature_label": feature_label,
+                # Both names resolve, so a caller may send either back.
+                "keys": list(features.symbols) if shown != list(features.symbols) else None}
+
+
+def _install_grn_routes(app, store) -> None:
+    """The two regulatory views Chat draws, and the HTTP routes behind them.
+
+    Nathan, 2026-09-07: "Both GRN and TF-activity should be able to have separate types of
+    plots supported in Chat." So there are two routes, not one with a flag: a network
+    answers who regulates a set of genes, and an activity profile answers which factors are
+    most active in a cell state and which of them moved. The rules are the site's own, and
+    `grn_network.py` records where each one comes from.
+
+    These are ADDED, never substituted. The shipped
+    `/api/jobs/{job_id}/grn/network` keeps its absolute-threshold behaviour, so nothing
+    that already calls it changes.
+    """
+
+    @app.get("/api/jobs/{job_id}/grn/regulator-network")
+    def grn_regulator_network(
+        job_id: str,
+        cell_state: str = Query(""),
+        contrast: str = Query(""),
+        features: str = Query(""),
+        limit: int = Query(gnet.DEFAULT_LIMIT),
+        edge_percentile: float = Query(gnet.DEFAULT_EDGE_PERCENTILE),
+        expression_percentile: float = Query(gnet.DEFAULT_EXPRESSION_PERCENTILE),
+    ):
+        """The factors that regulate the features one differential put on screen.
+
+        `limit` is the "Show" number: how many of the contrast's features become targets,
+        ranked by absolute log2 fold change among those at or below FDR 0.05. It defaults
+        to 200 and a reader may raise or lower it.
+        """
+        ds = store.dataset(job_id)
+        want = [f.strip() for f in str(features).replace(",", " ").split() if f.strip()]
+        return gnet.regulator_network(
+            ds, cell_state, contrast=contrast, features=want or None,
+            limit=int(limit), edge_percentile=float(edge_percentile),
+            expression_percentile=float(expression_percentile))
+
+    @app.get("/api/jobs/{job_id}/grn/tf-activity")
+    def grn_tf_activity(
+        job_id: str,
+        cell_state: str = Query(""),
+        contrast: str = Query(""),
+        factors: str = Query(""),
+        limit: int = Query(25),
+    ):
+        """Per-factor regulatory activity in one cell state, with its tested change."""
+        ds = store.dataset(job_id)
+        want = [f.strip() for f in str(factors).replace(",", " ").split() if f.strip()]
+        return gnet.tf_activity_profile(
+            ds, cell_state=cell_state, contrast=contrast,
+            factors=want or None, limit=int(limit))
 
 
 def _install_study_route(app, catalog: da.Catalog) -> None:

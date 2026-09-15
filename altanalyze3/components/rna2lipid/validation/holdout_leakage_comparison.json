@@ -1,0 +1,154 @@
+{
+  "generated_at": "2026-08-30T18:48:00+00:00",
+  "config": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/rna2lipid/validation/config_smoke_generic_tissue.json",
+  "label": "ADDITION. The delivered protocol is delivered_constrained.",
+  "matrices": {
+    "X": [
+      50,
+      1303
+    ],
+    "Y": [
+      50,
+      202
+    ],
+    "donors": 10
+  },
+  "hyperparameters": {
+    "top_gene_options": [
+      25,
+      50,
+      100,
+      200
+    ],
+    "l1_ratio_grid": [
+      0.7,
+      0.9,
+      0.95,
+      1.0
+    ],
+    "alpha_grid": [
+      0.001,
+      0.0013738237958832624,
+      0.0018873918221350976,
+      0.002592943797404667,
+      0.003562247890262444,
+      0.004893900918477494,
+      0.006723357536499335,
+      0.009236708571873866,
+      0.01268961003167922,
+      0.017433288221999882,
+      0.02395026619987486,
+      0.03290344562312668,
+      0.04520353656360243,
+      0.06210169418915616,
+      0.08531678524172806,
+      0.11721022975334805,
+      0.16102620275609392,
+      0.2212216291070448,
+      0.3039195382313198,
+      0.41753189365604004,
+      0.5736152510448681,
+      0.7880462815669912,
+      1.0826367338740541,
+      1.4873521072935119,
+      2.0433597178569416,
+      2.8072162039411754,
+      3.856620421163472,
+      5.298316906283707,
+      7.278953843983146,
+      10.0
+    ],
+    "cv_folds": 3,
+    "max_iter": 50000,
+    "sparsity_penalty": 0.002,
+    "random_seed": 1,
+    "n_jobs": -1,
+    "verbose": false
+  },
+  "modes": {
+    "delivered_constrained": {
+      "holdout_rule": {
+        "mode": "constrained",
+        "seed": 42,
+        "total_holdout": 28,
+        "min_per_group": 5,
+        "max_per_donor": 3,
+        "required_groups": [
+          "EPI",
+          "MES",
+          "MIC",
+          "END",
+          "PMX"
+        ]
+      },
+      "train_profiles": 22,
+      "holdout_profiles": 28,
+      "train_donors": 10,
+      "holdout_donors": 10,
+      "donors_in_both_sets": [
+        "D018",
+        "D019",
+        "D022",
+        "D024",
+        "D036",
+        "D038",
+        "D041",
+        "D043",
+        "D044",
+        "D071"
+      ],
+      "donor_disjoint": false,
+      "metrics": {
+        "Model": "SparseLipidwiseElasticNetCV",
+        "N_samples": 28,
+        "N_lipids": 202,
+        "N_values": 5656,
+        "N_values_dropped_non_finite": 0,
+        "RMSE": 1.1783306321719005,
+        "MAE": 0.7661145168453364,
+        "True_SD": 1.2911354528543364,
+        "Predicted_SD": 0.9596606837876857,
+        "SD_Ratio": 0.7432687884653361,
+        "Pearson_r": 0.48408669132128757,
+        "Spearman_r": 0.5157041444547227,
+        "R2": 0.16710410268667664
+      },
+      "fit_seconds": 43.577650792
+    },
+    "addition_donor_disjoint": {
+      "holdout_rule": {
+        "mode": "donor_disjoint",
+        "seed": 42,
+        "holdout_donor_fraction": 0.3,
+        "min_holdout_donors": 2
+      },
+      "train_profiles": 35,
+      "holdout_profiles": 15,
+      "train_donors": 7,
+      "holdout_donors": 3,
+      "donors_in_both_sets": [],
+      "donor_disjoint": true,
+      "metrics": {
+        "Model": "SparseLipidwiseElasticNetCV",
+        "N_samples": 15,
+        "N_lipids": 202,
+        "N_values": 3030,
+        "N_values_dropped_non_finite": 0,
+        "RMSE": 1.13526042386476,
+        "MAE": 0.7573170427893948,
+        "True_SD": 1.1123445059434254,
+        "Predicted_SD": 0.9810398687830397,
+        "SD_Ratio": 0.8819568609735517,
+        "Pearson_r": 0.4228992989947106,
+        "Spearman_r": 0.4644983197692961,
+        "R2": -0.04162733478831382
+      },
+      "fit_seconds": 53.62537866700001
+    }
+  },
+  "difference": {
+    "Pearson_r_constrained_minus_donor_disjoint": 0.06118739232657694,
+    "R2_constrained_minus_donor_disjoint": 0.20873143747499046,
+    "note": "Both runs share the trainer, the matrices and the hyperparameter grid. The holdout profile counts differ, so the gap mixes donor leakage with training-set size. Direction, not exact magnitude, is the claim."
+  }
+}

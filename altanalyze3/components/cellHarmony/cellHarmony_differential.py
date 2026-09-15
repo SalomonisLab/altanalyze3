@@ -658,6 +658,31 @@ def compute_pseudobulk_per_population(adata, population_col, sample_col, covaria
 
 # --------- Step 4: per-population DE and pooled/global/co-reg logic -------- #
 
+INDEPENDENT_FILTER_EXPR_THRESHOLD = 0.1
+INDEPENDENT_FILTER_MIN_SAMPLES = 2
+
+
+def _independent_filter_mask(matrix):
+    """Genes worth carrying into the multiple-testing correction.
+
+    A gene detected in fewer than INDEPENDENT_FILTER_MIN_SAMPLES rows above
+    INDEPENDENT_FILTER_EXPR_THRESHOLD cannot support a real call, but it still adds one to the
+    Benjamini-Hochberg denominator and so penalises every other gene. Restricting the
+    correction to the detected genes is standard independent filtering.
+
+    The moderated t-test has always done this. The Scanpy branch did not, which made the two
+    branches disagree for a reason that was not statistical. On Adams 2020 alveolar-fibroblast
+    metacells the expression filter keeps 17,803 of 36,601 genes, and moving Scanpy's
+    correction onto that subset took its FDR-significant count from 47 to 164. Both branches
+    now call this function, so neither can drift from the other.
+
+    matrix rows are samples, metacells or cells, columns are genes.
+    """
+    dense = matrix.toarray() if sps.issparse(matrix) else np.asarray(matrix)
+    detected = np.sum(dense > INDEPENDENT_FILTER_EXPR_THRESHOLD, axis=0)
+    return np.asarray(detected).ravel() >= INDEPENDENT_FILTER_MIN_SAMPLES
+
+
 def _rank_genes_scanpy(two_group_adata, groupby, case_label, control_label, method):
     # Run Scanpy DE and return names, pvals_adj, log2fc, raw pvals as Series for the case vs control
     two_for_rank = _prepare_scanpy_rank_input(two_group_adata)
@@ -674,8 +699,30 @@ def _rank_genes_scanpy(two_group_adata, groupby, case_label, control_label, meth
     rg = two_for_rank.uns["rank_genes_groups"]
     two_group_adata.uns["rank_genes_groups"] = rg
     names = pd.Index(rg["names"][case_label]).astype(str)
-    pvals_adj = pd.Series(rg["pvals_adj"][case_label], index=names, name="fdr").astype(float)
     pvals_raw = pd.Series(rg["pvals"][case_label], index=names, name="pval").astype(float)
+
+    # Independent filtering, matching the moderated t-test branch.
+    # Scanpy corrects across every gene in the matrix. On Adams 2020 alveolar-fibroblast
+    # metacells that is 36,601 genes, of which only 17,803 are detected, so 18,798 undetected
+    # genes were inflating the denominator and nothing else. Recomputing Benjamini-Hochberg on
+    # the detected genes took the FDR-significant count from 47 to 164 and removed a
+    # difference between the two branches that was never statistical.
+    # A gene outside the filter takes an FDR of 1.0, exactly as _moderated_t_test now does.
+    # It was tested and has a raw p; failing independent filtering means it cannot be called
+    # significant, which is an adjusted p of 1, not an absent one. Both branches must agree,
+    # or the same gene would be non-significant under one unit and missing under the other.
+    keep = pd.Series(_independent_filter_mask(two_group_adata.X),
+                     index=pd.Index(two_group_adata.var_names).astype(str))
+    keep = keep.reindex(names).fillna(False).to_numpy()
+    finite = np.isfinite(pvals_raw.to_numpy())
+    selected = keep & finite
+    adjusted = np.ones(len(names), dtype=float)
+    if selected.any():
+        adjusted[selected] = _bh_fdr(pvals_raw.to_numpy()[selected])
+    pvals_adj = pd.Series(adjusted, index=names, name="fdr")
+    if diagnostic_report:
+        print(f"[INFO] Scanpy FDR corrected over {int(selected.sum())} detected genes "
+              f"of {len(names)}")
     logfc_ln = pd.Series(rg["logfoldchanges"][case_label], index=names, name="logfc_ln").astype(float)
     logfc = pd.Series(_ln_to_log2(logfc_ln.values), index=names, name="log2fc")
     return names, pvals_adj, logfc, pvals_raw
@@ -850,11 +897,7 @@ def _moderated_t_test(adata, covariate_col, case_label, control_label, pop):
     pvals = 2 * stats.t.sf(np.abs(tvals), df=n_case + n_ctrl - 2)
 
     # --- Independent filtering for FDR correction ---
-    expr_threshold = 0.1
-    min_detected_samples = 2
-    X_all = np.vstack([X_case, X_ctrl])
-    detected_counts = np.sum(X_all > expr_threshold, axis=0)
-    filter_mask = detected_counts >= min_detected_samples
+    filter_mask = _independent_filter_mask(np.vstack([X_case, X_ctrl]))
 
     # Apply BH-FDR to filtered subset only
     filt_mask = filter_mask & np.isfinite(pvals)
@@ -867,8 +910,13 @@ def _moderated_t_test(adata, covariate_col, case_label, control_label, pop):
 
     _, fdr_filt, _, _ = multipletests(pvals_filt, method="fdr_bh")
 
-    # Map FDRs back to full array (untested = NaN)
-    fdr = np.full_like(pvals, np.nan, dtype=float)
+    # Map FDRs back to the full array. A gene the independent filter excluded still HAS a
+    # test -- it carries a log2 fold and a raw p -- so it needs an adjusted p as well. Not
+    # surviving the filter means it cannot be called significant, and the adjusted p that
+    # expresses that is 1.0, not "no value". Writing NaN here produced 2,703,362 empty FDR
+    # fields across the v8 index, and an empty field is not a statistic: a query for
+    # "fdr > 0.5" silently dropped those genes instead of returning them as non-significant.
+    fdr = np.ones_like(pvals, dtype=float)
     fdr[filt_mask] = fdr_filt
 
     # --- Diagnostics ---
@@ -911,7 +959,8 @@ def run_de_for_comparisons(adata,
                            min_cells_per_group,
                            use_rawp=False,
                            progress_callback=None,
-                           min_replicates_per_group=2):
+                           min_replicates_per_group=2,
+                           cell_state_override=None):
 
     # Filter to cells with both labels present
     keep = adata.obs[covariate_col].isin([case_label, control_label])
@@ -934,6 +983,49 @@ def run_de_for_comparisons(adata,
             min_cells = max(4, min_cells)
 
     populations = _ordered_categories_from_obs(sub.obs, population_col)
+
+    # --- cell_state_override -------------------------------------------------
+    # A cell state that exists only in disease has an empty control arm, so the
+    # loop below skips it and the state yields no differential, no network and
+    # no pathway result. On the CellRef2 metacell census aberrant basal has an
+    # empty control arm in 25 of 97 contrasts and a control arm of 1 or 2 in 25
+    # more. An override pairs such a state against a named normal state and runs
+    # the SAME moderated t-test.
+    #
+    # A unit is a label and a row mask. A normal unit masks one state and takes
+    # its two arms. An override unit masks the disease state in the case arm
+    # together with the reference state in the control arm. Everything after the
+    # mask is unchanged, so the override cannot drift from the standard method.
+    de_units = [(str(p), sub.obs[population_col].astype(str) == str(p))
+                for p in populations]
+    override_labels = []
+    if cell_state_override:
+        _state = sub.obs[population_col].astype(str)
+        _arm = sub.obs[covariate_col].astype(str)
+        _present = set(_state)
+        for _pair in cell_state_override:
+            _d = str(_pair.get("disease_state", "")).strip()
+            _r = str(_pair.get("reference_state", "")).strip()
+            if not _d or not _r:
+                print("[WARN] cell_state_override: a row lacks disease_state or "
+                      "reference_state; skipped")
+                continue
+            _label = "{}__vs__{}".format(_d, _r)
+            _missing = [s for s in (_d, _r) if s not in _present]
+            if _missing:
+                print("[WARN] cell_state_override: {} skipped, absent from this "
+                      "comparison: {}".format(_label, ", ".join(_missing)))
+                continue
+            _case_mask = (_state == _d) & (_arm == str(case_label))
+            _ctrl_mask = (_state == _r) & (_arm == str(control_label))
+            n_c, n_k = int(_case_mask.sum()), int(_ctrl_mask.sum())
+            print("[INFO] cell_state_override: {} | case {} | control {}".format(
+                _label, n_c, n_k))
+            de_units.append((_label, _case_mask | _ctrl_mask))
+            override_labels.append(_label)
+        print("[INFO] cell_state_override: {} of {} pairings usable here".format(
+            len(override_labels), len(cell_state_override)))
+
     results_rows = []
     long_stats = []
     per_pop_de = {}
@@ -945,8 +1037,7 @@ def run_de_for_comparisons(adata,
 
     # Per-population DE
     all_fold_values = {}
-    for pop in populations:
-        pop_mask = sub.obs[population_col].astype(str) == str(pop)
+    for pop, pop_mask in de_units:
         pop_data = sub[pop_mask].copy()
 
         # size checks
@@ -3972,6 +4063,51 @@ def parse_comparisons_arg(comp_str):
         comps.append((bits[0], bits[1]))
     return comps
 
+
+def load_cell_state_override(path):
+    """Read the disease-to-normal pairings, or return None when no file is given.
+
+    Nathan's design: the pairing is literature based, so this function reads it and never
+    guesses one. It requires disease_state and reference_state, keeps every other column so a
+    source citation travels with the pairing, and drops exact duplicates.
+    """
+    if not path:
+        return None
+    import csv as _csv
+    import os as _os
+    if not _os.path.exists(path):
+        raise SystemExit("--cell_state_override: no such file: {}".format(path))
+    with open(path, "r") as handle:
+        head = handle.readline()
+        delim = "\t" if head.count("\t") >= head.count(",") else ","
+        handle.seek(0)
+        rows = [dict(r) for r in _csv.DictReader(handle, delimiter=delim)]
+    if not rows:
+        raise SystemExit("--cell_state_override: {} holds no data rows".format(path))
+    have = set(rows[0].keys())
+    need = {"disease_state", "reference_state"}
+    if not need.issubset(have):
+        raise SystemExit(
+            "--cell_state_override: {} needs columns {} but holds {}".format(
+                path, sorted(need), sorted(have)))
+    seen, keep = set(), []
+    for r in rows:
+        key = (str(r["disease_state"]).strip(), str(r["reference_state"]).strip())
+        if key in seen:
+            continue
+        seen.add(key)
+        keep.append(r)
+    print("[INFO] --cell_state_override: {} pairings read from {}".format(len(keep), path))
+    for r in keep:
+        extra = {k: v for k, v in r.items()
+                 if k not in ("disease_state", "reference_state") and v}
+        print("[INFO]   {} -> {}{}".format(
+            r["disease_state"], r["reference_state"],
+            "  ({})".format("; ".join("{}={}".format(k, v) for k, v in extra.items()))
+            if extra else ""))
+    return keep
+
+
 def main():
     ap = argparse.ArgumentParser(description="cellHarmony differential analysis and (optional) pseudobulk generation.")
     ap.add_argument("--h5ad", required=True, help="Input h5ad with aligned annotations")
@@ -3995,6 +4131,18 @@ def main():
     ap.add_argument("--fc", type=float, default=1.2, help="Fold-change threshold (absolute, default: 1.2)")
     ap.add_argument("--min_cells_per_group", type=int, default=20, help="SINGLE-CELL mode only: minimum cells per group per population (default: 20; auto-relaxed to 4 if total<200). Ignored under --make_pseudobulk, which gates on --min_replicates_per_group instead.")
     ap.add_argument("--min_replicates_per_group", type=int, default=2, help="PSEUDOBULK mode: minimum pseudobulk replicates (samples) per group per population (default: 2, which is the floor the moderated t-test itself requires). A population below this is skipped entirely and reports 0 tested genes.")
+    ap.add_argument("--cell_state_override", default=None, metavar="FILE",
+                    help=(
+                        "SUPPLEMENT: a table pairing a disease-only cell state with a named "
+                        "normal state, so the state can be tested at all. cellHarmony "
+                        "normally compares a state against itself across two arms, so a "
+                        "state absent from the control arm is skipped and yields no "
+                        "differential, no network and no pathway result. Tab or comma "
+                        "separated with a header holding disease_state and reference_state; "
+                        "any further column, for example source, is carried into the "
+                        "manifest. Each pairing runs the SAME moderated t-test and appears "
+                        "as population '<disease>__vs__<reference>'. Standard results are "
+                        "untouched."))
     ap.add_argument("--make_pseudobulk", action="store_true", help="If set, compute pseudobulks per (population×sample)")
     ap.add_argument("--pseudobulk_min_cells", type=int, default=10, help="Minimum cells per pseudobulk group (default: 10)")
     ap.add_argument("--perturb_screen", action="store_true", help="Run perturbation-screen mode with bootstrapped metacells per (cell type × perturb target).")
@@ -4016,7 +4164,21 @@ def main():
     ap.add_argument("--goelite_max_term_size", type=int, default=2000, help="GO-Elite maximum term size (default: 2000)")
     ap.add_argument("--outdir", default="cellHarmony_DE_out", help="Output directory (default: cellHarmony_DE_out)")
     ap.add_argument("--skip_grn", action="store_true", help="Skip interaction network (GRN) generation")
+    ap.add_argument(
+        "--skip_deg_h5ad",
+        action="store_true",
+        help=(
+            "Skip writing differentials_only_<tag>.h5ad. That object repeats the expression "
+            "matrix of the significant genes and reaches hundreds of megabytes a run, which "
+            "a large contrast sweep cannot store. The DEG_*.tsv tables carry every statistic."
+        ),
+    )
     args = ap.parse_args()
+
+    # Read the disease-to-normal pairings once, before any comparison runs, so a bad
+    # file fails immediately rather than after the first differential.
+    _cell_state_override = load_cell_state_override(
+        getattr(args, "cell_state_override", None))
     if args.grn_species is None and args.goelite_species is not None:
         args.grn_species = args.goelite_species
 
@@ -4226,6 +4388,7 @@ def main():
                 fc_thresh=float(args.fc),
                 min_cells_per_group=int(per_comparison_min_cells),
                 min_replicates_per_group=int(args.min_replicates_per_group),
+                cell_state_override=_cell_state_override,
                 use_rawp=args.use_rawp,
                 progress_callback=progress_callback
             )
@@ -4328,8 +4491,9 @@ def main():
                 show_go_terms=bool(goelite_payload),
             )
 
-            out_h5ad = os.path.join(deg_dir, "differentials_only_{}.h5ad".format(tag))
-            write_differentials_only_h5ad(adata, de_store, out_h5ad)
+            if not args.skip_deg_h5ad:
+                out_h5ad = os.path.join(deg_dir, "differentials_only_{}.h5ad".format(tag))
+                write_differentials_only_h5ad(adata, de_store, out_h5ad)
 
             det = de_store["detailed_deg"]
             summ = de_store["summary_per_population"]
@@ -4358,6 +4522,18 @@ def main():
             if cr is not None and not cr.empty:
                 cr.to_csv(cr_path, sep="\t", index=False)
                 print("[INFO] Wrote {}".format(cr_path))
+
+            # Complete gene x cell-state fold matrix. The detailed table holds only the
+            # genes that passed the filters; a viewer that colours a gene across every
+            # cell state needs the folds of the states where it was not called.
+            fold_matrix = de_store.get("fold_matrix")
+            if fold_matrix is not None and not fold_matrix.empty:
+                fold_path = os.path.join(deg_dir, "DEG_fold_matrix_{}.tsv".format(tag))
+                fold_matrix.to_csv(fold_path, sep="\t")
+                print("[INFO] Wrote {} ({} features x {} cell states)".format(
+                    fold_path, fold_matrix.shape[0], fold_matrix.shape[1]))
+            else:
+                print("[WARN] No fold_matrix in de_store; DEG_fold_matrix_{}.tsv not written.".format(tag))
 
             interaction_root = os.path.join(comparison_root, "interaction-plots")
             if not args.skip_grn and interactions_df is not None:

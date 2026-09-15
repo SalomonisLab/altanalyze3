@@ -22,6 +22,7 @@ from . import isoform_matrix as iso
 from . import isoform_ratios as isor
 from . import isoform_translation as isot
 from . import gff_process as gff_process
+from .io_utils import exists as _io_exists
 from ..psi import psi_single as psi
 importlib.reload(psi)
 from Bio import SeqIO
@@ -166,8 +167,14 @@ def _force_overwrite():
     return os.environ.get("ALTANALYZE3_FORCE_OVERWRITE", "") == "1"
 
 
-def import_metadata(metadata_file, return_size = False, include_hashed_samples = False, extract_from_bams = False, reference_model = None):
-    """Reads metadata file and groups samples by uid."""
+def import_metadata(metadata_file, return_size = False, include_hashed_samples = False, extract_from_bams = False, reference_model = None, bulk = False):
+    """Reads metadata file and groups samples by uid.
+
+    bulk=True is the BULK long-read path. Bulk BAMs (PacBio CCS / ONT) carry no cell barcode tag, so
+    the extractor is given default_barcode=<library>: the whole BAM becomes ONE pseudo-cell instead
+    of every read being discarded by the extractor's 'no barcode -> skip' rule. Nothing else about
+    extraction changes. bulk=False (default) preserves single-cell behaviour exactly.
+    """
 
     metadata = pd.read_csv(metadata_file, sep='\t')
     sample_dict = {}
@@ -205,7 +212,21 @@ def import_metadata(metadata_file, return_size = False, include_hashed_samples =
                 )
                 from ..bam import isoform_structure_extract as bam_extract
                 print(f"Extracting isoform reads from bam:\n {bam_path}") 
-                gff_path, matrix_path, stats, n, o = bam_extract.parallel_extract_isoform_structures(bam_path, reference_model, output_dir, barcode_tags=['CB'])
+                default_barcode = None
+                if bulk:
+                    from .bulk_longread import bulk_barcode as _bulk_barcode
+                    default_barcode = _bulk_barcode(library)
+                    print(f"Bulk mode: reads with no barcode tag are assigned '{default_barcode}' (one pseudo-cell per BAM)")
+                # Bulk BAMs are minimap2/pbmm2 output whose 'ts' tag is the transcript strand
+                # RELATIVE TO THE READ. exonAnnotate keys gene lookup on the GENOMIC strand, so the
+                # tag must be XORed with the alignment orientation or every reverse-mapped read
+                # finds no gene. Measured on ENCFF044LIA chr7: kept reads 38,987/73,583 (53.0%)
+                # with the tag verbatim, 72,731/73,583 (98.8%) with this interpretation.
+                # Single-cell (bulk=False) is untouched and keeps the verbatim tag.
+                gff_path, matrix_path, stats, n, o = bam_extract.parallel_extract_isoform_structures(bam_path, reference_model, output_dir, barcode_tags=['CB'], default_barcode=default_barcode, ts_read_relative=bool(bulk))
+                if bulk:
+                    from .bulk_longread import report_extract_stats as _report_extract_stats
+                    _report_extract_stats(stats, library, log=print)
                 # Extraction returns pathlib.Path; downstream string ops (gff.split) need str.
                 gff_path = str(gff_path); matrix_path = str(matrix_path)
                 del stats, n, o
@@ -357,7 +378,8 @@ def export_junction_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict):
         _trim_memory()
 
 def export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, reference_gff, genome_fasta,
-                        deleteGFF=False, collapse_method='wta', force_recollapse=False, write_h5ad=True):
+                        deleteGFF=False, collapse_method='wta', force_recollapse=False, write_h5ad=True,
+                        min_total=3):
     """Cross-sample isoform consolidation + per-sample isoform h5ad + protein prediction.
 
     Uses the memory/compute-optimized ``isoform_collapse`` pipeline instead of the legacy combined
@@ -390,7 +412,7 @@ def export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, refe
     # or the collapse method (WTA vs EM) may differ, so an existing catalog must NOT silently
     # short-circuit it. The skip is only honored when explicitly NOT forcing a re-collapse (e.g. a
     # resumed run that deliberately reuses the prior catalog).
-    if os.path.exists(catalog_path) and deleteGFF == False and not force_recollapse:
+    if _io_exists(catalog_path) and deleteGFF == False and not force_recollapse:
         print(f"Isoform catalog exists, skipping collapse: {catalog_path}")
     else:
         # Annotate the GENCODE/Ensembl reference ONCE (run separately through gff_process), cache the
@@ -403,7 +425,7 @@ def export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, refe
         # per-sample stage3 re-key -- that is fanned out to P4 (export_sample_isoform) which reloads
         # the persisted maps. write_h5ad=True (single-process) does everything in one pass.
         collapse.run_pipeline(
-            samples, outdir=out_dir, nproc=nproc, min_total=3,
+            samples, outdir=out_dir, nproc=nproc, min_total=min_total,
             # Use the exon annotation passed in (cluster: --exon_annot) as the collapse gene->chrom
             # reference. Without this, run_pipeline falls back to its hardcoded DEFAULT_REF (a local
             # macOS path) and load_gene_chrom() FileNotFoundErrors anywhere else.
@@ -780,6 +802,10 @@ def _pseudobulk_one_h5ad(h5ad_path, dataType, compute_cpm):
                                         compute_cpm=compute_cpm, cpm_threshold=1, status=False)
     del adata
     _trim_memory()
+    # Compress the text exports. Readers go through io_utils.smart_open, so both this run's .gz and
+    # any earlier uncompressed run resolve from the same logical name.
+    from .io_utils import compress_many as _compress_many
+    _compress_many([f"{prefix}.txt", f"{prefix}_cpm.txt", f"{prefix}_ratio.txt"], log=print)
     return f"{prefix}.txt"
 
 
@@ -962,7 +988,7 @@ def combine_junctions(metadata_file, barcode_cluster_dirs, ensembl_exon_dir, min
 
 
 def build_isoform_catalog(metadata_file, ensembl_exon_dir, gencode_gff, genome_fasta,
-                          collapse_method='wta', force_recollapse=True):
+                          collapse_method='wta', force_recollapse=True, min_total=3):
     """P3: cross-sample isoform COLLAPSE (catalog) + translation/FASTA only. Skips the per-sample
     stage3 re-key (that is P4, export_sample_isoform). Persists FINAL_isoform_catalog.tsv,
     FINAL_structure_to_exemplar.tsv and (EM) FINAL_structure_to_exemplar_soft.tsv so P4 can re-key
@@ -970,7 +996,7 @@ def build_isoform_catalog(metadata_file, ensembl_exon_dir, gencode_gff, genome_f
     sample_dict = import_metadata(metadata_file)
     export_isoform_h5ad(sample_dict, ensembl_exon_dir, None, gencode_gff, genome_fasta,
                         collapse_method=collapse_method, force_recollapse=force_recollapse,
-                        write_h5ad=False)
+                        write_h5ad=False, min_total=min_total)
 
 
 def combine_isoforms(metadata_file, barcode_cluster_dirs):

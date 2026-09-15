@@ -63,11 +63,8 @@ def _parse_netMHCpan_stdout(stdout, peptide_set):
 def _run_netMHCpan_once(software_path, peptides_path, hla_strings, length, peptide_set):
     '''Invoke the netMHCpan binary directly (no shell) and parse its stdout.'''
     cmd = [software_path, '-p', peptides_path, '-a', hla_strings, '-l', str(length)]
-    try:
-        proc = subprocess.run(cmd, capture_output=True)
-        return _parse_netMHCpan_stdout(proc.stdout.decode('utf-8', errors='replace'), peptide_set)
-    except Exception:
-        return pd.DataFrame(columns=['peptide', 'mer', 'hla', 'score', 'identity'])
+    proc = subprocess.run(cmd, capture_output=True, check=True)
+    return _parse_netMHCpan_stdout(proc.stdout.decode('utf-8', errors='replace'), peptide_set)
 
 
 def run_netMHCpan(software_path,peptides,hlas,length,cmd_num=1,tmp_dir=None,tmp_name=None):
@@ -124,8 +121,10 @@ def _load_mhcflurry_predictor():
     from mhcflurry import Class1PresentationPredictor
     try:
         predictor = Class1PresentationPredictor.load()
-    except Exception:
-        # models not present locally -> fetch once, then load (offline if env var set)
+    except Exception as exc:
+        if os.environ.get('SNAF_OFFLINE') == '1':
+            raise RuntimeError('MHCflurry models are unavailable in offline mode; provision MHCFLURRY_DOWNLOADS_DIR before running SNAF') from exc
+        # models not present locally -> fetch once, then load
         try:
             from mhcflurry.downloads_command import run as _mhcflurry_downloads
             _mhcflurry_downloads(['fetch', 'models_class1_presentation'])

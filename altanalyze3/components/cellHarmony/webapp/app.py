@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import logging
 import os
 import re
@@ -279,6 +280,13 @@ def _modality_definition(meta: Dict, modality: object) -> Dict[str, object]:
     for entry in _modalities_state(meta)["available"]:
         if _normalize_modality_id(entry.get("id"), default="") == normalized:
             return dict(entry)
+    # A DEG-only modality is absent from the bundle's modality list, because the bundle
+    # stores no feature matrix for it. Cell communication is one: it arrives through
+    # --deg-modality alone. Falling straight through to RNA gave it RNA's feature label,
+    # so the panel read "gene" where it means "ligand-receptor interaction", and RNA's
+    # supports_* flags with it. Use the modality's OWN definition when one exists.
+    if normalized in _DEFAULT_MODALITY_DEFINITIONS:
+        return dict(_DEFAULT_MODALITY_DEFINITIONS[normalized])
     return dict(_DEFAULT_MODALITY_DEFINITIONS["rna"])
 
 
@@ -913,9 +921,26 @@ def _differential_options(meta: Dict) -> Dict:
         comparison_types = ["cells", "pseudobulk"] if pseudobulk_allowed else ["cells"]
     modalities_state = _modalities_state(meta)
     modalities_available = list(modalities_state["available"])
+    # fastComm being available does NOT mean a cell-communication DIFFERENTIAL exists.
+    # For a precomputed bundle fastComm scores communication per cell state for the
+    # Explore tab; running cellHarmony-differential on it is a separate analysis. Adding
+    # the modality regardless left a reader able to pick "Cell communication" while the
+    # panel stayed on the previous modality, because no contrast carries it. Offer it
+    # only when the bundle actually holds such a contrast, or when this is an
+    # interactive job that will compute one.
     fastcomm_analysis = meta.get("fastcomm_analysis") or {}
     if isinstance(fastcomm_analysis, dict) and fastcomm_analysis.get("enabled"):
-        if not any(_normalize_modality_id(entry.get("id"), default="") == "cell_communication" for entry in modalities_available):
+        precomputed = (meta.get("scalable_viewer") or {}).get("deg_comparisons")
+        if precomputed is None:
+            has_contrast = True                     # an interactive job computes on demand
+        else:
+            has_contrast = any(
+                _normalize_modality_id(str(c.get("modality") or ""), default="")
+                == "cell_communication"
+                for c in precomputed if isinstance(c, dict))
+        if has_contrast and not any(
+                _normalize_modality_id(entry.get("id"), default="") == "cell_communication"
+                for entry in modalities_available):
             modalities_available.append(dict(_DEFAULT_MODALITY_DEFINITIONS["cell_communication"]))
     return {
         "enabled": enabled,
@@ -940,7 +965,7 @@ def _build_differential_payload(app: FastAPI, job_id: str, meta: Dict, root_path
     selected_modality = _normalize_modality_id(config.get("modality") or options.get("default_modality") or "rna")
     modality_info = _modality_definition(meta, selected_modality)
     result_populations: List[str] = []
-    visualization_populations: Dict[str, List[str]] = {"heatmap": [], "volcano": [], "network": [], "go": [], "table": []}
+    visualization_populations: Dict[str, List[str]] = {"summary": [], "heatmap": [], "volcano": [], "network": [], "go": [], "table": []}
     if str(differential.get("status") or "") == "completed":
         try:
             result_populations = _differential_result_populations(app, meta)
@@ -951,6 +976,9 @@ def _build_differential_payload(app: FastAPI, job_id: str, meta: Dict, root_path
         except Exception:
             visualization_populations["heatmap"] = []
         visualization_populations["volcano"] = result_populations
+        # The DEG-count chart draws every cell state at once. It carries the same list
+        # so the selected state survives a switch into and out of the chart.
+        visualization_populations["summary"] = result_populations
         if selected_modality == "cell_communication":
             visualization_populations["network"] = result_populations
             visualization_populations["table"] = result_populations
@@ -982,12 +1010,14 @@ def _build_differential_payload(app: FastAPI, job_id: str, meta: Dict, root_path
     status = str(differential.get("status") or ("idle" if options["enabled"] else "unavailable"))
     if selected_modality == "cell_communication":
         visualization_modes = [
+            {"value": "summary", "label": "Differential counts"},
             {"value": "volcano", "label": "Score delta"},
             {"value": "network", "label": "Cell-state network"},
             {"value": "table", "label": "Top interaction table"},
         ]
     else:
         visualization_modes = [
+            {"value": "summary", "label": "Differential counts"},
             {"value": "heatmap", "label": "Heatmap"},
             {"value": "volcano", "label": "Volcano"},
         ]
@@ -1062,6 +1092,20 @@ def _get_differential_detail_table(app: FastAPI, meta: Dict) -> pd.DataFrame:
         raise ValueError("Differential DEG detail table is missing the population column.")
     frame["population"] = frame["population"].astype(str)
     frame["gene"] = frame["gene"].astype(str)
+    # AN OPTIONAL DISPLAY MAP RENAMES THE FEATURE FOR EVERY READER OF THIS FRAME.
+    #
+    # A precomputed bundle publishes `meta["feature_display"]` for the chosen contrast's
+    # modality (bundle_meta.build_meta), so the Differential Explorer names lipids
+    # "16:0/22:4 Phosphatidylethanolamine" rather than "PE(16:0/22:4)", which is what
+    # Explore already shows. `feature_key` keeps the key on every row for anything that
+    # joins against the fold matrix or the expression store.
+    #
+    # A cellHarmony job sets no such key, so this whole block is skipped and the frame is
+    # exactly what it was.
+    display = meta.get("feature_display") or {}
+    frame["feature_key"] = frame["gene"]
+    if isinstance(display, dict) and display:
+        frame["gene"] = frame["gene"].map(lambda g: display.get(g, g))
     cache_entry["detail_table"] = frame
     return frame
 
@@ -1184,6 +1228,65 @@ def _differential_gene_h5ad_path(meta: Dict) -> Path:
     raise FileNotFoundError("Aligned AnnData output is unavailable for differential gene detail.")
 
 
+_GRN_RAGGED_CACHE: Dict[str, Any] = {}
+
+
+def _grn_ragged_values(meta: Dict, population: str, edge: str, obs_names):
+    """Per-METACELL values of one GRN edge in one cell state, or None.
+
+    rna2grn imputed the shipped GRN sidecar per CELL STATE, so a violin of one state
+    held a single value repeated across its metacells: distinct=1, sd=0. The ragged
+    store gives every metacell its own value, and holds only the edges significant in
+    that state, which is what keeps it near 0.6 GB rather than 17.8 GB.
+
+    The violin must stay on metacells. The donor-level pseudobulk that produced the
+    statistics may not be published one point at a time, because a point is a donor.
+    """
+    root = str(meta.get("grn_ragged_dir") or "").strip()
+    if not root or not population or not edge:
+        return None
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in str(population))
+    path = os.path.join(root, "%s.h5ad" % safe)
+    if not os.path.isfile(path):
+        return None
+    entry = _GRN_RAGGED_CACHE.get(path)
+    mtime = os.path.getmtime(path)
+    if not entry or entry.get("mtime") != mtime:
+        adata = ad.read_h5ad(path)
+        entry = {"mtime": mtime, "adata": adata,
+                 "edges": {str(e): i for i, e in enumerate(adata.var_names.astype(str))},
+                 "rows": {str(b): i for i, b in enumerate(adata.obs_names.astype(str))}}
+        _GRN_RAGGED_CACHE[path] = entry
+    col = entry["edges"].get(str(edge))
+    if col is None:
+        return None
+    column = entry["adata"].X[:, col]
+    column = column.toarray().ravel() if hasattr(column, "toarray") else np.asarray(column).ravel()
+    rows = entry["rows"]
+    out = np.full(len(obs_names), np.nan, dtype=float)
+    for i_, barcode in enumerate(np.asarray(obs_names, dtype=str)):
+        j = rows.get(barcode)
+        if j is not None:
+            out[i_] = float(column[j])
+    return out if np.isfinite(out).any() else None
+
+
+
+def _has_edge_level_h5ad(meta: Dict) -> bool:
+    """True when a real edge-level h5ad backs this run's GRN differential.
+
+    A cellHarmony job writes `..._grn_edges.h5ad` and registers it, and the GRN gene
+    detail must read THAT rather than the per-TF activity matrix. A precomputed bundle
+    has no such file: its GRN modality store already holds the edges, so the expression
+    cache is the edge matrix and the h5ad branch must not run.
+    """
+    artifacts = (meta.get("differential", {}) or {}).get("artifacts", {}) or {}
+    candidates = [str(artifacts.get("differentials_only_h5ad", "")).strip()]
+    grn = (meta.get("modality_artifacts") or {}).get("grn") or {}
+    candidates.append(str(grn.get("differential_h5ad", "")).strip())
+    return any(path and Path(path).is_file() for path in candidates)
+
+
 def _open_gene_detail_adata(app: FastAPI, meta: Dict, gene: str) -> tuple[ad.AnnData, Path]:
     cache_entry = _get_differential_cache_entry(app, meta)
     primary = _differential_gene_h5ad_path(meta)
@@ -1264,14 +1367,30 @@ def _invalidate_fastcomm_cache(app: FastAPI, job_id: str) -> None:
         cache.pop(str(job_id), None)
 
 
-def _get_marker_heatmap_cache_entry(app: FastAPI, meta: Dict, modality: str = "rna") -> Dict[str, Any]:
+def _get_marker_heatmap_cache_entry(app: FastAPI, meta: Dict, modality: str = "rna",
+                                    compact: bool = True) -> Dict[str, Any]:
+    """The marker matrix for one modality, at one of two column densities.
+
+    `compact` picks the run that kept 10 metacells per cell population, which is the
+    default because a 441-column heatmap stays readable where 1,827 columns do not. The
+    all-column run is a SEPARATE MarkerFinder run and not a superset: MarkerFinder ranks
+    markers from the cells it is given, so the two share 760 of 1,248 rows, 60.9%, on the
+    COPD v7 build. A bundle that ships only the compact run keeps serving it whatever
+    `compact` says, because no second matrix exists to switch to.
+    """
     job_id = str(meta.get("job_id") or "").strip()
     if not job_id:
         raise ValueError("Job metadata is missing a job_id.")
 
     normalized_modality = _normalize_modality_id(modality)
     marker_analysis = _modality_marker_analysis(meta, normalized_modality) or {}
-    cache_path_text = str(marker_analysis.get("heatmap_cache", "")).strip()
+    full_path_text = str(marker_analysis.get("heatmap_cache_full", "")).strip()
+    if not compact and full_path_text:
+        cache_path_text = full_path_text
+        density = "all"
+    else:
+        cache_path_text = str(marker_analysis.get("heatmap_cache", "")).strip()
+        density = "compact"
     heatmap_tsv_text = str(marker_analysis.get("heatmap_tsv", "")).strip()
     expression_tsv_text = str(marker_analysis.get("expression_tsv", "")).strip()
 
@@ -1281,12 +1400,13 @@ def _get_marker_heatmap_cache_entry(app: FastAPI, meta: Dict, modality: str = "r
 
     cache_signature = {
         "modality": normalized_modality,
+        "density": density,
         "heatmap_cache": str(cache_path or ""),
         "heatmap_tsv": str(heatmap_tsv_path or ""),
         "expression_tsv": str(expression_tsv_path or ""),
     }
     cache = app.state.marker_heatmap_cache
-    cache_key = f"{job_id}:{normalized_modality}"
+    cache_key = f"{job_id}:{normalized_modality}:{density}"
     existing = cache.get(cache_key)
     if existing and existing.get("signature") == cache_signature:
         return existing
@@ -1548,6 +1668,7 @@ def _get_differential_cache_entry(app: FastAPI, meta: Dict) -> Dict[str, Any]:
         "",
     )
     heatmap_path = str(artifacts.get("heatmap_tsv", "")).strip()
+    fold_matrix_path = str(artifacts.get("fold_matrix_tsv", "")).strip()
     go_path = str(artifacts.get("goelite_tsv", "")).strip()
     primary_h5ad_path = str(artifacts.get("differentials_only_h5ad", "")).strip()
     fallback_h5ad_path = str(meta.get("artifacts", {}).get("combined_h5ad", "")).strip()
@@ -1562,6 +1683,7 @@ def _get_differential_cache_entry(app: FastAPI, meta: Dict) -> Dict[str, Any]:
     current_signature = {
         "detail_path": detail_path,
         "heatmap_path": heatmap_path,
+        "fold_matrix_path": fold_matrix_path,
         "go_path": go_path,
         "primary_h5ad_path": primary_h5ad_path,
         "fallback_h5ad_path": fallback_h5ad_path,
@@ -1575,6 +1697,7 @@ def _get_differential_cache_entry(app: FastAPI, meta: Dict) -> Dict[str, Any]:
         "signature": current_signature,
         "detail_table": None,
         "heatmap_table": None,
+        "fold_matrix": None,
         "go_table": None,
         "network_tables": {},
         "primary_adata": None,
@@ -1584,6 +1707,77 @@ def _get_differential_cache_entry(app: FastAPI, meta: Dict) -> Dict[str, Any]:
     }
     cache[job_id] = entry
     return entry
+
+
+def _get_differential_fold_matrix(app: FastAPI, meta: Dict) -> pd.DataFrame:
+    """The complete gene x cell-state log2 fold matrix the differential produced.
+
+    Every pseudobulk contrast yields a fold in every cell state, significant or not.
+    `fold_matrix_tsv` holds that matrix; flask/pipeline.py writes it from
+    de_store['fold_matrix'] (cellHarmony_differential.py:1419). A run made before that
+    artifact existed has no such file, and the caller falls back to the heatmap TSV.
+    """
+    cache_entry = _get_differential_cache_entry(app, meta)
+    if isinstance(cache_entry.get("fold_matrix"), pd.DataFrame):
+        return cache_entry["fold_matrix"]
+    path = _get_differential_artifact(meta, "fold_matrix_tsv")
+    frame = pd.read_csv(path, sep="\t", index_col=0)
+    frame.index = frame.index.astype(str)
+    frame.columns = [str(label) for label in frame.columns]
+    cache_entry["fold_matrix"] = frame
+    return frame
+
+
+def _differential_fold_rows(app: FastAPI, meta: Dict) -> tuple[Dict[str, List[float]], List[str], str]:
+    """gene -> its log2 fold in every cell state, the column order, and the source file.
+
+    Keyed by gene, never by (population, gene). A heatmap TSV row label names the
+    BLOCK the differential placed a gene in - `coreg_global__up:CLUH`,
+    `AT1__down:SFTPC` - and each gene sits in one block only. Keying by that block
+    population missed every gene whose block was not the selected cell state, and the
+    caller then read 0.0 from the significant-only detail table for all 45 columns.
+    """
+    # Cached per contrast. Rebuilding this for every heatmap request made the
+    # cell-communication modality unusable: its fold matrix holds 126,726 interactions over
+    # 55 cell states, and the old row-at-a-time loop below built about 7 million Python
+    # floats each time, pinning one core at 99% and 3.1 GB for minutes.
+    cache_entry = _get_differential_cache_entry(app, meta)
+    cached = cache_entry.get("fold_rows")
+    if cached is not None:
+        return cached
+
+    result: tuple[Dict[str, List[float]], List[str], str] = ({}, [], "detail_table")
+    for source, loader in (
+        ("fold_matrix_tsv", _get_differential_fold_matrix),
+        ("heatmap_tsv", _get_differential_heatmap_table),
+    ):
+        try:
+            frame = loader(app, meta)
+        except Exception:
+            continue
+        if frame is None or frame.empty:
+            continue
+        labels = [str(label).split(":", 1)[0] for label in frame.columns]
+        if len(set(labels)) != len(frame.columns):
+            labels = [str(label) for label in frame.columns]
+        # Vectorised: coerce every column once, then read whole rows out of one array.
+        # Same values as the old loop, which turned a non-finite entry into 0.0.
+        numeric = frame.apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+        numeric = np.where(np.isfinite(numeric), numeric, 0.0)
+        if source == "fold_matrix_tsv":
+            keys = [str(label) for label in frame.index]
+        else:
+            keys = [_parse_heatmap_row_key(label)["gene"] for label in frame.index]
+        rows: Dict[str, List[float]] = {}
+        for position, gene in enumerate(keys):
+            if not gene or gene in rows:
+                continue
+            rows[gene] = numeric[position].tolist()
+        if rows:
+            result = (rows, labels, source)
+            break
+    cache_entry["fold_rows"] = result
+    return result
 
 
 def _build_differential_heatmap_payload(app: FastAPI, meta: Dict, population: str) -> Dict:
@@ -1612,39 +1806,28 @@ def _build_differential_heatmap_payload(app: FastAPI, meta: Dict, population: st
         .dropna(subset=["gene", "log2fc"])
         .pivot_table(index="gene", columns="population", values="log2fc", aggfunc="first")
     )
-    heatmap_exact_rows: Dict[tuple[str, str], List[Optional[float]]] = {}
-    use_heatmap_columns = False
+    fold_rows, column_labels, fold_source = _differential_fold_rows(app, meta)
 
-    try:
-        heatmap_frame = _get_differential_heatmap_table(app, meta)
-        heatmap_columns = [str(label).split(":", 1)[0] for label in heatmap_frame.columns]
-        column_labels = list(dict.fromkeys(heatmap_columns))
-        if len(column_labels) != len(heatmap_frame.columns):
-            column_labels = [str(label) for label in heatmap_frame.columns]
-        heatmap_frame = heatmap_frame.copy()
-        heatmap_frame.columns = column_labels
-        for raw_key, values in heatmap_frame.iterrows():
-            parsed = _parse_heatmap_row_key(raw_key)
-            gene = parsed["gene"]
-            row_values = [float(value) if _is_finite_number(value) else 0.0 for value in values.tolist()]
-            row_key = (parsed["population"], gene)
-            heatmap_exact_rows.setdefault(row_key, row_values)
-        use_heatmap_columns = any(parsed_population == population for parsed_population, _ in heatmap_exact_rows.keys())
-    except Exception:
-        use_heatmap_columns = False
-
-    if not use_heatmap_columns:
+    if not fold_rows:
         column_labels = list(dict.fromkeys(detailed["population"].astype(str).tolist()))
 
     detailed_matrix = detailed_matrix.reindex(columns=column_labels).fillna(0.0)
 
     rows = []
+    rows_from_fold = 0
+    rows_from_detail = 0
     for row in subset.itertuples():
         gene = str(row.gene)
-        values = (
-            heatmap_exact_rows.get((population, gene))
-            or (detailed_matrix.loc[gene].tolist() if gene in detailed_matrix.index else [0.0] * len(column_labels))
-        )
+        values = fold_rows.get(gene)
+        if values is None:
+            rows_from_detail += 1
+            values = (
+                detailed_matrix.loc[gene].tolist()
+                if gene in detailed_matrix.index
+                else [0.0] * len(column_labels)
+            )
+        else:
+            rows_from_fold += 1
         row_values = [float(value) if _is_finite_number(value) else 0.0 for value in values]
         rows.append(
             {
@@ -1660,6 +1843,77 @@ def _build_differential_heatmap_payload(app: FastAPI, meta: Dict, population: st
         "columns": column_labels,
         "rows": rows,
         "default_gene": rows[0]["gene"],
+        "fold_source": fold_source,
+        "rows_with_measured_folds": rows_from_fold,
+        "rows_without_measured_folds": rows_from_detail,
+    }
+
+
+def _build_differential_summary_payload(app: FastAPI, meta: Dict) -> Dict:
+    """How many features the differential called up and down in each cell state.
+
+    The detailed DEG table holds one row per feature that passed the run's own fold and
+    significance filters, so these counts are the run's own calls and nothing is
+    re-thresholded here: log2fc > 0 counts up, log2fc < 0 counts down.
+
+    Cell states follow the fold matrix's column order, which is the lineage order the
+    differential used. Every tested state is reported, including the states where the
+    run called nothing, so the chart never presents a subset as the whole. A state in
+    the detailed table but absent from the fold matrix is appended in the table's order.
+    """
+    detailed = _get_differential_detail_table(app, meta).copy()
+    detailed["population"] = detailed["population"].astype(str)
+    detailed["log2fc"] = pd.to_numeric(detailed.get("log2fc"), errors="coerce")
+    scored = detailed.dropna(subset=["log2fc"])
+
+    _, fold_columns, fold_source = _differential_fold_rows(app, meta)
+    ordered: List[str] = [str(label) for label in fold_columns if str(label)]
+    for value in scored["population"].tolist():
+        if value and value not in ordered:
+            ordered.append(value)
+
+    up_counts = scored.loc[scored["log2fc"] > 0, "population"].value_counts()
+    down_counts = scored.loc[scored["log2fc"] < 0, "population"].value_counts()
+    sizes = (
+        detailed.drop_duplicates(subset=["population"]).set_index("population")
+        if "population" in detailed.columns
+        else pd.DataFrame()
+    )
+
+    rows: List[Dict[str, object]] = []
+    for population in ordered:
+        up = int(up_counts.get(population, 0))
+        down = int(down_counts.get(population, 0))
+        entry: Dict[str, object] = {
+            "population": population,
+            "up": up,
+            "down": down,
+            "total": up + down,
+        }
+        if population in getattr(sizes, "index", []):
+            for key, column in (("n_case", "n_case"), ("n_control", "n_control")):
+                value = sizes.loc[population].get(column)
+                entry[key] = int(value) if _is_finite_number(value) else None
+        rows.append(entry)
+
+    case_label, control_label = _differential_group_labels(meta)
+    modality = _normalize_modality_id(
+        (meta.get("differential", {}).get("config", {}) or {}).get("modality"), default="rna"
+    )
+    feature_label = str(_modality_definition(meta, modality).get("feature_label") or "gene")
+    max_count = max([0] + [max(row["up"], row["down"]) for row in rows])
+    return {
+        "rows": rows,
+        "max_count": int(max_count),
+        "case_label": case_label,
+        "control_label": control_label,
+        "feature_label": feature_label,
+        "population_col": str((meta.get("differential", {}).get("config", {}) or {}).get("population_col") or ""),
+        "n_states_tested": len(rows),
+        "n_states_with_calls": int(sum(1 for row in rows if row["total"] > 0)),
+        "n_features_called": int(len(scored)),
+        "state_order_source": fold_source,
+        "default_gene": None,
     }
 
 
@@ -1696,15 +1950,33 @@ def _build_differential_volcano_payload(app: FastAPI, meta: Dict, population: st
 
 
 def _build_differential_go_payload(app: FastAPI, meta: Dict, population: str) -> Dict:
+    # GO terms describe GENES. An antibody panel, a lipid species and a regulon edge have
+    # no gene-set annotation, so only the RNA contrasts run with --goelite_species and
+    # only they carry a table. An empty panel with no explanation reads as a broken view,
+    # so say which modality is showing and why it has no terms.
+    modality = _normalize_modality_id(
+        ((meta.get("differential") or {}).get("config") or {}).get("modality"), default="rna")
+    empty_reason = None
+    if modality != "rna":
+        label = str(_modality_definition(meta, modality).get("label") or modality)
+        empty_reason = ("GO enrichment describes genes, so it is not computed for "
+                        "%s. Switch the modality to RNA to see enriched terms." % label)
+
+    def _empty():
+        payload = {"population": population, "terms": [], "default_gene": None}
+        if empty_reason:
+            payload["message"] = empty_reason
+        return payload
+
     try:
         frame = _get_differential_go_table(app, meta)
     except HTTPException:
-        return {"population": population, "terms": [], "default_gene": None}
+        return _empty()
     except FileNotFoundError:
-        return {"population": population, "terms": [], "default_gene": None}
+        return _empty()
 
     if frame.empty or "population" not in frame.columns:
-        return {"population": population, "terms": [], "default_gene": None}
+        return _empty()
 
     directions = frame["population"].map(_split_population_direction)
     frame = frame.assign(
@@ -2096,7 +2368,16 @@ _GRN_EDGE_CACHE: Dict[str, Any] = {}
 
 
 def _grn_edges_adata(meta: Dict) -> ad.AnnData:
-    edges_path = str(((meta.get("modality_artifacts") or {}).get("grn") or {}).get("differential_h5ad", "")).strip()
+    # `network_h5ad` is the GRN NETWORK's own key. It must not be `differential_h5ad`,
+    # because `_has_edge_level_h5ad` (app.py:1193) treats that key as "this run has a
+    # real edge-level h5ad" and routes the DETAIL VIOLIN to it. For a precomputed
+    # bundle that object is the donor-level pseudobulk, so the violin would draw one
+    # point per donor. The COPD atlas may not publish per-donor points, and the violin
+    # must stay on metacells. A cellHarmony job still sets differential_h5ad, so that
+    # remains the fallback.
+    grn_meta = (meta.get("modality_artifacts") or {}).get("grn") or {}
+    edges_path = str(grn_meta.get("network_h5ad")
+                     or grn_meta.get("differential_h5ad", "")).strip()
     if not edges_path or not Path(edges_path).exists():
         raise FileNotFoundError("GRN edge output is unavailable for this job.")
     mtime = Path(edges_path).stat().st_mtime
@@ -3058,7 +3339,16 @@ def _build_differential_gene_detail_payload(
     group2_samples = [str(value).strip() for value in config.get("group2_samples", []) if str(value).strip()]
     sample_field = str(config.get("sample_field", "")).strip()
     if not group1_samples or not group2_samples:
-        raise ValueError("Differential comparison groups are not configured.")
+        # Some contrasts cannot be grouped from metacell annotation at all: the six
+        # tertile contrasts (FEV1, FVC, FEV1/FVC, DLCO, pack-years, weight) split donors
+        # on a continuous covariate that obs does not carry, and current_vs_never needs a
+        # "current" smoking value no metacell holds. The statistics are still valid, so
+        # say that rather than answering HTTP 500.
+        raise HTTPException(
+            status_code=404,
+            detail=("This comparison groups samples on a covariate the released "
+                    "metacells do not carry, so the per-replicate distribution cannot "
+                    "be drawn. The differential statistics above are unaffected."))
     population_col = _differential_population_col(meta)
     case_label, control_label = _differential_group_labels(meta)
 
@@ -3162,7 +3452,7 @@ def _build_differential_gene_detail_payload(
             },
         }
 
-    if modality == "grn":
+    if modality == "grn" and _has_edge_level_h5ad(meta):
         # GRN detail is an edge ("TF|target") distribution — read the edge-level h5ad, not the
         # per-TF activity matrix served by the expression cache.
         adata, _grn_detail_path = _open_gene_detail_adata(app, meta, gene)
@@ -3198,10 +3488,31 @@ def _build_differential_gene_detail_payload(
     else:
         mask = (population_values == population) & sample_values.isin(resolved_group1 + resolved_group2)
     if int(np.asarray(mask).sum()) == 0:
-        raise HTTPException(status_code=404, detail=f"No cells were found for '{population}' in the selected comparison groups.")
+        # The volcano and the violin read DIFFERENT objects. The statistics come from
+        # the sample pseudobulks, which cover every cell state the alignment found.
+        # The violin draws the replicate unit this dataset releases, which may cover
+        # fewer states: the COPD atlas releases 50 metacell states of 81 tested. A
+        # state with results but no replicates is not a failure, so say which of the
+        # two is missing rather than reporting the panel broken.
+        present = sorted(set(population_values[sample_values.isin(
+            resolved_group1 + resolved_group2)].unique()))
+        raise HTTPException(
+            status_code=404,
+            detail=(f"'{population}' carries differential statistics but no replicate "
+                    f"profiles in this atlas, so the distribution cannot be drawn. "
+                    f"The comparison covers {len(present)} cell states with replicates."))
 
     subset = adata[mask.to_numpy(), resolved_gene]
     values = _flatten_expr(subset.X).astype(float)
+    if modality == "grn":
+        # Prefer the per-metacell ragged store when it covers this state and edge. The
+        # bundle sidecar holds one value per CELL STATE, which draws a flat line.
+        # BundleAnnData exposes obs but not obs_names, so the index is read directly.
+        ragged = _grn_ragged_values(meta, population, resolved_gene, adata.obs.index)
+        if ragged is not None:
+            picked = ragged[mask.to_numpy()]
+            if np.isfinite(picked).any():
+                values = np.where(np.isfinite(picked), picked, values)
     subset_samples = sample_values.loc[mask].astype(str)
     group_labels = np.where(subset_samples.isin(resolved_group1), case_label, control_label)
 
@@ -3350,6 +3661,15 @@ def _numeric_obs_columns(cache: Dict[str, Any]) -> List[Dict[str, Any]]:
         finite = np.isfinite(values)
         if not finite.any():
             continue
+        # Nathan's rule, 2026-09-01, in his words: "any numerical columns
+        # non-counts or non-scaled counts obs field that are 100% float values".
+        # A column whose every value is a whole number is a count or an index,
+        # not a measurement: n_cells, n_counts, metacell, and the per-covariate
+        # `<name>__n_obs` tallies. Plotting one against a measurement draws a
+        # meaningless panel, so it is not offered as an axis. The test is on the
+        # VALUES, so no field name is hardcoded and a new count is caught too.
+        if np.all(values[finite] == np.round(values[finite])):
+            continue
         out.append({
             "field": str(name),
             "n_finite": int(finite.sum()),
@@ -3361,11 +3681,20 @@ def _numeric_obs_columns(cache: Dict[str, Any]) -> List[Dict[str, Any]]:
     return out
 
 
+UMAP_AXIS_FIELDS = ("__umap_1", "__umap_2")
+
+
 def _axis_values(cache: Dict[str, Any], field: str) -> Optional[np.ndarray]:
     """One numeric obs column as floats, or None when it cannot serve as an axis."""
     column = str(field or "").strip()
     if not column:
         return None
+    # The cellHarmony embedding is not an obs column, but a reader picking X and Y
+    # must be able to choose it, otherwise the default pair cannot be the UMAP.
+    if column == UMAP_AXIS_FIELDS[0]:
+        return np.asarray(cache["umap_x"], dtype=float)
+    if column == UMAP_AXIS_FIELDS[1]:
+        return np.asarray(cache["umap_y"], dtype=float)
     adata = cache["adata"]
     if column not in adata.obs.columns:
         return None
@@ -3374,6 +3703,56 @@ def _axis_values(cache: Dict[str, Any], field: str) -> Optional[np.ndarray]:
         return None
     values = pd.to_numeric(series, errors="coerce").to_numpy(dtype=float)
     return values if np.isfinite(values).any() else None
+
+
+def _axis_field_options(cache: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Every field a coordinate axis may use, the cellHarmony UMAP pair first.
+
+    "Coordinates" is two dropdowns, not one. The first two entries are the two
+    axes of the embedding the panel has always drawn, so an untouched panel picks
+    them by position and draws the UMAP. Everything after is a float measurement.
+    """
+    x = np.asarray(cache["umap_x"], dtype=float)
+    y = np.asarray(cache["umap_y"], dtype=float)
+    out = []
+    for field, label, values in ((UMAP_AXIS_FIELDS[0], "cellHarmony UMAP 1", x),
+                                 (UMAP_AXIS_FIELDS[1], "cellHarmony UMAP 2", y)):
+        finite = np.isfinite(values)
+        out.append({"field": field, "label": label,
+                    "n_finite": int(finite.sum()),
+                    "n_missing": int(values.size - finite.sum()),
+                    "n_unique": int(np.unique(values[finite]).size) if finite.any() else 0,
+                    "min": float(values[finite].min()) if finite.any() else 0.0,
+                    "max": float(values[finite].max()) if finite.any() else 0.0})
+    # An obs column that simply repeats the embedding above is the SAME axis under
+    # another name. The approximate-projection UMAP is written into obs and is also
+    # what the panel draws by default, so it appeared twice. The test compares
+    # VALUES, not names, so any future duplicate is caught the same way.
+    for entry in _numeric_obs_columns(cache):
+        values = _axis_values(cache, entry["field"])
+        if values is not None and any(
+                values.shape == ref.shape
+                and np.allclose(values, ref, rtol=0, atol=1e-6, equal_nan=True)
+                for ref in (x, y)):
+            continue
+        entry.setdefault("label", _axis_label(entry["field"]))
+        out.append(entry)
+    return out
+
+
+# A stored coordinate column says what it is, not what it was called in a script.
+# `umap_averaged_x` told a reader nothing about which embedding it holds.
+# scanpy_x / scanpy_y keep the names Nathan chose, so they are not relabelled.
+# The umap_averaged_* entries are gone: those columns held a mean of the wrong
+# coordinate export and were deleted from the objects on 2026-09-01.
+_AXIS_LABELS = {
+    "umap_approx_x": "approximate-projection UMAP 1",
+    "umap_approx_y": "approximate-projection UMAP 2",
+}
+
+
+def _axis_label(field: str) -> str:
+    return _AXIS_LABELS.get(str(field), str(field))
 
 
 def _umap_coordinate_options(cache: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -3386,13 +3765,39 @@ def _umap_coordinate_options(cache: Dict[str, Any]) -> List[Dict[str, str]]:
     options = [{"key": "", "label": "cellHarmony UMAP"}]
     for key in cache.get("obsm_keys", []) or []:
         options.append({"key": str(key), "label": str(key)})
+    # A coordinate set is a PAIR, so a stored `<stem>_x` / `<stem>_y` pair is one
+    # choice, not two fields a reader has to assemble by hand. A precomputed
+    # bundle keeps its embeddings as obs columns rather than in obsm, so without
+    # this the alternative UMAPs were reachable only by picking both axes
+    # manually from a list of 30-odd covariates.
+    for stem in _obs_coordinate_pairs(cache):
+        options.append({"key": OBS_PAIR_PREFIX + stem,
+                        "label": stem.replace("_", " ")})
     return options
+
+
+OBS_PAIR_PREFIX = "obspair:"
+
+
+def _obs_coordinate_pairs(cache: Dict[str, Any]) -> List[str]:
+    """Stems of every `<stem>_x` / `<stem>_y` float obs pair, in a stable order."""
+    fields = {c["field"] for c in _numeric_obs_columns(cache)}
+    stems = sorted({f[:-2] for f in fields
+                    if f.endswith("_x") and (f[:-2] + "_y") in fields})
+    return stems
 
 
 def _coordinates_for_key(cache: Dict[str, Any], coords_key: str = "") -> tuple:
     """(x, y, resolved key). An unknown key falls back to the cellHarmony one."""
     key = str(coords_key or "").strip()
     if not key:
+        return cache["umap_x"], cache["umap_y"], ""
+    if key.startswith(OBS_PAIR_PREFIX):
+        stem = key[len(OBS_PAIR_PREFIX):]
+        x = _axis_values(cache, stem + "_x")
+        y = _axis_values(cache, stem + "_y")
+        if x is not None and y is not None:
+            return x, y, key
         return cache["umap_x"], cache["umap_y"], ""
     adata = cache["adata"]
     obsm = getattr(adata, "obsm", {}) or {}
@@ -3777,7 +4182,9 @@ def _build_umap_payload(
             "color_by": resolved_color_by,
             "color_label": resolved_color_by or str(cache_entry["cluster_key"]),
             "coords_key": resolved_coords,
-            "coords_label": resolved_coords or "cellHarmony UMAP",
+            "coords_label": (resolved_coords[len(OBS_PAIR_PREFIX):].replace("_", " ")
+                             if resolved_coords.startswith(OBS_PAIR_PREFIX)
+                             else (resolved_coords or "cellHarmony UMAP")),
             "axes_source": axes_source,
             "x_field": resolved_x,
             "y_field": resolved_y,
@@ -3888,7 +4295,7 @@ def _build_reference_expression_payload(app: FastAPI, meta: Dict, gene: str) -> 
     }
 
 
-def split_gene_list(text: str) -> List[str]:
+def split_gene_list(text: str, keep_pipe: bool = False) -> List[str]:
     """Gene symbols out of whatever a user pasted.
 
     A column copied out of Excel arrives newline separated, a row tab separated,
@@ -3896,8 +4303,13 @@ def split_gene_list(text: str) -> List[str]:
     turned "SFTPC AGER" into one symbol of that name and found nothing.
     Duplicates are dropped and order is kept, so a figure reads in the order the
     genes were listed.
+
+    `keep_pipe` stops the vertical bar being a separator. A GRN edge feature is named
+    `TF|target`, so splitting on the bar turned one edge name into two names the
+    modality does not hold.
     """
-    parts = re.split(r"[\s,;|]+", str(text or ""))
+    pattern = r"[\s,;]+" if keep_pipe else r"[\s,;|]+"
+    parts = re.split(pattern, str(text or ""))
     seen, out = set(), []
     for part in parts:
         gene = part.strip().strip('"').strip("'")
@@ -3905,6 +4317,16 @@ def split_gene_list(text: str) -> List[str]:
             seen.add(gene)
             out.append(gene)
     return out
+
+
+def _names_have_pipe(cache: Dict[str, Any]) -> bool:
+    """True when this modality's feature names carry `|`, as a GRN edge does."""
+    cached = cache.get("names_have_pipe")
+    if cached is None:
+        names = cache.get("var_names")
+        cached = bool(names is not None and any("|" in str(name) for name in names))
+        cache["names_have_pipe"] = cached
+    return bool(cached)
 
 
 def _gene_rows(cache: Dict[str, Any], wanted: List[str]) -> tuple:
@@ -4239,6 +4661,8 @@ def _build_expression_payload(
     modality: str = "rna",
     display_filters: Optional[List[tuple[str, List[str]]]] = None,
     violin_limit: int = 10,
+    x_field: str = "",
+    y_field: str = "",
 ) -> Dict:
     """`violin_limit` is how many cell states the violin plot draws.
 
@@ -4260,6 +4684,14 @@ def _build_expression_payload(
     obs_names = cache_entry["obs_names"]
     umap_x = cache_entry["umap_x"]
     umap_y = cache_entry["umap_y"]
+    # Every UMAP panel takes the same coordinate control, not only the cell-type
+    # one. Nathan, 2026-09-01: "all UMAP plots should have the option to change
+    # umap coordinates". Both axes must resolve, or the panel would mix a
+    # metadata value against a UMAP axis and read as a map that is not one.
+    _ax = _axis_values(cache_entry, x_field)
+    _ay = _axis_values(cache_entry, y_field)
+    if _ax is not None and _ay is not None:
+        umap_x, umap_y = _ax, _ay
     display_mask = _apply_display_filter_mask(cache_entry, display_filters)
     resolved_gene = _resolve_gene_name(cache_entry["var_names"], gene)
     if not resolved_gene:
@@ -4759,6 +5191,71 @@ def _render_differential_heatmap_pdf(payload: Dict) -> io.BytesIO:
     ax.set_yticklabels([y_labels[index] for index in tick_positions], fontsize=8)
     cbar = fig.colorbar(image, ax=ax, pad=0.02)
     cbar.set_label("log2FC")
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="pdf", bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+#: The two bar colours of the DEG-count chart, read from the reference figure.
+DEG_COUNT_UP_COLOR = "#C75252"
+DEG_COUNT_DOWN_COLOR = "#7CC7E9"
+
+
+def _symmetric_count_ticks(limit: int) -> List[float]:
+    """Ticks either side of zero for a count axis: about four per side, 1/2/5 x 10^k."""
+    target = max(1.0, float(limit) / 4.0)
+    exponent = math.floor(math.log10(target))
+    for multiple in (1.0, 2.0, 5.0, 10.0):
+        step = multiple * (10.0 ** exponent)
+        if step >= target:
+            break
+    count = int(math.ceil(limit / step))
+    return [index * step for index in range(-count, count + 1)]
+
+
+def _render_differential_summary_pdf(payload: Dict) -> io.BytesIO:
+    """The DEG-count chart as vector PDF: one row per cell state, down left, up right."""
+    _configure_matplotlib_pdf_style()
+    rows = payload.get("rows", []) or []
+    if not rows:
+        raise HTTPException(status_code=404, detail="No differential counts were found.")
+
+    labels = [str(row.get("population", "")) for row in rows]
+    up = [int(row.get("up", 0) or 0) for row in rows]
+    down = [int(row.get("down", 0) or 0) for row in rows]
+    # Top of the axis is the first cell state of the lineage order, as the chart reads.
+    positions = np.arange(len(rows), dtype=float)[::-1]
+
+    height = max(3.0, min(24.0, len(rows) * 0.30 + 1.6))
+    fig, ax = plt.subplots(figsize=(6.5, height))
+    ax.barh(positions, up, height=0.62, color=DEG_COUNT_UP_COLOR, label="Upregulated",
+            edgecolor="none")
+    ax.barh(positions, [-value for value in down], height=0.62, color=DEG_COUNT_DOWN_COLOR,
+            label="Downregulated", edgecolor="none")
+    ax.axvline(0.0, color="#000000", linewidth=0.8)
+    ax.set_yticks(positions)
+    ax.set_yticklabels(labels, fontsize=8)
+    ax.set_ylim(-0.8, len(rows) - 0.2)
+    limit = max(1, int(payload.get("max_count", 0) or 0))
+    # Ticks first, limits last: set_xticks widens the axis to hold every tick it is
+    # given, so setting the limit first and the ticks after left the axis at +/-800
+    # when the largest count was 557.
+    ticks = _symmetric_count_ticks(limit)
+    ax.set_xticks(ticks)
+    ax.set_xticklabels([str(int(abs(value))) for value in ticks])
+    ax.set_xlim(-limit * 1.08, limit * 1.08)
+    feature_label = str(payload.get("feature_label") or "gene")
+    ax.set_xlabel(f"Number of differential {feature_label}s")
+    case_label = str(payload.get("case_label") or "case")
+    control_label = str(payload.get("control_label") or "control")
+    ax.set_title(f"{case_label} versus {control_label}")
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    ax.legend(loc="upper right", frameon=False, fontsize=8)
     fig.tight_layout()
 
     buf = io.BytesIO()
@@ -5387,6 +5884,8 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         filter2_field: Optional[str] = Query(None),
         filter2_values: List[str] = Query([]),
         violin_limit: int = Query(10),
+        x_field: str = Query(""),
+        y_field: str = Query(""),
     ):
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
@@ -5396,6 +5895,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         try:
             return JSONResponse(_build_expression_payload(
                 app, meta, gene, modality=modality, display_filters=display_filters,
+                x_field=str(x_field or ""), y_field=str(y_field or ""),
                 # Coerced defensively: this route is also called directly by
                 # the scALABLE viewer's wrapper, where an unpassed argument
                 # arrives as a FastAPI Query object rather than an int.
@@ -5524,7 +6024,8 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         cache = _get_expression_cache(app, store.get_job(job_id), modality=modality)
-        wanted = split_gene_list(genes) or _default_marker_genes(cache, group_by)
+        wanted = (split_gene_list(genes, keep_pipe=_names_have_pipe(cache))
+                  or _default_marker_genes(cache, group_by))
         if not wanted:
             raise HTTPException(status_code=400, detail="Give at least one gene.")
         payload = _gene_state_stats(cache, wanted, group_by, list(groups),
@@ -5553,7 +6054,8 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         cache = _get_expression_cache(app, store.get_job(job_id), modality=modality)
         # Blank means the marker gene of every group, the same default the
         # DotPlot uses, so switching between the two keeps the same gene set.
-        wanted = split_gene_list(genes) or _default_marker_genes(cache, group_by)
+        wanted = (split_gene_list(genes, keep_pipe=_names_have_pipe(cache))
+                  or _default_marker_genes(cache, group_by))
         if not wanted:
             raise HTTPException(status_code=400, detail="Give at least one gene.")
         payload = _gene_donor_state_means(cache, wanted, max(1, int(min_cells)),
@@ -5574,7 +6076,15 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
-        cache = _get_expression_cache(app, store.get_job(job_id), modality=modality)
+        try:
+            cache = _get_expression_cache(app, store.get_job(job_id), modality=modality)
+        except FileNotFoundError:
+            # A DEG-only modality stores no feature matrix. Cell communication is one: it
+            # reaches a bundle through --deg-modality alone. The variables returned here
+            # are obs columns, which every modality shares, so read them from RNA instead
+            # of answering 500. Before this, plot-variables?modality=cell_communication
+            # raised FileNotFoundError and the server returned 500.
+            cache = _get_expression_cache(app, store.get_job(job_id), modality="rna")
         variables = _groupable_columns(cache)
         return JSONResponse({"cluster_key": str(cache["cluster_key"]),
                              "variables": variables,
@@ -5583,7 +6093,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
                              # takes any pair of numeric obs columns as axes.
                              "color_variables": variables,
                              "coords": _umap_coordinate_options(cache),
-                             "numeric_variables": _numeric_obs_columns(cache)})
+                             "numeric_variables": _axis_field_options(cache)})
 
     @app.get("/api/jobs/{job_id}/display-filters")
     def job_display_filters(job_id: str, modality: str = Query("rna")):
@@ -5888,6 +6398,9 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         job_id: str,
         request: Request,
         modality: str = Query("rna"),
+        # True keeps the 10-metacells-per-population run, which is the readable default.
+        # False serves the all-column run when the bundle ships one.
+        compact: bool = Query(True),
         filter1_field: Optional[str] = Query(None),
         filter1_values: List[str] = Query([]),
         filter2_field: Optional[str] = Query(None),
@@ -5899,7 +6412,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         meta = store.get_job(job_id)
         display_filters = _display_filter_specs(filter1_field, filter1_values, filter2_field, filter2_values)
         try:
-            matrix_entry = _get_marker_heatmap_cache_entry(app, meta, modality=modality)
+            matrix_entry = _get_marker_heatmap_cache_entry(app, meta, modality=modality, compact=compact)
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail="Marker heatmap matrix unavailable.")
         origin = str(request.headers.get("origin") or "").strip()
@@ -5971,8 +6484,10 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
         modality = _normalize_modality_id(request.query_params.get("modality"), default="rna")
+        compact = str(request.query_params.get("compact", "true")).strip().lower() \
+            not in {"0", "false", "no", "off"}
         try:
-            matrix_entry = _get_marker_heatmap_cache_entry(app, meta, modality=modality)
+            matrix_entry = _get_marker_heatmap_cache_entry(app, meta, modality=modality, compact=compact)
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail="Marker heatmap matrix unavailable.")
         source_path = matrix_entry.get("source_path")
@@ -5996,6 +6511,9 @@ def create_app(test_config: dict | None = None) -> FastAPI:
     def marker_heatmap_pdf(
         job_id: str,
         modality: str = Query("rna"),
+        # True keeps the 10-metacells-per-population run, which is the readable default.
+        # False serves the all-column run when the bundle ships one.
+        compact: bool = Query(True),
         filter1_field: Optional[str] = Query(None),
         filter1_values: List[str] = Query([]),
         filter2_field: Optional[str] = Query(None),
@@ -6007,7 +6525,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         meta = store.get_job(job_id)
         display_filters = _display_filter_specs(filter1_field, filter1_values, filter2_field, filter2_values)
         try:
-            matrix_entry = _get_marker_heatmap_cache_entry(app, meta, modality=modality)
+            matrix_entry = _get_marker_heatmap_cache_entry(app, meta, modality=modality, compact=compact)
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail="Marker heatmap matrix unavailable.")
         if display_filters:
@@ -6145,6 +6663,14 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         meta = store.get_job(job_id)
         return JSONResponse(_build_differential_heatmap_payload(app, meta, population))
 
+    @app.get("/api/jobs/{job_id}/differential/interactive/summary")
+    def differential_summary_data(job_id: str):
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        meta = store.get_job(job_id)
+        return JSONResponse(_build_differential_summary_payload(app, meta))
+
     @app.get("/api/jobs/{job_id}/differential/interactive/volcano")
     def differential_volcano_data(job_id: str, population: str = Query(...)):
         store, _ = _job_resources(app)
@@ -6216,13 +6742,16 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         )
 
     @app.get("/api/jobs/{job_id}/differential/interactive/pdf")
-    def differential_rendered_pdf(job_id: str, mode: str = Query(...), population: str = Query(...)):
+    def differential_rendered_pdf(job_id: str, mode: str = Query(...), population: str = Query("")):
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
         mode_key = str(mode or "").strip().lower()
-        if mode_key == "heatmap":
+        if mode_key == "summary":
+            payload = _build_differential_summary_payload(app, meta)
+            pdf = _render_differential_summary_pdf(payload)
+        elif mode_key == "heatmap":
             payload = _build_differential_heatmap_payload(app, meta, population)
             pdf = _render_differential_heatmap_pdf(payload)
         elif mode_key == "volcano":
@@ -6235,7 +6764,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             payload = _build_differential_network_payload(app, meta, population, root_path=app.state.root_path)
             pdf = _render_network_pdf(payload, f"{population} network")
         else:
-            raise HTTPException(status_code=400, detail="Differential mode must be heatmap, volcano, network, or go.")
+            raise HTTPException(status_code=400, detail="Differential mode must be summary, heatmap, volcano, network, or go.")
         safe_population = re.sub(r"[^A-Za-z0-9_.-]+", "_", population).strip("._") or "population"
         filename = f"differential_{mode_key}_{safe_population}.pdf"
         return StreamingResponse(

@@ -416,17 +416,8 @@ def count_introns(args):
         pool.map(partial(process_contig, args), jobs)
     collect_results(args, jobs)
 
-    #"""
-    import pathlib
-    # Ensure you are getting the .bed.gz file path (this is args.ref after indexing)
-    ref_gz = pathlib.Path(args.ref)
-    # Delete .bed.gz (if you want) and .bed.gz.tbi
-    files_to_delete = [ref_gz, ref_gz.with_name(ref_gz.name + ".tbi")]
-    for f in files_to_delete:
-        if f.exists():
-            logging.info(f"Removing temporary file: {f}")
-            f.unlink()
-    #"""
+    # The reference is a caller-owned input, often shared by parallel BAM jobs.
+    # Only per-sample temporary files may be removed here.
     logging.debug(f"Removing temporary directory and all contents for sample {args.bam.stem} at {sample_path}")
     shutil.rmtree(sample_path)
 

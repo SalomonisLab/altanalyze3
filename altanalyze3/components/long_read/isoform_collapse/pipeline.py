@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import collections
 import os
+
+from .. import io_utils as _io
 import resource
 import time
 
@@ -509,10 +511,17 @@ def stage_protein(gene_results, kept_struct2exemplar, sample_gff_paths, outdir,
                 SeqIO.write(transcripts, f, 'fasta')
             with open('orf_sequences.fasta', 'w') as f:
                 SeqIO.write(cds, f, 'fasta')
+            # BGZF, not plain gzip: isv_web/data_api.py seeks into these by offset to pull one
+            # record, and a plain gzip stream cannot be seeked. BGZF stays gzip-readable.
+            _io.compress_many(['protein_sequences.fasta', 'transcript_sequences.fasta',
+                               'orf_sequences.fasta'], log=log)
         except Exception as e:
             log(f"[protein] fasta export note: {type(e).__name__}: {e}")
     finally:
         os.chdir(cwd)
+    _io.compress_many([os.path.join(outdir, n) for n in
+                       ('protein_summary.txt', 'coding_regions.txt', 'transcript_associations.txt')],
+                      log=log)
     log(f"[protein] gff_translate done -> {os.path.join(outdir, 'protein_summary.txt')} "
         f"({len(proteins)} proteins)")
     return combined_gz, ta
@@ -568,7 +577,7 @@ def stage3_rekey_h5ad(sample, h5ad_path, ta_path, kept_struct2exemplar, outdir,
 
     # molecule var ('gene:mol') -> {final_id: weight}
     var2final = {}
-    with open(ta_path) as f:
+    with _io.smart_open(ta_path) as f:
         for line in f:
             p = line.rstrip("\n").split("\t")
             if len(p) < 5:
@@ -711,6 +720,8 @@ def run_pipeline(samples, outdir, nproc=8, min_total=3, ref=DEFAULT_REF, write_h
         for g, s2e in kept.items():
             for struct, ex in s2e.items():
                 o.write(f"{g}\t{struct}\t{ex}\n")
+    catpath = _io.compress(catpath, log=log)
+    mappath = _io.compress(mappath, log=log)
     log(f"[stage2] wrote {catpath} and {mappath}")
 
     # Persist the EM soft-weight map so a SEPARATE per-sample re-key job (4-phase cluster mode) can
@@ -728,6 +739,7 @@ def run_pipeline(samples, outdir, nproc=8, min_total=3, ref=DEFAULT_REF, write_h
                 for parent_struct, w in pw.items():
                     o.write(f"{g}\t{child_struct}\t{parent_struct}\t{w:.10g}\n")
     if kept_soft:
+        softpath = _io.compress(softpath, log=log)
         log(f"[stage2] wrote EM soft map {softpath} ({sum(len(v) for v in kept_soft.values()):,} child structures)")
 
     # PROTEIN PREDICTION: combined.gff for final isoforms -> existing gff_translate -> protein_summary.txt
@@ -811,10 +823,11 @@ def run_pipeline(samples, outdir, nproc=8, min_total=3, ref=DEFAULT_REF, write_h
 def load_struct2exemplar(outdir):
     """Load FINAL_structure_to_exemplar.tsv -> kept {gene: {structure: final_id}} (the WTA map)."""
     path = os.path.join(outdir, "FINAL_structure_to_exemplar.tsv")
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Collapse catalog map missing: {path}. Run the collapse (P3) first.")
+    if not _io.exists(path):
+        raise FileNotFoundError(f"Collapse catalog map missing: {path} (or {path}.gz). "
+                                f"Run the collapse (P3) first.")
     kept = {}
-    with open(path) as f:
+    with _io.smart_open(path) as f:
         next(f, None)  # header
         for line in f:
             p = line.rstrip("\n").split("\t")
@@ -829,10 +842,10 @@ def load_struct2exemplar_soft(outdir):
     {gene: {child_structure: {parent_structure: weight}}}. Returns None if the file is absent or has
     no rows (i.e. a WTA collapse), so callers fall back to the hard WTA map automatically."""
     path = os.path.join(outdir, "FINAL_structure_to_exemplar_soft.tsv")
-    if not os.path.exists(path):
+    if not _io.exists(path):
         return None
     kept_soft = {}
-    with open(path) as f:
+    with _io.smart_open(path) as f:
         next(f, None)  # header
         for line in f:
             p = line.rstrip("\n").split("\t")

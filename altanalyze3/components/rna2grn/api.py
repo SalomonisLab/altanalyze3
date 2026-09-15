@@ -37,7 +37,13 @@ BUNDLE_DIR = Path(__file__).parent
 #: stays the default so existing callers are unaffected.
 REFERENCE_BUNDLES: Dict[str, Path] = {
     "leukemia": BUNDLE_DIR / "rna2grn_bundle.pkl.gz",
+    # LEGACY lung reference: 57,307 edges selected by a single global threshold on
+    # the maximum TF->target activity across all 39 columns. Kept for reproducibility
+    # of every result produced before 2026-09-05. Not the deployed lung default.
     "lung": BUNDLE_DIR / "rna2grn_lung_bundle.pkl.gz",
+    # CURRENT lung reference: 63,647 edges selected per TF per cell-type/condition
+    # column (score >= max(0.33 * that TF's column maximum, 0.05), capped at 50).
+    "lung_hybrid": BUNDLE_DIR / "rna2grn_lung_hybrid_bundle.pkl.gz",
 }
 DEFAULT_REFERENCE = "leukemia"
 DEFAULT_BUNDLE_PATH = REFERENCE_BUNDLES[DEFAULT_REFERENCE]

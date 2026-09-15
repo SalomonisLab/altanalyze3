@@ -19,6 +19,8 @@ import glob
 import hashlib
 import io
 import os
+
+from ...long_read import io_utils as _io
 import sqlite3
 import threading
 
@@ -406,7 +408,9 @@ class RunContext:
         if not entry:
             return None
         path, start, length = entry
-        with self._fasta_lock, open(path, "rb") as fh:
+        # Must use the same opener the index was built with: a BGZF virtual offset is only
+        # meaningful to pysam.BGZFile.seek, and a plain byte offset only to a normal handle.
+        with self._fasta_lock, _io.open_seekable(path) as fh:
             fh.seek(start)
             return fh.read(length).decode("utf-8", "replace")
 
@@ -1286,24 +1290,39 @@ def _id_lookup_keys(isoform_id):
 
 
 def _build_fasta_offset_index(path):
-    """Byte-offset index {record_id: (path, start, length)} for a FASTA. Seek-read on demand; never
-    holds sequences in RAM. record_id = the token after '>' up to the first space."""
+    """Offset index {record_id: (path, start, length)} for a FASTA, plain or BGZF-compressed.
+
+    ``start`` is whatever ``tell()`` returns on the handle the index was built from, and the reader
+    seeks with the same class, so the value is a plain byte offset for an uncompressed file and a
+    BGZF virtual offset for a compressed one. ``length`` is always a DECOMPRESSED byte count, which
+    is what ``read(length)`` consumes in both cases.
+
+    Positions come from explicit ``readline()`` plus ``tell()`` rather than iterating the handle:
+    iteration buffers ahead, which makes ``tell()`` meaningless. Sequences are never held in RAM.
+    record_id = the token after '>' up to the first space.
+    """
     index = {}
-    if not path or not os.path.exists(path):
+    if not path or not _io.exists(path):
         return index
-    offset = 0
+    resolved = _io.resolve(path)
     cur_id = None
     cur_start = 0
-    with open(path, "rb") as fh:
-        for raw in fh:
+    cur_len = 0
+    with _io.open_seekable(path) as fh:
+        pos = fh.tell()
+        raw = fh.readline()
+        while raw:
             if raw.startswith(b">"):
                 if cur_id is not None:
-                    index[cur_id] = (path, cur_start, offset - cur_start)
+                    index[cur_id] = (resolved, cur_start, cur_len)
                 cur_id = raw[1:].split(b" ", 1)[0].decode("utf-8", "replace").strip()
-                cur_start = offset
-            offset += len(raw)
+                cur_start = pos
+                cur_len = 0
+            cur_len += len(raw)
+            pos = fh.tell()
+            raw = fh.readline()
         if cur_id is not None:
-            index[cur_id] = (path, cur_start, offset - cur_start)
+            index[cur_id] = (resolved, cur_start, cur_len)
     return index
 
 

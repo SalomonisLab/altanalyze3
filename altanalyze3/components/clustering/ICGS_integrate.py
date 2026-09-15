@@ -633,7 +633,7 @@ def integrate_hierarchically(runs: List[RunInputs], *, marker_top_n: int, outdir
         # CCL19 with them. Adding one candidate at a time isolates its actual effect.
         #
         # Reference cells are subsampled for this test because only marker structure matters.
-        from altanalyze3.components.udon.markerFinder import marker_finder_wrapper
+        from altanalyze3.components.clustering.ICGS import marker_finder_wrapper  # embedded; no UDON dependency
 
         rng = np.random.default_rng(0)
         ref_by_state: Dict[str, List[int]] = {}
@@ -1406,7 +1406,7 @@ def hopach_order_states(states: List["HState"], genes: pd.Index) -> Tuple[List[i
 def final_markerfinder(matrix: sp.csr_matrix, genes: pd.Index, barcodes: List[str],
                        labels: List[str], outdir: str, top_n: int = 60) -> pd.DataFrame:
     """Run MarkerFinder once on the pooled representative cells and the harmonized labels."""
-    from altanalyze3.components.udon.markerFinder import marker_finder_wrapper
+    from altanalyze3.components.clustering.ICGS import marker_finder_wrapper  # embedded; no UDON dependency
 
     # marker_finder expects observations as the index and features as the columns, so the
     # pooled matrix goes in as cells x genes, not genes x cells.
@@ -1445,7 +1445,7 @@ def markerfinder_survival(pool: sp.csr_matrix, genes: pd.Index, barcodes: List[s
     the state that took its markers. So it is MERGED into that state when the datasets allow,
     and only dropped when no legal partner exists. Cells are never discarded silently.
     """
-    from altanalyze3.components.udon.markerFinder import marker_finder_wrapper
+    from altanalyze3.components.clustering.ICGS import marker_finder_wrapper  # embedded; no UDON dependency
 
     labels = list(labels)
     merged_log, dropped_log = [], []

@@ -23,6 +23,12 @@ from altanalyze3.components.long_read.cli import (
     run_sclr_gene_aggregate,
     run_sclr_diff,
     run_sclr_iso2func_network,
+    run_blr,
+    run_blr_isoforms,
+    run_blr_quant,
+    run_blr_combine,
+    run_blr_compare,
+    run_blr_junction_compare,
 )
 from altanalyze3.components.bam.variant_impact import run_variant_impact
 # Optional subcommand handlers. iso2function and snaf may be absent from a given checkout; import
@@ -510,6 +516,108 @@ class ArgsParser():
         sclr_netviz_parser.add_argument("--top-tfs", default=10, type=int, help="Number of top rewiring TF isoforms to plot per group (default 10)")
         self.add_common_arguments(sclr_netviz_parser)
 
+        # ---------------------------------------------------------------------
+        # BULK long-read workflow (blr): the SAME collapse as sclr, applied to
+        # bulk long-read BAMs (PacBio CCS / ONT) that carry no cell barcode.
+        # See components/long_read/bulk_longread.py.
+        # ---------------------------------------------------------------------
+
+        blr_parser = subparsers.add_parser(
+            "blr",
+            parents=[parent_parser],
+            help="Bulk long-read phase 1 (per sample): BAM -> read GFF + molecule h5ad + exon structures"
+        )
+        blr_parser.set_defaults(func=run_blr)
+        blr_parser.add_argument("--metadata", required=True, type=str, help="Tab-delimited metadata file (uid, library, bam, reverse, groups). Several rows sharing a uid collapse into ONE sample.")
+        blr_parser.add_argument("--sample", default=None, type=str, help="Process ONE uid. Omit to loop over all uids.")
+        blr_parser.add_argument("--species", default="human", choices=["human", "mouse"], help="Selects the bundled annotation defaults. Default: human")
+        blr_parser.add_argument("--exon_annot", default=None, type=str, help="Ensembl exon annotation file. Default: bundled gzipped <species> Ensembl exon file")
+        blr_parser.add_argument("--force", action="store_true", help="Re-extract and re-annotate, overwriting existing per-library outputs")
+        blr_parser.add_argument("--skip-bam-extract", dest="skip_bam_extract", action="store_true", help="Reuse already-extracted <library>.gff.gz / <library>.h5ad instead of re-reading the BAMs")
+        self.add_common_arguments(blr_parser)
+
+        blr_iso_parser = subparsers.add_parser(
+            "blr-isoforms",
+            parents=[parent_parser],
+            help="Bulk long-read phase 2 (one job): scored collapse catalog + combined.gff.gz + translation"
+        )
+        blr_iso_parser.set_defaults(func=run_blr_isoforms)
+        blr_iso_parser.add_argument("--metadata", required=True, type=str, help="Metadata file (same one used for blr)")
+        blr_iso_parser.add_argument("--ref_gff", required=True, type=str, help="GENCODE/Ensembl reference GFF/GTF, used to inject reference (ENST) structures and for translation")
+        blr_iso_parser.add_argument("--genome_fasta", required=True, type=str, help="Genome FASTA. Required to emit gff-output/combined.gff.gz and the protein summary")
+        blr_iso_parser.add_argument("--collapse_method", default="wta", choices=["wta", "em"], help="Ambiguous-substring allocation: wta (winner-takes-all, default) or em (fractional)")
+        blr_iso_parser.add_argument("--min_total", default=3, type=int, help="Drop a final isoform below this many reads summed over all samples. Default 3 (the single-cell default). Lower it for a study with few samples.")
+        blr_iso_parser.add_argument("--species", default="human", choices=["human", "mouse"], help="Default: human")
+        blr_iso_parser.add_argument("--exon_annot", default=None, type=str, help="Ensembl exon annotation file. Default: bundled gzipped <species> Ensembl exon file")
+        self.add_common_arguments(blr_iso_parser)
+
+        blr_quant_parser = subparsers.add_parser(
+            "blr-quant",
+            parents=[parent_parser],
+            help="Bulk long-read phase 3 (per sample): re-key molecules onto the catalog -> sample-level counts/CPM/ratio"
+        )
+        blr_quant_parser.set_defaults(func=run_blr_quant)
+        blr_quant_parser.add_argument("--metadata", required=True, type=str, help="Metadata file (same one used for blr)")
+        blr_quant_parser.add_argument("--sample", default=None, type=str, help="Process ONE uid. Omit to loop over all uids.")
+        blr_quant_parser.add_argument("--collapse_method", default="wta", choices=["wta", "em"], help="Must match the method used for blr-isoforms. Default: wta")
+        blr_quant_parser.add_argument("--cell_annot", default=None, type=str, help="Explicit library->cluster file. Default: the bulk_barcode_clusters.txt written by blr")
+        blr_quant_parser.add_argument("--force", action="store_true", help="Overwrite existing per-sample isoform outputs")
+        self.add_common_arguments(blr_quant_parser)
+
+        blr_combine_parser = subparsers.add_parser(
+            "blr-combine",
+            parents=[parent_parser],
+            help="Bulk long-read: concatenate the per-sample isoform matrices into the study matrices"
+        )
+        blr_combine_parser.set_defaults(func=run_blr_combine)
+        blr_combine_parser.add_argument("--metadata", required=True, type=str, help="Metadata file (same one used for blr)")
+        blr_combine_parser.add_argument("--cell_annot", default=None, type=str, help="Explicit library->cluster file. Default: the bulk_barcode_clusters.txt written by blr")
+        self.add_common_arguments(blr_combine_parser)
+
+        blr_cmp_parser = subparsers.add_parser(
+            "blr-compare",
+            parents=[parent_parser],
+            help="Compare a reference transcriptome GTF/GFF against the BAM-derived collapsed isoform catalog, on exon-structure identity"
+        )
+        blr_cmp_parser.set_defaults(func=run_blr_compare)
+        blr_cmp_parser.add_argument("--query_gff", required=True, type=str, help="Reference annotation to test, e.g. an ENCODE TALON GTF")
+        blr_cmp_parser.add_argument("--sample_gff", required=True, nargs="+", help="The per-library READ GFF(s) written by blr, i.e. <library>.gff.gz. NOT combined.gff.gz: that file interleaves GTF-style novel records with GFF3-style reference records and cannot be re-parsed by gff_process.")
+        blr_cmp_parser.add_argument("--sample_ta", required=True, nargs="+", help="The per-library molecule tables, <library gff dir>/gff-output/transcript_associations.txt, in the same order as --sample_gff")
+        blr_cmp_parser.add_argument("--final_ta", required=True, type=str, help="gff-output/transcript_associations.txt written by the collapse: one row per FINAL isoform with its representative structure")
+        blr_cmp_parser.add_argument("--catalog", required=True, type=str, help="FINAL_isoform_catalog.tsv, the source of our per-isoform read totals")
+        blr_cmp_parser.add_argument("--ref_gff", default=None, type=str, help="The reference GFF the collapse injected (e.g. gencode.v45.annotation.gff3). Required when the catalog holds KNOWN (ENST) isoforms: a known isoform absorbs truncated reads, so no molecule carries its full-length structure and it can only be placed in the shared namespace through the reference.")
+        blr_cmp_parser.add_argument("--counts", default=None, type=str, help="Optional per-sample counts matrix for our isoforms")
+        blr_cmp_parser.add_argument("--reference_counts", default=None, type=str, help="Optional quantification TSV for --query_gff (e.g. an ENCODE TALON abundance file). Restricts the headline denominator to transcripts the reference itself reports as observed.")
+        blr_cmp_parser.add_argument("--output", required=True, type=str, help="Output directory for the concordance tables")
+        blr_cmp_parser.add_argument("--top_n", default=10, type=int, help="How many highest-expressed mismatches to detail per direction. Default 10")
+        blr_cmp_parser.add_argument("--metadata", default=None, type=str, help="Optional metadata file, used only to resolve annotation defaults")
+        blr_cmp_parser.add_argument("--species", default="human", choices=["human", "mouse"], help="Default: human")
+        blr_cmp_parser.add_argument("--exon_annot", default=None, type=str, help="Ensembl exon annotation file. Default: bundled gzipped <species> Ensembl exon file")
+        blr_cmp_parser.add_argument("--gene_symbol", default=None, type=str, help="Ensembl-id -> symbol table, used to name genes in the mismatch tables. Default: Hs_Ensembl-annotations.txt beside --exon_annot")
+        # --output is defined above with a comparison-specific meaning (a directory, no default),
+        # so exclude the generic common '--output' to avoid an argparse conflict.
+        self.add_common_arguments(blr_cmp_parser, exclude=["output"])
+
+        blr_jcmp_parser = subparsers.add_parser(
+            "blr-junction-compare",
+            parents=[parent_parser],
+            help="Compare a reference annotation against our final GFF on splice-junction composition alone (Ensembl-version and transcript-name independent)"
+        )
+        blr_jcmp_parser.set_defaults(func=run_blr_junction_compare)
+        blr_jcmp_parser.add_argument("--our_gff", required=True, type=str, help="Our final derived GFF, gff-output/combined.gff.gz")
+        blr_jcmp_parser.add_argument("--query_gff", required=True, type=str, help="Reference annotation to test, e.g. an ENCODE TALON GTF")
+        blr_jcmp_parser.add_argument("--catalog", default=None, type=str, help="FINAL_isoform_catalog.tsv, so our side can be weighted by read count too")
+        blr_jcmp_parser.add_argument("--reference_counts", default=None, type=str, help="Quantification TSV for --query_gff, used to weight by expression and to restrict to observed transcripts")
+        blr_jcmp_parser.add_argument("--allow-unknown-genes", dest="allow_unknown_genes", action="store_true", help="Keep reference transcripts on loci Ensembl does not annotate as a gene. Off by default: neither pipeline can be credited or blamed for a locus one of them does not call a gene.")
+        blr_jcmp_parser.add_argument("--no-require-known-splice", dest="no_require_known_splice", action="store_true", help="Do not require a reference transcript to carry at least one known Ensembl splice site. Off by default, which mirrors the BAM extractor's own gate.")
+        blr_jcmp_parser.add_argument("--include-unobserved", dest="include_unobserved", action="store_true", help="Keep reference transcripts with zero reads. Off by default when --reference_counts is given.")
+        blr_jcmp_parser.add_argument("--output", required=True, type=str, help="Output directory")
+        blr_jcmp_parser.add_argument("--top_n", default=10, type=int, help="How many highest-expressed unique chains to detail per direction. Default 10")
+        blr_jcmp_parser.add_argument("--species", default="human", choices=["human", "mouse"], help="Default: human")
+        blr_jcmp_parser.add_argument("--exon_annot", default=None, type=str, help="Ensembl exon annotation file. Default: bundled gzipped <species> Ensembl exon file")
+        blr_jcmp_parser.add_argument("--gene_symbol", default=None, type=str, help="Ensembl-id -> symbol table for the output tables")
+        self.add_common_arguments(blr_jcmp_parser, exclude=["output"])
+
         variant_impact_parser = subparsers.add_parser(
             "variant-impact",
             parents=[parent_parser],
@@ -611,6 +719,8 @@ class ArgsParser():
         snaf_parser.add_argument("--tumor_prevalance_cutoff", default=0.1, type=float, help="prevalance: min tumor fraction. Default: 0.1")
         snaf_parser.add_argument("--control_stats", default=None, type=str, help="Precomputed control-stats table from `snaf-precompute-control` (default: auto-detect <gtex_db>.snaf_stats.tsv.gz). When present, the full control matrix is NOT loaded and BayesTS is not re-run.")
         snaf_parser.add_argument("--max_bayests_percentile", default=0.9, type=float, help="Drop sifted neojunctions whose precomputed BayesTS percentile exceeds this (0-1; lower=more tumor-specific). DEFAULT 0.9 (BayesTS filtering ON); auto-skips when the control has no BayesTS. Pass 1.0 (or a value >=1) to disable.")
+        snaf_parser.add_argument("--export_proteomics", action="store_true", help="Export candidate FASTA/source manifest for optional external pyNeoQuant")
+        snaf_parser.add_argument("--canonical_fasta", default=None, help="Optional canonical protein FASTA included in the proteomics export")
         self.add_common_arguments(snaf_parser)
 
         # SNAF-B: surface / B-antigen pipeline (pure-python: tmhmm.py + Biopython; no REST)
@@ -625,7 +735,14 @@ class ArgsParser():
         snaf_b_parser.add_argument("--freq_path", default=None, type=str, help="T-antigen frequency table from a prior `snaf` run (frequency_stage0_verbosity1_uid_gene_symbol_coord_mean_mle.txt). OPTIONAL: omit it and SNAF-B derives the equivalent table over its membrane neojunctions, so no SNAF-T run and no HLA types are needed.")
         snaf_b_parser.add_argument("--surface_db", default=None, type=str, help="Custom cell-surface gene database REPLACING the built-in Alt91_db surfaceome: a directory from `snaf-build-surface-db`, or a bare gene table with an Ensembl-gene-ID column. Genes with no reference protein are excluded and counted.")
         snaf_b_parser.add_argument("--mode", default="short_read", choices=["short_read", "long_read", "find_full_length"], help="Surface prediction mode. Default: short_read")
-        snaf_b_parser.add_argument("--validation_gtf", default=None, type=str, help="Long-read/EST GTF or GFF, plain or gzipped (e.g. SQANTI, or a long-read combined.gff.gz) enabling stringency-4/5 support gates; omit for stringency-3-only (fully offline)")
+        snaf_b_parser.add_argument("--isoform_method", default="learned", choices=["learned", "evidence", "legacy"], help="short_read reconstruction: learned (default; best mean protein similarity), evidence (explicit two-edit rule; best exact-chain recovery), or legacy")
+        snaf_b_parser.add_argument("--isoform_ranker", default=None, help="Optional fitted JSON/pickle ranking bundle; learned defaults to the bundled model")
+        snaf_b_parser.add_argument("--first_exon_junctions", default=None, help="Text file of junction UIDs selected as first-exon junctions, one per line; unannotated 5-prime boundaries assume a 250-nt exon")
+        snaf_b_parser.add_argument("--isoform_sample", default=None, help="Restrict synthetic junction combinations to this sample column; default is cohort-wide")
+        snaf_b_parser.add_argument("--isoform_min_reads", type=float, default=3, help="Minimum count for joint junction detection (default: 3)")
+        snaf_b_parser.add_argument("--isoform_max_edits", type=int, default=None, help="Search depth (default: learned=4, evidence=2)")
+        snaf_b_parser.add_argument("--isoform_top_k", type=int, default=5, help="Ranked isoforms per event passed to surface checks (default: 5)")
+        snaf_b_parser.add_argument("--validation_gtf", default=None, type=str, nargs="+", help="Long-read/EST GTF or GFF, plain or gzipped (e.g. SQANTI, or a long-read combined.gff.gz) enabling stringency-4/5 support gates; omit for stringency-3-only (fully offline). Repeatable: pass several catalogs (space- or comma-separated) and they are merged into one query structure, each keeping its own cached index")
         snaf_b_parser.add_argument("--allow_trans_splicing", action="store_true", help="Also keep trans-spliced junctions whose PARTNER gene is the surface gene, but ONLY when --validation_gtf contains a full-length isoform joining exactly those two sites. Off by default. Cross-chromosome partners cannot be supported by the GTF index and are never admitted.")
         snaf_b_parser.add_argument("--no_tmhmm", action="store_true", help="Disable the transmembrane-topology gate (otherwise pure-python tmhmm.py is used)")
         snaf_b_parser.add_argument("--tmhmm_path", default=None, type=str, help="Path to a legacy TMHMM 2.0c binary (Linux); if unset, the pure-python tmhmm.py is used")

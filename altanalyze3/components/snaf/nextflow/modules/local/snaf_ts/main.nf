@@ -1,12 +1,8 @@
+def sq(x) { "\'" + x.toString().replace("\'", "\'\\\'\'") + "\'" }
 // nf-core-style DSL2 module: SNAF tumor-specificity scoring (DB-free, offline)
 process SNAF_TS {
     tag "$meta.id"
     label 'process_medium'
-
-    conda "${moduleDir}/environment.yml"
-    container "${ workflow.containerEngine == 'singularity' && !task.ext.singularity_pull_docker_container ?
-        'oras://community.wave.seqera.io/library/altanalyze3:latest' :
-        'community.wave.seqera.io/library/altanalyze3:latest' }"
 
     input:
     tuple val(meta), path(juncounts)
@@ -25,8 +21,8 @@ process SNAF_TS {
     prefix   = task.ext.prefix ?: "${meta.id}"
     """
     altanalyze3 snaf-ts \\
-        --juncounts ${juncounts} \\
-        --control_h5ad ${control_h5ad} \\
+        --juncounts ${sq(juncounts)} \\
+        --control_h5ad ${sq(control_h5ad)} \\
         --output ${prefix} \\
         --cpus ${task.cpus} \\
         ${args}

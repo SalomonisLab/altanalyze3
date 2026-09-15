@@ -1,0 +1,39 @@
+delivered_constrained: train 22 profiles / 10 donors, holdout 28 profiles / 10 donors, donors in both = 10
+addition_donor_disjoint: train 35 profiles / 7 donors, holdout 15 profiles / 3 donors, donors in both = 0
+{
+  "Model": "SparseLipidwiseElasticNetCV",
+  "N_samples": 28,
+  "N_lipids": 202,
+  "N_values": 5656,
+  "N_values_dropped_non_finite": 0,
+  "RMSE": 1.1783306321719005,
+  "MAE": 0.7661145168453364,
+  "True_SD": 1.2911354528543364,
+  "Predicted_SD": 0.9596606837876857,
+  "SD_Ratio": 0.7432687884653361,
+  "Pearson_r": 0.48408669132128757,
+  "Spearman_r": 0.5157041444547227,
+  "R2": 0.16710410268667664
+}
+{
+  "Model": "SparseLipidwiseElasticNetCV",
+  "N_samples": 15,
+  "N_lipids": 202,
+  "N_values": 3030,
+  "N_values_dropped_non_finite": 0,
+  "RMSE": 1.13526042386476,
+  "MAE": 0.7573170427893948,
+  "True_SD": 1.1123445059434254,
+  "Predicted_SD": 0.9810398687830397,
+  "SD_Ratio": 0.8819568609735517,
+  "Pearson_r": 0.4228992989947106,
+  "Spearman_r": 0.4644983197692961,
+  "R2": -0.04162733478831382
+}
+{
+  "Pearson_r_constrained_minus_donor_disjoint": 0.06118739232657694,
+  "R2_constrained_minus_donor_disjoint": 0.20873143747499046,
+  "note": "Both runs share the trainer, the matrices and the hyperparameter grid. The holdout profile counts differ, so the gap mixes donor leakage with training-set size. Direction, not exact magnitude, is the claim."
+}
+
+Wrote /Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/rna2lipid/validation/holdout_leakage_comparison.json

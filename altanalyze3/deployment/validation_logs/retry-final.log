@@ -1,0 +1,35 @@
+Nextflow 26.04.6 is available - Please consider updating your version to it
+N E X T F L O W  ~  version 25.04.8
+Launching `/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/snaf/nextflow/tests/../main.nf` [mighty_euler] DSL2 - revision: c1ccf71b63
+WARN: Task runtime metrics are not reported when using macOS without a container engine
+[2b/1ce2d0] Submitted process > INDEX_REFERENCE
+[b8/d4b415] Submitted process > COUNT_JUNCTIONS (S1)
+[c4/c1d501] Submitted process > COUNT_JUNCTIONS (S2)
+[b8/d4b415] NOTE: Process `COUNT_JUNCTIONS (S1)` terminated with an error exit status (137) -- Execution is retried (1)
+[c4/c1d501] NOTE: Process `COUNT_JUNCTIONS (S2)` terminated with an error exit status (137) -- Execution is retried (1)
+[78/fc032e] Re-submitted process > COUNT_JUNCTIONS (S1)
+[3c/6a1fa2] Re-submitted process > COUNT_JUNCTIONS (S2)
+[78/69d401] Submitted process > COUNT_INTRONS (S2)
+[5a/cd1853] Submitted process > COUNT_INTRONS (S1)
+[ad/9d6ab2] Submitted process > AGGREGATE_COUNTS
+[f2/7e55b7] Submitted process > FILTER_COUNTS
+Nextflow 26.04.6 is available - Please consider updating your version to it
+N E X T F L O W  ~  version 25.04.8
+Launching `/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/snaf/nextflow/tests/../main.nf` [trusting_agnesi] DSL2 - revision: c1ccf71b63
+WARN: Task runtime metrics are not reported when using macOS without a container engine
+[42/4772ac] Submitted process > INDEX_REFERENCE
+[d2/39db90] Submitted process > COUNT_JUNCTIONS (S2)
+[8b/751071] Submitted process > COUNT_JUNCTIONS (S1)
+[10/8278b6] Submitted process > PREPARE_HLA (S1)
+[4f/4b53ee] Submitted process > PREPARE_HLA (S2)
+[d2/39db90] NOTE: Process `COUNT_JUNCTIONS (S2)` terminated with an error exit status (137) -- Execution is retried (1)
+[8b/751071] NOTE: Process `COUNT_JUNCTIONS (S1)` terminated with an error exit status (137) -- Execution is retried (1)
+[e1/4b2c44] Re-submitted process > COUNT_JUNCTIONS (S2)
+[b7/61403c] Re-submitted process > COUNT_JUNCTIONS (S1)
+[eb/8bdfd6] Submitted process > COUNT_INTRONS (S1)
+[40/3e50f5] Submitted process > COUNT_INTRONS (S2)
+[f3/ab9ae9] Submitted process > COMBINE_HLA
+[3b/c13969] Submitted process > AGGREGATE_COUNTS
+[9a/8483c2] Submitted process > FILTER_COUNTS
+[da/f765e1] Submitted process > SNAF (cohort)
+Validation artifacts: /tmp/snaf-retry-final

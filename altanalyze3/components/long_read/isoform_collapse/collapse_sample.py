@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import collections
 import os
+
+from .. import io_utils as _io
 import time
 
 
@@ -39,7 +41,7 @@ def collapse_sample(sample_name, ta_path, out_dir, log=print):
     gene_struct_mol = collections.defaultdict(dict)
     gene_strand = {}
     n_reads = 0
-    with open(ta_path) as f, open(mol2_path, 'w') as mol_out:
+    with _io.smart_open(ta_path) as f, open(mol2_path, 'w') as mol_out:
         mol_out.write("molecule_id\tgene\tstructure\n")
         for line in f:
             p = line.rstrip("\n").split("\t")

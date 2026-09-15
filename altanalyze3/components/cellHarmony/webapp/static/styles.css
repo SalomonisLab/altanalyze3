@@ -1258,3 +1258,13 @@ select:disabled {
 #chat-table table { width: 100%; border-collapse: collapse; font-size: 12px; }
 #chat-table th, #chat-table td { text-align: left; padding: 3px 8px; border-bottom: 1px solid #e6e6e6; white-space: nowrap; }
 #chat-table thead th { position: sticky; top: 0; background: #fff; }
+
+
+/* One control per row, full width. The Differential panel puts Cell state and Modality
+   on separate rows so neither select clips its option text. */
+.one-col {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+  margin-bottom: 12px;
+}

@@ -24,6 +24,201 @@ import numpy as np
 from . import bundle as B
 
 
+class ModalityStore:
+    """One modality's feature matrix inside a bundle, read from memory-mapped sidecars.
+
+    Two kinds, both exact.
+
+    `per_cell` carries the whole feature-major store, the layout the RNA store uses, so
+    one feature is one contiguous slice.
+
+    `per_state` carries only the feature x cell-state matrix. Its per-cell value is the
+    value of the cell's own cell state, because the modality was predicted at cell-state
+    granularity and broadcast to the cells of that state. Nothing is interpolated: every
+    cell of a state carries that state's number by construction.
+    """
+
+    def __init__(self, ds: "Dataset", modality_id: str, info: Dict):
+        self.ds = ds
+        self.id = str(modality_id)
+        self.info = dict(info or {})
+        self.kind = str(self.info.get("kind") or "per_cell")
+        self.label = str(self.info.get("label") or self.id.upper())
+        self.feature_label = str(self.info.get("feature_label") or "feature")
+        self.paths = ds.paths.modality(self.id)
+        missing = self.paths.missing(self.kind)
+        if missing:
+            raise FileNotFoundError(
+                f"modality '{self.id}' of bundle {ds.paths.bundle_dir} is incomplete: {missing}")
+        self._lock = threading.Lock()
+        self._features: Optional[List[str]] = None
+        self._display: Optional[List[str]] = None
+        self._index: Optional[Dict[str, int]] = None
+        self._mean = None
+        self._frac = None
+        self._indptr = None
+        self._indices = None
+        self._data = None
+        self._has_pipe: Optional[bool] = None
+
+    # ------------------------------------------------------------ lazy loaders
+
+    def _load_features(self) -> None:
+        if self._features is not None:
+            return
+        with self._lock:
+            if self._features is not None:
+                return
+            names: List[str] = []
+            shown: List[str] = []
+            with open(self.paths.genes, "r") as fh:
+                fh.readline()
+                for line in fh:
+                    parts = line.rstrip("\n").split("\t")
+                    key = parts[2] if len(parts) > 2 else parts[1]
+                    names.append(key)
+                    # A FOURTH COLUMN IS THE NAME A READER SEES; THE KEY NEVER MOVES.
+                    #
+                    # Nathan, 2026-09-08: show "CE(18:2)" as "18:2 Cholesterol ester" and
+                    # keep the abbreviation searchable. precompute writes the column only
+                    # when it was given a mapping, so a bundle without one behaves exactly
+                    # as before and `display` falls back to the key.
+                    shown.append(parts[3] if len(parts) > 3 and parts[3] else key)
+            index: Dict[str, int] = {}
+            for i, name in enumerate(names):
+                index.setdefault(name.upper(), i)
+            # BOTH NAMES RESOLVE, AND THE KEY WINS A COLLISION. `setdefault` above already
+            # claimed every key, so a display name that happens to equal another feature's
+            # key cannot steal it. That is why the keys are indexed first.
+            for i, name in enumerate(shown):
+                index.setdefault(name.upper(), i)
+            self._features, self._index = names, index
+            self._display = shown
+
+    @property
+    def features(self) -> List[str]:
+        self._load_features()
+        return self._features                                   # type: ignore[return-value]
+
+    @property
+    def stats_mean(self) -> np.ndarray:
+        if self._mean is None:
+            with self._lock:
+                if self._mean is None:
+                    self._mean = np.load(self.paths.stats_mean, mmap_mode="r")
+        return self._mean
+
+    @property
+    def stats_frac(self) -> np.ndarray:
+        if self._frac is None:
+            with self._lock:
+                if self._frac is None:
+                    self._frac = np.load(self.paths.stats_frac, mmap_mode="r")
+        return self._frac
+
+    @property
+    def indptr(self) -> np.ndarray:
+        if self._indptr is None:
+            with self._lock:
+                if self._indptr is None:
+                    self._indptr = np.load(self.paths.expr_indptr, mmap_mode="r")
+        return self._indptr
+
+    @property
+    def indices(self) -> np.ndarray:
+        if self._indices is None:
+            with self._lock:
+                if self._indices is None:
+                    self._indices = np.load(self.paths.expr_indices, mmap_mode="r")
+        return self._indices
+
+    @property
+    def data(self) -> np.ndarray:
+        if self._data is None:
+            with self._lock:
+                if self._data is None:
+                    self._data = np.load(self.paths.expr_data, mmap_mode="r")
+        return self._data
+
+    # ------------------------------------------------------------------ lookup
+
+    def resolve(self, name: str) -> Optional[int]:
+        self._load_features()
+        return self._index.get((name or "").strip().upper())     # type: ignore[union-attr]
+
+    @property
+    def display(self) -> List[str]:
+        """What a reader sees, one per feature, in feature order.
+
+        Equal to `features` unless the bundle carries a display column.
+        """
+        self._load_features()
+        return self._display                                    # type: ignore[return-value]
+
+    def display_of(self, row: int) -> str:
+        self._load_features()
+        d = self._display or []
+        return d[row] if 0 <= row < len(d) else ""
+
+    def search(self, q: str, limit: int = 25) -> List[str]:
+        """Features matching `q`, returned as the names a reader sees.
+
+        BOTH NAMES MATCH AND THE READER'S NAME COMES BACK. Nathan asked for the common
+        lipid name on screen with the abbreviation still searchable, so typing `CE(18:2)`
+        or `Cholesterol` both find the feature and the picker shows
+        `18:2 Cholesterol ester`. Returning the display name is safe because `resolve`
+        indexes it, so whatever this returns is a key the caller can send straight back.
+        """
+        self._load_features()
+        keys = self.features
+        shown = self._display or keys
+        query = (q or "").strip().upper()
+        if not query:
+            return shown[:limit]
+        pre, sub = [], []
+        for i, key in enumerate(keys):
+            label = shown[i]
+            if key.upper().startswith(query) or label.upper().startswith(query):
+                pre.append(label)
+            elif query in key.upper() or query in label.upper():
+                sub.append(label)
+        if len(pre) >= limit:
+            return pre[:limit]
+        return pre + sub[: max(0, limit - len(pre))]
+
+    # Aliases so a ModalityStore is a drop-in wherever a Dataset's feature calls are
+    # used: `resolve_gene`, `gene_column` and `symbols` name the same three things.
+    def resolve_gene(self, name: str) -> Optional[int]:
+        return self.resolve(name)
+
+    @property
+    def symbols(self) -> List[str]:
+        return self.features
+
+    def gene_column(self, row: int) -> Tuple[np.ndarray, np.ndarray]:
+        return self.feature_column(row)
+
+    @property
+    def names_have_pipe(self) -> bool:
+        """True when a feature name carries `|`, as a GRN edge `TF|target` does."""
+        if self._has_pipe is None:
+            self._has_pipe = any("|" in name for name in self.features)
+        return bool(self._has_pipe)
+
+    def feature_column(self, row: int) -> Tuple[np.ndarray, np.ndarray]:
+        """(cell indices, values) for one feature. Zero-valued cells are omitted."""
+        if self.kind == "per_state":
+            per_state = np.asarray(self.stats_mean[row], dtype=np.float32)
+            values = per_state[np.asarray(self.ds.state_code, dtype=np.int64)]
+            keep = np.nonzero(values)[0]
+            return keep.astype(np.uint32), values[keep]
+        start, end = int(self.indptr[row]), int(self.indptr[row + 1])
+        if end <= start:
+            return np.empty(0, dtype=np.uint32), np.empty(0, dtype=np.float32)
+        return (np.asarray(self.indices[start:end], dtype=np.uint32),
+                np.asarray(self.data[start:end], dtype=np.float32))
+
+
 class Dataset:
     """One precomputed bundle."""
 
@@ -56,6 +251,8 @@ class Dataset:
         self._gene_ids: Optional[List[str]] = None
         self._sym_index: Optional[Dict[str, int]] = None
         self._markers: Optional[List[Dict]] = None
+        self._modality_stores: Dict[str, "ModalityStore"] = {}
+        self._has_pipe: Optional[bool] = None
 
     # ------------------------------------------------------------ lazy loaders
 
@@ -166,6 +363,31 @@ class Dataset:
             return np.empty(0, dtype=np.uint32), np.empty(0, dtype=np.float32)
         return (np.asarray(self.indices[s:e], dtype=np.uint32),
                 np.asarray(self.data[s:e], dtype=np.float32))
+
+    @property
+    def names_have_pipe(self) -> bool:
+        """True when a gene symbol carries `|`. False for every RNA bundle."""
+        if self._has_pipe is None:
+            self._has_pipe = any("|" in name for name in self.symbols)
+        return bool(self._has_pipe)
+
+    # -------------------------------------------------------------- modalities
+
+    def modality_manifest(self) -> Dict[str, Dict]:
+        """Every modality store this bundle carries, keyed by modality id."""
+        entries = self.sv.get("modalities", {})
+        return entries if isinstance(entries, dict) else {}
+
+    def modality(self, modality_id: str) -> "ModalityStore":
+        key = str(modality_id)
+        store = self._modality_stores.get(key)
+        if store is None:
+            info = self.modality_manifest().get(key)
+            if info is None:
+                raise KeyError(f"bundle {self.id} carries no modality '{key}'")
+            store = ModalityStore(self, key, info)
+            self._modality_stores[key] = store
+        return store
 
     # ------------------------------------------------------------- covariates
 
@@ -294,6 +516,31 @@ class Dataset:
         c = entries.get(comp_id)
         if c is None:
             raise KeyError(comp_id)
+
+        # A DIFFERENTIAL NAMES ITS FEATURES THE WAY THE REST OF THE VIEWER DOES.
+        #
+        # Nathan, 2026-09-08, on the Differential Explorer: "still doesn't show the label
+        # name". The DEG tables on disk hold the KEY, `PE(16:0/22:4)`, because that is what
+        # cellHarmony was given, so the volcano hover, the feature filter and the detail
+        # panel all read the abbreviation while Explore reads the common name.
+        #
+        # The comparison record names its own modality, so the display column of THAT
+        # modality does the renaming. `feature_key` keeps the key on every row, and a
+        # modality with no display column renames nothing, which is every other one.
+        rename = lambda name: name                                        # noqa: E731
+        modality_id = str(c.get("modality") or "rna")
+        if modality_id != "rna":
+            try:
+                store = self.modality(modality_id)
+                shown = store.display
+                keys = store.symbols
+                if shown is not keys and len(shown) == len(keys):
+                    lookup = {k: s for k, s in zip(keys, shown) if s and s != k}
+                    if lookup:
+                        rename = lambda name: lookup.get(name, name)      # noqa: E731
+            except (KeyError, FileNotFoundError, OSError):
+                pass                      # a differential outlives its modality store
+
         path = os.path.join(self.paths.deg_dir, c["file"])
         with open(path, "r") as fh:
             header = fh.readline().rstrip("\n").split("\t")
@@ -323,7 +570,8 @@ class Dataset:
             pop = r[i_pop] if (i_pop is not None and i_pop < len(r)) else None
             if fdr is None:
                 n_no_fdr += 1
-            recs.append({"gene": g, "log2fc": fc, "fdr": fdr, "pval": pv, "population": pop})
+            recs.append({"gene": rename(g), "log2fc": fc, "fdr": fdr, "pval": pv,
+                         "population": pop, "feature_key": g})
 
         n_after_state = len(recs)
         if state and i_pop is not None:
@@ -339,7 +587,10 @@ class Dataset:
         shown = recs[:max_rows]
         volcano = [{"gene": r["gene"], "x": r["log2fc"],
                     "y": (-math.log10(r["fdr"]) if (r["fdr"] and r["fdr"] > 0) else None),
-                    "population": r["population"]}
+                    "population": r["population"],
+                    # The key rides along so a click-through never has to reverse the
+                    # display name, though the expression route resolves either.
+                    "feature_key": r.get("feature_key") or r["gene"]}
                    for r in recs if r["log2fc"] is not None]
         return {"id": comp_id, "comparison": c["comparison"], "kind": c["kind"],
                 "source": c.get("source"), "path": path, "columns": header,
@@ -373,6 +624,7 @@ class Dataset:
                 "has_markers": bool(self.sv.get("markers", {}).get("available")),
                 "n_deg_tables": len(self.deg_manifest().get("comparisons", [])),
                 "has_ccc": bool(self.sv.get("ccc", {}).get("available")),
+                "modalities": sorted(self.modality_manifest().keys()),
                 "n_warnings": len(self.sv.get("warnings", []))}
 
 

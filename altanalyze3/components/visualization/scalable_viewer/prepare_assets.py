@@ -397,6 +397,8 @@ def build_goelite(deg_tsv: str, background_genes_tsv: str, out_dir: str, *,
 #: Subdirectory names the cellHarmony differential writes under each contrast directory.
 PIPELINE_GOELITE_SUBDIR = "GeneSetEnrichment"
 PIPELINE_NETWORK_SUBDIR = "interaction-plots"
+PIPELINE_DEG_SUBDIR = "DEGs"
+PIPELINE_HEATMAP_SUBDIR = "heatmaps"
 
 
 def _count_data_rows(path: str) -> int:
@@ -471,6 +473,58 @@ def ingest_goelite(contrast_dir: str, out_dir: str, *, comparison_tag: str) -> D
     return {"path": str(target), "source": str(source), "n_terms": source_rows,
             "n_selected": n_selected, "n_populations": len(populations),
             "populations": populations}
+
+
+def ingest_fold_matrix(contrast_dir: str, out_dir: str, *, comparison_tag: str) -> Dict[str, object]:
+    """Copy the contrast's complete feature x cell-state log2 fold matrix.
+
+    Two files carry those folds and the viewer prefers the first.
+
+    `DEGs/DEG_fold_matrix_<tag>.tsv` is the whole matrix: every tested feature in every
+    cell state, written from de_store['fold_matrix'] (cellHarmony_differential.py:1419).
+
+    `heatmaps/heatmap_<tag>_by_<column>.tsv` is the same matrix restricted to the genes
+    the heatmap plots, with the block label prefixed to each row name
+    (`coreg_global__up:CLUH`). Every run made before 2026-08-31 wrote only this one.
+
+    Without either file the viewer heatmap can only read the significant-only detailed
+    table, which has no value at all for a gene in a cell state where it was not called,
+    and every such cell is drawn as 0.
+    """
+    import shutil
+
+    deg_source = Path(contrast_dir) / PIPELINE_DEG_SUBDIR / f"DEG_fold_matrix_{comparison_tag}.tsv"
+    heatmap_dir = Path(contrast_dir) / PIPELINE_HEATMAP_SUBDIR
+    heatmap_candidates = sorted(heatmap_dir.glob(f"heatmap_{comparison_tag}_by_*.tsv")) \
+        if heatmap_dir.is_dir() else []
+
+    if deg_source.is_file():
+        source, kind = deg_source, "fold_matrix_tsv"
+    elif len(heatmap_candidates) > 1:
+        raise ValueError(
+            f"{heatmap_dir} holds {len(heatmap_candidates)} heatmap tables for {comparison_tag!r}: "
+            f"{[p.name for p in heatmap_candidates]}; remove the stale one")
+    elif heatmap_candidates:
+        source, kind = heatmap_candidates[0], "heatmap_tsv"
+    else:
+        raise FileNotFoundError(
+            f"the differential run under {contrast_dir} has neither "
+            f"{PIPELINE_DEG_SUBDIR}/DEG_fold_matrix_{comparison_tag}.tsv nor "
+            f"{PIPELINE_HEATMAP_SUBDIR}/heatmap_{comparison_tag}_by_*.tsv; "
+            f"re-run the cellHarmony differential, or drop --folds-from")
+
+    os.makedirs(out_dir, exist_ok=True)
+    target = Path(out_dir) / source.name
+    shutil.copy2(source, target)
+
+    source_rows = _count_data_rows(str(source))
+    target_rows = _count_data_rows(str(target))
+    if source_rows != target_rows:
+        raise AssertionError(
+            f"fold matrix copy lost rows: {source} has {source_rows}, {target} has {target_rows}")
+    frame = pd.read_csv(target, sep="\t", index_col=0, nrows=1)
+    return {"path": str(target), "source": str(source), "kind": kind,
+            "n_features": source_rows, "n_cell_states": int(frame.shape[1])}
 
 
 def ingest_differential_networks(contrast_dir: str, deg_tsv: str, out_dir: str) -> List[Dict[str, str]]:
@@ -657,6 +711,10 @@ def check_completeness(assets: Dict[str, object], *, waived: Dict[str, str]) -> 
     n_contrasts = len(differential)
     n_diff_nets = sum(len(entry.get("networks") or []) for entry in differential.values())
     n_goelite = sum(1 for entry in differential.values() if entry.get("goelite_tsv"))
+    n_folds = sum(1 for entry in differential.values()
+                  if entry.get("fold_matrix_tsv") or entry.get("heatmap_tsv"))
+    fold_kinds = sorted({str((entry.get("fold_matrix_info") or {}).get("kind") or "")
+                         for entry in differential.values()} - {""})
     fastcomm = assets.get("fastcomm_analysis") or {}
     heatmap_info = assets.get("heatmap_cache_info") or {}
 
@@ -672,6 +730,8 @@ def check_completeness(assets: Dict[str, object], *, waived: Dict[str, str]) -> 
          f"{n_diff_nets} networks over {n_contrasts} contrasts"),
         ("goelite", "Differential / GO Terms", n_goelite > 0,
          f"{n_goelite} of {n_contrasts} contrasts"),
+        ("folds", "Differential / Heatmap folds", n_folds > 0 and n_folds == n_contrasts,
+         f"{n_folds} of {n_contrasts} contrasts as {', '.join(fold_kinds) or 'none'}"),
     ]
     failures: List[str] = []
     print("[assets] ---- completeness ----", flush=True)
@@ -731,6 +791,12 @@ def main(argv=None) -> int:
     ap.add_argument("--bundle-dir", required=True)
     ap.add_argument("--prefix", required=True)
     ap.add_argument("--out", required=True, help="asset directory (never the bundle directory)")
+    ap.add_argument("--marker-heatmap-npz-full", default=None, metavar="NPZ",
+                    help="a SECOND MarkerFinder heatmap npz holding every column, served "
+                         "beside the default one so the browser can offer both densities. "
+                         "The compact run (marker_heatmap_h5ad --cells-per-cluster 10) stays "
+                         "the default view. The two runs are separate MarkerFinder runs, so "
+                         "their marker rows differ; the browser labels which is shown.")
     ap.add_argument("--marker-heatmap-npz", default=None,
                     help="MarkerFinder heatmap cache (*_fold_matrix.npz). Defaults to the one "
                          "beside --markers-tsv, which generate_marker_heatmap_from_adata wrote")
@@ -776,9 +842,31 @@ def main(argv=None) -> int:
     ap.add_argument("--diff-networks-from", default=None,
                     help="ingest the cellHarmony differential's OWN interaction-plots/ networks "
                          "instead of recomputing them; same root layout as --goelite-from")
+    ap.add_argument("--folds-from", default=None,
+                    help="ingest each contrast's complete feature x cell-state fold matrix "
+                         "(DEGs/DEG_fold_matrix_<tag>.tsv, or heatmaps/heatmap_<tag>_by_*.tsv "
+                         "for a run made before that file existed). Same root layout as "
+                         "--goelite-from. Defaults to --diff-networks-from, then --goelite-from.")
+    ap.add_argument("--differential-from-modality", action="append", default=None,
+                    metavar="ID=DIR",
+                    help="the differential root of ONE modality's own contrasts, for example "
+                         "`--differential-from-modality adt=/path/to/adt_differential`. A "
+                         "modality contrast is never read from the RNA root: the two runs "
+                         "share a comparison tag, and the RNA GO terms would be served under "
+                         "the modality's name. Repeatable.")
+    ap.add_argument("--no-folds", action="store_true",
+                    help="ship the differential heatmap without measured folds: every cell "
+                         "state where a feature was not called is drawn as 0")
     ap.add_argument("--no-goelite", action="store_true",
                     help="build without the Differential GO Terms view, on purpose")
     a = ap.parse_args(argv)
+
+    modality_differential_roots: Dict[str, str] = {}
+    for raw in a.differential_from_modality or []:
+        if "=" not in raw:
+            ap.error(f"--differential-from-modality expects id=dir, got {raw!r}")
+        key, _, value = raw.partition("=")
+        modality_differential_roots[key.strip()] = value.strip()
 
     if a.goelite and a.goelite_from:
         ap.error("--goelite recomputes enrichment and --goelite-from ingests the pipeline's own; "
@@ -840,6 +928,22 @@ def main(argv=None) -> int:
         print(f"[assets] marker heatmap npz {npz}: {info['n_rows']} genes x {info['n_cols']} cells, "
               f"reshaped from the GCT {a.marker_gct}", flush=True)
 
+    # The second density. MarkerFinder picks its markers from the cells it is given, so a
+    # 10-column-per-population run and an all-column run do NOT share their marker rows:
+    # measured 760 of 1,248 shared, 60.9%, on the COPD v7 build. Both are therefore stored
+    # whole, and neither is derived from the other by subsampling.
+    if a.marker_heatmap_npz_full:
+        npz_full = str(out / f"{a.prefix}_marker_heatmap_cache_full.npz")
+        info_full = ingest_marker_heatmap_cache(
+            a.marker_heatmap_npz_full, npz_full, markers_tsv=markers_tsv,
+            clusters_tsv=paths.clusters)
+        assets["heatmap_cache_full"] = npz_full
+        assets["heatmap_cache_full_info"] = info_full
+        print(f"[assets] marker heatmap npz (all columns) {npz_full}: {info_full['n_rows']} rows "
+              f"x {info_full['n_cols']} columns, {info_full['n_genes']} genes over "
+              f"{info_full['n_states']} cell states, ingested from {info_full['source']}",
+              flush=True)
+
     if markers_tsv and os.path.isfile(markers_tsv):
         assets["markers_tsv"] = markers_tsv
         assets["dotplot_default"] = top_marker_per_state(markers_tsv, a.order_tsv)
@@ -880,12 +984,57 @@ def main(argv=None) -> int:
     for comparison in per_state:
         entry: Dict[str, object] = {}
         tag = comparison["comparison"]
+        contrast_modality = str(comparison.get("modality") or "rna")
+
+        if contrast_modality != "rna":
+            # A modality contrast reads ONLY from its own root. It shares the comparison
+            # tag with the RNA run, so reading the RNA root here would serve the RNA GO
+            # terms and the RNA networks under the modality's name. GO terms and
+            # interaction networks are off for an imputed modality
+            # (bundle_meta._modalities_block), so only the folds are ingested.
+            root = modality_differential_roots.get(contrast_modality)
+            if not root:
+                print(f"[assets] differential {contrast_modality}/{tag}: no "
+                      f"--differential-from-modality {contrast_modality}=<dir>; the heatmap "
+                      f"will read the significant-only table", flush=True)
+                continue
+            contrast_dir = find_pipeline_contrast_dir(root, tag)
+            if not contrast_dir:
+                raise FileNotFoundError(
+                    f"--differential-from-modality {contrast_modality}={root} holds no "
+                    f"contrast directory named {tag!r}")
+            fold_dir = str(out / f"{a.prefix}_diff_folds" / contrast_modality / tag)
+            fold_info = ingest_fold_matrix(contrast_dir, fold_dir, comparison_tag=tag)
+            entry[fold_info["kind"]] = fold_info["path"]
+            entry["fold_matrix_info"] = fold_info
+            entry["modality"] = contrast_modality
+            print(f"[assets] differential folds {contrast_modality}/{tag}: "
+                  f"{fold_info['n_features']} features x {fold_info['n_cell_states']} cell "
+                  f"states as {fold_info['kind']}, ingested from {fold_info['source']}",
+                  flush=True)
+            differential[comparison["id"]] = entry
+            continue
 
         # Where the cellHarmony differential put this contrast's own artifacts.
         goelite_contrast_dir = (find_pipeline_contrast_dir(a.goelite_from, tag)
                                 if a.goelite_from else None)
         network_contrast_dir = (find_pipeline_contrast_dir(a.diff_networks_from, tag)
                                 if a.diff_networks_from else None)
+        folds_root = a.folds_from or a.diff_networks_from or a.goelite_from
+        folds_contrast_dir = (find_pipeline_contrast_dir(folds_root, tag)
+                              if (folds_root and not a.no_folds) else None)
+
+        if folds_root and not a.no_folds:
+            if not folds_contrast_dir:
+                raise FileNotFoundError(
+                    f"--folds-from {folds_root} holds no contrast directory named {tag!r}")
+            fold_dir = str(out / f"{a.prefix}_diff_folds" / tag)
+            fold_info = ingest_fold_matrix(folds_contrast_dir, fold_dir, comparison_tag=tag)
+            entry[fold_info["kind"]] = fold_info["path"]
+            entry["fold_matrix_info"] = fold_info
+            print(f"[assets] differential folds {tag}: {fold_info['n_features']} features x "
+                  f"{fold_info['n_cell_states']} cell states as {fold_info['kind']}, "
+                  f"ingested from {fold_info['source']}", flush=True)
 
         if not a.skip_networks:
             net_dir = str(out / f"{a.prefix}_diff_networks" / tag)
@@ -979,6 +1128,10 @@ def main(argv=None) -> int:
         waived["marker_heatmap"] = "--no-marker-heatmap"
     if a.no_fastcomm:
         waived["fastcomm"] = "--no-fastcomm"
+    if a.no_folds:
+        waived["folds"] = "--no-folds"
+    if not (a.folds_from or a.diff_networks_from or a.goelite_from):
+        waived["folds"] = "no --folds-from, --diff-networks-from or --goelite-from"
     if a.no_goelite:
         waived["goelite"] = "--no-goelite"
     if a.skip_networks:

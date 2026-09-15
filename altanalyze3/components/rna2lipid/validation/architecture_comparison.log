@@ -1,0 +1,94 @@
+X [68, 1303]  Y [68, 202]
+train 38 / holdout 30 / donors in both 0
+Fitting sparse_lipidwise ...
+Fitting multitask ...
+{
+  "generated_at": "2026-08-30T19:14:32+00:00",
+  "design": {
+    "matrices": {
+      "X": [
+        68,
+        1303
+      ],
+      "Y": [
+        68,
+        202
+      ]
+    },
+    "train_profiles": 38,
+    "holdout_profiles": 30,
+    "train_donors": 17,
+    "holdout_donors": 8,
+    "donors_in_both_sets": [],
+    "donor_disjoint": true,
+    "holdout_group_counts": {
+      "UNKNOWN": 5,
+      "MIC": 5,
+      "MES": 5,
+      "EPI": 5,
+      "PMX": 5,
+      "END": 5
+    },
+    "note": "Both architectures share the split, the matrices and the samples."
+  },
+  "holdout_metrics": {
+    "sparse_lipidwise_NEW": {
+      "Model": "SparseLipidwiseElasticNetCV",
+      "N_samples": 30,
+      "N_lipids": 202,
+      "N_values": 6060,
+      "N_values_dropped_non_finite": 0,
+      "RMSE": 0.9482388224318979,
+      "MAE": 0.7069526164443357,
+      "True_SD": 1.0310818571203064,
+      "Predicted_SD": 0.7375496066695101,
+      "SD_Ratio": 0.7153162492155586,
+      "Pearson_r": 0.4979575425432702,
+      "Spearman_r": 0.4552947929087968,
+      "R2": 0.15423604184533468,
+      "fit_seconds": 78.973221167
+    },
+    "multitask_PRIOR": {
+      "Model": "MultiTaskElasticNetCV",
+      "N_samples": 30,
+      "N_lipids": 202,
+      "N_values": 6060,
+      "N_values_dropped_non_finite": 0,
+      "RMSE": 0.9315146580142362,
+      "MAE": 0.6727104088144531,
+      "True_SD": 1.0310818571203064,
+      "Predicted_SD": 0.8773926680359171,
+      "SD_Ratio": 0.8509437558007027,
+      "Pearson_r": 0.5556956773760773,
+      "Spearman_r": 0.5515635012343538,
+      "R2": 0.18380656690021602,
+      "fit_seconds": 206.794671666
+    },
+    "mean_lipid_baseline": {
+      "Model": "MeanLipidBaseline",
+      "N_samples": 30,
+      "N_lipids": 202,
+      "N_values": 6060,
+      "N_values_dropped_non_finite": 0,
+      "RMSE": 1.0035953403826452,
+      "MAE": 0.7535999376868853,
+      "True_SD": 1.0310818571203064,
+      "Predicted_SD": 0.2947284769366623,
+      "SD_Ratio": 0.2858439171452451,
+      "Pearson_r": 0.23650812338880403,
+      "Spearman_r": 0.11528936162226307,
+      "R2": 0.05260523131886152
+    }
+  },
+  "per_lipid": {
+    "lipids_scored": 202,
+    "new_beats_old": 65,
+    "old_beats_new": 137,
+    "new_median_r2": 0.04404479505783898,
+    "old_median_r2": 0.14204239900093024,
+    "new_lipids_with_positive_r2": 109,
+    "old_lipids_with_positive_r2": 121
+  }
+}
+
+Wrote /Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/rna2lipid/validation/architecture_comparison.json

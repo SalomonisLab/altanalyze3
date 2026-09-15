@@ -1,0 +1,27 @@
+<tool id="altanalyze3_snaf_hla" name="SNAF HLA input" version="0.1.3" profile="24.0">
+    <description>prepare supplied or BAM-derived class-I HLA alleles</description>
+    <requirements><container type="docker">altanalyze3-snaf:0.1.3</container></requirements>
+    <command detect_errors="exit_code"><![CDATA[
+python3 -m altanalyze3.components.neoantigen hla --sample '$sample' --output hla.tsv --qc hla_qc.tsv \
+#if $supplied
+ --supplied '$supplied' \
+#end if
+#if $bam
+ --bam '$bam' \
+#end if
+ --build '$build' --min-depth $min_depth
+    ]]></command>
+    <inputs>
+        <param name="sample" type="text" value="S1" label="Sample identifier"/>
+        <param name="supplied" type="data" format="tabular" optional="true" label="Supplied HLA table (takes precedence)"/>
+        <param name="bam" type="data" format="bam" optional="true" label="BAM for inferred calls"/>
+        <param name="build" type="select" label="Genome build"><option value="auto">Detect</option><option value="hg38">hg38</option><option value="hg19">hg19</option></param>
+        <param name="min_depth" type="integer" min="1" value="8" label="Minimum depth"/>
+    </inputs>
+    <outputs><data name="hla" label="HLA calls" format="tabular" from_work_dir="hla.tsv"/><data name="qc" label="HLA quality" format="tabular" from_work_dir="hla_qc.tsv"/></outputs>
+    <tests><test><param name="sample" value="S1"/><param name="supplied" value="hla.tsv"/>
+        <output name="hla"><assert_contents><has_text text="HLA-A*02:01"/></assert_contents></output>
+    </test></tests>
+    <help>Supplied class-I alleles override inference. Missing loci remain explicit no-calls in the QC table. Inference requires a coordinate-sorted indexed genome BAM and the bundled bam2hla signatures.</help>
+    <citations><citation type="doi">10.1126/scitranslmed.ade2886</citation></citations>
+</tool>

@@ -25,6 +25,8 @@ import gzip
 import json
 import shutil
 import logging
+
+from . import io_utils as _io
 from pathlib import Path
 
 # Bundled, gzipped default annotation files (packaged in the repo). Resolved per --species.
@@ -318,7 +320,7 @@ def run_sclr_isoquant(args):
     work_dir = _cellharmony_outdir(args.metadata)
     gff_output_dir = os.path.join(os.path.dirname(os.path.abspath(str(args.metadata))) or os.getcwd(),
                                   "gff-output")
-    if not os.path.exists(os.path.join(gff_output_dir, "FINAL_structure_to_exemplar.tsv")):
+    if not _io.exists(os.path.join(gff_output_dir, "FINAL_structure_to_exemplar.tsv")):
         raise FileNotFoundError(
             f"Collapse catalog not found in {gff_output_dir}. Run `altanalyze3 sclr-isoforms` (P3) first."
         )
@@ -415,7 +417,7 @@ def run_sclr_diff(args):
     # the cryptic FileNotFoundError on 'gff-output/protein_summary.txt' deep in annotate().
     if wants_annotated:
         protein_summary = os.path.join('gff-output', 'protein_summary.txt')
-        if not os.path.exists(protein_summary):
+        if not _io.exists(protein_summary):
             raise FileNotFoundError(
                 f"{protein_summary} not found -- run `altanalyze3 sclr-isoforms` (P3, translation) before "
                 f"sclr-diff. Differential annotation depends on the P3 protein summary."
@@ -511,3 +513,167 @@ def run_sclr_iso2func_network(args):
                                       metadata=str(args.metadata), reference_group=args.reference_group,
                                       comparisons=comps, edge_types=ets, top_tfs=int(getattr(args, "top_tfs", 10)))
     logging.info("sclr-iso2func-network: complete -> %s", dataset)
+
+
+# --------------------------------------------------------------- BULK long read (blr)
+# Bulk long-read BAMs run the SAME collapse as the single-cell path. See
+# components/long_read/bulk_longread.py for what differs (one pseudo-cell per BAM) and what does
+# not (everything else).
+
+
+def run_blr(args):
+    """Bulk phase 1 (per sample): BAM -> read GFF + molecule h5ad -> exon-structure table.
+
+    Bulk BAMs have no cell barcode, so extraction assigns one pseudo-barcode per library and writes a
+    one-row-per-library cluster annotation beside the metadata. Junctions and PSI are NOT built here;
+    bulk quantification is isoform-level.
+    """
+    import altanalyze3.components.long_read.isoform_automate as isoa
+    import altanalyze3.components.long_read.bulk_longread as blk
+    if getattr(args, "force", False):
+        os.environ["ALTANALYZE3_FORCE_OVERWRITE"] = "1"
+
+    species = args.species
+    meta_dir = os.path.dirname(os.path.abspath(str(args.metadata))) or os.getcwd()
+    exon_annot = _resolve_default(getattr(args, "exon_annot", None), species, "exon_annot", meta_dir)
+
+    metadata_for_extract = str(args.metadata)
+    if getattr(args, "sample", None):
+        metadata_for_extract = _write_single_sample_metadata(args.metadata, args.sample, meta_dir)
+    extract_from_bams = not getattr(args, "skip_bam_extract", False)
+    if not extract_from_bams:
+        logging.info("blr: --skip-bam-extract set; reusing existing per-library gff/h5ad.")
+
+    # Guard BEFORE extraction: a colliding layout would silently destroy the structure table hours
+    # later, during the collapse. Metadata parsing alone (no extraction) is enough to check it.
+    blk.assert_no_gff_output_collision(
+        isoa.import_metadata(str(args.metadata), include_hashed_samples=True))
+
+    sample_dict = isoa.import_metadata(
+        metadata_for_extract, include_hashed_samples=True,
+        extract_from_bams=extract_from_bams, reference_model=exon_annot, bulk=True,
+    )
+
+    # Exon structures per library (the table the collapse reads). Single-cell gets this as a side
+    # effect of the junction step; bulk calls the same gff_process entry point directly.
+    blk.annotate_sample_structures(sample_dict, exon_annot, force=getattr(args, "force", False))
+
+    # One cluster label per library, so every cluster-aware downstream step runs unmodified.
+    full_dict = isoa.import_metadata(str(args.metadata), include_hashed_samples=True)
+    blk.write_bulk_cell_annotation(full_dict, meta_dir)
+    logging.info("blr: phase-1 complete for %s",
+                 args.sample if getattr(args, "sample", None) else "all samples")
+
+
+def run_blr_isoforms(args):
+    """Bulk phase 2 (one job, cross-sample): the scored collapse catalog + combined.gff.gz +
+    translation. Identical to `sclr-isoforms`; only --min_total is exposed, because a bulk study may
+    have far fewer samples than a single-cell one over which to accumulate a read floor."""
+    import altanalyze3.components.long_read.isoform_automate as isoa
+    import altanalyze3.components.long_read.bulk_longread as blk
+
+    species = args.species
+    meta_dir = os.path.dirname(os.path.abspath(str(args.metadata))) or os.getcwd()
+    exon_annot = _resolve_default(getattr(args, "exon_annot", None), species, "exon_annot", meta_dir)
+
+    sample_dict = isoa.import_metadata(str(args.metadata), include_hashed_samples=True)
+    blk.assert_no_gff_output_collision(sample_dict)
+    blk.assert_extract_complete(sample_dict)
+
+    isoa.build_isoform_catalog(
+        str(args.metadata), exon_annot, str(args.ref_gff), str(args.genome_fasta),
+        collapse_method=getattr(args, "collapse_method", "wta"), force_recollapse=True,
+        min_total=int(getattr(args, "min_total", 3)),
+    )
+    logging.info("blr-isoforms: collapse catalog + combined.gff.gz + translation complete.")
+
+
+def run_blr_quant(args):
+    """Bulk phase 3 (per sample): re-key molecules onto the catalog and write the sample-level
+    counts / CPM / ratio matrices. A uid with several BAM rows concatenates to one h5ad and sums to
+    ONE column, which is how several BAMs collapse into one sample."""
+    import altanalyze3.components.long_read.isoform_automate as isoa
+    import altanalyze3.components.long_read.isoform_matrix as iso
+    import altanalyze3.components.long_read.bulk_longread as blk
+    if getattr(args, "force", False):
+        os.environ["ALTANALYZE3_FORCE_OVERWRITE"] = "1"
+
+    gff_output_dir = os.path.join(os.path.dirname(os.path.abspath(str(args.metadata))) or os.getcwd(),
+                                  "gff-output")
+    if not _io.exists(os.path.join(gff_output_dir, "FINAL_structure_to_exemplar.tsv")):
+        raise FileNotFoundError(
+            f"Collapse catalog not found in {gff_output_dir}. Run `altanalyze3 blr-isoforms` first.")
+
+    sample_dict = isoa.import_metadata(str(args.metadata), include_hashed_samples=True)
+    if getattr(args, "sample", None):
+        sample_dict = _subset_metadata_to_sample(sample_dict, args.sample)
+
+    annot = blk.bulk_annotation_path(args.metadata, getattr(args, "cell_annot", None))
+    barcode_sample_dict = iso.import_barcode_clusters([annot])
+    for uid, libs in sample_dict.items():
+        isoa.export_sample_isoform(libs, gff_output_dir, barcode_sample_dict, uid=uid,
+                                   collapse_method=getattr(args, "collapse_method", "wta"),
+                                   compute_cpm=True)
+    logging.info("blr-quant: per-sample isoform re-key + sample-level counts complete for %s.",
+                 args.sample if getattr(args, "sample", None) else "all samples")
+
+
+def run_blr_combine(args):
+    """Bulk combine: concatenate the per-sample isoform matrices into the study matrices
+    (isoform_combined_pseudo_cluster_{counts,cpm,ratio}*.h5ad)."""
+    import altanalyze3.components.long_read.isoform_automate as isoa
+    import altanalyze3.components.long_read.bulk_longread as blk
+    annot = blk.bulk_annotation_path(args.metadata, getattr(args, "cell_annot", None))
+    isoa.combine_isoforms(str(args.metadata), [annot])
+    logging.info("blr-combine: combined bulk isoform matrices written.")
+
+
+def run_blr_compare(args):
+    """Compare a reference transcriptome GTF/GFF (e.g. an ENCODE TALON annotation) against the
+    BAM-derived collapsed isoform catalog, on exon-structure identity."""
+    from altanalyze3.components.long_read import gff_compare
+    species = args.species
+    meta_dir = os.path.dirname(os.path.abspath(str(args.metadata))) if getattr(args, "metadata", None) else os.getcwd()
+    exon_annot = _resolve_default(getattr(args, "exon_annot", None), species, "exon_annot", meta_dir)
+    gff_compare.compare(
+        query_gff=str(args.query_gff),
+        sample_gffs=[str(p) for p in args.sample_gff],
+        exon_annot=exon_annot,
+        catalog=str(args.catalog),
+        final_ta=str(args.final_ta),
+        sample_tas=[str(p) for p in args.sample_ta],
+        ref_gff=(str(args.ref_gff) if getattr(args, "ref_gff", None) else None),
+        counts=getattr(args, "counts", None),
+        reference_counts=getattr(args, "reference_counts", None),
+        out_dir=str(args.output),
+        top_n=int(getattr(args, "top_n", 10)),
+        gene_symbols=getattr(args, "gene_symbol", None),
+    )
+    logging.info("blr-compare: structure concordance written -> %s", args.output)
+
+
+def run_blr_junction_compare(args):
+    """Compare a reference annotation against our final GFF on SPLICE-JUNCTION COMPOSITION alone.
+
+    Junction coordinates are independent of the Ensembl release and of transcript naming, and they
+    ignore the first and last exon boundaries, which are TSS/TES calls rather than splicing. The
+    reference side is first reduced by OUR OWN search requirements, so the two sides are asked the
+    same question."""
+    from altanalyze3.components.long_read import junction_compare as jcmp
+    species = args.species
+    meta_dir = os.path.dirname(os.path.abspath(str(args.output))) or os.getcwd()
+    exon_annot = _resolve_default(getattr(args, "exon_annot", None), species, "exon_annot", meta_dir)
+    jcmp.compare(
+        our_gff=str(args.our_gff),
+        query_gff=str(args.query_gff),
+        exon_annot=exon_annot,
+        out_dir=str(args.output),
+        our_catalog=getattr(args, "catalog", None),
+        reference_counts=getattr(args, "reference_counts", None),
+        gene_symbols=getattr(args, "gene_symbol", None),
+        require_known_gene=not getattr(args, "allow_unknown_genes", False),
+        require_known_splice=not getattr(args, "no_require_known_splice", False),
+        require_observed=not getattr(args, "include_unobserved", False),
+        top_n=int(getattr(args, "top_n", 10)),
+    )
+    logging.info("blr-junction-compare: complete -> %s", args.output)

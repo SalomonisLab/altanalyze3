@@ -68,6 +68,9 @@ const GENE_SET_MODES = new Set(["dotplot", "combplot"]);
 
 // The Coordinates entry that means "not an embedding: use two obs columns".
 const OBS_AXES_KEY = "__obs__";
+// Panels that draw one point per cell on an embedding. Each takes the X and Y
+// coordinate pair. "frequency" and "violin" plot no embedding, so they are out.
+const UMAP_COORD_MODES = new Set(["cluster", "relative", "expression_umap"]);
 const PAIRED_COLOR_STOPS = [
   [0.0, [0.6509804129600525, 0.8078431487083435, 0.8901960849761963]],
   [0.09090909090909091, [0.12156862765550613, 0.47058823704719543, 0.7058823704719543]],
@@ -781,7 +784,19 @@ function updatePanelFeatureInput(panelKey, options = {}) {
 }
 
 function panelAvailableModalities() {
-  return availableModalities();
+  // EXPLORE DROPS A MODALITY THAT DECLARES ITSELF UNBROWSABLE.
+  //
+  // A precomputed bundle sets supports_explore=false for a store held at cell-state
+  // granularity, because every cell of a state then carries one identical value and the
+  // embedding shows flat patches rather than a gradient. bundle_meta._modalities_block
+  // records why. Absent the flag the modality is shown, so nothing that never sets it
+  // changes.
+  //
+  // ONLY THIS LIST IS FILTERED. availableModalities() also backs modalityDefinition(),
+  // which resolves a label and feature noun BY ID for panels including the differential
+  // one, so filtering there would strip the label off a modality that is still selectable
+  // elsewhere.
+  return availableModalities().filter((entry) => entry.supports_explore !== false);
 }
 
 function panelModality(panelKey) {
@@ -869,6 +884,22 @@ function markerHeatmapAvailable(panelKey) {
   return Boolean(markerAnalysis.heatmap_tsv || markerAnalysis.heatmap_cache);
 }
 
+// A bundle may ship a SECOND MarkerFinder matrix holding every column beside the compact
+// 10-per-population one. The two come from separate MarkerFinder runs, so switching also
+// changes which markers the heatmap draws; the control says so in its label.
+function markerDensityAvailable(panelKey) {
+  const markerAnalysis = panelMarkerAnalysis(panelKey);
+  return Boolean(markerAnalysis && markerAnalysis.heatmap_cache_full);
+}
+
+function markerHeatmapCompact(panelKey) {
+  const select = document.getElementById(panelElementId(panelKey, "marker-density"));
+  if (!select || !markerDensityAvailable(panelKey)) {
+    return true;
+  }
+  return select.value !== "all";
+}
+
 function availableVisualizationModes(panelKey) {
   const modality = panelModality(panelKey);
   const modalityInfo = modalityDefinition(modality);
@@ -931,14 +962,15 @@ function updateExpressionModeOptions() {
     if (combMinField) combMinField.classList.toggle("hidden", mode !== "combplot");
     if (wantsGeneSet) geneField.classList.add("hidden");
 
-    // The UMAP cell-type view colours cells by the cellHarmony assignment and
-    // draws them on the cellHarmony projection. Both may be swapped for any
-    // categorical obs column and any 2-D embedding the h5ad carries. The other
-    // plot types have no such choice, so the two lists stay hidden there.
-    const wantsUmapOptions = mode === "cluster";
+    // Nathan, 2026-09-01: "all UMAP plots should have the option to change umap
+    // coordinates". Every panel that draws cells on an embedding therefore gets
+    // the X and Y lists: the cell-type view, "UMAP broad" and the expression
+    // UMAP. Colour-by stays with the cell-type view, which is the only one whose
+    // colour is a label rather than a measured value.
+    const wantsUmapOptions = UMAP_COORD_MODES.has(mode);
     const colorByField = document.getElementById(panelElementId(panelKey, "colorby-field"));
     const coordsField = document.getElementById(panelElementId(panelKey, "coords-field"));
-    if (colorByField) colorByField.classList.toggle("hidden", !wantsUmapOptions);
+    if (colorByField) colorByField.classList.toggle("hidden", mode !== "cluster");
     if (coordsField) coordsField.classList.toggle("hidden", !wantsUmapOptions);
     if (wantsUmapOptions) refreshUmapOptions(panelKey);
     syncUmapAxisFields(panelKey);
@@ -1023,6 +1055,10 @@ function updateExpressionModeOptions() {
     if (filterStack) {
       filterStack.classList.toggle("hidden", showGrn);
     }
+    const densityRow = document.getElementById(panelElementId(panelKey, "marker-density-row"));
+    if (densityRow) {
+      densityRow.hidden = !(mode === "marker_heatmap" && markerDensityAvailable(panelKey));
+    }
   });
 }
 
@@ -1084,6 +1120,7 @@ async function renderMarkerHeatmapViewer(jobId, panelKey) {
   const plot = document.getElementById(panelPlotId(panelKey));
   const params = getDisplayFilterParams(panelKey);
   params.set("modality", panelModality(panelKey));
+  params.set("compact", markerHeatmapCompact(panelKey) ? "true" : "false");
   const suffix = params.toString() ? `?${params.toString()}` : "";
   const datasetPath = apiPath(`/jobs/${jobId}/marker/heatmap.tsv${suffix}`);
   const datasetUrl = `${window.location.origin}${datasetPath}`;
@@ -1888,6 +1925,10 @@ function hookForms() {
     document.getElementById(panelElementId(panelKey, "marker-population")).addEventListener("change", () => {
       loadVisualizationPanel(panelKey);
     });
+    const densitySelect = document.getElementById(panelElementId(panelKey, "marker-density"));
+    if (densitySelect) {
+      densitySelect.addEventListener("change", () => loadVisualizationPanel(panelKey));
+    }
     ["grn-genes", "grn-sample", "grn-cellstate"].forEach((suffix) => {
       const el = document.getElementById(panelElementId(panelKey, suffix));
       if (el) {
@@ -3397,13 +3438,27 @@ function syncDifferentialPopulationSelect(state) {
   const populationSelect = document.getElementById("differential-result-population");
   const mode = document.getElementById("differential-viz-mode").value;
   const populations = differentialPopulationsForMode(state, mode);
+  // The counts chart draws every cell state, so neither the state select nor the
+  // one-gene filter applies to it.
+  populationSelect.classList.toggle("hidden", mode === "summary");
+  const filterInput = differentialGeneFilterInput();
+  if (filterInput) {
+    filterInput.classList.toggle("hidden", mode === "summary");
+  }
   const fallbackPopulation = state.default_result_population || "";
   const wantedPopulation = currentDifferentialPopulation || populationSelect.value || fallbackPopulation;
   populationSelect.innerHTML = "";
+  // The volcano covers every cell state the differential tested, read from the sample
+  // pseudobulks. The detail violin draws this atlas's released replicate unit, which
+  // covers fewer states: the COPD atlas releases 50 metacell states of the 81 tested.
+  // Marking the difference stops a reader picking a state whose distribution cannot be
+  // drawn, which is why "Deuterosomal" looked broken.
   populations.forEach((population) => {
     const option = document.createElement("option");
     option.value = population;
-    option.textContent = population;
+    option.textContent = (replicateStates && !replicateStates.has(population))
+      ? `${population} (no replicates)`
+      : population;
     if (population === wantedPopulation) {
       option.selected = true;
     }
@@ -3658,6 +3713,21 @@ async function loadDifferentialVisualization() {
 
   const population = document.getElementById("differential-result-population").value;
   const mode = document.getElementById("differential-viz-mode").value;
+  // The counts chart draws every cell state at once, so it needs no selected state.
+  if (mode === "summary") {
+    updateDifferentialDownloadButton();
+    try {
+      const summary = await fetchDifferentialJson(apiPath(`/jobs/${jobId}/differential/interactive/summary`));
+      renderDifferentialSummary(summary);
+      setDifferentialGeneFilterOptions([]);
+      resetDifferentialGeneDetail();
+    } catch (err) {
+      destroyDifferentialNetwork();
+      renderDifferentialEmpty(err.message || "Unable to load the differential counts.");
+      plotEmpty.classList.remove("hidden");
+    }
+    return;
+  }
   if (!population) {
     renderDifferentialEmpty(`No ${mode} data are available for this differential run.`);
     resetDifferentialGeneDetail();
@@ -3685,8 +3755,18 @@ async function loadDifferentialVisualization() {
       payload = await fetchDifferentialJson(apiPath(`/jobs/${jobId}/differential/interactive/go?population=${encodeURIComponent(population)}`));
       renderDifferentialGo(payload, geneFilter);
     }
-    setDifferentialGeneFilterOptions(differentialPayloadGenes(mode, payload));
+    const availableGenes = differentialPayloadGenes(mode, payload);
+    setDifferentialGeneFilterOptions(availableGenes);
     const payloadDefaultGene = (payload && payload.default_gene) || "";
+    // A feature carried over from another modality does not exist in this one, so the
+    // detail fetch failed and the panel fell back to "Select a <feature> from the
+    // differential view". Switching RNA -> ADT kept an RNA gene and emptied the panel.
+    // Treat a carried-over feature as stale so the payload's own default is used, which
+    // the server sets to the top result by p-value.
+    if (currentDifferentialGene && Array.isArray(availableGenes) && availableGenes.length
+        && !availableGenes.some((g) => String(g) === String(currentDifferentialGene))) {
+      currentDifferentialGene = "";
+    }
     const isCellCommunicationMode = mode === "network" || mode === "table";
     let staleGene = "";
     if (isCellCommunicationMode && currentDifferentialGene) {
@@ -3742,6 +3822,124 @@ async function fetchDifferentialJson(url) {
     throw new Error(data.detail || "Differential data request failed.");
   }
   return data;
+}
+
+// The two bar colours, read from the reference figure Nathan supplied.
+const DEG_COUNT_UP_COLOR = "#C75252";
+const DEG_COUNT_DOWN_COLOR = "#7CC7E9";
+
+// The first view of the Differential workspace: how many features the run called up
+// and called down in each cell state. Down and up share one row, down to the left of
+// zero and up to the right. Clicking either bar opens that cell state in the Volcano.
+function renderDifferentialSummary(payload) {
+  destroyDifferentialNetwork();
+  const plot = document.getElementById("differential-plot-area");
+  const rows = payload.rows || [];
+  setDifferentialGeneFilterNote("");
+  markDifferentialGeneFilterMatched(true);
+  if (!rows.length) {
+    renderDifferentialEmpty("No differential counts were found for this comparison.");
+    return;
+  }
+  // Plotly draws the first category at the bottom of a horizontal bar axis, so the
+  // array is reversed to put the first cell state of the lineage order on top.
+  const ordered = rows.slice().reverse();
+  const labels = ordered.map((row) => String(row.population));
+  const upValues = ordered.map((row) => Number(row.up) || 0);
+  const downValues = ordered.map((row) => -(Number(row.down) || 0));
+  const featureLabel = String(payload.feature_label || "gene");
+  const limit = Math.max(1, Number(payload.max_count) || 1);
+  const height = Math.max(360, Math.min(2400, rows.length * 26 + 150));
+  // Absolute tick labels: the sign of a bar only says which side of zero it is on.
+  // About four ticks per side, on a 1/2/5 x 10^k step.
+  const tickTarget = Math.max(1, limit / 4);
+  const tickExponent = Math.floor(Math.log10(tickTarget));
+  let tickStep = Math.pow(10, tickExponent);
+  for (const multiple of [1, 2, 5, 10]) {
+    tickStep = multiple * Math.pow(10, tickExponent);
+    if (tickStep >= tickTarget) break;
+  }
+  const tickCount = Math.ceil(limit / tickStep);
+  const tickVals = [];
+  for (let index = -tickCount; index <= tickCount; index += 1) {
+    tickVals.push(index * tickStep);
+  }
+  plot.classList.remove("hidden");
+  document.getElementById("differential-plot-empty").classList.add("hidden");
+  Plotly.newPlot(
+    plot,
+    [
+      {
+        type: "bar",
+        orientation: "h",
+        name: "Upregulated",
+        x: upValues,
+        y: labels,
+        marker: { color: DEG_COUNT_UP_COLOR },
+        customdata: ordered.map((row) => [row.up, row.down]),
+        hovertemplate: `%{y}<br>%{customdata[0]} up ${featureLabel}s<extra></extra>`,
+      },
+      {
+        type: "bar",
+        orientation: "h",
+        name: "Downregulated",
+        x: downValues,
+        y: labels,
+        marker: { color: DEG_COUNT_DOWN_COLOR },
+        customdata: ordered.map((row) => [row.up, row.down]),
+        hovertemplate: `%{y}<br>%{customdata[1]} down ${featureLabel}s<extra></extra>`,
+      },
+    ],
+    {
+      barmode: "relative",
+      bargap: 0.35,
+      title: `${payload.case_label || "Group 1"} versus ${payload.control_label || "Group 2"}`,
+      paper_bgcolor: "rgba(0,0,0,0)",
+      plot_bgcolor: "rgba(255,255,255,0.94)",
+      height,
+      margin: { t: 56, l: 170, r: 30, b: 60 },
+      legend: { orientation: "h", x: 1, xanchor: "right", y: 1.06 },
+      xaxis: {
+        title: `Number of differential ${featureLabel}s`,
+        range: [-limit * 1.08, limit * 1.08],
+        zeroline: true,
+        zerolinecolor: "#000000",
+        zerolinewidth: 1,
+        tickvals: tickVals,
+        ticktext: tickVals.map((value) => String(Math.abs(value))),
+      },
+      yaxis: { automargin: true, tickfont: { size: 11 }, type: "category" },
+    },
+    { responsive: true }
+  );
+  plot.on("plotly_click", (event) => {
+    const state = event?.points?.[0]?.y;
+    if (!state) {
+      return;
+    }
+    jumpToDifferentialVolcano(String(state));
+  });
+}
+
+// Selecting a cell state in the counts chart opens that state in the Volcano view.
+function jumpToDifferentialVolcano(population) {
+  const populationSelect = document.getElementById("differential-result-population");
+  const modeSelect = document.getElementById("differential-viz-mode");
+  currentDifferentialPopulation = population;
+  currentDifferentialGene = "";
+  modeSelect.value = "volcano";
+  syncDifferentialPopulationSelect(currentDifferentialState);
+  if (populationSelect.value !== population) {
+    const known = Array.from(populationSelect.options).some((option) => option.value === population);
+    if (!known) {
+      renderDifferentialEmpty(`The volcano view holds no result for ${population}.`);
+      return;
+    }
+    populationSelect.value = population;
+    currentDifferentialPopulation = population;
+  }
+  updateDifferentialDownloadButton();
+  loadDifferentialVisualization();
 }
 
 function renderDifferentialHeatmap(payload, geneFilter = null) {
@@ -4505,7 +4703,9 @@ function renderDifferentialGeneDetail(payload) {
     plot,
     traces,
     {
-      title: `${yTitle}: ${titleSubject}`,
+      // The y axis already names the measure, so the title carries only the subject.
+      // Nathan, 2026-09-01: "Just make it the gene name. The prefix is unnecessary."
+      title: titleSubject,
       paper_bgcolor: "rgba(0,0,0,0)",
       plot_bgcolor: "rgba(255,255,255,0.94)",
       margin: { t: 52, l: 50, r: 18, b: 48 },
@@ -4648,8 +4848,9 @@ function updateDifferentialDownloadButton() {
     button.href = "#";
     return;
   }
+  const mode = document.getElementById("differential-viz-mode").value;
   const population = document.getElementById("differential-result-population").value;
-  if (!population) {
+  if (!population && mode !== "summary") {
     button.classList.add("hidden");
     button.href = "#";
     return;
@@ -4780,6 +4981,8 @@ async function loadGeneSuggestions(jobId) {
         throw new Error(data.detail || "Unable to load gene suggestions.");
       }
       const seen = new Set();
+      // `accepted` is what may stay in the box; `seen` is what the box offers.
+      const accepted = new Set();
       const features = [];
       (data.genes || []).forEach((gene) => {
         const value = String(gene || "").trim();
@@ -4787,16 +4990,33 @@ async function loadGeneSuggestions(jobId) {
           return;
         }
         seen.add(value);
+        accepted.add(value);
         features.push(value);
         const option = document.createElement("option");
         option.value = value;
         datalist.appendChild(option);
       });
+      // A NAME THE SERVER CAN RESOLVE IS NEVER OVERWRITTEN.
+      //
+      // Nathan, 2026-09-08: "every name I select defaults to CE(18:2)". The reset below
+      // fires whenever the typed value is not in the suggestion list, and it replaces it
+      // with the FIRST suggestion. Once lipids began showing "18:2 Cholesterol ester",
+      // the list and the value could legitimately disagree: a bundle resolves both the
+      // display name and the abbreviation, so `CE(20:3)` is valid and was being wiped
+      // because only display names are offered.
+      //
+      // So the accepted set is the suggestions PLUS the keys the payload names, while the
+      // datalist still shows only the reader's name. A payload without `keys` -- every
+      // modality that has no display column -- leaves this exactly as it was.
+      (data.keys || []).forEach((key) => {
+        const value = String(key || "").trim();
+        if (value) accepted.add(value);
+      });
       const input = document.getElementById(panelElementId(panelKey, "gene-query"));
       if (input) {
         input.setAttribute("list", `${panelKey}-feature-suggestions`);
         const currentValue = String(input.value || "").trim();
-        if (!currentValue || !seen.has(currentValue)) {
+        if (!currentValue || !accepted.has(currentValue)) {
           input.value = preferredFeatureForModality(modality, features);
         }
       }
@@ -5030,6 +5250,9 @@ async function loadVisualizationPanel(panelKey) {
   if (GENE_SET_MODES.has(mode)) {
     const genes = panelGeneSet(panelKey);
     const params = new URLSearchParams();
+    // The DotPlot and CombPlot read the same modality the panel is set to. Without
+    // this they always read RNA, so choosing ADT or Lipids left them unchanged.
+    params.set("modality", modality);
     if (genes.length) {
       params.set("genes", genes.join(","));
     }
@@ -5062,18 +5285,16 @@ async function loadVisualizationPanel(panelKey) {
       // Only the cell-type view offers these. "UMAP broad" draws reference
       // against query, and the reference is hidden whenever either choice is
       // off-default, which would leave that view with nothing to contrast.
-      if (mode === "cluster") {
-        const colorBy = getPanelSelectValue(panelKey, "colorby");
+      if (UMAP_COORD_MODES.has(mode)) {
+        const colorBy = mode === "cluster" ? getPanelSelectValue(panelKey, "colorby") : "";
         const coordsKey = getPanelSelectValue(panelKey, "coords");
         if (colorBy) params.set("color_by", colorBy);
-        if (coordsKey === OBS_AXES_KEY) {
-          // Two obs columns replace the embedding, so no coords key is sent.
-          const xField = getPanelSelectValue(panelKey, "xfield");
-          const yField = getPanelSelectValue(panelKey, "yfield");
-          if (xField && yField) {
-            params.set("x_field", xField);
-            params.set("y_field", yField);
-          }
+        // The X and Y fields are the coordinate control, so they always decide.
+        const xField = getPanelSelectValue(panelKey, "xfield");
+        const yField = getPanelSelectValue(panelKey, "yfield");
+        if (xField && yField) {
+          params.set("x_field", xField);
+          params.set("y_field", yField);
         } else if (coordsKey) {
           params.set("coords", coordsKey);
         }
@@ -5176,6 +5397,16 @@ async function loadVisualizationPanel(panelKey) {
         // One window is twice as wide, so the violin plot draws more cell states
         // rather than leaving the extra space empty.
         params.set("violin_limit", singleWindowActive() ? "30" : "10");
+        // The expression UMAP draws on the same coordinate pair as the other UMAP
+        // panels. Without this the control appeared but changed nothing.
+        if (UMAP_COORD_MODES.has(mode)) {
+          const xField = getPanelSelectValue(panelKey, "xfield");
+          const yField = getPanelSelectValue(panelKey, "yfield");
+          if (xField && yField) {
+            params.set("x_field", xField);
+            params.set("y_field", yField);
+          }
+        }
       const resp = await fetch(apiPath(`/jobs/${jobId}/expression?${params.toString()}`));
       const data = await parseApiResponse(resp);
       if (!resp.ok) {
@@ -5761,6 +5992,10 @@ async function downloadDifferentialLeftPdf() {
   }
   const mode = document.getElementById("differential-viz-mode").value;
   const population = document.getElementById("differential-result-population").value;
+  if (mode === "summary") {
+    window.open(apiPath(`/jobs/${jobId}/differential/interactive/pdf?mode=summary`), "_blank");
+    return;
+  }
   if (!population) {
     return;
   }
@@ -6051,16 +6286,40 @@ async function loadChatExamples(jobId) {
   }
 }
 
+/* Empty every panel the previous answer wrote.
+ *
+ * The old code cleared the answer text and the table but left the figure and
+ * the follow-up buttons standing. A new question therefore showed the previous
+ * question's plot for as long as the server took to reply, and the two read as
+ * one answer. Plotly holds its own state on the node, so purging it is what
+ * actually removes the figure; emptying `innerHTML` alone leaves the chart
+ * registered and the next `newPlot` inherits its layout. */
+function clearChatOutput() {
+  chatLastResult = null;
+  try { Plotly.purge("chat-plot"); } catch (err) { /* nothing drawn yet */ }
+  ["chat-answer", "chat-table", "chat-plot", "chat-followups"].forEach((id) => {
+    const host = document.getElementById(id);
+    if (host) host.innerHTML = "";
+  });
+  const plot = document.getElementById("chat-plot");
+  if (plot) plot.classList.add("hidden");
+  const table = document.getElementById("chat-table");
+  if (table) table.classList.add("hidden");
+  const views = document.getElementById("chat-views");
+  if (views) views.classList.add("hidden");
+}
+
 async function askChat() {
   const question = String(document.getElementById("chat-question").value || "").trim();
   const jobIdField = document.getElementById("results-job-id");
   const jobId = jobIdField ? jobIdField.value.trim() : "";
   const status = document.getElementById("chat-status");
   if (!question) return;
+  // Clear before the request, not after it, so the old figure goes at the click
+  // rather than when the answer arrives.
+  clearChatOutput();
   if (!jobId) { status.textContent = "Load a dataset first."; return; }
   status.textContent = "Working...";
-  document.getElementById("chat-answer").innerHTML = "";
-  document.getElementById("chat-table").innerHTML = "";
   try {
     const response = await fetch(apiPath(`/api/jobs/${jobId}/chat`), {
       method: "POST",
@@ -6455,6 +6714,10 @@ function renderCombPlotFigure(hostId, payload) {
  */
 let plotVariablesCache = null;
 
+// Cell states that carry replicate profiles, i.e. the states the released object holds.
+// loadPlotVariables reports them as the cluster variable's values.
+let replicateStates = null;
+
 async function loadPlotVariables(jobId) {
   if (plotVariablesCache && plotVariablesCache.jobId === jobId) return plotVariablesCache;
   // apiPath honours CELLHARMONY_ROOT_PATH; a bare path 404s wherever the app
@@ -6463,6 +6726,11 @@ async function loadPlotVariables(jobId) {
   const data = await response.json();
   if (!response.ok) throw new Error(data.detail || "plot variables unavailable");
   plotVariablesCache = { jobId, ...data };
+  const clusterVariable = (data.variables || []).find(
+    (variable) => String(variable.field) === String(data.cluster_key));
+  if (clusterVariable && Array.isArray(clusterVariable.values)) {
+    replicateStates = new Set(clusterVariable.values.map(String));
+  }
   return plotVariablesCache;
 }
 
@@ -6561,9 +6829,10 @@ async function refreshUmapOptions(panelKey) {
   const coordOptions = (info.coords || []).length ? info.coords : [{ key: "", label: "cellHarmony UMAP" }];
   const numeric = info.numeric_variables || [];
   // Two numeric annotations are the minimum for a pair of axes.
-  const coordEntries = numeric.length > 1
-    ? coordOptions.concat([{ key: OBS_AXES_KEY, label: "obs columns (pick X and Y)" }])
-    : coordOptions;
+  // Nathan, 2026-09-01: "Coordinates has to be 2 fields not 1". The X and Y
+  // selects below ARE the coordinate control, so no meta-option is offered and
+  // nothing hides them.
+  const coordEntries = coordOptions;
   coordEntries.forEach((entry) => {
     const option = document.createElement("option");
     option.value = entry.key || "";
@@ -6588,7 +6857,7 @@ async function refreshUmapOptions(panelKey) {
       const option = document.createElement("option");
       option.value = entry.field;
       const missing = Number(entry.n_missing) > 0 ? `, ${entry.n_missing} without a value` : "";
-      option.textContent = `${entry.field} (${formatAxisNumber(entry.min)} to ${formatAxisNumber(entry.max)}${missing})`;
+      option.textContent = `${entry.label || entry.field} (${formatAxisNumber(entry.min)} to ${formatAxisNumber(entry.max)}${missing})`;
       select.appendChild(option);
     });
     if (Array.from(select.options).some((o) => o.value === previous)) {
@@ -6621,10 +6890,18 @@ async function refreshUmapOptions(panelKey) {
  * stay hidden while the panel draws an embedding. */
 function syncUmapAxisFields(panelKey) {
   const mode = getPanelSelectValue(panelKey, "mode");
-  const usingObsAxes = mode === "cluster" && getPanelSelectValue(panelKey, "coords") === OBS_AXES_KEY;
+  // The X and Y lists ARE the coordinate control, so they show whenever the panel
+  // draws cells. Hiding them behind a meta-option is what left Nathan looking at a
+  // single "Coordinates" dropdown three times over.
+  const showAxes = UMAP_COORD_MODES.has(mode);
+  // The single "Coordinates" dropdown is retired: it offered one field where a
+  // coordinate set needs two. It stays in the DOM because other code reads its
+  // value, but the reader never sees it.
+  const legacy = document.getElementById(panelElementId(panelKey, "coords-field"));
+  if (legacy) legacy.classList.add("hidden");
   ["xfield-field", "yfield-field"].forEach((suffix) => {
     const field = document.getElementById(panelElementId(panelKey, suffix));
-    if (field) field.classList.toggle("hidden", !usingObsAxes);
+    if (field) field.classList.toggle("hidden", !showAxes);
   });
 }
 
@@ -6728,7 +7005,140 @@ async function drawChatPlot() {
     }
     return;
   }
+  // A regulatory network, drawn from the nodes and edges the answer already carries.
+  if (spec.kind === "network") { drawChatNetwork(result, spec); return; }
   host.innerHTML = "<span class=\"warn\">This answer has no figure; the table holds the result.</span>";
+}
+
+var chatNetworkCy = null;
+
+/* The regulatory network a differential implies: the features that moved, and the factors
+ * the cell state's regulatory model puts above them.
+ *
+ * THE RULES ARE THE SITE'S, NOT MINE. scalable_viewer/grn_network.py applies them and
+ * records where each came from; this only draws what that returns. Nathan's own
+ * instruction, quoted there: the targets are the features on screen, and "The TFs do not
+ * need to be regulated themselves since their activity but not expression might be
+ * changed."
+ *
+ * SO A NODE HAS THREE COLOUR STATES, NOT TWO. `colour_by` says which number paints it:
+ * its differential EXPRESSION, or its differential ACTIVITY when only the activity moved,
+ * or neither. A factor that acts without changing its own transcript is the whole reason
+ * the activity layer exists, so painting it grey would hide the finding, and painting it
+ * as a measured zero would invent one. Activity-coloured nodes carry a dashed rim, which
+ * is what the site's legend promises.
+ */
+function drawChatNetwork(result, spec) {
+  const host = document.getElementById("chat-plot");
+  const nodes = result.nodes || [];
+  const edges = result.edges || [];
+  if (!nodes.length) {
+    host.innerHTML = `<span class="warn">${result.note || "No regulator reaches these features."}</span>`;
+    return;
+  }
+  if (typeof cytoscape !== "function") {
+    host.innerHTML = "<span class=\"warn\">Cytoscape did not load, so the network cannot be drawn.</span>";
+    return;
+  }
+  if (chatNetworkCy) {
+    try { chatNetworkCy.destroy(); } catch (err) { /* already gone */ }
+    chatNetworkCy = null;
+  }
+
+  // A DIVERGING RAMP ON THE FOLD CHANGE, GREY WHERE THERE IS NO ROW. Explicit hex, so the
+  // ramp is the same on every machine, and no rainbow.
+  const ramp = ["#2166ac", "#67a9cf", "#d1e5f0", "#fddbc7", "#ef8a62", "#b2182b"];
+  const fade = "#cbd5e1";
+  const colourFor = (node) => {
+    const by = String(node.colour_by || "none");
+    if (by === "none") return fade;
+    const fc = Number(by === "activity" ? node.activity_log2fc : node.expression_log2fc);
+    if (!Number.isFinite(fc)) return fade;
+    // Saturate at |2| so one extreme feature does not flatten every other colour.
+    const t = Math.max(0, Math.min(1, (fc + 2) / 4));
+    return ramp[Math.min(ramp.length - 1, Math.floor(t * ramp.length))];
+  };
+  const four = (v) => (Number.isFinite(Number(v)) ? Number(v).toPrecision(3) : "not tested");
+
+  const elements = [];
+  nodes.forEach((n) => {
+    elements.push({
+      data: {
+        id: n.id,
+        label: n.label || n.id,
+        role: n.role,
+        colour: colourFor(n),
+        shape: n.role === "factor" ? "diamond" : "ellipse",
+        // The rim states WHICH number the colour came from.
+        rim: n.colour_by === "activity" ? "dashed" : "solid",
+        size: n.role === "factor" ? 30 : 22,
+        // The hover carries the number the colour did NOT use, so both are readable.
+        tip: n.role === "factor"
+          ? `${n.id}: activity log2FC ${four(n.activity_log2fc)} (FDR ${four(n.activity_fdr)}), `
+            + `expression log2FC ${four(n.expression_log2fc)}, `
+            + `${n.n_targets_here} target(s) here`
+          : `${n.id}: expression log2FC ${four(n.expression_log2fc)} (FDR ${four(n.expression_fdr)})`,
+      },
+    });
+  });
+  edges.forEach((e, i) => {
+    elements.push({ data: { id: `e${i}`, source: e.source, target: e.target, score: e.score } });
+  });
+
+  // The edge score sets the line width, scaled to THIS network's own range, so a network
+  // of weak edges is still readable and a strong one is not all maximum width.
+  const range = (spec && spec.edge_score_range) || result.edge_score_range || null;
+  const lo = range ? Number(range[0]) : 0;
+  const hi = range ? Number(range[1]) : 1;
+  const span = hi > lo ? hi - lo : 1;
+
+  chatNetworkCy = cytoscape({
+    container: host,
+    elements,
+    style: [
+      {
+        selector: "node",
+        style: {
+          "background-color": "data(colour)",
+          shape: "data(shape)",
+          label: "data(label)",
+          color: "#0f172a",
+          "font-size": 11,
+          "text-valign": "center",
+          "text-halign": "center",
+          width: "data(size)",
+          height: "data(size)",
+          "border-width": 2,
+          "border-style": "data(rim)",
+          "border-color": "#0f172a",
+        },
+      },
+      {
+        selector: "edge",
+        style: {
+          width: (edge) => {
+            const s = Number(edge.data("score"));
+            if (!Number.isFinite(s)) return 1.2;
+            return Math.max(1, Math.min(9, 1 + ((s - lo) / span) * 8));
+          },
+          "line-color": "#94a3b8",
+          "target-arrow-color": "#94a3b8",
+          "target-arrow-shape": "triangle",
+          "curve-style": "bezier",
+          opacity: 0.8,
+        },
+      },
+      { selector: "node:selected", style: { "border-width": 4, "border-color": "#0f172a" } },
+    ],
+    layout: {
+      name: "cose", animate: true, fit: true, padding: 36, randomize: true,
+      idealEdgeLength: 80, nodeOverlap: 8, componentSpacing: 90,
+    },
+  });
+  chatNetworkCy.on("mouseover", "node", (event) => {
+    setDifferentialNetworkHoverTooltip(event.target.data("tip"), event.renderedPosition);
+  });
+  chatNetworkCy.on("mouseout", "node", () => setDifferentialNetworkHoverTooltip(""));
 }
 
 /* A volcano drawn from the differential table the answer already carries, so it

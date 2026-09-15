@@ -1,0 +1,146 @@
+{
+  "name": "rna2lipid-smoke-generic-tissue",
+  "tissue": "human lung (smoke test of the tissue-agnostic path)",
+  "_note": [
+    "End-to-end smoke test of the config-driven paired-table path a new tissue",
+    "would use. The hyperparameter grid is deliberately small so the run is fast.",
+    "It uses the two lipid tables present in this repository, which are NOT the",
+    "log2 tables the shipped bundle was trained on. Do not read the metrics of",
+    "this run as the lung model's performance."
+  ],
+  "data": {
+    "tables": [
+      {
+        "id": "bulk",
+        "rna": "../data/feature_blankreduiction.csv",
+        "rna_orientation": "samples_by_features",
+        "lipids": "../data/Bulk_lipids_cleaned_normalized_median_527.csv",
+        "lipid_orientation": "samples_by_features"
+      },
+      {
+        "id": "sorted_celltype",
+        "rna": "../data/newrna_cell_clair_filtered_symbol.csv",
+        "rna_orientation": "features_by_samples",
+        "lipids": "../data/cell_lipids_cleaned_norm_median_286.csv",
+        "lipid_orientation": "samples_by_features"
+      }
+    ]
+  },
+  "preprocessing": {
+    "collapse_duplicate_genes": true,
+    "fill_missing_with_feature_median": true,
+    "drop_rows_with_missing_lipids": false,
+    "remove_zero_only_genes": true,
+    "x_join_mode": "inner",
+    "y_join_mode": "inner"
+  },
+  "sample_metadata": {
+    "donor": {
+      "strategy": "split_field",
+      "delimiter": "_",
+      "field": 0
+    },
+    "label": {
+      "strategy": "split_field",
+      "delimiter": "_",
+      "field": 1,
+      "maxsplit": 1,
+      "missing": ""
+    },
+    "group": {
+      "strategy": "keyword_map",
+      "default": "UNKNOWN",
+      "rules": [
+        {
+          "group": "BULK",
+          "equals": [
+            "bulk",
+            "lung",
+            "wholelung",
+            "whole_lung"
+          ],
+          "any_of": [
+            "bulk"
+          ]
+        },
+        {
+          "group": "EPI",
+          "any_of": [
+            "epi"
+          ]
+        },
+        {
+          "group": "MES",
+          "any_of": [
+            "mes"
+          ]
+        },
+        {
+          "group": "MIC",
+          "any_of": [
+            "mic"
+          ]
+        },
+        {
+          "group": "END",
+          "any_of": [
+            "end"
+          ]
+        },
+        {
+          "group": "PMX",
+          "any_of": [
+            "pmx",
+            "pmn"
+          ]
+        }
+      ]
+    }
+  },
+  "training": {
+    "architecture": "sparse_lipidwise",
+    "bundle_output": "smoke_run/rna2lipid_smoke_bundle.pkl",
+    "report_output_dir": "smoke_run/report",
+    "model": {
+      "target_scaling": "standard",
+      "top_gene_options": [
+        25,
+        50
+      ],
+      "l1_ratio": [
+        1.0
+      ],
+      "alphas": {
+        "logspace": [
+          -3,
+          1,
+          5
+        ]
+      },
+      "cv": 3,
+      "max_iter": 5000,
+      "n_jobs": 2,
+      "sparsity_penalty": 0.002,
+      "random_seed": 1
+    },
+    "holdout": {
+      "mode": "donor_disjoint",
+      "seed": 42,
+      "holdout_donor_fraction": 0.3,
+      "min_holdout_donors": 2
+    }
+  },
+  "evaluation": {
+    "baselines": {
+      "pca_ridge": {
+        "max_components": 8,
+        "ridge_alphas": [
+          0.01,
+          0.1,
+          1.0,
+          10.0
+        ]
+      }
+    }
+  }
+}

@@ -113,7 +113,14 @@ def aggregate(args):
     from altanalyze3.components.aggregate.annotate import annotate_junctions, export_dense_matrix
 
     # Assume exon annotation file is named like "gene_model_all.tsv"
-    exon_file = Path(args.ref).with_name(Path(args.ref).stem.replace(".bed", "_all.tsv"))
+    reference = Path(args.ref)
+    name = reference.name
+    if name.endswith('.bed.gz'):
+        exon_file = reference.with_name(name[:-7] + '_all.tsv')
+    elif name.endswith('.bed'):
+        exon_file = reference.with_name(name[:-4] + '_all.tsv')
+    else:
+        exon_file = reference
     if not exon_file.exists():
         raise FileNotFoundError(f"Exon annotation file not found: {exon_file}")
 

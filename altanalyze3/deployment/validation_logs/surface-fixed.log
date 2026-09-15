@@ -1,0 +1,5 @@
+Nextflow 26.04.6 is available - Please consider updating your version to it
+N E X T F L O W  ~  version 25.10.0
+Launching `components/snaf/nextflow/main.nf` [voluminous_bartik] DSL2 - revision: c1ccf71b63
+WARN: Task runtime metrics are not reported when using macOS without a container engine
+[91/ad40ba] Submitted process > SNAF_B (cohort)

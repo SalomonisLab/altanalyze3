@@ -220,11 +220,11 @@
                            plots one metadata field against another. Counts live in
                            the matrix, not in obs, so nothing here is expression. -->
                       <label class="field hidden inline-field compact-inline-field" id="viz1-xfield-field">
-                        <span>X axis</span>
+                        <span>Coordinates X</span>
                         <select id="viz1-xfield" class="compact-select"></select>
                       </label>
                       <label class="field hidden inline-field compact-inline-field" id="viz1-yfield-field">
-                        <span>Y axis</span>
+                        <span>Coordinates Y</span>
                         <select id="viz1-yfield" class="compact-select"></select>
                       </label>
                       <!-- Group by. The DotPlot and CombPlot lay their columns out along this
@@ -296,6 +296,15 @@
                           <select id="viz1-filter1-values"></select>
                         </label>
                       </div>
+                      <div class="display-filter-grid" id="viz1-marker-density-row" hidden>
+                        <label class="field compact-field">
+                          <span>Heatmap columns</span>
+                          <select id="viz1-marker-density">
+                            <option value="compact" selected>10 metacells per cell population (random)</option>
+                            <option value="all">All metacells</option>
+                          </select>
+                        </label>
+                      </div>
                       <div class="display-filter-grid" id="viz1-filter-secondary-row">
                         <label class="field compact-field">
                           <span>Annotation 2</span>
@@ -353,11 +362,11 @@
                            plots one metadata field against another. Counts live in
                            the matrix, not in obs, so nothing here is expression. -->
                       <label class="field hidden inline-field compact-inline-field" id="viz2-xfield-field">
-                        <span>X axis</span>
+                        <span>Coordinates X</span>
                         <select id="viz2-xfield" class="compact-select"></select>
                       </label>
                       <label class="field hidden inline-field compact-inline-field" id="viz2-yfield-field">
-                        <span>Y axis</span>
+                        <span>Coordinates Y</span>
                         <select id="viz2-yfield" class="compact-select"></select>
                       </label>
                       <!-- Group by. The DotPlot and CombPlot lay their columns out along this
@@ -429,6 +438,15 @@
                           <select id="viz2-filter1-values"></select>
                         </label>
                       </div>
+                      <div class="display-filter-grid" id="viz2-marker-density-row" hidden>
+                        <label class="field compact-field">
+                          <span>Heatmap columns</span>
+                          <select id="viz2-marker-density">
+                            <option value="compact" selected>10 metacells per cell population (random)</option>
+                            <option value="all">All metacells</option>
+                          </select>
+                        </label>
+                      </div>
                       <div class="display-filter-grid" id="viz2-filter-secondary-row">
                         <label class="field compact-field">
                           <span>Annotation 2</span>
@@ -452,14 +470,19 @@
         <section class="workspace-panel" data-tab-panel="differential">
           <div class="differential-workspace">
             <section class="panel differential-controls-panel hidden" id="differential-panel">
-              <h2>4. Differential</h2>
+              <h2>DIFFERENTIAL ANALYSIS</h2>
               <p class="panel-copy" id="differential-intro">Perform cell-state differential expression.</p>
               <form id="differential-form">
-                <div class="two-col">
+                <!-- Cell state and Modality sit on SEPARATE rows. Sharing one row cut
+                     both selects to half width, and the cell-state names are long enough
+                     that the text clipped. -->
+                <div class="one-col">
                   <label class="field">
                     <span>Cell-state aligned to</span>
                     <select id="differential-population" required></select>
                   </label>
+                </div>
+                <div class="one-col">
                   <label class="field hidden" id="differential-modality-field">
                     <span>Modality</span>
                     <select id="differential-modality"></select>
@@ -498,7 +521,10 @@
                 Differential analysis is enabled when the job contains two or more samples.
               </div>
               <a class="download-btn hidden" id="differential-archive-link" href="#" target="_blank" rel="noopener">Download differential ZIP</a>
-              <a class="download-btn hidden" id="differential-log-link" href="#" target="_blank" rel="noopener">Download log</a>
+              <!-- "Download log" removed 2026-09-02: a precomputed bundle carries no run
+                   log for a reader to fetch. The element stays so the code that toggles
+                   it keeps working, but it never shows. -->
+              <a class="download-btn hidden" id="differential-log-link" href="#" target="_blank" rel="noopener" hidden style="display:none">Download log</a>
             </section>
 
             <section class="differential-results-column">
@@ -509,6 +535,7 @@
                     <div class="differential-head-actions">
                       <div class="differential-head-row">
                         <select id="differential-viz-mode" class="compact-select">
+                          <option value="summary">Differential counts</option>
                           <option value="heatmap">Heatmap</option>
                           <option value="volcano">Volcano</option>
                           <option value="network">Network</option>

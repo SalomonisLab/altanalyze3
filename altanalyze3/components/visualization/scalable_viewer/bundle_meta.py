@@ -72,8 +72,12 @@ class BundleAnnData:
     no matrix is held in memory.
     """
 
-    def __init__(self, ds: da.Dataset, obs: pd.DataFrame, var_names: pd.Index):
+    def __init__(self, ds: da.Dataset, obs: pd.DataFrame, var_names: pd.Index,
+                 store: Optional[object] = None):
         self._ds = ds
+        # `store` is a da.ModalityStore. Without one the RNA store is read. Both expose
+        # the same two calls, so the column lookup below is the same code either way.
+        self._store = store
         self.obs = obs
         self.var_names = var_names
         self.n_obs = int(ds.n_cells)
@@ -81,10 +85,16 @@ class BundleAnnData:
         self.isbacked = False
 
     def _dense_column(self, gene: str) -> np.ndarray:
-        row = self._ds.resolve_gene(gene)
-        if row is None:
-            raise KeyError(gene)
-        idx, val = self._ds.gene_column(row)
+        if self._store is None:
+            row = self._ds.resolve_gene(gene)
+            if row is None:
+                raise KeyError(gene)
+            idx, val = self._ds.gene_column(row)
+        else:
+            row = self._store.resolve(gene)
+            if row is None:
+                raise KeyError(gene)
+            idx, val = self._store.feature_column(row)
         out = np.zeros(self.n_obs, dtype=np.float32)
         if idx.size:
             out[idx.astype(np.int64)] = val
@@ -166,9 +176,30 @@ def build_obs(ds: da.Dataset) -> Tuple[pd.DataFrame, Dict[str, np.ndarray], str]
         obs_filter_values[name] = text
         columns[name] = pd.Categorical(text, categories=[""] + cats)
 
+    # Numeric covariates belong in obs too. precompute.py:865 writes each one as
+    # `cov_num_<name>`, but only the categorical ones were carried across, so
+    # `adata.obs` held no measurement a panel could put on an axis. That starved
+    # app.py:3470 `_numeric_obs_columns` (the ShinyCell-style X/Y choice) and
+    # app.py:3500 `_axis_values`, which read the obs frame and found nothing.
+    # They are not display filters, so they stay out of `obs_filter_values`.
+    for name in _numeric_covariates(ds):
+        columns[name] = np.asarray(cells["cov_num_" + name], dtype=np.float32)
+
     obs = pd.DataFrame(columns, index=pd.Index(barcodes, name="barcode"))
     sample_field = _pick_sample_field(ds, categorical)
     return obs, obs_filter_values, sample_field
+
+
+def _numeric_covariates(ds: da.Dataset) -> List[str]:
+    """Names of the bundle's numeric covariates that carry a stored array.
+
+    A covariate the manifest declares but the npz never stored would raise on
+    lookup, so the array has to be present before the name is returned.
+    """
+    cells = ds.cells
+    stored = set(cells.files) if hasattr(cells, "files") else set(cells.keys())
+    return [name for name, info in (ds.covariate_names() or {}).items()
+            if info.get("kind") == "numeric" and ("cov_num_" + name) in stored]
 
 
 def _obs_names(ds: da.Dataset) -> np.ndarray:
@@ -196,12 +227,152 @@ def _umap_xy(ds: da.Dataset) -> Tuple[np.ndarray, np.ndarray]:
     return emb[:, 0].copy(), emb[:, 1].copy()
 
 
+def feature_display_map(ds: da.Dataset, modality: str) -> Dict[str, str]:
+    """{feature key: the name a reader sees} for one modality, or {}.
+
+    Empty for RNA, for a modality this bundle does not carry, and for one whose store has
+    no display column. Only the pairs that actually differ are returned, so a caller can
+    treat a non-empty map as "there is renaming to do".
+
+    ONE IMPLEMENTATION, TWO CALLERS. `build_meta` sets this for the contrast a bundle
+    opens on, and the differential-select route resets it when the reader changes
+    modality. Building it in both places separately is how the select route came to update
+    the differential block and leave the names behind.
+    """
+    if str(modality or "rna") == "rna":
+        return {}
+    try:
+        store = ds.modality(str(modality))
+        shown, keys = store.display, store.symbols
+    except (KeyError, FileNotFoundError, OSError):
+        return {}                     # a differential can outlive its modality store
+    if shown is keys or len(shown) != len(keys):
+        return {}
+    return {k: s for k, s in zip(keys, shown) if s and s != k}
+
+
+def _modalities_block(ds: da.Dataset) -> Dict[str, Any]:
+    """`meta['modalities']` from the bundle's own modality manifest.
+
+    RNA is always first and always the default. Every other entry starts from the
+    webapp's own definition of that modality id (app.py:_DEFAULT_MODALITY_DEFINITIONS),
+    so a bundle's ADT is described exactly as an ADT job's ADT is, and the bundle's
+    label and feature noun override it when precompute.py was given them.
+    """
+    available: List[Dict[str, Any]] = [dict(W._DEFAULT_MODALITY_DEFINITIONS["rna"])]
+    for modality_id, info in sorted(ds.modality_manifest().items()):
+        normalized = W._normalize_modality_id(modality_id, default="")
+        if not normalized or normalized == "rna":
+            continue
+        entry = dict(W._DEFAULT_MODALITY_DEFINITIONS.get(
+            normalized,
+            {"id": normalized, "label": normalized.upper(), "feature_label": "feature"}))
+        entry.update({
+            "id": normalized,
+            # A precomputed bundle carries no MarkerFinder run and no interaction
+            # network for an imputed modality, so those views stay off rather than
+            # opening empty.
+            "supports_marker_heatmap": False,
+            "supports_marker_network": False,
+            "supports_differential_network": False,
+            "supports_differential_go": False,
+            "n_features": int(info.get("n_features") or 0),
+            "store_kind": str(info.get("kind") or ""),
+            # A per_state STORE IS NOT OFFERED IN EXPLORE.
+            #
+            # Nathan, 2026-09-08, on the GRN edge modality: "note it still shows one value
+            # per cell state (the original error) ... we are removing it". He read it off
+            # the UMAP twice, because a per_state store gives every metacell of a
+            # population one identical value, so the embedding shows 50 flat patches and
+            # invites a within-state reading it cannot support. Measured on the
+            # COPD-metacells bundle: the edge `ARNT|GAL3ST4` takes 11 distinct values over
+            # 83,416 metacells, with 50 of 50 populations uniform.
+            #
+            # THE RULE IS THE STORE'S GRANULARITY, NOT THE MODALITY'S NAME. Naming `grn`
+            # here would hide a per-metacell edge store if one is ever built, and would
+            # keep offering some other modality that arrives at cell-state granularity.
+            # The differential list is untouched: it reads the differential status, which
+            # is a separate path, so the 13 GRN edge contrasts stay selectable there.
+            "supports_explore": str(info.get("kind") or "per_cell") != "per_state",
+        })
+        if info.get("label"):
+            entry["label"] = str(info["label"])
+        if info.get("feature_label") and info["feature_label"] != "feature":
+            entry["feature_label"] = str(info["feature_label"])
+        available.append(entry)
+    return {"default": "rna", "available": available}
+
+
+def _modality_artifacts(ds: da.Dataset) -> Dict[str, Dict[str, str]]:
+    """`meta['modality_artifacts']`, the path `_modality_h5ad_path` (app.py:297) checks.
+
+    A bundle serves a modality from its own sidecars, not from an h5ad, so the path
+    named here is the modality's feature table inside the bundle. It exists for as long
+    as the bundle does, and it identifies the store the seeded cache holds.
+    """
+    artifacts: Dict[str, Dict[str, str]] = {}
+    for modality_id in ds.modality_manifest():
+        normalized = W._normalize_modality_id(modality_id, default="")
+        if not normalized or normalized == "rna":
+            continue
+        artifacts[normalized] = {"h5ad": ds.paths.modality(modality_id).genes}
+    return artifacts
+
+
+def _grn_differential_h5ad(differential_assets, contrast_id, root=""):
+    """The GRN contrast's `differentials_only_*.h5ad`, for the GRN network panel.
+
+    app.py:2236 `_grn_edges_adata` reads
+    meta['modality_artifacts']['grn']['differential_h5ad'] and raises "GRN edge output
+    is unavailable for this job" when it is absent. Nothing set it, so the GRN network
+    never drew. cellHarmony-differential writes that object beside the DEG tables of
+    each contrast, so it is found from the fold matrix path of the selected GRN entry.
+    """
+    entries = differential_assets or {}
+    chosen = entries.get(contrast_id) if contrast_id else None
+    if not chosen or str(chosen.get("modality") or "rna") != "grn":
+        chosen = next((v for v in entries.values()
+                       if str(v.get("modality") or "rna") == "grn"), None)
+    if not chosen:
+        return ""
+    fold = str(chosen.get("fold_matrix_tsv") or "")
+    if not fold:
+        return ""
+    name = os.path.basename(fold)
+    contrast = name.replace("DEG_fold_matrix_", "").replace(".tsv", "")
+    # prepare_assets COPIES the fold matrix into the assets tree, so the contrast object
+    # is not beside it. cellHarmony-differential writes it under the analysis tree, at
+    # <root>/analysis/<differential root>/grn/<run>/<contrast>/DEGs/.
+    import glob as _glob
+    for base in (os.path.dirname(fold), os.path.join(os.path.dirname(fold), "DEGs")):
+        candidate = os.path.join(base, "differentials_only_%s.h5ad" % contrast)
+        if os.path.isfile(candidate):
+            return candidate
+    if root:
+        hits = _glob.glob(os.path.join(
+            root, "analysis", "*", "grn", "*", contrast, "DEGs",
+            "differentials_only_%s.h5ad" % contrast))
+        if hits:
+            return sorted(hits)[0]
+    return ""
+
+
+def _with_grn_differential(artifacts, differential_assets, contrast_id, root=""):
+    """Attach the GRN contrast object so the GRN network panel can open it."""
+    if "grn" in artifacts:
+        path = _grn_differential_h5ad(differential_assets, contrast_id, root)
+        if path:
+            artifacts["grn"]["network_h5ad"] = path
+    return artifacts
+
+
 def build_meta(
     ds: da.Dataset,
     *,
     state_dir: Path,
     marker_source_tsv: Optional[str] = None,
     marker_heatmap_cache: Optional[str] = None,
+    marker_heatmap_cache_full: Optional[str] = None,
     fastcomm_analysis: Optional[Dict[str, Any]] = None,
     marker_networks: Optional[List[Dict[str, str]]] = None,
     differential_assets: Optional[Dict[str, Dict[str, Any]]] = None,
@@ -224,6 +395,11 @@ def build_meta(
     }
     if marker_heatmap_cache and os.path.isfile(marker_heatmap_cache):
         marker_analysis["heatmap_cache"] = marker_heatmap_cache
+    # The all-column MarkerFinder run, offered beside the compact one. It is a SEPARATE
+    # run, not a superset: on the COPD v7 build the two share 760 of 1,248 marker rows,
+    # 60.9%, so switching density also changes which markers the heatmap draws.
+    if marker_heatmap_cache_full and os.path.isfile(marker_heatmap_cache_full):
+        marker_analysis["heatmap_cache_full"] = marker_heatmap_cache_full
     if marker_networks:
         marker_analysis["networks"] = marker_networks
 
@@ -233,12 +409,30 @@ def build_meta(
     if contrast_id:
         chosen = next((c for c in per_state if c["id"] == contrast_id), None)
     if chosen is None and per_state:
-        chosen = per_state[0]
+        # RNA opens first when the bundle carries one, so a bundle that gained an ADT or
+        # lipid differential still opens on the contrast it opened on before.
+        chosen = next((c for c in per_state if str(c.get("modality") or "rna") == "rna"),
+                      per_state[0])
+
+    # THE DIFFERENTIAL EXPLORER NAMES FEATURES THE WAY EXPLORE DOES.
+    #
+    # Nathan, 2026-09-08: "still doesn't show the label name". The DEG tables hold the KEY,
+    # `PE(16:0/22:4)`, because that is what cellHarmony was given, so the volcano hover,
+    # the feature filter and the detail panel all showed the abbreviation while Explore
+    # showed the common name.
+    #
+    # This publishes the chosen contrast's own display map. The webapp applies it in
+    # `_get_differential_detail_table` and keeps the key in a `feature_key` column, so a
+    # cellHarmony job -- which sets no such key -- is untouched, and so is every modality
+    # whose store carries no display column.
+    feature_display = feature_display_map(
+        ds, str((chosen or {}).get("modality") or "rna"))
 
     meta: Dict[str, Any] = {
         "job_id": ds.id,
         "status": "completed",
         "progress": 100,
+        "feature_display": feature_display,
         "message": f"Precomputed bundle {ds.paths.prefix} loaded from {ds.paths.bundle_dir}.",
         "created_at": ds.sv.get("built_utc"),
         "updated_at": ds.sv.get("built_utc"),
@@ -255,7 +449,14 @@ def build_meta(
             "umap_coordinates": ds.paths.umap,
             "assignments": ds.paths.clusters,
         },
-        "modalities": {"default": "rna", "available": [dict(W._DEFAULT_MODALITY_DEFINITIONS["rna"])]},
+        "modalities": _modalities_block(ds),
+        # Where the per-metacell GRN store lives, read by _grn_ragged_values (app.py).
+        "grn_ragged_dir": os.path.join(
+            os.path.abspath(os.path.join(ds.paths.bundle_dir, "..", "..", "..")),
+            "analysis", "imputed_v7_grn_ragged"),
+        "modality_artifacts": _with_grn_differential(
+            _modality_artifacts(ds), differential_assets, contrast_id,
+            os.path.abspath(os.path.join(ds.paths.bundle_dir, "..", "..", ".."))),
         "marker_analysis": marker_analysis,
         "marker_analysis_by_modality": {"rna": marker_analysis},
         "fastcomm_analysis": fastcomm_analysis or {"enabled": False},
@@ -264,7 +465,8 @@ def build_meta(
             "prefix": ds.paths.prefix,
             "state_dir": str(state_dir),
             "deg_comparisons": [
-                {"id": c["id"], "comparison": c["comparison"], "n_rows": c.get("n_rows")}
+                {"id": c["id"], "comparison": c["comparison"], "n_rows": c.get("n_rows"),
+                 "modality": str(c.get("modality") or "rna")}
                 for c in per_state
             ],
         },
@@ -356,6 +558,23 @@ def _contrast_group_field(ds, comparison, categorical: Dict[str, List[str]]
             keys = {key_of(c): c for c in cats}
             if case_key in keys and control_key in keys:
                 return field, keys[case_key], keys[control_key]
+    # The DEG label is sometimes a SHORTER form of the covariate value: the contrast
+    # says "explant" where obs holds "lung explant". An exact key match misses that, the
+    # field resolved empty, and the detail panel answered HTTP 500 for that whole
+    # contrast. Fall back to containment, accepted only when each label picks exactly
+    # ONE value, so a partial word can never silently choose between two categories.
+    for key_of in (_label_tokens, _norm_label):
+        case_key, control_key = key_of(case), key_of(control)
+        if not case_key or not control_key or case_key == control_key:
+            continue
+        for field, cats in categorical.items():
+            hits = {}
+            for slot, key in (("case", case_key), ("control", control_key)):
+                matched = [c for c in cats if c and key in key_of(c)]
+                if len(matched) == 1:
+                    hits[slot] = matched[0]
+            if len(hits) == 2 and hits["case"] != hits["control"]:
+                return field, hits["case"], hits["control"]
     return "", "", ""
 
 
@@ -395,6 +614,13 @@ def build_differential_block(ds, comparison, categorical: Dict[str, List[str]],
     go_tsv = str(assets.get("goelite_tsv") or "")
     if go_tsv and os.path.isfile(go_tsv):
         artifacts["goelite_tsv"] = go_tsv
+    # The measured folds behind the differential heatmap. Without one of these two the
+    # heatmap can only read the significant-only detailed table, and every cell state
+    # where a feature was not called is drawn as 0 (webapp/app.py:_differential_fold_rows).
+    for key in ("fold_matrix_tsv", "heatmap_tsv"):
+        path = str(assets.get(key) or "")
+        if path and os.path.isfile(path):
+            artifacts[key] = path
     networks = [n for n in (assets.get("networks") or []) if os.path.isfile(str(n.get("tsv", "")))]
     return {
         "status": "completed",
@@ -405,7 +631,7 @@ def build_differential_block(ds, comparison, categorical: Dict[str, List[str]],
         "control_label": control,
         "go_terms_included": bool(go_tsv),
         "config": {
-            "modality": "rna",
+            "modality": W._normalize_modality_id(comparison.get("modality"), default="rna"),
             "population_col": ds.cluster_key,
             "sample_field": field,
             "group1_samples": [case_value] if field else [],
@@ -422,7 +648,8 @@ def build_differential_block(ds, comparison, categorical: Dict[str, List[str]],
 # 3. Cache seeding - the step that keeps every h5ad closed
 # =================================================================================
 
-def seed_expression_cache(app, ds: da.Dataset, meta: Dict[str, Any]) -> Dict[str, Any]:
+def seed_expression_cache(app, ds: da.Dataset, meta: Dict[str, Any],
+                          modality: str = "rna") -> Dict[str, Any]:
     """Pre-fill `app.state.expression_cache` so app.py:1353 returns on its cache hit.
 
     The signature app.py:1370-1376 compares is (h5ad_path, umap_path, cluster_key,
@@ -430,21 +657,31 @@ def seed_expression_cache(app, ds: da.Dataset, meta: Dict[str, Any]) -> Dict[str
     its `ad.read_h5ad` at app.py:1391.
     """
     obs, obs_filter_values, sample_field = build_obs(ds)
-    var_names = np.asarray(ds.symbols, dtype=str)
-    adata = BundleAnnData(ds, obs, pd.Index(var_names))
+    store = None if modality == "rna" else ds.modality(modality)
+    var_names = (np.asarray(ds.symbols, dtype=str) if store is None
+                 else np.asarray(store.features, dtype=str))
+    adata = BundleAnnData(ds, obs, pd.Index(var_names), store=store)
     umap_x, umap_y = _umap_xy(ds)
     obs_names = _obs_names(ds)
 
     fields = [{"value": f, "label": f} for f in obs_filter_values]
     values = {f: sorted({v for v in vals if v}) for f, vals in obs_filter_values.items()}
-    default_primary = sample_field if sample_field in obs_filter_values else (fields[0]["value"] if fields else "")
+    # Annotation 1 opens on the study's disease axis when the bundle carries one, so both
+    # Explore windows start split by the comparison a reader came for. Nathan set this on
+    # 2026-09-02. The sample field, then the first field, remain the fallbacks for a
+    # bundle that carries no such column.
+    _preferred_primary = ("copd_status", "disease_status", "condition", "Condition")
+    default_primary = next(
+        (f for f in _preferred_primary if f in obs_filter_values),
+        sample_field if sample_field in obs_filter_values
+        else (fields[0]["value"] if fields else ""))
     default_secondary = ds.cluster_key if ds.cluster_key != default_primary else ""
 
     entry = {
-        "h5ad_path": str(W._modality_h5ad_path(meta, "rna")),
+        "h5ad_path": str(W._modality_h5ad_path(meta, modality)),
         "umap_path": str(meta.get("artifacts", {}).get("umap_coordinates") or ""),
         "cluster_key": str(ds.cluster_key),
-        "modality": "rna",
+        "modality": modality,
         "adata": adata,
         "obs_names": obs_names,
         "var_names": var_names,
@@ -462,7 +699,7 @@ def seed_expression_cache(app, ds: da.Dataset, meta: Dict[str, Any]) -> Dict[str
             "show_secondary": True,
         },
     }
-    app.state.expression_cache[f"{ds.id}:rna"] = entry
+    app.state.expression_cache[f"{ds.id}:{modality}"] = entry
     return entry
 
 
@@ -473,31 +710,39 @@ def seed_marker_heatmap_cache(app, ds: da.Dataset, meta: Dict[str, Any]) -> Opti
     read once here and never again.
     """
     marker_analysis = meta.get("marker_analysis") or {}
-    cache_path = str(marker_analysis.get("heatmap_cache") or "")
-    if not cache_path or not os.path.isfile(cache_path):
-        return None
-    with np.load(cache_path, allow_pickle=False) as npz:
-        matrix = np.asarray(npz["matrix"], dtype=np.float32)
-        row_ids = np.asarray(npz["row_ids"], dtype=str)
-        col_ids = np.asarray(npz["col_ids"], dtype=str)
-        col_barcodes = np.asarray(npz["col_barcodes"], dtype=str)
-    entry = {
-        "signature": {
+    entry = None
+    # One entry per density. The cache key and signature carry the density, so a seeded
+    # entry is found by `_get_marker_heatmap_cache_entry` (app.py) instead of being
+    # rebuilt on the first request. Keys are "<id>:<modality>:<density>".
+    for density, key in (("compact", "heatmap_cache"), ("all", "heatmap_cache_full")):
+        cache_path = str(marker_analysis.get(key) or "")
+        if not cache_path or not os.path.isfile(cache_path):
+            continue
+        with np.load(cache_path, allow_pickle=False) as npz:
+            matrix = np.asarray(npz["matrix"], dtype=np.float32)
+            row_ids = np.asarray(npz["row_ids"], dtype=str)
+            col_ids = np.asarray(npz["col_ids"], dtype=str)
+            col_barcodes = np.asarray(npz["col_barcodes"], dtype=str)
+        seeded = {
+            "signature": {
+                "modality": "rna",
+                "density": density,
+                "heatmap_cache": cache_path,
+                "heatmap_tsv": str(marker_analysis.get("heatmap_tsv") or ""),
+                "expression_tsv": str(marker_analysis.get("expression_tsv") or ""),
+            },
             "modality": "rna",
-            "heatmap_cache": cache_path,
-            "heatmap_tsv": str(marker_analysis.get("heatmap_tsv") or ""),
-            "expression_tsv": str(marker_analysis.get("expression_tsv") or ""),
-        },
-        "modality": "rna",
-        "source": "cache",
-        "source_path": Path(cache_path),
-        "matrix": matrix,
-        "row_ids": row_ids,
-        "col_ids": col_ids,
-        "col_barcodes": col_barcodes,
-        "tsv_path": None,
-    }
-    app.state.marker_heatmap_cache[f"{ds.id}:rna"] = entry
+            "source": "cache",
+            "source_path": Path(cache_path),
+            "matrix": matrix,
+            "row_ids": row_ids,
+            "col_ids": col_ids,
+            "col_barcodes": col_barcodes,
+            "tsv_path": None,
+        }
+        app.state.marker_heatmap_cache[f"{ds.id}:rna:{density}"] = seeded
+        if density == "compact":
+            entry = seeded
     return entry
 
 
@@ -542,12 +787,18 @@ class BundleJobStore:
                 # the unique and the redundant marker table (prepare_assets.py).
                 marker_source_tsv=assets.get("marker_fold_lookup_tsv") or assets.get("markers_tsv"),
                 marker_heatmap_cache=assets.get("heatmap_cache"),
+                marker_heatmap_cache_full=assets.get("heatmap_cache_full"),
                 fastcomm_analysis=assets.get("fastcomm_analysis"),
                 marker_networks=assets.get("networks"),
                 differential_assets=assets.get("differential"),
             )
             self._meta[job_id] = meta
             seed_expression_cache(app, ds, meta)
+            for entry in (meta.get("modalities") or {}).get("available", []):
+                modality_id = str(entry.get("id") or "")
+                if not modality_id or modality_id == "rna":
+                    continue
+                seed_expression_cache(app, ds, meta, modality=modality_id)
             seed_marker_heatmap_cache(app, ds, meta)
             return meta
 

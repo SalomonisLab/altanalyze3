@@ -9,15 +9,8 @@ from numpy import linalg as LA
 def determine_nmf_ranks(df, small_feature=False, rel_threshold=0.1, max_rank=30):
     # "To estimate the rank of the matrix (i.e. clusters) for SNMF, the ICGS Guide3 matrix is z-score normalized and its eigenvalues are calculated."
 
-    # Convert X to a numpy array.
-    # Cast to float64 BEFORE scaling. ICGS3 hands this a float32 matrix, and sklearn's
-    # scale() then warns "Dataset may contain too large values ... you may need to
-    # prescale" and "standard deviation is probably very close to 0" -- both are float32
-    # precision losses in the variance pass, not properties of the data. float64 is the
-    # accumulation precision scale() assumes; this does not alter the intended math, and
-    # zero-variance features are deliberately NOT dropped because g feeds the muTW /
-    # sigmaTW boundary and removing them would change k.
-    X = np.asarray(df, dtype=np.float64)
+    # Convert X to a numpy array
+    X = np.array(df)
     g = float(X.shape[0])  # Number of rows/genes
     c = float(X.shape[1])  # Number of columns/pseudobulks
     print(g)
@@ -31,6 +24,9 @@ def determine_nmf_ranks(df, small_feature=False, rel_threshold=0.1, max_rank=30)
     muTW = (np.sqrt(g - 1) + np.sqrt(c)) ** 2.0
     sigmaTW = (np.sqrt(g - 1) + np.sqrt(c)) * (1.0 / np.sqrt(g - 1) + 1.0 / np.sqrt(c)) ** (1.0 / 3.0)
 
+    # Compute the covariance matrix
+    sigmaHat = np.dot(Xt, X)
+
     # Calculate the threshold boundary
     boundary = 3.273 * sigmaTW + muTW
     print(boundary)
@@ -38,20 +34,6 @@ def determine_nmf_ranks(df, small_feature=False, rel_threshold=0.1, max_rank=30)
     # sigmaHat = Xt @ X is a symmetric Gram matrix, so eigh gives the SAME (real)
     # eigenvalues as eig but is far faster and numerically stable -- LA.eig on a
     # samples x samples matrix is O(n^3) and was the full-scale bottleneck.
-    #
-    # Xt @ X (c x c) and X @ Xt (g x g) share their ENTIRE non-zero spectrum; the
-    # larger Gram matrix only pads with |c - g| exact zeros. Zeros never clear the
-    # positive Tracy-Widom boundary, so counting eigenvalues above `boundary` on the
-    # SMALLER Gram matrix returns an identical k. On genes x cells input with
-    # c >> g (e.g. 2,773 x 15,000) this replaces a 15,000^2 matrix (1.8 GB, O(c^3)
-    # eigh) with a 2,773^2 matrix (62 MB, O(g^3)) -- the ICGS2-era Guide3 matrix had
-    # few columns, so the original orientation was never the bottleneck it is here.
-    # The muTW/sigmaTW/boundary formulas above are UNCHANGED and still use the
-    # original (n=rows, p=cols) convention.
-    if c > g:
-        sigmaHat = np.dot(X, Xt)   # g x g
-    else:
-        sigmaHat = np.dot(Xt, X)   # c x c
     w = LA.eigh(sigmaHat)[0]
 
     if not small_feature:
@@ -84,99 +66,38 @@ Main steps in the run_nmf function:
 '''
 
 
-def run_nmf(df, rank, n_run=5, assignment_normalization=None):
+def run_nmf(df, rank, n_run=5):
     """n_run: number of NMF restarts. Default 5 -- the original pyudon stability default
     (the developer kept multiple runs to keep clustering stable). seed='nndsvd' is a
     deterministic init, so n_run=1 is a validated faster opt-in (run1-vs-run2 ARI=1.000).
     Override globally without threading args via the env var UDON_NMF_RUNS (e.g. =1 for speed)."""
     import os
-    import scipy.sparse as _sp
     n_run = int(os.environ.get("UDON_NMF_RUNS", n_run))
-    engine = str(os.environ.get("UDON_NMF_ENGINE", "sklearn")).lower()
+    mat = df.to_numpy()
+    mat_t = mat.transpose()
 
-    # Build the cells x features matrix WITHOUT a dense float64 round trip. nimfa's
-    # SNMF/L active-set solver cost ~281 s per iteration at rank 128 on 15,000 x 2,773
-    # and densifies everything; sklearn's NMF is a Cython coordinate-descent solver that
-    # accepts scipy sparse directly and runs float32.
-    if _sp.issparse(getattr(df, "values", None)) or _sp.issparse(df):
-        mat_t = (df.values if hasattr(df, "values") else df).T.tocsr()
-        columns = df.columns
-    else:
-        arr = df.to_numpy(dtype=np.float32, copy=False)
-        mat_t = np.ascontiguousarray(arr.T)
-        columns = df.columns
-        del arr
-    # Single-cell input is ~90% zeros; CSR cuts memory and lets CD skip the zeros.
-    if not _sp.issparse(mat_t):
-        density = float(np.count_nonzero(mat_t)) / max(1, mat_t.size)
-        if density < 0.5:
-            mat_t = _sp.csr_matrix(mat_t)
-    np.clip(mat_t.data if _sp.issparse(mat_t) else mat_t, 0, None,
-            out=(mat_t.data if _sp.issparse(mat_t) else mat_t))
-
+    # sd cannot be 0 across all rows/cols? ##what does nimfa snmf do when some columns or even rows are all 0s? ## see source for their checks
+    # enter try statement here
     w = None
-    if engine == "sklearn":
-        try:
-            from sklearn.decomposition import NMF as _SkNMF
-            best_err = None
-            for _run in range(max(1, int(n_run))):
-                model = _SkNMF(
-                    n_components=int(rank),
-                    init="nndsvd",          # deterministic, matches the previous seed
-                    solver="cd",            # Cython coordinate descent
-                    beta_loss="frobenius",
-                    tol=1e-4,
-                    max_iter=200,
-                    random_state=42 + _run,
-                )
-                w_run = model.fit_transform(mat_t)   # cells x rank
-                if best_err is None or model.reconstruction_err_ < best_err:
-                    best_err, w = model.reconstruction_err_, w_run
-        except KeyboardInterrupt:
-            raise
-        except Exception as exc:
-            print(f"[UDON NMF] sklearn engine failed ({type(exc).__name__}: {exc}); falling back to nimfa")
-            w = None
+    try:
+        nmf = nimfa.Snmf(mat_t, seed="nndsvd", rank=int(rank), max_iter=20, n_run=int(n_run),
+                         track_factor=False)
+        nmf_fit = nmf()
+        w = nmf_fit.basis()
+    except ValueError:
+        w = mat  # this needs to change -- how are errors handled?
 
-    if w is None:
-        dense_t = mat_t.toarray() if _sp.issparse(mat_t) else mat_t
-        try:
-            nmf = nimfa.Snmf(dense_t, seed="nndsvd", rank=int(rank), max_iter=20, n_run=int(n_run),
-                             track_factor=False)
-            nmf_fit = nmf()
-            w = nmf_fit.basis()
-        except KeyboardInterrupt:
-            raise
-        except ValueError:
-            w = df.to_numpy()  # this needs to change -- how are errors handled?
-    w = np.asarray(w)
+    finally:
+        nmf_matrix = pd.DataFrame(w.transpose(), columns=df.columns)
 
-    nmf_matrix = pd.DataFrame(w.transpose(), columns=df.columns)
-
-    nmf_clusters = binarize_nmf(w, normalization=assignment_normalization)
+    nmf_clusters = binarize_nmf(w)
     nmf_clusters.index = df.columns
 
     return nmf_matrix, nmf_clusters
 
 
-def binarize_nmf(w, normalization=None):
-    w = np.asarray(w).transpose()
-    if normalization:
-        method = str(normalization).lower()
-        if method == "rowmax":
-            denom = np.maximum(w.max(axis=1, keepdims=True), 1e-12)
-            w = w / denom
-        elif method == "rowsum":
-            denom = np.maximum(w.sum(axis=1, keepdims=True), 1e-12)
-            w = w / denom
-        elif method == "zscore":
-            denom = np.maximum(w.std(axis=1, keepdims=True), 1e-12)
-            w = (w - w.mean(axis=1, keepdims=True)) / denom
-        elif method == "quantile95":
-            denom = np.maximum(np.quantile(w, 0.95, axis=1, keepdims=True), 1e-12)
-            w = w / denom
-        elif method not in {"raw", "none"}:
-            raise ValueError(f"Unsupported NMF assignment normalization: {normalization}")
+def binarize_nmf(w):
+    w = w.transpose()
     # components = w.shape[0]  # this is number of rows/components
     samples = w.shape[1]  # number of columns/samples
 

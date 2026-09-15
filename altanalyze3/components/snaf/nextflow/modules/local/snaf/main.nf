@@ -1,53 +1,35 @@
-// nf-core-style DSL2 module: SNAF full MHC-bound T-antigen pipeline
+def sq(x) { "'" + x.toString().replace("'", "'\\''") + "'" }
 process SNAF {
     tag "$meta.id"
     label 'process_high'
-
-    conda "${moduleDir}/environment.yml"
-    container "${ workflow.containerEngine == 'singularity' && !task.ext.singularity_pull_docker_container ?
-        'oras://community.wave.seqera.io/library/altanalyze3:latest' :
-        'community.wave.seqera.io/library/altanalyze3:latest' }"
-
     input:
     tuple val(meta), path(juncounts), path(hla)
     path db_dir
     path genome_fasta
-
+    path canonical_fasta
+    path mhcflurry_models
     output:
-    tuple val(meta), path("${prefix}/T_candidates/*")    , emit: candidates, optional: true
-    tuple val(meta), path("${prefix}/frequency_stage*")  , emit: frequency,  optional: true
-    tuple val(meta), path("${prefix}/burden_stage*")     , emit: burden,     optional: true
-    tuple val(meta), path("${prefix}/after_prediction.p"), emit: pickle,     optional: true
-    path "versions.yml"                                  , emit: versions
-
-    when:
-    task.ext.when == null || task.ext.when
-
+    tuple val(meta), path("${meta.id}/T_candidates"), emit: candidates
+    tuple val(meta), path("${meta.id}/frequency_stage*"), emit: frequency
+    path "${meta.id}/proteomics_export", emit: bundle
+    path "${meta.id}/after_prediction.p", emit: pickle
     script:
-    def args    = task.ext.args ?: ''
-    def genome  = genome_fasta.name != 'NO_FILE' ? "--genome_fasta ${genome_fasta}" : ''
-    prefix      = task.ext.prefix ?: "${meta.id}"
+    def genome = genome_fasta ? "--genome_fasta ${sq(genome_fasta)}" : ''
+    def canonical = canonical_fasta ? "--canonical_fasta ${sq(canonical_fasta)}" : ''
+    def external = params.netmhcpan_path ? "--software_path ${sq(params.netmhcpan_path)}" : ''
+    def modelEnv = mhcflurry_models ? "export MHCFLURRY_DOWNLOADS_DIR=${sq(mhcflurry_models)}" : ''
+    def args = task.ext.args ?: ''
     """
-    export SNAF_OFFLINE=\${SNAF_OFFLINE:-0}
-    altanalyze3 snaf \\
-        --juncounts ${juncounts} \\
-        --db_dir ${db_dir} \\
-        --hla ${hla} \\
-        --output ${prefix} \\
-        --cpus ${task.cpus} \\
-        ${genome} \\
-        ${args}
-
-    cat <<-END_VERSIONS > versions.yml
-    "${task.process}":
-        altanalyze3: \$(altanalyze3 --version 2>&1 | tr -d '\\n')
-    END_VERSIONS
+    export SNAF_OFFLINE=1
+    ${modelEnv}
+    altanalyze3 snaf --juncounts ${sq(juncounts)} --db_dir ${sq(db_dir)} --hla ${sq(hla)} --output '${meta.id}' --cpus ${task.cpus} --binding_method '${params.binding_method}' --export_proteomics ${genome} ${canonical} ${external} ${args}
     """
-
     stub:
-    prefix = task.ext.prefix ?: "${meta.id}"
     """
-    mkdir -p ${prefix}/T_candidates
-    touch ${prefix}/after_prediction.p versions.yml
+    mkdir -p '${meta.id}/T_candidates' '${meta.id}/proteomics_export'
+    touch '${meta.id}/frequency_stage0.txt' '${meta.id}/after_prediction.p'
+    printf 'candidate_id\\tsource_id\\tsample_id\\tpeptide\\tevent_id\\thla_allele\\n' > '${meta.id}/proteomics_export/candidates.tsv'
+    printf 'source_id\\tsource_type\\tfasta_path\\tfasta_record\\n' > '${meta.id}/proteomics_export/source_manifest.tsv'
+    touch '${meta.id}/proteomics_export/candidates.fasta'
     """
 }

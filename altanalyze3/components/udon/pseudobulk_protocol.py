@@ -25,14 +25,20 @@ CHRY_MARKERS = ["RPS4Y1","DDX3Y","EIF1AY","KDM5D","UTY","USP9Y","NLGN4Y","TMSB4Y
 SEX_GENES = set(CHRY_MARKERS + ["XIST"])
 
 
-def filter_udon_genes(genes, species="Hs", pc_path=None, min_pc_frac=0.5, logger=print):
+def filter_udon_genes(genes, species="Hs", pc_path=None, min_pc_frac=0.5, logger=print,
+                      drop_sex_genes=True, drop_mito=True):
     """Restrict UDON features to minimize batch effects, done up front on the feature set:
       - protein-coding only (requires a species annotation; applied ONLY if the majority of
         detected features match it, else the namespace likely differs and we don't restrict),
       - drop ribosomal genes (symbol begins with RPL/RPS, e.g. RPL*/RPS*; mouse Rpl/Rps too),
-      - drop XIST and TSIX (X-inactivation; strong sex-batch drivers).
-    Y-chromosome genes are ALWAYS kept (loss-of-Y in confirmed males is a real disease signal),
-    which also exempts the Y-linked RPS4Y1/RPS4Y2 from the ribosomal rule. Returns kept genes."""
+      - drop XIST and TSIX (X-inactivation; strong sex-batch drivers),
+      - drop_sex_genes (default True): also drop the Y-chromosome markers, so no feature can
+        separate pseudobulks by donor sex. Set False for loss-of-Y work, where Y expression is
+        the signal rather than a confounder; that restores the older Y-always-kept behaviour and
+        exempts the Y-linked RPS4Y1/RPS4Y2 from the ribosomal rule,
+      - drop_mito (default True): drop mitochondrial genes (MT-/mt- prefix), which track
+        dissociation stress and ambient RNA rather than cell state.
+    Returns kept genes."""
     import os
     if pc_path is None:
         pc_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ProteinCoding-Hs-Mm.txt")
@@ -46,20 +52,25 @@ def filter_udon_genes(genes, species="Hs", pc_path=None, min_pc_frac=0.5, logger
     elif restrict_pc:
         logger(f"[gene-filter] protein-coding ({species}): {frac:.0%} of features matched -> restricting")
     Y = {g.upper() for g in CHRY_MARKERS}
-    keep, n_nc, n_rib, n_x = [], 0, 0, 0
+    keep, n_nc, n_rib, n_x, n_y, n_mt = [], 0, 0, 0, 0, 0
     for g, s in zip(genes, sym):
         u = s.upper()
-        if u in Y:                                       # always keep Y (loss-of-Y indicator)
-            keep.append(g); continue
+        if u in Y:
+            if drop_sex_genes:
+                n_y += 1; continue                       # sex gene: drop with XIST/TSIX
+            keep.append(g); continue                     # loss-of-Y mode: keep, exempt from RPL/RPS
         if restrict_pc and s not in pc:
             n_nc += 1; continue
         if u in ("XIST", "TSIX"):
             n_x += 1; continue
-        if u.startswith("RPL") or u.startswith("RPS"):   # ribosomal (RPS4Y* already kept above)
+        if drop_mito and u.startswith("MT-"):            # mitochondrial (Hs MT-, Mm mt- upper-cased)
+            n_mt += 1; continue
+        if u.startswith("RPL") or u.startswith("RPS"):   # ribosomal
             n_rib += 1; continue
         keep.append(g)
+    tail = (f"{n_y} Y-chromosome/sex" if drop_sex_genes else "Y-chromosome genes kept")
     logger(f"[gene-filter] {len(genes)} -> {len(keep)} features (dropped {n_nc} non-coding, "
-           f"{n_rib} ribosomal RPL/RPS, {n_x} XIST/TSIX; Y-chromosome genes kept)")
+           f"{n_rib} ribosomal RPL/RPS, {n_x} XIST/TSIX, {n_mt} mitochondrial MT-, {tail})")
     return keep
 
 

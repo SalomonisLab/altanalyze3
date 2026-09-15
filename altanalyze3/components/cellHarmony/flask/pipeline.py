@@ -311,8 +311,16 @@ def _attach_imputed_expression_metadata(
     return info
 
 
-def _build_imputed_lipid_adata(query_adata: ad.AnnData) -> tuple[ad.AnnData, Dict[str, object]]:
-    bundle = load_rna2lipid_bundle()
+def _build_imputed_lipid_adata(
+    query_adata: ad.AnnData,
+    reference_entry: Optional[Dict[str, object]] = None,
+) -> tuple[ad.AnnData, Dict[str, object]]:
+    # The reference may name its own tissue-specific lipid bundle. When it does
+    # not, rna2lipid's DEFAULT_BUNDLE_PATH is used, which is the human lung
+    # sparse lipid-by-lipid model.
+    impute_config = _reference_impute_config(reference_entry or {}, "lipids")
+    bundle_path = impute_config.get("bundle_path")
+    bundle = load_rna2lipid_bundle(bundle_path) if bundle_path else load_rna2lipid_bundle()
     prediction = bundle.predict_from_adata(query_adata)
     prediction_df = prediction.predictions.reindex(query_adata.obs_names)
     prediction_matrix = np.asarray(prediction_df.to_numpy(dtype=np.float32), dtype=np.float32)
@@ -333,8 +341,10 @@ def _build_imputed_lipid_adata(query_adata: ad.AnnData) -> tuple[ad.AnnData, Dic
     scale_info = _attach_imputed_expression_metadata(
         lipid_adata,
         prediction_matrix,
-        expression_scale="log2",
-        log_base=2.0,
+        expression_scale=_normalize_expression_scale(
+            impute_config.get("expression_scale", "log2"), default="log2"
+        ),
+        log_base=impute_config.get("log_base", 2.0),
     )
     for key in ("X_umap",):
         if key in query_adata.obsm:
@@ -1586,8 +1596,24 @@ def run_cellharmony_pipeline(
     if "lipids" in selected_impute_modalities:
         store.update_job(job_id, progress=88, message="Imputing lipid profiles from aligned RNA.")
         store.append_log(job_id, "Running rna2lipid lipid imputation.")
-        store.append_log(job_id, "[params] rna2lipid bundle=default input=aligned_query_adata modality=lipids")
-        lipid_adata, lipid_summary = _build_imputed_lipid_adata(approx_result.query_adata)
+        lipid_impute_config = _reference_impute_config(reference_entry, "lipids")
+        store.append_log(
+            job_id,
+            "[params] rna2lipid bundle="
+            f"{lipid_impute_config.get('bundle_path') or 'default'} "
+            "input=aligned_query_adata modality=lipids",
+        )
+        lipid_adata, lipid_summary = _build_imputed_lipid_adata(
+            approx_result.query_adata, reference_entry
+        )
+        store.append_log(
+            job_id,
+            "[params] rna2lipid resolved bundle="
+            f"{lipid_summary.get('bundle_path')} "
+            f"architecture={lipid_summary.get('architecture')} "
+            f"lipids={lipid_summary.get('output_lipid_count')} "
+            f"matched_genes={lipid_summary.get('matched_genes')}/{lipid_summary.get('model_gene_count')}",
+        )
         lipid_h5ad_path = outputs_dir / "combined_with_umap_and_markers_lipids.h5ad"
         approx_result.query_adata.obsm["X_lipids"] = np.asarray(lipid_adata.X, dtype=np.float32)
         approx_result.query_adata.uns["lipid_feature_names"] = lipid_adata.var_names.astype(str).tolist()
@@ -2414,6 +2440,21 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
         coreg_deg.to_csv(path, sep="\t", index=False)
         deg_artifacts[path.stem] = path
         print(f"[INFO] Wrote {path}")
+    # The complete gene x cell-state fold matrix. Every gene has a measured fold in
+    # every cell state, significant or not; the detailed table holds only the genes
+    # that passed the filters, so the viewer heatmap needs this file to colour a row
+    # across the states where the gene was not called.
+    fold_matrix_path = None
+    fold_matrix = de_store.get("fold_matrix")
+    if fold_matrix is not None and not fold_matrix.empty:
+        fold_matrix_path = deg_dir / f"DEG_fold_matrix_{comparison_tag}.tsv"
+        fold_matrix.to_csv(fold_matrix_path, sep="\t")
+        deg_artifacts[fold_matrix_path.stem] = fold_matrix_path
+        print(f"[INFO] Wrote {fold_matrix_path} "
+              f"({fold_matrix.shape[0]} features x {fold_matrix.shape[1]} cell states)")
+    else:
+        print("[WARN] de_store carries no fold_matrix; the viewer heatmap falls back to "
+              "the heatmap TSV and then to the significant-only detailed table.")
     differential_h5ad_path = deg_dir / f"differentials_only_{comparison_tag}.h5ad"
     cellHarmony_differential.write_differentials_only_h5ad(adata, de_store, str(differential_h5ad_path))
 
@@ -2520,6 +2561,8 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
         differential_artifacts["heatmap_svg"] = heatmap_svg
     if heatmap_tsv is not None:
         differential_artifacts["heatmap_tsv"] = heatmap_tsv
+    if fold_matrix_path is not None:
+        differential_artifacts["fold_matrix_tsv"] = fold_matrix_path
     goelite_tsv = goelite_dir / f"GOElite_{NetPerspective.safe_component(comparison_tag)}.tsv"
     if goelite_tsv.exists():
         differential_artifacts["goelite_tsv"] = goelite_tsv

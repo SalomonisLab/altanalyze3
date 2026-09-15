@@ -1,0 +1,106 @@
+name: SNAF portable workflow
+on:
+  pull_request:
+    paths:
+      - 'altanalyze3/components/neoantigen/**'
+      - 'altanalyze3/components/snaf/**'
+      - 'altanalyze3/components/gene_model/**'
+      - 'altanalyze3/components/intron_count/**'
+      - 'altanalyze3/components/aggregate/**'
+      - 'altanalyze3/deployment/**'
+      - 'pyproject.toml'
+      - '.github/workflows/snaf-portable.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        nextflow: ['25.04.8', '25.10.0']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install locked runtime and local package
+        run: |
+          pip install --require-hashes -r altanalyze3/deployment/containers/requirements-linux-x86_64.txt
+          pip install --no-deps -e .
+          pip install build jsonschema
+          pip check
+      - name: Interface and modernization tests
+        run: python -m pytest altanalyze3/components/neoantigen/tests altanalyze3/components/snaf/tests/test_snaf_modernization.py -q
+      - name: Build and check wheel
+        run: |
+          python -m build --wheel
+          python altanalyze3/deployment/tests/check_artifacts.py --wheel dist/altanalyze3-0.1.3-py3-none-any.whl
+      - name: Install Nextflow
+        env:
+          NXF_VER: ${{ matrix.nextflow }}
+        run: |
+          curl -fsSL "https://github.com/nextflow-io/nextflow/releases/download/v${NXF_VER}/nextflow" -o /tmp/nextflow
+          chmod +x /tmp/nextflow
+      - name: Real BAM fixture and prediction orchestration
+        env:
+          NXF_VER: ${{ matrix.nextflow }}
+          NEXTFLOW_BIN: /tmp/nextflow
+          SNAF_TEST_WORK: ${{ runner.temp }}/snaf-test
+        run: bash altanalyze3/components/snaf/nextflow/tests/smoke.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: snaf-native-${{ matrix.nextflow }}
+          path: ${{ runner.temp }}/snaf-test
+  galaxy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install 'planemo==0.75.33' 'galaxy-tool-util-models==25.0.4'
+      - run: planemo lint altanalyze3/deployment/galaxy/*.xml
+  containers:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - run: pip install build pysam
+      - run: bash altanalyze3/deployment/containers/build.sh
+      - name: Install Nextflow and Apptainer
+        run: |
+          curl -fsSL https://github.com/nextflow-io/nextflow/releases/download/v25.04.8/nextflow -o /tmp/nextflow
+          chmod +x /tmp/nextflow
+          sudo add-apt-repository -y ppa:apptainer/ppa
+          sudo apt-get update
+          sudo apt-get install -y apptainer
+          command -v singularity || sudo ln -s "$(command -v apptainer)" /usr/local/bin/singularity
+      - name: Docker runtime
+        env:
+          NXF_VER: '25.04.8'
+          NEXTFLOW_BIN: /tmp/nextflow
+        run: bash altanalyze3/components/snaf/nextflow/tests/smoke.sh -profile docker
+      - name: Singularity-compatible runtime
+        env:
+          NXF_VER: '25.04.8'
+          NEXTFLOW_BIN: /tmp/nextflow
+        run: |
+          docker save altanalyze3-snaf:0.1.3 -o /tmp/snaf-image.tar
+          apptainer build /tmp/snaf.sif docker-archive:///tmp/snaf-image.tar
+          bash altanalyze3/components/snaf/nextflow/tests/smoke.sh -profile singularity --container /tmp/snaf.sif

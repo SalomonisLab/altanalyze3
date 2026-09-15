@@ -925,6 +925,15 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse", gene
     junction_db = sort_isoforms_with_ENST_first(junction_db)
 
     if collapse_isoforms == False:
+        # Compress the per-sample molecule table. It is the largest single text product of the
+        # extraction (1.4M rows on the ENCODE PC-3 sample) and every reader resolves either form
+        # through io_utils.smart_open.
+        try:
+            from .io_utils import compress as _compress
+            transcript_associations = _compress(transcript_associations, log=print)
+            _compress(transcript_associations_raw, log=print)
+        except Exception as _e:
+            print(f"[compress] transcript_associations left uncompressed: {type(_e).__name__}: {_e}")
         return transcript_associations
     else:
         """ Most isoforms should be redundant between samples - collapse isoforms based on redundant junctions

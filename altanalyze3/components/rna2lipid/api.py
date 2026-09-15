@@ -24,7 +24,12 @@ except ImportError:  # pragma: no cover
 import pickle
 
 
-DEFAULT_BUNDLE_PATH = Path(__file__).with_name("newnormelastic_multitask_try.pkl")
+# Default lung bundle. Sparse lipid-by-lipid ElasticNetCV, one model per lipid.
+DEFAULT_BUNDLE_PATH = Path(__file__).with_name("rna2lipid_hs_lung_lipidwise_bundle.pkl")
+
+# Prior lung bundle. Single MultiTaskElasticNetCV over all lipids. Kept for
+# provenance and for reproducing results published before 2026-08-30.
+LEGACY_MULTITASK_BUNDLE_PATH = Path(__file__).with_name("newnormelastic_multitask_try.pkl")
 
 
 def _clean_labels(values: Iterable[object]) -> List[str]:
@@ -73,65 +78,194 @@ def _transformer_is_fitted(transformer) -> bool:
     return True
 
 
+
 class Rna2LipidBundle:
+
     def __init__(
         self,
         *,
         bundle_path: Path,
-        model,
-        scaler_x,
-        scaler_y,
+        model=None,
+        models=None,
+        scaler_x=None,
+        scaler_y=None,
         input_genes: Sequence[str],
         output_lipids: Sequence[str],
         metadata: Optional[Dict[str, object]] = None,
     ) -> None:
+
         self.bundle_path = Path(bundle_path)
+
+        # Old architecture:
+        # bundle["model"]
         self.model = model
+
+        # New architecture:
+        # bundle["models"][lipid]["model"]
+        self.models = models or {}
+
         self.scaler_x = scaler_x
         self.scaler_y = scaler_y
-        self.input_genes = tuple(_clean_labels(input_genes))
-        self.output_lipids = tuple(_clean_labels(output_lipids))
+
+        self.input_genes = tuple(
+            _clean_labels(input_genes)
+        )
+
+        self.output_lipids = tuple(
+            _clean_labels(output_lipids)
+        )
+
         self.metadata = metadata or {}
-        self.target_scaling_mode = _model_output_scaling_mode(self.metadata, scaler_y)
-        self._input_gene_to_index = {gene: idx for idx, gene in enumerate(self.input_genes)}
+
+        self.target_scaling_mode = (
+            _model_output_scaling_mode(
+                self.metadata,
+                scaler_y,
+            )
+        )
+
+        self._input_gene_to_index = {
+            gene: idx
+            for idx, gene
+            in enumerate(self.input_genes)
+        }
+
+        if self.models:
+            self.architecture = "lipidwise"
+
+        elif self.model is not None:
+            self.architecture = "single_model"
+
+        else:
+            raise ValueError(
+                "Bundle contains neither "
+                "'model' nor 'models'."
+            )
+
 
     @classmethod
-    def load(cls, bundle_path: Path | str = DEFAULT_BUNDLE_PATH) -> "Rna2LipidBundle":
+    def load(
+        cls,
+        bundle_path: Path | str = DEFAULT_BUNDLE_PATH,
+    ) -> "Rna2LipidBundle":
+
         bundle_path = Path(bundle_path)
+
         with warnings.catch_warnings():
-            warnings.simplefilter("ignore", InconsistentVersionWarning)
+            warnings.simplefilter(
+                "ignore",
+                InconsistentVersionWarning,
+            )
+
             with bundle_path.open("rb") as handle:
                 bundle = pickle.load(handle)
 
-        required = {"model", "scaler_x", "X_columns", "Y_columns"}
+        if not isinstance(bundle, dict):
+            raise TypeError(
+                "RNA2Lipid bundle must be a dictionary."
+            )
+
+        required = {
+            "scaler_x",
+            "X_columns",
+            "Y_columns",
+        }
+
         missing = required.difference(bundle)
+
         if missing:
-            raise ValueError(f"Model bundle is missing required keys: {sorted(missing)}")
+            raise ValueError(
+                "Model bundle is missing required keys: "
+                f"{sorted(missing)}"
+            )
+
+        has_single_model = (
+            bundle.get("model") is not None
+        )
+
+        has_lipidwise_models = (
+            isinstance(
+                bundle.get("models"),
+                dict,
+            )
+            and bool(bundle["models"])
+        )
+
+        if not has_single_model and not has_lipidwise_models:
+            raise ValueError(
+                "Model bundle must contain either "
+                "'model' for the legacy single-model "
+                "architecture or 'models' for the "
+                "lipid-wise architecture."
+            )
+
+        metadata = dict(
+            bundle.get("metadata") or {}
+        )
+
+        # Preserve useful metadata from newer bundles.
+        for key in (
+            "model_name",
+            "architecture",
+            "model_type",
+            "model_architecture",
+            "top_gene_options",
+            "l1_ratio_grid",
+            "alpha_grid",
+            "cv_folds",
+            "max_iter",
+            "sparsity_penalty",
+            "random_seed",
+            "final_training_seconds",
+            "validation_global_metrics",
+        ):
+            if key in bundle:
+                metadata.setdefault(
+                    key,
+                    bundle[key],
+                )
 
         return cls(
             bundle_path=bundle_path,
-            model=bundle["model"],
+            model=bundle.get("model"),
+            models=bundle.get("models"),
             scaler_x=bundle["scaler_x"],
             scaler_y=bundle.get("scaler_y"),
             input_genes=bundle["X_columns"],
             output_lipids=bundle["Y_columns"],
-            metadata=bundle.get("metadata"),
+            metadata=metadata,
         )
+
 
     def model_info(self) -> Dict[str, object]:
         info = {
             "bundle_path": str(self.bundle_path),
             "n_input_genes": len(self.input_genes),
             "n_output_lipids": len(self.output_lipids),
-            "model_class": type(self.model).__name__,
+            "architecture": self.architecture,
+            "model_class": (
+                "lipidwise"
+                if self.architecture == "lipidwise"
+                else type(self.model).__name__
+            ),
             "scaler_x_class": type(self.scaler_x).__name__,
-            "scaler_y_class": type(self.scaler_y).__name__ if self.scaler_y is not None else None,
+            "scaler_y_class": (
+                type(self.scaler_y).__name__
+                if self.scaler_y is not None
+                else None
+            ),
             "target_scaling_mode": self.target_scaling_mode,
         }
+
+        if self.architecture == "lipidwise":
+            info["n_lipid_models"] = len(self.models)
+
         if self.metadata:
             info["metadata"] = self.metadata
+
         return info
 
+        
     def predict_from_dataframe(self, expression: pd.DataFrame) -> PredictionResult:
         aligned, matched_genes = self._align_dataframe(expression)
         predicted = self._predict_aligned_matrix(aligned)
@@ -321,20 +455,244 @@ class Rna2LipidBundle:
 
         return aligned
 
-    def _predict_aligned_matrix(self, aligned_matrix) -> pd.DataFrame:
-        if not isinstance(aligned_matrix, pd.DataFrame):
-            aligned_matrix = pd.DataFrame(aligned_matrix, columns=self.input_genes)
-        transformed = self.scaler_x.transform(aligned_matrix)
-        predicted = self.model.predict(transformed)
-        if self.target_scaling_mode == "standard":
-            if self.scaler_y is None or not _transformer_is_fitted(self.scaler_y):
+    def _predict_aligned_matrix(
+        self,
+        aligned_matrix,
+    ) -> pd.DataFrame:
+
+        if not isinstance(
+            aligned_matrix,
+            pd.DataFrame,
+        ):
+            aligned_matrix = pd.DataFrame(
+                aligned_matrix,
+                columns=self.input_genes,
+            )
+
+        # Scale complete RNA matrix using the training scaler.
+        transformed = self.scaler_x.transform(
+            aligned_matrix
+        )
+
+        transformed_df = pd.DataFrame(
+            np.asarray(
+                transformed,
+                dtype=float,
+            ),
+            index=aligned_matrix.index,
+            columns=self.input_genes,
+        )
+
+        # NEW LIPID-WISE ARCHITECTURE
+
+        if self.architecture == "lipidwise":
+
+            if not self.models:
                 raise ValueError(
-                    f"Bundle {self.bundle_path} declares standardized target outputs but scaler_y is unavailable or unfitted."
+                    "Architecture is 'lipidwise' but "
+                    "self.models is empty."
                 )
-            predicted = self.scaler_y.inverse_transform(predicted)
+
+            prediction_columns = {}
+
+            for lipid in self.output_lipids:
+
+                if lipid not in self.models:
+                    raise ValueError(
+                        f"No model entry exists for lipid {lipid!r}"
+                    )
+
+                model_info = self.models[lipid]
+
+                if not isinstance(model_info, dict):
+                    raise TypeError(
+                        f"Model entry for {lipid!r} is "
+                        f"{type(model_info).__name__}; expected dict."
+                    )
+
+                estimator = model_info.get("model")
+
+                if estimator is None:
+                    raise ValueError(
+                        f"The stored model for lipid {lipid!r} is None."
+                    )
+
+                if not hasattr(estimator, "predict"):
+                    raise TypeError(
+                        f"The stored model for lipid {lipid!r} "
+                        f"is {type(estimator).__name__} and does "
+                        "not have predict()."
+                    )
+
+                selected_genes = model_info.get(
+                    "genes"
+                )
+
+                if not selected_genes:
+                    raise ValueError(
+                        f"No selected genes were stored for "
+                        f"lipid {lipid!r}."
+                    )
+
+                selected_genes = [
+                    str(gene).strip()
+                    for gene in selected_genes
+                ]
+
+                missing = [
+                    gene
+                    for gene in selected_genes
+                    if gene not in transformed_df.columns
+                ]
+
+                if missing:
+                    raise ValueError(
+                        f"Model for lipid {lipid!r} contains "
+                        f"{len(missing)} genes that are not in "
+                        f"X_columns. First missing genes: "
+                        f"{missing[:10]}"
+                    )
+
+                lipid_matrix = (
+                    transformed_df
+                    .loc[:, selected_genes]
+                    .to_numpy(dtype=float)
+                )
+
+                expected_features = getattr(
+                    estimator,
+                    "n_features_in_",
+                    None,
+                )
+
+                if expected_features is not None:
+
+                    if (
+                        int(expected_features)
+                        != lipid_matrix.shape[1]
+                    ):
+                        raise ValueError(
+                            f"Lipid {lipid!r}: estimator expects "
+                            f"{int(expected_features)} genes but "
+                            f"{lipid_matrix.shape[1]} were supplied."
+                        )
+
+                try:
+
+                    lipid_prediction = estimator.predict(
+                        lipid_matrix
+                    )
+
+                except Exception as exc:
+
+                    raise RuntimeError(
+                        f"Prediction failed specifically for "
+                        f"lipid {lipid!r} using model "
+                        f"{type(estimator).__name__}: {exc}"
+                    ) from exc
+
+                prediction_columns[lipid] = (
+                    np.asarray(
+                        lipid_prediction,
+                        dtype=float,
+                    )
+                    .reshape(-1)
+                )
+
+            predicted = (
+                pd.DataFrame(
+                    prediction_columns,
+                    index=aligned_matrix.index,
+                )
+                .reindex(
+                    columns=self.output_lipids
+                )
+                .to_numpy(dtype=float)
+            )
+
+        # old SINGLE-MODEL ARCHITECTURE
+        elif self.architecture == "single_model":
+
+            if self.model is None:
+                raise ValueError(
+                    "Architecture is 'single_model' but "
+                    "self.model is None. This bundle may actually "
+                    "be a lipid-wise bundle."
+                )
+
+            if not hasattr(
+                self.model,
+                "predict",
+            ):
+                raise TypeError(
+                    "Legacy model does not have predict()."
+                )
+
+            predicted = self.model.predict(
+                transformed
+            )
+
+            predicted = np.asarray(
+                predicted,
+                dtype=float,
+            )
+
+            if predicted.ndim == 1:
+                predicted = predicted.reshape(
+                    -1,
+                    1,
+                )
+
         else:
-            predicted = np.asarray(predicted, dtype=float)
-        return pd.DataFrame(predicted, columns=self.output_lipids)
+
+            raise ValueError(
+                f"Unknown RNA2Lipid architecture: "
+                f"{self.architecture!r}"
+            )
+
+        if predicted.shape[1] != len(
+            self.output_lipids
+        ):
+            raise ValueError(
+                f"Prediction returned "
+                f"{predicted.shape[1]} lipid columns, "
+                f"but the bundle declares "
+                f"{len(self.output_lipids)}."
+            )
+        if self.target_scaling_mode == "standard":
+
+            if (
+                self.scaler_y is None
+                or not _transformer_is_fitted(
+                    self.scaler_y
+                )
+            ):
+                raise ValueError(
+                    "Predictions were trained on standardized "
+                    "lipid targets, but scaler_y is missing "
+                    "or unfitted."
+                )
+
+            predicted = (
+                self.scaler_y
+                .inverse_transform(
+                    predicted
+                )
+            )
+
+        else:
+
+            predicted = np.asarray(
+                predicted,
+                dtype=float,
+            )
+
+        return pd.DataFrame(
+            predicted,
+            index=aligned_matrix.index,
+            columns=self.output_lipids,
+        )
+
 
     def _build_summary(self, *, input_rows: int, matched_genes: int, input_kind: str) -> Dict[str, object]:
         return {
@@ -346,6 +704,7 @@ class Rna2LipidBundle:
             "model_gene_count": len(self.input_genes),
             "output_lipid_count": len(self.output_lipids),
             "target_scaling_mode": self.target_scaling_mode,
+            "architecture": self.architecture,
         }
 
 

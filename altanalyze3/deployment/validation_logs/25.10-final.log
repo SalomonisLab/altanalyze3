@@ -1,0 +1,27 @@
+Nextflow 26.04.6 is available - Please consider updating your version to it
+N E X T F L O W  ~  version 25.10.0
+Launching `/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/snaf/nextflow/tests/../main.nf` [grave_bohr] DSL2 - revision: c1ccf71b63
+WARN: Task runtime metrics are not reported when using macOS without a container engine
+[c3/dc5579] Submitted process > COUNT_JUNCTIONS (S1)
+[52/79ba78] Submitted process > INDEX_REFERENCE
+[bb/bf3178] Submitted process > COUNT_JUNCTIONS (S2)
+[ed/e56012] Submitted process > COUNT_INTRONS (S1)
+[8d/f36360] Submitted process > COUNT_INTRONS (S2)
+[54/925335] Submitted process > AGGREGATE_COUNTS
+[4e/813336] Submitted process > FILTER_COUNTS
+Nextflow 26.04.6 is available - Please consider updating your version to it
+N E X T F L O W  ~  version 25.10.0
+Launching `/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/snaf/nextflow/tests/../main.nf` [angry_perlman] DSL2 - revision: c1ccf71b63
+WARN: Task runtime metrics are not reported when using macOS without a container engine
+[62/e406e3] Submitted process > COUNT_JUNCTIONS (S1)
+[08/e891e5] Submitted process > INDEX_REFERENCE
+[6c/bfe496] Submitted process > PREPARE_HLA (S2)
+[e1/7bd040] Submitted process > PREPARE_HLA (S1)
+[15/1e91dc] Submitted process > COUNT_JUNCTIONS (S2)
+[90/3311a6] Submitted process > COUNT_INTRONS (S1)
+[09/3ff642] Submitted process > COUNT_INTRONS (S2)
+[82/c3728a] Submitted process > COMBINE_HLA
+[72/9eabd2] Submitted process > AGGREGATE_COUNTS
+[82/17ef53] Submitted process > FILTER_COUNTS
+[f2/9beeee] Submitted process > SNAF (cohort)
+Validation artifacts: /tmp/snaf-25.10-final

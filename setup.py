@@ -17,6 +17,7 @@ setup(
     license="Apache-2.0",
     include_package_data=True,
     package_data={
+        "altanalyze3.components.snaf": ["docs/*.md", "surface/data/*.json"],
         "altanalyze3.components.fastCNV": ["resources/*.tsv"],
         "altanalyze3.components.long_read": ["resources/*.gz"],
     },

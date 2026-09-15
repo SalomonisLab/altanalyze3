@@ -1,0 +1,31 @@
+rare_state	original_post_qc_cells	all_gene_rarity_quantile_5k	icgs2_louvain_pagerank_30k	icgs2_louvain_pagerank_5k	louvain_medoid_direct_5k	random_5k	random_projection_kmeans_5k	rarity_quantile_5k	sparse_gene_coverage_5k	sparse_gene_coverage_aggressive_5k
+AT0	691	13	38	11	8	14	16	17	16	18
+AT2 proliferating	146	2	17	13	2	4	4	5	6	7
+Alveolar Mph MT-positive	672	8	74	11	5	7	10	17	8	12
+Club (non-nasal)	259	7	53	5	2	3	3	7	7	5
+DC1	950	22	118	27	12	16	17	12	9	8
+Deuterosomal	39	1	6	0	2	0	2	1	2	6
+EC aerocyte capillary	502	8	22	15	2	10	11	13	59	95
+EC arterial	722	12	31	6	5	17	18	10	64	74
+EC venous systemic	798	9	44	4	5	17	16	16	22	24
+Goblet (bronchial)	126	4	23	1	2	3	4	7	4	4
+Goblet (nasal)	57	0	11	0	1	0	1	0	3	1
+Goblet (subsegmental)	130	2	4	0	1	1	3	2	4	5
+Hillock-like	67	2	4	0	1	2	0	1	6	12
+Ionocyte	22	0	8	0	2	0	2	0	9	15
+Lymphatic EC mature	981	20	11	0	1	20	22	18	38	53
+Mast cells	903	9	19	9	6	14	20	7	64	87
+Mesothelium	574	11	43	3	4	13	16	13	50	53
+Myofibroblasts	242	5	19	2	5	5	8	5	28	28
+Neuroendocrine	59	1	18	0	2	1	0	0	39	54
+Peribronchial fibroblasts	804	13	12	3	5	19	9	10	33	32
+Pericytes	358	8	40	1	5	5	9	4	36	44
+Plasma cells	888	16	138	54	24	21	12	13	20	18
+Plasmacytoid DCs	652	9	111	9	20	8	11	12	31	40
+SM activated stress response	293	8	28	2	0	6	7	9	20	22
+SMG duct	134	1	31	0	3	1	2	5	5	4
+Smooth muscle	614	15	34	2	4	19	16	11	65	72
+Smooth muscle FAM83D+	84	1	16	0	1	5	2	1	17	19
+Subpleural fibroblasts	265	3	10	1	4	3	5	6	12	14
+Suprabasal	296	6	27	4	2	6	8	10	11	16
+T cells proliferating	217	3	21	8	8	6	16	3	10	13

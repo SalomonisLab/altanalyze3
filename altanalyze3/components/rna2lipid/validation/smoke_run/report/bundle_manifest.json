@@ -1,0 +1,222 @@
+{
+  "bundle_format_version": 3,
+  "created_at": "2026-08-30T18:44:31Z",
+  "dataset_manifest": {
+    "builder": "build_paired_training_dataset",
+    "combined_shapes": {
+      "X": [
+        50,
+        1303
+      ],
+      "Y": [
+        50,
+        202
+      ]
+    },
+    "config_path": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/rna2lipid/validation/config_smoke_generic_tissue.json",
+    "counts": {
+      "genes_after_information_filter": 1303,
+      "genes_before_information_filter": 1303,
+      "matched_samples_after_group_filter": 50,
+      "matched_samples_before_group_filter": 68,
+      "missing_lipid_values_before_fill": 0,
+      "missing_rna_values_before_fill": 0,
+      "sample_retained_fraction": 0.7352941176470589,
+      "samples_dropped_by_group_filter": {
+        "UNKNOWN": 18
+      },
+      "unique_donors": 10
+    },
+    "created_at": "2026-08-30T18:43:20Z",
+    "environment": {
+      "numpy": "1.24.3",
+      "pandas": "2.0.3",
+      "platform": "macOS-13.7.8-arm64-arm-64bit",
+      "python": "3.9.6",
+      "sklearn": "1.3.0"
+    },
+    "preprocessing": {
+      "collapse_duplicate_genes": true,
+      "drop_rows_with_missing_lipids": false,
+      "fill_missing_with_feature_median": true,
+      "remove_zero_only_genes": true,
+      "x_join_mode": "inner",
+      "y_join_mode": "inner"
+    },
+    "sample_summary": {
+      "donor_counts": {
+        "D018": 5,
+        "D019": 5,
+        "D022": 5,
+        "D024": 5,
+        "D036": 5,
+        "D038": 5,
+        "D041": 5,
+        "D043": 5,
+        "D044": 5,
+        "D071": 5
+      },
+      "group_counts": {
+        "END": 10,
+        "EPI": 10,
+        "MES": 10,
+        "MIC": 10,
+        "PMX": 10
+      },
+      "profile_kind_counts": {
+        "celltype": 50
+      }
+    },
+    "tables": [
+      {
+        "id": "bulk",
+        "lipid_path": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/rna2lipid/data/Bulk_lipids_cleaned_normalized_median_527.csv",
+        "lipid_samples_dropped_unmatched": 9,
+        "lipid_shape": [
+          27,
+          527
+        ],
+        "matched_samples": 18,
+        "rna_path": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/rna2lipid/data/feature_blankreduiction.csv",
+        "rna_samples_dropped_unmatched": 1,
+        "rna_shape": [
+          19,
+          1348
+        ]
+      },
+      {
+        "id": "sorted_celltype",
+        "lipid_path": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/rna2lipid/data/cell_lipids_cleaned_norm_median_286.csv",
+        "lipid_samples_dropped_unmatched": 0,
+        "lipid_shape": [
+          50,
+          286
+        ],
+        "matched_samples": 50,
+        "rna_path": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/rna2lipid/data/newrna_cell_clair_filtered_symbol.csv",
+        "rna_samples_dropped_unmatched": 100,
+        "rna_shape": [
+          150,
+          1830
+        ]
+      }
+    ],
+    "tissue": "human lung (smoke test of the tissue-agnostic path)"
+  },
+  "holdout": {
+    "donor_disjoint": true,
+    "donors_in_both_sets": [],
+    "holdout_donors": 3,
+    "holdout_group_counts": {
+      "END": 3,
+      "EPI": 3,
+      "MES": 3,
+      "MIC": 3,
+      "PMX": 3
+    },
+    "holdout_profiles": 15,
+    "holdout_samples": [
+      "D018_MIC",
+      "D018_EPI",
+      "D018_PMX",
+      "D038_PMX",
+      "D041_PMX",
+      "D038_EPI",
+      "D041_MIC",
+      "D038_MIC",
+      "D041_MES",
+      "D041_EPI",
+      "D041_END",
+      "D038_MES",
+      "D018_MES",
+      "D018_END",
+      "D038_END"
+    ],
+    "mode": "donor_disjoint",
+    "train_donors": 7,
+    "train_profiles": 35
+  },
+  "holdout_metrics": {
+    "MAE": 0.7065240090528175,
+    "Model": "SparseLipidwiseElasticNetCV",
+    "N_lipids": 202,
+    "N_samples": 15,
+    "N_values": 3030,
+    "N_values_dropped_non_finite": 0,
+    "Pearson_r": 0.47850543597469625,
+    "Predicted_SD": 0.8579139965871491,
+    "R2": 0.13542964175671746,
+    "RMSE": 1.034283234537246,
+    "SD_Ratio": 0.7712664484817289,
+    "Spearman_r": 0.4833676091604424,
+    "Training_seconds": 36.202566041000004,
+    "True_SD": 1.1123445059434254
+  },
+  "model_architecture": "sparse_lipidwise_elasticnet_cv",
+  "model_hyperparameters": {
+    "alphas": [
+      0.001,
+      0.01,
+      0.1,
+      1.0,
+      10.0
+    ],
+    "cv": 3,
+    "l1_ratio": [
+      1.0
+    ],
+    "max_iter": 5000,
+    "n_jobs": 2,
+    "random_seed": 1,
+    "sparsity_penalty": 0.002,
+    "top_gene_options": [
+      25,
+      50
+    ]
+  },
+  "resubstitution_metrics": {
+    "mape": 0.04599208672761531,
+    "mean_output_r2": 0.6601070690714956,
+    "median_output_r2": 0.6653869826330483,
+    "normalized_rmse": 0.07433870153410242,
+    "output_count": 202,
+    "pearson_r": 0.8300820710267856,
+    "positive_output_r2_count": 197,
+    "r2_global": 0.6746022673999361,
+    "rmse": 0.7001695499424031,
+    "sample_count": 50
+  },
+  "source_config_path": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/rna2lipid/validation/config_smoke_generic_tissue.json",
+  "target_scaling": {
+    "enabled": true,
+    "mode": "standard"
+  },
+  "tissue": "human lung (smoke test of the tissue-agnostic path)",
+  "training_label": "rna2lipid-smoke-generic-tissue",
+  "training_summary": {
+    "donor_count": 10,
+    "final_training_seconds": 35.012783,
+    "group_counts": {
+      "END": 10,
+      "EPI": 10,
+      "MES": 10,
+      "MIC": 10,
+      "PMX": 10
+    },
+    "input_gene_count": 1303,
+    "lipids_with_all_zero_coefficients": 6,
+    "lipids_with_all_zero_coefficients_names": [
+      "PE(16:0/18:2)",
+      "PE(P-18:0/22:5)",
+      "PI(16:0/18:0)",
+      "SM(d18:1/24:1)",
+      "TG(16:0/18:0/22:6)",
+      "TG(51:1)"
+    ],
+    "output_lipid_count": 202,
+    "profile_kind_counts": {
+      "celltype": 50
+    },
+    "sample_count": 50
+  }
+}

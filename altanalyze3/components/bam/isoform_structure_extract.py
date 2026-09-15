@@ -301,13 +301,35 @@ def resolve_bam_chrom(chrom, bam_refs):
     return None
 
 
-def get_read_strand(read):
+def get_read_strand(read, ts_read_relative=False):
+    """Genomic strand of the transcript this read came from.
+
+    ``exonAnnotate`` looks up ``exonCoordinates[(chr, pos, strand, 1|2)]``, and
+    ``importEnsemblGenes`` registers every boundary under the GENE's own strand only. The strand
+    returned here therefore gates gene assignment: get it wrong and the read finds no gene.
+
+    ts_read_relative=False (default, unchanged): the ``ts``/``XS``/``TS`` tag is taken verbatim.
+
+    ts_read_relative=True: ``ts`` is interpreted as minimap2 documents it, the transcript strand
+    RELATIVE TO THE READ, so the genomic strand is the tag XOR the alignment orientation. Needed for
+    BAMs where minimap2/pbmm2 emits ``ts`` this way. Measured on the ENCODE PC-3 long-read BAM
+    (ENCFF044LIA), where every read carries ``ts:A:+``: of 20,000 chr7 spliced reads, the 9,352
+    forward reads key into exonCoordinates under '+' (98.8%) and the 10,648 reverse reads key in
+    under '-' (99.2%) and not under '+' (0.1%). Verified independently against the genome sequence:
+    forward reads show GT..AG introns (24,443/25,008), reverse reads show CT..AC (10,860/11,064),
+    which is the reverse complement, so their transcripts are on the minus strand.
+
+    ``XS``/``TS`` are written by HISAT2/STAR/TopHat as GENOMIC strand, so they are always taken
+    verbatim; only ``ts`` is subject to the read-relative interpretation.
+    """
     for tag in ('ts', 'XS', 'TS'):
         try:
             strand = read.get_tag(tag)
         except KeyError:
             continue
         if strand in ('+', '-'):
+            if tag == 'ts' and ts_read_relative and read.is_reverse:
+                return '-' if strand == '+' else '+'
             return strand
     return '-' if read.is_reverse else '+'
 
@@ -360,7 +382,7 @@ def has_known_splice_site(chrom, strand, exons, exon_coordinates):
     return False
 
 
-def resolve_barcode(read, barcode_tags):
+def resolve_barcode(read, barcode_tags, default_barcode=None):
     """Return the cell barcode from the first present tag, normalized to the standard single-cell
     convention with a ``-1`` lane suffix (e.g. ``AAACACCTGTTAGTGC-1``).
 
@@ -368,6 +390,15 @@ def resolve_barcode(read, barcode_tags):
     isoform matrices, pseudobulk, comparisons) and keeps the barcodes compatible with cell
     annotations produced outside this workflow and with the reverse-complement code path. Barcodes
     that already carry a ``-<lane>`` suffix are left as-is.
+
+    ``default_barcode`` is the BULK long-read path. Bulk libraries (PacBio CCS / ONT, e.g. the ENCODE
+    long-read RNA-seq BAMs) carry no ``CB``/``CR``/``BC``/``BX`` tag, so every read would otherwise be
+    discarded by the caller's ``if not barcode: continue``. Passing the library name here makes the
+    whole BAM one pseudo-cell, which lets every downstream single-cell step (molecule h5ad, collapse,
+    re-key, pseudobulk) run UNCHANGED and sum to a sample-level count. It is returned VERBATIM: no
+    ``-1`` suffix is appended, because a library name is not a 10x barcode and the suffix would only
+    break the barcode->annotation join. ``None`` (the default) preserves single-cell behaviour
+    exactly: a read with no barcode tag is still dropped.
     """
     for tag in barcode_tags:
         try:
@@ -377,7 +408,7 @@ def resolve_barcode(read, barcode_tags):
         if value:
             value = str(value)
             return value if '-' in value else f"{value}-1"
-    return None
+    return default_barcode
 
 
 def resolve_molecule_id(read, molecule_tag):
@@ -434,7 +465,8 @@ def write_gff_isoform(handle, chrom, strand, exons, isoform_id, gene, barcode, m
 
 def extract_isoform_structures(bam_path, exon_file, output_prefix, target_gene=None,
                                min_mapq=1, barcode_tags=None, molecule_tag='zm',
-                               source='bam', require_known_splice=True):
+                               source='bam', require_known_splice=True, default_barcode=None,
+                               ts_read_relative=False):
     if barcode_tags is None:
         barcode_tags = ['CB', 'CR', 'BC', 'BX']
 
@@ -480,7 +512,7 @@ def extract_isoform_structures(bam_path, exon_file, output_prefix, target_gene=N
             if not has_splice(read.cigartuples):
                 continue
             stats['spliced_reads'] += 1
-            barcode = resolve_barcode(read, barcode_tags)
+            barcode = resolve_barcode(read, barcode_tags, default_barcode=default_barcode)
             if not barcode:
                 continue
             stats['barcode_reads'] += 1
@@ -489,7 +521,7 @@ def extract_isoform_structures(bam_path, exon_file, output_prefix, target_gene=N
             if len(exons) < 2:
                 continue
             chrom = normalize_chrom(read.reference_name, exon_coordinates)
-            strand = get_read_strand(read)
+            strand = get_read_strand(read, ts_read_relative=ts_read_relative)
             gene, _, _, genes = gff_process.exonAnnotate(
                 chrom, list(exons), strand, read.query_name
             )
@@ -576,7 +608,8 @@ def _write_chunk_stats(stats, stats_path):
 
 def extract_isoform_structures_chunk(bam_path, exon_file, output_prefix, chrom, strand,
                                      min_mapq=1, barcode_tags=None, molecule_tag='zm',
-                                     source='bam', require_known_splice=True, chunk_dir=None):
+                                     source='bam', require_known_splice=True, chunk_dir=None,
+                                     default_barcode=None, ts_read_relative=False):
     if barcode_tags is None:
         barcode_tags = ['CB', 'CR', 'BC', 'BX']
     if chunk_dir is None:
@@ -641,7 +674,7 @@ def extract_isoform_structures_chunk(bam_path, exon_file, output_prefix, chrom, 
             if not has_splice(read.cigartuples):
                 continue
             stats['spliced_reads'] += 1
-            barcode = resolve_barcode(read, barcode_tags)
+            barcode = resolve_barcode(read, barcode_tags, default_barcode=default_barcode)
             if not barcode:
                 continue
             stats['barcode_reads'] += 1
@@ -650,7 +683,7 @@ def extract_isoform_structures_chunk(bam_path, exon_file, output_prefix, chrom, 
             if len(exons) < 2:
                 continue
             chrom_norm = normalize_chrom(read.reference_name, exon_coordinates)
-            strand_call = get_read_strand(read)
+            strand_call = get_read_strand(read, ts_read_relative=ts_read_relative)
             if strand is not None and strand_call != strand:
                 continue
             gene, _, _, genes = gff_process.exonAnnotate(
@@ -855,7 +888,8 @@ def _gzip_file(path):
 def parallel_extract_isoform_structures(bam_path, exon_file, output_prefix, min_mapq=1,
                                         barcode_tags=None, molecule_tag='zm',
                                         source='bam', require_known_splice=True,
-                                        max_processes=None):
+                                        max_processes=None, default_barcode=None,
+                                        ts_read_relative=False):
     if barcode_tags is None:
         barcode_tags = ['CB', 'CR', 'BC', 'BX']
     _set_pysam_verbosity()
@@ -887,6 +921,8 @@ def parallel_extract_isoform_structures(bam_path, exon_file, output_prefix, min_
             source,
             require_known_splice,
             str(chunk_dir),
+            default_barcode,
+            ts_read_relative,
         ))
 
     stats = defaultdict(int)
@@ -926,7 +962,8 @@ def parallel_extract_isoform_structures(bam_path, exon_file, output_prefix, min_
 
 def chunked_extract_isoform_structures(bam_path, exon_file, output_prefix, min_mapq=1,
                                        barcode_tags=None, molecule_tag='zm',
-                                       source='bam', require_known_splice=True):
+                                       source='bam', require_known_splice=True,
+                                       default_barcode=None, ts_read_relative=False):
     gff_path, h5ad_path, stats, _used_processes, _chunk_count = parallel_extract_isoform_structures(
         bam_path,
         exon_file,
@@ -937,6 +974,8 @@ def chunked_extract_isoform_structures(bam_path, exon_file, output_prefix, min_m
         source=source,
         require_known_splice=require_known_splice,
         max_processes=1,
+        default_barcode=default_barcode,
+        ts_read_relative=ts_read_relative,
     )
     return gff_path, h5ad_path, stats
 
@@ -992,6 +1031,15 @@ def main():
     parser.add_argument('--require-known-splice', dest='require_known_splice',
                         action=argparse.BooleanOptionalAction, default=True,
                         help='Require at least one known Ensembl splice site per read.')
+    parser.add_argument('--ts-read-relative', dest='ts_read_relative',
+                        action='store_true',
+                        help="Interpret the minimap2 'ts' tag as the transcript strand RELATIVE TO "
+                             "THE READ (genomic strand = ts XOR alignment orientation). Off by "
+                             "default, which keeps the tag verbatim.")
+    parser.add_argument('--bulk-barcode', dest='bulk_barcode', default=None,
+                        help='BULK long-read mode: barcode to assign when a read carries none of '
+                             '--barcode-tags (bulk PacBio/ONT BAMs have no CB tag). Use the library '
+                             'name; the whole BAM becomes one pseudo-cell. Omit for single-cell.')
     parser.add_argument('--no-parallel', dest='no_parallel', action='store_true',
                         help='Disable parallel chromosome/strand processing when no gene is provided.')
     parser.add_argument('--max-processes', dest='max_processes', type=int, default=None,
@@ -1021,6 +1069,8 @@ def main():
                     source=args.source,
                     require_known_splice=args.require_known_splice,
                     max_processes=1,
+                    default_barcode=args.bulk_barcode,
+                    ts_read_relative=args.ts_read_relative,
                 )
                 print(f"Processing mode: chunked sequential (chunks={chunk_count}, workers={used_processes})")
             else:
@@ -1034,6 +1084,8 @@ def main():
                     source=args.source,
                     require_known_splice=args.require_known_splice,
                     max_processes=args.max_processes,
+                    default_barcode=args.bulk_barcode,
+                    ts_read_relative=args.ts_read_relative,
                 )
                 print(f"Processing mode: parallel chrom (chunks={chunk_count}, workers={used_processes})")
         else:
@@ -1047,6 +1099,8 @@ def main():
                 molecule_tag=args.molecule_tag,
                 source=args.source,
                 require_known_splice=args.require_known_splice,
+                default_barcode=args.bulk_barcode,
+                ts_read_relative=args.ts_read_relative,
             )
             print("Processing mode: single-process (gene)")
 

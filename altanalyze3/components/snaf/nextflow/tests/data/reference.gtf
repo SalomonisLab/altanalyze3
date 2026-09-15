@@ -1,0 +1,4 @@
+chr1	test	gene	101	400	.	+	.	gene_id "ENSG00000000001"; gene_name "TEST";
+chr1	test	transcript	101	400	.	+	.	gene_id "ENSG00000000001"; transcript_id "ENST00000000001";
+chr1	test	exon	101	200	.	+	.	gene_id "ENSG00000000001"; transcript_id "ENST00000000001"; exon_id "ENSE1"; exon_number "1";
+chr1	test	exon	301	400	.	+	.	gene_id "ENSG00000000001"; transcript_id "ENST00000000001"; exon_id "ENSE2"; exon_number "2";

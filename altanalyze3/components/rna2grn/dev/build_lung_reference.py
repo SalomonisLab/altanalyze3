@@ -57,6 +57,8 @@ def main(argv=None) -> int:
     ap.add_argument("--out", default=OUT)
     ap.add_argument("--bundle", default=BUNDLE)
     ap.add_argument("--ridge-lambda", type=float, default=training.DEFAULT_RIDGE)
+    ap.add_argument("--reference-name", default="lung",
+                    help="value written to bundle metadata['reference']")
     args = ap.parse_args(argv)
 
     matched_dir = Path(args.out) / "matched"
@@ -176,7 +178,7 @@ def main(argv=None) -> int:
         created_at=started,
     )
     md = bundle["metadata"]
-    md["reference"] = "lung"
+    md["reference"] = args.reference_name
     md["tissue"] = "human lung (LungMAP IPF vs control)"
     md["pseudobulk_statistic"] = PSEUDOBULK_STATISTIC
     md["input_already_normalized"] = True
@@ -210,6 +212,7 @@ def main(argv=None) -> int:
         n_edges=int(grn.n_edges), n_tfs=len(tfs), n_targets=len(tgs),
         n_feature_genes=int(md["n_feature_genes"]),
         n_train_pseudobulks=int(md["n_train_pseudobulks"]),
+        reference_name=args.reference_name,
         pseudobulk_statistic=PSEUDOBULK_STATISTIC,
         internal_validation="none (all pseudobulks used for training, by request)",
     )

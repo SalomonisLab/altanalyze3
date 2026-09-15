@@ -1,0 +1,409 @@
+#!/usr/bin/env python3
+"""ICGS3-powered UDON: UDON's interfaces, ICGS3's unsupervised engine.
+
+WHY
+UDON's own clustering assigns each pseudobulk by a raw argmax over the NMF W matrix
+(nmf.py:binarize_nmf). Components with larger magnitude absorb nearly every pseudobulk, so most
+programs starve and are then culled by `cluster_counts > min_group_size` before markers are even
+computed. On the lung atlas that collapsed rank 26 to 10 programs. ICGS3 solves the same problem
+with a graph + Leiden + NMF + linear-SVM pipeline, loading normalisation on the NMF assignment,
+and optional Harmony batch correction.
+
+WHAT IS PRESERVED (UDON interfaces, unchanged)
+  - inputs: the log2 pseudobulk h5ad, the raw-count pseudobulk h5ad, the sample metadata TSV
+  - control design: matched / annotation / collective, via pseudobulk_protocol.select_matched_controls
+    and build_fold_matrix, including the --control-annotation pairing file
+  - the min-cells QC floor and the RNA gene filter (protein-coding, no ribosomal/MT/sex)
+  - the output contract: udon_core/udon_clusters.txt indexed 'celltype__Sample' with one `cluster`
+    column, which satay_udon_core.py reads unchanged
+
+WHAT IS REPLACED (unsupervised components, all ICGS3)
+  - feature selection, kNN graph, Leiden, NMF rank, NMF, SVM reclassification, MarkerFinder
+  - Harmony batch correction is available via --batch-correction harmony --batch-key
+  - NO downsampling: PageRank and Louvain downsampling are disabled by default here, because a
+    pseudobulk is already an aggregate and sampling it again discards patients.
+
+The fold matrix is genes x pseudobulks; ICGS3 expects observations x features, so the matrix is
+transposed and each pseudobulk becomes an ICGS3 "cell".
+"""
+import argparse, os, subprocess, sys
+import numpy as np
+import pandas as pd
+import anndata as ad
+import scipy.sparse as sp
+
+UDON_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.abspath(os.path.join(UDON_DIR, "..", "..", ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+from altanalyze3.components.udon import pseudobulk_protocol as P  # noqa: E402
+
+CELLCOL_DEFAULT = "Hs-BM-titrated-reference-centroid"
+
+
+def log(msg):
+    print(f"[icgs-udon] {msg}", flush=True)
+
+
+def build_folds(args):
+    """UDON's own fold construction, untouched: QC floor, control pairing, fold matrix, gene filter."""
+    a = ad.read_h5ad(os.path.abspath(args.pseudobulk))
+    log(f"loaded pseudobulk {a.shape} from {os.path.basename(args.pseudobulk)}")
+    nc = pd.to_numeric(a.obs[args.ncells_col], errors="coerce").fillna(0).values
+    if args.min_cells > 0:
+        keep = nc >= args.min_cells
+        log(f"QC: {int((~keep).sum())} pseudobulks below {args.min_cells} cells dropped, "
+            f"{int(keep.sum())}/{len(keep)} kept")
+        a = a[keep].copy()
+    ann = a.obs[args.annot_col].astype(str)
+    log(f"control pseudobulks: {int((ann == args.control_label).sum())} | "
+        f"disease pseudobulks: {int((ann != args.control_label).sum())}")
+
+    selected = None
+    if args.control_mode == "annotation":
+        if not args.control_annotation:
+            sys.exit("[icgs-udon] --control-annotation is required with --control-mode annotation")
+        selected = P.read_control_annotation(os.path.abspath(args.control_annotation))
+        log(f"read control annotation: {len(selected)} disease samples")
+        mode = "matched"
+    elif args.control_mode == "matched":
+        counts = ad.read_h5ad(os.path.abspath(args.counts_pseudobulk)) if args.counts_pseudobulk else None
+        if counts is not None:
+            counts = counts[[i for i in a.obs_names if i in counts.obs_names]].copy()
+        sex_of = P.predict_sample_sex(a, args.sample_col, counts_adata=counts, log_input=True)
+        chem_of = None
+        if args.sample_metadata and os.path.exists(args.sample_metadata):
+            sm = pd.read_csv(args.sample_metadata, sep="\t", index_col=0)
+            if "chemistry" in sm.columns:
+                chem_of = sm["chemistry"].astype(str).to_dict()
+        selected, _ = P.select_matched_controls(a, args.sample_col, args.cell_col, args.annot_col,
+                                                args.ncells_col, sex_of, chemistry_of=chem_of,
+                                                control_label=args.control_label, logger=log)
+        mode = "matched"
+    else:
+        mode = "collective"
+
+    folds, fold_obs = P.build_fold_matrix(a, args.sample_col, args.cell_col, args.annot_col,
+                                          control_label=args.control_label, mode=mode,
+                                          selected_controls=selected, logger=log)
+    if args.modality == "rna" and not args.no_gene_filter:
+        folds = folds.loc[P.filter_udon_genes(list(folds.index), species=args.species, logger=log)]
+    log(f"fold matrix: {folds.shape[0]} genes x {folds.shape[1]} disease pseudobulks")
+    return folds, fold_obs
+
+
+def folds_to_h5ad(folds, fold_obs, path, sample_meta=None, cell_col=CELLCOL_DEFAULT):
+    """Transpose to pseudobulks x genes and attach the covariates ICGS3 can batch-correct on.
+
+    Folds are shifted to be non-negative per gene, exactly as UDON's own assemble_udon_adata does,
+    because NMF requires non-negative input."""
+    X = folds.T.to_numpy(dtype=np.float32)
+    X = X - np.minimum(X.min(axis=0, keepdims=True), 0.0)   # per-gene shift, never subtracts from a positive min
+    obs = fold_obs.copy()
+    obs.index = folds.columns.astype(str)
+    obs["pseudobulk"] = obs.index
+    if cell_col in obs.columns:
+        obs["cell_state"] = obs[cell_col].astype(str)
+    if sample_meta is not None and args_sample_col_in(obs):
+        sm = sample_meta
+        for c in sm.columns:
+            if c not in obs.columns:
+                obs[c] = [sm[c].get(s, "unknown") for s in obs[args_sample_col_in(obs)]]
+    a = ad.AnnData(X=sp.csr_matrix(X), obs=obs.astype(str),
+                   var=pd.DataFrame(index=pd.Index(folds.index.astype(str), name="gene")))
+    a.layers["counts"] = a.X.copy()          # ICGS3 reads --layer counts; folds are already the signal
+    a.write_h5ad(path, compression="gzip")
+    log(f"wrote ICGS3 input {a.shape} (pseudobulks x genes) -> {os.path.basename(path)}")
+    return a
+
+
+def args_sample_col_in(obs):
+    for c in ("Sample", "sample"):
+        if c in obs.columns:
+            return c
+    return None
+
+
+def run_icgs3(h5ad_path, outdir, args, n_obs):
+    """Call ICGS3 through its documented CLI. Downsampling is switched off by setting every
+    threshold above the pseudobulk count, so no patient is dropped."""
+    big = max(n_obs * 10, 100000)
+    cmd = [sys.executable, "-m", "altanalyze3.components.clustering.ICGS",
+           "--input", h5ad_path, "--output-dir", outdir,
+           "--modality", "rna", "--layer", "counts",
+           "--input-normalized",                       # folds are already normalised; do not re-normalise
+           "--min-genes", "0", "--min-cells", "0", "--min-counts", "0", "--mito-percent", "100",
+           "--target-cells", "0",                      # no memory-guard cap
+           "--pagerank-cells", str(big),               # no PageRank downsampling
+           "--louvain-downsample-cutoff", str(big),    # no Louvain downsampling
+           "--pre-pagerank-cells", "0",
+           "--random-state", str(args.random_state),
+           "--n-top-features", str(args.n_top_features),
+           "--leiden-resolution", str(args.leiden_resolution),
+           "--n-neighbors", str(args.n_neighbors),
+           "--marker-top-n", str(args.marker_top_n),
+           "--marker-rho", str(args.marker_rho),
+           "--marker-min-per-cluster", str(args.marker_min_per_cluster),
+           "--min-group-size", str(args.min_group_size),
+           "--nmf-assignment-normalization", args.nmf_assignment_normalization,
+           "--nmf-runs", str(args.nmf_runs),
+           "--intercorr-threshold", str(args.intercorr_threshold),
+           "--corr-n-events", str(args.corr_n_events),
+           "--skip-canonical-heatmap",   # folds are ratios; MarkerFinder's scale check rightly refuses them
+           "--cluster-key", "ICGS3_cluster", "--species", args.species]
+    if args.rank:
+        cmd += ["--rank", str(args.rank)]
+    if args.batch_correction != "none":
+        cmd += ["--batch-correction", args.batch_correction,
+                "--batch-correction-use", args.batch_correction_use]
+        if args.batch_key:
+            cmd += ["--batch-key", args.batch_key]
+    log("ICGS3 command: " + " ".join(cmd))
+    env = os.environ.copy()
+    env["PYTHONPATH"] = REPO_ROOT + os.pathsep + env.get("PYTHONPATH", "")
+    rc = subprocess.run(cmd, cwd=REPO_ROOT, env=env).returncode
+    if rc != 0:
+        sys.exit(f"[icgs-udon] ICGS3 failed with exit {rc}")
+
+
+def write_udon_clusters(icgs_dir, fold_obs, outdir, cell_col, sample_col):
+    """Translate ICGS3's per-observation clusters into UDON's contract so SATAY reads them
+    unchanged: index 'celltype__Sample', a single `cluster` column, labels prefixed U."""
+    src = os.path.join(icgs_dir, "icgs3_clusters.tsv")
+    if not os.path.exists(src):
+        sys.exit(f"[icgs-udon] ICGS3 produced no clusters at {src}")
+    cl = pd.read_csv(src, sep="\t", index_col=0)
+    col = "ICGS3_cluster" if "ICGS3_cluster" in cl.columns else cl.columns[-1]
+    o = fold_obs.copy()
+    o.index = o.index.astype(str)
+    ct = o[cell_col].astype(str) if cell_col in o.columns else o.get("cell_state", pd.Series(index=o.index)).astype(str)
+    sm = o[sample_col].astype(str)
+    ids = pd.Series([f"{c}__{s}" for c, s in zip(ct, sm)], index=o.index)
+    shared = [i for i in cl.index.astype(str) if i in ids.index]
+    # A silent filter here would drop clustered pseudobulks with no message. Account for it.
+    n_drop = len(cl) - len(shared)
+    if n_drop:
+        missing = [i for i in cl.index.astype(str) if i not in ids.index][:5]
+        log(f"WARNING: {n_drop} of {len(cl)} ICGS3-clustered rows have no fold_obs match "
+            f"and are dropped; first: {missing}")
+    if not shared:
+        sys.exit("[icgs-udon] no ICGS3 cluster row matched fold_obs; check --cell-col/--sample-col")
+    new_index = ids.loc[shared].values
+    if pd.Index(new_index).duplicated().any():
+        dup = pd.Index(new_index)[pd.Index(new_index).duplicated()].unique()[:5]
+        sys.exit(f"[icgs-udon] 'celltype__Sample' is not unique ({len(dup)}+ collisions, e.g. "
+                 f"{list(dup)}). SATAY aggregates on this key, so a collision would merge "
+                 f"distinct pseudobulks. Fix the sample metadata before rerunning.")
+    out = pd.DataFrame({"cluster": ["U" + str(v) for v in cl.loc[shared, col].astype(str)]},
+                       index=new_index)
+    core = os.path.join(outdir, "udon_core")
+    os.makedirs(core, exist_ok=True)
+    dst = os.path.join(core, "udon_clusters.txt")
+    out.to_csv(dst, sep="\t")
+    n = out["cluster"].nunique()
+    log(f"wrote {dst}: {len(out)} pseudobulks across {n} clusters")
+    log("cluster sizes: " + ", ".join(f"{k}={v}" for k, v in out["cluster"].value_counts().items()))
+    return dst, n
+
+
+def finalize_udon_outputs(folds, fold_obs, outdir, clusters_path, args):
+    """Run UDON's OWN downstream on the ICGS3 clusters: MarkerFinder over the fold matrix,
+    GO-Elite per cluster, and the canonical MarkerFinder heatmap with GO callouts.
+
+    ICGS3 decided the clusters. This step only describes them, so it never re-culls a
+    cluster: UDON's own `marker_finder_wrapper` drops a cluster holding fewer than 3
+    markers above `rho_threshold`, so the rho passed here matches the clustering rho.
+    """
+    if UDON_DIR not in sys.path:
+        sys.path.insert(0, UDON_DIR)
+    from markerFinder import marker_finder_wrapper
+
+    clusters = pd.read_csv(clusters_path, sep="\t", index_col=0)
+
+    # fold columns carry fold_obs ids; the UDON contract carries 'celltype__Sample'.
+    o = fold_obs.copy()
+    o.index = o.index.astype(str)
+    ct = o[args.cell_col].astype(str) if args.cell_col in o.columns else o["cell_state"].astype(str)
+    sm = o[args.sample_col].astype(str)
+    ids = pd.Series([f"{c}__{s}" for c, s in zip(ct, sm)], index=o.index)
+    fm = folds.copy()
+    mapped = ids.reindex(fm.columns.astype(str))
+    n_unmapped = int(mapped.isna().sum())
+    if n_unmapped:
+        sys.exit(f"[icgs-udon] {n_unmapped} of {fm.shape[1]} fold columns carry no fold_obs "
+                 f"entry, so their 'celltype__Sample' id is undefined. Refusing to guess.")
+    fm.columns = mapped.values
+    n_dup = int(pd.Index(fm.columns).duplicated().sum())
+    if n_dup:
+        sys.exit(f"[icgs-udon] {n_dup} duplicate 'celltype__Sample' fold columns. Dropping them "
+                 f"would silently discard pseudobulks. Fix the sample metadata before rerunning.")
+    keep = [c for c in clusters.index.astype(str) if c in set(fm.columns.astype(str))]
+    n_lost = len(clusters) - len(keep)
+    if n_lost:
+        log(f"WARNING: {n_lost} of {len(clusters)} clustered pseudobulks have no fold column "
+            f"and are excluded from MarkerFinder")
+    fm = fm.loc[:, keep]
+    clusters = clusters.loc[keep]
+    log(f"[udon-downstream] MarkerFinder over {fm.shape[0]} genes x {fm.shape[1]} pseudobulks, "
+        f"{clusters['cluster'].nunique()} clusters")
+
+    rho = float(args.marker_rho)
+    mk_all, mk_top, heat = marker_finder_wrapper(input_df=fm.transpose(), groups=clusters,
+                                                 top_n=args.marker_top_n,
+                                                 rho_threshold=rho, marker_finder_rho=rho)
+    kept = pd.Index(mk_top["top_cluster"].astype(str).unique())
+    lost = sorted(set(clusters["cluster"].astype(str)) - set(kept))
+    log(f"[udon-downstream] {len(mk_top)} markers across {len(kept)} clusters (rho={rho})")
+    if lost:
+        log(f"[udon-downstream] clusters with too few markers to plot: {', '.join(lost)}")
+
+    core = os.path.join(outdir, "udon_core")
+    os.makedirs(core, exist_ok=True)
+    mk_all.to_csv(os.path.join(core, "marker_genes_all.txt"), sep="\t")
+    heat.to_csv(os.path.join(core, "marker_heatmap.txt"), sep="\t")
+    log(f"[udon-downstream] wrote {core}/marker_genes_all.txt and marker_heatmap.txt")
+
+    # Minimal AnnData carrying what GO-Elite and the plotter read. X stays an explicit
+    # all-zero placeholder: the fold values live in varm['pseudobulk_folds'], and building a
+    # second dense copy here would cost ~0.6 GB. Anything reading .X would get zeros, so the
+    # flag below marks that plainly rather than leaving a silent trap.
+    u = ad.AnnData(X=sp.csr_matrix((fm.shape[1], fm.shape[0]), dtype="float32"))
+    u.uns["icgs_udon_X_is_placeholder"] = True
+    u.obs_names = pd.Index(fm.columns.astype(str))
+    u.var_names = pd.Index(fm.index.astype(str))
+    u.varm["pseudobulk_folds"] = fm
+    u.uns["udon_clusters"] = clusters
+    u.uns["udon_marker_genes_full"] = mk_all
+    u.uns["udon_marker_genes_top_n"] = mk_top
+    u.uns["marker_heatmap"] = heat
+
+    if not bool(getattr(args, "no_goelite", False)) and len(mk_top):
+        try:
+            from goelite_enrichment import run_goelite_on_udon
+            run_goelite_on_udon(u, os.path.join(outdir, "goelite"), species=args.species, logger=log)
+        except Exception as e:
+            log(f"[udon-downstream] GO-Elite skipped: {e}")
+
+    prev = os.getcwd()
+    try:
+        os.chdir(UDON_DIR)
+        from visualizations import plot_markers_df
+        left_c, right_c = {}, {}
+        try:
+            if len(mk_top) and "pearson_r" in mk_top.columns:
+                for cc, g in mk_top.sort_values("pearson_r", ascending=False).groupby("top_cluster"):
+                    right_c[str(cc)] = str(g.iloc[0]["marker"])
+            sel = os.path.join(outdir, "goelite", "GOElite_UDON_selected.tsv")
+            if os.path.exists(sel):
+                sdf = pd.read_csv(sel, sep="\t")
+                if len(sdf):
+                    for cc, g in sdf.sort_values("fdr").groupby("cluster"):
+                        left_c[str(cc)] = str(g.iloc[0]["term_name"])
+        except Exception as e:
+            log(f"[udon-downstream] callouts skipped: {e}")
+        plot_markers_df(heat, mk_top, clusters, os.path.join(outdir, "marker_heatmap.pdf"),
+                        left_callouts=(left_c or None), right_callouts=(right_c or None))
+        log(f"[udon-downstream] wrote {outdir}/marker_heatmap.pdf")
+    except Exception as e:
+        log(f"[udon-downstream] marker heatmap failed: {e}")
+    finally:
+        os.chdir(prev)
+
+    try:
+        os.chdir(UDON_DIR)
+        from udon_binary_heatmaps import make_udon_binary_heatmaps
+        study_of, donor_of = None, None
+        if args.sample_metadata and os.path.exists(args.sample_metadata):
+            _m = pd.read_csv(args.sample_metadata, sep="\t", index_col=0).astype(str)
+            for c in ("Dataset", "source_study_title", "study", "Study"):
+                if c in _m.columns:
+                    study_of = _m[c].to_dict(); break
+            if "Donor_ID" in _m.columns:
+                donor_of = _m["Donor_ID"].to_dict()
+        # covariate heatmap: same metadata and mean-binarize list the SATAY steps use
+        cov_df = None
+        _meta = os.environ.get("UDON_METADATA")
+        if _meta and os.path.exists(_meta):
+            try:
+                from satay_udon_core import load_metadata
+                _mb = os.environ.get("UDON_MEAN_BINARIZE")
+                _mb = [c.strip() for c in _mb.split(",") if c.strip()] if _mb else None
+                cov_df, _ = load_metadata(_meta, mean_binarize=_mb)
+                if donor_of is None:
+                    _md = pd.read_csv(_meta, sep="\t", dtype=str)
+                    if {"Sample", "Donor_ID"} <= set(_md.columns):
+                        donor_of = dict(zip(_md["Sample"], _md["Donor_ID"]))
+            except Exception as _e:
+                log(f"[udon-downstream] covariate metadata load skipped: {_e}")
+        make_udon_binary_heatmaps(clusters, outdir, donor_of=donor_of, study_of=study_of,
+                                  covariates_df=cov_df)
+        log(f"[udon-downstream] wrote binary heatmaps to {outdir}"
+            + (" (donor + study + covariate)" if (donor_of and cov_df is not None) else ""))
+    except Exception as e:
+        log(f"[udon-downstream] binary heatmaps skipped: {e}")
+    finally:
+        os.chdir(prev)
+    return mk_top
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="ICGS3-powered UDON: UDON interfaces, ICGS3 clustering")
+    ap.add_argument("--pseudobulk", required=True)
+    ap.add_argument("--counts-pseudobulk", default=None)
+    ap.add_argument("--sample-metadata", default=None)
+    ap.add_argument("--output-dir", required=True)
+    ap.add_argument("--control-mode", choices=["matched", "collective", "annotation"], default="matched")
+    ap.add_argument("--control-annotation", default=None)
+    ap.add_argument("--min-cells", type=int, default=5)
+    ap.add_argument("--species", default="Hs")
+    ap.add_argument("--modality", default="rna")
+    ap.add_argument("--no-gene-filter", action="store_true")
+    ap.add_argument("--sample-col", default="Sample")
+    ap.add_argument("--cell-col", default=CELLCOL_DEFAULT)
+    ap.add_argument("--annot-col", default="Annotation")
+    ap.add_argument("--ncells-col", default="n_cells")
+    ap.add_argument("--control-label", default="Control")
+    # ICGS3 unsupervised parameters
+    ap.add_argument("--rank", type=int, default=None)
+    ap.add_argument("--leiden-resolution", type=float, default=2.0,
+                    help="higher = finer Leiden partition; 2.0 targets high-resolution subtypes")
+    ap.add_argument("--n-neighbors", type=int, default=30)
+    ap.add_argument("--n-top-features", type=int, default=3000)
+    ap.add_argument("--intercorr-threshold", type=float, default=0.2)
+    ap.add_argument("--corr-n-events", type=int, default=3)
+    ap.add_argument("--marker-top-n", type=int, default=60)
+    ap.add_argument("--marker-rho", type=float, default=0.3)
+    ap.add_argument("--marker-min-per-cluster", type=int, default=2)
+    ap.add_argument("--min-group-size", type=int, default=3)
+    ap.add_argument("--nmf-assignment-normalization",
+                    choices=["auto", "raw", "rowsum", "rowmax", "zscore", "quantile95"], default="rowsum",
+                    help="rowsum balances component scale before the argmax; raw reproduces UDON's collapse")
+    ap.add_argument("--nmf-runs", type=int, default=1)
+    ap.add_argument("--random-state", type=int, default=0)
+    ap.add_argument("--batch-correction", choices=["none", "harmony"], default="none")
+    ap.add_argument("--batch-key", default=None)
+    ap.add_argument("--no-goelite", action="store_true")
+    ap.add_argument("--batch-correction-use", choices=["graph", "umap", "graph-umap", "all"], default="graph")
+    args = ap.parse_args(argv)
+
+    outdir = os.path.abspath(args.output_dir)
+    os.makedirs(outdir, exist_ok=True)
+    with open(os.path.join(outdir, "command.txt"), "w") as fh:
+        fh.write("python " + " ".join([os.path.basename(sys.argv[0])] + (argv or sys.argv[1:])) + "\n")
+
+    folds, fold_obs = build_folds(args)
+    sm = None
+    if args.sample_metadata and os.path.exists(args.sample_metadata):
+        sm = pd.read_csv(args.sample_metadata, sep="\t", index_col=0).astype(str)
+    h5 = os.path.join(outdir, "folds_for_icgs3.h5ad")
+    a = folds_to_h5ad(folds, fold_obs, h5, sample_meta=sm, cell_col=args.cell_col)
+    icgs_dir = os.path.join(outdir, "icgs3")
+    run_icgs3(h5, icgs_dir, args, n_obs=a.n_obs)
+    dst, n = write_udon_clusters(icgs_dir, fold_obs, outdir, args.cell_col, args.sample_col)
+    finalize_udon_outputs(folds, fold_obs, outdir, dst, args)
+    log(f"DONE: {n} clusters -> {dst}")
+    return dst
+
+
+if __name__ == "__main__":
+    main()

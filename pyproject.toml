@@ -4,8 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "AltAnalyze3"
-version = "0.1.2"
+version = "0.1.3"
 description = "AltAnalyze3: Advanced RNA-Seq Analysis Workflow"
+requires-python = ">=3.11"
 authors = [{ name = "AltAnalyze", email = "altanalyze@gmail.com" }]
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -15,12 +16,12 @@ dependencies = [
     "Bio==1.7.1",
     "biopython>=1.84",
     "future==1.0.0",
-    "h5py==3.10.0",
+    "h5py>=3.10.0,<3.15",
     "joblib==1.3.2",
     "matplotlib==3.6.2",
     "nimfa==1.4.0",
-    "numpy==1.23.5",
-    "pandas==1.5.2",
+    "numpy>=1.23.5,<2",
+    "pandas>=1.5.2,<3",
     "pysam==0.22.0",
     "pytest==8.3.3",
     "requests==2.32.3",
@@ -34,6 +35,9 @@ dependencies = [
     "tqdm==4.62.3"
 ]
 
+[project.scripts]
+altanalyze3-neo = "altanalyze3.components.neoantigen.cli:main"
+
 [project.optional-dependencies]
 # SNAF neoantigen workflow extras (all cross-platform; import lazily so the core
 # package never requires them):
@@ -41,11 +45,11 @@ dependencies = [
 #   snaf-immuno  -> deepimmuno immunogenicity prediction (tensorflow)
 #   snaf         -> everything above
 snaf-bayes = ["torch>=1.13", "pyro-ppl>=1.8.4", "mhcflurry>=2.0", "xmltodict>=0.13"]
-snaf-immuno = ["tensorflow>=2.10"]
+snaf-immuno = ["tensorflow>=2.10", "tf-keras>=2.16; python_version >= '3.10'"]
 #   snaf-surface -> B-antigen surface pipeline: pure-python transmembrane topology
 #                   (tmhmm.py) + gene-symbol lookup (mygene). Biopython is already core.
-snaf-surface = ["tmhmm.py>=1.3", "mygene>=3.2"]
-snaf = ["torch>=1.13", "pyro-ppl>=1.8.4", "mhcflurry>=2.0", "xmltodict>=0.13", "tensorflow>=2.10", "tmhmm.py>=1.3", "mygene>=3.2"]
+snaf-surface = ["tmhmm.py>=1.2.1", "mygene>=3.2"]
+snaf = ["torch>=1.13", "pyro-ppl>=1.8.4", "mhcflurry>=2.0", "xmltodict>=0.13", "tensorflow>=2.10", "tf-keras>=2.16; python_version >= '3.10'", "tmhmm.py>=1.2.1", "mygene>=3.2"]
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -54,4 +58,7 @@ where = ["."]
 "altanalyze3.components.fastCNV" = ["resources/*.tsv"]
 "altanalyze3.components.fastComm" = ["resources/*.tsv", "configs/*.json"]
 "altanalyze3.components.long_read" = ["resources/*.gz"]
-"altanalyze3.components.snaf" = ["nextflow/*.nf", "nextflow/*.config", "nextflow/conf/*", "nextflow/assets/*", "nextflow/modules/local/*/*"]
+"altanalyze3.components.snaf" = ["docs/*.md", "BayesTS/*.tsv.gz", "data/*.json", "HLA_Allele_frequency_21_populations.csv", "surface/data/*.json", "surface/TMHMM2.0.model", "nextflow/*.nf", "nextflow/*.json", "nextflow/tests/*.config", "nextflow/tests/*.nf", "nextflow/tests/*.py", "nextflow/tests/*.sh", "nextflow/tests/data/*", "nextflow/tests/data/snaf_db/*", "nextflow/*.config", "nextflow/conf/*", "nextflow/assets/*", "nextflow/modules/local/*/*"]
+
+"altanalyze3.components.bam.bam2hla" = ["build/signatures_*.json.gz", "data/HLA_Allele_frequency_21_populations.csv"]
+"altanalyze3.components.snaf.deepimmuno" = ["data/*.txt", "models/cnn_model_331_3_7/*", "models/cnn_model_331_3_7/.*"]

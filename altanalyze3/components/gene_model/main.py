@@ -12,7 +12,11 @@ def build_gene_model(df):
     position_ense = {}
     boundary_set = set()
     gene_start, gene_end, strand, ensg, chromosome = None,None,None,None,None
-    pat = re.compile(r'exon_id=(ENSE\d+\.\d+)')
+    # GTF exon IDs are quoted; GFF3 uses key=value and custom IDs are valid.
+    pat = re.compile(r'(?:exon_id[ =]+|ID=)[\"]?([^;\" ]+)')
+    if not df.empty:
+        gene_start, gene_end = int(df.start.min()), int(df.end.max())
+        strand, ensg, chromosome = df.iloc[0].strand, df.iloc[0].gene, df.iloc[0].chr
 
     # phase1: build footprint and record all unique exon boundary positions
     for row in df.itertuples(index=False):
@@ -24,13 +28,12 @@ def build_gene_model(df):
         elif row.type == 'exon':
             attrs = row.attrs
             ense_match = re.search(pat, attrs)
-            if ense_match:
-                ense = ense_match.group(1)
-                for p in range(row.start, row.end):
-                    position_footprint.setdefault(p, []).append(transcript_id)
-                    position_ense.setdefault(p, []).append(ense)
-                boundary_set.add(row.start)
-                boundary_set.add(row.end)
+            ense = ense_match.group(1) if ense_match else f'{row.gene}:{row.start}-{row.end}'
+            for p in range(row.start, row.end):
+                position_footprint.setdefault(p, []).append(transcript_id)
+                position_ense.setdefault(p, []).append(ense)
+            boundary_set.add(row.start)
+            boundary_set.add(row.end)
 
     # phase2: sort all boundaries into ordered list
     ordered_boundaries = sorted(boundary_set, reverse=(strand == '-'))
@@ -102,26 +105,48 @@ def main(args):
 
     df = pd.read_csv(gtf, sep='\t', comment='#', header=None)
     df.columns = ['chr', 'source', 'type', 'start', 'end', 'score', 'strand', 'phase', 'attrs']
-    df = df[df['type'].isin(['gene', 'transcript', 'exon'])]
+    df['type'] = df['type'].replace({'mRNA': 'transcript'})
+    df = df[df['type'].isin(['gene', 'transcript', 'exon'])].copy()
 
-    if gtf.endswith('.gff3') or gtf.endswith('.gff'):
-        pat = re.compile(r'gene_id=(ENSG\d+)(?:\.\d+)?')
-    else:
-        pat = re.compile(r'gene_id "(ENSG\d+)"')
-    df['gene'] = df['attrs'].apply(lambda x: re.search(pat, x).group(1) if re.search(pat, x) else None)
+    def attributes(text):
+        fields = {}
+        for field in text.split(';'):
+            field = field.strip()
+            if not field:
+                continue
+            key, value = field.split('=', 1) if '=' in field else field.split(None, 1)
+            fields[key] = value.strip('" ')
+        return fields
+    parsed = [attributes(x) for x in df['attrs']]
+    parent_gene = {}
+    for row, attrs in zip(df.itertuples(index=False), parsed):
+        if row.type == 'gene':
+            ident = attrs.get('gene_id') or attrs.get('ID')
+            if ident:
+                parent_gene[attrs.get('ID', ident)] = ident.removeprefix('gene:')
+    for row, attrs in zip(df.itertuples(index=False), parsed):
+        if row.type == 'transcript':
+            parent = attrs.get('gene_id') or parent_gene.get(attrs.get('Parent', ''), attrs.get('Parent', ''))
+            if parent:
+                parent_gene[attrs.get('ID', attrs.get('transcript_id', ''))] = parent.removeprefix('gene:')
+    df['gene'] = [a.get('gene_id') or parent_gene.get(a.get('ID', '')) or parent_gene.get(a.get('Parent', '')) for a in parsed]
+    if df.loc[df['type'] == 'exon', 'gene'].isna().any():
+        raise ValueError('Exons require gene_id or resolvable GFF3 Parent attributes')
 
     if gene != 'all':
         df = df[df['gene'] == gene]
         string_stream = build_gene_model(df)
     else:
         sub_df_list = [group for _, group in df.groupby(by='gene')] 
-        chunks = split_array_to_chunks(sub_df_list, mp.cpu_count())
-        pool = mp.Pool(processes=mp.cpu_count())
-        print(f'spawn {mp.cpu_count()} subprocesses')
-        r = [pool.apply_async(func=process_single_core, args=(chunk,)) for chunk in chunks]
-        pool.close()
-        pool.join()
-        string_stream = ''.join([res.get() for res in r])
+        cores = max(1, min(getattr(args, 'cpus', 1), len(sub_df_list)))
+        chunks = split_array_to_chunks(sub_df_list, cores)
+        if cores == 1:
+            string_stream = process_single_core(chunks[0])
+        else:
+            with mp.Pool(processes=cores) as pool:
+                string_stream = ''.join(pool.map(process_single_core, chunks))
+        if not string_stream:
+            raise ValueError('Reference contains no usable exon models')
 
     with open(os.path.join(outdir, f'gene_model_{gene}.tsv'), 'w') as f:
         f.write(string_stream)

@@ -1,0 +1,7 @@
+Nextflow 26.04.6 is available - Please consider updating your version to it
+N E X T F L O W  ~  version 25.10.0
+Launching `components/snaf/nextflow/tests/proteomics_smoke.nf` [angry_cuvier] DSL2 - revision: 0f3fddd2e1
+WARN: There's no process matching config selector: SNAF_TS
+WARN: Task runtime metrics are not reported when using macOS without a container engine
+[47/5407d5] Submitted process > PYNEOQUANT (S1)
+[fb/40e9eb] Submitted process > MERGE_MS (S1)

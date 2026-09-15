@@ -64,6 +64,19 @@ SUF_DEG_DIR = "_deg"
 SUF_DEG_MANIFEST = "_deg_manifest.json"
 SUF_CCC = "_ccc.tsv"
 
+# Per-modality sidecars. One set per imputed or measured modality beside the RNA store,
+# named `<prefix>_<modality id><suffix>`. A modality store is either `per_cell` (the
+# full gene-major store, the same layout the RNA store uses) or `per_state` (the
+# feature x cell-state matrix only, whose per-cell value is the cell's own state value).
+MODALITY_SUFFIXES = {
+    "genes": SUF_GENES,
+    "stats_mean": SUF_STATS_MEAN,
+    "stats_frac": SUF_STATS_FRAC,
+    "expr_indptr": SUF_EXPR_INDPTR,
+    "expr_indices": SUF_EXPR_INDICES,
+    "expr_data": SUF_EXPR_DATA,
+}
+
 
 class BundlePaths:
     """Every path in one bundle. All paths are absolute."""
@@ -126,6 +139,10 @@ class BundlePaths:
     @property
     def ccc(self) -> str: return self._p(SUF_CCC)
 
+    def modality(self, modality_id: str) -> "ModalityPaths":
+        """Every sidecar path of one modality store."""
+        return ModalityPaths(self, modality_id)
+
     def required(self) -> List[str]:
         """Files that must exist before the server will serve this bundle."""
         return [self.metadata, self.cells, self.genes, self.stats_mean, self.stats_frac,
@@ -133,6 +150,46 @@ class BundlePaths:
 
     def missing(self) -> List[str]:
         return [p for p in self.required() if not os.path.isfile(p)]
+
+
+class ModalityPaths:
+    """The sidecars of one modality, named `<prefix>_<modality id><suffix>`."""
+
+    def __init__(self, paths: "BundlePaths", modality_id: str):
+        self.bundle_dir = paths.bundle_dir
+        self.prefix = paths.prefix
+        self.modality_id = str(modality_id)
+
+    def _p(self, suffix: str) -> str:
+        return os.path.join(self.bundle_dir, f"{self.prefix}_{self.modality_id}{suffix}")
+
+    @property
+    def genes(self) -> str: return self._p(SUF_GENES)
+
+    @property
+    def stats_mean(self) -> str: return self._p(SUF_STATS_MEAN)
+
+    @property
+    def stats_frac(self) -> str: return self._p(SUF_STATS_FRAC)
+
+    @property
+    def expr_indptr(self) -> str: return self._p(SUF_EXPR_INDPTR)
+
+    @property
+    def expr_indices(self) -> str: return self._p(SUF_EXPR_INDICES)
+
+    @property
+    def expr_data(self) -> str: return self._p(SUF_EXPR_DATA)
+
+    def required(self, kind: str) -> List[str]:
+        """The files a store of this kind must carry."""
+        common = [self.genes, self.stats_mean, self.stats_frac]
+        if kind == "per_state":
+            return common
+        return common + [self.expr_indptr, self.expr_indices, self.expr_data]
+
+    def missing(self, kind: str) -> List[str]:
+        return [p for p in self.required(kind) if not os.path.isfile(p)]
 
 
 def read_metadata(path: str) -> Dict:

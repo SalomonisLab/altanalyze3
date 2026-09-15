@@ -1,0 +1,41 @@
+{
+  "generated_at": "2026-08-30T18:39:38+00:00",
+  "delivered_script": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/rna2lipid/provenance/train_sparse_lipidwise_delivered_2026-08-19.py",
+  "delivered_line_ranges": {
+    "safe_pearson": [
+      648,
+      689
+    ],
+    "fit_sparse_lipidwise_elasticnet": [
+      838,
+      1313
+    ]
+  },
+  "matrix_shapes": {
+    "X": [
+      68,
+      1303
+    ],
+    "Y": [
+      68,
+      8
+    ]
+  },
+  "check_E_trainer_equivalence": {
+    "lipids_compared": 8,
+    "models_compared": 8,
+    "coefficients_compared": 1225,
+    "predictions_compared": 544,
+    "selection_field_mismatches": [],
+    "max_abs_coefficient_difference": 0.0,
+    "max_abs_intercept_difference": 0.0,
+    "max_abs_prediction_difference": 0.0,
+    "scaler_x_identical": true,
+    "scaler_y_identical": true,
+    "x_columns_identical": true,
+    "y_columns_identical": true,
+    "summary_table_equal": true,
+    "pass": true
+  },
+  "all_pass": true
+}

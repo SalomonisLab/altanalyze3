@@ -144,7 +144,8 @@ that pass nothing keep their previous behaviour (verified bit-identical).
 | reference | tissue | edges | TFs | training pseudobulks | bundle |
 |---|---|---|---|---|---|
 | `leukemia` (default) | human bone marrow / AML | 7,486 | 217 | 341 | `rna2grn_bundle.pkl.gz` (0.47 MB) |
-| `lung` | human lung, LungMAP IPF vs control | 57,307 | 221 | 39 | `rna2grn_lung_bundle.pkl.gz` (3.93 MB) |
+| `lung` (LEGACY) | human lung, LungMAP IPF vs control | 57,307 | 221 | 39 | `rna2grn_lung_bundle.pkl.gz` (3.93 MB) |
+| `lung_hybrid` (deployed in scALABLE) | human lung, LungMAP IPF vs control | 63,647 | 284 | 39 | `rna2grn_lung_hybrid_bundle.pkl.gz` (3.63 MB) |
 
 ```python
 b = Rna2GrnBundle.load(reference="lung")      # or load_bundle(reference="lung")
@@ -178,6 +179,41 @@ configuration, leave-one-pseudobulk-out is an added honest counterpart:
 | per-edge r (median) | 0.941 | 0.916 |
 | mean absolute error | 0.084 | 0.097 |
 
+### The lung_hybrid reference (edge selection, 2026-09-05)
+
+`lung` and `lung_hybrid` differ only in which edges enter the model. Everything
+else stays the same: the same RNA matrix, the same 39 matched pseudobulks, the same
+per-edge ridge fit, the same `mean_over_cells_of_log1p_cp10k` statistic.
+
+`lung` took the 57,307 edges that passed one global threshold on the maximum
+TF-to-target activity across all 39 columns. That rule ranks a TF by its absolute
+score range. It dropped 64 of 285 TFs and gave one TF 1,693 edges and another 1.
+
+`lung_hybrid` selects edges inside each TF and each cell-type/condition column. It
+keeps a target when the score reaches `max(0.33 x that TF's maximum in that column,
+0.05)`, and it caps each TF-column pair at 50 targets. The rule retains 63,647 of
+454,364 candidate edges (14.0%), 284 of 285 TFs and 5,804 of 11,061 target genes.
+Only PRDM6 falls out, because the 0.05 floor removes all of its edges.
+
+Accuracy over 39 pseudobulks x 63,647 edges:
+
+| metric | resubstitution | leave-one-out |
+|---|---|---|
+| R² vs global mean | 0.867 | 0.816 |
+| profile r (median / min) | 0.932 / 0.870 | 0.897 / 0.778 |
+| per-edge r (median) | 0.867 | 0.797 |
+| mean absolute error | 0.070 | 0.080 |
+
+The held-out numbers sit below the `lung` numbers. The hybrid set adds
+cell-type-restricted edges that carry a lower score and a narrower dynamic range,
+and a per-edge model predicts those edges less well. Compare the two references on
+the same edges before you read the drop as a loss of model quality.
+
+Source matrix and selection code:
+`/Users/saljh8/Dropbox/LungMAP/GRN/TF_to_Gene_connection_scores_log10-NOT_ordered_clusters_ALL_GENES-hybrid-r0.33-f0.05-cap50.txt`
+and `/Users/saljh8/Dropbox/LungMAP/GRN/rna2grn_hybrid/code/build_hybrid_edges.py`.
+Full report: `/Users/saljh8/Dropbox/LungMAP/GRN/rna2grn_hybrid/README.md`.
+
 ### Pseudobulk statistic (how inference must form its input)
 
 A bundle declares in `metadata["pseudobulk_statistic"]` how its training pseudobulks
@@ -186,7 +222,7 @@ were formed, and `predict_from_adata` honours that declaration by default:
 | statistic | meaning | bundle |
 |---|---|---|
 | `sum_counts` (default when a bundle declares nothing) | sum the group's counts, then CP10k + log1p | `leukemia` |
-| `mean_over_cells_of_log1p_cp10k` | average the group's already CP10k+log1p rows | `lung` |
+| `mean_over_cells_of_log1p_cp10k` | average the group's already CP10k+log1p rows | `lung`, `lung_hybrid` |
 
 ```python
 b.predict_from_adata(adata, groupby="pb", layer=None)          # uses the bundle's own statistic

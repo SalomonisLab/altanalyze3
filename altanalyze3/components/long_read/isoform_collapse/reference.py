@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import os
 
+from .. import io_utils as _io
+
 from .. import gff_process as gff
 
 
@@ -47,7 +49,7 @@ def _load_from_transcript_associations(ta_path):
     the transcript-id version is stripped.
     """
     out = {}
-    with open(ta_path) as f:
+    with _io.smart_open(ta_path) as f:
         for line in f:
             parts = line.rstrip("\n").split("\t")
             if len(parts) < 4:
@@ -76,7 +78,7 @@ def annotate_reference(ref_gff, ref_exons, cache_path=None, force=False, log=pri
     # 1. our own cached {gene, structure, ENST}
     if cache_path and not force and os.path.exists(cache_path):
         out = {}
-        with open(cache_path) as f:
+        with _io.smart_open(cache_path) as f:
             next(f, None)
             for line in f:
                 g, struct, enst = line.rstrip("\n").split("\t")

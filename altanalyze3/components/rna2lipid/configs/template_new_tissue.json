@@ -1,0 +1,100 @@
+{
+  "name": "rna2lipid-<tissue>-lipidwise",
+  "tissue": "<tissue name, for example human kidney>",
+  "_how_to_use": [
+    "1. Put one RNA matrix and one lipid matrix per source under data/.",
+    "   The two matrices of a pair must share sample identifiers.",
+    "2. Set rna_orientation / lipid_orientation per table.",
+    "   samples_by_features = rows are samples. features_by_samples = rows are genes or lipids.",
+    "3. Set sample_metadata so donor and group can be read from the sample id.",
+    "   donor drives the donor-disjoint holdout. group drives the constrained holdout.",
+    "4. Set keep_groups to the groups you want to train on, or null to keep all.",
+    "   Anything outside keep_groups is DROPPED. The training log reports how many.",
+    "5. Choose the holdout mode. 'constrained' is the lung protocol and is NOT",
+    "   donor-disjoint. 'donor_disjoint' holds out whole donors. 'none' skips it.",
+    "6. Run: python -m altanalyze3.components.rna2lipid.cli train --config <this file>",
+    "7. Point a scALABLE reference at the bundle through impute_config.lipids.bundle_path",
+    "   in altanalyze3/components/cellHarmony/flask/reference_config.json."
+  ],
+  "data": {
+    "tables": [
+      {
+        "id": "bulk",
+        "rna": "../data/<tissue>_bulk_rna.csv",
+        "rna_orientation": "samples_by_features",
+        "lipids": "../data/<tissue>_bulk_lipids_log2.csv",
+        "lipid_orientation": "samples_by_features"
+      },
+      {
+        "id": "sorted_celltype",
+        "rna": "../data/<tissue>_celltype_rna.csv",
+        "rna_orientation": "features_by_samples",
+        "lipids": "../data/<tissue>_celltype_lipids_log2.csv",
+        "lipid_orientation": "samples_by_features"
+      }
+    ]
+  },
+  "preprocessing": {
+    "collapse_duplicate_genes": true,
+    "fill_missing_with_feature_median": true,
+    "drop_rows_with_missing_lipids": false,
+    "remove_zero_only_genes": true,
+    "x_join_mode": "inner",
+    "y_join_mode": "inner"
+  },
+  "sample_metadata": {
+    "donor": {"strategy": "split_field", "delimiter": "_", "field": 0},
+    "label": {"strategy": "split_field", "delimiter": "_", "field": 1, "maxsplit": 1, "missing": ""},
+    "group": {
+      "strategy": "keyword_map",
+      "default": "UNKNOWN",
+      "rules": [
+        {"group": "<GROUP_A>", "any_of": ["<substring_a>"]},
+        {"group": "<GROUP_B>", "any_of": ["<substring_b>"]}
+      ],
+      "_other_strategies": {
+        "label": "use the label verbatim as the group",
+        "regex": "{'strategy':'regex','pattern':'^(?:[^_]+)_(.+)$','group':1}"
+      }
+    },
+    "keep_groups": ["<GROUP_A>", "<GROUP_B>"]
+  },
+  "training": {
+    "architecture": "sparse_lipidwise",
+    "bundle_output": "../artifacts/rna2lipid_<tissue>_lipidwise_bundle.pkl",
+    "report_output_dir": "../artifacts/reports/<tissue>_lipidwise",
+    "model": {
+      "target_scaling": "standard",
+      "top_gene_options": [25, 50, 100, 200],
+      "l1_ratio": [0.70, 0.90, 0.95, 1.00],
+      "alphas": {"logspace": [-3, 1, 30]},
+      "cv": 3,
+      "max_iter": 50000,
+      "n_jobs": -1,
+      "sparsity_penalty": 0.002,
+      "random_seed": 1
+    },
+    "holdout": {
+      "mode": "donor_disjoint",
+      "seed": 42,
+      "holdout_donor_fraction": 0.3,
+      "min_holdout_donors": 2,
+      "_constrained_alternative": {
+        "mode": "constrained",
+        "seed": 42,
+        "total_holdout": 28,
+        "min_per_group": 5,
+        "max_per_donor": 3,
+        "required_groups": ["<GROUP_A>", "<GROUP_B>"]
+      }
+    }
+  },
+  "evaluation": {
+    "baselines": {
+      "pca_ridge": {
+        "max_components": 16,
+        "ridge_alphas": [0.001, 0.01, 0.1, 1.0, 10.0, 100.0]
+      }
+    }
+  }
+}

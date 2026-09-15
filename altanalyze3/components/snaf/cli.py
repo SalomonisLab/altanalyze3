@@ -34,6 +34,38 @@ def _ensure_fork_safety():
 logger = logging.getLogger(__name__)
 
 
+def _is_junction_uid(uid):
+    """True when snaf.uid_to_coord can parse this identifier.
+
+    uid_to_coord splits on ':' and accepts two parts (gene, exons) or three (a trans-spliced
+    junction whose acceptor names its own gene), then splits the remainder on '-' and unpacks
+    exactly two. This mirrors that contract, so nothing reaches it that it cannot read and
+    nothing it could read is discarded. An intron-retention junction keeps its I token and a
+    UTR junction keeps its U token; only a lone exon, intron or UTR feature fails.
+    """
+    stem = str(uid).split('=')[0]
+    parts = stem.split(':')
+    if len(parts) not in (2, 3):
+        return False
+    return ':'.join(parts[1:]).count('-') == 1
+
+
+def _classify_non_junction(uid):
+    """Name the kind of row being ignored, so the warning says what was in the file."""
+    stem = str(uid).split('=')[0]
+    parts = stem.split(':')
+    if len(parts) not in (2, 3):
+        return 'no_gene_prefix'
+    token = ':'.join(parts[1:])
+    if token.count('-') > 1:
+        return 'multiple_dashes'
+    first = token.split('_')[0]
+    for prefix, name in (('E', 'exon_only'), ('I', 'intron_only'), ('U', 'utr_only')):
+        if first.startswith(prefix):
+            return name
+    return 'other_single_feature'
+
+
 # --------------------------------------------------------------------------- helpers
 def _read_count_matrix(path, label='junction matrix'):
     """Read an AltAnalyze junction-count matrix, compressed or not, and report what it lost.
@@ -75,6 +107,27 @@ def _read_count_matrix(path, label='junction matrix'):
         logger.warning('%s %s: %d / %d rows are duplicate UIDs after stripping the coordinate '
                        'suffix; keeping the first of each', label, path, n_dup, df.shape[0])
     df = df.loc[np.logical_not(dup), :]
+
+    # AltAnalyze2 can quantify exons and introns alongside junctions, and several cohort
+    # matrices ship with those rows. A lone feature such as ENSG00000000003:E1.1 carries no
+    # donor-acceptor pair, so uid_to_coord raises ValueError on it and the whole run dies at
+    # the frequency table. A junction UID has exactly one '-' after the gene prefix; keep
+    # those and drop the rest, counted by kind so the loss is on the record, never silent.
+    keep = np.fromiter((_is_junction_uid(uid) for uid in df.index), bool, df.shape[0])
+    n_drop = int(np.count_nonzero(~keep))
+    if n_drop:
+        kinds = {}
+        for uid in df.index[~keep]:
+            kind = _classify_non_junction(uid)
+            kinds[kind] = kinds.get(kind, 0) + 1
+        logger.warning('%s %s: %d / %d rows are not junctions and are ignored (%s); '
+                       'AltAnalyze2 writes these when exon or intron quantification is on',
+                       label, path, n_drop, df.shape[0],
+                       ', '.join('%s=%d' % kv for kv in sorted(kinds.items())))
+        df = df.loc[keep, :]
+        if df.shape[0] == 0:
+            raise ValueError('{} {}: every row was an exon or intron feature; no junction '
+                             'remains to analyse'.format(label, path))
     logger.info('%s %s: %d rows x %d samples', label, path, df.shape[0], df.shape[1])
     return df
 
@@ -100,6 +153,33 @@ def _read_hla(path, samples):
             vals = [str(v) for v in row.values if str(v) not in ('nan', '')]
         hlas.append([v.strip() for v in vals if v.strip()])
     return hlas
+
+
+def _validation_gtf_paths(value):
+    """Normalize --validation_gtf into None, one path, or a list of paths.
+
+    argparse gives a list because the flag takes several values; a user may also comma-separate
+    them inside one value, or pass a single string from Python. A lone catalog comes back as a
+    plain string so every index and parse cached by earlier runs still hits. Every path is
+    checked here, so a typo fails before the pipeline starts.
+    """
+    if not value:
+        return None
+    raw = value if isinstance(value, (list, tuple)) else [value]
+    paths = []
+    for item in raw:
+        s = str(item).strip()
+        if not s:
+            continue
+        parts = [s] if os.path.exists(s) else [q.strip() for q in s.split(',') if q.strip()]
+        for p in parts:
+            if p not in paths:
+                paths.append(p)
+    for p in paths:
+        _require_file(p, '--validation_gtf')
+    if not paths:
+        return None
+    return paths[0] if len(paths) == 1 else paths
 
 
 def _require_file(path, flag):
@@ -244,6 +324,12 @@ def run_snaf(args):
     snaf.JunctionCountMatrixQuery.generate_results(
         path=os.path.join(outdir, 'after_prediction.p'), outdir=outdir)
     print('[STAGE-TIMING] generate_results (burden+freq+symbols): {:.1f}s'.format(_t.time()-_tg))
+    if getattr(args, 'export_proteomics', False):
+        from pathlib import Path
+        from altanalyze3.components.neoantigen.proteomics import export_candidates
+        export_candidates(sorted(Path(outdir, 'T_candidates').glob('T_antigen_candidates_*.txt')),
+                          Path(outdir, 'proteomics_export'), getattr(args, 'canonical_fasta', None),
+                          args.binding_method)
     print('SNAF T-antigen results written to {}'.format(outdir))
     return outdir
 
@@ -370,13 +456,28 @@ def run_snaf_b(args):
     surface_db = str(args.surface_db) if getattr(args, 'surface_db', None) else None
     if surface_db is not None and not os.path.exists(surface_db):
         raise FileNotFoundError('--surface_db not found: {}'.format(surface_db))
-    validation_gtf = str(args.validation_gtf) if getattr(args, 'validation_gtf', None) else None
-    if validation_gtf:
-        _require_file(validation_gtf, '--validation_gtf')
+    validation_gtf = _validation_gtf_paths(getattr(args, 'validation_gtf', None))
+    if isinstance(validation_gtf, list):
+        logger.info('SNAF-B validation catalogs (%d): %s', len(validation_gtf),
+                    ', '.join(validation_gtf))
     add_control = _load_add_control(getattr(args, 'add_control', None))
     genome_fasta = str(args.genome_fasta) if getattr(args, 'genome_fasta', None) else None
     gtex_db = str(args.gtex_db) if getattr(args, 'gtex_db', None) else None
     mode = args.mode
+    isoform_method = getattr(args, 'isoform_method', 'learned')
+    isoform_ranker = getattr(args, 'isoform_ranker', None)
+    first_exon_file = getattr(args, 'first_exon_junctions', None)
+    first_exons = []
+    if first_exon_file:
+        _require_file(first_exon_file, '--first_exon_junctions')
+        with open(first_exon_file) as fh:
+            first_exons = [line.strip() for line in fh if line.strip() and not line.startswith('#')]
+        if mode != 'short_read' or isoform_method == 'legacy':
+            raise ValueError('--first_exon_junctions requires short_read learned/evidence inference')
+    if isoform_ranker:
+        _require_file(isoform_ranker, '--isoform_ranker')
+        if mode != 'short_read' or isoform_method != 'learned':
+            raise ValueError('--isoform_ranker requires short_read learned inference')
 
     if genome_fasta is None and os.environ.get('SNAF_OFFLINE', '0') != '1':
         logger.warning(
@@ -425,6 +526,13 @@ def run_snaf_b(args):
     run_gtf = validation_gtf if mode == 'long_read' else None
     surface.run(uids=membrane_tuples, outdir=outdir, prediction_mode=mode, n_stride=args.n_stride,
                 gtf=run_gtf, tmhmm=(not args.no_tmhmm),
+                cores=args.cpus, junction_counts=df, isoform_method=isoform_method,
+                genome_fasta=genome_fasta, isoform_ranker=isoform_ranker,
+                first_exon_junctions=first_exons,
+                isoform_sample=getattr(args, 'isoform_sample', None),
+                isoform_min_reads=getattr(args, 'isoform_min_reads', 3),
+                isoform_max_edits=getattr(args, 'isoform_max_edits', None),
+                isoform_top_k=getattr(args, 'isoform_top_k', 5),
                 software_path=(str(args.tmhmm_path) if getattr(args, 'tmhmm_path', None) else None))
     surface.generate_full_results(outdir=outdir, freq_path=freq_path, mode=mode,
                                   validation_gtf=validation_gtf)

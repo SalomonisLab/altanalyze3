@@ -1,5 +1,8 @@
 import os,sys
 import re
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+from long_read import io_utils as _io
 from Bio import SeqIO
 from Bio.Seq import Seq
 
@@ -255,7 +258,7 @@ with open(junctions_file, "r") as f:
 
 # Step 3: Import transcript associations
 transcript_associations = {}
-with open(transcript_associations_file, "r") as f:
+with _io.smart_open(transcript_associations_file) as f:
     for line in f:
         parts = line.strip().split("\t")
         if len(parts) >= 4:

@@ -322,46 +322,87 @@ def ingest_markers(src: Optional[str], dst: str) -> Dict:
             "columns": ["gene", "cluster", "fold", "p"] + header}
 
 
-def ingest_deg(deg_root: Optional[str], deg_dir: str, manifest_path: str) -> Dict:
-    """Copy every DEG_detailed_*.tsv / DEG_pooled_overall_*.tsv found under deg_root.
+def ingest_deg(deg_root: Optional[str], deg_dir: str, manifest_path: str,
+               modality_roots: Optional[Dict[str, str]] = None) -> Dict:
+    """Copy every DEG_detailed_*.tsv / DEG_pooled_overall_*.tsv found under each root.
 
     Nothing is recomputed. Each file is copied verbatim and indexed, so the browser
     shows the numbers the differential workflow produced.
+
+    `deg_root` holds the RNA differentials. `modality_roots` maps a modality id to the
+    root of that modality's own differential runs, so one bundle can serve an ADT, lipid
+    or GRN contrast beside the RNA one. A non-RNA file is copied under a modality
+    subdirectory, because two modalities of the same contrast share a file name.
     """
     manifest = {"comparisons": []}
-    if not deg_root or not os.path.isdir(deg_root):
-        with open(manifest_path, "w") as fh:
-            json.dump(manifest, fh, indent=2)
-        return manifest
-    os.makedirs(deg_dir, exist_ok=True)
-    for dirpath, _d, filenames in os.walk(deg_root):
-        for fn in sorted(filenames):
-            if not fn.endswith(".tsv"):
-                continue
-            kind = None
-            if fn.startswith("DEG_detailed_"):
-                kind = "per_cell_state"
-                comp = fn[len("DEG_detailed_"):-4]
-            elif fn.startswith("DEG_pooled_overall_"):
-                kind = "pooled_overall"
-                comp = fn[len("DEG_pooled_overall_"):-4]
-            else:
-                continue
-            src = os.path.join(dirpath, fn)
-            dst = os.path.join(deg_dir, fn)
-            with open(src, "r") as fi:
-                text = fi.read()
-            with open(dst, "w") as fo:
-                fo.write(text)
-            lines = [ln for ln in text.split("\n") if ln.strip()]
-            header = lines[0].split("\t") if lines else []
-            manifest["comparisons"].append({
-                "id": f"{comp}::{kind}", "comparison": comp, "kind": kind,
-                "file": os.path.basename(dst), "path": os.path.abspath(dst),
-                "source": os.path.abspath(src), "columns": header,
-                "n_rows": max(len(lines) - 1, 0),
-            })
-    manifest["comparisons"].sort(key=lambda c: (c["comparison"], c["kind"]))
+    roots: List[Tuple[str, Optional[str]]] = [("rna", deg_root)]
+    for modality_id, root in sorted((modality_roots or {}).items()):
+        roots.append((modality_id, root))
+
+    for modality_id, root in roots:
+        if not root or not os.path.isdir(root):
+            continue
+        target_dir = deg_dir if modality_id == "rna" else os.path.join(deg_dir, modality_id)
+        os.makedirs(target_dir, exist_ok=True)
+        for dirpath, _d, filenames in os.walk(root):
+            for fn in sorted(filenames):
+                if not fn.endswith(".tsv"):
+                    continue
+                kind = None
+                if fn.startswith("DEG_detailed_"):
+                    kind = "per_cell_state"
+                    comp = fn[len("DEG_detailed_"):-4]
+                elif fn.startswith("DEG_pooled_overall_"):
+                    kind = "pooled_overall"
+                    comp = fn[len("DEG_pooled_overall_"):-4]
+                else:
+                    continue
+                src = os.path.join(dirpath, fn)
+
+                # THE CONTRAST COMES FROM THE PATH, NOT THE FILE NAME.
+                #
+                # cellHarmony names every comparison directory after the two arm labels, and
+                # a covariate file that labels its arms CASE and CONTROL therefore yields
+                # CASE_vs_CONTROL for every contrast in the project. Deriving `comp` from the
+                # file name alone gave every contrast the same id AND the same destination
+                # path, so each copy overwrote the previous one. A CellRef2 bundle built on
+                # 2026-09-03 recorded 505 tables, kept 7, and lost 100 of 101 contrasts.
+                #
+                # The layout is <root>/<contrast>/<comparison>/DEGs/<file>, so the first
+                # component of the path relative to the root names the contrast. A flat root
+                # with no contrast directory keeps the previous behaviour unchanged.
+                rel = os.path.relpath(dirpath, root)
+                parts = [p for p in rel.split(os.sep) if p not in ("", ".")]
+                contrast = parts[0] if parts else ""
+
+                if contrast:
+                    out_dir = os.path.join(target_dir, contrast)
+                    os.makedirs(out_dir, exist_ok=True)
+                else:
+                    out_dir = target_dir
+                dst = os.path.join(out_dir, fn)
+
+                with open(src, "r") as fi:
+                    text = fi.read()
+                with open(dst, "w") as fo:
+                    fo.write(text)
+                lines = [ln for ln in text.split("\n") if ln.strip()]
+                header = lines[0].split("\t") if lines else []
+                label = f"{contrast}::{comp}" if contrast else comp
+                entry_id = (f"{label}::{kind}" if modality_id == "rna"
+                            else f"{modality_id}::{label}::{kind}")
+                manifest["comparisons"].append({
+                    "id": entry_id, "comparison": comp, "kind": kind,
+                    "contrast": contrast,
+                    "modality": modality_id,
+                    "file": os.path.relpath(dst, deg_dir), "path": os.path.abspath(dst),
+                    "source": os.path.abspath(src), "columns": header,
+                    "n_rows": max(len(lines) - 1, 0),
+                })
+    manifest["comparisons"].sort(key=lambda c: (c.get("modality", "rna") != "rna",
+                                                c.get("modality", "rna"),
+                                                c.get("contrast", ""),
+                                                c["comparison"], c["kind"]))
     with open(manifest_path, "w") as fh:
         json.dump(manifest, fh, indent=2)
     return manifest
@@ -378,6 +419,254 @@ def ingest_ccc(src: Optional[str], dst: str) -> Dict:
     return {"available": True, "n_rows": max(len(lines) - 1, 0), "path": os.path.abspath(dst),
             "source": os.path.abspath(src),
             "columns": lines[0].split("\t") if lines else []}
+
+
+# ------------------------------------------------------------------- modalities
+
+
+def _read_feature_matrix(path: str):
+    """Read a modality prediction table as (row labels, feature names, float32 matrix).
+
+    rna2adt, rna2lipid and rna2grn all write a delimited table through
+    `predictions.to_csv` (rna2adt/cli.py:25), so a `.h5ad` extension on one of those
+    outputs names a CSV, not HDF5. The format is decided by the file's own first bytes,
+    never by its extension.
+    """
+    import pandas as pd
+
+    with open(path, "rb") as fh:
+        head = fh.read(8)
+    if head[:8] == b"\x89HDF\r\n\x1a\n":
+        import anndata as ad
+
+        adata = ad.read_h5ad(path)
+        matrix = adata.X
+        matrix = matrix.toarray() if hasattr(matrix, "toarray") else np.asarray(matrix)
+        return (np.asarray(adata.obs_names, dtype=str),
+                np.asarray(adata.var_names, dtype=str),
+                np.asarray(matrix, dtype=np.float32))
+
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        header = fh.readline()
+    sep = "\t" if header.count("\t") > header.count(",") else ","
+    frame = pd.read_csv(path, sep=sep, index_col=0)
+    return (frame.index.astype(str).to_numpy(),
+            frame.columns.astype(str).to_numpy(),
+            np.ascontiguousarray(frame.to_numpy(dtype=np.float32)))
+
+
+def _read_display_names(path: str) -> Dict[str, str]:
+    """`feature<TAB>display` from a TSV, ignoring any further columns.
+
+    A header line naming the first column `feature` is skipped; a file without one is
+    read from its first row, so a hand-made two-column list works.
+    """
+    out: Dict[str, str] = {}
+    with open(path, "r") as fh:
+        first = True
+        for line in fh:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < 2:
+                continue
+            if first:
+                first = False
+                if parts[0].strip().lower() in ("feature", "id", "gene", "symbol"):
+                    continue
+            key, shown = parts[0].strip(), parts[1].strip()
+            if key and shown:
+                out[key] = shown
+    if not out:
+        raise SystemExit(f"--modality-display-names read no pair from {path}")
+    return out
+
+
+def ingest_modality(
+    modality_id: str,
+    source: str,
+    *,
+    paths: B.BundlePaths,
+    barcodes: List[str],
+    states: List[str],
+    state_code: np.ndarray,
+    state_n: np.ndarray,
+    label: str = "",
+    feature_label: str = "feature",
+    expr_dtype: str = "float32",
+    display_names: Optional[Dict[str, str]] = None,
+) -> Dict:
+    """Write one modality's sidecars beside the RNA store and report what aligned.
+
+    The table's row labels decide the store kind. Rows that are cell barcodes give a
+    `per_cell` store, the same feature-major layout the RNA store uses. Rows that are
+    cell-state names give a `per_state` store: the modality was predicted at cell-state
+    granularity, so every cell of a state carries that state's value and only the
+    feature x cell-state matrix is stored. Nothing is interpolated in either case.
+    """
+    mpaths = paths.modality(modality_id)
+    rows, features, matrix = _read_feature_matrix(source)
+    n_features = len(features)
+    n_states = len(states)
+    n_cells = len(barcodes)
+    log(f"[{modality_id}] {source}: {matrix.shape[0]:,} rows x {n_features:,} features")
+
+    barcode_pos = {str(b): i for i, b in enumerate(barcodes)}
+    state_pos = {str(s): i for i, s in enumerate(states)}
+    hit_cells = sum(1 for r in rows if str(r) in barcode_pos)
+    hit_states = sum(1 for r in rows if str(r) in state_pos)
+
+    if hit_cells >= hit_states and hit_cells > 0:
+        kind = "per_cell"
+    elif hit_states > 0:
+        kind = "per_state"
+    else:
+        raise RuntimeError(
+            f"modality '{modality_id}': no row label of {source} matches a bundle barcode "
+            f"or a cell state. First rows: {list(rows[:3])}. "
+            f"First bundle barcodes: {barcodes[:2]}. First states: {states[:2]}")
+
+    if kind == "per_cell":
+        matched = np.full(n_cells, -1, dtype=np.int64)
+        for source_row, label_value in enumerate(rows):
+            target = barcode_pos.get(str(label_value))
+            if target is not None and matched[target] < 0:
+                matched[target] = source_row
+        n_matched = int((matched >= 0).sum())
+        retention = n_matched / n_cells if n_cells else 0.0
+        log(f"[{modality_id}] per-cell store: {n_matched:,} of {n_cells:,} bundle cells "
+            f"matched a row ({retention:.4f})")
+        if retention < 0.90:
+            log(f"[WARN] [{modality_id}] retention below 90%: {n_matched:,} of {n_cells:,}")
+        dense = np.zeros((n_cells, n_features), dtype=np.float32)
+        present = matched >= 0
+        dense[present] = matrix[matched[present]]
+        # A cell with no row in the table keeps zeros; the count above is the denominator.
+    else:
+        matched = np.full(n_states, -1, dtype=np.int64)
+        for source_row, label_value in enumerate(rows):
+            target = state_pos.get(str(label_value))
+            if target is not None and matched[target] < 0:
+                matched[target] = source_row
+        n_matched = int((matched >= 0).sum())
+        retention = n_matched / n_states if n_states else 0.0
+        log(f"[{modality_id}] per-state store: {n_matched:,} of {n_states:,} cell states "
+            f"matched a row ({retention:.4f})")
+        unmatched = [states[i] for i in range(n_states) if matched[i] < 0]
+        if unmatched:
+            log(f"[WARN] [{modality_id}] {len(unmatched)} cell states carry no prediction "
+                f"and are served as zero: {unmatched}")
+        state_matrix = np.zeros((n_states, n_features), dtype=np.float32)
+        present = matched >= 0
+        state_matrix[present] = matrix[matched[present]]
+
+    # ---- statistics, in the same definition the RNA store uses ----------------
+    counts = np.asarray(state_n, dtype=np.int64)
+    denominator = np.maximum(counts, 1)
+    if kind == "per_cell":
+        codes = np.asarray(state_code, dtype=np.int64)
+        sums = np.zeros((n_states, n_features), dtype=np.float64)
+        nonzero = np.zeros((n_states, n_features), dtype=np.int64)
+        np.add.at(sums, codes, dense.astype(np.float64))
+        np.add.at(nonzero, codes, (dense != 0.0))
+        mean_fs = (sums / denominator[:, None]).T.astype(np.float32)
+        frac_fs = (nonzero / denominator[:, None]).T.astype(np.float32)
+    else:
+        mean_fs = state_matrix.T.astype(np.float32)
+        frac_fs = (state_matrix != 0.0).T.astype(np.float32)
+
+    np.save(mpaths.stats_mean, mean_fs)
+    np.save(mpaths.stats_frac, frac_fs)
+    # A FOURTH COLUMN CARRIES THE NAME A READER SEES, AND THE KEY NEVER MOVES.
+    #
+    # Nathan, 2026-09-08: scALABLE should show "CE(18:2)" as "18:2 Cholesterol ester",
+    # and the abbreviation must stay searchable. So `symbol` keeps the key every
+    # differential table, saved URL and Chat question already uses, and `display` holds
+    # the reader's name. data_api indexes BOTH, so either resolves.
+    #
+    # The column is written only when a mapping is given, so a bundle built without one
+    # is byte-identical to before.
+    n_display = 0
+    with open(mpaths.genes, "w") as fh:
+        header = "index\tgene_id\tsymbol"
+        fh.write(header + ("\tdisplay\n" if display_names else "\n"))
+        for i, name in enumerate(features):
+            if display_names:
+                shown = str(display_names.get(name) or name)
+                if shown != name:
+                    n_display += 1
+                fh.write(f"{i}\t{name}\t{name}\t{shown}\n")
+            else:
+                fh.write(f"{i}\t{name}\t{name}\n")
+    if display_names:
+        missing = [f for f in features if f not in display_names]
+        log(f"[{modality_id}] display names: {n_display:,} of {n_features:,} features "
+            f"renamed ({n_display / max(1, n_features):.4f})")
+        if missing:
+            log(f"[WARN] [{modality_id}] {len(missing)} of {n_features:,} features carry "
+                f"no display name and keep their key, first: {missing[:5]}")
+
+    nnz = 0
+    if kind == "per_cell":
+        dtype = np.float16 if expr_dtype == "float16" else np.float32
+        columns = []
+        indptr = np.zeros(n_features + 1, dtype=np.int64)
+        for feature_row in range(n_features):
+            column = dense[:, feature_row]
+            keep = np.nonzero(column)[0]
+            columns.append((keep.astype(np.uint32), column[keep].astype(dtype)))
+            indptr[feature_row + 1] = indptr[feature_row] + keep.size
+        nnz = int(indptr[-1])
+        out_idx = np.lib.format.open_memmap(mpaths.expr_indices, mode="w+",
+                                            dtype=np.uint32, shape=(max(nnz, 1),))
+        out_val = np.lib.format.open_memmap(mpaths.expr_data, mode="w+",
+                                            dtype=dtype, shape=(max(nnz, 1),))
+        for feature_row, (keep, values) in enumerate(columns):
+            start = int(indptr[feature_row])
+            out_idx[start:start + keep.size] = keep
+            out_val[start:start + keep.size] = values
+        out_idx.flush(); out_val.flush()
+        del out_idx, out_val
+        np.save(mpaths.expr_indptr, indptr)
+        written = int(np.load(mpaths.expr_indptr)[-1])
+        if written != nnz:
+            raise RuntimeError(f"modality '{modality_id}' store tail {written} != nnz {nnz}")
+        log(f"[{modality_id}] feature-major store: {nnz:,} non-zero values "
+            f"of {n_cells * n_features:,} ({nnz / max(n_cells * n_features, 1):.4f} dense)")
+
+    info = {
+        "id": modality_id,
+        "label": label or modality_id.upper(),
+        "feature_label": feature_label,
+        "kind": kind,
+        "source": os.path.abspath(source),
+        "source_mtime": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                      time.gmtime(os.path.getmtime(source))),
+        "n_features": int(n_features),
+        "n_source_rows": int(matrix.shape[0]),
+        "n_matched": int(n_matched),
+        "n_expected": int(n_cells if kind == "per_cell" else n_states),
+        "retention": float(retention),
+        "nnz": nnz,
+        "expr_dtype": expr_dtype if kind == "per_cell" else None,
+        "stats_method": ("mean = unweighted mean over the cells of a state; frac = fraction "
+                         "of those cells above zero"
+                         if kind == "per_cell" else
+                         "the predicted cell-state value; every cell of the state carries it"),
+    }
+    return info
+
+
+def _parse_id_value(pairs: Optional[List[str]], flag: str) -> Dict[str, str]:
+    """`--flag id=value` pairs into a dict, with the whole pair named on an error."""
+    out: Dict[str, str] = {}
+    for raw in pairs or []:
+        if "=" not in raw:
+            raise SystemExit(f"{flag} expects id=value, got {raw!r}")
+        key, _, value = raw.partition("=")
+        key = key.strip()
+        if not key:
+            raise SystemExit(f"{flag} expects id=value, got {raw!r}")
+        out[key] = value.strip()
+    return out
 
 
 def read_canonical_order(path: Optional[str]) -> Tuple[Optional[List[str]], Dict[str, str]]:
@@ -409,9 +698,95 @@ def read_canonical_order(path: Optional[str]) -> Tuple[Optional[List[str]], Dict
 # ------------------------------------------------------------------------ main
 
 
+def _add_modalities_to_bundle(a, sources: Dict[str, str], labels: Dict[str, str],
+                              feature_labels: Dict[str, str],
+                              deg_roots: Optional[Dict[str, str]] = None,
+                              display_names: Optional[Dict[str, Dict[str, str]]] = None) -> int:
+    """Write modality sidecars into a bundle that already exists.
+
+    Reads the bundle's own metadata for the cell barcodes, the cell states and the
+    per-state cell counts, so the modality store is aligned to the cells the viewer
+    serves and nothing about the RNA store is recomputed or rewritten.
+    """
+    paths = B.BundlePaths(a.out, a.prefix)
+    if not os.path.isfile(paths.metadata):
+        raise SystemExit(f"--modalities-only needs a built bundle; {paths.metadata} is absent")
+    meta = B.read_metadata(paths.metadata)
+    block = B.viewer_block(meta)
+    if block is None:
+        raise SystemExit(f"{paths.metadata} has no 'scalable_viewer' block")
+
+    states: List[str] = list(block["states"])
+    state_n = np.asarray(block["state_n"], dtype=np.int64)
+    barcodes: List[str] = []
+    codes: List[int] = []
+    position = {s: i for i, s in enumerate(states)}
+    with open(paths.clusters, "r") as fh:
+        header = fh.readline().rstrip("\n").split("\t")
+        state_column = 1 if len(header) > 1 else 0
+        for line in fh:
+            parts = line.rstrip("\n").split("\t")
+            barcodes.append(parts[0])
+            codes.append(position.get(parts[state_column], -1))
+    state_code = np.asarray(codes, dtype=np.int64)
+    unassigned = int((state_code < 0).sum())
+    if unassigned:
+        raise SystemExit(f"{paths.clusters} holds {unassigned} rows whose cell state is not in "
+                         f"the bundle's state list")
+    if len(barcodes) != int(meta["n_cells"]):
+        raise SystemExit(f"{paths.clusters} holds {len(barcodes)} barcodes but the bundle "
+                         f"declares {meta['n_cells']} cells")
+    counted = np.bincount(state_code, minlength=len(states))
+    if not np.array_equal(counted, state_n):
+        raise SystemExit("cells per state read from the clusters table disagree with the "
+                         "bundle metadata; the bundle is inconsistent")
+    log(f"bundle {paths.bundle_dir}: {len(barcodes):,} cells, {len(states)} cell states")
+
+    existing = dict(block.get("modalities") or {})
+    for modality_id, source in sources.items():
+        info = ingest_modality(
+            modality_id, source, paths=paths, barcodes=barcodes, states=states,
+            state_code=state_code, state_n=state_n,
+            label=labels.get(modality_id, ""),
+            feature_label=feature_labels.get(modality_id, "feature"),
+            expr_dtype=a.expr_dtype,
+            display_names=(display_names or {}).get(modality_id),
+        )
+        existing[modality_id] = info
+    block["modalities"] = existing
+
+    # Modality differentials are MERGED into the DEG manifest. Only the named modality
+    # roots are read here, so the RNA comparisons the bundle already indexes are kept.
+    if deg_roots:
+        added = ingest_deg(None, paths.deg_dir, paths.deg_manifest, modality_roots=deg_roots)
+        manifest = dict(block.get("deg") or {"comparisons": []})
+        kept = [c for c in manifest.get("comparisons", [])
+                if str(c.get("modality") or "rna") not in deg_roots]
+        manifest["comparisons"] = kept + added["comparisons"]
+        manifest["comparisons"].sort(key=lambda c: (str(c.get("modality") or "rna") != "rna",
+                                                    str(c.get("modality") or "rna"),
+                                                    c["comparison"], c["kind"]))
+        block["deg"] = manifest
+        with open(paths.deg_manifest, "w") as fh:
+            json.dump(manifest, fh, indent=2)
+        for modality_id in sorted(deg_roots):
+            n = sum(1 for c in added["comparisons"] if c.get("modality") == modality_id)
+            log(f"[{modality_id}] differential tables indexed: {n}")
+        log(f"DEG manifest: {len(manifest['comparisons'])} tables "
+            f"({len(kept)} kept, {len(added['comparisons'])} added)")
+
+    block["modalities_updated_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    with open(paths.metadata, "w") as fh:
+        json.dump(meta, fh, indent=2)
+    log(f"updated {paths.metadata}: modalities = {sorted(existing)}")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Build a scalable_viewer bundle from an h5ad.")
-    ap.add_argument("--h5ad", required=True)
+    ap.add_argument("--h5ad", default=None,
+                    help="source h5ad. Required unless --modalities-only, which reads only "
+                         "the built bundle")
     ap.add_argument("--out", required=True, help="bundle directory (created if absent)")
     ap.add_argument("--prefix", required=True, help="file-name prefix inside the bundle")
     ap.add_argument("--label", default=None, help="human label for the catalog")
@@ -424,7 +799,10 @@ def main(argv=None) -> int:
     ap.add_argument("--layer", default="lognorm", help="layer to serve ('X' for adata.X)")
     ap.add_argument("--markers", default=None)
     ap.add_argument("--order", default=None, help="canonical order TSV (order/cell_state/color)")
-    ap.add_argument("--deg", default=None, help="directory tree holding DEG_*.tsv tables")
+    ap.add_argument("--deg", default=None, help="directory tree holding the RNA DEG_*.tsv tables")
+    ap.add_argument("--deg-modality", action="append", default=None, metavar="ID=DIR",
+                    help="directory tree holding one modality's own DEG_*.tsv tables, for "
+                         "example `--deg-modality adt=/path/to/adt_differential`. Repeatable.")
     ap.add_argument("--ccc", default=None, help="cell-cell communication TSV")
     ap.add_argument("--n-hvg", type=int, default=2000)
     ap.add_argument("--n-pcs", type=int, default=50)
@@ -439,7 +817,54 @@ def main(argv=None) -> int:
                     help="rows written to <prefix>.txt (marker genes first)")
     ap.add_argument("--skip-expr", action="store_true",
                     help="reuse an existing expression store and statistics (rebuild only the rest)")
+    ap.add_argument("--modality", action="append", default=None, metavar="ID=PATH",
+                    help="add a modality store: `--modality adt=/path/to/predictions.csv`. "
+                         "Repeatable. The table's row labels decide the store: cell barcodes "
+                         "give a per-cell store, cell-state names give a per-state store "
+                         "broadcast to the cells of the state. rna2adt, rna2lipid and rna2grn "
+                         "write CSV even when the file is named .h5ad; the format is read from "
+                         "the file's own bytes.")
+    ap.add_argument("--modality-label", action="append", default=None, metavar="ID=LABEL",
+                    help="human label for a modality, for example `--modality-label adt='ADT (imputed)'`")
+    ap.add_argument("--modality-feature-label", action="append", default=None, metavar="ID=NOUN",
+                    help="what one feature of a modality is called, for example "
+                         "`--modality-feature-label lipids=lipid`")
+    ap.add_argument("--modality-display-names", action="append", default=None,
+                    metavar="ID=TSV",
+                    help="a two-column TSV, `feature<TAB>display`, naming what a reader "
+                         "sees for each feature of a modality, for example "
+                         "`--modality-display-names lipid=/path/lipid_display_names.tsv`. "
+                         "The feature name stays the key and stays searchable; only the "
+                         "shown label changes. A feature absent from the file keeps its "
+                         "key, and the count is logged.")
+    ap.add_argument("--modalities-only", action="store_true",
+                    help="write ONLY the --modality sidecars into an existing bundle and update "
+                         "its metadata. Nothing else is read or rewritten, so adding a modality "
+                         "to a built bundle costs minutes instead of the hours a full rebuild takes.")
     a = ap.parse_args(argv)
+
+    modality_sources = _parse_id_value(a.modality, "--modality")
+    modality_labels = _parse_id_value(a.modality_label, "--modality-label")
+    modality_display = {
+        mid: _read_display_names(path)
+        for mid, path in _parse_id_value(
+            a.modality_display_names, "--modality-display-names").items()}
+    modality_feature_labels = _parse_id_value(a.modality_feature_label, "--modality-feature-label")
+    for key in list(modality_labels) + list(modality_feature_labels):
+        if key not in modality_sources:
+            raise SystemExit(f"--modality-label/--modality-feature-label names {key!r}, "
+                             f"which no --modality declares")
+    modality_deg_roots = _parse_id_value(a.deg_modality, "--deg-modality")
+    if a.modalities_only and not (modality_sources or modality_deg_roots):
+        raise SystemExit("--modalities-only needs at least one --modality id=path or "
+                         "--deg-modality id=dir")
+
+    if a.modalities_only:
+        return _add_modalities_to_bundle(a, modality_sources, modality_labels,
+                                         modality_feature_labels, modality_deg_roots,
+                                         modality_display)
+    if not a.h5ad:
+        raise SystemExit("--h5ad is required unless --modalities-only is given")
 
     os.makedirs(a.out, exist_ok=True)
     paths = B.BundlePaths(a.out, a.prefix)
@@ -618,7 +1043,8 @@ def main(argv=None) -> int:
 
     # ---- markers, DEG, CCC ----------------------------------------------------
     marker_info = ingest_markers(a.markers, paths.markers)
-    deg_manifest = ingest_deg(a.deg, paths.deg_dir, paths.deg_manifest)
+    deg_manifest = ingest_deg(a.deg, paths.deg_dir, paths.deg_manifest,
+                              modality_roots=_parse_id_value(a.deg_modality, "--deg-modality"))
     ccc_info = ingest_ccc(a.ccc, paths.ccc)
     log(f"markers: {marker_info['n_rows']} rows; DEG: {len(deg_manifest['comparisons'])} tables; "
         f"CCC available: {ccc_info['available']}")
@@ -661,6 +1087,20 @@ def main(argv=None) -> int:
     log(f"wrote {paths.centroids}: {len(chosen)} genes x {n_states} states "
         f"({n_marker_rows} unique marker genes matched)")
 
+    # ---- modality stores ------------------------------------------------------
+    modality_manifest: Dict[str, Dict] = {}
+    for modality_id, source in modality_sources.items():
+        modality_manifest[modality_id] = ingest_modality(
+            modality_id, source, paths=paths, barcodes=barcodes, states=ordered_states,
+            state_code=state_code, state_n=state_n,
+            label=modality_labels.get(modality_id, ""),
+            feature_label=modality_feature_labels.get(modality_id, "feature"),
+            expr_dtype=a.expr_dtype,
+            display_names=modality_display.get(modality_id),
+        )
+    if modality_manifest:
+        log(f"modalities: {sorted(modality_manifest)}")
+
     # ---- metadata + config snippet -------------------------------------------
     ds_id = a.dataset_id or a.prefix
     meta = {
@@ -700,6 +1140,7 @@ def main(argv=None) -> int:
             "markers": marker_info,
             "deg": deg_manifest,
             "ccc": ccc_info,
+            "modalities": modality_manifest,
             "centroid_genes": len(chosen),
             "centroid_marker_genes": n_marker_rows,
             "warnings": warn_log,

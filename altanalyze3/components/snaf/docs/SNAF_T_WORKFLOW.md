@@ -12,7 +12,7 @@ altanalyze3 snaf \
   --min_samples 1 --cpus 8 --output out/
 ```
 
-`snaf-ts` is the long-read (isoform) variant (same engine, adds the isoform reference).
+`snaf-ts` computes tumor-specificity scores only; it does not perform peptide translation or HLA-binding prediction.
 
 | Flag | Meaning | Default |
 |------|---------|---------|

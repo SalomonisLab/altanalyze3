@@ -202,8 +202,18 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False):
     def colof(m):
         return _two.get(_ckey(m)) or color_for(m)
 
-    # unique plotted isoforms (one structure row each) for the optional bottom structure track
+    # unique plotted isoforms (one structure row each) for the optional bottom structure track.
+    #
+    # The row's STRUCTURE is the isoform's REGISTERED structure from gff-output/combined.gff.gz,
+    # attached as m["registered_exons"] by main() via precompute_gff_structures.StructureIndex.
+    # It is NOT the representative read's structure. That read is arbitrary with respect to
+    # completeness: when every read carries count 1 the `-count` tie-break below is constant and
+    # the choice degenerates to lexicographic molecule-id order. On FLNB that drew
+    # ENST00000295956 as 5 merged exons / 11,161 bp (58,159,623-58,170,783) in place of its
+    # registered 46 exons / 163,830 bp (58,008,422-58,172,251) -- 151,201 bp of 5' structure lost.
+    # A representative read is used ONLY when the isoform is not registered, or the index is absent.
     iso_rows = []
+    n_registered = n_fallback = 0
     if isoform_track:
         seen = set()
         for m in sorted(all_mol, key=lambda mm: (mm.get("cluster_index", 0),
@@ -211,7 +221,25 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False):
             key = m.get("final_isoform_id") or m.get("isoform_id")
             if key in seen or not (m.get("merged") or {}).get("exons"):
                 continue
-            seen.add(key); iso_rows.append(m)
+            seen.add(key)
+            reg = m.get("registered_exons")
+            if reg:
+                m["struct_merged"] = {"exons": [{"a": int(a), "b": int(b), "label": ""} for a, b in reg],
+                                      "introns": []}
+                m["struct_source"] = "registered"
+                n_registered += 1
+            else:
+                m["struct_merged"] = m["merged"]
+                m["struct_source"] = "representative-read"
+                n_fallback += 1
+            iso_rows.append(m)
+        print("[isv_web_remote] structure track: {} isoform(s) from the registered combined.gff.gz "
+              "structures, {} fallback to a representative read".format(n_registered, n_fallback),
+              flush=True)
+        # a registered structure can reach beyond the reads' own extent -> widen so nothing is clipped
+        for m in iso_rows:
+            for e in m["struct_merged"]["exons"]:
+                lo = min(lo, e["a"]); hi = max(hi, e["b"])
 
     # intron-compressed x-map: exon intervals come from the gene-model blocks + the molecules' merged
     # exons; everything NOT covered by an exon is treated as intron and scaled by intron_scale.
@@ -221,6 +249,9 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False):
             exon_ivs.append((min(b["start"], b["end"]), max(b["start"], b["end"])))
     for m in all_mol:
         for e in m["merged"]["exons"]:
+            exon_ivs.append((min(e["a"], e["b"]), max(e["a"], e["b"])))
+    for m in iso_rows:                        # registered structure exons share the same x-map
+        for e in m["struct_merged"]["exons"]:
             exon_ivs.append((min(e["a"], e["b"]), max(e["a"], e["b"])))
     xz = build_xz(_merge_ivs(exon_ivs), lo, hi, max(0.01, float(intron_scale)), track_x0, track_x1)
 
@@ -353,7 +384,7 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False):
         ystruct = struct_top + 16
         for m in iso_rows:
             color = colof(m)
-            merged = m["merged"]
+            merged = m.get("struct_merged") or m["merged"]
             exs, ins = merged["exons"], merged["introns"]
             rc = ystruct + ISO_ROW / 2.0                          # row centre
             ex_y = ystruct + (ISO_ROW - ISO_EXH) / 2.0            # tall (CDS) exon top
@@ -613,6 +644,24 @@ def main(argv=None):
             for m in p.get("molecules", []):
                 cds = ctx.coding_region(m.get("final_isoform_id") or m.get("isoform_id"))
                 m["cds_min"], m["cds_max"] = (cds[0], cds[1]) if cds else (None, None)
+        # attach each final isoform's REGISTERED exon structure from gff-output/combined.gff.gz, so the
+        # bottom structure track draws the registered isoform rather than one representative read.
+        # Absent index -> registered_exons stays None and render() falls back, with a printed count.
+        from .precompute_gff_structures import StructureIndex
+        sidx = StructureIndex.open(a.run_dir)
+        if sidx is not None:
+            resolved = set(); unresolved = set()
+            for p in res.get("panels", []):
+                for m in p.get("molecules", []):
+                    fin = m.get("final_isoform_id") or m.get("isoform_id")
+                    ex = sidx.exons(gene, fin)
+                    m["registered_exons"] = ex
+                    (resolved if ex else unresolved).add(fin)
+            print("[isv_web_remote] registered structures: {} of {} final isoform(s) resolved from "
+                  "{}".format(len(resolved), len(resolved) + len(unresolved), sidx.path), flush=True)
+            if unresolved:
+                print("[isv_web_remote]   NOT registered (representative read will be drawn): {}".format(
+                    ", ".join(sorted(unresolved)[:10]) + (" ..." if len(unresolved) > 10 else "")), flush=True)
     print("[isv_web_remote] source={} min_isoform_pct={} panels={}".format(
         res.get("source", "index"), a.min_isoform_pct,
         ", ".join(f"{p['condition']}:{p['n_molecules']}" for p in res.get("panels", []))), flush=True)

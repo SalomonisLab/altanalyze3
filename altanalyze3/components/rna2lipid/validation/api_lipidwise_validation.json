@@ -1,0 +1,84 @@
+{
+  "generated_at": "2026-08-30T18:51:01+00:00",
+  "input": {
+    "bulk_rna_path": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/rna2lipid/data/feature_blankreduiction.csv",
+    "bulk_rna_rows": 19,
+    "celltype_rna_path": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/rna2lipid/data/newrna_cell_clair_filtered_symbol.csv",
+    "celltype_rna_rows": 150,
+    "rows": 169,
+    "columns": 1303
+  },
+  "check_A_backward_compatibility": {
+    "bundle": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/rna2lipid/newnormelastic_multitask_try.pkl",
+    "rows_compared": 169,
+    "lipids_compared": 202,
+    "values_compared": 34138,
+    "max_abs_difference": 0.0,
+    "bitwise_identical": true,
+    "target_scaling_mode": "none",
+    "pass": true
+  },
+  "check_B_prediction_math": {
+    "bundle": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/rna2lipid/rna2lipid_hs_lung_lipidwise_bundle.pkl",
+    "architecture": "lipidwise",
+    "target_scaling_mode": "standard",
+    "rows_compared": 169,
+    "lipids_compared": 202,
+    "values_compared": 34138,
+    "max_abs_difference": 0.0,
+    "per_lipid_nonzero_genes_min": 0,
+    "per_lipid_nonzero_genes_median": 21,
+    "per_lipid_nonzero_genes_max": 57,
+    "predicted_min": -4.049297621584703,
+    "predicted_median": 17.757177202991244,
+    "predicted_max": 33.2700856349599,
+    "pass": true
+  },
+  "check_C_adata_path": {
+    "chunk_size": 7,
+    "rows_compared": 169,
+    "values_compared": 34138,
+    "max_abs_difference": 1.6372419260335391e-06,
+    "pass": true,
+    "note": "adata path casts the design matrix to float32, so the tolerance is 1e-4, not 0."
+  },
+  "check_D_bundle_scope": {
+    "training_profiles": 50,
+    "training_donors": 10,
+    "training_cell_types": [
+      "END",
+      "EPI",
+      "MES",
+      "MIC",
+      "PMX"
+    ],
+    "training_bulk_profiles": 0,
+    "holdout_reported_metrics": {
+      "Model": "SparseLipidwiseElasticNetCV",
+      "N_samples": 28,
+      "N_lipids": 202,
+      "N_values": 5656,
+      "RMSE": 1.3840050601340432,
+      "MAE": 1.023131483833822,
+      "Pearson_r": 0.8706106221171764,
+      "Spearman_r": 0.8641866896944967,
+      "R2": 0.753572817739851,
+      "True_SD": 2.7880038707316,
+      "Predicted_SD": 2.597225237096905,
+      "SD_Ratio": 0.9315716037422026,
+      "Training_seconds": 75.21617420599796
+    },
+    "lipids_with_all_zero_coefficients": 1,
+    "lipids_with_all_zero_coefficients_names": [
+      "TG(51:1)"
+    ],
+    "predictions_outside_train_mean_pm_3sd": {
+      "all_rows": 0.019362587146288593,
+      "bulk_rows": 0.16023970818134445,
+      "celltype_rows": 0.0015181518151815181
+    },
+    "pass": true,
+    "note": "Descriptive, not a gate. The shipped bundle was fit on sorted cell-type profiles only, so bulk RNA input is extrapolation."
+  },
+  "all_pass": true
+}

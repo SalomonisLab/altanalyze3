@@ -1,0 +1,89 @@
+{
+  "name": "rna2lipid-hs-lung-lipidwise",
+  "tissue": "human lung",
+  "_note": [
+    "Reproduces the shipped bundle rna2lipid_hs_lung_lipidwise_bundle.pkl.",
+    "The two lipid tables below are the log2 tables used for the shipped run.",
+    "They are NOT in this repository. Obtain them and place them under",
+    "altanalyze3/components/rna2lipid/data/ before running train.",
+    "The RNA tables ARE in this repository.",
+    "keep_groups drops every sample whose label maps outside the five sorted",
+    "compartments, which removes all bulk profiles. That is what the shipped",
+    "bundle did: 50 sorted profiles from 10 donors, 0 bulk profiles."
+  ],
+  "data": {
+    "tables": [
+      {
+        "id": "bulk",
+        "rna": "../data/feature_blankreduiction.csv",
+        "rna_orientation": "samples_by_features",
+        "lipids": "../data/Bulk_lipids_cleaned_normalized_median_527_log2.csv",
+        "lipid_orientation": "samples_by_features"
+      },
+      {
+        "id": "sorted_celltype",
+        "rna": "../data/newrna_cell_clair_filtered_symbol.csv",
+        "rna_orientation": "features_by_samples",
+        "lipids": "../data/cell_lipids_cleaned_norm_median_286_log2.csv",
+        "lipid_orientation": "samples_by_features"
+      }
+    ]
+  },
+  "preprocessing": {
+    "collapse_duplicate_genes": true,
+    "fill_missing_with_feature_median": true,
+    "drop_rows_with_missing_lipids": false,
+    "remove_zero_only_genes": true,
+    "x_join_mode": "inner",
+    "y_join_mode": "inner"
+  },
+  "sample_metadata": {
+    "donor": {"strategy": "split_field", "delimiter": "_", "field": 0},
+    "label": {"strategy": "split_field", "delimiter": "_", "field": 1, "maxsplit": 1, "missing": ""},
+    "group": {
+      "strategy": "keyword_map",
+      "default": "UNKNOWN",
+      "rules": [
+        {"group": "BULK", "equals": ["bulk", "lung", "wholelung", "whole_lung"], "any_of": ["bulk"]},
+        {"group": "EPI", "any_of": ["epi"]},
+        {"group": "MES", "any_of": ["mes"]},
+        {"group": "MIC", "any_of": ["mic"]},
+        {"group": "END", "any_of": ["end"]},
+        {"group": "PMX", "any_of": ["pmx", "pmn"]}
+      ]
+    },
+    "keep_groups": ["EPI", "MES", "MIC", "END", "PMX"]
+  },
+  "training": {
+    "architecture": "sparse_lipidwise",
+    "bundle_output": "../artifacts/rna2lipid_hs_lung_lipidwise_retrained.pkl",
+    "report_output_dir": "../artifacts/reports/lung_lipidwise",
+    "model": {
+      "target_scaling": "standard",
+      "top_gene_options": [25, 50, 100, 200],
+      "l1_ratio": [0.70, 0.90, 0.95, 1.00],
+      "alphas": {"logspace": [-3, 1, 30]},
+      "cv": 3,
+      "max_iter": 50000,
+      "n_jobs": -1,
+      "sparsity_penalty": 0.002,
+      "random_seed": 1
+    },
+    "holdout": {
+      "mode": "constrained",
+      "seed": 42,
+      "total_holdout": 28,
+      "min_per_group": 5,
+      "max_per_donor": 3,
+      "required_groups": ["EPI", "MES", "MIC", "END", "PMX"]
+    }
+  },
+  "evaluation": {
+    "baselines": {
+      "pca_ridge": {
+        "max_components": 16,
+        "ridge_alphas": [0.001, 0.01, 0.1, 1.0, 10.0, 100.0]
+      }
+    }
+  }
+}

@@ -1,0 +1,80 @@
+{
+  "generated_at": "2026-08-30T18:51:06+00:00",
+  "registry": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/flask/reference_config.json",
+  "rna2lipid_default_bundle": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/rna2lipid/rna2lipid_hs_lung_lipidwise_bundle.pkl",
+  "default_bundle_architecture": "lipidwise",
+  "input": {
+    "cells": 40,
+    "var_names": 1000,
+    "model_genes_present": 900,
+    "decoy_genes": 100,
+    "note": "Synthetic matrix. Wiring test only, no accuracy claim."
+  },
+  "references": {
+    "hs_lung_cellref_reference": {
+      "declared_bundle_path": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/rna2lipid/rna2lipid_hs_lung_lipidwise_bundle.pkl",
+      "resolved_bundle_path": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/rna2lipid/rna2lipid_hs_lung_lipidwise_bundle.pkl",
+      "resolves_to_default": true,
+      "architecture": "lipidwise",
+      "target_scaling_mode": "standard",
+      "matched_genes": 900,
+      "model_gene_count": 1303,
+      "output_lipids": 202,
+      "output_cells": 40,
+      "expression_scale": "log2",
+      "modality": "lipids",
+      "counts_layer_present": true,
+      "umap_carried_over": true,
+      "pass": true
+    },
+    "hs_lung_hlca_reference": {
+      "declared_bundle_path": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/rna2lipid/rna2lipid_hs_lung_lipidwise_bundle.pkl",
+      "resolved_bundle_path": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/rna2lipid/rna2lipid_hs_lung_lipidwise_bundle.pkl",
+      "resolves_to_default": true,
+      "architecture": "lipidwise",
+      "target_scaling_mode": "standard",
+      "matched_genes": 900,
+      "model_gene_count": 1303,
+      "output_lipids": 202,
+      "output_cells": 40,
+      "expression_scale": "log2",
+      "modality": "lipids",
+      "counts_layer_present": true,
+      "umap_carried_over": true,
+      "pass": true
+    },
+    "hs_lung_natri_reference": {
+      "declared_bundle_path": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/rna2lipid/rna2lipid_hs_lung_lipidwise_bundle.pkl",
+      "resolved_bundle_path": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/rna2lipid/rna2lipid_hs_lung_lipidwise_bundle.pkl",
+      "resolves_to_default": true,
+      "architecture": "lipidwise",
+      "target_scaling_mode": "standard",
+      "matched_genes": 900,
+      "model_gene_count": 1303,
+      "output_lipids": 202,
+      "output_cells": 40,
+      "expression_scale": "log2",
+      "modality": "lipids",
+      "counts_layer_present": true,
+      "umap_carried_over": true,
+      "pass": true
+    },
+    "hs_lung_bpd_sun_reference": {
+      "declared_bundle_path": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/rna2lipid/rna2lipid_hs_lung_lipidwise_bundle.pkl",
+      "resolved_bundle_path": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/rna2lipid/rna2lipid_hs_lung_lipidwise_bundle.pkl",
+      "resolves_to_default": true,
+      "architecture": "lipidwise",
+      "target_scaling_mode": "standard",
+      "matched_genes": 900,
+      "model_gene_count": 1303,
+      "output_lipids": 202,
+      "output_cells": 40,
+      "expression_scale": "log2",
+      "modality": "lipids",
+      "counts_layer_present": true,
+      "umap_carried_over": true,
+      "pass": true
+    }
+  },
+  "all_pass": true
+}

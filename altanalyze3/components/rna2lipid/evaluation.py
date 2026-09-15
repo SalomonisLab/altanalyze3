@@ -14,8 +14,16 @@ from sklearn.multioutput import MultiOutputRegressor
 from sklearn.preprocessing import StandardScaler
 
 from .api import load_bundle
-from .pipeline import build_training_dataset, dump_json, json_ready, load_json, resolve_path
-from .training import fit_target_scaler, inverse_target_scaler, normalize_target_scaling, regression_metrics
+from .pipeline import build_dataset, build_training_dataset, dump_json, json_ready, load_json, resolve_path
+from .training import (
+    fit_sparse_lipidwise_elasticnet,
+    fit_target_scaler,
+    inverse_target_scaler,
+    normalize_architecture,
+    normalize_target_scaling,
+    regression_metrics,
+    resolve_alpha_grid,
+)
 
 
 class MeanLipidBaseline:
@@ -86,6 +94,40 @@ def _predict_main_model(model, scaler_x, scaler_y, target_scaling: str, x_test: 
     return pd.DataFrame(y_pred, index=x_test.index, columns=y_columns)
 
 
+MAIN_MODEL_KEYS = {
+    "multitask": "multitask_elastic_net",
+    "sparse_lipidwise": "sparse_lipidwise_elastic_net",
+}
+
+
+def _fit_and_predict_main(
+    x_train: pd.DataFrame,
+    y_train: pd.DataFrame,
+    x_test: pd.DataFrame,
+    model_config: Mapping[str, Any],
+    architecture: str,
+) -> pd.DataFrame:
+    """Fit the configured architecture on one fold and predict the held-out samples."""
+    if architecture == "sparse_lipidwise":
+        predictions, _, _ = fit_sparse_lipidwise_elasticnet(
+            x_train,
+            y_train,
+            x_test,
+            top_gene_options=[int(v) for v in model_config.get("top_gene_options", [25, 50, 100, 200])],
+            l1_ratio_grid=[float(v) for v in model_config.get("l1_ratio", [0.70, 0.90, 0.95, 1.00])],
+            alpha_grid=resolve_alpha_grid(model_config.get("alphas", {"logspace": [-3, 1, 30]})),
+            cv_folds=int(model_config.get("cv", 3)),
+            max_iter=int(model_config.get("max_iter", 50000)),
+            sparsity_penalty=float(model_config.get("sparsity_penalty", 0.002)),
+            random_seed=int(model_config.get("random_seed", 1)),
+            n_jobs=int(model_config.get("n_jobs", -1)),
+            verbose=False,
+        )
+        return predictions
+    model, scaler_x, scaler_y, target_scaling = _fit_main_model(x_train, y_train, model_config)
+    return _predict_main_model(model, scaler_x, scaler_y, target_scaling, x_test, list(y_train.columns))
+
+
 def evaluate_internal_holdout(
     *,
     config_path: str | Path,
@@ -93,8 +135,10 @@ def evaluate_internal_holdout(
     max_folds: int | None = None,
 ) -> Dict[str, Any]:
     config = load_json(config_path)
-    data = build_training_dataset(config_path)
+    data = build_dataset(config_path)
     model_config = config["training"]["model"]
+    architecture = normalize_architecture(config["training"].get("architecture"))
+    main_model_key = MAIN_MODEL_KEYS[architecture]
     baseline_config = config["evaluation"]["baselines"]
     groups = data.sample_metadata["donor_id"].to_numpy()
     logo = LeaveOneGroupOut()
@@ -103,7 +147,7 @@ def evaluate_internal_holdout(
 
     fold_records: List[Dict[str, Any]] = []
     pred_frames: Dict[str, List[pd.DataFrame]] = {
-        "multitask_elastic_net": [],
+        main_model_key: [],
         "mean_lipid_profile": [],
         "pca_ridge": [],
     }
@@ -118,8 +162,7 @@ def evaluate_internal_holdout(
         y_test = data.Y.iloc[test_idx]
         test_donors = sorted(set(data.sample_metadata.iloc[test_idx]["donor_id"].tolist()))
 
-        model, scaler_x, scaler_y, target_scaling = _fit_main_model(x_train, y_train, model_config)
-        main_pred = _predict_main_model(model, scaler_x, scaler_y, target_scaling, x_test, list(y_train.columns))
+        main_pred = _fit_and_predict_main(x_train, y_train, x_test, model_config, architecture)
 
         mean_baseline = MeanLipidBaseline().fit(y_train)
         mean_pred = mean_baseline.predict(len(x_test), x_test.index)
@@ -131,12 +174,12 @@ def evaluate_internal_holdout(
         pca_pred = pca_ridge.predict(x_test)
 
         truth_frames.append(y_test)
-        pred_frames["multitask_elastic_net"].append(main_pred)
+        pred_frames[main_model_key].append(main_pred)
         pred_frames["mean_lipid_profile"].append(mean_pred)
         pred_frames["pca_ridge"].append(pca_pred)
 
         for model_name, frame in [
-            ("multitask_elastic_net", main_pred),
+            (main_model_key, main_pred),
             ("mean_lipid_profile", mean_pred),
             ("pca_ridge", pca_pred),
         ]:
@@ -165,6 +208,8 @@ def evaluate_internal_holdout(
 
     summary = {
         "grouping": "donor_id",
+        "architecture": architecture,
+        "main_model": main_model_key,
         "fold_count": int(fold_df["fold"].nunique()),
         "models": aggregated_metrics,
         "truth_shape": [int(truth_all.shape[0]), int(truth_all.shape[1])],

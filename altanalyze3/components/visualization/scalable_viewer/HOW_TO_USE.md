@@ -1,163 +1,126 @@
 # How to use scALABLE-viewer
 
-scALABLE-viewer explores a single-cell atlas that has already been computed. You do not
-upload data and you do not launch a run. The dataset opens by itself.
+scALABLE-viewer explores a single-cell atlas whose analyses already exist. You upload nothing
+and launch nothing. The dataset opens by itself, and one viewer can hold several datasets.
 
-scALABLE, the analysis tool, is a different program. scALABLE takes your raw data,
-aligns it and runs the comparisons. scALABLE-viewer serves the finished result.
+scALABLE, the analysis tool, is a different program. It takes raw data, aligns it and runs the
+comparisons; the viewer serves the finished result through the same interface. The controls of
+`Explore`, `Differential` and `Chat` are the ones described in
+`/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/HOW_TO_USE.md`.
+This guide covers what the viewer adds or changes. The methods behind every number are in
+`/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/README.md`.
 
----
+## The four tabs
 
-## The three tabs
+| Tab | Content |
+| --- | --- |
+| `Study` | title, abstract, assay, organism, technology, cell count, links to the raw data and the paper; lists of tools, downloads and samples |
+| `Explore` | two plot panels over the same cells |
+| `Differential` | the precomputed group comparisons |
+| `Chat` | questions in plain language, answered from the dataset |
 
-**Study** describes the dataset: title, abstract, assay, organism, technology, cell
-count, and links to the raw data and the paper. Below that sit three lists: **Tools**
-links to other viewers for the same study, **Downloads** lists the released files, and
-**Samples** lists every sample with sorting, filtering and paging.
+Explore opens first. When the viewer serves more than one dataset, a dataset menu switches
+between them.
 
-**Explore** draws the cells. Two panels sit side by side so you can compare two views at
-once.
+## Study
 
-**Differential** shows the precomputed group comparisons.
-
-Explore opens first. Click Study or Differential to move.
-
----
+The Study tab reads the LungMAP record of the study the bundle belongs to. When no record is
+configured, the tab says so instead of showing another study's record. A metacell dataset states
+its metacell count and how many donors each metacell mixes.
 
 ## Explore
 
-Each panel has its own **Select plot type** menu:
+The plot types match the analysis tool: `UMAP cell types`, `UMAP broad`, `Cell frequency`,
+`UMAP`, `Violin`, `DotPlot`, `CombPlot`, `MarkerHeatmap`, `MarkerNetwork` and
+`Cell communication`. Three things differ.
 
-| Plot type | What it shows |
-|---|---|
-| UMAP cell types | Every cell, coloured by cell state, with state names on the map |
-| UMAP broad | The same map at a coarser grouping |
-| UMAP | One gene's expression across the map |
-| Violin | One gene's distribution within each cell state |
-| DotPlot | Dot size is the fraction of cells expressing a gene; colour is the mean level |
-| Cell frequency | How cell-state proportions differ between groups |
-| MarkerHeatmap | The marker genes that define each cell state |
-| MarkerNetwork | Known interactions among one state's marker genes |
-| Cell communication | Predicted receptor-ligand signalling between cell states |
+| Difference | Behaviour |
+| --- | --- |
+| Modality menu | lists the modalities the bundle carries, for example RNA, ADT, lipid, GRN; a modality predicted per cell state, not per cell, does not appear here, because every cell of a state would show one value |
+| Violin covariate | the violin can group by any categorical covariate of the dataset, not only by cell state |
+| CombPlot bands | dark bands under the bars mark each donor column's disease status, group, sex and smoking status when the dataset records them |
 
-**Select gene** takes a gene symbol. Type a few letters and pick from the list.
-
-**Dot size** sits beside the plot type and controls point size. Each panel has its own.
-
-**Filter data to display** narrows the plot. Choose a column under Annotation 1 or
-Annotation 2, then choose which values to keep. Filters apply to that panel only.
-
-**Download PDF** saves the current plot as an editable vector PDF. Text stays text, so
-you can restyle it in Illustrator or Inkscape.
-
----
+`Select gene` accepts the names a reader knows, for example a lipid's common name, and the
+viewer resolves them to the stored feature. `Download PDF` saves an editable vector PDF.
 
 ## Differential
 
-Pick a **contrast** to choose which comparison to view, then a **cell state**.
+A `Precomputed comparison` menu lists the contrasts the bundle carries for the chosen modality.
+Choosing one loads its tables; nothing recomputes. The `Modality` menu shows only modalities
+that have at least one contrast, and switching modality keeps the same comparison when it exists
+on the new modality.
 
-| View | What it shows |
-|---|---|
-| Heatmap | Genes changed in that cell state, across samples |
-| Volcano | Fold change against significance, one point per gene |
-| Gene detail | One gene's values in both groups |
-| GO Terms | Enriched biological processes |
-| Network | Interactions among the changed genes |
+The views are `Summary`, `Heatmap`, `Volcano`, `GO Terms`, `Network` and `Gene Detail`, with
+`Filter by gene` as in the analysis tool. GO terms and networks exist for RNA contrasts only.
 
-Every view exports to PDF.
+The GO Terms plot colours each term by tier: `Representative` terms are the ones GO-Elite kept
+after removing redundant parents and children, `Significant` terms passed the FDR cut of 0.05 but
+folded into a broader term, and other terms failed the cut. A term can be significant without
+being representative.
 
-### Filter by gene
+A comparison lists only the cell states it tested. A state needs at least 2 samples on each
+side; a state with fewer is absent, not reported at low confidence. The comparison table gives
+the sample count per side.
 
-**Filter by gene** sits beside the cell-state menu. Type a gene symbol and press Enter, or
-pick one from the list. The list offers the genes of the view you are looking at, so every
-gene it offers gives you a result.
+## Chat
 
-One gene selects a gene set: the gene you typed, plus every gene it interacts with in that
-cell state. All four views then show that set only.
+Type a question or click an example. The viewer sends the question to an assistant service that
+picks one of 17 named analyses and fills in the gene, cell state, comparison or covariate it
+names. The viewer then computes the answer from the bundle's own statistics. The assistant never
+sees a value and never states a number.
 
-| View | What the filter keeps |
-|---|---|
-| Network | The gene, the genes it connects to, and the edges between them |
-| Heatmap | One row per gene in the set |
-| Volcano | One point per gene in the set, each point labelled |
-| GO Terms | Terms that overlap the set |
-| Cell communication | Interactions that use the gene as ligand or as receptor |
+| Ask about | Example | Answer |
+| --- | --- | --- |
+| a cell state's markers | What are the best marker genes of AT2 cells? | a table and a DotPlot |
+| two cell states | What distinguishes AT1 from AT2 cells? | a table and a DotPlot |
+| a gene | Where is SFTPC expressed? | the top states by mean and a DotPlot |
+| a comparison in a state | Which genes change in COPD versus control in AT2 cells? | the top rows and a volcano |
+| a clinical variable | Which genes track FEV1 in AT2 cells? | a per-donor correlation table and a gradient plot |
+| co-expression | Which genes co-vary with SFTPC across donors? | the top partners and a CombPlot |
+| composition | Which cell states shift in GOLD IV versus GOLD I, II? | per-donor fractions and a frequency plot |
+| donor heterogeneity | Do all COPD donors show the AT2 signature? | a per-donor score and a signature plot |
+| the most affected state | Which cell type is most affected in COPD versus control? | states ranked by significant genes |
+| pathways | Which pathways change in AT2 cells? | GO-Elite terms as bars |
+| regulators | Show me the transcriptional targets of a regulator in AT2 cells | a TF-to-target network, or TF activity bars |
 
-A cell communication comparison has no gene-to-gene network behind it, so the filter there
-matches the gene alone. Its network keeps the interactions that use the gene and the cell
-states those interactions join. Its table keeps the matching rows.
+Below the answer, `Table` and `Plot` toggle the view, and up to four follow-up questions appear.
 
-scALABLE names the feature after the modality, and the box follows: `Filter by gene` for
-RNA, `Filter by protein` for ADT, `Filter by TF` for a GRN. Changing the modality clears
-the box, because a new modality names different features.
+| Reply | Meaning |
+| --- | --- |
+| a list of states or comparisons | the question named none of them; pick one |
+| `not covered` | the comparison exists but did not test that state; the reply lists the states it did test |
+| `unsupported` | the question asks for a modality the bundle lacks; the reply names the ones it has |
+| HTTP 503 | the assistant service is down |
 
-A line under the menus reports the result, for example
-`Filtered to FGF2 + 10 interacting genes: 60 of 2191 GO terms shown.`
-
-The box turns blue when the filter matches and red when it matches nothing. Clear the box
-to see everything again.
-
-Two limits. A gene with no interaction edge in that cell state gives a set of one gene, and
-the line under the menus says so. The cell communication network draws cell states, not
-genes, so the filter leaves it whole and says why.
-
-**Download PDF** follows the filter. With a filter on, the button saves the plot you see
-rather than the whole comparison.
-
-### Reading the GO Terms plot
-
-Each point is one biological process. The x axis is the enrichment Z-score. The y axis is
-the false discovery rate, drawn so the strongest results sit lowest.
-
-Colour carries two different meanings, so read the legend:
-
-- **Representative** terms are the ones GO-Elite kept after it removed redundant parents
-  and children. Use these first.
-- **Significant** terms passed the FDR cut but were folded into a broader term, or rest on
-  few genes.
-- **Not significant** terms failed the FDR cut.
-
-A term can be highly significant without being representative. GO-Elite prunes the tree so
-a hundred near-identical terms do not crowd out the real signal.
-
----
+On 2026-08-26, 55 of 55 protocol questions and 68 of 68 paraphrased questions on the
+COPD-metacells dataset returned the intended analysis; the record is in
+`/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/visualization/scalable_viewer/VALIDATION.md`.
+The suites covered one RNA-only dataset and drove the endpoint, not the rendered page.
 
 ## What the numbers mean
 
-A cell in this atlas may be a **metacell**. A metacell sums several real cells that were
-matched on their donor metadata. Metacells protect participant privacy and reduce noise.
-The Study tab states the metacell count and how many donors each one mixes.
-
-Differential testing runs on **pseudobulks**. The viewer sums each sample's cells within
-one cell state, then compares those sums between groups. Each point in a comparison is
-therefore a sample, not a cell, which is what keeps the statistics honest.
-
----
+A cell in this atlas may be a metacell: several real cells summed after matching on donor
+metadata, which protects participant privacy and reduces noise. Differential tests run on
+pseudobulks, one per sample and cell state, so each point in a comparison is a sample, not a
+cell. Imputed modalities are model predictions from the RNA, not measurements; the analysis
+tool's README names each model and its held-out accuracy.
 
 ## Things that surprise people
 
-**A cell state is missing from Differential.** A comparison needs enough samples on both
-sides. A state that appears in only a few samples is skipped rather than reported at low
-confidence. The comparison table lists how many samples each side had.
-
-**MarkerHeatmap takes a moment.** It loads a large matrix into an embedded viewer. Give it
-a few seconds.
-
-**A gene shows nothing.** The gene may not be detected in this dataset. Check the spelling
-against the suggestion list.
-
-**Plot types disappear from the menu.** Reload the page. Report it if it repeats.
-
----
+| Symptom | Cause |
+| --- | --- |
+| a cell state is missing from Differential | the comparison had fewer than 2 samples on one side for that state |
+| a modality is missing from Explore but present in Differential | its values exist per cell state only |
+| MarkerHeatmap takes a moment | it loads a large matrix into an embedded viewer from the Broad Institute's server |
+| a gene shows nothing | the dataset did not detect it; check the suggestion list |
+| a chat answer says the assistant is unavailable | the service on port 8001 is down |
 
 ## Getting a figure out
 
-Use **Download PDF** rather than a screenshot. The PDF holds real vector shapes and
-editable text at any size. Screenshots are fixed-resolution images and cannot be edited.
-
----
+Use `Download PDF` rather than a screenshot. The PDF holds vector shapes and editable text at
+any size. With `Filter by gene` on, the button saves the filtered figure you see.
 
 ## Where the data came from
 
-The Study tab names the source study, the raw-data accession and the publication.
-`README.md` beside this file describes how the viewer is built and served.
+The Study tab names the source study, the raw-data accession and the publication. The
+`README.md` beside this file describes how to build, validate and serve a bundle.

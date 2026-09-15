@@ -1,0 +1,14 @@
+# Runtime pins on top of AltAnalyze3's package requirements.
+# Regenerate per platform with deployment/containers/lock.sh.
+../../..[snaf]
+numpy==1.26.4
+pandas==2.2.3
+h5py==3.14.0
+mhcflurry==2.2.1
+tensorflow==2.21.0
+tf-keras==2.21.0
+pyro-ppl==1.9.1
+torch==2.6.0+cpu
+tmhmm.py==1.2.1
+mygene==3.2.2
+xmltodict==1.0.4

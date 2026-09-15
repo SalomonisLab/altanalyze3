@@ -1,0 +1,2076 @@
+INFO:     Started server process [12485]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:61413 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61420 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61424 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61424 - "GET /static/styles.css?v=1787532081 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61425 - "GET /static/app.js?v=1787543865 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61425 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61424 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:61432 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61453 - "GET /api/meta/reference-preview?species=mouse&reference=mm_lung_cellref_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61455 - "GET /api/meta/reference-preview?species=mouse&reference=mm_bm_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61480 - "POST /api/jobs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61480 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787668989499 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "POST /api/jobs/ea39a47961814c7183e90d2f92a70b3a/qc HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "POST /api/jobs/ea39a47961814c7183e90d2f92a70b3a/run HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669000851 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669002853 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669004852 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669006851 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669008852 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669010853 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669012852 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669014853 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669016853 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669018851 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669020853 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669022853 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669024853 HTTP/1.1" 200 OK
+WARNING: adata.X seems to be already log-transformed.
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669026853 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669028853 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669030852 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669032852 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669034852 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669036852 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669038852 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669040853 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669042852 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669044853 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669046853 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669048852 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669050853 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669052853 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669054853 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669056853 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669058853 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669060853 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669062853 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669064852 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669066853 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669068852 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669070852 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669072852 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669074853 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669076853 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669078853 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669080852 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669082853 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669084853 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669086852 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61540 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669088853 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61487 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669092853 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61541 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669090852 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61540 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669096853 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61543 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669094853 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61541 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/genes?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61546 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669098853 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61543 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/genes?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61547 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/status?t=1787669100853 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61546 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/genes?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61547 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/genes?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61547 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/display-filters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61547 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/umap?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61546 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/expression?gene=Cpne8&modality=rna&violin_limit=10 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61629 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/umap?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61636 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/umap?filter1_field=cell_type&filter1_values=CD4SP-mature&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61636 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/umap?filter1_field=cell_type&filter1_values=DN&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61734 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/umap?filter1_field=cell_type&filter1_values=CD8SP&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61734 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/umap?filter1_field=cell_type&filter1_values=DN&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61734 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/umap?filter1_field=cell_type&filter1_values=DN&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61734 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/umap?filter1_field=cell_type&filter1_values=DN&filter2_field=cell_type&filter2_values=DN&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61734 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/umap?filter1_field=cell_type&filter1_values=CD4SP-immature&filter2_field=cell_type&filter2_values=DN&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61734 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/umap?filter1_field=cell_type&filter1_values=CD4SP-premature&filter2_field=cell_type&filter2_values=DN&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61734 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/umap?filter1_field=cell_type&filter1_values=CD4SP-mature&filter2_field=cell_type&filter2_values=DN&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61734 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/umap?filter2_field=cell_type&filter2_values=DN&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61756 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/umap?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61756 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/umap?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61761 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/umap?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61761 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/umap?filter1_field=Mm-MarrowAtlas-L4&filter1_values=ILC1_3%2BNKP&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61761 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/umap?filter1_field=Mm-MarrowAtlas-L4&filter1_values=EILP&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61765 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/umap?filter1_field=Mm-MarrowAtlas-L4&filter1_values=EILP&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61775 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/umap?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61775 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/umap?filter1_field=cell_type&filter1_values=DN&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61775 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/umap?filter1_field=cell_type&filter1_values=ISP&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61797 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/umap?filter1_field=cell_type&filter1_values=DN&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61803 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/umap?filter1_field=cell_type&filter1_values=ISP&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61820 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/umap?filter1_field=cell_type&filter1_values=DP-blast&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61854 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/umap?filter1_field=cell_type&filter1_values=DP-blast&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61854 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/umap?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61915 - "GET /api/meta/reference-preview?species=mouse&reference=mm_bm_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61915 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61915 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61917 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61926 - "POST /api/jobs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61926 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669677458 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61939 - "POST /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/qc HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61939 - "POST /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/run HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61939 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669690441 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61939 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669692442 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61939 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669694443 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61939 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669696441 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61939 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669698442 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61939 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669700442 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61939 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669702441 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61939 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669704441 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61939 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669706443 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61939 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669708442 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61939 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669710442 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61939 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669712441 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61939 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669714443 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61939 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669716441 HTTP/1.1" 200 OK
+WARNING: adata.X seems to be already log-transformed.
+INFO:     127.0.0.1:61939 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669718442 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61939 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669720442 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61939 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669722442 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61939 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669724441 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61939 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669726441 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61939 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669728443 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61939 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669730442 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61939 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669732443 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61939 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669734443 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61939 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669736442 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61939 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669738443 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61939 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669740442 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61939 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669742442 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61939 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669744442 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61982 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669746442 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61982 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669748442 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61982 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669750443 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61982 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669752443 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61982 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/status?t=1787669754443 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61982 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/genes?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61982 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/genes?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61982 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/display-filters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61982 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/umap?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61986 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/expression?gene=Gm29155&modality=rna&violin_limit=10 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62104 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62104 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62104 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62107 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62107 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62109 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62110 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62110 - "GET /api/meta/reference-preview?species=mouse&reference=mm_lung_cellref_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62110 - "GET /api/meta/reference-preview?species=mouse&reference=mm_bm_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62117 - "POST /api/jobs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62117 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787669969052 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "POST /api/jobs/8677866414b84a07a0b66a56fb0d1321/qc HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "POST /api/jobs/8677866414b84a07a0b66a56fb0d1321/run HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787669979644 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787669981646 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787669983645 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787669985646 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787669987645 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787669989645 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787669991646 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787669993646 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787669995646 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787669997646 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787669999646 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787670001646 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787670003645 HTTP/1.1" 200 OK
+WARNING: adata.X seems to be already log-transformed.
+INFO:     127.0.0.1:62123 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787670005646 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787670007645 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787670009646 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787670011645 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787670013646 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787670015646 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787670017646 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787670019646 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787670021645 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787670023645 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787670025646 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787670027646 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787670029646 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787670031645 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787670033646 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787670035646 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62123 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787670037646 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62182 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787670039646 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62182 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787670041646 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62182 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787670043646 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62182 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787670045646 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62182 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status?t=1787670047646 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62182 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/genes?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62182 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/genes?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62182 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/display-filters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62182 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62188 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/expression?gene=Cpne8&modality=rna&violin_limit=10 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62230 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62233 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62233 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?filter1_field=cell_type&filter1_values=DN&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62245 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?filter1_field=cell_type&filter1_values=ISP&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62245 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?filter1_field=cell_type&filter1_values=DN&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62258 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?filter1_field=cell_type&filter1_values=ISP&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62258 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?filter1_field=cell_type&filter1_values=DN&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62442 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?filter1_field=cell_type&filter1_values=B&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62442 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?filter1_field=cell_type&filter1_values=CD8SP&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62447 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?filter1_field=cell_type&filter1_values=CD8SP&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62447 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62453 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62463 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?filter1_field=cell_type&filter1_values=DN&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62552 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?filter1_field=cell_type&filter1_values=ISP&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62586 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/plot-variables HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62587 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/combplot?min_cells=5&subset_by=cell_type&subset_values=ISP HTTP/1.1" 500 Internal Server Error
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/protocols/http/httptools_impl.py", line 421, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/middleware/proxy_headers.py", line 62, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/applications.py", line 1159, in __call__
+    await super().__call__(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/applications.py", line 90, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 186, in __call__
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 328, in run_endpoint_function
+    return await dependant.call(**values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 5031, in combplot
+    payload = _gene_donor_state_means(cache, wanted, max(1, int(min_cells)),
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 3684, in _gene_donor_state_means
+    colors = _state_colors(cache, [c["group"] for c in columns])
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 3709, in _state_colors
+    order = [str(s) for s in cache.get("populations") or []]
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: The truth value of an array with more than one element is ambiguous. Use a.any() or a.all()
+INFO:     127.0.0.1:62586 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?filter1_field=cell_type&filter1_values=ISP&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62880 - "POST /api/jobs/8677866414b84a07a0b66a56fb0d1321/client-log HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62881 - "POST /api/jobs/8677866414b84a07a0b66a56fb0d1321/client-log HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62882 - "POST /api/jobs/8677866414b84a07a0b66a56fb0d1321/client-log HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62883 - "POST /api/jobs/8677866414b84a07a0b66a56fb0d1321/client-log HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62884 - "POST /api/jobs/8677866414b84a07a0b66a56fb0d1321/client-log HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62891 - "GET /api/meta/reference-preview?species=mouse&reference=mm_bm_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62880 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62884 - "HEAD /api/jobs/8677866414b84a07a0b66a56fb0d1321/marker/heatmap.tsv?modality=rna HTTP/1.1" 500 Internal Server Error
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/protocols/http/httptools_impl.py", line 421, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/middleware/proxy_headers.py", line 62, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/applications.py", line 1159, in __call__
+    await super().__call__(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/applications.py", line 90, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 186, in __call__
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 328, in run_endpoint_function
+    return await dependant.call(**values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 5151, in marker_heatmap_tsv
+    matrix_entry = _get_marker_heatmap_cache_entry(app, meta, modality=modality)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 1294, in _get_marker_heatmap_cache_entry
+    with np.load(cache_path, allow_pickle=False) as npz_data:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/numpy/lib/npyio.py", line 438, in load
+    raise ValueError("Cannot load file containing pickled data "
+ValueError: Cannot load file containing pickled data when allow_pickle=False
+INFO:     127.0.0.1:62883 - "HEAD /api/jobs/8677866414b84a07a0b66a56fb0d1321/marker/heatmap.tsv?modality=rna HTTP/1.1" 500 Internal Server Error
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/protocols/http/httptools_impl.py", line 421, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/middleware/proxy_headers.py", line 62, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/applications.py", line 1159, in __call__
+    await super().__call__(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/applications.py", line 90, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 186, in __call__
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 328, in run_endpoint_function
+    return await dependant.call(**values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 5151, in marker_heatmap_tsv
+    matrix_entry = _get_marker_heatmap_cache_entry(app, meta, modality=modality)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 1294, in _get_marker_heatmap_cache_entry
+    with np.load(cache_path, allow_pickle=False) as npz_data:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/numpy/lib/npyio.py", line 438, in load
+    raise ValueError("Cannot load file containing pickled data "
+ValueError: Cannot load file containing pickled data when allow_pickle=False
+INFO:     127.0.0.1:62882 - "HEAD /api/jobs/8677866414b84a07a0b66a56fb0d1321/marker/heatmap.tsv?modality=rna HTTP/1.1" 500 Internal Server Error
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/protocols/http/httptools_impl.py", line 421, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/middleware/proxy_headers.py", line 62, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/applications.py", line 1159, in __call__
+    await super().__call__(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/applications.py", line 90, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 186, in __call__
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 328, in run_endpoint_function
+    return await dependant.call(**values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 5151, in marker_heatmap_tsv
+    matrix_entry = _get_marker_heatmap_cache_entry(app, meta, modality=modality)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 1294, in _get_marker_heatmap_cache_entry
+    with np.load(cache_path, allow_pickle=False) as npz_data:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/numpy/lib/npyio.py", line 438, in load
+    raise ValueError("Cannot load file containing pickled data "
+ValueError: Cannot load file containing pickled data when allow_pickle=False
+INFO:     127.0.0.1:62881 - "HEAD /api/jobs/8677866414b84a07a0b66a56fb0d1321/marker/heatmap.tsv?modality=rna HTTP/1.1" 500 Internal Server Error
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/protocols/http/httptools_impl.py", line 421, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/middleware/proxy_headers.py", line 62, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/applications.py", line 1159, in __call__
+    await super().__call__(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/applications.py", line 90, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 186, in __call__
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 328, in run_endpoint_function
+    return await dependant.call(**values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 5151, in marker_heatmap_tsv
+    matrix_entry = _get_marker_heatmap_cache_entry(app, meta, modality=modality)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 1294, in _get_marker_heatmap_cache_entry
+    with np.load(cache_path, allow_pickle=False) as npz_data:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/numpy/lib/npyio.py", line 438, in load
+    raise ValueError("Cannot load file containing pickled data "
+ValueError: Cannot load file containing pickled data when allow_pickle=False
+INFO:     127.0.0.1:62998 - "HEAD /api/jobs/8677866414b84a07a0b66a56fb0d1321/marker/heatmap.tsv?modality=rna HTTP/1.1" 500 Internal Server Error
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/protocols/http/httptools_impl.py", line 421, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/middleware/proxy_headers.py", line 62, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/applications.py", line 1159, in __call__
+    await super().__call__(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/applications.py", line 90, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 186, in __call__
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 328, in run_endpoint_function
+    return await dependant.call(**values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 5151, in marker_heatmap_tsv
+    matrix_entry = _get_marker_heatmap_cache_entry(app, meta, modality=modality)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 1294, in _get_marker_heatmap_cache_entry
+    with np.load(cache_path, allow_pickle=False) as npz_data:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/numpy/lib/npyio.py", line 438, in load
+    raise ValueError("Cannot load file containing pickled data "
+ValueError: Cannot load file containing pickled data when allow_pickle=False
+INFO:     127.0.0.1:62880 - "POST /api/jobs/8677866414b84a07a0b66a56fb0d1321/client-log HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62999 - "POST /api/jobs/8677866414b84a07a0b66a56fb0d1321/client-log HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63000 - "POST /api/jobs/8677866414b84a07a0b66a56fb0d1321/client-log HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63001 - "POST /api/jobs/8677866414b84a07a0b66a56fb0d1321/client-log HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63002 - "GET /static/styles.css?v=1787532081 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63003 - "GET /static/app.js?v=1787543865 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63003 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63002 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63009 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:50758 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/dotplot HTTP/1.1" 500 Internal Server Error
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/protocols/http/httptools_impl.py", line 421, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/middleware/proxy_headers.py", line 62, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/applications.py", line 1159, in __call__
+    await super().__call__(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/applications.py", line 90, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 186, in __call__
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 328, in run_endpoint_function
+    return await dependant.call(**values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 5002, in dotplot
+    payload = _gene_state_stats(cache, wanted, group_by, list(groups),
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 3632, in _gene_state_stats
+    "colors": _state_colors(cache, groups),
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 3709, in _state_colors
+    order = [str(s) for s in cache.get("populations") or []]
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: The truth value of an array with more than one element is ambiguous. Use a.any() or a.all()
+INFO:     127.0.0.1:50931 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/dotplot?genes=Mpo,Elane HTTP/1.1" 500 Internal Server Error
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/protocols/http/httptools_impl.py", line 421, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/middleware/proxy_headers.py", line 62, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/applications.py", line 1159, in __call__
+    await super().__call__(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/applications.py", line 90, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 186, in __call__
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 328, in run_endpoint_function
+    return await dependant.call(**values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 5002, in dotplot
+    payload = _gene_state_stats(cache, wanted, group_by, list(groups),
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 3632, in _gene_state_stats
+    "colors": _state_colors(cache, groups),
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 3709, in _state_colors
+    order = [str(s) for s in cache.get("populations") or []]
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: The truth value of an array with more than one element is ambiguous. Use a.any() or a.all()
+INFO:     127.0.0.1:51021 - "POST /api/jobs/8677866414b84a07a0b66a56fb0d1321/chat HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:51030 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/combplot?genes=Mpo,Elane&min_cells=5 HTTP/1.1" 500 Internal Server Error
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/protocols/http/httptools_impl.py", line 421, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/middleware/proxy_headers.py", line 62, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/applications.py", line 1159, in __call__
+    await super().__call__(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/applications.py", line 90, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 186, in __call__
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 328, in run_endpoint_function
+    return await dependant.call(**values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 5031, in combplot
+    payload = _gene_donor_state_means(cache, wanted, max(1, int(min_cells)),
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 3684, in _gene_donor_state_means
+    colors = _state_colors(cache, [c["group"] for c in columns])
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 3709, in _state_colors
+    order = [str(s) for s in cache.get("populations") or []]
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: The truth value of an array with more than one element is ambiguous. Use a.any() or a.all()
+INFO:     127.0.0.1:54017 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54018 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/plot-variables HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54019 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/expression?gene=Mpo&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54020 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/display-filters HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [12485]
+/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/lib/python3.11/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 2 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
+INFO:     Started server process [88148]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:54196 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54201 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/dotplot?genes=Mpo,Elane HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54202 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/dotplot HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54203 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/combplot?genes=Mpo,Elane&min_cells=5 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54204 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/combplot?min_cells=5 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54205 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/combplot?min_cells=5&subset_by=cell_type&subset_values=ISP HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [88148]
+/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/lib/python3.11/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
+INFO:     Started server process [40837]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:54452 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54467 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54469 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/plot-variables HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54470 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna&color_by=cell_type HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54471 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna&coords=X_umap HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54472 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna&coords=not_a_key&color_by=not_a_column HTTP/1.1" 200 OK
+ERROR:root:Unhandled API error for /api/jobs/8677866414b84a07a0b66a56fb0d1321/chat-examples
+Traceback (most recent call last):
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 330, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/concurrency.py", line 32, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/to_thread.py", line 56, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 2485, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 976, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 5519, in chat_examples
+    return JSONResponse(_chat_examples(app, store.get_job(job_id)))
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 3527, in _chat_examples
+    markers = _chat_markers_for_states(app, meta, cache, [first] if first else [], 6)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 3487, in _chat_markers_for_states
+    "fold": float(row._fold) if _is_finite_number(row._fold) else 0.0,
+                                                  ^^^^^^^^^
+AttributeError: 'Pandas' object has no attribute '_fold'
+INFO:     127.0.0.1:54546 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/chat-examples HTTP/1.1" 500 Internal Server Error
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/protocols/http/httptools_impl.py", line 421, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/middleware/proxy_headers.py", line 62, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/applications.py", line 1159, in __call__
+    await super().__call__(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/applications.py", line 90, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 186, in __call__
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 330, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/concurrency.py", line 32, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/to_thread.py", line 56, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 2485, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 976, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 5519, in chat_examples
+    return JSONResponse(_chat_examples(app, store.get_job(job_id)))
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 3527, in _chat_examples
+    markers = _chat_markers_for_states(app, meta, cache, [first] if first else [], 6)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 3487, in _chat_markers_for_states
+    "fold": float(row._fold) if _is_finite_number(row._fold) else 0.0,
+                                                  ^^^^^^^^^
+AttributeError: 'Pandas' object has no attribute '_fold'
+ERROR:root:Unhandled API error for /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/chat-examples
+Traceback (most recent call last):
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 330, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/concurrency.py", line 32, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/to_thread.py", line 56, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 2485, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 976, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 5519, in chat_examples
+    return JSONResponse(_chat_examples(app, store.get_job(job_id)))
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 3527, in _chat_examples
+    markers = _chat_markers_for_states(app, meta, cache, [first] if first else [], 6)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 3487, in _chat_markers_for_states
+    "fold": float(row._fold) if _is_finite_number(row._fold) else 0.0,
+                                                  ^^^^^^^^^
+AttributeError: 'Pandas' object has no attribute '_fold'
+INFO:     127.0.0.1:54547 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/chat-examples HTTP/1.1" 500 Internal Server Error
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/protocols/http/httptools_impl.py", line 421, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/middleware/proxy_headers.py", line 62, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/applications.py", line 1159, in __call__
+    await super().__call__(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/applications.py", line 90, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 186, in __call__
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 330, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/concurrency.py", line 32, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/to_thread.py", line 56, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 2485, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 976, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 5519, in chat_examples
+    return JSONResponse(_chat_examples(app, store.get_job(job_id)))
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 3527, in _chat_examples
+    markers = _chat_markers_for_states(app, meta, cache, [first] if first else [], 6)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 3487, in _chat_markers_for_states
+    "fold": float(row._fold) if _is_finite_number(row._fold) else 0.0,
+                                                  ^^^^^^^^^
+AttributeError: 'Pandas' object has no attribute '_fold'
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [40837]
+/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/lib/python3.11/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
+INFO:     Started server process [59127]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:54573 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54580 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/chat-examples HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54581 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/chat-examples HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54596 - "POST /api/jobs/8677866414b84a07a0b66a56fb0d1321/chat HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54598 - "POST /api/jobs/8677866414b84a07a0b66a56fb0d1321/chat HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54600 - "POST /api/jobs/8677866414b84a07a0b66a56fb0d1321/chat HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54602 - "POST /api/jobs/8677866414b84a07a0b66a56fb0d1321/chat HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54610 - "POST /api/jobs/8677866414b84a07a0b66a56fb0d1321/chat HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54671 - "GET / HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     127.0.0.1:54672 - "POST /api/jobs/8677866414b84a07a0b66a56fb0d1321/chat HTTP/1.1" 200 OK
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [59127]
+/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/lib/python3.11/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
+INFO:     Started server process [71637]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [71637]
+/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/lib/python3.11/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
+INFO:     Started server process [73929]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:54700 - "GET / HTTP/1.1" 200 OK
+ERROR:root:Unhandled API error for /api/jobs/8677866414b84a07a0b66a56fb0d1321/chat
+Traceback (most recent call last):
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 330, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/concurrency.py", line 32, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/to_thread.py", line 56, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 2485, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 976, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 5626, in chat
+    result["reading"] = reading
+    ^^^^^^
+UnboundLocalError: cannot access local variable 'result' where it is not associated with a value
+INFO:     127.0.0.1:54710 - "POST /api/jobs/8677866414b84a07a0b66a56fb0d1321/chat HTTP/1.1" 500 Internal Server Error
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/protocols/http/httptools_impl.py", line 421, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/middleware/proxy_headers.py", line 62, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/applications.py", line 1159, in __call__
+    await super().__call__(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/applications.py", line 90, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 186, in __call__
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 330, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/concurrency.py", line 32, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/to_thread.py", line 56, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 2485, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 976, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 5626, in chat
+    result["reading"] = reading
+    ^^^^^^
+UnboundLocalError: cannot access local variable 'result' where it is not associated with a value
+ERROR:root:Unhandled API error for /api/jobs/8677866414b84a07a0b66a56fb0d1321/chat
+Traceback (most recent call last):
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 330, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/concurrency.py", line 32, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/to_thread.py", line 56, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 2485, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 976, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 5626, in chat
+    result["reading"] = reading
+    ^^^^^^
+UnboundLocalError: cannot access local variable 'result' where it is not associated with a value
+INFO:     127.0.0.1:54712 - "POST /api/jobs/8677866414b84a07a0b66a56fb0d1321/chat HTTP/1.1" 500 Internal Server Error
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/protocols/http/httptools_impl.py", line 421, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/middleware/proxy_headers.py", line 62, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/applications.py", line 1159, in __call__
+    await super().__call__(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/applications.py", line 90, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 186, in __call__
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 330, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/concurrency.py", line 32, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/to_thread.py", line 56, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 2485, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 976, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 5626, in chat
+    result["reading"] = reading
+    ^^^^^^
+UnboundLocalError: cannot access local variable 'result' where it is not associated with a value
+ERROR:root:Unhandled API error for /api/jobs/8677866414b84a07a0b66a56fb0d1321/chat
+Traceback (most recent call last):
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 330, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/concurrency.py", line 32, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/to_thread.py", line 56, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 2485, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 976, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 5626, in chat
+    result["reading"] = reading
+    ^^^^^^
+UnboundLocalError: cannot access local variable 'result' where it is not associated with a value
+INFO:     127.0.0.1:54714 - "POST /api/jobs/8677866414b84a07a0b66a56fb0d1321/chat HTTP/1.1" 500 Internal Server Error
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/protocols/http/httptools_impl.py", line 421, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/middleware/proxy_headers.py", line 62, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/applications.py", line 1159, in __call__
+    await super().__call__(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/applications.py", line 90, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 186, in __call__
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 330, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/concurrency.py", line 32, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/to_thread.py", line 56, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 2485, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 976, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 5626, in chat
+    result["reading"] = reading
+    ^^^^^^
+UnboundLocalError: cannot access local variable 'result' where it is not associated with a value
+ERROR:root:Unhandled API error for /api/jobs/8677866414b84a07a0b66a56fb0d1321/chat
+Traceback (most recent call last):
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 330, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/concurrency.py", line 32, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/to_thread.py", line 56, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 2485, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 976, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 5626, in chat
+    result["reading"] = reading
+    ^^^^^^
+UnboundLocalError: cannot access local variable 'result' where it is not associated with a value
+INFO:     127.0.0.1:54719 - "POST /api/jobs/8677866414b84a07a0b66a56fb0d1321/chat HTTP/1.1" 500 Internal Server Error
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/protocols/http/httptools_impl.py", line 421, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/middleware/proxy_headers.py", line 62, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/applications.py", line 1159, in __call__
+    await super().__call__(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/applications.py", line 90, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 186, in __call__
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 330, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/concurrency.py", line 32, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/to_thread.py", line 56, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 2485, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 976, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 5626, in chat
+    result["reading"] = reading
+    ^^^^^^
+UnboundLocalError: cannot access local variable 'result' where it is not associated with a value
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [73929]
+/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/lib/python3.11/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
+INFO:     Started server process [78500]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:54735 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54741 - "POST /api/jobs/8677866414b84a07a0b66a56fb0d1321/chat HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54743 - "POST /api/jobs/8677866414b84a07a0b66a56fb0d1321/chat HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54745 - "POST /api/jobs/8677866414b84a07a0b66a56fb0d1321/chat HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54750 - "POST /api/jobs/8677866414b84a07a0b66a56fb0d1321/chat HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54752 - "POST /api/jobs/8677866414b84a07a0b66a56fb0d1321/chat HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [78500]
+/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/lib/python3.11/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
+INFO:     Started server process [82028]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:54776 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54788 - "POST /api/jobs/8677866414b84a07a0b66a56fb0d1321/chat HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54791 - "POST /api/jobs/8677866414b84a07a0b66a56fb0d1321/chat HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54793 - "POST /api/jobs/8677866414b84a07a0b66a56fb0d1321/chat HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54825 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/plot-variables HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54826 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54819 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna&nocache=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54820 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna&nocache=5 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54821 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna&nocache=2 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54823 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna&nocache=4 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54824 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna&nocache=6 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54822 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna&nocache=3 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54838 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54839 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/genes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54840 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/plot-variables HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54841 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/display-filters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54842 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54843 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna&color_by=cell_type HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54844 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna&coords=X_umap HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54845 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/expression?gene=Mpo&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54846 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/dotplot HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54847 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/dotplot?genes=Mpo,Elane HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54848 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/combplot?min_cells=5 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54849 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/combplot?genes=Mpo&min_cells=5 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54850 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/chat-examples HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54851 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/marker/network?population=matB&modality=rna HTTP/1.1" 200 OK
+ERROR:root:Unhandled API error for /api/jobs/8677866414b84a07a0b66a56fb0d1321/marker/heatmap.tsv
+Traceback (most recent call last):
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 330, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/concurrency.py", line 32, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/to_thread.py", line 56, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 2485, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 976, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 5802, in marker_heatmap_tsv
+    matrix_entry = _get_marker_heatmap_cache_entry(app, meta, modality=modality)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 1301, in _get_marker_heatmap_cache_entry
+    with np.load(cache_path, allow_pickle=False) as npz_data:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/numpy/lib/npyio.py", line 438, in load
+    raise ValueError("Cannot load file containing pickled data "
+ValueError: Cannot load file containing pickled data when allow_pickle=False
+INFO:     127.0.0.1:54852 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/marker/heatmap.tsv?modality=rna HTTP/1.1" 500 Internal Server Error
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/protocols/http/httptools_impl.py", line 421, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/middleware/proxy_headers.py", line 62, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/applications.py", line 1159, in __call__
+    await super().__call__(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/applications.py", line 90, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 186, in __call__
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 330, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/concurrency.py", line 32, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/to_thread.py", line 56, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 2485, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 976, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 5802, in marker_heatmap_tsv
+    matrix_entry = _get_marker_heatmap_cache_entry(app, meta, modality=modality)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 1301, in _get_marker_heatmap_cache_entry
+    with np.load(cache_path, allow_pickle=False) as npz_data:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/numpy/lib/npyio.py", line 438, in load
+    raise ValueError("Cannot load file containing pickled data "
+ValueError: Cannot load file containing pickled data when allow_pickle=False
+INFO:     127.0.0.1:54853 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/expression?gene=Mpo&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54872 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54873 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/genes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54874 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/plot-variables HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54875 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/display-filters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54876 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54914 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54945 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54946 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54947 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/genes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54948 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/plot-variables HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54949 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/display-filters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54950 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54953 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna&color_by=cell_type HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54954 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna&coords=X_umap HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54955 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/expression?gene=Mpo&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54957 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/dotplot HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54958 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/dotplot?genes=Mpo,Elane HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54959 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/combplot?min_cells=5 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54962 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/combplot?genes=Mpo&min_cells=5 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54963 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/chat-examples HTTP/1.1" 200 OK
+ERROR:root:Unhandled API error for /api/jobs/8677866414b84a07a0b66a56fb0d1321/marker/heatmap.tsv
+Traceback (most recent call last):
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 330, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/concurrency.py", line 32, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/to_thread.py", line 56, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 2485, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 976, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 5802, in marker_heatmap_tsv
+    matrix_entry = _get_marker_heatmap_cache_entry(app, meta, modality=modality)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 1301, in _get_marker_heatmap_cache_entry
+    with np.load(cache_path, allow_pickle=False) as npz_data:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/numpy/lib/npyio.py", line 438, in load
+    raise ValueError("Cannot load file containing pickled data "
+ValueError: Cannot load file containing pickled data when allow_pickle=False
+INFO:     127.0.0.1:54965 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/marker/heatmap.tsv?modality=rna HTTP/1.1" 500 Internal Server Error
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/protocols/http/httptools_impl.py", line 421, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/middleware/proxy_headers.py", line 62, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/applications.py", line 1159, in __call__
+    await super().__call__(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/applications.py", line 90, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 186, in __call__
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 330, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/concurrency.py", line 32, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/to_thread.py", line 56, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 2485, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 976, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 5802, in marker_heatmap_tsv
+    matrix_entry = _get_marker_heatmap_cache_entry(app, meta, modality=modality)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 1301, in _get_marker_heatmap_cache_entry
+    with np.load(cache_path, allow_pickle=False) as npz_data:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/numpy/lib/npyio.py", line 438, in load
+    raise ValueError("Cannot load file containing pickled data "
+ValueError: Cannot load file containing pickled data when allow_pickle=False
+INFO:     127.0.0.1:63410 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63411 - "GET /static/app.js?v=1787771024 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63410 - "GET /static/styles.css?v=1787532081 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63416 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:63411 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63410 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref_reference HTTP/1.1" 200 OK
+ERROR:root:Unhandled API error for /api/jobs/8677866414b84a07a0b66a56fb0d1321/marker/heatmap.tsv
+Traceback (most recent call last):
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 330, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/concurrency.py", line 32, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/to_thread.py", line 56, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 2485, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 976, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 5802, in marker_heatmap_tsv
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 1301, in _get_marker_heatmap_cache_entry
+    with np.load(cache_path, allow_pickle=False) as npz_data:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/numpy/lib/npyio.py", line 438, in load
+    raise ValueError("Cannot load file containing pickled data "
+ValueError: Cannot load file containing pickled data when allow_pickle=False
+INFO:     127.0.0.1:60147 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/marker/heatmap.tsv?modality=rna HTTP/1.1" 500 Internal Server Error
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/protocols/http/httptools_impl.py", line 421, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/uvicorn/middleware/proxy_headers.py", line 62, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/applications.py", line 1159, in __call__
+    await super().__call__(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/applications.py", line 90, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 186, in __call__
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/fastapi/routing.py", line 330, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/starlette/concurrency.py", line 32, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/to_thread.py", line 56, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 2485, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 976, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 5802, in marker_heatmap_tsv
+  File "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/app.py", line 1301, in _get_marker_heatmap_cache_entry
+    with np.load(cache_path, allow_pickle=False) as npz_data:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/lib/python3.11/site-packages/numpy/lib/npyio.py", line 438, in load
+    raise ValueError("Cannot load file containing pickled data "
+ValueError: Cannot load file containing pickled data when allow_pickle=False
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [82028]
+/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/lib/python3.11/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
+INFO:     Started server process [68221]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:60252 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60281 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/marker/heatmap.tsv?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60282 - "GET /api/jobs/aa37e2ddd6b04861b29ebc0af6068175/marker/heatmap.tsv?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60284 - "GET /api/jobs/ea39a47961814c7183e90d2f92a70b3a/marker/heatmap.tsv?modality=rna HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [68221]
+/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/lib/python3.11/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
+INFO:     Started server process [87702]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:60405 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60406 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/plot-variables HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60443 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna&x_field=pct_counts_mt&y_field=pct_counts_mt HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60444 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60451 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60452 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/genes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60453 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/plot-variables HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60454 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/display-filters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60455 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60456 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna&color_by=cell_type HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60457 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna&coords=X_umap HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60458 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/expression?gene=Mpo&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60459 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/dotplot HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60460 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/dotplot?genes=Mpo,Elane HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60461 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/combplot?min_cells=5 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60462 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/combplot?genes=Mpo&min_cells=5 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60463 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/chat-examples HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60464 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/marker/heatmap.tsv?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60494 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60495 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/genes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60496 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/plot-variables HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60497 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/display-filters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60498 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60499 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna&color_by=cell_type HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60500 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna&coords=X_umap HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60501 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/umap?modality=rna&x_field=pct_counts_mt&y_field=pct_counts_mt HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60502 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/expression?gene=Mpo&modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60503 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/dotplot HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60504 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/dotplot?genes=Mpo,Elane HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60506 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/combplot?min_cells=5 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60507 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/combplot?genes=Mpo&min_cells=5 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60508 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/chat-examples HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60509 - "GET /api/jobs/8677866414b84a07a0b66a56fb0d1321/marker/heatmap.tsv?modality=rna HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60516 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50415 - "GET /static/app.js?v=1787771024 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50416 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:50415 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58552 - "GET /static/app.js?v=1787771024 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58553 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:58552 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref_reference HTTP/1.1" 200 OK
+INFO:     Started server process [81647]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:50587 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50589 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50590 - "GET /static/app.js?v=1788363224 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50589 - "GET /static/styles.css?v=1788354040 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50594 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:50590 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref2_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50589 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref2_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50595 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50596 - "GET /api/meta/species HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50745 - "GET /api/meta/reference-preview?species=mouse&reference=mm_lung_cellref_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50745 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref2_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50751 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50751 - "GET /api/meta/reference-preview?species=human&reference=hs_bm_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50751 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref2_reference HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [81647]
+INFO:     Started server process [83580]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:51130 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51131 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref2_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51148 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51149 - "GET /static/styles.css?v=1788354040 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51148 - "GET /static/app.js?v=1788363224 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51156 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:51149 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref2_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51148 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref2_reference HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [83580]
+INFO:     Started server process [83906]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:51204 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51205 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref2_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51220 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51220 - "GET /static/styles.css?v=1788354040 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51221 - "GET /static/app.js?v=1788363224 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51223 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:51221 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref2_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51220 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref2_reference HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [83906]
+INFO:     Started server process [84077]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:51245 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51246 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref2_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51254 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51255 - "GET /static/app.js?v=1788363224 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51254 - "GET /static/styles.css?v=1788354040 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51257 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:51255 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref2_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51254 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref2_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60401 - "GET /api/molecule/BACH1/grn-activity HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:60416 - "GET /api/molecule/BACH1/grn-activity HTTP/1.1" 404 Not Found
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [84077]

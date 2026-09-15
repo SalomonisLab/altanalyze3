@@ -1,0 +1,18 @@
+<tool id="altanalyze3_snaf_merge_ms" name="SNAF MS evidence" version="0.1.3" profile="24.0">
+    <description>merge optional pyNeoQuant evidence into candidate reports</description>
+    <requirements><container type="docker">altanalyze3-snaf:0.1.3</container></requirements>
+    <command detect_errors="exit_code"><![CDATA[
+python3 -m altanalyze3.components.neoantigen merge --candidates '$candidates' --evidence '$evidence' --q-threshold $q_threshold --output merged.tsv
+    ]]></command>
+    <inputs>
+        <param name="candidates" type="data" format="tabular" label="Normalized SNAF candidates"/>
+        <param name="evidence" type="data" format="tabular" label="pyNeoQuant evidence"/>
+        <param name="q_threshold" type="float" value="0.01" min="0" max="1" label="Maximum q-value"/>
+    </inputs>
+    <outputs><data name="merged" format="tabular" from_work_dir="merged.tsv"/></outputs>
+    <tests><test><param name="candidates" value="normalized.tsv"/><param name="evidence" value="evidence.tsv"/>
+        <output name="merged"><assert_contents><has_text text="peptide_source_supported"/></assert_contents></output>
+    </test></tests>
+    <help>Matches evidence by sample, peptide, and source identifier. Explicit evidence HLA alleles must also match. Missing and invalid q-values do not count as passing evidence. A supported peptide/source association does not prove an HLA assignment.</help>
+    <citations><citation type="doi">10.1126/scitranslmed.ade2886</citation></citations>
+</tool>

@@ -1,0 +1,8 @@
+Nextflow 26.04.6 is available - Please consider updating your version to it
+N E X T F L O W  ~  version 25.04.8
+Launching `components/snaf/nextflow/main.nf` [fabulous_goldwasser] DSL2 - revision: c1ccf71b63
+WARN: Task runtime metrics are not reported when using macOS without a container engine
+[21/fe1f02] Submitted process > FILTER_COUNTS (1)
+[b4/e7a866] Submitted process > SNAF (cohort)
+[5f/17965f] Submitted process > PYNEOQUANT (S1)
+[d6/bc7882] Submitted process > MERGE_MS (S1)

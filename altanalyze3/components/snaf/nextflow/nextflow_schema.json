@@ -1,0 +1,228 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AltAnalyze3 SNAF parameters",
+  "type": "object",
+  "properties": {
+    "input": {
+      "type": "string",
+      "format": "file-path",
+      "description": "CSV samplesheet. bam: id,bam,bai,psm; full: id,juncounts,hla; ts: id,juncounts."
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "bam",
+        "full",
+        "ts",
+        "surface",
+        "b"
+      ],
+      "default": "ts"
+    },
+    "gtf": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null,
+      "description": "gtf"
+    },
+    "hla": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null,
+      "description": "hla"
+    },
+    "control_h5ad": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null,
+      "description": "control h5ad"
+    },
+    "db_dir": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null,
+      "description": "db dir"
+    },
+    "genome_fasta": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null,
+      "description": "genome fasta"
+    },
+    "canonical_fasta": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null,
+      "description": "canonical fasta"
+    },
+    "netmhcpan_path": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null,
+      "description": "netmhcpan path"
+    },
+    "validation_gtf": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null,
+      "description": "validation gtf"
+    },
+    "isoform_ranker": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null,
+      "description": "isoform ranker"
+    },
+    "first_exon_junctions": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null,
+      "description": "first exon junctions"
+    },
+    "ms_input": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null,
+      "description": "ms input"
+    },
+    "infer_hla": {
+      "type": "boolean",
+      "default": false
+    },
+    "hla_require_all": {
+      "type": "boolean",
+      "default": false
+    },
+    "stop_after_counts": {
+      "type": "boolean",
+      "default": false
+    },
+    "with_pyneoquant": {
+      "type": "boolean",
+      "default": false
+    },
+    "hla_min_depth": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 8
+    },
+    "genome_build": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "hg19",
+        "hg38"
+      ],
+      "default": "auto"
+    },
+    "strandness": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "forward",
+        "reverse",
+        "unstranded"
+      ],
+      "default": "auto"
+    },
+    "novel_gene_mode": {
+      "type": "string",
+      "enum": [
+        "corrected",
+        "legacy"
+      ],
+      "default": "corrected"
+    },
+    "min_reads": {
+      "type": "number",
+      "minimum": 0,
+      "default": 20
+    },
+    "binding_method": {
+      "type": "string",
+      "enum": [
+        "MHCflurry",
+        "netMHCpan"
+      ],
+      "default": "MHCflurry"
+    },
+    "isoform_method": {
+      "type": "string",
+      "enum": [
+        "learned",
+        "evidence",
+        "legacy"
+      ],
+      "default": "learned"
+    },
+    "search_format": {
+      "type": "string",
+      "default": "generic"
+    },
+    "ms_q_threshold": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "default": 0.01
+    },
+    "outdir": {
+      "type": "string",
+      "default": "results"
+    },
+    "container": {
+      "type": "string",
+      "default": "altanalyze3-snaf:0.1.3"
+    },
+    "pyneoquant_container": {
+      "type": "string",
+      "default": "pyneoquant:0.1.0a1"
+    },
+    "max_cpus": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 16
+    },
+    "max_memory": {
+      "type": "string",
+      "default": "128.GB"
+    },
+    "max_time": {
+      "type": "string",
+      "default": "48.h"
+    },
+    "mhcflurry_models": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null,
+      "description": "Prepared MHCflurry download directory staged into prediction tasks"
+    }
+  },
+  "required": [
+    "input"
+  ],
+  "additionalProperties": false
+}

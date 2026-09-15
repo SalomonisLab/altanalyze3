@@ -318,7 +318,7 @@
     const entry = SV.current
       || (SV.datasets && SV.datasets.length ? SV.datasets[0] : null);
     const n = Number(entry && entry.n_cells);
-    return Number.isFinite(n) && n > LARGE_ATLAS_CELLS ? "0.25" : "0.5";
+      return "0.25";   // Nathan 2026-09-01: 0.25 default for every dataset
   }
 
   function installPanelDotSize() {
@@ -410,22 +410,157 @@
       await fetch(`/api/jobs/${jobId}/differential/select?contrast=${encodeURIComponent(event.target.value)}`,
         { method: "POST" });
       SV.contrast = event.target.value;
-      await pollStatus(jobId);
+        // app.js:5106 setResultMode() hides BOTH result views and returns early
+        // while areExploreResultsReady() is false, and nothing restores them, so a
+        // modality switch blanked the Differential panel for good.
+        // The flag is set ONLY by ensureExploreResultsReady (app.js:155). Waiting on
+        // it in a loop waits for something nothing will set, so call it instead.
+        try {
+          await pollStatus(jobId);
+          if (typeof ensureExploreResultsReady === "function") {
+            await ensureExploreResultsReady(jobId);
+          }
+          await pollStatus(jobId);
+          if (typeof setResultMode === "function") setResultMode("differential");
+        } catch (err) {
+          console.error("contrast switch failed:", err);
+        }
     });
   }
 
-  function fillContrastSelector(contrasts, selected) {
+    /* The Differential panel's Modality select.
+     *
+     * app.js:1962 handles it by calling markDifferentialConfigDirty (app.js:2025),
+     * which flips a completed run to status "idle" and asks the reader to "Run
+     * cellHarmony-differential to analyze the updated configuration". A precomputed
+     * bundle has no run button, so the whole Differential view emptied and never
+     * came back. Nathan reported this repeatedly; earlier attempts patched the
+     * CONTRAST selector, which is a different control and left this untouched.
+     *
+     * Here the modality is not a setting to re-run. It picks WHICH precomputed
+     * comparison to show: the same comparison, computed on that modality. The
+     * listener runs in the capture phase and stops the upstream handler, so the
+     * run is never marked dirty.
+     */
+    /* The Differential tab's Modality list comes from the bundle's imputed modalities,
+     * so it offered every one of them whether or not a differential exists for it.
+     * Choosing "Cell communication" left the whole panel on the previous modality:
+     * fastComm scored communication per cell state for the Explore tab, and no
+     * cellHarmony-differential was ever run on it, so there is nothing to select.
+     * Prune the list to the modalities SV.contrasts actually carries, so a reader
+     * cannot pick a dead end. */
+    function pruneDifferentialModalities() {
+      const select = el("differential-modality");
+      if (!select || !SV.contrasts || SV.contrasts.length === 0) return;
+      const have = new Set(SV.contrasts.map(
+        (c) => String(c.modality || "rna").toLowerCase()));
+      let removed = 0;
+      Array.from(select.options).forEach((option) => {
+        const id = String(option.value || "rna").toLowerCase();
+        if (!have.has(id)) {
+          option.remove();
+          removed += 1;
+        }
+      });
+      if (removed && !have.has(String(select.value || "").toLowerCase())) {
+        select.value = have.has("rna") ? "rna" : (select.options[0] || {}).value || "";
+      }
+    }
+
+
+    function installDifferentialModalitySwitch() {
+      const select = el("differential-modality");
+      if (!select || select.dataset.svModalitySwitch === "1") return;
+      select.dataset.svModalitySwitch = "1";
+      select.addEventListener("change", async (event) => {
+        if (!SV.contrasts || SV.contrasts.length === 0) return;
+        event.stopImmediatePropagation();
+        const jobId = el("results-job-id").value.trim();
+        if (!jobId) return;
+        const wanted = String(select.value || "rna").toLowerCase();
+        const current = SV.contrasts.find((c) => c.id === SV.contrast);
+        const comparison = current ? current.comparison : null;
+        // The same comparison on the chosen modality; failing that, any comparison
+        // on it, so the panel always lands on something real.
+        const match = SV.contrasts.find(
+          (c) => String(c.modality || "rna").toLowerCase() === wanted
+            && c.comparison === comparison,
+        ) || SV.contrasts.find(
+          (c) => String(c.modality || "rna").toLowerCase() === wanted,
+        );
+        if (!match) {
+          console.warn("no precomputed comparison for modality " + wanted);
+          return;
+        }
+        SV.contrast = match.id;
+        // REFILL THE COMPARISON LIST FOR THE MODALITY JUST CHOSEN. Setting the value
+        // alone left all 77 entries in place, so the reader saw the other modalities'
+        // comparisons and a prefix telling them which was which.
+        fillContrastSelector(SV.contrasts, match.id, wanted);
+        try {
+          await fetch("/api/jobs/" + jobId + "/differential/select?contrast="
+            + encodeURIComponent(match.id), { method: "POST" });
+          await pollStatus(jobId);
+          if (typeof ensureExploreResultsReady === "function") {
+            await ensureExploreResultsReady(jobId);
+          }
+          await pollStatus(jobId);
+          if (typeof setResultMode === "function") setResultMode("differential");
+        } catch (err) {
+          console.error("modality switch failed:", err);
+        }
+      }, true);
+    }
+
+  function contrastModality(entry) {
+    return String((entry || {}).modality || "rna").toLowerCase();
+  }
+
+  /* A COMPARISON NAME APPEARS ONCE, AND THE MODALITY DECIDES WHICH SET IS LISTED.
+   *
+   * Nathan, 2026-09-08: "the prefixes are present resulting in redundant comparison
+   * names. A comparison name should only exist once and be refiltered once the user
+   * selects a Modality."
+   *
+   * This list used to hold every contrast of every modality, each labelled
+   * `MODALITY: comparison`. On the COPD bundle that is 77 entries for 13 comparisons,
+   * so the reader scrolls past the same 13 names six times and the Modality control
+   * above it appears to do nothing. The prefix existed because two entries would
+   * otherwise read alike; filtering to one modality removes the collision, so the
+   * prefix is no longer carrying anything.
+   *
+   * A MODALITY WITH NO PRECOMPUTED COMPARISON FALLS BACK TO ALL OF THEM rather than
+   * emptying the list, because an empty picker reads as a broken panel. That cannot
+   * happen while pruneDifferentialModalities runs, which removes exactly the
+   * modalities that carry no contrast, but it costs one line to not depend on that.
+   */
+  function fillContrastSelector(contrasts, selected, modality) {
     const select = el("sv-contrast");
     if (!select) return;
+    const all = contrasts || [];
+    // The caller names the modality when it is switching. On the first fill nothing
+    // has been chosen yet, so the selected contrast's own modality is the truth.
+    let wanted = String(modality || "").trim().toLowerCase();
+    if (!wanted) {
+      const current = all.find((entry) => entry.id === selected);
+      wanted = current ? contrastModality(current) : "rna";
+    }
+    let rows = all.filter((entry) => contrastModality(entry) === wanted);
+    if (!rows.length) rows = all;
     select.innerHTML = "";
-    contrasts.forEach((entry) => {
+    rows.forEach((entry) => {
       const option = document.createElement("option");
       option.value = entry.id;
       option.textContent = `${entry.comparison} (${entry.n_rows} rows)`;
       if (entry.id === selected) option.selected = true;
       select.appendChild(option);
     });
-    select.parentElement.classList.toggle("hidden", contrasts.length === 0);
+    // Never leave the control showing a name the server is not holding. The switch
+    // handler sets SV.contrast before it refills, so `selected` is normally present.
+    if (rows.length && !rows.some((entry) => entry.id === selected)) {
+      select.value = rows[0].id;
+    }
+    select.parentElement.classList.toggle("hidden", rows.length === 0);
   }
 
   // ------------------------------------------------------------- state colours
@@ -653,6 +788,8 @@
     const qc = el("qc-job-id"); if (qc) qc.value = entry.id;
     SV.contrasts = entry.contrasts || [];
     fillContrastSelector(SV.contrasts, SV.contrast);
+    installDifferentialModalitySwitch();
+    pruneDifferentialModalities();
     try {
       const stateColors = await getJson(`/api/jobs/${entry.id}/state-colors`);
       SV.stateColors = stateColors.colors || null;

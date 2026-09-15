@@ -61,9 +61,13 @@ def assess_expression_scale(adata, *, random_state=0):
     """
     from altanalyze3.components.clustering.ICGS import infer_expression_scale
 
-    cached = getattr(adata, "uns", {}).get("cellharmony_expression_scale")
-    if cached is not None:
-        return cached
+    # A verdict stored in uns describes X as it was when that verdict was made, not as it
+    # is now. combined_with_umap_and_markers.h5ad carries x_verdict "counts" and
+    # skip_normalization False, yet its X holds log1p CP10k values and uns['log1p'] exists:
+    # the run that wrote it classified raw counts, normalized X, then saved both. Every later
+    # read trusted the stale verdict and log-transformed an already log-transformed matrix.
+    # So the classifier always runs now, and a stored verdict is reported, never obeyed.
+    stored = getattr(adata, "uns", {}).get("cellharmony_expression_scale")
 
     reports = {"X": infer_expression_scale(adata.X, name="X", random_state=random_state)}
     if "counts" in getattr(adata, "layers", {}):
@@ -101,10 +105,13 @@ def assess_expression_scale(adata, *, random_state=0):
     elif x_verdict == "centered":
         print("[scale] WARNING X looks z-scored or residualised. Skipping normalization. "
               "Count-based QC on this matrix is meaningless.")
-    try:
-        adata.uns["cellharmony_expression_scale"] = decision
-    except Exception:
-        pass
+    if stored is not None:
+        stored_verdict = stored.get("x_verdict") if hasattr(stored, "get") else None
+        if stored_verdict != x_verdict:
+            print("[scale] NOTE this object stores an older verdict of %r for X. The matrix "
+                  "in hand is %r. The stored verdict is ignored." % (stored_verdict, x_verdict))
+    # The decision is deliberately NOT written back into adata.uns. Writing it produced the
+    # stale verdict described above once the caller normalized X and saved the object.
     return decision
 
 
@@ -121,6 +128,47 @@ def normalize_adata(adata, show_progress=False):
 def save_marker_genes(adata, groupby, output_file):
     deg = pd.DataFrame(adata.uns['rank_genes_groups']['names'])
     deg.to_csv(output_file, sep='\t', index=False)
+
+
+def write_umap_coordinates(adata, ref_name, output_dir, coords=None, source="computed"):
+    """Write barcode, UMAP-X, UMAP-Y and the reference state to umap_coordinates.txt.
+
+    A UMAP that lives only inside an h5ad cannot be redrawn or joined to the assignment
+    table without reopening a multi-gigabyte file, so every path that computes or inherits
+    coordinates writes the same text table through this function.
+
+    Pass coords to write a freshly computed embedding. Leave coords as None to export what
+    the object already carries. Returns the path, or None when no coordinates exist.
+    """
+    if coords is None:
+        if "X_umap" in getattr(adata, "obsm", {}):
+            coords = adata.obsm["X_umap"]
+            source = source if source != "computed" else "existing obsm['X_umap']"
+        elif {"UMAP-X", "UMAP-Y"}.issubset(set(adata.obs.columns)):
+            coords = adata.obs[["UMAP-X", "UMAP-Y"]].to_numpy()
+            source = source if source != "computed" else "existing obs['UMAP-X'/'UMAP-Y']"
+        else:
+            print("[umap] the object carries no obsm['X_umap'] and no obs['UMAP-X'/'UMAP-Y']. "
+                  "No coordinates exported. Add --generate_umap to compute them.")
+            return None
+    coords = np.asarray(coords)
+    if coords.ndim != 2 or coords.shape[1] < 2:
+        raise ValueError("UMAP coordinates have shape %s; two columns are required"
+                         % (coords.shape,))
+    if coords.shape[0] != adata.n_obs:
+        raise ValueError("UMAP coordinates hold %d rows and the object holds %d cells"
+                         % (coords.shape[0], adata.n_obs))
+    table = {
+        "barcode": adata.obs_names.astype(str),
+        "UMAP-X": coords[:, 0],
+        "UMAP-Y": coords[:, 1],
+    }
+    if ref_name in adata.obs.columns:
+        table[ref_name] = adata.obs[ref_name].astype(str).values
+    path = os.path.join(output_dir, "umap_coordinates.txt")
+    pd.DataFrame(table).to_csv(path, sep="\t", index=False)
+    print("[umap] wrote %d %s coordinates -> %s" % (coords.shape[0], source, path))
+    return path
 
 
 def ensure_category_palette(adata, column):
@@ -190,6 +238,9 @@ def combine_and_align_h5(
     min_counts=1000,
     mit_percent=10,
     generate_umap=False,
+    umap_features="markers",
+    umap_init="spectral",
+    export_umap=False,
     save_adata=False,
     unsupervised_cluster=False,
     leiden_resolution=0.5,
@@ -246,6 +297,8 @@ def combine_and_align_h5(
         else:
             n_genes = np.sum(X > 0, axis=1)
         keep = np.asarray(n_genes).ravel() >= min_genes
+        if keep.all():
+            return                        # a subset that keeps every cell still copies X
         adata._inplace_subset_obs(keep)
 
     def _filter_genes_min_cells(adata, min_cells, matrix):
@@ -258,6 +311,8 @@ def combine_and_align_h5(
         else:
             n_cells = np.sum(X > 0, axis=0)
         keep = np.asarray(n_cells).ravel() >= min_cells
+        if keep.all():
+            return                        # a subset that keeps every gene still copies X
         adata._inplace_subset_var(keep)
 
     def _filter_cells_min_counts(adata, min_counts, matrix):
@@ -270,6 +325,8 @@ def combine_and_align_h5(
         else:
             counts = np.sum(X, axis=1)
         keep = np.asarray(counts).ravel() >= min_counts
+        if keep.all():
+            return                        # a subset that keeps every cell still copies X
         adata._inplace_subset_obs(keep)
 
     def _apply_qc_filters(adata):
@@ -291,7 +348,14 @@ def combine_and_align_h5(
         total_counts = np.asarray(matrix.sum(axis=1)).ravel()
         total_counts = np.maximum(total_counts, 1e-12)
         adata.obs["pct_counts_mt"] = (mito_counts / total_counts) * 100
-        adata = adata[adata.obs["pct_counts_mt"] < mit_percent].copy()
+        keep_mt = (adata.obs["pct_counts_mt"] < mit_percent).to_numpy()
+        if keep_mt.all():
+            # Copying a 1.68M cell object to exclude nothing cost 138 GB and killed job
+            # 1203663 with TERM_MEMLIMIT. The column is still written, so nothing is lost.
+            print(f"Cells remaining after mito-percent filtering: {adata.n_obs} "
+                  f"(no cell excluded at mit_percent {mit_percent}; object not copied)")
+            return adata
+        adata = adata[keep_mt].copy()
         print(f"Cells remaining after mito-percent filtering: {adata.n_obs}")
         return adata
     reference_df = pd.read_csv(cellharmony_ref, sep='\t', index_col=0)
@@ -842,7 +906,12 @@ def combine_and_align_h5(
             for pop in reference_df.columns if pop in match_df[ref_name].values
         ], ignore_index=True)
 
-    adata_combined = adata_combined[match_df.CellBarcode].copy()
+    _wanted = match_df.CellBarcode.astype(str).to_numpy()
+    if adata_combined.n_obs == len(_wanted) and np.array_equal(
+            adata_combined.obs_names.astype(str).to_numpy(), _wanted):
+        print("[mem] every aligned cell is already present in order; skipping the reorder copy")
+    else:
+        adata_combined = adata_combined[match_df.CellBarcode].copy()
     adata_combined.obs[ref_name] = match_df.set_index('CellBarcode').loc[adata_combined.obs_names][ref_name]
 
     if export_cptt and metacell_align:
@@ -873,62 +942,119 @@ def combine_and_align_h5(
                       "umap-learn can import" % np.__version__)
             os.chdir(output_dir)
 
-            def downsample_cells_per_group(adata, groupby, max_cells=50):
+            def downsample_barcodes_per_group(labels, max_cells=50):
+                """Return the chosen barcodes. The old code copied the whole object to
+                every-state-with-10-cells, then downsampled the copy. That first copy held
+                1.68M cells across 36,212 genes with a counts layer, cost 138 GB and killed
+                job 1203663. Choosing barcodes first costs an index."""
                 idx = []
-                for group, count in adata.obs[groupby].value_counts().items():
-                    cells = adata.obs_names[adata.obs[groupby] == group]
-                    selected = np.random.choice(cells, min(len(cells), max_cells), replace=False)
-                    idx.extend(selected)
-                return adata[idx].copy()
+                for group in labels.value_counts().index:
+                    cells = labels.index[labels == group].to_numpy()
+                    idx.extend(np.random.choice(cells, min(len(cells), max_cells), replace=False))
+                return idx
 
-            adata_filtered = adata_combined[adata_combined.obs[ref_name].isin(
-                adata_combined.obs[ref_name].value_counts()[lambda x: x >= 10].index
-            )].copy()
+            _labels = adata_combined.obs[ref_name].astype(str)
+            _kept_states = _labels.value_counts()[lambda x: x >= 10].index
+            _labels = _labels[_labels.isin(_kept_states)]
+            _picked = downsample_barcodes_per_group(_labels, max_cells=150)
+            print("[umap] marker subset: %d cells across %d states with 10 or more cells"
+                  % (len(_picked), len(_kept_states)))
+            adata_filtered = adata_combined[_picked].copy()
 
-            adata_filtered = downsample_cells_per_group(adata_filtered, ref_name, max_cells=150)
+            if umap_features == "reference":
+                # Embed on the reference marker genes themselves, so the UMAP answers to the
+                # same features the alignment used. No query-derived marker discovery enters
+                # the embedding, and no unsupervised clustering runs.
+                umap_genes = [g for g in reference_df.index.astype(str)
+                              if g in set(adata_combined.var_names.astype(str))]
+                print("[umap] feature set = reference genes only: %d of %d %s genes are "
+                      "present in the query" % (len(umap_genes), reference_df.shape[0], ref_name))
+                if len(umap_genes) == 0:
+                    raise ValueError(
+                        "No reference gene is present in the query, so no UMAP can be built "
+                        "from the reference feature set.")
+                if len(umap_genes) < 0.5 * reference_df.shape[0]:
+                    print("[umap] WARNING fewer than half of the reference genes are present. "
+                          "Check the gene identifier type before you read the embedding.")
+            else:
+                sc.tl.rank_genes_groups(adata_filtered, groupby=ref_name, method='wilcoxon', use_raw=False)
+                save_marker_genes(adata_filtered, ref_name, os.path.join(output_dir, 'supervised_markers.txt'))
 
-            sc.tl.rank_genes_groups(adata_filtered, groupby=ref_name, method='wilcoxon', use_raw=False)
-            save_marker_genes(adata_filtered, ref_name, os.path.join(output_dir, 'supervised_markers.txt'))
+                deg_results = pd.DataFrame(adata_filtered.uns['rank_genes_groups']['names'])
 
-            deg_results = pd.DataFrame(adata_filtered.uns['rank_genes_groups']['names'])
+                markers = list(set([gene for col in deg_results.columns for gene in deg_results[col][:10]]))
+                excluded_prefixes = ('mt-', 'rp', 'xist')
+                markers = [gene for gene in markers if not gene.lower().startswith(excluded_prefixes) and gene in adata_filtered.var_names]
 
-            markers = list(set([gene for col in deg_results.columns for gene in deg_results[col][:10]]))
-            excluded_prefixes = ('mt-', 'rp', 'xist')
-            markers = [gene for gene in markers if not gene.lower().startswith(excluded_prefixes) and gene in adata_filtered.var_names]
+                adata_markers = adata_filtered[:, markers].copy()
+                sc.pp.pca(adata_markers, n_comps=50)
+                sc.pp.neighbors(adata_markers)
 
-            adata_markers = adata_filtered[:, markers].copy()
-            sc.pp.pca(adata_markers, n_comps=50)
-            sc.pp.neighbors(adata_markers)
+                sc.tl.umap(adata_markers)
+                umap_genes = markers
+                print("[umap] feature set = query-derived markers: %d genes" % len(umap_genes))
 
-            sc.tl.umap(adata_markers)
-            adata_all_cells = adata_combined[:, markers].copy()
+            # Carry X alone. adata_combined[:, genes].copy() also copies layers['counts'],
+            # which doubles the cost for a matrix the UMAP never reads.
+            _view = adata_combined[:, umap_genes]
+            adata_all_cells = ad.AnnData(X=_view.X.copy(),
+                                         obs=_view.obs[[ref_name]].copy(),
+                                         var=_view.var.copy())
+            del _view
+            print("[umap] embedding matrix: %d cells x %d genes, layers dropped"
+                  % (adata_all_cells.n_obs, adata_all_cells.n_vars))
 
-            sc.pp.pca(adata_all_cells, n_comps=50) ### Segmentation fault: 11 - leaked semaphore - if library mismatch
+            n_comps = min(50, adata_all_cells.n_vars - 1, adata_all_cells.n_obs - 1)
+            sc.pp.pca(adata_all_cells, n_comps=n_comps) ### Segmentation fault: 11 - leaked semaphore - if library mismatch
 
             sc.pp.neighbors(adata_all_cells)
-            sc.tl.umap(adata_all_cells)
+            # umap_init "spectral" is umap-learn's default. It calls
+            # umap.spectral._spectral_layout -> scipy.sparse.linalg.eigsh -> ARPACK, and
+            # ARPACK in scipy 1.17.1 segfaults on a large graph. Job 1207046 died there on
+            # 2026-08-31 with 1,685,272 cells; the fatal-error dump named
+            # arpack.py:584 in iterate. Initialization only sets UMAP's starting
+            # coordinates, so "random" is a legitimate alternative and umap-learn itself
+            # falls back to it when spectral fails.
+            if umap_init == "spectral" and adata_all_cells.n_obs > 500000:
+                print("[umap] WARNING init 'spectral' runs ARPACK through "
+                      "scipy.sparse.linalg.eigsh on %d cells. ARPACK in scipy 1.17.1 "
+                      "segfaults at this size. Pass --umap_init random to skip it."
+                      % adata_all_cells.n_obs)
+            print("[umap] initialization: %s" % umap_init)
+            sc.tl.umap(adata_all_cells, init_pos=umap_init)
 
             coords = adata_all_cells.obsm['X_umap']
             adata_combined.obs['UMAP-X'] = coords[:, 0]
             adata_combined.obs['UMAP-Y'] = coords[:, 1]
             adata_combined.obsm['X_umap'] = coords
 
-            # Write the coordinates as text, so a UMAP can be redrawn or joined to the
-            # barcode-to-state table without reopening an h5ad.
-            _umap_path = os.path.join(output_dir, "umap_coordinates.txt")
-            pd.DataFrame({
-                "barcode": adata_combined.obs_names.astype(str),
-                "UMAP-X": coords[:, 0],
-                "UMAP-Y": coords[:, 1],
-                ref_name: adata_combined.obs[ref_name].astype(str).values,
-            }).to_csv(_umap_path, sep="\t", index=False)
-            print(f"[umap] wrote {len(coords):,} coordinates -> {_umap_path}")
+            # Write the coordinates as text first, so a later failure in the plotting or
+            # heatmap steps cannot cost the embedding.
+            write_umap_coordinates(
+                adata_combined, ref_name, output_dir, coords=coords,
+                source=("reference-gene" if umap_features == "reference" else "marker-gene"))
 
             ensure_category_palette(adata_combined, ref_name)
-            sc.pl.umap(adata_combined, color=ref_name, 
+            sc.pl.umap(adata_combined, color=ref_name,
                 save=f"_UMAP.pdf", show=False, legend_loc='on data',
                 legend_fontsize=3,legend_fontweight='normal')
+        except Exception as e:
+            import traceback
+            print(f"UMAP generation step skipped due to error: {e}")
+            traceback.print_exc()
 
+        # The marker table and its heatmap run after the coordinates are on disk. The old
+        # code put them inside the same try, so a heatmap error printed one line and threw
+        # the UMAP away with it.
+        try:
+            os.chdir(output_dir)
+            if "adata_filtered" not in locals() or ref_name not in adata_filtered.obs.columns:
+                raise RuntimeError(
+                    "the downsampled per-state object was never built, so no marker table or "
+                    "heatmap can be produced")
+            if umap_features == "reference":
+                sc.tl.rank_genes_groups(adata_filtered, groupby=ref_name, method='wilcoxon', use_raw=False)
+                save_marker_genes(adata_filtered, ref_name, os.path.join(output_dir, 'supervised_markers.txt'))
             sc.pl.rank_genes_groups_heatmap(
                 adata_filtered,
                 show=False,
@@ -939,7 +1065,13 @@ def combine_and_align_h5(
                 var_group_rotation=90,
             )
         except Exception as e:
-            print(f"UMAP generation step skipped due to error: {e}")
+            import traceback
+            print(f"Marker heatmap step skipped due to error: {e}")
+            traceback.print_exc()
+
+    elif export_umap:
+        # Export coordinates the input h5ad already carries, without recomputing anything.
+        write_umap_coordinates(adata_combined, ref_name, output_dir)
 
 
     if unsupervised_cluster:
@@ -1428,6 +1560,18 @@ if __name__ == '__main__':
     parser.add_argument('--min_counts', type=int, default=500, help='min_counts for scanpy QC')
     parser.add_argument('--mit_percent', type=int, default=10, help='mit_percent for scanpy QC')
     parser.add_argument('--generate_umap', action='store_true', help='generate UMAP and marker analysis')
+    parser.add_argument('--umap_features', type=str, default='markers', choices=['markers', 'reference'],
+                        help="features the UMAP is built from: 'markers' (default, unchanged) uses the "
+                             "top query-derived Wilcoxon markers per reference state; 'reference' uses "
+                             "the reference marker genes themselves")
+    parser.add_argument('--umap_init', type=str, default='spectral',
+                        choices=['spectral', 'random', 'pca'],
+                        help="UMAP initialization. 'spectral' (default, unchanged) runs ARPACK "
+                             "through scipy.sparse.linalg.eigsh, which segfaults above roughly "
+                             "500,000 cells under scipy 1.17.1. 'random' skips that solver.")
+    parser.add_argument('--export_umap', action='store_true',
+                        help='write umap_coordinates.txt from coordinates the input h5ad already '
+                             'carries, without recomputing a UMAP')
     parser.add_argument('--save_adata', action='store_true', help='save updated AnnData object')
     parser.add_argument('--unsupervised_cluster', action='store_true', help='perform unsupervised clustering analysis')
     parser.add_argument('--resolution', type=float, default=0.5, help='Leiden clustering resolution (default 0.5)')
@@ -1469,6 +1613,9 @@ if __name__ == '__main__':
     min_counts = args.min_counts
     mit_percent = args.mit_percent
     generate_umap = args.generate_umap
+    umap_features = args.umap_features
+    umap_init = args.umap_init
+    export_umap = args.export_umap
     save_adata = args.save_adata
     alignment_mode = args.alignment_mode
     unsupervised_cluster = args.unsupervised_cluster
@@ -1536,6 +1683,9 @@ if __name__ == '__main__':
             min_counts=min_counts,
             mit_percent=mit_percent,
             generate_umap=generate_umap,
+            umap_features=umap_features,
+            umap_init=umap_init,
+            export_umap=export_umap,
             save_adata=save_adata,
             unsupervised_cluster=unsupervised_cluster,
             leiden_resolution=leiden_resolution,

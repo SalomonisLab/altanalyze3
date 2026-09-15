@@ -44,7 +44,8 @@ BM_H5AD = ("/Users/saljh8/Dropbox/Collaborations/Grimes/UDON/cellHarmony-dataset
            "final/pseudobulk/pseudobulk_counts_hashed.h5ad")
 OUT = "/Users/saljh8/Dropbox/LungMAP/GRN/rna2grn/validation"
 LUNG_REFS = ("hs_lung_natri_reference", "hs_lung_hlca_reference",
-             "hs_lung_cellref_reference", "hs_lung_bpd_sun_reference")
+             "hs_lung_cellref_reference", "hs_lung_bpd_sun_reference",
+             "hs_lung_cellref2_reference")
 LUNG_CLUSTER_COL = "manual_annotation_1"
 BM_CLUSTER_COL = "Hs-BM-titrated-reference-centroid"
 
@@ -151,7 +152,7 @@ def main(argv=None) -> int:
         check(f"{rid} grn declares lung statistic",
               cfg.get("pseudobulk_statistic") == "mean_over_cells_of_log1p_cp10k")
         check(f"{rid} grn points at the lung bundle",
-              str(cfg.get("bundle_path", "")).endswith("rna2grn_lung_bundle.pkl.gz"))
+              str(cfg.get("bundle_path", "")).endswith("rna2grn_lung_hybrid_bundle.pkl.gz"))
     bm_grn_cfg = pipeline._reference_impute_config(resolved_refs["hs_bm_reference"], "grn")
     check("hs_bm_reference grn declares NO statistic (keeps sum_counts)",
           not bm_grn_cfg.get("pseudobulk_statistic"))
@@ -173,10 +174,10 @@ def main(argv=None) -> int:
     check("statistic used = mean_over_cells_of_log1p_cp10k",
           summary.get("pseudobulk_statistic") == "mean_over_cells_of_log1p_cp10k")
     check("no counts-path warning fired", not counts_warn)
-    check("TF activity adata = cells x TFs", tf_adata.shape == (q.n_obs, 221),
+    check("TF activity adata = cells x TFs", tf_adata.shape == (q.n_obs, 284),
           str(tf_adata.shape))
-    check("edge adata = pseudobulks x 57307 edges",
-          edges_adata.shape[1] == 57307 and edges_adata.shape[0] == summary["n_pseudobulks"],
+    check("edge adata = pseudobulks x 63647 edges",
+          edges_adata.shape[1] == 63647 and edges_adata.shape[0] == summary["n_pseudobulks"],
           str(edges_adata.shape))
     check("edge values finite and non-negative",
           bool(np.isfinite(edges_adata.X).all() and (edges_adata.X >= 0).all()))
@@ -185,7 +186,7 @@ def main(argv=None) -> int:
           f"sd={float(tf_adata.X.std()):.4f}")
     check("edge adata carries pseudobulk_method for the group test",
           edges_adata.uns.get("pseudobulk_method") == "pseudobulk")
-    check("summary names the lung reference", summary.get("grn_reference") == "lung",
+    check("summary names the lung reference", summary.get("grn_reference") == "lung_hybrid",
           str(summary.get("grn_reference")))
     report["B_lung"] = {k: v for k, v in summary.items() if k != "neighbors"}
     report["B_lung"]["tf_shape"] = list(tf_adata.shape)

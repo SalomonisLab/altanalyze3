@@ -193,7 +193,8 @@ def generate_full_results(outdir,freq_path,mode,validation_gtf):
     :param outdir: string, the output folder
     :param freq_path: string, the path to the frequency_stage0_verbosity1_uid_gene_symbol_coord_mean_mle.txt file from T antigen pipeline
     :param mode: string, either long_read or short_read
-    :param validation_gtf: string, the path to the validation long_read gtf when mode=short_read
+    :param validation_gtf: path, comma-separated paths, or a list of paths to the validation
+                            long_read catalogs when mode=short_read
 
     Examples::
 
@@ -214,46 +215,32 @@ def generate_full_results(outdir,freq_path,mode,validation_gtf):
                                             freq_df_path=freq_path,
                                             mode='long_read',outdir=os.path.join(outdir,'B_candidates'),name='lr_str3_report_{}_{}.txt'.format(style,overlap_extracellular))
     elif mode == 'short_read':
-        # Parallel pre-warm of the is_support (GTF validation) cache ONCE, so the many
-        # (serial, memoized) stringency-4/5 x style x overlap generate_results passes below are
-        # all cache hits -- this is the generate_full_results speedup on the SNAF-B bottleneck.
-        try:
-            with open(os.path.join(outdir, 'surface_antigen_sr.p'), 'rb') as _f:
-                _res = pickle.load(_f)
-            prewarm_support_cache(_res, validation_gtf)
-        except Exception as _e:
-            logger.warning('is_support pre-warm skipped (%s); passes will compute lazily', _e)
-        # first strigency 5
-        for style in [None,'deletion','insertion']:
-            for overlap_extracellular in [True,False]:
-                cc,cf = generate_results(pickle_path=os.path.join(outdir,'surface_antigen_sr.p'),strigency=5,outdir=outdir,long_read=False,style=style,overlap_extracellular=overlap_extracellular,gtf=validation_gtf)
-                if cc > 0:
-                    report_candidates(pickle_path=os.path.join(outdir,'surface_antigen_sr.p'),
-                                            candidates_path=os.path.join(outdir,'candidates_5_sr_{}_{}.txt'.format(style,overlap_extracellular)),
-                                            validation_path=os.path.join(outdir,'validation_5_sr_{}_{}.txt'.format(style,overlap_extracellular)),
-                                            freq_df_path=freq_path,
-                                            mode='short_read',outdir=os.path.join(outdir,'B_candidates'),name='sr_str5_report_{}_{}.txt'.format(style,overlap_extracellular)) 
-        # next strigency 4
-        for style in [None,'deletion','insertion']:
-            for overlap_extracellular in [True,False]:
-                cc, cf = generate_results(pickle_path=os.path.join(outdir,'surface_antigen_sr.p'),strigency=4,outdir=outdir,long_read=False,style=style,overlap_extracellular=overlap_extracellular,gtf=validation_gtf)
-                if cc > 0:
-                    report_candidates(pickle_path=os.path.join(outdir,'surface_antigen_sr.p'),
-                                            candidates_path=os.path.join(outdir,'candidates_4_sr_{}_{}.txt'.format(style,overlap_extracellular)),
-                                            validation_path=os.path.join(outdir,'validation_4_sr_{}_{}.txt'.format(style,overlap_extracellular)),
-                                            freq_df_path=freq_path,
-                                            mode='short_read',outdir=os.path.join(outdir,'B_candidates'),name='sr_str4_report_{}_{}.txt'.format(style,overlap_extracellular)) 
-
-         # then strigency 3
-        for style in [None,'deletion','insertion']:
-            for overlap_extracellular in [True,False]:
-                cc, cf = generate_results(pickle_path=os.path.join(outdir,'surface_antigen_sr.p'),strigency=3,outdir=outdir,long_read=False,style=style,overlap_extracellular=overlap_extracellular,gtf=None)
-                if cc > 0:
-                    report_candidates(pickle_path=os.path.join(outdir,'surface_antigen_sr.p'),
-                                            candidates_path=os.path.join(outdir,'candidates_3_sr_{}_{}.txt'.format(style,overlap_extracellular)),
-                                            validation_path=os.path.join(outdir,'validation_3_sr_{}_{}.txt'.format(style,overlap_extracellular)),
-                                            freq_df_path=freq_path,
-                                            mode='short_read',outdir=os.path.join(outdir,'B_candidates'),name='sr_str3_report_{}_{}.txt'.format(style,overlap_extracellular)) 
+        prediction_path = os.path.join(outdir, 'surface_antigen_sr.p')
+        # Independent validation only: no catalog means stringency 3, even if a
+        # previous run in this process populated the long-read support cache.
+        if validation_gtf is not None:
+            try:
+                with open(prediction_path, 'rb') as fh:
+                    prewarm_support_cache(pickle.load(fh), validation_gtf)
+            except Exception as exc:
+                logger.warning('is_support pre-warm skipped (%s); passes will compute lazily', exc)
+        stringencies = [5, 4, 3] if validation_gtf is not None else [3]
+        for stringency in stringencies:
+            for style in [None, 'deletion', 'insertion']:
+                for overlap in [True, False]:
+                    cc, cf = generate_results(
+                        pickle_path=prediction_path, strigency=stringency, outdir=outdir,
+                        long_read=False, style=style, overlap_extracellular=overlap,
+                        gtf=validation_gtf if stringency > 3 else None)
+                    if cc > 0:
+                        suffix = '{}_sr_{}_{}.txt'.format(stringency, style, overlap)
+                        report_candidates(
+                            pickle_path=prediction_path,
+                            candidates_path=os.path.join(outdir, 'candidates_' + suffix),
+                            validation_path=os.path.join(outdir, 'validation_' + suffix),
+                            freq_df_path=freq_path, mode='short_read',
+                            outdir=os.path.join(outdir, 'B_candidates'),
+                            name='sr_str{}_report_{}_{}.txt'.format(stringency, style, overlap))
 
     elif mode == 'find_full_length':
         # first strigency 5
@@ -761,7 +748,10 @@ def _process_sa_chunk(chunk, mode, n_stride, tmhmm, software_path):
     return out
 
 
-def run(uids,outdir,prediction_mode='short_read',n_stride=2,gtf=None,tmhmm=False,software_path=None,serialize=True,cores=None):
+def run(uids,outdir,prediction_mode='short_read',n_stride=2,gtf=None,tmhmm=False,software_path=None,serialize=True,cores=None,
+        junction_counts=None, isoform_method=None, genome_fasta=None, isoform_ranker=None,
+        first_exon_junctions=(), isoform_sample=None, isoform_min_reads=3,
+        isoform_max_edits=None, isoform_top_k=5):
     '''
     main function for run B antigen pipeline
 
@@ -769,10 +759,17 @@ def run(uids,outdir,prediction_mode='short_read',n_stride=2,gtf=None,tmhmm=False
     :param outdir: string, the path where all the output will go into
     :param prediction_mode: string, either 'short_read' or 'long_read'
     :param n_stride: int, how many exons define a early stop codon, for NMD check
-    :param gtf: None or string, if prediction mode is long_read, supply the path to the gtf file
+    :param gtf: None, a path, a comma-separated string of paths, or a list of paths. In long_read
+                mode these catalogs supply the transcripts; several catalogs merge into one
     :param tmhmm: bool, use tmhmm or not
     :param software_path: None or string, if tmhmm=True, specify the tmhmm software path
     :param serialize: bool, serialize to the pickle file for the result
+    :param junction_counts: complete sample-level count DataFrame; enables learned synthetic
+        isoforms by default in short_read mode. Includes measured background junctions.
+    :param isoform_method: learned (bundled ranker), evidence (explicit two-edit rule), or
+        legacy. Without counts, existing Python calls keep legacy behavior.
+    :param first_exon_junctions: UIDs selected as first-exon junctions; unknown 5' boundaries
+        use a strand-aware 250-nt first exon. Annotated boundaries take precedence.
 
     Examples::
 
@@ -781,6 +778,16 @@ def run(uids,outdir,prediction_mode='short_read',n_stride=2,gtf=None,tmhmm=False
         # if not using TMHMM
         surface.run(membrane_tuples,outdir='result',tmhmm=False,software_path=None)
     '''
+    method = isoform_method or ('learned' if junction_counts is not None else 'legacy')
+    if method not in ('learned', 'evidence', 'legacy'):
+        raise ValueError('Unknown isoform method: ' + method)
+    if prediction_mode == 'short_read' and method != 'legacy':
+        from .evidence_workflow import run_surface_evidence
+        return run_surface_evidence(uids, outdir, junction_counts, method=method,
+            genome_fasta=genome_fasta, ranker_path=isoform_ranker,
+            first_exon_junctions=first_exon_junctions, sample=isoform_sample,
+            min_reads=isoform_min_reads, max_edits=isoform_max_edits, top_k=isoform_top_k,
+            tmhmm=tmhmm, software_path=software_path, serialize=serialize)
     if not os.path.exists(outdir):
         os.mkdir(outdir)
     file_name = {'short_read': 'surface_antigen_sr.p', 'long_read': 'surface_antigen_lr.p',
@@ -788,8 +795,7 @@ def run(uids,outdir,prediction_mode='short_read',n_stride=2,gtf=None,tmhmm=False
     if prediction_mode == 'long_read':
         # module globals so the (forked) chunk workers inherit them copy-on-write
         global gtf_dict, gtf_starts
-        gtf_dict = process_est_or_long_read_with_id(gtf)
-        gtf_starts = _GTF_STARTS_CACHE.get(os.path.abspath(gtf)) if isinstance(gtf, str) and os.path.exists(gtf) else None
+        _set_gtf_globals(gtf)
     if tmhmm:   # warm the tmhmm model in the parent so forked workers inherit it (no per-worker load)
         try:
             from .alignment import _load_tmhmm_model
@@ -903,6 +909,97 @@ def _gtf_index_path(gtf):
 
 
 _GTF_ID_RE = re.compile(r'transcript_id[ =]"?([^";]+)"?')
+
+
+def _gtf_path_list(gtf):
+    '''Normalize the validation-GTF argument to a list of paths.
+
+    Accepts None, one path, a comma-separated string, or a list/tuple/set of either. Several
+    catalogs (say a SQANTI GTF plus a long-read combined.gff.gz plus an Ensembl GTF) merge into
+    one query structure. A path that exists on disk is never split, so a comma inside a real
+    file name stays intact.'''
+    if gtf is None:
+        return []
+    if isinstance(gtf, (list, tuple, set)):
+        out = []
+        for item in gtf:
+            for p in _gtf_path_list(item):
+                if p not in out:
+                    out.append(p)
+        return out
+    s = str(gtf).strip()
+    if not s:
+        return []
+    if os.path.exists(s):
+        return [s]
+    parts = [p.strip() for p in s.split(',') if p.strip()]
+    return parts if len(parts) > 1 else [s]
+
+
+def _gtf_cache_key(gtf):
+    '''Cache key for one or many GTFs. A single path keeps its plain abspath key, so every
+    index and parse cached by earlier versions still hits. Many paths get the sorted abspaths
+    joined by "|", so the merge is cached once per catalog set.'''
+    paths = _gtf_path_list(gtf)
+    if not paths:
+        return None
+    keys = [os.path.abspath(p) for p in paths if os.path.exists(p)]
+    if len(keys) != len(paths):
+        return None
+    if len(keys) == 1:
+        return keys[0]
+    return '|'.join(sorted(set(keys)))
+
+
+def _merge_gtf_dicts(dicts, dedup=True):
+    '''Merge parsed GTF dicts into one {chrom:{'+':[transcript,...],'-':[...]}} plus the
+    per-(chrom,strand) transcript-start arrays.
+
+    Transcripts are re-sorted by first-exon start because the support query bisects on that
+    order and early-breaks out of the scan. With dedup=True an exon chain that two catalogs
+    both contain is stored once; the count of dropped duplicates is logged. The per-file dicts
+    are never mutated: the merged lists hold references, and the sort acts on the new lists.'''
+    merged = {}
+    seen = set()
+    n_dup = 0
+    n_in = 0
+    for d in dicts:
+        for chrom, sd in d.items():
+            tgt = merged.setdefault(chrom, {'+': [], '-': []})
+            for strand in ('+', '-'):
+                for tx in sd.get(strand, []):
+                    n_in += 1
+                    if dedup:
+                        sig = (chrom, strand, tuple(tx[1:]))
+                        if sig in seen:
+                            n_dup += 1
+                            continue
+                        seen.add(sig)
+                    tgt.setdefault(strand, []).append(tx)
+    starts = {}
+    n_out = 0
+    for chrom, sd in merged.items():
+        starts[chrom] = {}
+        for strand in ('+', '-'):
+            sd.setdefault(strand, []).sort(key=lambda t: int(t[1][0]))
+            starts[chrom][strand] = [int(t[1][0]) for t in sd[strand]]
+            n_out += len(sd[strand])
+    if n_dup:
+        logger.info('SNAF-B GTF merge: %d of %d transcripts were identical exon chains already '
+                    'present in an earlier catalog and were stored once', n_dup, n_in)
+    logger.info('SNAF-B GTF merge: %d transcripts over %d contigs from %d catalogs',
+                n_out, len(merged), len(dicts))
+    return merged, starts
+
+
+def _set_gtf_globals(gtf):
+    '''Parse or load one or many validation GTFs and publish them as the module globals the
+    support query reads. Returns the merged gtf_dict. Every caller that used to set gtf_dict
+    and gtf_starts by hand calls this instead, so single-path and multi-path behave the same.'''
+    global gtf_dict, gtf_starts
+    gtf_dict = process_est_or_long_read_with_id(gtf)
+    gtf_starts = _GTF_STARTS_CACHE.get(_gtf_cache_key(gtf))
+    return gtf_dict
 
 
 def _gtf_open(gtf):
@@ -1029,6 +1126,13 @@ def _parse_gtf_raw(gtf):
                 composition.append((int(start),int(end)))
             else:
                 continue
+        # Flush the final transcript. The loop above only writes a block when it meets the NEXT
+        # `transcript` line, so without this the last transcript of every file was dropped. The
+        # defect hid while one classic GTF was the only input: it cost 1 transcript per run. It
+        # surfaced when a catalog split in two stopped reproducing the whole-file parse. Files
+        # that list exons before their transcript line take _parse_gtf_grouped and never had it.
+        if transcript > -1 and len(composition) > 1:
+            gtf_dict.setdefault(chrom,{'+':[],'-':[]})[strand].append(composition)
     return gtf_dict
 
 
@@ -1065,6 +1169,24 @@ gtf_starts = None   # module global set alongside gtf_dict; enables the bisect f
 
 
 def process_est_or_long_read_with_id(gtf):
+    '''Load the query structure for one GTF, or the merge of several.
+
+    gtf may be a path, a comma-separated string of paths, or a list/tuple of paths. Each file
+    keeps its own on-disk index sidecar, so adding a second catalog never re-parses the first.'''
+    paths = _gtf_path_list(gtf)
+    if len(paths) > 1:
+        key = _gtf_cache_key(gtf)
+        if key is not None and key in _GTF_PARSE_CACHE:
+            return _GTF_PARSE_CACHE[key]
+        merged, starts = _merge_gtf_dicts([_process_one_gtf_with_id(p) for p in paths])
+        if key is not None:
+            _GTF_PARSE_CACHE[key] = merged
+            _GTF_STARTS_CACHE[key] = starts
+        return merged
+    return _process_one_gtf_with_id(paths[0] if paths else gtf)
+
+
+def _process_one_gtf_with_id(gtf):
     cache_key = os.path.abspath(gtf) if isinstance(gtf, str) and os.path.exists(gtf) else None
     if cache_key is not None and cache_key in _GTF_PARSE_CACHE:
         return _GTF_PARSE_CACHE[cache_key]
@@ -1182,8 +1304,7 @@ def prewarm_support_cache(results, gtf, cores=None):
         return
     global gtf_dict, gtf_starts
     if gtf is not None:
-        gtf_dict = process_est_or_long_read_with_id(gtf)
-        gtf_starts = _GTF_STARTS_CACHE.get(os.path.abspath(gtf)) if isinstance(gtf, str) and os.path.exists(gtf) else None
+        _set_gtf_globals(gtf)
     seen = set(); tasks = []
     for sa in results:
         if len(sa.comments) > 0:
@@ -1273,16 +1394,19 @@ def report_candidates(pickle_path,candidates_path,validation_path,freq_df_path,m
                     sa = _run_dash_prioritizer_return_sa(results,value)
                     valid_indices = _run_dash_prioritizer_return_valid_indices(candidates,collect_uid,value)
                     ensg = value.split(':')[0]
-                    df_certain = df_exonlist.loc[df_exonlist['EnsGID']==ensg,:]
-                    df_certain = df_certain.iloc[valid_indices,:]
-                    df_certain.insert(loc=0,column='index',value=valid_indices)
+                    synthetic = hasattr(sa, 'synthetic_predictions')
+                    if not synthetic:
+                        df_certain = df_exonlist.loc[df_exonlist['EnsGID']==ensg,:]
+                        df_certain = df_certain.iloc[valid_indices,:]
+                        df_certain.insert(loc=0,column='index',value=valid_indices)
                     for value_index in valid_indices:
-                        orft_sequence = sa.orft[value_index]
+                        orft_sequence = sa.full_length[value_index] if synthetic else sa.orft[value_index]
                         orfp_sequence = sa.orfp[value_index]
-                        evidence = df_certain.loc[df_certain['index']==value_index,:]['EnsTID'].values[0]
+                        evidence = sa.full_length_attrs[value_index] if synthetic else df_certain.loc[df_certain['index']==value_index,:]['EnsTID'].values[0]
                         candidate_count += 1
                         _bts, _btp = _bt(uid)
-                        stream = 'candidate{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(candidate_count,uid,mode,evidence,orft_sequence,orfp_sequence,gene,sa.freq,ts_mean,ts_mle,_bts,_btp,line.rstrip('\n'))
+                        report_mode = 'synthetic_' + sa.isoform_method if synthetic else mode
+                        stream = 'candidate{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(candidate_count,uid,report_mode,evidence,orft_sequence,orfp_sequence,gene,sa.freq,ts_mean,ts_mle,_bts,_btp,line.rstrip('\n'))
                         f3.write(stream)
         elif mode == 'long_read':
             with open(os.path.join(outdir,name),'w') as f3, open(validation_path,'r') as f4:
@@ -1371,8 +1495,7 @@ def fake_generate_results(pickle_path,strigency=3,outdir='.',gtf=None,long_read=
         os.mkdir(outdir)
     if gtf is not None:
         global gtf_dict, gtf_starts
-        gtf_dict = process_est_or_long_read_with_id(gtf)
-        gtf_starts = _GTF_STARTS_CACHE.get(os.path.abspath(gtf)) if isinstance(gtf, str) and os.path.exists(gtf) else None
+        _set_gtf_globals(gtf)
     if overlap_extracellular:   # have to load some database
         global ensg2ensps
         global ensp2regions
@@ -1521,7 +1644,8 @@ def generate_results(pickle_path,strigency=3,outdir='.',gtf=None,long_read=False
         * strigency4: novel isoform also needs to have long-read or EST support (as long as the novel junction present in full-length)
         * strigency5: novel isoform also needs to have long-read or EST support (whole ORF needs to be the same as full-length)
     :param outdir: string, path to the output folder
-    :param gtf: string, if strigency>3, you need to specify the path to the long-read or EST gtf file
+    :param gtf: if strigency>3, the path (or comma-separated paths, or list of paths) to the
+                long-read or EST catalogs
     :param long_read: boolean, whether the last run was using prediction_mode as long_read or not, default to False
     :param style: None or string, can either be 'deletion' or 'insertion' meaning only generate result with deleted or inserted region
     :param overlap_extracellular: boolean, default is True, only generate result whose junction overlap with extracellular domain
@@ -1538,8 +1662,7 @@ def generate_results(pickle_path,strigency=3,outdir='.',gtf=None,long_read=False
         os.mkdir(outdir)
     if gtf is not None:
         global gtf_dict, gtf_starts
-        gtf_dict = process_est_or_long_read_with_id(gtf)
-        gtf_starts = _GTF_STARTS_CACHE.get(os.path.abspath(gtf)) if isinstance(gtf, str) and os.path.exists(gtf) else None
+        _set_gtf_globals(gtf)
     if overlap_extracellular:   # have to load some database
         global ensg2ensps
         global ensp2regions
@@ -1744,9 +1867,7 @@ def filter_to_membrane_protein(lis, allow_trans_splicing=False, gtf=None):
     global gtf_dict, gtf_starts
     all_membrane = set(dict_uni_fa.keys())
     if allow_trans_splicing and gtf is not None and globals().get('gtf_dict') is None:
-        gtf_dict = process_est_or_long_read_with_id(gtf)
-        gtf_starts = _GTF_STARTS_CACHE.get(os.path.abspath(gtf)) \
-            if isinstance(gtf, str) and os.path.exists(gtf) else None
+        _set_gtf_globals(gtf)
 
     filtered_lis = []
     n_direct = n_trans_candidate = n_trans_kept = n_trans_unsupported = 0

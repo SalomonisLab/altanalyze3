@@ -13,6 +13,8 @@ Task #7 turns the gained and lost lists into the ``ProteinPredictions`` string.
 """
 
 import os
+
+from ..long_read import io_utils as _io
 from collections import defaultdict, namedtuple
 
 ### ``intervals`` holds the domain's CODING intervals: its genomic span intersected with the coding
@@ -294,7 +296,7 @@ def load_isoform_forms(coding_regions_file, transcripts):
     """
     import csv
     forms = {}
-    with open(coding_regions_file) as handler:
+    with _io.smart_open(coding_regions_file) as handler:
         for row in csv.DictReader(handler, delimiter="\t"):
             transcript = row["Transcript ID"]
             record = transcripts.get(transcript)

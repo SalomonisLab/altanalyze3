@@ -17,6 +17,8 @@ Charts are vector PDFs with editable text (Type-42 fonts, Arial) so they drop st
 Illustrator for figures.
 """
 import os
+
+from . import io_utils as _io
 import csv
 
 # Charts are OPTIONAL: the TSV tables must always be written even where matplotlib is unavailable
@@ -87,7 +89,7 @@ def _count_reads_from_ta(ta_path):
     """Reads (molecules) for a sample = non-UNK rows of its transcript_associations.txt."""
     n = 0
     try:
-        with open(ta_path) as f:
+        with _io.smart_open(ta_path) as f:
             for line in f:
                 p = line.split("\t", 1)
                 if p and "UNK" not in p[0]:
@@ -174,9 +176,9 @@ def write_summary(outdir, *, collapse_method, min_total, n_structures, catalog, 
     log(f"[summary] wrote known_vs_novel.tsv (known={n_known:,} novel={n_novel:,})")
 
     # ---- 4. protein class: NMD vs truncated(<25% longest) vs protein-coding ----
-    if protein_summary_path and os.path.exists(protein_summary_path):
+    if protein_summary_path and _io.exists(protein_summary_path):
         n_nmd = n_trunc = n_coding = n_unknown = 0
-        with open(protein_summary_path) as f:
+        with _io.smart_open(protein_summary_path) as f:
             next(f, None)  # header
             for line in f:
                 p = line.rstrip("\n").split("\t")
