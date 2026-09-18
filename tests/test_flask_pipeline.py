@@ -67,7 +67,13 @@ def _write_query_h5ad(tmp_path: Path) -> Path:
     return h5ad_path
 
 
-def test_flask_pipeline_end_to_end(tmp_path):
+@pytest.mark.parametrize("empty_markers", [False, True])
+def test_flask_pipeline_end_to_end(tmp_path, monkeypatch, empty_markers):
+    if empty_markers:
+        from altanalyze3.components.cellHarmony.flask import pipeline
+        def no_markers(*args, **kwargs):
+            raise pipeline.marker_mod.NoMarkersSelectedError("No markers were selected.")
+        monkeypatch.setattr(pipeline.marker_mod, "generate_marker_heatmap_from_adata", no_markers)
     reference_meta = _write_reference(tmp_path)
     registry = {
         "species": [

@@ -1,0 +1,6 @@
+snaf_export.xml: test 1 passed
+snaf_filter.xml: test 1 passed
+snaf_hla.xml: test 1 passed
+snaf_ipepgen_export.xml: test 1 passed
+snaf_merge_ms.xml: test 1 passed
+snaf_predict.xml: test 1 passed

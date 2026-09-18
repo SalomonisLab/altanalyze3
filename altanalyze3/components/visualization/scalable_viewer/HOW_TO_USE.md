@@ -38,7 +38,7 @@ The plot types match the analysis tool: `UMAP cell types`, `UMAP broad`, `Cell f
 | --- | --- |
 | Modality menu | lists the modalities the bundle carries, for example RNA, ADT, lipid, GRN; a modality predicted per cell state, not per cell, does not appear here, because every cell of a state would show one value |
 | Violin covariate | the violin can group by any categorical covariate of the dataset, not only by cell state |
-| CombPlot bands | dark bands under the bars mark each donor column's disease status, group, sex and smoking status when the dataset records them |
+| CombPlot bands | dark bands under the bars mark each cell's annotations; selecting Donor means instead uses each donor group's annotations |
 
 `Select gene` accepts the names a reader knows, for example a lipid's common name, and the
 viewer resolves them to the stored feature. `Download PDF` saves an editable vector PDF.
@@ -124,3 +124,5 @@ any size. With `Filter by gene` on, the button saves the filtered figure you see
 
 The Study tab names the source study, the raw-data accession and the publication. The
 `README.md` beside this file describes how to build, validate and serve a bundle.
+
+CombPlot opens with one bar per cell, grouped by cell state. Choose **Display → Donor means** to average cells within each donor and state; **Min cells** then controls the minimum contributing count. Hover for column details. Labels are shown on axes, never over the bars or annotation bands.

@@ -1,24 +1,55 @@
-<tool id="altanalyze3_snaf_predict" name="SNAF T-antigen prediction" version="0.1.3" profile="24.0">
+<tool id="altanalyze3_snaf_predict" name="SNAF T-antigen prediction" version="0.1.3+galaxy1" profile="24.0">
     <description>predict splicing-derived peptides with HLA binding and immunogenicity scores</description>
     <requirements><container type="docker">altanalyze3-snaf:0.1.3</container></requirements>
     <command detect_errors="exit_code"><![CDATA[
 python3 -m altanalyze3.components.neoantigen unpack --archive '$reference' --outdir reference &&
-SNAF_OFFLINE=1 altanalyze3 snaf --juncounts '$counts' --hla '$hla' --db_dir reference --genome_fasta '$genome' --cpus \${GALAXY_SLOTS:-1} --output snaf --export_proteomics --binding_method MHCflurry
+SNAF_OFFLINE=1 altanalyze3 snaf --juncounts '$counts' --hla '$hla' --db_dir reference --genome_fasta '$genome' --cpus \${GALAXY_SLOTS:-1} --output snaf --export_proteomics --binding_method MHCflurry $galaxy_integration
     ]]></command>
     <inputs>
         <param name="counts" type="data" format="tabular" label="Annotated junction counts"/>
         <param name="hla" type="data" format="tabular" label="Sample HLA alleles"/>
         <param name="reference" type="data" format="tar" label="Reference bundle (Alt91_db and controls)"/>
         <param name="genome" type="data" format="fasta" label="Matching genome FASTA"/>
+        <param name="galaxy_integration" type="boolean" checked="false" truevalue="--galaxy_integration" falsevalue="" label="Create iPepGen integration outputs"/>
     </inputs>
     <outputs>
         <data name="candidates" format="tabular" from_work_dir="snaf/proteomics_export/candidates.tsv" label="SNAF candidates"/>
         <data name="manifest" format="tabular" from_work_dir="snaf/proteomics_export/source_manifest.tsv" label="SNAF source manifest"/>
         <data name="fasta" format="fasta" from_work_dir="snaf/proteomics_export/candidates.fasta" label="SNAF peptides"/>
+        <data name="ipepgen_database" format="fasta" from_work_dir="snaf/galaxy_export/snaf.database.fasta" label="SNAF FASTA for iPepGen database merge">
+            <filter>galaxy_integration</filter></data>
+        <data name="ipepgen_map" format="tabular" from_work_dir="snaf/galaxy_export/candidate_map.tsv" label="SNAF accession and candidate map">
+            <filter>galaxy_integration</filter></data>
+        <data name="ipepgen_annotations" format="tabular" from_work_dir="snaf/galaxy_export/annotations.tsv" label="SNAF peptide annotation schema">
+            <filter>galaxy_integration</filter></data>
+        <data name="ipepgen_bed" format="bed" from_work_dir="snaf/galaxy_export/peptides.bed" label="SNAF supplied peptide BED12 mappings">
+            <filter>galaxy_integration</filter></data>
+        <data name="ipepgen_lengths" format="tabular" from_work_dir="snaf/galaxy_export/length_eligibility.tsv" label="SNAF workflow length eligibility">
+            <filter>galaxy_integration</filter></data>
+        <data name="ipepgen_samples" format="tabular" from_work_dir="snaf/galaxy_export/samples.tsv" label="SNAF Galaxy sample collection map">
+            <filter>galaxy_integration</filter></data>
+        <data name="ipepgen_contract" format="json" from_work_dir="snaf/galaxy_export/integration.json" label="SNAF iPepGen contract and provenance">
+            <filter>galaxy_integration</filter></data>
+        <collection name="sample_databases" type="list" label="Sample search databases">
+            <filter>galaxy_integration</filter>
+            <discover_datasets pattern="(?P&lt;designation&gt;.+)\.database\.fasta" directory="snaf/galaxy_export/by_sample" ext="fasta"/>
+        </collection>
+        <collection name="pepquery_inputs" type="list" label="Sample PepQuery peptides">
+            <filter>galaxy_integration</filter>
+            <discover_datasets pattern="(?P&lt;designation&gt;.+)\.pepquery\.txt" directory="snaf/galaxy_export/by_sample" ext="txt"/>
+        </collection>
+        <collection name="iedb_sequences" type="list" label="Sample IEDB peptides">
+            <filter>galaxy_integration</filter>
+            <discover_datasets pattern="(?P&lt;designation&gt;.+)\.iedb\.fasta" directory="snaf/galaxy_export/by_sample" ext="fasta"/>
+        </collection>
+        <collection name="iedb_alleles" type="list" label="Sample IEDB allele lists">
+            <filter>galaxy_integration</filter>
+            <discover_datasets pattern="(?P&lt;designation&gt;.+)\.alleles\.txt" directory="snaf/galaxy_export/by_sample" ext="txt"/>
+        </collection>
     </outputs>
     <tests><test expect_failure="true"><param name="counts" value="counts.tsv"/><param name="hla" value="hla.tsv"/><param name="reference" value="invalid_reference.tar"/><param name="genome" value="genome.fasta"/>
         <assert_stderr><has_text text="Reference archive must contain Alt91_db and controls"/></assert_stderr>
     </test></tests>
-    <help>Runs SNAF with MHCflurry and DeepImmuno. Administrators must provision the pinned model bundle described in the deployment README. Uses supplied HLA types; bam2hla is available as a separate tool. The small bundled test exercises missing-reference rejection. A full prediction acceptance test requires the scientific reference and models.</help>
+    <help>Runs SNAF with MHCflurry and DeepImmuno. Administrators must provision the pinned model bundle described in the deployment README. Uses supplied HLA types; bam2hla is available as a separate tool. The small bundled test exercises missing-reference rejection. A full prediction acceptance test requires the scientific reference and models. Enable iPepGen integration to produce search FASTA, annotation/accession maps and matched per-sample PepQuery/IEDB collections. These outputs use the bundled OneClick workflow contract; coordinate fields remain empty without supplied peptide mappings. See the SNAF iPepGen export tool for downstream wiring and length restrictions.</help>
     <citations><citation type="doi">10.1126/scitranslmed.ade2886</citation></citations>
 </tool>

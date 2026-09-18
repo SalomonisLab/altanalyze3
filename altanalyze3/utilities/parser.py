@@ -721,6 +721,10 @@ class ArgsParser():
         snaf_parser.add_argument("--max_bayests_percentile", default=0.9, type=float, help="Drop sifted neojunctions whose precomputed BayesTS percentile exceeds this (0-1; lower=more tumor-specific). DEFAULT 0.9 (BayesTS filtering ON); auto-skips when the control has no BayesTS. Pass 1.0 (or a value >=1) to disable.")
         snaf_parser.add_argument("--export_proteomics", action="store_true", help="Export candidate FASTA/source manifest for optional external pyNeoQuant")
         snaf_parser.add_argument("--canonical_fasta", default=None, help="Optional canonical protein FASTA included in the proteomics export")
+        snaf_parser.add_argument("--galaxy_integration", action="store_true", help="Create additional iPepGen Galaxy input files and per-sample collections")
+        snaf_parser.add_argument("--galaxy_workflow", default=None, help="Optional .ga workflow to read length/input requirements (default: bundled OneClick iPepGen contract)")
+        snaf_parser.add_argument("--galaxy_peptide_bed", default=None, help="Optional complete-peptide BED12 with names matching exported SNAF accessions")
+        snaf_parser.add_argument("--galaxy_assembly", default="hg38", help="Assembly identifier for supplied peptide BED coordinates (default: hg38)")
         self.add_common_arguments(snaf_parser)
 
         # SNAF-B: surface / B-antigen pipeline (pure-python: tmhmm.py + Biopython; no REST)

@@ -1,5 +1,23 @@
 # Local validation — September 15, 2026
 
+## September 17 follow-up: OneClick iPepGen exports
+
+- The extracted bundled contract matches the user-supplied `.ga` checksum and settings.
+- Neoantigen/interface suite: **15 passed, 1 skipped**. The skipped test requires
+  a separately installed pyNeoQuant executable; the Galaxy path has no such dependency.
+- All **six AltAnalyze3 Galaxy wrappers** pass Planemo lint without warnings and
+  rendered-command tests, including two-sample collection discovery for the new exporter.
+- Nextflow 25.10.0 stub runs pass with Galaxy exports enabled in BAM mode and
+  disabled in matrix mode; expected presence/absence of the export directory was checked.
+- Main SNAF CLI help exposes the new opt-in flags; the importable export workflow's
+  tool/version/output/connection references are checked against the local wrapper.
+- Wheel building and the bundled contract/resource check pass.
+
+See [GALAXY_IPEPGEN.md](GALAXY_IPEPGEN.md) for outputs and connections. These are
+local export/orchestration checks; no Galaxy server, FragPipe, PepQuery or IEDB
+prediction was executed. This follow-up does not establish the older container
+or scientific cross-platform acceptance milestones below.
+
 ## Results
 
 | Check | Observed result |

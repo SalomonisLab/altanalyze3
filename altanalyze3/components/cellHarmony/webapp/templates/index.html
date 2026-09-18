@@ -116,6 +116,24 @@
                     </select>
                   </label>
                 </div>
+                <details>
+                  <summary>Optional marker heatmap exports</summary>
+                  <p class="muted">Static heatmap files are skipped by default for speed. Interactive heatmaps, Download PDF, and marker results are unaffected; only the downloaded static files change. All cells are used to find markers.</p>
+                  <div class="two-col">
+                    <label class="field"><span>Static heatmap files</span>
+                      <select name="marker_render_heatmap"><option value="false" selected>Skip for faster analysis (default)</option><option value="true">Generate static PDF/SVG</option></select>
+                    </label>
+                    <label class="field"><span>Companion SVG</span>
+                      <select name="marker_write_svg"><option value="true" selected>Include (default)</option><option value="false">Skip</option></select>
+                    </label>
+                    <label class="field"><span>Static heatmap resolution</span>
+                      <select name="marker_heatmap_dpi"><option value="" selected>Default (2400 DPI)</option><option value="600">600 DPI</option><option value="300">300 DPI</option></select>
+                    </label>
+                    <label class="field"><span>Displayed cells per state</span>
+                      <select name="marker_cells_per_cluster"><option value="100" selected>100 (default)</option><option value="50">50</option><option value="25">25</option></select>
+                    </label>
+                  </div>
+                </details>
                 <button class="primary-btn" type="submit">Save QC and run</button>
               </form>
               <div class="progress-shell">
@@ -248,8 +266,14 @@
                         <textarea id="viz1-geneset" rows="3" spellcheck="false"
                           placeholder="paste a gene list &#8212; Excel column, comma, space or newline"></textarea>
                       </label>
-                      <!-- CombPlot only: a donor contributing one cell to a state yields a mean
-                           from that single cell, which draws as a tall bar built on nothing. -->
+                      <!-- Individual cells are the default; the minimum applies only to donor means. -->
+                      <label class="field hidden inline-field compact-inline-field" id="viz1-combunit-field">
+                        <span>Display</span>
+                        <select id="viz1-combunit" class="compact-select">
+                          <option value="cells" selected>Cells</option>
+                          <option value="donor">Donor means</option>
+                        </select>
+                      </label>
                       <label class="field hidden inline-field compact-inline-field" id="viz1-combmin-field">
                         <span>Min cells</span>
                         <select id="viz1-combmin" class="compact-select">
@@ -268,8 +292,9 @@
                         <select id="viz1-marker-population"></select>
                       </label>
                       <label class="field hidden inline-field compact-inline-field" id="viz1-grn-genes-field">
-                        <span>GRN genes</span>
-                        <input id="viz1-grn-genes" placeholder="e.g. GATA1, SPI1" list="viz1-feature-suggestions">
+                        <span>TF or target gene</span>
+                        <input id="viz1-grn-genes" placeholder="e.g. GATA1, SPI1" list="viz1-grn-suggestions">
+                        <datalist id="viz1-grn-suggestions"></datalist>
                       </label>
                       <label class="field hidden inline-field compact-inline-field" id="viz1-grn-sample-field">
                         <span>Sample</span>
@@ -278,6 +303,15 @@
                       <label class="field hidden inline-field compact-inline-field" id="viz1-grn-cellstate-field">
                         <span>Cell type</span>
                         <select id="viz1-grn-cellstate" class="compact-select"></select>
+                      </label>
+                      <label class="field hidden inline-field compact-inline-field" id="viz1-grn-limit-field">
+                        <span>Show edges</span>
+                        <select id="viz1-grn-limit" class="compact-select">
+                          <option value="25" selected>Top 25</option>
+                          <option value="50">Top 50</option>
+                          <option value="100">Top 100</option>
+                          <option value="300">Top 300</option>
+                        </select>
                       </label>
                       <label class="field hidden inline-field compact-inline-field" id="viz1-grn-threshold-field">
                         <span>Edge |score| &ge; <span id="viz1-grn-threshold-value">0.000</span></span>
@@ -298,10 +332,13 @@
                       </div>
                       <div class="display-filter-grid" id="viz1-marker-density-row" hidden>
                         <label class="field compact-field">
-                          <span>Heatmap columns</span>
+                          <span>Cells per sample per cell type</span>
                           <select id="viz1-marker-density">
-                            <option value="compact" selected>10 metacells per cell population (random)</option>
-                            <option value="all">All metacells</option>
+                            <option value="5">5</option>
+                            <option value="10" selected>10</option>
+                            <option value="20">20</option>
+                            <option value="50">50</option>
+                            <option value="0">All cells</option>
                           </select>
                         </label>
                       </div>
@@ -317,6 +354,7 @@
                       </div>
                     </div>
                   </div>
+                  <p class="grn-description hidden" id="viz1-grn-description" aria-live="polite"></p>
                   <div id="viz1-plot" class="plot-area"></div>
                   <div class="plot-caption" id="viz1-filter-summary"></div>
                 </article>
@@ -390,8 +428,14 @@
                         <textarea id="viz2-geneset" rows="3" spellcheck="false"
                           placeholder="paste a gene list &#8212; Excel column, comma, space or newline"></textarea>
                       </label>
-                      <!-- CombPlot only: a donor contributing one cell to a state yields a mean
-                           from that single cell, which draws as a tall bar built on nothing. -->
+                      <!-- Individual cells are the default; the minimum applies only to donor means. -->
+                      <label class="field hidden inline-field compact-inline-field" id="viz2-combunit-field">
+                        <span>Display</span>
+                        <select id="viz2-combunit" class="compact-select">
+                          <option value="cells" selected>Cells</option>
+                          <option value="donor">Donor means</option>
+                        </select>
+                      </label>
                       <label class="field hidden inline-field compact-inline-field" id="viz2-combmin-field">
                         <span>Min cells</span>
                         <select id="viz2-combmin" class="compact-select">
@@ -410,8 +454,9 @@
                         <select id="viz2-marker-population"></select>
                       </label>
                       <label class="field hidden inline-field compact-inline-field" id="viz2-grn-genes-field">
-                        <span>GRN genes</span>
-                        <input id="viz2-grn-genes" placeholder="e.g. GATA1, SPI1" list="viz2-feature-suggestions">
+                        <span>TF or target gene</span>
+                        <input id="viz2-grn-genes" placeholder="e.g. GATA1, SPI1" list="viz2-grn-suggestions">
+                        <datalist id="viz2-grn-suggestions"></datalist>
                       </label>
                       <label class="field hidden inline-field compact-inline-field" id="viz2-grn-sample-field">
                         <span>Sample</span>
@@ -420,6 +465,15 @@
                       <label class="field hidden inline-field compact-inline-field" id="viz2-grn-cellstate-field">
                         <span>Cell type</span>
                         <select id="viz2-grn-cellstate" class="compact-select"></select>
+                      </label>
+                      <label class="field hidden inline-field compact-inline-field" id="viz2-grn-limit-field">
+                        <span>Show edges</span>
+                        <select id="viz2-grn-limit" class="compact-select">
+                          <option value="25" selected>Top 25</option>
+                          <option value="50">Top 50</option>
+                          <option value="100">Top 100</option>
+                          <option value="300">Top 300</option>
+                        </select>
                       </label>
                       <label class="field hidden inline-field compact-inline-field" id="viz2-grn-threshold-field">
                         <span>Edge |score| &ge; <span id="viz2-grn-threshold-value">0.000</span></span>
@@ -440,10 +494,13 @@
                       </div>
                       <div class="display-filter-grid" id="viz2-marker-density-row" hidden>
                         <label class="field compact-field">
-                          <span>Heatmap columns</span>
+                          <span>Cells per sample per cell type</span>
                           <select id="viz2-marker-density">
-                            <option value="compact" selected>10 metacells per cell population (random)</option>
-                            <option value="all">All metacells</option>
+                            <option value="5">5</option>
+                            <option value="10" selected>10</option>
+                            <option value="20">20</option>
+                            <option value="50">50</option>
+                            <option value="0">All cells</option>
                           </select>
                         </label>
                       </div>
@@ -459,6 +516,7 @@
                       </div>
                     </div>
                   </div>
+                  <p class="grn-description hidden" id="viz2-grn-description" aria-live="polite"></p>
                   <div id="viz2-plot" class="plot-area"></div>
                   <div class="plot-caption" id="viz2-filter-summary"></div>
                 </article>
@@ -623,6 +681,7 @@
               <button type="button" class="ghost-btn active" data-view="table">Table</button>
               <button type="button" class="ghost-btn" data-view="plot">Plot</button>
             </div>
+            <div id="chat-result-controls" class="chat-result-controls hidden"></div>
             <div id="chat-table"></div>
             <div id="chat-plot" class="hidden"></div>
           </article>
@@ -635,5 +694,6 @@
       window.__REFERENCE_REGISTRY__ = {{ registry_json | safe }};
     </script>
     <script src="{{ url_for('static', path='app.js') }}?v={{ app_js_version }}"></script>
+<script src="{{ url_for('static', path='integrated.js') }}?v={{ app_js_version }}"></script>
 </body>
 </html>

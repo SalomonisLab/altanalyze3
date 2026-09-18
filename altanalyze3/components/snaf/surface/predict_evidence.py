@@ -78,9 +78,18 @@ def main():
              labels={j: v['uid'] for j, v in gc.items()}) if (gc or not args.sample) else []
         ranked = E.rank_candidates(cs, model)
         if not ranked:
+            # REPORT THE MEASUREMENT, NOT A PLACEHOLDER. joint_sample_columns=0 was a literal
+            # here, so a target with no constructible candidate was published as one with no
+            # sample support. On pediatric AML all 27 unresolved targets are in fact measured:
+            # ADGRB1 I16.1_142510347-E17.1 has >=3 reads in 148 of 547 columns, LRFN4
+            # E2.1-E3.1_66857513 in 344. The two statements are unrelated, and conflating them
+            # turns a construction gap into a false claim about the data.
+            n_support = ev.recurrence((target,)) if gc else 0
+            status = ('unresolved_no_candidate' if n_support
+                      else 'unresolved_no_evidence')
             records.append(dict(junction_id=uid, gene=gene, rank=0, score='',
-                status='unresolved', joint_sample_columns=0, supporting_samples='',
-                construction='', candidate_count=0, artifact_id='',
+                status=status, joint_sample_columns=n_support, supporting_samples='',
+                construction='', candidate_count=len(cs), artifact_id='',
                 **{k: '' for k in P.PREDICTION_COLUMNS}))
             continue
         for rank, (score, c) in enumerate(ranked[:args.top_k], 1):

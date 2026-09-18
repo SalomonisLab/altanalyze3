@@ -234,7 +234,8 @@ def _covariates_for_cache(h5ad_path, ordered_cells, covariate_columns):
 
 def render_heatmap_from_cache(cache_path, output_path, covariate_df=None, go_terms=None,
                               go_terms_max=30, run_dir=None, covariate_h5ad=None,
-                              covariate_columns=None, load_go_terms=True):
+                              covariate_columns=None, load_go_terms=True,
+                              dpi=None, write_svg=True):
     """Redraw a saved heatmap cache with the current plotting code.
 
     Use this to change how a finished result is drawn -- resolution, colour range, labels --
@@ -270,6 +271,8 @@ def render_heatmap_from_cache(cache_path, output_path, covariate_df=None, go_ter
         covariate_df=covariate_df,
         go_terms=go_terms,
         go_terms_max=go_terms_max,
+        dpi=dpi,
+        write_svg=write_svg,
     )
     return output_path
 
@@ -447,16 +450,19 @@ def _zscore_columns(df):
 
 def _bh_fdr(pvals):
     p = np.asarray(pvals, dtype=float)
-    n = p.size
+    finite = np.isfinite(p)
+    out = np.full_like(p, np.nan)
+    valid = p[finite]
+    n = valid.size
     if n == 0:
-        return p
-    order = np.argsort(p)
+        return out
+    order = np.argsort(valid)
     ranks = np.arange(1, n + 1)
-    q = p[order] * n / ranks
+    q = valid[order] * n / ranks
     q = np.minimum.accumulate(q[::-1])[::-1]
-    q = np.clip(q, 0, 1)
-    out = np.empty_like(q)
-    out[order] = q
+    adjusted = np.empty_like(q)
+    adjusted[order] = np.clip(q, 0, 1)
+    out[finite] = adjusted
     return out
 
 
@@ -684,7 +690,9 @@ def _build_marker_centroids(adata, cluster_key, genes, cluster_order, use_raw, l
     return pd.DataFrame(centroid_columns, index=genes)
 
 
-def _build_marker_centroids_from_aggregates(genes, cluster_order, aggregates):
+def _build_marker_centroids_from_aggregates(genes, cluster_order, aggregates, method="log2_cp10k"):
+    if method not in {"log2_cp10k", "mean"}:
+        raise ValueError(f"Unknown centroid method: {method}")
     if not genes or not aggregates:
         return pd.DataFrame()
     sums = aggregates.get("sums")
@@ -702,6 +710,12 @@ def _build_marker_centroids_from_aggregates(genes, cluster_order, aggregates):
         return pd.DataFrame()
 
     cluster_gene_sums = sums.reindex(index=ordered_clusters, columns=genes, fill_value=0.0).to_numpy(dtype=float)
+    if method == "mean":
+        # Imputed lipid, ADT and TF values have a model-defined scale. Retain
+        # their signed means; normalizing them as library counts changes it.
+        counts = aggregates["counts"].reindex(ordered_clusters).to_numpy(dtype=float)
+        means = cluster_gene_sums / np.maximum(counts[:, None], 1.0)
+        return pd.DataFrame(means.T, index=genes, columns=ordered_clusters)
     # The centroid is a pseudobulk CPM: log2(cluster_sum / cluster_total * 10000 + 1). The
     # formula is defined only for non-negative counts. Summing mean-centred or z-scored values
     # gives negative cluster totals, and log2 of the resulting negative ratio is NaN, which
@@ -1131,6 +1145,8 @@ def _plot_heatmap(
     covariate_df=None,
     go_terms=None,
     go_terms_max=30,
+    dpi=None,
+    write_svg=True,
 ):
     if heatmap_df.empty:
         raise ValueError("Heatmap dataframe is empty.")
@@ -1345,7 +1361,7 @@ def _plot_heatmap(
     cbar.ax.text(-0.08, 0.5, f"{vmin:g}", ha="right", va="center", transform=cbar.ax.transAxes)
     cbar.ax.text(1.08, 0.5, f"{vmax:g}", ha="left", va="center", transform=cbar.ax.transAxes)
 
-    _save_figure(fig, output_path)
+    _save_figure(fig, output_path, dpi=dpi, write_svg=write_svg)
     plt.close(fig)
 
 
@@ -1376,8 +1392,8 @@ def _heatmap_dpi():
     return dpi if dpi > 0 else 2400.0
 
 
-def _save_figure(fig, output_path, dpi=None):
-    """Write the heatmap to `output_path` AND to a sibling `.svg`, always.
+def _save_figure(fig, output_path, dpi=None, write_svg=True):
+    """Write the heatmap and, by default, a sibling `.svg`.
 
     Illustrator opens the SVG with the text still text, because `svg.fonttype='none'` keeps glyphs
     as characters instead of converting them to outlines, which matches what `pdf.fonttype=42`
@@ -1391,7 +1407,7 @@ def _save_figure(fig, output_path, dpi=None):
     fig.savefig(output_path, facecolor="white", transparent=False, dpi=dpi)
     base, ext = os.path.splitext(output_path)
     svg_path = base + ".svg"
-    if ext.lower() != ".svg":
+    if write_svg and ext.lower() != ".svg":
         prior = plt.rcParams.get("svg.fonttype")
         try:
             plt.rcParams["svg.fonttype"] = "none"      # keep text editable
@@ -1543,6 +1559,10 @@ def _export_marker_networks(marker_stats, out_dir, network_top_n=1000, network_j
     return networks
 
 
+class NoMarkersSelectedError(ValueError):
+    """Valid input produced no features passing marker selection."""
+
+
 def generate_marker_heatmap_from_adata(
     adata,
     *,
@@ -1560,6 +1580,7 @@ def generate_marker_heatmap_from_adata(
     scale_data=False,
     scale_factor=None,
     validate_scaling=True,
+    centroid_method="log2_cp10k",
     cells_per_cluster=50,
     seed=0,
     export_networks=False,
@@ -1569,11 +1590,23 @@ def generate_marker_heatmap_from_adata(
     write_heatmap_tsv=False,
     write_expression_tsv=True,
     write_heatmap_cache=True,
+    render_heatmap=True,
+    write_svg=True,
+    heatmap_dpi=None,
     pval_threshold=0.001,
     covariate_columns=None,
     go_terms=None,
     go_terms_max=30,
 ):
+    """Find markers using all input cells; output controls do not change scoring.
+
+    ``render_heatmap=False`` skips static figures while retaining the optional
+    interactive cache. Disable all three matrix exports as well to avoid sampling
+    and constructing a plotting matrix entirely. Marker tables and compact
+    marker-by-state centroids are retained in either mode.
+    """
+    if heatmap_dpi is not None and (not np.isfinite(heatmap_dpi) or heatmap_dpi <= 0):
+        raise ValueError("heatmap_dpi must be a finite positive number.")
     total_started = time.perf_counter()
     timings = {}
     out = str(out)
@@ -1637,7 +1670,7 @@ def generate_marker_heatmap_from_adata(
             scale_data=scale_data, scale_factor=scale_factor,
             validate_scaling=validate_scaling,
         )
-        fdr_df = pvals.apply(_bh_fdr, axis=0)
+        fdr_df = pvals.copy() if pvals.empty else pvals.apply(_bh_fdr, axis=0)
     else:
         n_genes = adata.raw.n_vars if use_raw and adata.raw is not None else adata.n_vars
         print(f"[INFO] Running rank_genes_groups for {len(cluster_order)} clusters with {n_genes} genes.")
@@ -1659,7 +1692,7 @@ def generate_marker_heatmap_from_adata(
         if pval_col == "pvals_adj":
             fdr_df = pvals.copy()
         else:
-            fdr_df = pvals.apply(_bh_fdr, axis=0)
+            fdr_df = pvals.copy() if pvals.empty else pvals.apply(_bh_fdr, axis=0)
         if "logfoldchanges" not in rg_df.columns:
             raise ValueError("logfoldchanges missing; cannot enforce upregulated marker selection.")
         effect_df = rg_df.pivot_table(index="names", columns="group", values="logfoldchanges", aggfunc="first")
@@ -1686,7 +1719,7 @@ def generate_marker_heatmap_from_adata(
         key="select_unique_markers",
     )
     if selected.empty:
-        raise ValueError("No markers were selected. Check inputs and parameters.")
+        raise NoMarkersSelectedError("No markers were selected. Check inputs and parameters.")
 
     redundant_select_started = time.perf_counter()
     redundant_selected = _select_top_markers_per_cluster(
@@ -1703,95 +1736,103 @@ def generate_marker_heatmap_from_adata(
         key="select_redundant_markers",
     )
 
-    if cells_per_cluster and cells_per_cluster > 0:
-        print(f"[INFO] Downsampling to {cells_per_cluster} cells per cluster (seed={seed}).")
-    else:
-        print("[INFO] Using all cells (no downsampling).")
-    downsample_started = time.perf_counter()
-    adata_plot = downsample_cells_per_group(
-        adata,
-        cluster_key,
-        cells_per_cluster=cells_per_cluster,
-        seed=seed,
-        group_order=cluster_order,
-    )
-    _log_step_timing(
-        "marker_heatmap.downsample_cells",
-        downsample_started,
-        timings=timings,
-        key="downsample_cells",
-    )
-    print(f"[INFO] Heatmap will use {adata_plot.n_obs} cells.")
-    adata_plot.obs[cluster_key] = pd.Categorical(
-        adata_plot.obs[cluster_key].astype(str),
-        categories=cluster_order,
-        ordered=True,
-    )
-
     selected_genes = selected["gene"].tolist()
-    print(f"[INFO] Building heatmap matrix for {len(selected_genes)} markers.")
-    build_heatmap_started = time.perf_counter()
-    heatmap_df, heatmap_col_df, cluster_counts, ordered_cells = _build_heatmap(
-        adata_plot,
-        cluster_key,
-        selected_genes,
-        cluster_order,
-        use_raw,
-        layer,
-        include_column_zscore=write_expression_tsv,
-    )
-    _log_step_timing(
-        "marker_heatmap.build_heatmap_matrix",
-        build_heatmap_started,
-        timings=timings,
-        key="build_heatmap_matrix",
-    )
-    if heatmap_df.empty:
-        raise ValueError("Heatmap data is empty after filtering genes.")
-
-    column_clusters = adata_plot.obs[cluster_key].astype(str).loc[ordered_cells].tolist()
-    row_clusters = selected.set_index("gene").loc[heatmap_df.index, "cluster"].astype(str).tolist()
-    covariate_df = None
-    if covariate_columns:
-        covariate_columns = [str(c).strip() for c in covariate_columns if str(c).strip()]
-        covariate_columns = [c for c in dict.fromkeys(covariate_columns) if c in adata_plot.obs]
-        if covariate_columns:
-            retained_covariates, skipped_covariates = _filter_covariate_columns_for_heatmap(
-                adata_plot.obs,
-                ordered_cells,
-                covariate_columns,
-                max_categories=12,
-            )
-            if skipped_covariates:
-                skipped_text = ", ".join(f"{name} ({count})" for name, count in skipped_covariates)
-                print(f"[INFO] Skipping heatmap covariates with >12 displayed categories: {skipped_text}")
-            if retained_covariates:
-                covariate_df = adata_plot.obs.loc[ordered_cells, retained_covariates].copy()
-                print(f"[INFO] Rendering heatmap covariate bars: {', '.join(retained_covariates)}")
-            else:
-                print("[INFO] No requested heatmap covariates passed the <=12 category display limit.")
+    needs_plot_matrix = render_heatmap or write_heatmap_cache or write_heatmap_tsv or write_expression_tsv
+    if needs_plot_matrix:
+        if cells_per_cluster and cells_per_cluster > 0:
+            print(f"[INFO] Downsampling to {cells_per_cluster} cells per cluster (seed={seed}).")
         else:
-            print("[INFO] No requested heatmap covariates were present in adata.obs.")
-    print("[INFO] Rendering heatmap.")
-    render_heatmap_started = time.perf_counter()
-    _plot_heatmap(
-        heatmap_df,
-        out,
-        cluster_counts,
-        cluster_order,
-        column_clusters,
-        row_clusters,
-        covariate_df=covariate_df,
-        go_terms=go_terms,
-        go_terms_max=go_terms_max,
-    )
-    _log_step_timing(
-        "marker_heatmap.render_heatmap_pdf",
-        render_heatmap_started,
-        timings=timings,
-        key="render_heatmap_pdf",
-    )
-    print(f"Saved marker heatmap to: {out}")
+            print("[INFO] Using all cells (no downsampling).")
+        downsample_started = time.perf_counter()
+        adata_plot = downsample_cells_per_group(
+            adata,
+            cluster_key,
+            cells_per_cluster=cells_per_cluster,
+            seed=seed,
+            group_order=cluster_order,
+        )
+        _log_step_timing(
+            "marker_heatmap.downsample_cells",
+            downsample_started,
+            timings=timings,
+            key="downsample_cells",
+        )
+        print(f"[INFO] Heatmap will use {adata_plot.n_obs} cells.")
+        adata_plot.obs[cluster_key] = pd.Categorical(
+            adata_plot.obs[cluster_key].astype(str),
+            categories=cluster_order,
+            ordered=True,
+        )
+
+        print(f"[INFO] Building heatmap matrix for {len(selected_genes)} markers.")
+        build_heatmap_started = time.perf_counter()
+        heatmap_df, heatmap_col_df, cluster_counts, ordered_cells = _build_heatmap(
+            adata_plot,
+            cluster_key,
+            selected_genes,
+            cluster_order,
+            use_raw,
+            layer,
+            include_column_zscore=write_expression_tsv,
+        )
+        _log_step_timing(
+            "marker_heatmap.build_heatmap_matrix",
+            build_heatmap_started,
+            timings=timings,
+            key="build_heatmap_matrix",
+        )
+        if heatmap_df.empty:
+            raise ValueError("Heatmap data is empty after filtering genes.")
+
+        column_clusters = adata_plot.obs[cluster_key].astype(str).loc[ordered_cells].tolist()
+        row_clusters = selected.set_index("gene").loc[heatmap_df.index, "cluster"].astype(str).tolist()
+        covariate_df = None
+        if covariate_columns:
+            covariate_columns = [str(c).strip() for c in covariate_columns if str(c).strip()]
+            covariate_columns = [c for c in dict.fromkeys(covariate_columns) if c in adata_plot.obs]
+            if covariate_columns:
+                retained_covariates, skipped_covariates = _filter_covariate_columns_for_heatmap(
+                    adata_plot.obs,
+                    ordered_cells,
+                    covariate_columns,
+                    max_categories=12,
+                )
+                if skipped_covariates:
+                    skipped_text = ", ".join(f"{name} ({count})" for name, count in skipped_covariates)
+                    print(f"[INFO] Skipping heatmap covariates with >12 displayed categories: {skipped_text}")
+                if retained_covariates:
+                    covariate_df = adata_plot.obs.loc[ordered_cells, retained_covariates].copy()
+                    print(f"[INFO] Rendering heatmap covariate bars: {', '.join(retained_covariates)}")
+                else:
+                    print("[INFO] No requested heatmap covariates passed the <=12 category display limit.")
+            else:
+                print("[INFO] No requested heatmap covariates were present in adata.obs.")
+        if render_heatmap:
+            print("[INFO] Rendering heatmap.")
+            render_heatmap_started = time.perf_counter()
+            _plot_heatmap(
+                heatmap_df,
+                out,
+                cluster_counts,
+                cluster_order,
+                column_clusters,
+                row_clusters,
+                covariate_df=covariate_df,
+                go_terms=go_terms,
+                go_terms_max=go_terms_max,
+                dpi=heatmap_dpi,
+                write_svg=write_svg,
+            )
+            _log_step_timing(
+                "marker_heatmap.render_heatmap_pdf",
+                render_heatmap_started,
+                timings=timings,
+                key="render_heatmap_pdf",
+            )
+            print(f"Saved marker heatmap to: {out}")
+
+    else:
+        print("[INFO] Skipping plot matrix construction and static heatmap rendering.")
 
     print("[INFO] Computing marker statistics for TSV.")
     aggregate_stats_started = time.perf_counter()
@@ -1917,11 +1958,13 @@ def generate_marker_heatmap_from_adata(
 
     centroid_started = time.perf_counter()
     centroid_df = _build_marker_centroids_from_aggregates(
-        heatmap_df.index.tolist(),
+        selected_genes,
         cluster_order,
         stats_aggregates,
+        method=centroid_method,
     )
-    centroid_df.index = [_strip_marker_cluster_prefix(gene) for gene in centroid_df.index]
+    if centroid_method != "mean":
+        centroid_df.index = [_strip_marker_cluster_prefix(gene) for gene in centroid_df.index]
     centroid_df.to_csv(centroids_tsv, sep="\t", float_format="%.4g")
     _log_step_timing(
         "marker_heatmap.build_and_write_centroids_tsv",
@@ -1958,7 +2001,7 @@ def generate_marker_heatmap_from_adata(
     )
 
     return {
-        "pdf": out,
+        "pdf": out if render_heatmap else None,
         "markers_tsv": markers_tsv,
         "redundant_markers_tsv": redundant_markers_tsv,
         "heatmap_tsv": heatmap_tsv,
@@ -2197,15 +2240,21 @@ def main():
         action="store_true",
         help="Skip writing both expression-matrix and fold-heatmap TSV outputs.",
     )
+    parser.add_argument("--skip-heatmap-render", action="store_true",
+                        help="Skip static PDF/SVG heatmaps; retain requested matrix/cache outputs.")
+    parser.add_argument("--skip-svg", action="store_true",
+                        help="Skip the companion SVG when generating a static heatmap.")
+    parser.add_argument("--markers-only", action="store_true",
+                        help="Write marker statistics and state centroids, without heatmap matrices, caches or figures.")
     parser.add_argument(
         "--heatmap-cache",
         default=None,
-        help="Output compressed NPZ cache for the marker heatmap matrix.",
+        help="Output compressed H5AD cache for selected markers and sampled cells.",
     )
     parser.add_argument(
         "--skip-heatmap-cache",
         action="store_true",
-        help="Skip writing the compressed heatmap cache NPZ.",
+        help="Skip writing the compressed marker heatmap cache.",
     )
     parser.add_argument(
         "--heatmap-covariates",
@@ -2214,6 +2263,10 @@ def main():
     )
     parser.add_argument("--seed", type=int, default=0, help="Random seed for cell sampling.")
     args = parser.parse_args()
+    if args.render_from_cache and (args.markers_only or args.skip_heatmap_render):
+        parser.error("--render-from-cache cannot be combined with an option that skips rendering.")
+    if args.dpi is not None and (not np.isfinite(args.dpi) or args.dpi <= 0):
+        parser.error("--dpi must be a finite positive number.")
 
     if args.render_from_cache:
         if args.dpi:
@@ -2240,6 +2293,8 @@ def main():
             covariate_h5ad=args.covariate_h5ad,
             covariate_columns=covariate_columns,
             load_go_terms=not args.no_go_terms,
+            dpi=args.dpi,
+            write_svg=not args.skip_svg,
         )
         print(f"Saved marker heatmap to: {written}")
         return
@@ -2252,17 +2307,17 @@ def main():
     markers_tsv = args.markers_tsv or os.path.join(out_dir, f"{base_name}_markers.tsv")
     heatmap_tsv = (
         args.heatmap_tsv or os.path.join(out_dir, f"{base_name}_fold_matrix.tsv")
-        if not args.skip_expression_tsv
+        if not (args.skip_expression_tsv or args.markers_only)
         else None
     )
     heatmap_column_tsv = (
         args.heatmap_column_tsv or os.path.join(out_dir, f"{base_name}_exp_matrix.tsv")
-        if not args.skip_expression_tsv
+        if not (args.skip_expression_tsv or args.markers_only)
         else None
     )
     heatmap_cache = (
         args.heatmap_cache or os.path.join(out_dir, f"{base_name}_fold_matrix.h5ad")
-        if not args.skip_heatmap_cache
+        if not (args.skip_heatmap_cache or args.markers_only)
         else None
     )
     centroids_base = heatmap_tsv or os.path.join(out_dir, f"{base_name}_fold_matrix.tsv")
@@ -2349,9 +2404,12 @@ def main():
             network_top_n=args.network_top_n,
             network_jobs=args.network_jobs,
             species=args.species,
-            write_heatmap_tsv=not args.skip_expression_tsv,
-            write_expression_tsv=not args.skip_expression_tsv,
-            write_heatmap_cache=not args.skip_heatmap_cache,
+            write_heatmap_tsv=not (args.skip_expression_tsv or args.markers_only),
+            write_expression_tsv=not (args.skip_expression_tsv or args.markers_only),
+            write_heatmap_cache=not (args.skip_heatmap_cache or args.markers_only),
+            render_heatmap=not (args.skip_heatmap_render or args.markers_only),
+            write_svg=not args.skip_svg,
+            heatmap_dpi=args.dpi,
             covariate_columns=[c.strip() for c in str(args.heatmap_covariates or "").split(",") if c.strip()],
         )
         timings = outputs.get("timings", {}) if isinstance(outputs, dict) else {}

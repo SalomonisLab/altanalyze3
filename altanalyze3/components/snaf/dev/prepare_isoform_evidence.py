@@ -5,6 +5,7 @@ not sum, to avoid counting alternative labels of the same measurement twice.
 """
 import argparse
 import csv
+import gzip
 import json
 import re
 from pathlib import Path
@@ -12,9 +13,18 @@ from pathlib import Path
 import numpy as np
 
 
+def _open_text(path):
+    """Open a counts matrix whether it is plain text or gzip.
+
+    A network share can unmount mid-run, so every matrix is kept on local disk as .gz.
+    Reading the compressed copy must give the same bytes as the uncompressed original.
+    """
+    return gzip.open(path, 'rt') if str(path).endswith('.gz') else open(path)
+
+
 def extract(path, genes):
     evidence = {}
-    with open(path) as fh:
+    with _open_text(path) as fh:
         samples = fh.readline().rstrip('\n').split('\t')[1:]
         for line in fh:
             key, _, rest = line.partition('\t')

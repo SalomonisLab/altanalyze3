@@ -272,8 +272,38 @@ def run_snaf_ts(args):
 
 
 # --------------------------------------------------------------------------- snaf (full T pipeline)
+def _export_snaf_outputs(args, outdir, samples=None):
+    """Additional outputs are gated independently from normal SNAF reporting."""
+    proteomics = getattr(args, 'export_proteomics', False)
+    galaxy = getattr(args, 'galaxy_integration', False)
+    if not (proteomics or galaxy):
+        return
+    from pathlib import Path
+    from altanalyze3.components.neoantigen.galaxy import candidate_reports, export_galaxy
+    paths = candidate_reports(outdir)
+    if proteomics:
+        from altanalyze3.components.neoantigen.proteomics import export_candidates
+        export_candidates(paths, Path(outdir, 'proteomics_export'),
+                          getattr(args, 'canonical_fasta', None), args.binding_method)
+    if galaxy:
+        export_galaxy(paths, args.hla, Path(outdir, 'galaxy_export'),
+                      workflow=getattr(args, 'galaxy_workflow', None), predictor=args.binding_method,
+                      peptide_bed=getattr(args, 'galaxy_peptide_bed', None),
+                      assembly=getattr(args, 'galaxy_assembly', 'hg38'), sample_ids=samples)
+
+
 def run_snaf(args):
     """Full MHC-bound T-antigen pipeline entry."""
+    if getattr(args, 'galaxy_integration', False):
+        from pathlib import Path
+        from altanalyze3.components.neoantigen.galaxy import extract_contract
+        if getattr(args, 'galaxy_workflow', None):
+            extract_contract(args.galaxy_workflow)
+        if getattr(args, 'galaxy_peptide_bed', None):
+            _require_file(args.galaxy_peptide_bed, '--galaxy_peptide_bed')
+        destination = Path(args.output) / 'galaxy_export'
+        if destination.exists() and any(destination.iterdir()):
+            raise ValueError('Use a fresh output directory for Galaxy integration: ' + str(destination))
     _ensure_fork_safety()
     from altanalyze3.components import snaf
 
@@ -324,12 +354,7 @@ def run_snaf(args):
     snaf.JunctionCountMatrixQuery.generate_results(
         path=os.path.join(outdir, 'after_prediction.p'), outdir=outdir)
     print('[STAGE-TIMING] generate_results (burden+freq+symbols): {:.1f}s'.format(_t.time()-_tg))
-    if getattr(args, 'export_proteomics', False):
-        from pathlib import Path
-        from altanalyze3.components.neoantigen.proteomics import export_candidates
-        export_candidates(sorted(Path(outdir, 'T_candidates').glob('T_antigen_candidates_*.txt')),
-                          Path(outdir, 'proteomics_export'), getattr(args, 'canonical_fasta', None),
-                          args.binding_method)
+    _export_snaf_outputs(args, outdir, samples)
     print('SNAF T-antigen results written to {}'.format(outdir))
     return outdir
 

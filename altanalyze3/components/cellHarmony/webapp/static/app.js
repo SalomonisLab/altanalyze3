@@ -29,11 +29,15 @@ let previousJobStatus = "";
 let currentJobSpecies = "";
 let currentJobReference = "";
 let referenceRerunPending = false;
+let restoringSavedSession = Boolean(new URLSearchParams(window.location.search).get("job_id"));
+const markerHeatmapRenderTokens = {};
 let currentMarkerAnalysis = null;
 let currentMarkerAnalysisByModality = { rna: null };
 let currentFastCommAnalysis = null;
 let currentModalitiesState = { default: "rna", available: [{ id: "rna", label: "RNA", feature_label: "gene", example_feature: "MPO" }] };
 let currentDifferentialState = null;
+let differentialVisualizationRequest = 0;
+let differentialDetailRequest = 0;
 let currentDifferentialGene = "";
 let currentDifferentialPopulation = "";
 let currentDifferentialInteraction = null;
@@ -65,6 +69,46 @@ const BASE_VISUALIZATION_MODES = [
 // DotPlot and CombPlot take a list of genes rather than one symbol, so they show
 // the gene-set box instead of the single-molecule input.
 const GENE_SET_MODES = new Set(["dotplot", "combplot"]);
+
+// The backend scopes this catalog to the source study. Original feature IDs stay
+// in plot coordinates, requests and click handlers; only presentation is expanded.
+const featureAnnotationCache = new Map();
+const featureAnnotationRequests = new Map();
+async function ensureFeatureAnnotations(jobId) {
+  if (!jobId || featureAnnotationCache.has(jobId)) return;
+  if (!featureAnnotationRequests.has(jobId)) {
+    featureAnnotationRequests.set(jobId, (async () => {
+      try {
+        const response = await fetch(apiPath(`/jobs/${jobId}/feature-annotations?modality=metabolite`));
+        if (!response.ok) throw new Error(`Feature annotations: ${response.status}`);
+        featureAnnotationCache.set(jobId, await response.json());
+      } catch (error) { console.warn("Feature source annotations unavailable", error); }
+      finally { featureAnnotationRequests.delete(jobId); }
+    })());
+  }
+  await featureAnnotationRequests.get(jobId);
+}
+function featureAnnotation(feature, modality) {
+  if (!String(modality || "").toLowerCase().startsWith("metabolite")) return null;
+  return featureAnnotationCache.get(getResultsJobId())?.[String(feature)] || null;
+}
+function featureDisplayName(feature, modality) {
+  return featureAnnotation(feature, modality)?.label || String(feature);
+}
+function featurePlotTitle(feature, modality) {
+  const info = featureAnnotation(feature, modality);
+  return info ? `${feature}<br>m/z ${info.mz} · ${info.assay}<br>RT ${info.rt_min} min` : String(feature);
+}
+function featureHover(feature, modality) {
+  const escape = value => String(value).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  const info = featureAnnotation(feature, modality);
+  if (!info) return escape(feature);
+  return `${escape(info.label)}<br>${escape(info.status)} · ${escape(info.source)}<br>${escape(info.source_cell)} · DOI ${escape(info.doi)}`
+    + (info.formula ? `<br>Source formula: ${escape(info.formula)}` : "");
+}
+function differentialFeatureModality() {
+  return currentDifferentialState?.config?.modality || currentDifferentialState?.modality || "rna";
+}
 
 // The Coordinates entry that means "not an embedding: use two obs columns".
 const OBS_AXES_KEY = "__obs__";
@@ -185,6 +229,13 @@ async function ensureExploreResultsReady(jobId, statusData = null) {
       exploreResultsPendingJobId = null;
     }
     updateWorkflowPanels(referenceRerunPending ? "uploaded" : currentJobStatus);
+    document.getElementById("qc-cell-status").textContent =
+      `Unable to load expression results: ${error.message || error}. Reload to retry.`;
+    const tab = document.querySelector('.workspace-tab-btn[data-tab="explore"]');
+    if (tab) {
+      tab.textContent = "Explore (unavailable)";
+      tab.setAttribute("aria-busy", "false");
+    }
     throw error;
   }).finally(() => {
     if (exploreResultsPendingJobId !== normalizedJobId) {
@@ -290,7 +341,8 @@ async function ensureSvg2PdfLoaded() {
 }
 
 async function ensureCytoscapeSvgLoaded() {
-  if (window.cytoscape && window.cytoscape.prototype && typeof window.cytoscape.prototype.svg === "function") {
+  const ready = () => window.cytoscape && typeof window.cytoscape("core", "svg") === "function";
+  if (ready()) {
     return;
   }
   if (!cytoscapeSvgLoaderPromise) {
@@ -306,7 +358,7 @@ async function ensureCytoscapeSvgLoaded() {
           if (window.cytoscapeSvg && window.cytoscape) {
             window.cytoscapeSvg(window.cytoscape);
           }
-          if (window.cytoscape && window.cytoscape.prototype && typeof window.cytoscape.prototype.svg === "function") {
+          if (ready()) {
             return;
           }
         } catch (err) {
@@ -411,7 +463,7 @@ function getSvgIntrinsicSize(svgElement) {
   };
 }
 
-async function saveSvgMarkupAsPdf(svgMarkup, filename) {
+async function saveSvgMarkupAsPdf(svgMarkup, filename, caption = "") {
   const JsPdf = await ensureJsPdfLoaded();
   await ensureSvg2PdfLoaded();
   const parser = new DOMParser();
@@ -433,12 +485,21 @@ async function saveSvgMarkupAsPdf(svgMarkup, filename) {
   const pageHeight = pdf.internal.pageSize.getHeight();
   const margin = 18;
   const availableWidth = pageWidth - margin * 2;
-  const availableHeight = pageHeight - margin * 2;
+  pdf.setFontSize(9);
+  const captionLines = caption ? pdf.splitTextToSize(caption.replaceAll("→", "->"), availableWidth) : [];
+  const captionHeight = captionLines.length ? captionLines.length * 11 + 12 : 0;
+  if (captionLines.length) pdf.text(captionLines, margin, margin + 9);
+  const availableHeight = pageHeight - margin * 2 - captionHeight;
   const scale = Math.min(availableWidth / width, availableHeight / height, 1);
   const renderWidth = width * scale;
   const renderHeight = height * scale;
   const x = (pageWidth - renderWidth) / 2;
-  const y = (pageHeight - renderHeight) / 2;
+  const y = margin + captionHeight + (availableHeight - renderHeight) / 2;
+  // svg2pdf reads the SVG viewport, not the width/height options below. Keep
+  // the original coordinate system while fitting the whole graph on the page.
+  if (!documentSvg.hasAttribute("viewBox")) documentSvg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  documentSvg.setAttribute("width", String(renderWidth));
+  documentSvg.setAttribute("height", String(renderHeight));
   await pdf.svg(documentSvg, {
     x,
     y,
@@ -644,6 +705,7 @@ function setPanelSummary(panelKey, text) {
 }
 
 function resetVisualizationSurface(panelKey) {
+  markerHeatmapRenderTokens[panelKey] = null;
   const plot = document.getElementById(panelPlotId(panelKey));
   if (!plot) {
     return;
@@ -653,6 +715,8 @@ function resetVisualizationSurface(panelKey) {
     cy.destroy();
     expressionCyByPanel[panelKey] = null;
   }
+  plot._integratedDispose?.();
+  plot.classList.remove("integrated-view");
   try {
     Plotly.purge(plot);
   } catch (_) {
@@ -661,6 +725,7 @@ function resetVisualizationSurface(panelKey) {
   plot.innerHTML = "";
   plot.style.height = "";
   plot.style.minHeight = "";
+  plot.style.overflowX = "";
 }
 
 function selectedReferenceConfig() {
@@ -687,9 +752,10 @@ function normalizeModalityId(value, fallback = "rna") {
   if (raw === "metabolite" || raw === "metabolites" || raw === "rna2metabolite") {
     return "metabolite";
   }
-  if (raw === "grn" || raw === "grns" || raw === "regulon" || raw === "regulons" || raw === "gene_regulatory_network" || raw === "rna2grn" || raw === "tf_activity") {
+  if (raw === "grn" || raw === "grns" || raw === "regulon" || raw === "regulons" || raw === "gene_regulatory_network" || raw === "rna2grn" || raw === "grn_edges" || raw === "tf_edges") {
     return "grn";
   }
+  if (["grn_tf", "tf_activity", "regulator_activity"].includes(raw)) return "grn_tf";
   if (raw === "adts" || raw === "cite" || raw === "cite-seq" || raw === "citeseq") {
     return "adt";
   }
@@ -723,8 +789,8 @@ function modalityDefinition(modalityId) {
   } else if (normalized === "lipid") {
     defaultFeatureLabel = "lipid";
     defaultExample = "Hex2Cer 18:1;2O/16:0";
-  } else if (normalized === "grn") {
-    defaultFeatureLabel = "TF";
+  } else if (normalized === "grn_tf") {
+    defaultFeatureLabel = "factor";
     defaultExample = "GATA1";
   }
   return availableModalities().find((entry) => normalizeModalityId(entry.id) === normalized)
@@ -801,7 +867,7 @@ function panelAvailableModalities() {
 
 function panelModality(panelKey) {
   const mode = getPanelSelectValue(panelKey, "mode");
-  if (mode === "fastcomm_network") {
+  if (["fastcomm_network", "cluster", "relative", "marker_network"].includes(mode)) {
     return "rna";
   }
   const select = document.getElementById(panelElementId(panelKey, "modality"));
@@ -884,20 +950,9 @@ function markerHeatmapAvailable(panelKey) {
   return Boolean(markerAnalysis.heatmap_tsv || markerAnalysis.heatmap_cache);
 }
 
-// A bundle may ship a SECOND MarkerFinder matrix holding every column beside the compact
-// 10-per-population one. The two come from separate MarkerFinder runs, so switching also
-// changes which markers the heatmap draws; the control says so in its label.
-function markerDensityAvailable(panelKey) {
-  const markerAnalysis = panelMarkerAnalysis(panelKey);
-  return Boolean(markerAnalysis && markerAnalysis.heatmap_cache_full);
-}
-
-function markerHeatmapCompact(panelKey) {
-  const select = document.getElementById(panelElementId(panelKey, "marker-density"));
-  if (!select || !markerDensityAvailable(panelKey)) {
-    return true;
-  }
-  return select.value !== "all";
+function panelCellsPerSample(panelKey) {
+  const value = Number(document.getElementById(panelElementId(panelKey, "marker-density"))?.value ?? 10);
+  return [0, 5, 10, 20, 50].includes(value) ? value : 10;
 }
 
 function availableVisualizationModes(panelKey) {
@@ -908,15 +963,18 @@ function availableVisualizationModes(panelKey) {
     modes.push({ value: "marker_heatmap", label: "MarkerHeatmap" });
   }
   const networkPopulations = markerNetworkPopulations(panelKey);
-  if (modalityInfo.supports_marker_network !== false && panelMarkerAnalysis(panelKey) && networkPopulations.length) {
+  if ((currentMarkerAnalysisByModality.rna || currentMarkerAnalysis)?.networks?.length) {
     modes.push({ value: "marker_network", label: "MarkerNetwork" });
   }
-  if (modality === "rna" && fastCommAvailable()) {
+  if (fastCommAvailable()) {
     modes.push({ value: "fastcomm_network", label: "Cell communication" });
   }
-  if (modality === "grn") {
+  if (availableModalities().some(m => m.id === "grn")) {
     modes.push({ value: "grn_network", label: "GRN edges" });
   }
+  modes.push({value:"integrated_network",label:"Regulatory network"});
+  if (crossPathwayContexts.marker?.jobId === getResultsJobId()) modes.push({value:"integrated_cross_pathway",label:"Pathway (cross-modality)"});
+  if (["lipid", "lipids", "metabolite"].includes(modality)) modes.push({value:"integrated_pathway",label:"Pathway"});
   return modes;
 }
 
@@ -959,7 +1017,9 @@ function updateExpressionModeOptions() {
     if (groupByField) groupByField.classList.toggle("hidden", !wantsGeneSet);
     if (groupsField) groupsField.classList.toggle("hidden", !wantsGeneSet);
     if (wantsGeneSet) refreshGroupControls(panelKey);
-    if (combMinField) combMinField.classList.toggle("hidden", mode !== "combplot");
+    const combUnitField = document.getElementById(panelElementId(panelKey, "combunit-field"));
+    if (combUnitField) combUnitField.classList.toggle("hidden", mode !== "combplot");
+    if (combMinField) combMinField.classList.toggle("hidden", mode !== "combplot" || panelCombUnit(panelKey) !== "donor");
     if (wantsGeneSet) geneField.classList.add("hidden");
 
     // Nathan, 2026-09-01: "all UMAP plots should have the option to change umap
@@ -1011,13 +1071,18 @@ function updateExpressionModeOptions() {
       if (modalityLabel) {
         modalityLabel.textContent = "Modality";
       }
-      modalityField.classList.toggle("hidden", modalities.length <= 1);
+      modalityField.classList.toggle("hidden", modalities.length <= 1 || ["cluster", "relative", "marker_network", "grn_network", "integrated_network", "integrated_cross_pathway"].includes(mode));
     }
 
     const currentPopulation = markerPopulationSelect.value;
     markerPopulationSelect.innerHTML = "";
     const fastcommPlotType = panelCommunicationPlotType(panelKey);
-    const dropdownPopulations = modeSelect.value === "fastcomm_network" ? fastcommPopulations : networkPopulations;
+    const integratedPopulations = [...new Set([
+      ...(currentMarkerAnalysis?.populations || []),
+      ...(currentMarkerAnalysis?.networks || []).map(entry => entry.population),
+      ...(currentDisplayFiltersMeta?.values?.[currentDisplayFiltersMeta?.default_secondary_field] || []),
+    ].filter(Boolean))];
+    const dropdownPopulations = modeSelect.value.startsWith("integrated_") ? integratedPopulations : modeSelect.value === "fastcomm_network" ? fastcommPopulations : networkPopulations;
     dropdownPopulations.forEach((population) => {
       const option = document.createElement("option");
       option.value = population;
@@ -1032,7 +1097,7 @@ function updateExpressionModeOptions() {
     }
 
     const showMarkerPopulation =
-      (mode === "marker_network" && networkPopulations.length > 0)
+      ((mode === "marker_network" || mode.startsWith("integrated_")) && dropdownPopulations.length > 0)
       || (mode === "fastcomm_network" && fastcommPopulations.length > 0 && fastCommPlotNeedsPopulation(fastcommPlotType));
     const showGene = mode === "expression_umap" || mode === "violin";
     updatePanelFeatureInput(panelKey);
@@ -1043,7 +1108,12 @@ function updateExpressionModeOptions() {
     markerPopulationField.classList.toggle("hidden", !showMarkerPopulation);
     geneField.classList.toggle("hidden", !showGene);
     const showGrn = mode === "grn_network";
-    ["grn-genes-field", "grn-sample-field", "grn-cellstate-field", "grn-threshold-field"].forEach((suffix) => {
+    if (showGrn) {
+      const grnGenes = document.getElementById(panelElementId(panelKey, "grn-genes"));
+      const feature = document.getElementById(panelElementId(panelKey, "gene-query"))?.value || "";
+      if (grnGenes && !grnGenes.value.trim() && panelModality(panelKey) === "grn_tf") grnGenes.value = feature;
+    }
+    ["grn-genes-field", "grn-sample-field", "grn-cellstate-field", "grn-threshold-field", "grn-limit-field", "grn-description"].forEach((suffix) => {
       const el = document.getElementById(panelElementId(panelKey, suffix));
       if (el) {
         el.classList.toggle("hidden", !showGrn);
@@ -1053,38 +1123,49 @@ function updateExpressionModeOptions() {
     // don't apply to the network, so hide them to avoid confusion.
     const filterStack = document.getElementById(panelElementId(panelKey, "filter-stack"));
     if (filterStack) {
-      filterStack.classList.toggle("hidden", showGrn);
+      filterStack.classList.toggle("hidden", showGrn || mode === "marker_network" || mode.startsWith("integrated_"));
     }
     const densityRow = document.getElementById(panelElementId(panelKey, "marker-density-row"));
     if (densityRow) {
-      densityRow.hidden = !(mode === "marker_heatmap" && markerDensityAvailable(panelKey));
+      densityRow.hidden = !(mode === "marker_heatmap" || (mode === "combplot" && panelCombUnit(panelKey) === "cells"));
     }
   });
 }
 
 function populateGrnDropdowns(panelKey, data) {
-  const fill = (suffix, values) => {
+  const fill = (suffix, values, selected, allowAny = true) => {
     const sel = document.getElementById(panelElementId(panelKey, suffix));
     if (!sel) return;
-    const desired = ["", ...(values || [])];
+    const desired = [...(allowAny ? [""] : []), ...(values || [])];
     const existing = Array.from(sel.options).map((o) => o.value);
     if (existing.length === desired.length && existing.every((v, i) => v === desired[i])) {
+      if (desired.includes(selected)) sel.value = selected;
       return;
     }
-    const current = sel.value;
+    const current = selected ?? sel.value;
     sel.innerHTML = "";
     desired.forEach((v) => {
       const o = document.createElement("option");
       o.value = v;
-      o.textContent = v === "" ? "(any)" : v;
+      o.textContent = v === "" ? "All" : v;
       sel.appendChild(o);
     });
     if (desired.includes(current)) {
       sel.value = current;
     }
   };
-  fill("grn-sample", data && data.available_samples);
-  fill("grn-cellstate", data && data.available_cell_states);
+  fill("grn-sample", data && data.available_samples, data?.sample);
+  const sampleLabel = document.querySelector(`#${panelKey}-grn-sample-field > span`);
+  if (sampleLabel) sampleLabel.textContent = data?.sample_field || "Sample";
+  fill("grn-cellstate", data && data.available_cell_states, data?.cell_state, false);
+  const input = document.getElementById(panelElementId(panelKey, "grn-genes"));
+  if (input && !input.value.trim()) input.value = (data?.genes || []).join(", ");
+  const suggestions = document.getElementById(`${panelKey}-grn-suggestions`);
+  if (suggestions) {
+    suggestions.replaceChildren(...(data?.available_factors || []).map(tf => {
+      const option = document.createElement("option"); option.value = tf; return option;
+    }));
+  }
 }
 
 function setPanelGeneValue(panelKey, value) {
@@ -1117,10 +1198,13 @@ async function logClientEvent(jobId, message) {
 
 async function renderMarkerHeatmapViewer(jobId, panelKey) {
   resetVisualizationSurface(panelKey);
+  const token = {};
+  markerHeatmapRenderTokens[panelKey] = token;
+  const isCurrent = () => markerHeatmapRenderTokens[panelKey] === token;
   const plot = document.getElementById(panelPlotId(panelKey));
   const params = getDisplayFilterParams(panelKey);
   params.set("modality", panelModality(panelKey));
-  params.set("compact", markerHeatmapCompact(panelKey) ? "true" : "false");
+  params.set("cells_per_sample", String(panelCellsPerSample(panelKey)));
   const suffix = params.toString() ? `?${params.toString()}` : "";
   const datasetPath = apiPath(`/jobs/${jobId}/marker/heatmap.tsv${suffix}`);
   const datasetUrl = `${window.location.origin}${datasetPath}`;
@@ -1137,10 +1221,17 @@ async function renderMarkerHeatmapViewer(jobId, panelKey) {
       jobId,
       `MarkerHeatmap preflight status=${resp.status} ok=${resp.ok} content_type=${resp.headers.get("content-type") || "-"} content_length=${resp.headers.get("content-length") || "-"}`
     );
+    if (resp.ok) {
+      const count = resp.headers.get("X-Marker-Columns");
+      const field = resp.headers.get("X-Sample-Field");
+      const limit = panelCellsPerSample(panelKey);
+      setPanelSummary(panelKey, `${count || ""} individual cells; ${limit ? `up to ${limit} per sample per cell type` : "all cells"}. ${field ? `Sample annotation: ${field}.` : "Dataset treated as one sample."} Colours show per-gene standardized expression.`);
+    }
     if (!resp.ok) {
       throw new Error(`Marker heatmap TSV returned ${resp.status}.`);
     }
   } catch (err) {
+    if (!isCurrent()) return;
     await logClientEvent(jobId, `MarkerHeatmap preflight failed: ${err.message || err}`);
     renderVisualizationMessage(
       panelKey,
@@ -1162,6 +1253,7 @@ async function renderMarkerHeatmapViewer(jobId, panelKey) {
       throw new Error(`Marker heatmap viewer returned ${viewerResp.status}.`);
     }
   } catch (err) {
+    if (!isCurrent()) return;
     await logClientEvent(jobId, `MarkerHeatmap viewer preflight failed: ${err.message || err}`);
     renderVisualizationMessage(
       panelKey,
@@ -1170,6 +1262,7 @@ async function renderMarkerHeatmapViewer(jobId, panelKey) {
     );
     return;
   }
+  if (!isCurrent()) return;
   const iframe = document.createElement("iframe");
   iframe.className = "morpheus-frame";
   iframe.loading = "lazy";
@@ -1182,6 +1275,28 @@ async function renderMarkerHeatmapViewer(jobId, panelKey) {
   });
   iframe.src = viewerPath;
   plot.appendChild(iframe);
+}
+
+// A missing or zero fold is neutral; it is not evidence of upregulation.
+function networkFoldColor(value) {
+  if (value === null || value === undefined || value === "" || !Number.isFinite(Number(value)) || Number(value) === 0) return "#cbd5e1";
+  return Number(value) > 0 ? "#fca5a5" : "#7dd3fc";
+}
+
+function measurementLabel(modality) {
+  const id = normalizeModalityId(modality);
+  if (id === "grn_tf") return "Imputed TF activity";
+  if (id === "grn") return "Predicted edge score";
+  return id === "rna" ? "Expression" : "Abundance";
+}
+
+function grnNetworkDescription(payload) {
+  const genes = (payload.genes || []).join(", ");
+  const scope = `${payload.cell_state || "no cell type"}; ${payload.sample_field || "samples"}: ${payload.sample || "all"}`;
+  return `Predicted TF → target connections involving ${genes || "the selected genes"} (${scope}). `
+    + `Showing ${payload.n_edges || 0} of ${payload.n_matching_edges || 0} matching edges, ranked by |mean score|. `
+    + `Scores average ${payload.n_aggregates || 0} sample × cell-type aggregates. `
+    + "This view explores predicted connections; use Regulatory network to restrict targets to positive markers.";
 }
 
 function renderExpressionNetwork(panelKey, payload) {
@@ -1197,14 +1312,16 @@ function renderExpressionNetwork(panelKey, payload) {
     if (!element.data || !element.data.id || element.data.source) {
       return element;
     }
-    const log2fc = Number(element.data.log2fc || 0);
     return {
       data: {
         ...element.data,
-        color: log2fc >= 0 ? "#fca5a5" : "#7dd3fc",
+        color: payload.node_encoding === "role"
+          ? (element.data.role === "tf" ? "#facc15" : "#ef4444")
+          : networkFoldColor(element.data.log2fc),
       },
     };
   });
+  const maxEdgeScore = Math.max(...elements.filter(e => e.data?.source).map(e => Math.abs(Number(e.data.score) || 0)), 1e-12);
   if (!elements.length) {
     renderVisualizationMessage(panelKey, `No marker network was available for ${payload.population}.`, `${payload.population} marker network`);
     return;
@@ -1219,24 +1336,28 @@ function renderExpressionNetwork(panelKey, payload) {
           "background-color": "data(color)",
           label: "data(label)",
           color: "#0f172a",
-          "font-size": 12,
+          "font-size": (node) => payload.node_encoding === "role" ? (node.data("role") === "tf" ? 20 : 14) : 12,
+          "font-weight": (node) => payload.node_encoding === "role" && node.data("role") === "tf" ? "bold" : "normal",
           "text-valign": "center",
           "text-halign": "center",
-          width: 26,
-          height: 26,
+          width: (node) => payload.node_encoding === "role" && node.data("role") === "tf" ? 52 : 26,
+          height: (node) => payload.node_encoding === "role" && node.data("role") === "tf" ? 52 : 26,
+          "border-width": (node) => payload.node_encoding === "role" && node.data("queried") ? 3 : 0,
+          "border-color": "#0f172a",
+          shape: (node) => payload.node_encoding === "role" && node.data("role") === "tf" ? "diamond" : "ellipse",
         },
       },
       {
         selector: "edge",
         style: {
-          // GRN edges carry a score (regulatory activity) -> encode as width so cell-state
-          // differences are visible (e.g. HLF edges thick in HSC, absent in monocytes).
+          // GRN widths are relative to this graph; raw scores remain available on hover.
           width: (edge) => {
             const s = Math.abs(Number(edge.data("score")) || 0);
+            if (payload.node_encoding === "role") return 1 + 4 * s / maxEdgeScore;
             return s > 0 ? Math.max(1, Math.min(9, 1 + s * 24)) : 1.8;
           },
-          "line-color": networkEdgeColor,
-          "target-arrow-color": networkEdgeColor,
+          "line-color": payload.node_encoding === "role" ? "#94a3b8" : networkEdgeColor,
+          "target-arrow-color": payload.node_encoding === "role" ? "#94a3b8" : networkEdgeColor,
           "target-arrow-shape": networkEdgeArrowShape,
           "curve-style": "bezier",
           opacity: 0.85,
@@ -1250,9 +1371,14 @@ function renderExpressionNetwork(panelKey, payload) {
         },
       },
     ],
-    layout: {
+    layout: payload.node_encoding === "role" ? {
+      name: "concentric", animate: false, fit: true, padding: 45,
+      concentric: (node) => node.data("queried") ? 2 : 1,
+      levelWidth: () => 1, minNodeSpacing: 10, avoidOverlap: true,
+      nodeDimensionsIncludeLabels: true,
+    } : {
       name: "cose",
-      animate: true,
+      animate: false,
       fit: true,
       padding: 36,
       randomize: true,
@@ -1267,6 +1393,15 @@ function renderExpressionNetwork(panelKey, payload) {
       setPanelGeneValue(panelKey, gene);
     }
   });
+  if (payload.node_encoding === "role") {
+    expressionCyByPanel[panelKey].on("mouseover", "node, edge", (event) => {
+      const item = event.target;
+      const text = item.isNode() ? `${item.id()} — ${item.data("role") === "tf" ? "transcription factor" : "target"}`
+        : `${item.data("source")} → ${item.data("target")}; predicted edge score ${item.data("score")}`;
+      setNetworkHoverTooltip(panelKey, text, event.renderedPosition);
+    });
+    expressionCyByPanel[panelKey].on("mouseout", "node, edge", () => setNetworkHoverTooltip(panelKey, ""));
+  }
 }
 
 function setNetworkHoverTooltip(panelKey, text, renderedPosition = null) {
@@ -1750,7 +1885,43 @@ document.addEventListener("DOMContentLoaded", () => {
   initWindowCount();
   initGeneSetBoxes();
   initChatTab();
+  restoreJobFromUrl();
 });
+
+async function restoreJobFromUrl() {
+  const jobId = new URLSearchParams(window.location.search).get("job_id");
+  if (!jobId) return;
+  try {
+    const response = await fetch(apiPath(`/jobs/${encodeURIComponent(jobId)}/status`), {cache:"no-store"});
+    const data = await parseApiResponse(response);
+    if (!response.ok) throw new Error(data.detail || "Unable to reopen this job.");
+    document.getElementById("species-select").value = data.species;
+    document.getElementById("species-select").dispatchEvent(new Event("change"));
+    document.getElementById("reference-select").value = data.reference;
+    document.getElementById("reference-select").dispatchEvent(new Event("change"));
+    for (const [name, value] of Object.entries(data.qc || {})) {
+      const field = document.querySelector(`#qc-form [name="${name}"]`);
+      if (field && !Array.isArray(value)) field.value = value == null ? "" : String(value);
+    }
+    const imputed = data.qc?.impute_modalities || [];
+    updateMarkerExportControls();
+    if (imputed.length) document.getElementById("qc-impute-modality-select").value = imputed.includes("all") ? "all" : imputed[0];
+    applyJobStatus(jobId, data);
+    if (["queued", "processing"].includes(data.status) ||
+        ["queued", "processing"].includes(data.differential_ui?.status)) {
+      startStatusPolling(jobId);
+    }
+    if (data.status === "completed") {
+      await ensureExploreResultsReady(jobId, data);
+      setExplorerTab("explore");
+    }
+  } catch (error) {
+    alert(error.message || "Unable to reopen this job.");
+  } finally {
+    restoringSavedSession = false;
+    if (!currentJobStatus) loadReferencePreview();
+  }
+}
 
 function initSpeciesSelect() {
   const speciesSelect = document.getElementById("species-select");
@@ -1894,9 +2065,18 @@ function addSampleRow() {
   sampleCount += 1;
 }
 
+function updateMarkerExportControls() {
+  const form = document.getElementById("qc-form");
+  const disabled = form.elements.marker_render_heatmap.value === "false";
+  form.elements.marker_write_svg.disabled = disabled;
+  form.elements.marker_heatmap_dpi.disabled = disabled;
+}
+
 function hookForms() {
   document.getElementById("job-form").addEventListener("submit", handleJobSubmit);
   document.getElementById("qc-form").addEventListener("submit", handleQcSubmit);
+  document.querySelector('#qc-form [name="marker_render_heatmap"]').addEventListener("change", updateMarkerExportControls);
+  updateMarkerExportControls();
   document.getElementById("differential-form").addEventListener("submit", handleDifferentialSubmit);
   document.getElementById("results-form").addEventListener("submit", handleResultsSubmit);
   document.getElementById("reset-data-btn").addEventListener("click", resetWorkspaceData);
@@ -1929,7 +2109,7 @@ function hookForms() {
     if (densitySelect) {
       densitySelect.addEventListener("change", () => loadVisualizationPanel(panelKey));
     }
-    ["grn-genes", "grn-sample", "grn-cellstate"].forEach((suffix) => {
+    ["grn-genes", "grn-sample", "grn-cellstate", "grn-limit"].forEach((suffix) => {
       const el = document.getElementById(panelElementId(panelKey, suffix));
       if (el) {
         el.addEventListener("change", () => loadVisualizationPanel(panelKey));
@@ -1996,22 +2176,25 @@ function hookForms() {
     currentDifferentialState = markDifferentialConfigDirty(nextState);
     updateDifferentialUi(currentDifferentialState);
   });
-  document.getElementById("differential-modality").addEventListener("change", () => {
-    if (!currentDifferentialState) {
-      return;
-    }
-    // A different modality names different features, so the typed one no longer applies.
+  document.getElementById("differential-modality").addEventListener("change", async () => {
+    if (!currentDifferentialState) return;
     clearDifferentialGeneFilter();
-    currentDifferentialState = {
-      ...markDifferentialConfigDirty({
-        ...currentDifferentialState,
-        config: {
-          ...(currentDifferentialState.config || {}),
-          modality: normalizeModalityId(document.getElementById("differential-modality").value || "rna"),
-        },
-      }),
-    };
-    updateDifferentialUi(currentDifferentialState);
+    const modality = normalizeModalityId(document.getElementById("differential-modality").value || "rna");
+    const config = {...currentDifferentialState.config, modality};
+    const matching = (currentDifferentialState.completed_comparisons || []).filter(entry => {
+      if (entry.modality !== modality) return false;
+      let identity;
+      try { identity = JSON.parse(entry.contrast); } catch (_) { return false; }
+      return ["population_col", "sample_field", "comparison_type"].every(k => (identity[k] || "") === (config[k] || "")) &&
+        ["group1_samples", "group2_samples"].every(k => JSON.stringify([...(identity[k] || [])].sort()) === JSON.stringify([...(config[k] || [])].sort()));
+    });
+    if (matching.length) {
+      await selectCompletedDifferential(matching[matching.length - 1].id);
+    } else {
+      ++savedComparisonSelectionRequest;
+      currentDifferentialState = markDifferentialConfigDirty({...currentDifferentialState, config});
+      updateDifferentialUi(currentDifferentialState);
+    }
   });
   document.getElementById("differential-sample-field").addEventListener("change", () => {
     if (!currentDifferentialState) {
@@ -2059,6 +2242,23 @@ function hookForms() {
   attachDifferentialLrToggleHandlers();
 }
 
+let savedComparisonSelectionRequest = 0;
+async function selectCompletedDifferential(contrast) {
+  const request = ++savedComparisonSelectionRequest;
+  ++differentialVisualizationRequest;
+  ++differentialDetailRequest;
+  try {
+    const response = await fetch(apiPath(`/jobs/${getResultsJobId()}/differential/select?contrast=${encodeURIComponent(contrast)}`), {method: "POST"});
+    const body = await response.json();
+    if (request !== savedComparisonSelectionRequest) return;
+    if (!response.ok) throw new Error(body.detail || "Comparison selection failed");
+    updateDifferentialUi(body);
+    setResultMode("differential");
+  } catch (error) {
+    if (request === savedComparisonSelectionRequest) document.getElementById("differential-message").textContent = error.message;
+  }
+}
+
 function markDifferentialConfigDirty(state) {
   if (!state || state.status !== "completed") {
     return state;
@@ -2080,6 +2280,7 @@ function updateResetDataButton() {
 }
 
 function resetWorkspaceData() {
+  setSessionUrl(null);
   if (pollTimer) {
     clearInterval(pollTimer);
     pollTimer = null;
@@ -2287,6 +2488,7 @@ async function handleJobSubmit(evt) {
       throw new Error(resp.data.detail || "Failed to create job.");
     }
     const data = resp.data;
+    setSessionUrl(data.job_id);
     setUploadProgress(100, true);
     document.getElementById("upload-job-id").value = data.job_id;
     const uploadJobIdDisplay = document.getElementById("upload-job-id-display");
@@ -2321,6 +2523,10 @@ async function handleQcSubmit(evt) {
     mit_percent: evt.target.mit_percent.value,
     align_cutoff: evt.target.align_cutoff.value,
     ambient_correction: evt.target.ambient_correction.value,
+    marker_render_heatmap: evt.target.marker_render_heatmap.value === "true",
+    marker_write_svg: evt.target.marker_write_svg.value === "true",
+    marker_heatmap_dpi: evt.target.marker_heatmap_dpi.value ? Number(evt.target.marker_heatmap_dpi.value) : null,
+    marker_cells_per_cluster: Number(evt.target.marker_cells_per_cluster.value),
     impute_modalities: (() => {
       const value = evt.target.impute_modality ? evt.target.impute_modality.value : "none";
       return value && value !== "none" ? [value] : [];   // "all" expands on the backend
@@ -2468,7 +2674,16 @@ async function pollStatus(jobId) {
   }
 }
 
+function setSessionUrl(jobId) {
+  if (window.__SCALABLE_VIEWER__) return;
+  const url = new URL(window.location.href);
+  if (jobId) url.searchParams.set("job_id", jobId);
+  else url.searchParams.delete("job_id");
+  if (url.href !== window.location.href) window.history.replaceState(null, "", url);
+}
+
 function applyJobStatus(jobId, data) {
+  setSessionUrl(jobId);
   previousJobStatus = currentJobStatus;
   currentJobStatus = String(data.status || "").trim().toLowerCase();
   currentJobSpecies = String(data.species || currentJobSpecies || "");
@@ -2582,8 +2797,13 @@ function updateWorkflowPanels(status) {
     runGrid.classList.toggle("workflow-mode", hasUploadedJob);
   }
   if (exploreTabButton) {
-    exploreTabButton.classList.toggle("hidden", !hasExploreReady);
+    // Large saved sessions need time to load their expression matrices. Keep
+    // the tab visible so loading does not look like missing saved results.
+    exploreTabButton.classList.toggle("hidden", !hasCompletedAlignment);
     exploreTabButton.disabled = !hasExploreReady;
+    exploreTabButton.textContent = hasCompletedAlignment && !hasExploreReady
+      ? "Explore (loading…)" : "Explore";
+    exploreTabButton.setAttribute("aria-busy", String(hasCompletedAlignment && !hasExploreReady));
   }
   if (differentialTabButton) {
     differentialTabButton.classList.toggle("hidden", !hasCompletedAlignment);
@@ -2600,6 +2820,7 @@ function updateWorkflowPanels(status) {
 }
 
 async function loadReferencePreview() {
+  if (restoringSavedSession) return;
   const previewPanel = document.getElementById("reference-preview-panel");
   if (currentJobStatus) {
     previewPanel.classList.add("hidden");
@@ -3153,7 +3374,8 @@ async function populateDownloadLinks(jobId, statusData = null) {
     imputed_adt_results_zip: "Download ADT results ZIP",
     imputed_metabolite_results_zip: "Download Metabolite results ZIP",
     imputed_lipid_results_zip: "Download Lipid (AML) results ZIP",
-    imputed_grn_results_zip: "Download GRN results ZIP",
+    imputed_grn_results_zip: "Download GRN edge results ZIP",
+    imputed_grn_tf_results_zip: "Download TF activity results ZIP",
     fastcomm_archive: "Download cell communication ZIP",
   };
   Object.keys(artifacts).forEach((key) => {
@@ -3183,6 +3405,13 @@ async function populateDownloadLinks(jobId, statusData = null) {
 }
 
 function updateDifferentialUi(state) {
+  if (currentDifferentialState?.run_id !== state?.run_id ||
+      currentDifferentialState?.config?.modality !== state?.config?.modality) {
+    ++differentialVisualizationRequest;
+    ++differentialDetailRequest;
+    currentDifferentialGene = "";
+    clearDifferentialGeneFilter();
+  }
   currentDifferentialState = state;
   const panel = document.getElementById("differential-panel");
   const emptyState = document.getElementById("differential-tab-empty");
@@ -3207,6 +3436,25 @@ function updateDifferentialUi(state) {
   const enabled = Boolean(state && state.enabled);
   const config = (state && state.config) || {};
   const populationOptions = (state && state.population_columns) || [];
+  let completedField = document.getElementById("differential-completed-field");
+  if (!completedField) {
+    completedField = document.createElement("label");
+    completedField.id = "differential-completed-field";
+    completedField.className = "field";
+    completedField.innerHTML = '<span>Completed comparison</span><select id="differential-completed-run"></select>';
+    panel.prepend(completedField);
+    document.getElementById("differential-completed-run").addEventListener("change", async (event) => {
+      if (!event.target.value) return;
+      event.target.disabled = true;
+      try { await selectCompletedDifferential(event.target.value); }
+      finally { event.target.disabled = false; }
+    });
+  }
+  const completed = (state && state.completed_comparisons) || [];
+  completedField.classList.toggle("hidden", !completed.length || Boolean(window.__SCALABLE_VIEWER__));
+  populateSingleSelect(document.getElementById("differential-completed-run"),
+    completed.map(c => ({value: c.id, label: `${modalityDefinition(c.modality).label}: ${c.comparison}`})), state && state.run_id);
+  document.getElementById("differential-completed-run").disabled = ["queued", "processing"].includes(state && state.status);
   const modalityOptions = (state && state.modalities) || [{ id: "rna", label: "RNA", feature_label: "gene" }];
   const sampleFieldOptions = (state && state.sample_fields) || [];
   const sampleValuesMap = (state && state.sample_values) || {};
@@ -3324,7 +3572,9 @@ function updateDifferentialUi(state) {
   message.textContent = statusMessage;
 
   const currentVizMode = vizModeSelect.value;
-  const visualizationModes = (state.visualization_modes || []);
+  const visualizationModes = [...(state.visualization_modes || [])];
+  if (crossPathwayContexts.differential?.jobId === getResultsJobId() && crossPathwayContexts.differential?.contrast === state.run_id)
+    visualizationModes.push({value:"integrated_cross_pathway",label:"Pathway (cross-modality)"});
   vizModeSelect.innerHTML = "";
   visualizationModes.forEach((entry) => {
     const option = document.createElement("option");
@@ -3443,7 +3693,7 @@ function syncDifferentialPopulationSelect(state) {
   populationSelect.classList.toggle("hidden", mode === "summary");
   const filterInput = differentialGeneFilterInput();
   if (filterInput) {
-    filterInput.classList.toggle("hidden", mode === "summary");
+    filterInput.classList.toggle("hidden", mode === "summary" || mode.startsWith("integrated_"));
   }
   const fallbackPopulation = state.default_result_population || "";
   const wantedPopulation = currentDifferentialPopulation || populationSelect.value || fallbackPopulation;
@@ -3702,10 +3952,56 @@ function markDifferentialGeneFilterMatched(matched) {
   input.classList.toggle("filter-unmatched", active && !matched);
 }
 
+
+const crossPathwayContexts = {};
+async function openCrossPathway(row, spec) {
+  const jobId = getResultsJobId();
+  const mode = "integrated_cross_pathway";
+  const context = {...spec, id:row.id, jobId, crossModal:true, kind:"integrated_pathway"};
+  const setOption = (id, value, label) => {
+    const select = document.getElementById(id);
+    if (![...select.options].some(o=>o.value === value)) select.add(new Option(label || value,value));
+    select.value=value;
+  };
+  if (spec.source === "differential") {
+    await selectCompletedDifferential(spec.contrast);
+    if (currentDifferentialState?.run_id !== spec.contrast) return;
+    crossPathwayContexts.differential=context;
+    setOption("differential-viz-mode", mode, "Pathway (cross-modality)");
+    setOption("differential-result-population", spec.cell_state);
+    document.querySelector('[data-tab="differential"]')?.click();
+    await loadDifferentialVisualization();
+  } else {
+    crossPathwayContexts.marker=context;
+    updateExpressionModeOptions();
+    setOption("viz1-mode",mode,"Pathway (cross-modality)");
+    updateExpressionModeOptions();
+    setOption("viz1-marker-population",spec.cell_state);
+    document.querySelector('[data-tab="explore"]')?.click();
+    await loadVisualizationPanel("viz1");
+  }
+}
+
+function integratedOptions(jobId, kind, cellState, modality, source="differential") {
+  return {jobId,kind,cell_state:cellState,modality,source,externalPdf:true,availableModalities:availableModalities().map(m=>m.id),
+    contrast: window.__SCALABLE_VIEWER__?.contrast || currentDifferentialState?.run_id || "",apiPath,
+    ...(kind === "integrated_cross_pathway" ? {...crossPathwayContexts[source], cell_state:cellState} : {}),
+    onFeature: (gene, kind) => {
+      const panel="viz1",mod=document.getElementById("viz1-modality");
+      if(mod && [...mod.options].some(o=>o.value===kind))mod.value=kind;
+      updateExpressionModeOptions();document.getElementById("viz1-mode").value="expression_umap";
+      setPanelGeneValue(panel,gene);
+      document.querySelector('[data-tab="explore"]')?.click();loadVisualizationPanel(panel);
+    }};
+}
+
 async function loadDifferentialVisualization() {
+  const request = ++differentialVisualizationRequest;
+  ++differentialDetailRequest;
   const state = currentDifferentialState;
   const plotEmpty = document.getElementById("differential-plot-empty");
   const jobId = document.getElementById("results-job-id").value.trim();
+  await ensureFeatureAnnotations(jobId);
   if (!state || state.status !== "completed") {
     resetDifferentialResults();
     return;
@@ -3713,15 +4009,25 @@ async function loadDifferentialVisualization() {
 
   const population = document.getElementById("differential-result-population").value;
   const mode = document.getElementById("differential-viz-mode").value;
+  const isCurrent = () => request === differentialVisualizationRequest &&
+    state.run_id === currentDifferentialState?.run_id &&
+    jobId === document.getElementById("results-job-id").value.trim();
+  const integratedMode=mode.startsWith("integrated_");
+  document.getElementById("differential-results-view").classList.toggle("show-integrated",integratedMode);
+  if(!integratedMode)document.getElementById("differential-plot-area")._integratedDispose?.();
+  updateDifferentialDownloadButton();
+
   // The counts chart draws every cell state at once, so it needs no selected state.
   if (mode === "summary") {
     updateDifferentialDownloadButton();
     try {
       const summary = await fetchDifferentialJson(apiPath(`/jobs/${jobId}/differential/interactive/summary`));
+      if (!isCurrent()) return;
       renderDifferentialSummary(summary);
       setDifferentialGeneFilterOptions([]);
       resetDifferentialGeneDetail();
     } catch (err) {
+      if (!isCurrent()) return;
       destroyDifferentialNetwork();
       renderDifferentialEmpty(err.message || "Unable to load the differential counts.");
       plotEmpty.classList.remove("hidden");
@@ -3735,24 +4041,38 @@ async function loadDifferentialVisualization() {
   }
 
   currentDifferentialPopulation = population;
+  if(mode.startsWith("integrated_")) {
+    destroyDifferentialNetwork();resetDifferentialGeneDetail();
+    const host=document.getElementById("differential-plot-area");
+    try {Plotly.purge(host);} catch(e) {}
+    host.classList.remove("hidden");plotEmpty.classList.add("hidden");
+    await ScalableIntegrated.mount(host,integratedOptions(jobId,mode,population,state.config?.modality || state.modality || "rna"));
+    return;
+  }
   updateDifferentialDownloadButton();
   try {
     let payload = null;
     const geneFilter = await resolveDifferentialGeneFilter(jobId, population);
+    if (!isCurrent()) return;
     if (mode === "heatmap") {
       payload = await fetchDifferentialJson(apiPath(`/jobs/${jobId}/differential/interactive/heatmap?population=${encodeURIComponent(population)}`));
+      if (!isCurrent()) return;
       renderDifferentialHeatmap(payload, geneFilter);
     } else if (mode === "volcano") {
       payload = await fetchDifferentialJson(apiPath(`/jobs/${jobId}/differential/interactive/volcano?population=${encodeURIComponent(population)}`));
+      if (!isCurrent()) return;
       renderDifferentialVolcano(payload, geneFilter);
     } else if (mode === "network") {
       payload = await fetchDifferentialJson(apiPath(`/jobs/${jobId}/differential/interactive/network?population=${encodeURIComponent(population)}`));
+      if (!isCurrent()) return;
       renderDifferentialNetwork(payload, geneFilter);
     } else if (mode === "table") {
       payload = await fetchDifferentialJson(apiPath(`/jobs/${jobId}/differential/interactive/table?population=${encodeURIComponent(population)}`));
+      if (!isCurrent()) return;
       renderDifferentialCommunicationTable(payload, geneFilter);
     } else if (mode === "go") {
       payload = await fetchDifferentialJson(apiPath(`/jobs/${jobId}/differential/interactive/go?population=${encodeURIComponent(population)}`));
+      if (!isCurrent()) return;
       renderDifferentialGo(payload, geneFilter);
     }
     const availableGenes = differentialPayloadGenes(mode, payload);
@@ -3809,6 +4129,7 @@ async function loadDifferentialVisualization() {
       resetDifferentialGeneDetail();
     }
   } catch (err) {
+    if (!isCurrent()) return;
     destroyDifferentialNetwork();
     renderDifferentialEmpty(err.message || "Unable to load the differential visualization.");
     plotEmpty.classList.remove("hidden");
@@ -3960,6 +4281,10 @@ function renderDifferentialHeatmap(payload, geneFilter = null) {
     return;
   }
   const z = rows.map((row) => row.values);
+  // Keep missing folds missing. A separate black layer supplies their colour and
+  // tooltip without replacing them with a measured zero on the fold-change scale.
+  const missing = z.map(values => values.map(value =>
+    value === null || value === undefined || !Number.isFinite(Number(value)) ? 1 : null));
   const finiteValues = z
     .flat()
     .filter((value) => value !== null && Number.isFinite(Number(value)))
@@ -3973,16 +4298,34 @@ function renderDifferentialHeatmap(payload, geneFilter = null) {
   }
   const colorMin = -colorExtent;
   const colorMax = colorExtent;
+  const modality = differentialFeatureModality();
+  const hover = rows.map(row => payload.columns.map(() => featureHover(row.gene, modality)));
   const y = rows.map((row) => row.gene);
   const directions = rows.map((row) => payload.columns.map(() => row.direction));
   const figureHeight = Math.max(560, Math.min(2800, rows.length * 18 + 180));
+  const tickStep = Math.max(1, Math.ceil(rows.length / ((figureHeight - 180) / 16)));
+  const tickGenes = y.filter((_, i) => i % tickStep === 0);
   plot.classList.remove("hidden");
   document.getElementById("differential-plot-empty").classList.add("hidden");
   Plotly.newPlot(
     plot,
     [
       {
+        z: missing,
+        text: hover,
+        x: payload.columns,
+        y,
+        type: "heatmap",
+        colorscale: [[0, "#000000"], [1, "#000000"]],
+        zmin: 0,
+        zmax: 1,
+        showscale: false,
+        hoverongaps: false,
+        hovertemplate: "%{text}<br>%{x}<br>log2FC: not retained in the results<extra></extra>",
+      },
+      {
         z,
+        text: hover,
         x: payload.columns,
         y,
         type: "heatmap",
@@ -3995,7 +4338,8 @@ function renderDifferentialHeatmap(payload, geneFilter = null) {
         zmax: colorMax,
         zmid: 0,
         customdata: directions,
-        hovertemplate: "%{y}<br>%{x}<br>log2FC=%{z:.3f}<br>%{customdata}<extra></extra>",
+        hoverongaps: false,
+        hovertemplate: "%{text}<br>%{x}<br>log2FC=%{z:.3f}<br>%{customdata}<extra></extra>",
         colorbar: {
           title: "log2FC",
           tickmode: "array",
@@ -4011,7 +4355,7 @@ function renderDifferentialHeatmap(payload, geneFilter = null) {
       height: figureHeight,
       margin: { t: 56, l: 170, r: 30, b: 110 },
       xaxis: { tickangle: -40, automargin: true },
-      yaxis: { automargin: true, tickfont: { size: 10 } },
+      yaxis: { automargin: true, tickfont: { size: 10 }, tickvals: tickGenes, ticktext: tickGenes.map(g => featureDisplayName(g, modality)) },
     },
     { responsive: true }
   );
@@ -4027,6 +4371,8 @@ function renderDifferentialHeatmap(payload, geneFilter = null) {
 function renderDifferentialVolcano(payload, geneFilter = null) {
   destroyDifferentialNetwork();
   const plot = document.getElementById("differential-plot-area");
+  const modality = differentialFeatureModality();
+  const statisticLabel = payload.statistic_label || "FDR";
   const allPoints = payload.points || [];
   const points = geneFilter
     ? allPoints.filter((point) => geneFilter.genes.has(String(point.gene)))
@@ -4055,7 +4401,8 @@ function renderDifferentialVolcano(payload, geneFilter = null) {
       {
         x: down.map((point) => point.log2fc),
         y: down.map((point) => point.score),
-        text: down.map((point) => point.gene),
+        text: down.map((point) => featureDisplayName(point.gene, modality)),
+        hovertext: down.map(point => featureHover(point.gene, modality)),
         customdata: down.map((point) => [point.gene, point.fdr, point.pval]),
         type: "scattergl",
         mode: pointMode,
@@ -4063,12 +4410,13 @@ function renderDifferentialVolcano(payload, geneFilter = null) {
         textfont: { size: 10, color: "#1e293b" },
         name: "Down",
         marker: { color: "#2563eb", size: 16, opacity: 0.72 },
-        hovertemplate: "%{text}<br>log2FC=%{x:.3f}<br>-log10(FDR)=%{y:.3f}<extra></extra>",
+        hovertemplate: `%{hovertext}<br>log2FC=%{x:.3f}<br>-log10(${statisticLabel})=%{y:.3f}<extra></extra>`,
       },
       {
         x: up.map((point) => point.log2fc),
         y: up.map((point) => point.score),
-        text: up.map((point) => point.gene),
+        text: up.map((point) => featureDisplayName(point.gene, modality)),
+        hovertext: up.map(point => featureHover(point.gene, modality)),
         customdata: up.map((point) => [point.gene, point.fdr, point.pval]),
         type: "scattergl",
         mode: pointMode,
@@ -4076,7 +4424,7 @@ function renderDifferentialVolcano(payload, geneFilter = null) {
         textfont: { size: 10, color: "#1e293b" },
         name: "Up",
         marker: { color: "#dc2626", size: 16, opacity: 0.72 },
-        hovertemplate: "%{text}<br>log2FC=%{x:.3f}<br>-log10(FDR)=%{y:.3f}<extra></extra>",
+        hovertemplate: `%{hovertext}<br>log2FC=%{x:.3f}<br>-log10(${statisticLabel})=%{y:.3f}<extra></extra>`,
       },
     ],
     {
@@ -4086,13 +4434,13 @@ function renderDifferentialVolcano(payload, geneFilter = null) {
       margin: { t: 56, l: 60, r: 20, b: 56 },
       height: 640,
       xaxis: { title: "log2 fold change", zeroline: true, zerolinecolor: "rgba(100,116,139,0.45)" },
-      yaxis: { title: "-log10(FDR)" },
+      yaxis: { title: `-log10(${statisticLabel})` },
       hovermode: "closest",
     },
     { responsive: true }
   );
   plot.on("plotly_click", (event) => {
-    const gene = event?.points?.[0]?.text;
+    const gene = event?.points?.[0]?.customdata?.[0];
     if (gene) {
       currentDifferentialGene = gene;
       loadDifferentialGeneDetail(gene, payload.population);
@@ -4277,11 +4625,10 @@ function renderDifferentialNetwork(payload, geneFilter = null) {
     if (!element.data || !element.data.id || element.data.source) {
       return element;
     }
-    const log2fc = Number(element.data.log2fc || 0);
     return {
       data: {
         ...element.data,
-        color: log2fc >= 0 ? "#fca5a5" : "#7dd3fc",
+        color: networkFoldColor(element.data.log2fc),
       },
     };
   });
@@ -4619,7 +4966,12 @@ function renderDifferentialCommunicationTable(payload, geneFilter = null) {
 }
 
 async function loadDifferentialGeneDetail(gene, population, options) {
+  const request = ++differentialDetailRequest;
+  const runId = currentDifferentialState?.run_id;
   const jobId = document.getElementById("results-job-id").value.trim();
+  const isCurrent = () => request === differentialDetailRequest &&
+    runId === currentDifferentialState?.run_id &&
+    jobId === document.getElementById("results-job-id").value.trim();
   if (!gene || !population || !jobId) {
     resetDifferentialGeneDetail();
     return;
@@ -4631,6 +4983,7 @@ async function loadDifferentialGeneDetail(gene, population, options) {
   }
   try {
     const payload = await fetchDifferentialJson(url);
+    if (!isCurrent()) return;
     currentDifferentialPopulation = payload.population || population;
     if (payload.interaction_key || payload.ligand || payload.receptor) {
       currentDifferentialInteraction = {
@@ -4650,6 +5003,7 @@ async function loadDifferentialGeneDetail(gene, population, options) {
     }
     renderDifferentialGeneDetail(payload);
   } catch (err) {
+    if (!isCurrent()) return;
     resetDifferentialGeneDetail();
     document.getElementById("differential-selected-gene").textContent = gene;
     document.getElementById("differential-gene-empty").textContent = err.message || "Unable to load gene detail.";
@@ -4658,18 +5012,20 @@ async function loadDifferentialGeneDetail(gene, population, options) {
 }
 
 function renderDifferentialGeneDetail(payload) {
+  const modality = differentialFeatureModality();
+  const displayGene = featureDisplayName(payload.gene, modality);
   const plot = document.getElementById("differential-gene-plot");
   const empty = document.getElementById("differential-gene-empty");
   const stats = document.getElementById("differential-gene-stats");
   const downloadButton = document.getElementById("download-differential-gene-btn");
   const isCommunication = isCurrentDifferentialCommunicationAnalysis(payload);
   const isFeatureExpression = payload.view_kind === "feature_expression";
-  const yTitle = isFeatureExpression
+  const yTitle = payload.value_label || (isFeatureExpression
     ? "Normalized expression"
-    : (isCommunication ? "fastComm communication score" : "Normalized expression");
+    : (isCommunication ? "fastComm communication score" : "Normalized expression"));
   const headerLabel = isFeatureExpression
-    ? `${payload.gene} (${payload.feature_role || "feature"}) in ${payload.feature_state || payload.population}`
-    : `${payload.gene} in ${payload.population}`;
+    ? `${displayGene} (${payload.feature_role || "feature"}) in ${payload.feature_state || payload.population}`
+    : `${displayGene} in ${payload.population}`;
   document.getElementById("differential-selected-gene").textContent = headerLabel;
   updateDifferentialLrToggle(payload);
   plot.classList.remove("hidden");
@@ -4694,21 +5050,21 @@ function renderDifferentialGeneDetail(payload) {
     },
     box: { visible: true },
     meanline: { visible: true },
-    hovertemplate: `${group.label}<br>${isFeatureExpression ? "expr" : (isCommunication ? "score" : "expr")}=%{y:.3f}<extra></extra>`,
+    hovertemplate: `${featureHover(payload.gene, modality)}<br>${group.label}<br>${isFeatureExpression ? "expr" : (isCommunication ? "score" : "expr")}=%{y:.3f}<extra></extra>`,
   }));
   const titleSubject = isFeatureExpression
-    ? `${payload.gene} in ${payload.feature_state || payload.population}`
-    : payload.gene;
+    ? `${displayGene} in ${payload.feature_state || payload.population}`
+    : displayGene;
   Plotly.newPlot(
     plot,
     traces,
     {
       // The y axis already names the measure, so the title carries only the subject.
       // Nathan, 2026-09-01: "Just make it the gene name. The prefix is unnecessary."
-      title: titleSubject,
+      title: {text: featureAnnotation(payload.gene, modality) ? featurePlotTitle(payload.gene, modality) : titleSubject, font:{size:14}},
       paper_bgcolor: "rgba(0,0,0,0)",
       plot_bgcolor: "rgba(255,255,255,0.94)",
-      margin: { t: 52, l: 50, r: 18, b: 48 },
+      margin: { t: featureAnnotation(payload.gene, modality) ? 90 : 52, l: 50, r: 18, b: 48 },
       height: 420,
       yaxis: { title: yTitle },
       xaxis: { automargin: true },
@@ -4849,6 +5205,7 @@ function updateDifferentialDownloadButton() {
     return;
   }
   const mode = document.getElementById("differential-viz-mode").value;
+
   const population = document.getElementById("differential-result-population").value;
   if (!population && mode !== "summary") {
     button.classList.add("hidden");
@@ -4899,6 +5256,7 @@ function resetDifferentialResults() {
 }
 
 function resetDifferentialGeneDetail() {
+  ++differentialDetailRequest;
   const featureLabel = String((currentDifferentialState && currentDifferentialState.feature_label) || "gene");
   const isGrn = featureLabel === "TF";   // GRN is the only TF-feature modality
   const detailNoun = isGrn ? "edge" : featureLabel;
@@ -4960,6 +5318,7 @@ function clearDisplayFilters() {
 }
 
 async function loadGeneSuggestions(jobId) {
+  await ensureFeatureAnnotations(jobId);
   const signature = [
     String(jobId || "").trim(),
     ...VISUALIZATION_PANELS.map((panelKey) => `${panelKey}:${panelModality(panelKey)}`),
@@ -4994,6 +5353,7 @@ async function loadGeneSuggestions(jobId) {
         features.push(value);
         const option = document.createElement("option");
         option.value = value;
+        option.label = featureDisplayName(value, modality);
         datalist.appendChild(option);
       });
       // A NAME THE SERVER CAN RESOLVE IS NEVER OVERWRITTEN.
@@ -5089,6 +5449,7 @@ function populateDisplayFilterControls(meta) {
   VISUALIZATION_PANELS.forEach((panelKey) => {
     populateDisplayFilterControlsForPanel(panelKey, meta);
   });
+  updateExpressionModeOptions();
 }
 
 async function loadDisplayFilters(jobId) {
@@ -5245,6 +5606,15 @@ async function loadVisualizationPanel(panelKey) {
     return;
   }
 
+  if(mode.startsWith("integrated_")) {
+    const host=document.getElementById(panelElementId(panelKey,"plot"));
+    resetVisualizationSurface(panelKey);
+    setPanelSummary(panelKey, "");
+    host.classList.remove("hidden");
+    await ScalableIntegrated.mount(host,integratedOptions(jobId,mode,getPanelSelectValue(panelKey,"marker-population"),modality,"marker"));
+    return;
+  }
+
   // Gene-set plot types fetch their own payload and draw it here, so they do not
   // travel through the single-molecule expression path below.
   if (GENE_SET_MODES.has(mode)) {
@@ -5257,7 +5627,9 @@ async function loadVisualizationPanel(panelKey) {
       params.set("genes", genes.join(","));
     }
     if (mode === "combplot") {
-      params.set("min_cells", String(panelCombMinCells(panelKey)));
+      params.set("unit", panelCombUnit(panelKey));
+      params.set("cells_per_sample", String(panelCellsPerSample(panelKey)));
+      if (panelCombUnit(panelKey) === "donor") params.set("min_cells", String(panelCombMinCells(panelKey)));
     }
     // "Filter data to display" restricts these plots too, not only the UMAP and
     // violin. Without this the DotPlot and CombPlot ignored both annotation rows.
@@ -5369,6 +5741,7 @@ async function loadVisualizationPanel(panelKey) {
       params.set("sample", getPanelSelectValue(panelKey, "grn-sample"));
       params.set("cell_state", getPanelSelectValue(panelKey, "grn-cellstate"));
       params.set("threshold", String(document.getElementById(panelElementId(panelKey, "grn-threshold"))?.value || "0"));
+      params.set("max_edges", getPanelSelectValue(panelKey, "grn-limit") || "25");
       const resp = await fetch(apiPath(`/jobs/${jobId}/grn/network?${params.toString()}`));
       const data = await parseApiResponse(resp);
       if (!resp.ok) {
@@ -5684,6 +6057,8 @@ function renderPanelUmap(panelKey, umapData, mode, dotScale) {
 
 function renderPanelExpression(panelKey, expressionData, mode, dotScale) {
   updateBaselineFilterSummaries(panelKey);
+  const displayGene = featureDisplayName(expressionData?.gene, expressionData?.modality);
+  const valueLabel = measurementLabel(expressionData?.modality);
   if (!expressionData?.umap?.length && !expressionData?.violin?.length) {
     renderVisualizationMessage(
       panelKey,
@@ -5702,7 +6077,7 @@ function renderPanelExpression(panelKey, expressionData, mode, dotScale) {
         marker: { color: "#475569", opacity: 0.85 },
       };
       Plotly.newPlot(panelPlotId(panelKey), [trace], {
-        title: `${expressionData.gene} (reference centroid expression, top 10 states)`,
+        title: `${displayGene} (reference centroid expression, top 10 states)`,
         paper_bgcolor: "rgba(0,0,0,0)",
         plot_bgcolor: "rgba(255,255,255,0.9)",
         height: 560,
@@ -5721,6 +6096,7 @@ function renderPanelExpression(panelKey, expressionData, mode, dotScale) {
     const yPad = Math.max((globalMax - globalMin) * 0.04, 0.05);
     const violinTraces = expressionData.violin.map((entry) => ({
       type: "violin",
+      hovertemplate: `${featureHover(expressionData.gene, expressionData.modality)}<br>%{y:.3f}<extra>%{fullData.name}</extra>`,
       name: entry.population,
       y: entry.values,
       box: { visible: false },
@@ -5731,25 +6107,25 @@ function renderPanelExpression(panelKey, expressionData, mode, dotScale) {
       marker: { size: 3 * dotScale, opacity: 0.55 },
     }));
     Plotly.newPlot(panelPlotId(panelKey), violinTraces, {
-      title: `${expressionData.gene} (top 10 states by mean)`,
+      title: `${displayGene} (top 10 states by mean)`,
       paper_bgcolor: "rgba(0,0,0,0)",
       plot_bgcolor: "rgba(255,255,255,0.9)",
       height: 560,
       margin: { t: 36, l: 48, r: 20, b: 120 },
-      yaxis: { title: "Expression", range: [globalMin - yPad, globalMax + yPad] },
+      yaxis: { title: valueLabel, range: [globalMin - yPad, globalMax + yPad] },
     });
     return;
   }
-  const zeroPoints = expressionData.umap.filter((p) => Number(p.value) <= 0);
+  const zeroPoints = expressionData.umap.filter((p) => Number(p.value) === 0);
   const expressedPoints = expressionData.umap
-    .filter((p) => Number(p.value) > 0)
+    .filter((p) => Number.isFinite(Number(p.value)) && Number(p.value) !== 0)
     .sort((a, b) => Number(a.value) - Number(b.value));
   const traces = [];
   if (zeroPoints.length) {
     traces.push({
       x: zeroPoints.map((p) => p.x),
       y: zeroPoints.map((p) => p.y),
-      text: zeroPoints.map((p) => `${p.barcode}<br>${p.population}<br>${expressionData.gene}: 0.000`),
+      text: zeroPoints.map((p) => `${p.barcode}<br>${p.population}<br>${featureHover(expressionData.gene, expressionData.modality)}: 0.000`),
       mode: "markers",
       type: "scattergl",
       marker: {
@@ -5758,7 +6134,7 @@ function renderPanelExpression(panelKey, expressionData, mode, dotScale) {
         opacity: 0.9,
       },
       hoverinfo: "text",
-      name: `${expressionData.gene} = 0`,
+      name: `${displayGene} = 0`,
       showlegend: false,
     });
   }
@@ -5775,7 +6151,7 @@ function renderPanelExpression(panelKey, expressionData, mode, dotScale) {
       maxValue = minValue + 1e-9;
     }
     const normalizedModality = normalizeModalityId(expressionData?.modality);
-    const useImputedPalette = normalizedModality === "lipids" || normalizedModality === "adt" || normalizedModality === "metabolite" || normalizedModality === "lipid" || normalizedModality === "grn";
+    const useImputedPalette = normalizedModality === "lipids" || normalizedModality === "adt" || normalizedModality === "metabolite" || normalizedModality === "lipid" || normalizedModality === "grn" || normalizedModality === "grn_tf";
     const colorscale = useImputedPalette
       ? [
           [0.0, "#2563eb"],
@@ -5796,7 +6172,7 @@ function renderPanelExpression(panelKey, expressionData, mode, dotScale) {
       traces.push({
         x: bin.map((p) => p.x),
         y: bin.map((p) => p.y),
-        text: bin.map((p) => `${p.barcode}<br>${p.population}<br>${expressionData.gene}: ${p.value.toFixed(3)}`),
+        text: bin.map((p) => `${p.barcode}<br>${p.population}<br>${featureHover(expressionData.gene, expressionData.modality)}: ${p.value.toFixed(3)}`),
         mode: "markers",
         type: "scattergl",
         marker: {
@@ -5806,17 +6182,17 @@ function renderPanelExpression(panelKey, expressionData, mode, dotScale) {
           cmin: minValue,
           cmax: maxValue,
           showscale: start + step >= expressedPoints.length,
-          colorbar: start + step >= expressedPoints.length ? { title: expressionData.gene } : undefined,
+          colorbar: start + step >= expressedPoints.length ? { title: displayGene } : undefined,
         },
-        name: expressionData.gene,
+        name: displayGene,
         showlegend: false,
       });
     }
   }
   const expressionLayout = {
     title: expressionData.source === "reference"
-      ? `${expressionData.gene} reference expression`
-      : `${expressionData.gene} expression`,
+      ? `${displayGene} reference expression`
+      : `${displayGene} ${valueLabel.charAt(0).toLowerCase() + valueLabel.slice(1)}`,
     paper_bgcolor: "rgba(0,0,0,0)",
     plot_bgcolor: "rgba(255,255,255,0.9)",
     height: 560,
@@ -5843,6 +6219,12 @@ function renderPanelExpression(panelKey, expressionData, mode, dotScale) {
 
 function renderVisualizationPanel(panelKey) {
   const mode = getPanelSelectValue(panelKey, "mode");
+  // Integrated views own their live SVG/Cytoscape state. Repainting an old
+  // expression payload here replaces a pathway when the window count changes.
+  if (mode.startsWith("integrated_")) {
+    document.getElementById(panelPlotId(panelKey))?._integratedResize?.();
+    return;
+  }
   const data = panelPlotData[panelKey];
 
   // Gene-set figures are drawn from their own payload, not the expression one.
@@ -5852,7 +6234,13 @@ function renderVisualizationPanel(panelKey) {
         (data && data.payload && data.payload.message) || "Enter a gene set to draw this plot.");
       return;
     }
-    if (mode === "combplot") renderCombPlotFigure(panelPlotId(panelKey), data.payload || {});
+    resetVisualizationSurface(panelKey);
+    setPanelSummary(panelKey, "");
+    if (mode === "combplot") {
+      renderCombPlotFigure(panelPlotId(panelKey), data.payload || {});
+      const sampling = data.payload?.sampling;
+      setPanelSummary(panelKey, sampling ? sampling.description : "");
+    }
     else renderDotPlotFigure(panelPlotId(panelKey), data.payload || {});
     return;
   }
@@ -5888,10 +6276,9 @@ function renderVisualizationPanel(panelKey) {
   }
   if (mode === "grn_network") {
     const p = data.payload || {};
-    const scoreType = p.score_type ? ` (${p.score_type})` : "";
-    setPanelSummary(panelKey, p.sample
-      ? `GRN edges · ${p.sample}${p.cell_state ? " · " + p.cell_state : ""}${scoreType}.`
-      : `GRN edge network${scoreType}.`);
+    const description = document.getElementById(panelElementId(panelKey, "grn-description"));
+    if (description) description.textContent = grnNetworkDescription(p);
+    setPanelSummary(panelKey, "Yellow diamond = TF; red circle = target; dark outline = your selected gene. Colors identify node roles. Arrow = TF → target. Width scales with |mean score| within this graph; hover for scores. These predictions do not indicate activation/repression or marker up/down regulation.");
     if (!(p.elements || []).length) {
       renderVisualizationMessage(panelKey, p.message || "No GRN edges matched.", "GRN edges");
       return;
@@ -5930,12 +6317,17 @@ async function downloadVisualizationImage(panelKey) {
   const jobId = document.getElementById("results-job-id").value.trim();
   const mode = getPanelSelectValue(panelKey, "mode");
   const modality = panelModality(panelKey);
+  if (jobId && mode?.startsWith("integrated_")) {
+    try {await document.getElementById(panelPlotId(panelKey))._integratedPdf?.();}
+    catch(error){showDownloadError(error);}return;
+  }
   if (!jobId || !mode || !panelPlotData[panelKey]) {
     return;
   }
   if (mode === "marker_heatmap") {
     const params = getDisplayFilterParams(panelKey);
     params.set("modality", modality);
+    params.set("cells_per_sample", String(panelCellsPerSample(panelKey)));
     window.open(apiPath(`/jobs/${jobId}/marker/heatmap.pdf?${params.toString()}`), "_blank");
     return;
   }
@@ -5953,16 +6345,10 @@ async function downloadVisualizationImage(panelKey) {
     if (cy) {
       try {
         await ensureCytoscapeSvgLoaded();
-        const svg = cy.svg({ scale: 1, full: true });
-        const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = buildPdfFilename([jobId, panelKey, plotType], "svg").replace(/\.pdf$/i, ".svg");
-        link.click();
-        URL.revokeObjectURL(url);
+        await saveSvgMarkupAsPdf(cy.svg({ scale: 1, full: true }),
+          buildPdfFilename([jobId, panelKey, plotType], plotType));
       } catch (err) {
-        console.warn(err);
+        showDownloadError(err);
       }
       return;
     }
@@ -5970,6 +6356,20 @@ async function downloadVisualizationImage(panelKey) {
       panelPlotId(panelKey),
       buildPdfFilename([jobId, panelKey, plotType], plotType),
     );
+    return;
+  }
+  if (mode === "grn_network") {
+    const cy = expressionCyByPanel[panelKey];
+    if (!cy) return;
+    try {
+      await ensureCytoscapeSvgLoaded();
+      await saveSvgMarkupAsPdf(cy.svg({ scale: 1, full: true }),
+        buildPdfFilename([jobId, panelKey, getPanelSelectValue(panelKey, "grn-cellstate"), "grn_edges"], "grn_edges"),
+        grnNetworkDescription(panelPlotData[panelKey]?.payload || {}) + " "
+          + document.getElementById(panelElementId(panelKey, "filter-summary")).textContent);
+    } catch (error) {
+      showDownloadError(error);
+    }
     return;
   }
   try {
@@ -5998,6 +6398,10 @@ async function downloadDifferentialLeftPdf() {
   }
   if (!population) {
     return;
+  }
+  if (mode.startsWith("integrated_")) {
+    try {await document.getElementById("differential-plot-area")._integratedPdf?.();}
+    catch(error){showDownloadError(error);}return;
   }
   if (mode === "table") {
     const plot = document.getElementById("differential-plot-area");
@@ -6097,6 +6501,7 @@ function setExplorerTab(tab) {
   if (tab === "differential" && currentJobStatus !== "completed") {
     tab = "run";
   }
+  const tabChanged = activeExplorerTab !== tab;
   activeExplorerTab = tab;
   document.querySelectorAll(".workspace-tab-btn").forEach((button) => {
     button.classList.toggle("active", button.dataset.tab === tab);
@@ -6104,6 +6509,18 @@ function setExplorerTab(tab) {
   document.querySelectorAll(".workspace-panel").forEach((panel) => {
     panel.classList.toggle("active", panel.dataset.tabPanel === tab);
   });
+  if (tabChanged && tab === "explore") {
+    // Initial plots are prepared while the workspace is hidden. Resize only
+    // after it is visible, so restored plots fit the actual panel dimensions.
+    requestAnimationFrame(() => {
+      VISUALIZATION_PANELS.forEach((panelKey) => {
+        const plot = document.getElementById(panelPlotId(panelKey));
+        if (plot?.data?.length && plot.offsetWidth && plot.offsetHeight) {
+          Plotly.Plots.resize(plot);
+        }
+      });
+    });
+  }
 }
 
 function syncExplorerWorkspace(preferredTab = null) {
@@ -6187,6 +6604,10 @@ function panelGeneSet(panelKey) {
   return parseGeneSet(box ? box.value : "");
 }
 
+function panelCombUnit(panelKey) {
+  return document.getElementById(panelElementId(panelKey, "combunit"))?.value === "donor" ? "donor" : "cells";
+}
+
 function panelCombMinCells(panelKey) {
   const select = document.getElementById(panelElementId(panelKey, "combmin"));
   const value = Number(select && select.value);
@@ -6197,6 +6618,14 @@ function initGeneSetBoxes() {
   VISUALIZATION_PANELS.forEach((panelKey) => {
     const box = document.getElementById(panelElementId(panelKey, "geneset"));
     const min = document.getElementById(panelElementId(panelKey, "combmin"));
+    const unit = document.getElementById(panelElementId(panelKey, "combunit"));
+    if (unit && unit.dataset.wired !== "1") {
+      unit.dataset.wired = "1";
+      unit.addEventListener("change", () => {
+        updateExpressionModeOptions();
+        loadVisualizationPanel(panelKey);
+      });
+    }
     if (box && box.dataset.wired !== "1") {
       box.dataset.wired = "1";
       let timer = null;
@@ -6295,6 +6724,10 @@ async function loadChatExamples(jobId) {
  * actually removes the figure; emptying `innerHTML` alone leaves the chart
  * registered and the next `newPlot` inherits its layout. */
 function clearChatOutput() {
+  const correlationPlot = document.getElementById("chat-correlation-plot");
+  if (correlationPlot) Plotly.purge(correlationPlot);
+  chatResultState = null;
+  document.getElementById("chat-result-controls")?.classList.add("hidden");
   chatLastResult = null;
   try { Plotly.purge("chat-plot"); } catch (err) { /* nothing drawn yet */ }
   ["chat-answer", "chat-table", "chat-plot", "chat-followups"].forEach((id) => {
@@ -6319,6 +6752,7 @@ async function askChat() {
   // rather than when the answer arrives.
   clearChatOutput();
   if (!jobId) { status.textContent = "Load a dataset first."; return; }
+  await ensureFeatureAnnotations(jobId);
   status.textContent = "Working...";
   try {
     const response = await fetch(apiPath(`/api/jobs/${jobId}/chat`), {
@@ -6374,17 +6808,181 @@ function renderChatAnswer(data) {
   const views = document.getElementById("chat-views");
   if (!table || !(table.rows || []).length) { views.classList.add("hidden"); return; }
   views.classList.remove("hidden");
-  const columns = table.columns || Object.keys(table.rows[0] || {}).slice(0, 8);
-  const head = columns.map((c) => `<th>${c}</th>`).join("");
-  const body = table.rows.slice(0, 50).map((row) => {
-    const cells = Array.isArray(row) ? row : columns.map((c) => row[c]);
-    return "<tr>" + cells.map((v) => `<td>${formatChatCell(v)}</td>`).join("") + "</tr>";
-  }).join("");
-  document.getElementById("chat-table").innerHTML =
-    `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+  initChatResultControls(data);
   document.getElementById("chat-table").classList.remove("hidden");
   document.getElementById("chat-plot").classList.add("hidden");
   views.querySelectorAll("button").forEach((b, i) => b.classList.toggle("active", i === 0));
+  if (["cross_modal", "modality_markers"].includes(data.plot?.kind)) {
+    document.getElementById("chat-table").classList.add("hidden");
+    document.getElementById("chat-plot").classList.remove("hidden");
+    views.querySelectorAll("button").forEach(b => b.classList.toggle("active", b.dataset.view === "plot"));
+    drawChatPlot();
+  }
+}
+
+// One result set drives the table and correlation plots; filters never discard it.
+let chatResultState = null;
+function chatResultRows() {
+  const columns = chatLastResult?.table?.columns || [];
+  return (chatLastResult?.table?.rows || []).map(row => Array.isArray(row)
+    ? Object.fromEntries(columns.map((key, i) => [key, row[i]])) : row);
+}
+function filteredChatRows() {
+  const state = chatResultState;
+  if (!state) return chatResultRows();
+  const query = state.search.trim().toLocaleLowerCase();
+  const rows = chatResultRows().filter(row => {
+    if (query && ![...Object.values(row), featureDisplayName(row.feature || row.gene || "", row.modality)].some(v => String(v ?? "").toLocaleLowerCase().includes(query))) return false;
+    if ((state.requiredModalities || []).some(m => !(row[m] > 0))) return false;
+    if (!state.correlation) return true;
+    const rho = row.rho;
+    if (!Number.isFinite(rho)) return false;
+    if (state.relationship === "positive" && rho <= 0) return false;
+    if (state.relationship === "negative" && rho >= 0) return false;
+    if (state.relationship === "near_zero" && Math.abs(rho) > state.threshold) return false;
+    return (state.min === "" || rho >= Number(state.min)) && (state.max === "" || rho <= Number(state.max));
+  });
+  const direction = state.direction === "desc" ? -1 : 1;
+  if (state.sort) rows.sort((a, b) => {
+    const x = a[state.sort], y = b[state.sort];
+    if (x == null) return y == null ? 0 : 1;
+    if (y == null) return -1;
+    return direction * (typeof x === "number" && typeof y === "number"
+      ? x - y : String(x).localeCompare(String(y), undefined, {numeric: true}));
+  });
+  return rows;
+}
+function filteredChatPairs() {
+  const pairs = chatLastResult?.plot?.pairs || [];
+  const lookup = new Map(pairs.map(pair => [JSON.stringify([pair.feature, pair.gene]), pair]));
+  return filteredChatRows().map(row => lookup.get(JSON.stringify([row.feature, row.gene]))).filter(Boolean);
+}
+function initChatResultControls(data) {
+  const host = document.getElementById("chat-result-controls");
+  const defaults = data.result_controls || {};
+  const columns = data.table.columns || Object.keys(data.table.rows[0] || {});
+  chatResultState = {search:"", sort:defaults.sort_by || "", direction:defaults.sort_direction || "asc",
+    limit:data.plot?.kind === "cross_pathways" ? 25 : 50, page:0, requiredModalities:[], relationship:defaults.relationship || "all", threshold:defaults.near_zero_threshold ?? .2,
+    min:"", max:"", correlation:data.plot?.kind === "cross_modal", selectedPair:null};
+  host.replaceChildren();
+  host.classList.remove("hidden");
+  const field = (text, control, id) => {
+    const label = document.createElement("label");
+    label.className = "chat-result-field";
+    const caption = document.createElement("span"); caption.textContent = text;
+    control.id = id; label.append(caption, control); host.appendChild(label); return control;
+  };
+  const input = (label, id, key, type="text") => {
+    const el = document.createElement("input"); el.type = type; el.value = chatResultState[key];
+    if (type === "number") { el.min = key === "threshold" ? "0" : "-1"; el.max = "1"; el.step = "any"; }
+    field(label, el, id);
+    el.addEventListener("input", () => {
+      if (!el.checkValidity() || (key === "threshold" && el.value === "")) return;
+      chatResultState[key] = key === "threshold" ? Number(el.value) : el.value;
+      chatResultState.page = 0; refreshChatResults();
+    });
+    return el;
+  };
+  const select = (label, id, key, choices) => {
+    const el = document.createElement("select");
+    choices.forEach(([value, text]) => { const o=document.createElement("option"); o.value=value; o.textContent=text; el.appendChild(o); });
+    el.value = String(chatResultState[key]); field(label, el, id);
+    el.addEventListener("change", () => {
+      chatResultState[key] = key === "limit" ? Number(el.value) : el.value;
+      if (key === "relationship" && el.value === "near_zero") {
+        chatResultState.sort="abs_rho"; chatResultState.direction="asc";
+      }
+      chatResultState.page=0; refreshChatResults();
+    });
+    return el;
+  };
+  input("Search results", "chat-results-search", "search", "search");
+  if (data.plot?.kind === "cross_pathways") {
+    const group=document.createElement("fieldset");group.className="chat-modality-filters";
+    const legend=document.createElement("legend");legend.textContent="Require a hit in every checked modality";group.appendChild(legend);
+    data.plot.modalities.forEach(mod=>{
+      const label=document.createElement("label"),box=document.createElement("input");box.type="checkbox";box.value=mod.id;
+      box.dataset.modality=mod.id; label.append(box, document.createTextNode(mod.label));group.appendChild(label);
+      box.addEventListener("change",()=>{chatResultState.requiredModalities=[...group.querySelectorAll("input:checked")].map(e=>e.value);chatResultState.page=0;refreshChatResults();});
+    });host.appendChild(group);
+    const pdf=document.createElement("button");pdf.type="button";pdf.className="ghost-btn";pdf.id="chat-pathways-pdf";pdf.textContent="Download PDF";
+    pdf.addEventListener("click",async()=>{
+      try {
+        document.getElementById("chat-table").classList.add("hidden");document.getElementById("chat-plot").classList.remove("hidden");
+        document.querySelectorAll("#chat-views button").forEach(b=>b.classList.toggle("active",b.dataset.view === "plot"));
+        await drawChatPlot();
+        await exportPlotlyElementToVectorPdf("chat-plot",buildPdfFilename([getResultsJobId(),data.plot.cell_state,"cross_modality_pathways"]));
+      } catch(error) {showDownloadError(error);}
+    });host.appendChild(pdf);
+  }
+  if (chatResultState.correlation) {
+    select("Relationship", "chat-results-relationship", "relationship", [["all","All pairs"],["positive","Positive ρ"],["negative","Negative ρ"],["near_zero","Near zero"]]);
+    input("Near zero: |ρ| ≤", "chat-results-threshold", "threshold", "number").disabled = chatResultState.relationship !== "near_zero";
+    input("Minimum ρ", "chat-results-min", "min", "number");
+    input("Maximum ρ", "chat-results-max", "max", "number");
+  }
+  select("Sort by", "chat-results-sort", "sort", [["","Returned order"], ...columns.map(c=>[c, c === "abs_rho" ? "|ρ| (correlation strength)" : (data.column_labels?.[c] || c)])]);
+  select("Order", "chat-results-direction", "direction", [["asc","Ascending"],["desc","Descending"]]);
+  select("Rows per page", "chat-results-limit", "limit", [25,50,100,200,500,1000,2000,0].map(n=>[String(n),n ? String(n) : "All"]));
+  const pagination=document.createElement("div"); pagination.className="chat-result-pages";
+  for (const [id,label,step] of [["prev","Previous",-1],["next","Next",1]]) {
+    const button=document.createElement("button"); button.type="button"; button.className="ghost-btn";
+    button.id=`chat-results-${id}`; button.textContent=label;
+    button.addEventListener("click",()=>{chatResultState.page+=step; refreshChatResults();});
+    pagination.appendChild(button);
+  }
+  const count=document.createElement("span"); count.id="chat-results-count"; count.setAttribute("aria-live","polite");
+  pagination.appendChild(count);host.appendChild(pagination);
+  renderChatResultTable();
+}
+function refreshChatResults() {
+  document.getElementById("chat-results-sort").value=chatResultState.sort;
+  document.getElementById("chat-results-direction").value=chatResultState.direction;
+  const threshold=document.getElementById("chat-results-threshold");
+  if (threshold) threshold.disabled=chatResultState.relationship !== "near_zero";
+  renderChatResultTable();
+  if ((chatLastResult?.plot?.filterable || chatResultState.correlation || ["modality_markers","cross_pathways"].includes(chatLastResult?.plot?.kind)) && !document.getElementById("chat-plot").classList.contains("hidden")) drawChatPlot();
+}
+function renderChatResultTable() {
+  const host=document.getElementById("chat-table"), state=chatResultState;
+  const rows=filteredChatRows(), columns=chatLastResult.table.columns || Object.keys(rows[0] || {});
+  const limit=state.limit || Math.max(rows.length,1);
+  state.page=Math.max(0,Math.min(state.page,Math.ceil(rows.length/limit)-1));
+  const start=state.page*limit, end=Math.min(start+limit,rows.length);
+  document.getElementById("chat-results-prev").disabled=state.page === 0;
+  document.getElementById("chat-results-next").disabled=end >= rows.length;
+  document.getElementById("chat-results-count").textContent=`${rows.length ? start+1 : 0}–${end} of ${rows.length} matching / ${chatResultRows().length} returned results`;
+  host.replaceChildren();
+  const table=document.createElement("table"), head=document.createElement("thead"), tr=document.createElement("tr"), body=document.createElement("tbody");
+  columns.forEach(key=>{
+    const th=document.createElement("th"), button=document.createElement("button");
+    const active=state.sort === key;
+    th.setAttribute("aria-sort",active ? (state.direction === "asc" ? "ascending" : "descending") : "none");
+    button.type="button"; button.className="chat-sort-button";
+    button.textContent=(key === "abs_rho" ? "|ρ|" : (chatLastResult.column_labels?.[key] || key))+(active ? (state.direction === "asc" ? " ↑" : " ↓") : " ↕");
+    button.addEventListener("click",()=>{state.direction=active && state.direction === "asc" ? "desc" : "asc";state.sort=key;state.page=0;refreshChatResults();});
+    th.appendChild(button);tr.appendChild(th);
+  });
+  head.appendChild(tr);
+  rows.slice(start,end).forEach(row=>{
+    const tr=document.createElement("tr");
+    columns.forEach(key=>{const td=document.createElement("td");td.textContent=["rho","abs_rho"].includes(key) && Number.isFinite(row[key]) ? row[key].toFixed(5) : formatChatCell(row[key]);td.title=String(row[key] ?? "");if (["feature","gene"].includes(key) && featureAnnotation(row[key], row.modality)) { td.textContent=featureDisplayName(row[key], row.modality); const info=featureAnnotation(row[key],row.modality); td.title=`${info.status} · ${info.source} · ${info.source_cell}`; }if (key === "pathway" && chatLastResult.plot?.kind === "cross_pathways") {
+      const button=document.createElement("button");button.type="button";button.className="ghost-btn";button.textContent=row.pathway;
+      button.title=`Open ${row.id} in ${chatLastResult.plot.source === "marker" ? "Explore" : "Differential"}`;
+      button.addEventListener("click",()=>openCrossPathway(row,chatLastResult.plot));td.replaceChildren(button);
+    } else if (row.hits?.[key]) td.title=row.hits[key].join("\n");
+    tr.appendChild(td);});
+    if (state.correlation) {
+      const td=document.createElement("td"), button=document.createElement("button");button.type="button";button.className="ghost-btn";button.textContent="Plot";
+      button.setAttribute("aria-label",`Plot ${row.feature} / ${row.gene}`);
+      button.addEventListener("click",()=>{state.selectedPair=JSON.stringify([row.feature,row.gene]);document.querySelector('#chat-views [data-view="plot"]').click();});
+      td.appendChild(button);tr.appendChild(td);
+    }
+    body.appendChild(tr);
+  });
+  if (state.correlation) {const th=document.createElement("th");th.textContent="View";tr.appendChild(th);}
+  table.append(head,body);host.appendChild(table);
+  if (!rows.length) {const message=document.createElement("p");message.textContent="No results match these filters. Change the search or selected filters.";host.appendChild(message);}
 }
 
 function formatChatCell(value) {
@@ -6410,28 +7008,32 @@ function renderDotPlotFigure(hostId, payload) {
   const frac = payload.frac || [];
   const host = document.getElementById(hostId);
   if (!host) return;
-  if (!genes.length || !states.length) {
-    host.innerHTML = "<span class=\"warn\">No genes to draw.</span>";
+  if (!genes.length || !states.length || (payload.state_n && !payload.state_n.some(n => n > 0))) {
+    try { Plotly.purge(hostId); } catch (err) { /* no previous plot */ }
+    host.innerHTML = "<span class=\"warn\">No observations match the selected genes and filters.</span>";
     return;
   }
   // scALABLE writes plain HTML into this div for its status messages. Plotly
   // still believes it owns the container after that, and the redraw comes back
   // blank, so the container is released first.
   try { Plotly.purge(hostId); } catch (err) { /* nothing drawn there yet */ }
-  let maxMean = 0;
-  mean.forEach((row) => row.forEach((v) => { if (v > maxMean) maxMean = v; }));
+  let maxMean = 0, minMean = 0;
+  mean.forEach((row) => row.forEach((v) => { if (v > maxMean) maxMean = v; if (v < minMean) minMean = v; }));
   const x = [], y = [], size = [], color = [], text = [];
   genes.forEach((gene, gi) => {
     states.forEach((state, si) => {
+      if (payload.state_n && !payload.state_n[si]) return;
       x.push(si);
       y.push(gi);
       const f = (frac[gi] || [])[si] || 0;
       const m = (mean[gi] || [])[si] || 0;
       size.push(4 + f * 18);
       color.push(m);
-      text.push(`${gene}<br>${state}<br>mean ${m.toFixed(3)}<br>detected ${(f * 100).toFixed(0)}%`);
+      text.push(`${featureHover(gene, payload.modality)}<br>${state}<br>mean ${m.toFixed(3)}<br>values > 0: ${(f * 100).toFixed(0)}%`);
     });
   });
+  host.style.overflowX = "auto";
+  const plotWidth = Math.max(host.clientWidth || 500, 440 + 28 * states.length);
   Plotly.react(hostId, [{
     type: "scatter", mode: "markers", x, y, text, hoverinfo: "text",
     marker: {
@@ -6439,58 +7041,41 @@ function renderDotPlotFigure(hostId, payload) {
       // White at no expression through to red at the highest mean, so an
       // unexpressed gene reads as absent rather than as a pale colour.
       colorscale: [[0, "#FFFFFF"], [0.5, "#F4A582"], [1, "#B2182B"]],
-      cmin: 0, cmax: maxMean || 1,
+      cmin: minMean, cmax: maxMean > minMean ? maxMean : minMean + 1,
       colorbar: { title: { text: "mean", side: "right" }, thickness: 10 },
       line: { width: 0 },
     },
   }], {
-    margin: { l: 110, r: 10, t: 10, b: 150 },
+    width: plotWidth,
+    autosize: false,
+    margin: { l: genes.some(g => featureAnnotation(g, payload.modality)) ? 370 : 180, r: 50, t: 10, b: 180 },
     xaxis: {
       tickvals: states.map((_, i) => i), ticktext: states,
       tickangle: -90, tickfont: { size: 9 }, showgrid: false,
       range: [-0.6, states.length - 0.4],
     },
     yaxis: {
-      tickvals: genes.map((_, i) => i), ticktext: genes,
+      tickvals: genes.map((_, i) => i), ticktext: genes.map(g => featureDisplayName(g, payload.modality)),
       tickfont: { size: 10 }, showgrid: false, range: [-0.6, genes.length - 0.4],
     },
     height: Math.max(240, 22 * genes.length + 170),
   }, { responsive: true, displaylogo: false });
 }
 
-/* CombPlot: one bar per donor per cell state, one row per gene.
- *
- * Bars are coloured by cell state and run in canonical order, so a block of one
- * colour is a state and its width is the number of donors that contributed
- * cells to it. Values are per-donor pseudobulk, not per cell: cell-level bars
- * would number in the hundreds of thousands and would hide the donor-to-donor
- * spread this figure exists to show. Hovering a bar names the donor and the
- * state and gives the cell count behind the mean. */
-
-/* CombPlot: one bar per donor per group, one row per gene.
- *
- * Layout is explicit subplot domains, not a Plotly `grid`. Combining a grid
- * with per-trace axis assignments collapsed every gene after the first onto one
- * subplot, so only one row was ever drawn.
- *
- * The top strip is the legend: one coloured block per group, labelled, in the
- * same order and the same colours as the bars beneath it. Reading down a column
- * gives that donor's value for each gene in the set.
- *
- * Values are per-donor pseudobulk. Cell-level bars would number as many as the
- * dataset has cells and would bury the donor-to-donor spread this figure exists
- * to show.
- */
+/* CombPlot shows individual observations by default; donor means are optional.
+ * State names label the top colour strip. Column details belong only in hover.
+ * Explicit subplot domains keep each gene and annotation band on its own row. */
 function renderCombPlotFigure(hostId, payload) {
   const genes = payload.genes || [];
   const columns = payload.columns || [];
   const values = payload.values || [];
   const colors = payload.colors || [];
+  const columnUnit = payload.unit === "cells" ? (payload.observation_unit || "cells") : "donor groups";
   const groupLabel = payload.group_label || "cell state";
   const host = document.getElementById(hostId);
   if (!host) return;
   if (!genes.length || !columns.length) {
-    host.innerHTML = "<span class=\"warn\">No donor groups to draw.</span>";
+    host.innerHTML = "<span class=\"warn\">No observations match the selected filters.</span>";
     return;
   }
 
@@ -6498,7 +7083,9 @@ function renderCombPlotFigure(hostId, payload) {
   const nCols = columns.length;
   const x = columns.map((_, i) => i);
   const hover = columns.map((c) =>
-    `${c.donor}<br>${c.group}<br>${c.n_cells} cell${c.n_cells === 1 ? "" : "s"}`);
+    payload.unit === "cells"
+      ? `${c.cell}<br>${c.group}${c.donor ? `<br>${c.donor}` : ""}`
+      : `${c.donor}<br>${c.group}<br>${c.n_cells} cells`);
 
   // Where each group's block of donors starts and ends, for the strip and ticks.
   const firstAt = new Map(), lastAt = new Map();
@@ -6595,14 +7182,14 @@ function renderCombPlotFigure(hostId, payload) {
       sx.push((blockFrom + i) / 2);
       sw.push(span);
       scolor.push(colors[blockFrom]);
-      stext.push(`${c.group}<br>${span} donor group${span === 1 ? "" : "s"}`);
+      stext.push(`${c.group}<br>${span} ${columnUnit}`);
       blockFrom = i + 1;
     }
   });
   traces.push({
     type: "bar", x: sx, y: sx.map(() => 1), width: sw,
     marker: { color: scolor, line: { width: 0 } },
-    text: stext, hoverinfo: "text",
+    hovertext: stext, textposition: "none", hoverinfo: "text",
     xaxis: "x", yaxis: "y",
   });
   layout.yaxis = {
@@ -6631,7 +7218,7 @@ function renderCombPlotFigure(hostId, payload) {
     traces.push({
       type: "bar", x, y: values[gi], width: 1,
       marker: { color: colors, line: { width: 0 } },
-      text: hover, hoverinfo: "text+y",
+      hovertext: hover.map(value => `${featureHover(gene, payload.modality)}<br>${value}`), textposition: "none", hoverinfo: "text+y",
       xaxis: "x", yaxis: axis,
     });
     layout[`yaxis${gi + 2}`] = {
@@ -6664,7 +7251,7 @@ function renderCombPlotFigure(hostId, payload) {
         ty.push(0.82);
         tbase.push(floorAt + 0.09);
         twidth.push(span);
-        ttext.push(`${row.label}<br>${span} donor group${span === 1 ? "" : "s"}`);
+        ttext.push(`${row.label}<br>${span} ${columnUnit}`);
         runStart = null;
       };
       row.at.forEach((i) => {
@@ -6678,7 +7265,7 @@ function renderCombPlotFigure(hostId, payload) {
     traces.push({
       type: "bar", x: tx, y: ty, base: tbase, width: twidth,
       marker: { color: "#2B2B2B", line: { width: 0 } },
-      text: ttext, hoverinfo: "text",
+      hovertext: ttext, textposition: "none", hoverinfo: "text",
       xaxis: "x", yaxis: trackAxis,
     });
     layout[`yaxis${genes.length + 2}`] = {
@@ -6699,7 +7286,7 @@ function renderCombPlotFigure(hostId, payload) {
     domain: [0, 1], anchor: trackRows.length ? trackAxis : `y${genes.length + 1}`,
     showticklabels: false, showgrid: false,
     zeroline: false, range: [-0.5, nCols - 0.5], fixedrange: true,
-    title: { text: `${nCols} donor groups, ordered by ${groupLabel}${note}`,
+    title: { text: `${nCols} ${columnUnit}, ordered by ${groupLabel}${note}`,
              font: { size: 10 } },
   };
   Plotly.react(hostId, traces, layout, { responsive: true, displaylogo: false });
@@ -6958,6 +7545,8 @@ async function drawChatPlot() {
 
   // Release the container before reusing it, or the second draw is blank.
   try { Plotly.purge("chat-plot"); } catch (err) { /* never drawn yet */ }
+  const previousCorrelation = document.getElementById("chat-correlation-plot");
+  if (previousCorrelation) Plotly.purge(previousCorrelation);
   host.innerHTML = "";
 
   if (!spec) {
@@ -6966,6 +7555,77 @@ async function drawChatPlot() {
   }
   const jobId = document.getElementById("results-job-id").value.trim();
 
+  if (spec.kind === "cross_pathways") {
+    const all=filteredChatRows(), limit=chatResultState.limit || Math.max(1,all.length);
+    const rows=all.slice(chatResultState.page*limit,(chatResultState.page+1)*limit);
+    if (!rows.length) {host.textContent="No pathways match the selected modality requirements.";return;}
+    const traces=spec.modalities.map(mod=>({type:"bar",orientation:"h",name:mod.label,
+      x:rows.map(r=>r[mod.id]), y:rows.map(r=>r.id), marker:{color:mod.color},
+      customdata:rows.map(r=>[r.id,r.pathway,(r.hits[mod.id] || []).join(", ")]),
+      hovertemplate:"%{customdata[1]}<br>Unique features: %{x}<br>%{customdata[2]}<extra>"+mod.label+"</extra>"}));
+    await Plotly.newPlot(host,traces,{barmode:"stack",height:Math.max(380,rows.length*32+160),
+      margin:{l:310,r:25,t:65,b:85},title:{text:`Cross-modality pathways: ${spec.cell_state}`,font:{size:16}},
+      xaxis:{title:{text:"Unique features per pathway, counted within each modality"},rangemode:"tozero",dtick:Math.max(1,Math.ceil(Math.max(...rows.map(r=>r.total_hits))/10))},
+      yaxis:{tickvals:rows.map(r=>r.id),ticktext:rows.map(r=>r.pathway),categoryorder:"array",categoryarray:rows.map(r=>r.id).reverse(),automargin:true},
+      legend:{orientation:"h",y:1.12}}, {responsive:true,displaylogo:false});
+    host.on("plotly_click",event=>{const id=event.points?.[0]?.customdata?.[0];const row=rows.find(r=>r.id===id);if(row)openCrossPathway(row,spec);});
+    return;
+  }
+
+  if (spec.kind === "modality_markers") {
+    const best = new Map();
+    filteredChatRows().forEach(row => {
+      if (!best.has(row.modality) || best.get(row.modality).marker_r < row.marker_r) best.set(row.modality, row);
+    });
+    const rows = [...best.values()].sort((a,b) => b.marker_r - a.marker_r);
+    if (!rows.length) { host.textContent = "No markers match these filters."; return; }
+    const labels = rows.map(r => `${r.modality}: ${featureDisplayName(r.feature, r.modality)}`);
+    Plotly.newPlot(host, [{type:"bar", orientation:"h", x:rows.map(r=>r.marker_r), y:labels,
+      marker:{color:rows.map(r=>r.annotation === "Unidentified" ? "#64748b" : "#0f807c")},
+      hovertemplate:"%{y}<br>MarkerFinder Pearson r: %{x:.4f}<extra></extra>"}],
+      {height:Math.max(300,rows.length*55+110), margin:{l:270,r:25,t:45,b:60},
+       title:{text:`Best retained marker per modality: ${spec.cell_state}`,font:{size:15}},
+       xaxis:{title:{text:"Pearson r with cell-state membership"},rangemode:"tozero"},
+       yaxis:{automargin:true,categoryorder:"array",categoryarray:labels.slice().reverse()}},
+      {responsive:true,displaylogo:false});
+    return;
+  }
+  if (spec.kind === "cross_modal") {
+    const pairs = filteredChatPairs();
+    if (!pairs.length) { host.textContent = "No pairs match these filters. Change the relationship, search, or correlation range."; return; }
+    const select = document.createElement("select");
+    select.setAttribute("aria-label", "Expression correlation pair");
+    pairs.forEach((pair, i) => {
+      const option = document.createElement("option");
+      option.value = String(i);
+      option.textContent = `${pair.feature} / ${pair.gene} (Spearman ρ = ${pair.rho.toFixed(3)})`;
+      select.appendChild(option);
+    });
+    const selected = pairs.findIndex(pair => JSON.stringify([pair.feature, pair.gene]) === chatResultState?.selectedPair);
+    if (selected >= 0) select.value = String(selected);
+    const chart = document.createElement("div");
+    chart.id = "chat-correlation-plot";
+    host.append(select, chart);
+    const draw = () => {
+      const pair = pairs[Number(select.value)];
+      chatResultState.selectedPair = JSON.stringify([pair.feature, pair.gene]);
+      Plotly.react(chart, [{type:"scatter", mode:"markers", x:pair.x, y:pair.y,
+        text:pair.labels, customdata:pair.n_cells, marker:{size:9, color:"#0f807c"},
+        hovertemplate:"%{text}<br>RNA: %{x:.3f}<br>Measurement: %{y:.3f}<br>Matched observations: %{customdata}<extra></extra>"}],
+        {height:440, margin:{l:85,r:25,t:45,b:70},
+         title:{text:`${pair.feature} / ${pair.gene}: ${spec.unit}`,font:{size:14}},
+         xaxis:{title:{text:`${pair.gene}: mean RNA expression`}},
+         yaxis:{title:{text:`${pair.feature}: mean ${spec.y_label}`}}},
+        {responsive:true,displaylogo:false});
+    };
+    select.addEventListener("change", draw);
+    draw();
+    return;
+  }
+  if (spec.kind.startsWith("integrated_")) {
+    await ScalableIntegrated.mount(host,{...integratedOptions(jobId,spec.kind,spec.cell_state,spec.modality,spec.source),...spec,externalPdf:false});
+    return;
+  }
   if (spec.kind === "volcano") {
     drawChatVolcano(host, result);
     return;
@@ -6975,7 +7635,7 @@ async function drawChatPlot() {
   // protocols that do the most work.
   if (spec.kind === "combplot" && (spec.genes || []).length) {
     try {
-      const bits = [`genes=${encodeURIComponent(spec.genes.join(","))}`, "min_cells=5"];
+      const bits = [`genes=${encodeURIComponent(spec.genes.join(","))}`, "min_cells=5", "unit=donor"];
       if (spec.group_by) bits.push(`group_by=${encodeURIComponent(spec.group_by)}`);
       const response = await fetch(apiPath(`/api/jobs/${jobId}/combplot?${bits.join("&")}`));
       const data = await response.json();
@@ -7052,13 +7712,16 @@ function drawChatNetwork(result, spec) {
   const colourFor = (node) => {
     const by = String(node.colour_by || "none");
     if (by === "none") return fade;
-    const fc = Number(by === "activity" ? node.activity_log2fc : node.expression_log2fc);
+    const raw = by === "activity" ? node.activity_log2fc : node.expression_log2fc;
+    if (raw === null || raw === undefined || raw === "") return fade;
+    const fc = Number(raw);
     if (!Number.isFinite(fc)) return fade;
     // Saturate at |2| so one extreme feature does not flatten every other colour.
     const t = Math.max(0, Math.min(1, (fc + 2) / 4));
     return ramp[Math.min(ramp.length - 1, Math.floor(t * ramp.length))];
   };
-  const four = (v) => (Number.isFinite(Number(v)) ? Number(v).toPrecision(3) : "not tested");
+  const four = (v) => (v !== null && v !== undefined && v !== "" && Number.isFinite(Number(v))
+    ? Number(v).toPrecision(3) : "not reported");
 
   const elements = [];
   nodes.forEach((n) => {
@@ -7153,12 +7816,13 @@ function drawChatVolcano(host, result) {
     ? row[((result.table.columns || []).indexOf(name))] : row[name]);
   const x = [], y = [], text = [], color = [];
   rows.forEach((row) => {
-    const fc = Number(get(row, "log2fc"));
-    const fdr = Number(get(row, "fdr"));
-    if (!Number.isFinite(fc)) return;
+    const rawFold = get(row, "log2fc"), rawFdr = get(row, "fdr");
+    if (rawFold === null || rawFold === undefined || rawFold === "" || rawFdr === null || rawFdr === undefined || rawFdr === "") return;
+    const fc = Number(rawFold), fdr = Number(rawFdr);
+    if (!Number.isFinite(fc) || !Number.isFinite(fdr) || fdr < 0 || fdr > 1) return;
     // A reported FDR of 0 is below the smallest float the table stores, so it is
     // drawn at the top of the axis rather than dropped.
-    const safe = Number.isFinite(fdr) && fdr > 0 ? fdr : Number.MIN_VALUE;
+    const safe = fdr > 0 ? fdr : 1e-300;
     x.push(fc);
     y.push(-Math.log10(safe));
     text.push(`${get(row, "gene")}<br>log2FC ${fc.toFixed(3)}<br>FDR ${fdr.toExponential(2)}`);
@@ -7320,6 +7984,7 @@ function drawChatGradient(spec) {
       title: { text: spec.covariate, font: { size: 10 } }, tickfont: { size: 9 },
       zeroline: false,
     };
+    if(spec.levels){layout[`xaxis${axis}`].tickvals=spec.levels.map((_,i)=>i);layout[`xaxis${axis}`].ticktext=spec.levels;}
     layout[`yaxis${axis}`] = {
       title: { text: gene, font: { size: 11 } }, tickfont: { size: 9 },
       zeroline: false, rangemode: "tozero",
@@ -7444,7 +8109,9 @@ function drawChatSignature(spec) {
 function drawChatBars(result, spec) {
   const host = document.getElementById("chat-plot");
   const table = result.table || {};
-  const rows = table.rows || [];
+  const allRows = spec.filterable ? filteredChatRows() : (table.rows || []);
+  const limit = chatResultState?.limit || Math.max(1, allRows.length);
+  const rows = spec.filterable ? allRows.slice(chatResultState.page*limit,(chatResultState.page+1)*limit) : allRows;
   const columns = table.columns || [];
   if (!rows.length) {
     host.innerHTML = "<span class=\"warn\">No rows to plot.</span>";
@@ -7474,7 +8141,12 @@ function drawChatBars(result, spec) {
   // a GO Z score is always positive, but the term may be up or down.
   const colours = rows.map((r, i) => {
     if (signAt >= 0) {
-      return String(at(r, signAt)).toLowerCase().startsWith("d") ? "#2166AC" : "#B2182B";
+      const sign = at(r, signAt);
+      if (sign === null || sign === undefined || sign === "") return "#cbd5e1";
+      if (Number.isFinite(Number(sign))) {
+        return Number(sign) < 0 ? "#2166AC" : (Number(sign) > 0 ? "#B2182B" : "#cbd5e1");
+      }
+      return String(sign).toLowerCase().startsWith("d") ? "#2166AC" : "#B2182B";
     }
     return values[i] >= 0 ? "#B2182B" : "#2166AC";
   });

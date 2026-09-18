@@ -1,0 +1,47 @@
+{
+  "retrieved_on": "2026-09-17",
+  "sources": [
+    {
+      "file": "cptac.metabo.table.csv",
+      "url": "https://pdc.cancer.gov/pdc/study/PDC000561",
+      "path": "/Users/saljh8/Dropbox/LungMAP/LungMAP.net/Datasets/COPD-atlas/scalable_viewer/release_validation_20260917/metabolite_name_audit/source_files/cptac.metabo.table.csv",
+      "sha256": "8e0019810bb745e9094105df556b8d4ac0ef8155528aac34a5cd19ff858f7bff",
+      "bytes": 3835468
+    },
+    {
+      "file": "pdc-files.json",
+      "url": "https://pdc.cancer.gov/graphql",
+      "path": "/Users/saljh8/Dropbox/LungMAP/LungMAP.net/Datasets/COPD-atlas/scalable_viewer/release_validation_20260917/metabolite_name_audit/source_files/pdc-files.json",
+      "sha256": "05a57103097b08f0fca63c1bac4764309b4bbb5e63e861845501b02ddd824d74",
+      "bytes": 66061
+    },
+    {
+      "file": "43018_2026_1175_MOESM6_ESM.xlsx",
+      "url": "https://media.springernature.com/original/springer-static/esm/art%3A10.1038%2Fs43018-026-01175-6/MediaObjects/43018_2026_1175_MOESM6_ESM.xlsx",
+      "path": "/Users/saljh8/Dropbox/LungMAP/LungMAP.net/Datasets/COPD-atlas/scalable_viewer/release_validation_20260917/metabolite_name_audit/source_files/43018_2026_1175_MOESM6_ESM.xlsx",
+      "sha256": "bafee19088cf2d04eb3da3d0cea07cf4d818a82ef67e1ceeb6b839540aa80a5e",
+      "bytes": 13412149
+    },
+    {
+      "file": "43018_2026_1175_MOESM15_ESM.xlsx",
+      "url": "https://media.springernature.com/original/springer-static/esm/art%3A10.1038%2Fs43018-026-01175-6/MediaObjects/43018_2026_1175_MOESM15_ESM.xlsx",
+      "path": "/Users/saljh8/Dropbox/LungMAP/LungMAP.net/Datasets/COPD-atlas/scalable_viewer/release_validation_20260917/metabolite_name_audit/source_files/43018_2026_1175_MOESM15_ESM.xlsx",
+      "sha256": "c9d2950d07f7c6d1e88243d92aa98938289a505c17799c5cd2aae6ea6d82dc78",
+      "bytes": 166499
+    },
+    {
+      "file": "supplementary-methods.pdf",
+      "url": "https://media.springernature.com/original/springer-static/esm/art%3A10.1038%2Fs43018-026-01175-6/MediaObjects/43018_2026_1175_MOESM1_ESM.pdf",
+      "path": "/Users/saljh8/Dropbox/LungMAP/LungMAP.net/Datasets/COPD-atlas/scalable_viewer/release_validation_20260917/metabolite_name_audit/source_files/supplementary-methods.pdf",
+      "sha256": "dc8d7fe63ff0744338a9e889ddf67af13a7ed76b7896ac046e4a8ecaa9969efa",
+      "bytes": 347643
+    },
+    {
+      "file": "supplement-2.pdf",
+      "url": "https://media.springernature.com/original/springer-static/esm/art%3A10.1038%2Fs43018-026-01175-6/MediaObjects/43018_2026_1175_MOESM2_ESM.pdf",
+      "path": "/Users/saljh8/Dropbox/LungMAP/LungMAP.net/Datasets/COPD-atlas/scalable_viewer/release_validation_20260917/metabolite_name_audit/source_files/supplement-2.pdf",
+      "sha256": "a711a0a6a6539383e2da3e16492b584e889868828593099a76dcd0814305badb",
+      "bytes": 2669608
+    }
+  ]
+}

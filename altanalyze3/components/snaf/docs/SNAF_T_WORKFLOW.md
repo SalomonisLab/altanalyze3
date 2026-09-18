@@ -58,3 +58,15 @@ Default is OFF (bit-identical stock path); enable for large cohorts where 3 h wa
 ## Cross-platform notes
 - macOS forking after TF/MHCflurry load: `OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES` (set automatically for darwin).
 - netMHCpan/MixMHCpred are academic-licensed and cannot ship; MHCflurry (Apache) is the distributable default. netMHCpan remains supported if the user installs it (`--binding_method netMHCpan --software_path`).
+
+
+## Additional iPepGen Galaxy outputs (opt-in)
+
+Append `--galaxy_integration` to a SNAF run to create `galaxy_export/` with
+FragPipe-compatible candidate FASTA, sample-matched headerless PepQuery peptide
+lists, IEDB peptide/allele files, accession maps and annotation tables. Use
+`--galaxy_workflow` to read a compatible edited workflow's input/length settings.
+The default contract comes from the supplied OneClick iPepGen workflow.
+Existing reports can be exported using `altanalyze3-neo galaxy-export`.
+See the [Galaxy integration guide](../../../deployment/GALAXY_IPEPGEN.md) for
+connections, length eligibility, and optional supplied peptide BED12 mappings.

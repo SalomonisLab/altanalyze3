@@ -19,11 +19,13 @@ for name in a.tools:
         for param in tool.findall('inputs/param'):
             key=param.get('name')
             if param.get('type')=='select':values[key]=param.find('option').get('value')
+            elif param.get('type')=='boolean':values[key]=param.get('truevalue','true') if param.get('checked')=='true' else param.get('falsevalue','false')
             else:values[key]=param.get('value','')
         for param in test.findall('param'):
             key=param.get('name');value=param.get('value')
             spec=tool.find(f"inputs/param[@name='{key}']")
             if spec.get('type')=='data':value=str(path.parent/'test-data'/value)
+            elif spec.get('type')=='boolean':value=spec.get('truevalue','true') if value=='true' else spec.get('falsevalue','false')
             values[key]=value
         command=str(Template(tool.find('command').text,searchList=[values]))
         with tempfile.TemporaryDirectory(prefix='snaf-galaxy-') as td:
@@ -39,4 +41,9 @@ for name in a.tools:
                     assert actual==(path.parent/'test-data'/expected.get('file')).read_text()
                 for assertion in expected.findall('assert_contents/has_text'):
                     assert assertion.get('text') in actual,(path,actual)
+            for expected in test.findall('output_collection'):
+                import re
+                out=tool.find(f"outputs/collection[@name='{expected.get('name')}']/discover_datasets")
+                matches=[p for p in Path(td,out.get('directory')).iterdir() if re.fullmatch(out.get('pattern'),p.name)]
+                assert len(matches)==int(expected.get('count')),(path.name,expected.get('name'),matches)
         print(f'{path.name}: test {i+1} passed')

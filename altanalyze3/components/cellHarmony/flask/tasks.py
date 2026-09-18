@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import threading
 import time
 import traceback
@@ -74,11 +75,42 @@ class JobRunner:
             future = self.executor.submit(target, job_id)
             self._futures[key] = future
 
+    def recover_interrupted_differential(self, job_id: str) -> Dict:
+        """Reconcile persisted progress with the worker that actually owns the task."""
+        with self._lock:
+            meta = self.store.get_job(job_id)
+            differential = dict(meta.get("differential") or {})
+            if differential.get("status") not in {"queued", "processing"}:
+                return meta
+            future = self._futures.get(f"differential:{job_id}")
+            if future is not None and not future.done():
+                return meta
+            owner = differential.get("worker_pid")
+            if owner and int(owner) != os.getpid():
+                try:
+                    os.kill(int(owner), 0)
+                except ProcessLookupError:
+                    pass
+                except PermissionError:
+                    return meta  # Another live process owns this task.
+                else:
+                    return meta
+            message = "Differential analysis was interrupted. Run it again to finish the saved comparison."
+            differential.update(status="failed", message=message, worker_pid=None)
+            meta = self.store.update_job(job_id, differential=differential)
+            self.store.append_log(job_id, message)
+            return meta
+
     def _update_differential(self, job_id: str, **changes) -> None:
         meta = self.store.get_job(job_id)
         differential = dict(meta.get("differential") or {})
         differential.update(changes)
-        self.store.update_job(job_id, differential=differential)
+        updates = {"differential": differential}
+        if differential.get("status") == "completed" and differential.get("run_id"):
+            history = dict(meta.get("differential_history") or {})
+            history[differential["run_id"]] = differential
+            updates["differential_history"] = history
+        self.store.update_job(job_id, **updates)
 
     @staticmethod
     def _exception_summary(exc: BaseException) -> str:
@@ -117,7 +149,7 @@ class JobRunner:
 
     def _run_differential(self, job_id: str) -> None:
         try:
-            self._update_differential(job_id, status="processing", message="Preparing differential analysis.", progress=10)
+            self._update_differential(job_id, status="processing", message="Preparing differential analysis.", progress=10, worker_pid=os.getpid())
             self.store.append_log(job_id, "Differential analysis accepted by worker.")
             time.sleep(0.1)
             log_stream = _JobLogStream(self.store, job_id)

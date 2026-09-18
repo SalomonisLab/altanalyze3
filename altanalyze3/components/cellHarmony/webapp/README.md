@@ -1,3 +1,64 @@
+## Pathway color scales and window switching (2026-09-18)
+
+Cross-modality pathway diagrams now have a numeric color bar per modality:
+MarkerFinder r for cell-state markers, or a separate symmetric log2FC scale for
+each modality in contrasts. Domains use the mapped features of the selected
+pathway. A node stripe uses its modality's strongest absolute retained score;
+all original feature scores remain in hover text. Modalities without mapped
+values are explicitly labelled, without an invented numeric range. The same
+vector color bars and ranges are included in PDF exports.
+
+Switching between one and two windows resizes integrated views without drawing
+cached expression data over them. Pathway, state, zoom, and the other panel's
+view are preserved. SVG gradient IDs are unique to each mounted panel.
+
+## Named TF activity by cell type (2026-09-18)
+
+“Where is SPI1 TF-activity most enriched?” ranks the named TF's stored mean
+activity across cell states, names the leading states in the answer, and supplies
+all states in a sortable/filterable table and matching bar chart. The default
+no longer averages away the cell-state axis. An explicit top-N limit is honored.
+Questions naming a cell state retain the existing within-state factor ranking.
+This is an activity-level ranking, without a new differential or enrichment test.
+The shared analysis and chart apply to both uploaded sessions and the viewer.
+
+## Cross-modality pathway representation (2026-09-18)
+
+Chat accepts “What pathways have the best cross-modality HSC-1 representation?”
+for retained positive MarkerFinder scores, without a differential run. Add
+“for contrasts” to use the selected completed comparison. Explicit named
+comparisons must match a saved comparison label. All joined modality runs must
+share the comparison, grouping field, cell-state field, and comparison type.
+
+The sortable, searchable table and stacked bar chart report unique original
+feature IDs per pathway per modality. Repeated diagram nodes do not increase
+counts. Checked modality boxes are AND requirements, each requiring at least
+one mapped hit. Filters and pagination share one result set and do not change
+normalization. Chart heights represent raw counts, not ranking scores.
+
+Ranking uses **modality count + balanced coverage**. For each modality, divide
+the pathway count by its maximum count across all evaluated diagrams; balanced
+coverage is the mean of those fractions over modalities with mapped hits.
+Modality breadth therefore ranks first, and each mapped modality contributes
+equally to the secondary score regardless of assay size. This is descriptive
+representation across the 68 bundled WikiPathways diagrams, not an enrichment
+p-value or an exhaustive pathway database search.
+
+RNA/TF activity map by exact gene or Ensembl ID; ADTs use curated gene mappings;
+lipid species map through Discover lipid classes; named metabolites match exact
+names. Unknown metabolites do not acquire inferred identities. GRN edges count
+once only when all regulators and the target belong to the pathway. Missing
+marker tables, unmatched comparisons, and unmapped modalities are reported.
+No additional significance filter is applied to retained differential calls.
+
+Selecting a table pathway or bar opens its diagram in Explore (markers) or
+Differential (contrasts), preserving state, comparison, and pathway ID. Node
+stripes show the contributing modalities, with individual feature IDs and
+retained statistics on hover. Effect sizes from different modalities are never
+averaged into one color. Both the stacked chart and diagram offer vector PDF
+export through the shared exporter. Implemented in the shared web app and used
+by the precomputed viewer as well.
+
 # scALABLE (cellHarmony web)
 
 scALABLE is the analysis web application of AltAnalyze3. It aligns single-cell RNA data to a
@@ -190,6 +251,46 @@ The QC form defaults are `min_genes 500`, `min_counts 1000`, `min_cells 0`, `mit
 the form always sends its values, so the fallbacks only apply to a job created outside the
 form.
 
+### Optional marker outputs
+
+The Run tab's **Optional marker heatmap exports** controls apply to RNA and every
+imputed modality. scALABLE skips the static PDF and SVG render by default, changed on
+2026-09-18. The default keeps marker statistics, state centroids, the compact
+selected-marker cache, interactive heatmaps, and on-demand Download PDF. Only the
+packaged static files change, so the browser loses no function. On a 147,376-cell study
+the five marker stages took 188.10 seconds with the static render and 38.05 seconds
+without it, a 4.94x speedup (`MARKER_OUTPUT_BENCHMARK.md`).
+
+To write the static files, set **Static heatmap files → Generate static PDF/SVG**. That
+option writes a PDF plus SVG at 2400 DPI (or `MARKER_HEATMAP_DPI`) and displays up to
+100 cells per state. `marker_write_svg` and `marker_heatmap_dpi` apply only when the
+static render runs.
+
+scALABLE already disables both marker expression-matrix TSV exports. The pipeline keeps
+the primary expression H5AD for Explore, Chat, differential analysis and session reload.
+The `marker_heatmap_h5ad` package API and CLI keep their own defaults; only scALABLE
+changed.
+
+The QC API accepts `marker_render_heatmap` (default `false`), `marker_write_svg`
+(`true`), `marker_heatmap_dpi` (`null`, use renderer default) and
+`marker_cells_per_cluster` (`100`, `0` displays all). Values are saved with the job.
+Each modality records output options and stage timings. Sampling affects
+only display; marker scoring and cell-state averages still use all input cells.
+
+For standalone Python callers, `generate_marker_heatmap_from_adata` accepts
+`render_heatmap=False`, `write_svg=False`, and `heatmap_dpi=600`. To avoid constructing
+any plotting matrix, also set `write_heatmap_cache=False`, `write_heatmap_tsv=False`,
+and `write_expression_tsv=False`. Marker tables and marker-by-state centroids remain.
+The CLI equivalents are `--skip-heatmap-render`, `--skip-svg`, `--dpi 600`, and
+`--markers-only` (the last combines all heatmap-output skips). Existing CLI/API defaults
+remain unchanged. The standalone markers-only mode does not supply an interactive
+heatmap cache; use the web option when interactive exploration is required.
+
+`tests/benchmark_marker_outputs.py JOB_JSON NEW_OUTPUT_DIRECTORY` benchmarks these
+options against saved matrices, checks identical marker tables and centroids, and
+writes stage timings and artifact sizes without changing the saved job or imputations.
+Measured results for the 147,376-cell marrow study are in [MARKER_OUTPUT_BENCHMARK.md](MARKER_OUTPUT_BENCHMARK.md).
+
 ### fastComm parameters
 
 `FastCommParams`: `lr_sources=("CellChatDB",)`, `min_cells=5`, `min_lr_expression_score=0.2`,
@@ -217,7 +318,8 @@ in `app.py` and `_MODALITY_DEFINITIONS` in `flask/pipeline.py` hold the same tab
 | `adt` | ADT (CITE-seq) | ADT | yes | no | no |
 | `metabolite` | Metabolite (AML) | metabolite | yes | no | no |
 | `lipid` | Lipid (AML) | lipid | yes | no | no |
-| `grn` | GRN (TF activity) | TF | yes | no | no |
+| `grn` | GRN (edges) | edge | no | no | no |
+| `grn_tf` | TF activity (imputed) | factor | yes | no | no |
 | `cell_communication` | Cell communication | ligand-receptor interaction | no | no | no |
 
 `cell_communication` is not imputed. It appears only as a Differential modality, once a
@@ -259,19 +361,26 @@ matrix, which the lung references declare; otherwise the model sums `layers['cou
 
 ### GRN: edges and TF activity
 
-The GRN model predicts one score per TF-to-target edge per pseudobulk. The pipeline then builds
-two objects:
+Selecting GRN imputation produces separate edge and factor outputs. Factor activity is
+the **sum of predicted outgoing edge scores**, matching the precomputed viewer. Cell
+predictions are computed in bounded chunks and discarded after summing by factor.
+Differentials use independent sample x cell-state predictions; cells are never counted
+as independent biological replicates for either GRN modality.
 
 | Object | Features | Rows | Used by |
 | --- | --- | --- | --- |
-| `combined_with_umap_and_markers_grn.h5ad` | one column per TF | every cell | Explore plots of the `grn` modality |
-| `combined_with_umap_and_markers_grn_edges.h5ad` | one column per `TF|target` edge | sample x cell state pseudobulks | the GRN differential and the GRN edges network |
+| `combined_with_umap_and_markers_grn_tf.h5ad` | factors | cells | TF Explore plots and differential detail violins |
+| `combined_with_umap_and_markers_grn_tf_pseudobulk.h5ad` | factors | sample x cell state | TF activity differential |
+| `combined_with_umap_and_markers_grn_edges.h5ad` | `TF|target` edges | sample x cell state | edge differential and GRN network |
 
-Per-cell TF activity in `_grn_tf_activity_per_cell` is a target-set enrichment score. For each
-TF, take its targets from the imputed edges, z-score each target gene over all cells, sum the
-z-scores in the cell, and divide by the square root of the number of targets. The score is
-signed and has no unit. The h5ad records `expression_scale = "linear"` for it, which describes
-storage, not a count scale.
+Older jobs used standardized target-set enrichment for per-cell TF exploration. They
+are labelled **TF enrichment (legacy)**, retain their edge differentials, and must be
+reprocessed to obtain predicted TF activity comparisons. No existing scientific output
+is rewritten automatically.
+
+MarkerFinder operates directly on the continuous predicted TF scores; RNA depth-scaling
+validation does not apply to them. When no TF markers pass selection, the job completes
+with the activity and differential outputs and explains why no marker heatmap exists.
 
 ### Output files per modality
 
@@ -281,7 +390,8 @@ storage, not a count scale.
 | `adt` | `combined_with_umap_and_markers_adt.h5ad` | none | `marker_heatmap_adt/`, `cell_state_adt_markers.zip` | `adt_results.zip` |
 | `metabolite` | `..._metabolite.h5ad` | `..._metabolite_pseudobulk.h5ad` | `marker_heatmap_metabolite/` | `metabolite_results.zip` |
 | `lipid` | `..._lipid.h5ad` | `..._lipid_pseudobulk.h5ad` | `marker_heatmap_lipid/` | `lipid_results.zip` |
-| `grn` | `..._grn.h5ad` | `..._grn_edges.h5ad` | `marker_heatmap_grn/` | `grn_results.zip` |
+| `grn` | network only | `..._grn_edges.h5ad` | none | `grn_results.zip` |
+| `grn_tf` | `..._grn_tf.h5ad` | `..._grn_tf_pseudobulk.h5ad` | `marker_heatmap_grn_tf/` | `grn_tf_results.zip` |
 
 Explore opens one h5ad per modality; it never reads layers of the RNA object. Each imputed
 h5ad also carries `layers['counts']`, the linear-scale values derived from `expression_scale`
@@ -310,7 +420,7 @@ label and a control label. Under `pseudobulk`, `compute_pseudobulk_per_populatio
 `layers['counts']` over the cells of each `population|sample` group with at least 10 cells,
 normalises to counts per 10,000, and takes `log2(x + 1)`. Any cell state with fewer than 2
 pseudobulks in either condition leaves the object before testing. The pseudobulk modalities
-(`metabolite`, `lipid`, `grn`) arrive already aggregated and skip this step, because re-summing
+(`metabolite`, `lipid`, `grn`, `grn_tf`) arrive already aggregated and skip this step, because re-summing
 predicted values would distort them.
 
 ### Tests
@@ -338,7 +448,7 @@ engine calls a gene when `|log2fc| > log2(fc_thresh)` and the chosen p falls bel
 | `rna` and default | 0.05 | 1.2 | 20 for `cells`, 1 for `pseudobulk` | raw p for `pseudobulk`, FDR for `cells` |
 | `lipids`, `adt` | 0.05 | 1.0 | 10 for `cells`, 1 for `pseudobulk` | raw p for `pseudobulk`, FDR for `cells` |
 | `metabolite`, `lipid` | 0.05 | 1.2 | 2 | raw p |
-| `grn` | 0.05 | 1.1 | 2 | raw p |
+| `grn`, `grn_tf` | 0.05 | 1.1 | 2 | raw p |
 
 Under `pseudobulk` the gate on a cell state is `min_replicates_per_group = 2`, not the table's
 min-cells column. Under `cells` with fewer than 200 cells in the contrast, the gate rises to
@@ -353,6 +463,18 @@ The `grn` differential tests edges, not TFs: its input is the `TF|target` pseudo
 with fold threshold 1.1 and raw p. The Explore mode `GRN edges` reads the same object and draws
 edges touching a requested gene whose mean score over the selected pseudobulks exceeds a
 threshold, up to `max_edges` (default 300).
+It defaults to the first cell state in lineage order and a TF with the largest summed
+absolute outgoing score in that state (or retains the panel's selected TF). Sample
+`(any)` averages samples within that state. Neutral nodes and edges do not imply
+up/down regulation; TFs are diamonds, targets are circles, and width encodes score.
+
+Explore's `Regulatory network` uses stored RNA markers for the selected state and
+state-specific predicted GRN edges. It does not require differential runs. Its
+filters are marker fold versus other states, absolute edge score, and mean stored
+RNA expression of the TF within the state. Unmeasured or below-threshold TFs are
+omitted. Node colours use actual marker log2 folds; missing marker folds are gray.
+The Differentials regulatory view retains its matched RNA/edge differential gates.
+Cell communication is available in either Explore panel regardless of its modality.
 
 ### Cell communication differentials
 
@@ -429,7 +551,9 @@ executors.
 | `state_comparison` | compare | 30 marker rows for two states and a DotPlot |
 | `expression_lookup` | expression | top 5 states by mean for each gene (`gene, cell state, mean, fraction`) and a DotPlot |
 | `state_contrast`, `contrast_specificity`, `shared_vs_state_specific`, `patient_stratification`, `donor_heterogeneity`, `most_affected_state` | differential | top 25 rows of the completed contrast in the named state, sorted by FDR, and a volcano |
-| `pathway_program`, `regulatory_driver`, `communication_rewiring` | existing view | names the Differential or Explore tab that holds the analysis |
+| `regulatory_driver` | shared regulatory network | inline network with factor activity and expression statistics from matching completed comparisons |
+| `tf_activity`, `regulator_activity` | shared factor profile | inline ranked activity bars and a table of reported fold changes/FDRs |
+| `pathway_program`, `communication_rewiring` | existing view | names the Differential or Explore tab that holds the analysis |
 | `severity_gradient`, `dose_response`, `composition_shift`, `coexpression_module`, `annotation_concordance` | not implemented here | names the missing statistic instead of answering with a neighbouring analysis |
 
 The web app repairs the router's reading against its own names before dispatch: it matches
@@ -519,3 +643,30 @@ MarkerHeatmap mode needs network access. Every other mode works offline.
 - `/api/jobs/{id}/fastcomm/network`, `/umap/pdf` and `/expression/pdf` have no browser caller.
 - The two `uns['imputed_modalities']` defects listed under Modalities.
 - No automated test covers the web app's chat route.
+
+
+### GRN release validation
+
+See [GRN_RELEASE.md](GRN_RELEASE.md) for the shared implementation, release checks,
+compatibility notes, and the evaluated boundary of upload/viewer parity. Completed
+uploaded comparisons are retained and selectable in **Differential → Completed
+comparison**. Regulatory Chat questions route locally in both deployments; other
+questions still use the configured intent service.
+
+CombPlot defaults to individual cells in both visualization panels. **Display → Donor means** opts into per-donor, per-group averaging and reveals **Min cells**. Both annotation filters apply to the cell view. Bar and annotation-band details appear only on hover, including in the shared viewer; PDFs omit those hover labels. **Cells per sample per cell type** controls individual-cell CombPlot and MarkerHeatmap.
+
+CombPlot and MarkerHeatmap share **Cells per sample per cell type** controls in both panels: **5, 10 (default), 20, 50, All cells**. Sampling preserves individual observations and uses a reproducible cell-ID ranking within each sample × cell-type group. Groups smaller than the cap keep all available cells. The caption names the sample annotation; datasets without one are treated as one sample. Display filters apply before sampling. Donor means remain an explicit separate CombPlot mode.
+
+MarkerHeatmap uses the same fixed marker rows for every sample size and reads the selected cells from the underlying expression store. Per-gene standardization uses the full source dataset, so values stay comparable when changing sample size or display filters. Screen, TSV, and PDF receive the same sample-size parameter and cell selection. Original analysis matrices are preserved.
+# Unidentified AML metabolite labels
+
+For the CPTAC AML imputation model, unidentified features retain their source ID
+and display m/z, assay/polarity and retention time, for example
+`Unknown 0235 · m/z 234.09706 · RP+ · RT 1.221 min`. Plot hovers also identify
+PDC000561, the original supplementary-table row, DOI and any recorded formula.
+The same labels are used in heatmaps and PDF exports; queries and plot clicks
+continue to use the original IDs. These descriptors support tracing and candidate
+comparison, not chemical identification: retention times depend on the assay.
+Other metabolomics studies do not inherit this study's Unknown-ID annotations.
+Viewer manifests can explicitly identify this catalog with
+`annotation_source: "PDC000561"` on their metabolite modality.

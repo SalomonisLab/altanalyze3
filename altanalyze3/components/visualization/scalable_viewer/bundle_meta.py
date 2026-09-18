@@ -297,6 +297,8 @@ def _modalities_block(ds: da.Dataset) -> Dict[str, Any]:
         })
         if info.get("label"):
             entry["label"] = str(info["label"])
+        if info.get("annotation_source"):
+            entry["annotation_source"] = str(info["annotation_source"])
         if info.get("feature_label") and info["feature_label"] != "feature":
             entry["feature_label"] = str(info["feature_label"])
         available.append(entry)
@@ -650,11 +652,10 @@ def build_differential_block(ds, comparison, categorical: Dict[str, List[str]],
 
 def seed_expression_cache(app, ds: da.Dataset, meta: Dict[str, Any],
                           modality: str = "rna") -> Dict[str, Any]:
-    """Pre-fill `app.state.expression_cache` so app.py:1353 returns on its cache hit.
+    """Build a bundle-owned expression cache from published arrays only.
 
-    The signature app.py:1370-1376 compares is (h5ad_path, umap_path, cluster_key,
-    modality); this builds exactly that key, so `_get_expression_cache` never reaches
-    its `ad.read_h5ad` at app.py:1391.
+    The shared webapp delegates to BundleJobStore.get_expression_cache before
+    resolving upload artifacts, including after a cache invalidation.
     """
     obs, obs_filter_values, sample_field = build_obs(ds)
     store = None if modality == "rna" else ds.modality(modality)
@@ -678,7 +679,7 @@ def seed_expression_cache(app, ds: da.Dataset, meta: Dict[str, Any],
     default_secondary = ds.cluster_key if ds.cluster_key != default_primary else ""
 
     entry = {
-        "h5ad_path": str(W._modality_h5ad_path(meta, modality)),
+        "bundle_path": ds.paths.bundle_dir,
         "umap_path": str(meta.get("artifacts", {}).get("umap_coordinates") or ""),
         "cluster_key": str(ds.cluster_key),
         "modality": modality,
@@ -770,6 +771,16 @@ class BundleJobStore:
 
     def dataset(self, job_id: str) -> da.Dataset:
         return self._catalog.get(job_id)
+
+    def get_expression_cache(self, app, meta: Dict[str, Any], modality: str):
+        """Serve bundle arrays without resolving or opening a source H5AD."""
+        job_id = str(meta["job_id"])
+        key = f"{job_id}:{modality}"
+        with self._lock:
+            entry = app.state.expression_cache.get(key)
+            if entry is None:
+                entry = seed_expression_cache(app, self.dataset(job_id), meta, modality)
+            return entry
 
     def ensure(self, app, job_id: str) -> Dict[str, Any]:
         """Build the meta for one bundle and seed its caches. Idempotent."""

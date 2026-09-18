@@ -219,6 +219,25 @@
       ],
       "default": null,
       "description": "Prepared MHCflurry download directory staged into prediction tasks"
+    },
+    "galaxy_integration": {
+      "type": "boolean",
+      "default": false,
+      "description": "Export additional iPepGen Galaxy inputs"
+    },
+    "galaxy_workflow": {
+      "type": "string",
+      "description": "Optional Galaxy .ga contract"
+    },
+    "galaxy_peptide_bed": {
+      "type": "string",
+      "description": "Optional complete-peptide BED12 mapping"
+    },
+    "galaxy_assembly": {
+      "type": "string",
+      "default": "hg38",
+      "pattern": "^[A-Za-z0-9_.-]+$",
+      "description": "Assembly of supplied peptide BED mappings"
     }
   },
   "required": [

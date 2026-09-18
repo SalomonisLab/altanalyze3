@@ -23,6 +23,7 @@ from matplotlib import cm
 from matplotlib.colors import ListedColormap, to_hex
 from scipy import sparse
 from scipy.stats import t
+from sklearn.utils.sparsefuncs import mean_variance_axis
 
 # Default diverging colormap similar to the UDON visualizations
 _N = 256
@@ -416,8 +417,12 @@ def marker_finder(
 
     indicator, cluster_names = _build_cluster_indicator(groups)
 
-    sum_x = np.asarray(expression_matrix.sum(axis=0)).ravel()
-    sum_x2 = np.asarray(expression_matrix.power(2).sum(axis=0)).ravel()
+    # Imputed features can have a large baseline and very small variance.
+    # float32 sums of squares lose that variance and can even turn it negative.
+    # Stable sparse variance avoids cancellation without densifying the matrix.
+    expression_matrix = expression_matrix.astype(np.float64, copy=False)
+    mean_x, variance_x = mean_variance_axis(expression_matrix, axis=0)
+    sum_x = mean_x * n_cells
     sum_y = np.asarray(indicator.sum(axis=0)).ravel()
 
     sum_xy = expression_matrix.T.dot(indicator)
@@ -428,12 +433,14 @@ def marker_finder(
 
     n = float(n_cells)
     numerator = sum_xy - np.outer(sum_x, sum_y) / n
-    ssx = sum_x2 - (sum_x**2) / n
-    ssy = sum_y - (sum_y**2) / n
+    ssx = np.maximum(variance_x * n, 0.0)
+    ssy = np.maximum(sum_y - (sum_y**2) / n, 0.0)
     denom = np.sqrt(np.outer(ssx, ssy))
 
     with np.errstate(divide="ignore", invalid="ignore"):
-        r = numerator / denom
+        r = np.clip(numerator / denom, -1.0, 1.0)
+    r[ssx == 0, :] = np.nan
+    r[:, ssy == 0] = np.nan
 
     degrees_f = n_cells - 2
     with np.errstate(divide="ignore", invalid="ignore"):

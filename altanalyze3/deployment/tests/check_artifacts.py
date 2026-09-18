@@ -25,11 +25,25 @@ for xml in (root/'deployment/galaxy').glob('*.xml'):
             declared=tool.find(f"inputs/param[@name='{param.attrib['name']}']")
             if declared is not None and declared.get('type')=='data':
                 assert (xml.parent/'test-data'/param.attrib['value']).is_file()
+for workflow_path in (root/'deployment/galaxy/workflows').glob('*.ga'):
+    workflow=json.loads(workflow_path.read_text())
+    steps=workflow['steps']
+    for step in steps.values():
+        if step.get('type')!='tool':
+            continue
+        tool=next(ET.parse(xml).getroot() for xml in (root/'deployment/galaxy').glob('*.xml')
+                  if ET.parse(xml).getroot().get('id')==step['tool_id'])
+        assert tool.get('version')==step['tool_version']
+        assert {o['output_name'] for o in step['workflow_outputs']}=={o.get('name') for o in tool.find('outputs')}
+        for name,connection in step['input_connections'].items():
+            assert tool.find(f"inputs/param[@name='{name}']") is not None
+            assert str(connection['id']) in steps
 p=argparse.ArgumentParser();p.add_argument('--wheel');args=p.parse_args()
 if args.wheel:
     with zipfile.ZipFile(args.wheel) as z:
         names=set(z.namelist())
         for suffix in ['altanalyze3/components/neoantigen/cli.py',
+                       'altanalyze3/components/neoantigen/data/ipepgen_contract.json',
                        'altanalyze3/components/bam/bam2hla/build/signatures_hg38.json.gz',
                        'altanalyze3/components/bam/bam2hla/build/signatures_hg19.json.gz',
                        'altanalyze3/components/snaf/BayesTS/GTEx_BayesTS.tsv.gz',

@@ -207,6 +207,7 @@ def create_scalable_app(
     _install_feature_name_routes(app, store)
     _install_differential_feature_name_route(app, store)
     _install_grn_routes(app, store)
+    _install_grn_edge_adata(app, store)
     _install_study_route(app, catalog)
     return app
 
@@ -581,6 +582,8 @@ def _regroup_violin(app, meta, payload, covariate, modality, display_filters):
             continue
         group_values = values[mask]
         finite_values = group_values[np.isfinite(group_values)]
+        if not len(finite_values):
+            continue
         groups.append(
             {
                 "population": label,
@@ -883,6 +886,8 @@ def _install_differential_select(app, store) -> None:
         return {"contrasts": meta.get("scalable_viewer", {}).get("deg_comparisons", []),
                 "selected": (meta.get("differential") or {}).get("run_id")}
 
+    _drop_official_route(app, "/api/jobs/{job_id}/differential/select", "POST")
+
     @app.post("/api/jobs/{job_id}/differential/select")
     def select(job_id: str, contrast: str = Query(...)):
         ds = store.dataset(job_id)
@@ -1018,8 +1023,6 @@ def _bundle_subset_mask(ds, subset_by: str, subset_values: List[str]):
     if subset_by in (cluster_key, "cell_state"):
         codes = np.asarray(ds.state_code, dtype=np.int64)
         wanted = {i for i, s in enumerate(ds.states) if s in keep}
-        if not wanted:
-            return None
         return np.isin(codes, list(wanted))
     try:
         kind, values, labels = ds.covariate_values(subset_by)
@@ -1028,8 +1031,6 @@ def _bundle_subset_mask(ds, subset_by: str, subset_values: List[str]):
     if kind != "categorical" or labels is None:
         return None
     wanted = {i for i, s in enumerate(labels) if str(s) in keep}
-    if not wanted:
-        return None
     return np.isin(np.asarray(values, dtype=np.int64), list(wanted))
 
 
@@ -1163,38 +1164,78 @@ def _install_combplot_routes(app, store, assets: Dict[str, Dict[str, Any]]) -> N
 
     @app.get("/api/jobs/{job_id}/combplot")
     def combplot(job_id: str, genes: str = Query(""), donor_key: str = Query(""),
-                 min_cells: int = Query(5), group_by: str = Query(""),
+                 min_cells: int = Query(5), cells_per_sample: int = Query(10), group_by: str = Query(""),
                  groups: List[str] = Query([]), subset_by: str = Query(""),
                  subset_values: List[str] = Query([]), subset2_by: str = Query(""),
                  subset2_values: List[str] = Query([]), tracks: str = Query(""),
-                 modality: str = Query("")):
-        """Per-donor pseudobulk for each gene, grouped by cell state.
-
-        One bar per (cell state, donor). The bar is the mean of the gene over
-        that donor's cells in that state, so a state with 178 donors draws 178
-        bars, coloured by the state. Cell-level values would draw 123,076 bars
-        and hide the donor structure the plot exists to show.
-
-        States run in the bundle's canonical order, which is the centroid
-        ordering `lineage_order` records, so the x axis reads the same way as
-        every other plot in the viewer.
-
-        The mean is over the cells present, so a donor contributing no cells to
-        a state produces no bar rather than a zero. `min_cells` raises that
-        floor; the response reports how many groups it removed.
-        """
+                 modality: str = Query(""), unit: str = Query("cells", pattern="^(cells|donor)$")):
+        """Individual stored observations by default, or explicit per-donor means."""
         ds = store.dataset(job_id)
         group_column, group_names, group_code, _ = _bundle_group_axis(ds, group_by)
         if groups:
             wanted_groups = [g for g in group_names if g in set(groups)]
-            if wanted_groups:
-                group_names = wanted_groups
+            group_names = wanted_groups
         # Blank means the marker gene of every group, matching the DotPlot.
         features = _feature_source(ds, modality)
         wanted = (split_gene_list(genes, keep_pipe=features.names_have_pipe)
                   or _bundle_default_genes(ds, group_names, features))
         if not wanted:
             raise HTTPException(400, "give at least one gene")
+
+        if unit == "cells":
+            codes = np.asarray(group_code, dtype=np.int64)
+            valid = (codes >= 0) & (codes < len(_bundle_group_axis(ds, group_by)[1]))
+            original = _bundle_group_axis(ds, group_by)[1]
+            selected_codes = [i for i, name in enumerate(original) if name in group_names]
+            valid &= np.isin(codes, selected_codes)
+            restrict = _bundle_subset_masks(ds, subset_by, list(subset_values),
+                                            subset2_by, list(subset2_values))
+            if restrict is not None:
+                valid &= restrict
+            keep = np.flatnonzero(valid)
+            keep = keep[np.argsort(codes[keep], kind="stable")]
+            names = bundle_meta._obs_names(ds)
+            from types import SimpleNamespace
+            sample_field = _donor_covariate(ds) or ""
+            obs = pd.DataFrame(index=names)
+            if sample_field:
+                _, sample_codes, sample_names = ds.covariate_values(sample_field)
+                obs[sample_field] = [str(sample_names[int(c)]) if int(c) >= 0 else "" for c in sample_codes]
+            sampling_cache = {"adata": SimpleNamespace(obs=obs), "obs_names": names,
+                              "sample_field": sample_field, "populations": np.asarray(ds.states)[np.asarray(ds.state_code)]}
+            keep, sampling = W._sample_plot_cells(sampling_cache, keep, cells_per_sample)
+            columns = [{"cell": str(names[i]), "group": original[codes[i]],
+                        "state": original[codes[i]], "n_cells": 1} for i in keep]
+            labels, series, missing = [], [], []
+            for gene in wanted:
+                row = features.resolve_gene(gene)
+                if row is None:
+                    missing.append(gene)
+                    continue
+                idx, val = features.gene_column(row)
+                values = np.zeros(ds.n_cells, dtype=float)
+                values[np.asarray(idx, dtype=np.int64)] = val
+                labels.append(gene)
+                series.append(np.round(values[keep], 5).tolist())
+            if not labels:
+                raise HTTPException(404, "none of the requested genes are in this dataset")
+            # Each track column is now an observation, so its annotation is exact.
+            observation_codes = np.arange(ds.n_cells, dtype=np.int64)
+            asked = [t.strip() for t in tracks.split(",") if t.strip()]
+            if not asked:
+                asked = [t for t in COMBPLOT_TRACK_DEFAULTS if t in (ds.covariate_names() or {})]
+            track_names, track_values, track_levels, purity, skipped = _combplot_tracks(
+                ds, asked, observation_codes, keep, ds.n_cells)
+            return {"unit": "cells", "sampling": sampling, "observation_unit": ds.sv.get("observation_unit", "cells"),
+                    "genes": labels, "values": series, "columns": columns,
+                    "colors": [ds.colors.get(c["group"], "#BBBBBB") for c in columns],
+                    "groups": group_names, "states": group_names,
+                    "group_by": group_column, "group_label": group_column,
+                    "n_columns": len(columns), "n_cells_kept": len(columns), "n_groups_dropped": 0,
+                    "track_names": track_names, "tracks": track_values, "track_levels": track_levels,
+                    "track_purity": purity, "track_skipped": skipped,
+                    "n_requested": len(wanted), "n_returned": len(labels),
+                    "n_missing": len(missing), "missing": missing}
 
         key = donor_key.strip() or _donor_covariate(ds)
         if not key:
@@ -1270,6 +1311,7 @@ def _install_combplot_routes(app, store, assets: Dict[str, Dict[str, Any]]) -> N
             raise HTTPException(404, f"none of the {len(wanted)} requested genes are in this dataset")
 
         return {
+            "unit": "donor",
             "genes": labels, "values": series,
             "columns": columns, "colors": colors,
             "states": group_names, "groups": group_names,
@@ -1495,6 +1537,9 @@ def _install_chat_routes(app, store, assets: Dict[str, Dict[str, Any]]) -> None:
             examples.append(f"Do the {categorical} groups differ molecularly in {first}?")
         examples.append(f"Show me the transcriptional targets of a regulator in {first}")
 
+        from altanalyze3.components.cellHarmony.webapp.cross_modal import examples as cross_examples
+        available = (store.get_job(job_id).get("modalities") or {}).get("available", [])
+        examples = cross_examples([m["id"] for m in available]) + [f"What pathways have the best cross-modality {first} representation?", f"What is the best modality marker of {first}?"] + examples
         return {"reference": ds.sv.get("label") or job_id,
                 "examples": examples[:8],
                 "placeholder": f"e.g. What are the best marker genes of {first} cells?"}
@@ -1523,64 +1568,104 @@ def _install_chat_routes(app, store, assets: Dict[str, Dict[str, Any]]) -> None:
                      for c in (ds.deg_manifest() or {}).get("comparisons", [])]
         contrasts = [c for c in contrasts if c]
 
-        reading: Dict[str, Any]
-        try:
-            import urllib.request
-            covariates = [name for name, info in (ds.covariate_names() or {}).items()
-                          if info.get("kind") in ("numeric", "categorical")]
-            # THE ROUTER MUST BE TOLD EVERY MODALITY THIS BUNDLE CARRIES.
-            #
-            # `ds.sv` is the bundle's STORED metadata block, where `modalities` is the raw
-            # manifest keyed by id -- {"adt": {...}, "grn": {...}, "grn_tf": {...}} -- and
-            # carries no "available" key. So `.get("available")` was always None and this
-            # sent ["rna"] for every dataset. The router then had no modality slot to fill,
-            # and no GRN, TF-activity, ADT, lipid or cell-communication question could
-            # route at all. Measured on the COPD-metacells bundle 2026-09-08: the runtime
-            # block holds ['rna','adt','grn','grn_tf','lipid'] and this line sent ['rna'].
-            #
-            # `bundle_meta._modalities_block(ds)` is the runtime shape, {"default", ...,
-            # "available": [...]}, and it is what /api/catalog already serves.
-            modalities = [m.get("id") for m in
-                          (bundle_meta._modalities_block(ds).get("available") or [])] or ["rna"]
-            payload = json.dumps({"question": question, "states": ds.states,
-                                  "contrasts": contrasts,
-                                  # Without these the router cannot fill a
-                                  # covariate slot and every severity or
-                                  # composition question returned `clarify`.
-                                  "covariates": covariates,
-                                  "modalities": modalities}).encode()
-            req = urllib.request.Request(
-                ASSISTANT_URL, data=payload,
-                headers={"Content-Type": "application/json"})
-            # The model runs on CPU: about 24 s on the first call, which loads
-            # the 1.07 GB file, and about 15 s warm. A 30 s ceiling failed the
-            # cold call outright, so the window is wide enough for both.
-            # One retry. Routing is deterministic now, so a failure here is a
-            # dropped connection rather than a slow answer, and it cost one
-            # question in a 68-question sweep. The second attempt uses a fresh
-            # request object because a urllib Request cannot be replayed.
-            last_error = None
-            for attempt in (1, 2):
-                try:
-                    retry = urllib.request.Request(
-                        ASSISTANT_URL, data=payload,
-                        headers={"Content-Type": "application/json"})
-                    with urllib.request.urlopen(retry, timeout=120) as resp:
-                        reading = json.loads(resp.read().decode())
-                    last_error = None
-                    break
-                except Exception as exc:            # noqa: BLE001
-                    last_error = exc
-                    if attempt == 1:
-                        time.sleep(0.25)
-            if last_error is not None:
-                raise last_error
-        except Exception as exc:                  # noqa: BLE001 - the site may be down
-            raise HTTPException(
-                503,
-                f"the assistant at {ASSISTANT_URL} did not answer ({exc}). "
-                "The scALABLE viewer holds no model of its own.")
+        from altanalyze3.components.cellHarmony.webapp.cross_pathways import answer_if_requested as pathway_answer
+        pathways = pathway_answer(app, store.get_job(job_id), question)
+        if pathways is not None:
+            return pathways
+        from altanalyze3.components.cellHarmony.webapp.modality_markers import answer_if_requested as marker_answer
+        markers = marker_answer(app, store.get_job(job_id), question)
+        if markers is not None:
+            return markers
+        from altanalyze3.components.cellHarmony.webapp.cross_modal import answer_if_requested
+        cross_answer = answer_if_requested(app, store.get_job(job_id), question)
+        if cross_answer is not None:
+            return cross_answer
+        from altanalyze3.components.cellHarmony.webapp.integration_chat import read_question as read_integrated, answer as integrated_answer
+        integrated = read_integrated(question, ds.states, ds.symbols)
+        if integrated is not None:
+            return integrated_answer(app, store.get_job(job_id), question, integrated)
+        from altanalyze3.components.cellHarmony.webapp.chat_service import read_question as read_protocol, execute as execute_protocol
+        local=read_protocol(question,ds.states,ds.symbols,getattr(ds,"covariate_names",lambda:{})())
+        if local is not None:
+            answer=execute_protocol(app,store.get_job(job_id),question,local)
+            if answer is not None:return answer
+        reading = gnet.read_regulatory_question(question, ds.states, ds.symbols)
+        if reading is None and local is not None:
+            reading=local
+            from altanalyze3.components.cellHarmony.webapp.chat_service import resolve_contrast
+            reading['contrast']=resolve_contrast(ds,store.get_job(job_id),question)
 
+        if reading is not None and reading.get("router") != "local_protocol":
+            selected = (store.get_job(job_id).get("differential") or {}).get("run_id", "")
+            modality = reading["modality"]
+            candidates = [c for c in ds.deg_manifest().get("comparisons", [])
+                          if c.get("modality", "rna") == modality and c.get("kind") == "per_cell_state"]
+            question_words = re.sub(r"[^a-z0-9]+", " ", question.lower())
+            named = next((c["id"] for c in candidates if c.get("comparison") and
+                          re.sub(r"[^a-z0-9]+", " ", c.get("comparison", "").lower()) in question_words), "")
+            reading["contrast"] = named or gnet._sibling_comparison(ds, selected, modality)
+            if not reading["contrast"] and reading["intent"] != "differential":
+                reading["contrast"] = selected
+        elif reading is None:
+            try:
+                import urllib.request
+                covariates = [name for name, info in (ds.covariate_names() or {}).items()
+                              if info.get("kind") in ("numeric", "categorical")]
+                # THE ROUTER MUST BE TOLD EVERY MODALITY THIS BUNDLE CARRIES.
+                #
+                # `ds.sv` is the bundle's STORED metadata block, where `modalities` is the raw
+                # manifest keyed by id -- {"adt": {...}, "grn": {...}, "grn_tf": {...}} -- and
+                # carries no "available" key. So `.get("available")` was always None and this
+                # sent ["rna"] for every dataset. The router then had no modality slot to fill,
+                # and no GRN, TF-activity, ADT, lipid or cell-communication question could
+                # route at all. Measured on the COPD-metacells bundle 2026-09-08: the runtime
+                # block holds ['rna','adt','grn','grn_tf','lipid'] and this line sent ['rna'].
+                #
+                # `bundle_meta._modalities_block(ds)` is the runtime shape, {"default", ...,
+                # "available": [...]}, and it is what /api/catalog already serves.
+                modalities = [m.get("id") for m in
+                              (bundle_meta._modalities_block(ds).get("available") or [])] or ["rna"]
+                payload = json.dumps({"question": question, "states": ds.states,
+                                      "contrasts": contrasts,
+                                      # Without these the router cannot fill a
+                                      # covariate slot and every severity or
+                                      # composition question returned `clarify`.
+                                      "covariates": covariates,
+                                      "modalities": modalities}).encode()
+                req = urllib.request.Request(
+                    ASSISTANT_URL, data=payload,
+                    headers={"Content-Type": "application/json"})
+                # The model runs on CPU: about 24 s on the first call, which loads
+                # the 1.07 GB file, and about 15 s warm. A 30 s ceiling failed the
+                # cold call outright, so the window is wide enough for both.
+                # One retry. Routing is deterministic now, so a failure here is a
+                # dropped connection rather than a slow answer, and it cost one
+                # question in a 68-question sweep. The second attempt uses a fresh
+                # request object because a urllib Request cannot be replayed.
+                last_error = None
+                for attempt in (1, 2):
+                    try:
+                        retry = urllib.request.Request(
+                            ASSISTANT_URL, data=payload,
+                            headers={"Content-Type": "application/json"})
+                        with urllib.request.urlopen(retry, timeout=120) as resp:
+                            reading = json.loads(resp.read().decode())
+                        last_error = None
+                        break
+                    except Exception as exc:            # noqa: BLE001
+                        last_error = exc
+                        if attempt == 1:
+                            time.sleep(0.25)
+                if last_error is not None:
+                    raise last_error
+            except Exception as exc:                  # noqa: BLE001 - the site may be down
+                raise HTTPException(
+                    503,
+                    f"the assistant at {ASSISTANT_URL} did not answer ({exc}). "
+                    "The scALABLE viewer holds no model of its own.")
+
+        protocol_result=execute_protocol(app,store.get_job(job_id),question,reading)
+        if protocol_result is not None:return protocol_result
         intent = reading.get("intent")
         state = reading.get("cell_state") or ""
         state2 = reading.get("cell_state_2") or ""
@@ -1590,6 +1675,10 @@ def _install_chat_routes(app, store, assets: Dict[str, Dict[str, Any]]) -> None:
 
         result: Dict[str, Any] = {"question": question, "reading": reading,
                                   "intent": intent}
+
+        if reading.get("router") == "local_regulatory" and intent == "differential" and not contrast:
+            result.update(status="not_run", answer="No precomputed comparison for this modality matches the selected groups.")
+            return result
 
         if intent == "clarify":
             result["answer"] = (
@@ -1625,68 +1714,6 @@ def _install_chat_routes(app, store, assets: Dict[str, Dict[str, Any]]) -> None:
             "regulatory_driver": "network",
             "communication_rewiring": "ccc",
         }
-        NOT_YET = {
-            "severity_gradient": "a Spearman correlation of per-donor pseudobulk against a clinical variable",
-            "dose_response": "a monotonic trend test across ordered stages",
-            "composition_shift": "per-donor cell-count composition",
-            "coexpression_module": "per-donor co-expression around a seed gene",
-            "annotation_concordance": "a cross-tabulation of the two annotations",
-        }
-        # --- protocols computed here, from the bundle -----------------------
-        if intent == "severity_gradient" and state and covariate:
-            answer = _run_severity_gradient(ds, state, covariate)
-            result.update(answer)
-            top = [r[0] for r in ((answer.get("table") or {}).get("rows") or [])[:1]]
-            result["follow_ups"] = _follow_ups(intent, ds, state, covariate, top)
-            return result
-        if intent == "coexpression_module" and state and genes:
-            result.update(_run_coexpression(ds, state, genes[0]))
-            result["follow_ups"] = _follow_ups(intent, ds, state, covariate, genes)
-            return result
-        if intent == "composition_shift" and covariate:
-            result.update(_run_composition(ds, covariate, question))
-            result["follow_ups"] = _follow_ups(intent, ds, state, covariate, genes)
-            return result
-        if intent == "annotation_concordance":
-            result.update(_run_concordance(ds, state))
-            return result
-        if intent == "dose_response" and state:
-            result.update(_run_dose_response(ds, state, covariate or "Group", genes))
-            return result
-
-        if intent in NOT_YET:
-            result["answer"] = (
-                f"That is the {intent} protocol. It needs {NOT_YET[intent]}, which this "
-                "viewer does not compute yet, so I am not going to answer it with a "
-                "different analysis. The protocol is specified and the endpoint is the "
-                "remaining work.")
-            result["status"] = "not_implemented"
-            return result
-        # GO-Elite is shipped for every comparison, so this is answered here
-        # rather than pointing at another tab.
-        # Where the disease acts, not which genes move. Aliasing this to the
-        # generic differential answered a cell-type question with a gene volcano.
-        # Who carries the signature, not which genes define it. Aliasing this to
-        # the generic differential answered a donor question with a gene volcano.
-        if intent == "donor_heterogeneity" and state:
-            result.update(_run_donor_heterogeneity(
-                ds, state, contrast or (contrasts[0] if contrasts else "")))
-            result["follow_ups"] = _follow_ups(intent, ds, state, covariate, genes)
-            return result
-
-        if intent == "most_affected_state":
-            result.update(_run_most_affected_state(ds, contrast or (contrasts[0] if contrasts else "")))
-            result["follow_ups"] = _follow_ups(intent, ds, state, covariate, genes)
-            return result
-
-        if intent == "pathway_program" and state:
-            answer = _run_pathway_program(assets.get(job_id, {}), ds, state,
-                                          contrast or (contrasts[0] if contrasts else ""),
-                                          reading.get("direction") or "both")
-            result.update(answer)
-            result["follow_ups"] = _follow_ups(intent, ds, state, covariate, genes)
-            return result
-
         # --- the two regulatory answers, computed here -----------------------
         #
         # Nathan, 2026-09-07: "Both GRN and TF-activity should be able to have separate
@@ -1703,9 +1730,12 @@ def _install_chat_routes(app, store, assets: Dict[str, Dict[str, Any]]) -> None:
                 intent == "regulatory_driver" and _grn_modality == "grn_tf"):
             answer = gnet.tf_activity_profile(
                 ds, cell_state=state,
-                contrast=contrast or (contrasts[0] if contrasts else ""),
+                contrast=contrast,
                 factors=genes or None, limit=int(reading.get("limit") or 25))
             result.update(answer)
+            if answer.get("by_cell_state"):
+                result.update(gnet.tf_activity_state_chat(answer))
+                return result
             rows = answer.get("rows") or []
             # `plot` IS A SPEC OBJECT, NOT A NAME. app.js:6924 reads `result.plot` and
             # dispatches on `spec.kind`; a bare string matches no branch and the panel
@@ -1730,9 +1760,9 @@ def _install_chat_routes(app, store, assets: Dict[str, Dict[str, Any]]) -> None:
                 moved = [r for r in rows if r.get("tested")]
                 lead = rows[0]
                 result["answer"] = (
-                    f"In {answer.get('cell_state')}, {lead['factor']} carries the highest "
-                    f"summed regulatory activity of the {answer.get('n_factors')} modelled "
-                    f"factors, {lead['activity']}. "
+                    f"In {answer.get('cell_state')}, {lead['factor']} leads this ranking "
+                    f"of {answer.get('n_factors')} modelled factors (reported change first, then activity); "
+                    f"its summed regulatory activity is {lead['activity']}. "
                     + (f"{len(moved)} of the {len(rows)} shown changed in "
                        f"{answer.get('tf_activity_contrast') or 'the comparison'}."
                        if moved else
@@ -1743,7 +1773,7 @@ def _install_chat_routes(app, store, assets: Dict[str, Dict[str, Any]]) -> None:
 
         if intent == "regulatory_driver" and state:
             answer = gnet.regulator_network(
-                ds, state, contrast=contrast or (contrasts[0] if contrasts else ""),
+                ds, state, contrast=contrast,
                 features=genes or None,
                 limit=int(reading.get("limit") or gnet.DEFAULT_LIMIT))
             result.update(answer)
@@ -1971,8 +2001,7 @@ def _install_dotplot_routes(app, store, assets: Dict[str, Dict[str, Any]]) -> No
         group_column, group_names, group_code, is_states = _bundle_group_axis(ds, group_by)
         if groups:
             chosen = [g for g in group_names if g in set(groups)]
-            if chosen:
-                group_names = chosen
+            group_names = chosen
         features = _feature_source(ds, modality)
         pairs = ([] if features is not ds
                  else _dotplot_default_genes(assets.get(job_id, {}), ds))
@@ -2002,8 +2031,16 @@ def _install_dotplot_routes(app, store, assets: Dict[str, Dict[str, Any]]) -> No
         if restrict is None and is_states and len(group_names) == len(ds.states):
             # Fast path: the bundle already holds the per-state statistics.
             mean = np.asarray(features.stats_mean[rows, :], dtype=np.float32).tolist()
-            frac = np.asarray(features.stats_frac[rows, :], dtype=np.float32).tolist()
             counts = list(ds.state_n)
+            # Older bundles count stored nonzeros (including negative predictions).
+            # Derive the displayed >0 fraction consistently with filtered views.
+            frac = []
+            state_codes = np.asarray(ds.state_code, dtype=np.int64)
+            for row in rows:
+                idx, val = features.gene_column(row)
+                positive_cells = np.asarray(idx, dtype=np.int64)[np.asarray(val) > 0]
+                hits = np.bincount(state_codes[positive_cells], minlength=len(ds.states))
+                frac.append((hits / np.maximum(np.asarray(counts), 1)).tolist())
         else:
             codes = np.asarray(group_code, dtype=np.int64)
             index = {g: i for i, g in enumerate(group_names)}
@@ -2023,13 +2060,13 @@ def _install_dotplot_routes(app, store, assets: Dict[str, Dict[str, Any]]) -> No
                     cells = idx.astype(np.int64)
                     keep_cells = per_cell[cells] >= 0
                     np.add.at(sums, per_cell[cells][keep_cells], val.astype(np.float64)[keep_cells])
-                    np.add.at(hits, per_cell[cells][keep_cells], 1)
+                    np.add.at(hits, per_cell[cells][keep_cells], (np.asarray(val)[keep_cells] > 0).astype(np.int64))
                 mean.append([float(sums[i] / counts[i]) if counts[i] else 0.0
                              for i in range(len(group_names))])
                 frac.append([float(hits[i] / counts[i]) if counts[i] else 0.0
                              for i in range(len(group_names))])
         return {
-            "genes": labels, "states": group_names, "groups": group_names,
+            "modality": modality or "rna", "genes": labels, "states": group_names, "groups": group_names,
             "group_by": group_column, "group_label": group_column,
             "subset_by": subset_by or "", "subset_values": list(subset_values),
             "subset2_by": subset2_by or "", "subset2_values": list(subset2_values),
@@ -2063,7 +2100,7 @@ def _install_dotplot_routes(app, store, assets: Dict[str, Dict[str, Any]]) -> No
 
 SITE_DB = os.environ.get(
     "LUNGMAP_SITE_DB",
-    "/Users/saljh8/Dropbox/LungMAP/refactored_website/build/breath.sqlite")
+    "/Users/saljh8/Dropbox/LungMAP/refactored_website/lungmap-data/site/breath.sqlite")
 
 # EXACTLY ONE id, and it belongs to the DATASET, not to this module. There is
 # deliberately no fallback to another study: showing a different study's title,
@@ -3043,6 +3080,9 @@ def _install_grn_routes(app, store) -> None:
     that already calls it changes.
     """
 
+    _drop_official_route(app, "/api/jobs/{job_id}/grn/regulator-network")
+    _drop_official_route(app, "/api/jobs/{job_id}/grn/tf-activity")
+
     @app.get("/api/jobs/{job_id}/grn/regulator-network")
     def grn_regulator_network(
         job_id: str,
@@ -3080,6 +3120,86 @@ def _install_grn_routes(app, store) -> None:
         return gnet.tf_activity_profile(
             ds, cell_state=cell_state, contrast=contrast,
             factors=want or None, limit=int(limit))
+
+
+# =================================================================================
+# GRN edges from the bundle's own per-cell-state store
+# =================================================================================
+#
+# webapp/app.py `_grn_edges_adata` opens
+# `meta['modality_artifacts']['grn']['network_h5ad']`, the edge-level object
+# cellHarmony-differential writes beside each contrast's DEG tables. A precomputed bundle
+# has no such object. Measured on the COPD atlas: 0 files match
+# `differentials_only_*.h5ad` anywhere under the study tree, so `network_h5ad` was never
+# set and every GRN edges request answered "GRN edge output is unavailable for this job."
+#
+# The edges were present the whole time, as the bundle's own `grn` modality store:
+# `<prefix>_grn_genes.tsv` names 63,647 `TF|target` edges and `<prefix>_grn_stats_mean.npy`
+# holds each edge's mean score in each of the 50 cell states. This assembles those two
+# arrays into the cell-state x edge AnnData the payload builder already knows how to read.
+# No score is recomputed and nothing is written: the values are the ones precompute stored.
+#
+# The store is per cell state, so the AnnData carries no sample column, `disp_col` stays
+# None and the panel's Sample menu stays empty. That is the store's granularity, not a
+# missing field.
+
+_GRN_EDGE_ADATA_CACHE: Dict[str, Any] = {}
+
+
+def _bundle_grn_edge_adata(ds, cluster_key: str):
+    """Cell-state x edge AnnData from one bundle's `grn` store."""
+    import anndata as ad
+
+    store_grn = ds.modality("grn")
+    mean = np.asarray(store_grn.stats_mean)          # (n_edges, n_states)
+    states = [str(s) for s in ds.states]
+    names = [str(n) for n in store_grn.features]
+    if mean.shape != (len(names), len(states)):
+        raise ValueError(
+            f"GRN store is {mean.shape} but names {len(names)} edges and "
+            f"{len(states)} cell states.")
+    key = str(cluster_key or "cell_type")
+    obs = pd.DataFrame({key: states}, index=pd.Index(states, name="cell_state"))
+    var = pd.DataFrame(index=pd.Index(names, name="edge"))
+    adata = ad.AnnData(X=np.ascontiguousarray(mean.T, dtype=np.float32), obs=obs, var=var)
+    if adata.shape != (len(states), len(names)):
+        raise ValueError(f"assembled GRN AnnData is {adata.shape}, expected "
+                         f"{(len(states), len(names))}")
+    return adata
+
+
+def _install_grn_edge_adata(app, store) -> None:
+    """Serve `_grn_edges_adata` from the bundle when the job is one.
+
+    The wrap is on the shared webapp module, the same way the GO payload builder is
+    wrapped above. An uploaded cellHarmony job still reaches the original, so the
+    contrast-written edge h5ad remains the source there.
+    """
+    original = W._grn_edges_adata
+    if getattr(original, "_bundle_aware", False):
+        return
+
+    def bundle_aware(meta):
+        sv = (meta or {}).get("scalable_viewer") or {}
+        bundle_dir = str(sv.get("bundle_dir") or "")
+        if not bundle_dir:
+            return original(meta)
+        cached = _GRN_EDGE_ADATA_CACHE.get(bundle_dir)
+        if cached is not None:
+            return cached
+        catalog = getattr(app.state, "catalog", None)
+        ids = list(catalog.ids()) if catalog is not None else []
+        job_id = next((jid for jid in ids
+                       if str(store.dataset(jid).paths.bundle_dir) == bundle_dir), "")
+        if not job_id:
+            return original(meta)
+        cluster_key = str(meta.get("cluster_key") or meta.get("reference_cluster_key") or "")
+        adata = _bundle_grn_edge_adata(store.dataset(job_id), cluster_key)
+        _GRN_EDGE_ADATA_CACHE[bundle_dir] = adata
+        return adata
+
+    bundle_aware._bundle_aware = True
+    W._grn_edges_adata = bundle_aware
 
 
 def _install_study_route(app, catalog: da.Catalog) -> None:
@@ -3149,7 +3269,8 @@ def _install_study_route(app, catalog: da.Catalog) -> None:
             entry = next((e for e in catalog.entries if e["id"] == ds_id), None)
             if entry:
                 record["viewer_stats"] = {"n_cells": entry["n_cells"], "n_genes": entry["n_genes"],
-                                          "n_states": entry["n_states"], "label": entry["label"]}
+                                          "n_states": entry["n_states"], "label": entry["label"],
+                                          "observation_unit": catalog.get(ds_id).sv.get("observation_unit", "cells")}
         if not record.get("ok"):
             return JSONResponse(record, status_code=200)
         return record
@@ -3161,186 +3282,16 @@ def _install_study_route(app, catalog: da.Catalog) -> None:
 # the bundle: per-donor pseudobulk for the three that need a donor axis, cell
 # counts for composition, and a covariate cross-tabulation for concordance.
 
-def _run_severity_gradient(ds, state: str, covariate: str) -> Dict[str, Any]:
-    """Genes whose per-donor level tracks a numeric clinical variable.
-
-    A case-control contrast says whether a gene differs between two labelled
-    groups. It cannot say whether the gene follows severity. Spearman against a
-    measured variable separates a step at the diagnosis boundary from a decline
-    with lung function, and only the second is a graded mechanism.
-    """
-    from scipy import stats as _st
-
-    try:
-        kind, values, _ = ds.covariate_values(covariate)
-    except KeyError:
-        return {"answer": f"{covariate} is not recorded in this dataset.",
-                "status": "not_covered"}
-    if kind != "numeric":
-        return {"answer": f"{covariate} is categorical, so it has no gradient. "
-                          "Ask for a group comparison instead.",
-                "status": "not_covered"}
-
-    rows = _candidate_rows(ds)
-    matrix, donors, counts = _donor_pseudobulk(ds, rows, state)
-    if matrix is None or len(donors) < 8:
-        return {"answer": f"Too few donors contribute cells to {state} to correlate anything.",
-                "status": "not_covered"}
-
-    # One covariate value per donor: the mean over that donor's cells, which is
-    # exact here because these covariates are donor-level and constant within a
-    # donor.
-    donor_code, donor_labels = _donor_axis(ds)
-    per_donor = []
-    values = np.asarray(values, dtype=np.float64)
-    for name in donors:
-        mask = donor_code == donor_labels.index(name)
-        per_donor.append(float(np.nanmean(values[mask])) if mask.any() else np.nan)
-    covariate_values = np.asarray(per_donor, dtype=np.float64)
-    good = np.isfinite(covariate_values)
-    if int(good.sum()) < 8:
-        return {"answer": f"{covariate} is missing for too many donors in {state}.",
-                "status": "not_covered"}
-
-    # spearmanr returns a scalar for one gene, a matrix for many. Indexing the
-    # scalar case as a matrix raised "IndexError: invalid index to scalar
-    # variable" for EC general capillary, where only one gene survived the
-    # per-donor filter.
-    # spearmanr returns a scalar for a single pair and a correlation matrix for
-    # many, so the RESULT decides how to read it, not the input shape. Indexing
-    # a scalar as a matrix raised IndexError for EC general capillary, where the
-    # per-donor filter left one gene.
-    # Spearman is Pearson on ranks, so the whole scan is one matrix product.
-    # `spearmanr` on the stacked matrix builds the full gene-by-gene correlation
-    # matrix, 3022 x 3022 here, to use one column of it: that cost 5.07 s.
-    scanned = matrix[:, good]
-    n = int(good.sum())
-
-    def rank_rows(block: np.ndarray) -> np.ndarray:
-        """Average ranks along each row, ties shared, as Spearman requires."""
-        order = np.argsort(block, axis=1, kind="mergesort")
-        ranks = np.empty_like(order, dtype=np.float64)
-        rows_index = np.arange(block.shape[0])[:, None]
-        ranks[rows_index, order] = np.arange(block.shape[1], dtype=np.float64)
-        # Ties: average the ranks of equal values, or a flat gene ranks 0..n-1
-        # and correlates perfectly with anything.
-        sorted_block = np.take_along_axis(block, order, axis=1)
-        for row in range(block.shape[0]):
-            values = sorted_block[row]
-            start = 0
-            for index in range(1, block.shape[1] + 1):
-                if index == block.shape[1] or values[index] != values[start]:
-                    if index - start > 1:
-                        ranks[row, order[row, start:index]] = (start + index - 1) / 2.0
-                    start = index
-        return ranks
-
-    gene_ranks = rank_rows(scanned)
-    covariate_ranks = rank_rows(covariate_values[good][None, :])[0]
-    gene_centred = gene_ranks - gene_ranks.mean(axis=1, keepdims=True)
-    covariate_centred = covariate_ranks - covariate_ranks.mean()
-    denominator = (np.linalg.norm(gene_centred, axis=1)
-                   * np.linalg.norm(covariate_centred))
-    with np.errstate(invalid="ignore", divide="ignore"):
-        rho = np.where(denominator > 0,
-                       gene_centred @ covariate_centred / np.maximum(denominator, 1e-12),
-                       0.0)
-    rho = np.clip(np.nan_to_num(rho, nan=0.0), -1.0, 1.0)
-    # The same t approximation scipy uses for Spearman.
-    with np.errstate(invalid="ignore", divide="ignore"):
-        tstat = rho * np.sqrt((n - 2) / np.maximum(1e-12, 1 - rho ** 2))
-    pval = np.nan_to_num(2 * _st.t.sf(np.abs(tstat), max(1, n - 2)), nan=1.0)
-
-    varying = scanned.std(axis=1) > 0
-    rho = np.where(varying[:len(rho)], rho, 0.0)
-    order = [int(i) for i in np.argsort(-np.abs(rho)) if varying[int(i)]][:25]
-    # A linear fit alongside the rank correlation. Spearman says a relationship
-    # is monotonic; the slope says how much the gene moves per unit of the
-    # variable, which is what "regulated with age" actually claims. Both are
-    # reported, because a high rho with a slope near zero is a real ordering of
-    # noise.
-    x = covariate_values[good]
-    x_centred = x - x.mean()
-    denominator = float((x_centred ** 2).sum())
-    table_rows = []
-    points: Dict[str, Any] = {}
-    for i in order:
-        y = scanned[int(i)]
-        slope = float((x_centred * (y - y.mean())).sum() / denominator) if denominator else 0.0
-        intercept = float(y.mean() - slope * x.mean())
-        predicted = slope * x + intercept
-        ss_res = float(((y - predicted) ** 2).sum())
-        ss_tot = float(((y - y.mean()) ** 2).sum())
-        r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
-        gene = ds.symbols[rows[int(i)]]
-        table_rows.append([gene, round(float(rho[int(i)]), 4), float(pval[int(i)]),
-                           round(slope, 6), round(r2, 4), int(good.sum()),
-                           "up with " + covariate if slope > 0 else "down with " + covariate])
-        if len(points) < 6:
-            points[gene] = {"x": [round(float(v), 4) for v in x],
-                            "y": [round(float(v), 5) for v in y],
-                            "slope": round(slope, 6), "intercept": round(intercept, 6),
-                            "rho": round(float(rho[int(i)]), 4), "r2": round(r2, 4)}
-    if not table_rows:
-        # Every scanned gene was flat across these donors, so no correlation is
-        # defined. An empty table would read as "nothing correlates", which is a
-        # different and unsupported claim.
-        return {
-            "answer": (f"No gene varies across the {int(good.sum())} donors that "
-                       f"contribute cells to {state}, so no correlation with "
-                       f"{covariate} is defined. Too few cells per donor in this "
-                       "state, not an absence of signal."),
-            "status": "not_covered",
-            "table": {"columns": ["donors with cells in " + state],
-                      "rows": [[d] for d in donors[:40]]},
-        }
-    return {
-        "answer": (f"Genes in {state} whose per-donor level tracks {covariate}, "
-                   f"Spearman across {int(good.sum())} donors, "
-                   f"{len(rows)} genes scanned."),
-        "status": "answered",
-        "table": {"columns": ["gene", "rho", "p", "slope", "r2", "n_donors", "direction"],
-                  "rows": table_rows},
-        # One panel per gene: each donor's level against the variable, with the
-        # fitted line. A CombPlot here drew all 39 cell states for a correlation
-        # computed inside one of them, which showed the wrong thing entirely.
-        "plot": {"kind": "gradient", "covariate": covariate, "state": state,
-                 "donors": donors, "points": points},
-    }
+def _run_severity_gradient(ds, *args, **kwargs):
+    from altanalyze3.components.cellHarmony import chat_protocols
+    from altanalyze3.components.cellHarmony.webapp.chat_data import protocol_adapter
+    return chat_protocols._run_severity_gradient(protocol_adapter(ds), *args, **kwargs)
 
 
-def _run_coexpression(ds, state: str, seed: str) -> Dict[str, Any]:
-    """Genes co-varying with a seed gene across donors, inside one cell state."""
-    seed_row = ds.resolve_gene(seed)
-    if seed_row is None:
-        return {"answer": f"{seed} is not in this dataset.", "status": "not_covered"}
-    rows = _candidate_rows(ds)
-    if seed_row not in rows:
-        rows = [seed_row] + rows
-    matrix, donors, _ = _donor_pseudobulk(ds, rows, state)
-    if matrix is None or len(donors) < 8:
-        return {"answer": f"Too few donors contribute cells to {state}.",
-                "status": "not_covered"}
-
-    seed_index = rows.index(seed_row)
-    seed_values = matrix[seed_index]
-    centred = matrix - matrix.mean(axis=1, keepdims=True)
-    seed_centred = seed_values - seed_values.mean()
-    denominator = (np.linalg.norm(centred, axis=1) * np.linalg.norm(seed_centred))
-    with np.errstate(invalid="ignore", divide="ignore"):
-        r = np.where(denominator > 0, centred @ seed_centred / np.maximum(denominator, 1e-12), 0.0)
-    r[seed_index] = 1.0
-    order = [int(i) for i in np.argsort(-r) if int(i) != seed_index][:25]
-    return {
-        "answer": (f"Genes co-varying with {seed} across {len(donors)} donors in {state}. "
-                   "Correlation is over per-donor pseudobulk, the same axis disease varies along."),
-        "status": "answered",
-        "table": {"columns": ["gene", "r with " + seed, "n_donors"],
-                  "rows": [[ds.symbols[rows[i]], round(float(r[i]), 4), len(donors)]
-                           for i in order]},
-        "plot": {"kind": "combplot",
-                 "genes": [seed] + [ds.symbols[rows[i]] for i in order[:5]]},
-    }
+def _run_coexpression(ds, *args, **kwargs):
+    from altanalyze3.components.cellHarmony import chat_protocols
+    from altanalyze3.components.cellHarmony.webapp.chat_data import protocol_adapter
+    return chat_protocols._run_coexpression(protocol_adapter(ds), *args, **kwargs)
 
 
 def _categorical_twin(ds, covariate: str) -> str:
@@ -3386,324 +3337,28 @@ def _named_level(question: str, labels) -> int:
     return best
 
 
-def _run_composition(ds, covariate: str, question: str = "") -> Dict[str, Any]:
-    """Which cell states change in abundance between the levels of a variable."""
-    try:
-        kind, values, labels = ds.covariate_values(covariate)
-    except KeyError:
-        return {"answer": f"{covariate} is not recorded here.", "status": "not_covered"}
-    swapped = ""
-    if kind != "categorical" or labels is None:
-        twin = _categorical_twin(ds, covariate)
-        if twin:
-            swapped, covariate = covariate, twin
-            kind, values, labels = ds.covariate_values(covariate)
-    if kind != "categorical" or labels is None:
-        return {"answer": f"{covariate} is numeric; composition needs groups.",
-                "status": "not_covered"}
-
-    donor_code, donor_labels = _donor_axis(ds)
-    if donor_code is None:
-        return {"answer": "This bundle records no donor column.", "status": "not_covered"}
-    states = np.asarray(ds.state_code, dtype=np.int64)
-    values = np.asarray(values, dtype=np.int64)
-
-    # Fraction of each donor's cells in each state, then the mean per group.
-    per_donor = np.zeros((len(donor_labels), len(ds.states)), dtype=np.float64)
-    np.add.at(per_donor, (donor_code, states), 1.0)
-    totals = per_donor.sum(axis=1, keepdims=True)
-    fractions = np.divide(per_donor, np.maximum(totals, 1))
-    donor_group = np.full(len(donor_labels), -1, dtype=np.int64)
-    for donor in range(len(donor_labels)):
-        mask = donor_code == donor
-        if mask.any():
-            donor_group[donor] = int(np.bincount(values[mask]).argmax())
-
-    present = [g for g in range(len(labels)) if (donor_group == g).any()]
-    if len(present) < 2:
-        return {"answer": f"{covariate} has fewer than two groups with donors.",
-                "status": "not_covered"}
-    # Reference group first, so it takes the sky-blue bar and the disease the
-    # red one. Stored order put COPD first and inverted the colours.
-    named = _named_level(question, labels)
-    if named in present and len(present) > 2:
-        # Three GOLD levels: compare the one asked about against the mildest
-        # remaining level rather than an arbitrary pair.
-        rest = [g for g in present if g != named]
-        first, second = _control_first(labels, [rest[0], named])
-    else:
-        first, second = _control_first(labels, present)
-    a = fractions[donor_group == first].mean(axis=0)
-    b = fractions[donor_group == second].mean(axis=0)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        ratio = np.log2((a + 1e-6) / (b + 1e-6))
-    # A Mann-Whitney per state: donor fractions are bounded and skewed, so a
-    # rank test is the defensible one, and the two groups have unequal sizes.
-    from scipy import stats as _st
-
-    a_donors = fractions[donor_group == first]
-    b_donors = fractions[donor_group == second]
-    pvals = []
-    for index in range(len(ds.states)):
-        x, y = a_donors[:, index], b_donors[:, index]
-        if x.size < 3 or y.size < 3 or (x.std() == 0 and y.std() == 0):
-            pvals.append(1.0)
-            continue
-        try:
-            pvals.append(float(_st.mannwhitneyu(x, y, alternative="two-sided").pvalue))
-        except ValueError:
-            pvals.append(1.0)
-    # Rank by the test, not by the log ratio. The ratio carries a pseudocount,
-    # so a state present at 0.00012 against 0.00000 topped the list on a
-    # difference of one ten-thousandth of a donor's cells, which is noise. The
-    # rank test asks whether the donors actually separate.
-    order = sorted(range(len(ds.states)),
-                   key=lambda i: (pvals[i], -abs(float(a[i] - b[i]))))[:25]
-    return {
-        "answer": ((f"{swapped} is numeric, so the grouped variable {covariate} "
-                    f"was used instead. " if swapped else "")
-                   + f"Cell-state abundance, {labels[first]} against {labels[second]}, "
-                   f"as each donor's share of their own cells. "
-                   f"{int((donor_group == first).sum())} and "
-                   f"{int((donor_group == second).sum())} donors. "
-                   "Abundance and expression are confounded: a depleted state looks "
-                   "changed in any pooled expression comparison."),
-        "status": "answered",
-        "table": {"columns": ["cell state", f"mean fraction {labels[first]}",
-                              f"mean fraction {labels[second]}", "log2 ratio", "p"],
-                  "rows": [[ds.states[int(i)], round(float(a[int(i)]), 5),
-                            round(float(b[int(i)]), 5), round(float(ratio[int(i)]), 4),
-                            float(pvals[int(i)])]
-                           for i in order]},
-        # A paired bar per cell state, one bar per group, so the two frequencies
-        # are read directly. A log ratio alone hides whether a state is common
-        # in both groups or rare in both.
-        # Every donor's own fraction travels with the summary, so the figure can
-        # show the biological replicates behind each bar rather than only the
-        # mean. A mean of 141 donors and a mean of 4 look identical otherwise.
-        "plot": {"kind": "frequency",
-                 "groups": [str(labels[first]), str(labels[second])],
-                 "n_donors": [int((donor_group == first).sum()),
-                              int((donor_group == second).sum())],
-                 "states": [ds.states[int(i)] for i in order],
-                 "a": [round(float(a[int(i)]), 6) for i in order],
-                 "b": [round(float(b[int(i)]), 6) for i in order],
-                 # Standard error of the mean, which is what an error bar on a
-                 # group mean should show.
-                 "a_sem": [round(float(a_donors[:, int(i)].std(ddof=1)
-                                       / max(1.0, np.sqrt(a_donors.shape[0]))), 6)
-                           for i in order],
-                 "b_sem": [round(float(b_donors[:, int(i)].std(ddof=1)
-                                       / max(1.0, np.sqrt(b_donors.shape[0]))), 6)
-                           for i in order],
-                 "a_points": [[round(float(v), 6) for v in a_donors[:, int(i)]]
-                              for i in order],
-                 "b_points": [[round(float(v), 6) for v in b_donors[:, int(i)]]
-                              for i in order],
-                 "p": [float(pvals[int(i)]) for i in order]},
-    }
+def _run_composition(ds, *args, **kwargs):
+    from altanalyze3.components.cellHarmony import chat_protocols
+    from altanalyze3.components.cellHarmony.webapp.chat_data import protocol_adapter
+    return chat_protocols._run_composition(protocol_adapter(ds), *args, **kwargs)
 
 
-def _run_concordance(ds, state: str = "") -> Dict[str, Any]:
-    """Where the two cell annotations agree, and where they do not."""
-    second = next((name for name in ("TGEN-IPF", "Population", "celltype_level3")
-                   if name in (ds.covariate_names() or {})), "")
-    if not second:
-        return {"answer": "This bundle carries only one cell annotation.",
-                "status": "not_covered"}
-    kind, values, labels = ds.covariate_values(second)
-    if kind != "categorical" or labels is None:
-        return {"answer": f"{second} is not categorical.", "status": "not_covered"}
-
-    states = np.asarray(ds.state_code, dtype=np.int64)
-    values = np.asarray(values, dtype=np.int64)
-    wanted = range(len(ds.states)) if not state else [ds.states.index(state)]
-    table_rows = []
-    for index in wanted:
-        mask = states == index
-        total = int(mask.sum())
-        if not total:
-            continue
-        counts = np.bincount(values[mask], minlength=len(labels))
-        for other in np.argsort(-counts)[:3]:
-            if counts[int(other)] == 0:
-                continue
-            table_rows.append([ds.states[int(index)], str(labels[int(other)]),
-                               int(counts[int(other)]),
-                               round(float(counts[int(other)]) / total, 4)])
-    scope = state or f"all {len(ds.states)} cell states"
-    return {
-        "answer": (f"How {ds.sv.get('cluster_key') or 'cell_state'} maps onto {second}, "
-                   f"for {scope}. A state whose top match holds well under 1.0 is a "
-                   "boundary case, and a differential there may be an artefact of "
-                   "which labelling was used."),
-        "status": "answered",
-        "table": {"columns": ["cell state", second, "n cells", "fraction"],
-                  "rows": table_rows[:60]},
-        "plot": {"kind": "heatmap"},
-    }
+def _run_concordance(ds, *args, **kwargs):
+    from altanalyze3.components.cellHarmony import chat_protocols
+    from altanalyze3.components.cellHarmony.webapp.chat_data import protocol_adapter
+    return chat_protocols._run_concordance(protocol_adapter(ds), *args, **kwargs)
 
 
-def _run_dose_response(ds, state: str, covariate: str, genes: List[str]) -> Dict[str, Any]:
-    """Whether a gene changes stepwise across the levels of an ordered variable."""
-    from scipy import stats as _st
-
-    try:
-        kind, values, labels = ds.covariate_values(covariate)
-    except KeyError:
-        return {"answer": f"{covariate} is not recorded here.", "status": "not_covered"}
-    if kind != "categorical" or labels is None:
-        # "across GOLD stages" resolves to `gold_ordinal`, which is numeric.
-        # The same variable exists categorically as `Group`, and an ordered
-        # question wants the levels, so swap rather than refuse.
-        swapped = ""
-        for name, info in (ds.covariate_names() or {}).items():
-            if info.get("kind") != "categorical":
-                continue
-            stem = covariate.lower().split("_")[0][:4]
-            if stem and (stem in name.lower() or name.lower()[:4] == stem):
-                swapped = name
-                break
-        if not swapped and "Group" in (ds.covariate_names() or {}):
-            swapped = "Group"
-        if not swapped:
-            return {"answer": f"{covariate} is numeric; ask for a gradient instead.",
-                    "status": "not_covered"}
-        covariate = swapped
-        kind, values, labels = ds.covariate_values(covariate)
-
-    wanted = [g for g in (genes or []) if ds.resolve_gene(g) is not None]
-    if not wanted:
-        wanted = _bundle_default_genes(ds, [state])[:6]
-    rows = [ds.resolve_gene(g) for g in wanted]
-    matrix, donors, _ = _donor_pseudobulk(ds, rows, state)
-    if matrix is None or len(donors) < 8:
-        return {"answer": f"Too few donors contribute cells to {state}.",
-                "status": "not_covered"}
-
-    donor_code, donor_labels = _donor_axis(ds)
-    values = np.asarray(values, dtype=np.int64)
-    donor_level = []
-    for name in donors:
-        mask = donor_code == donor_labels.index(name)
-        donor_level.append(int(np.bincount(values[mask]).argmax()) if mask.any() else -1)
-    level = np.asarray(donor_level, dtype=np.float64)
-    good = level >= 0
-
-    table_rows = []
-    for position, gene in enumerate(wanted):
-        per_level = []
-        for index in sorted(set(level[good].astype(int))):
-            selected = good & (level == index)
-            per_level.append(round(float(matrix[position][selected].mean()), 4)
-                             if selected.any() else None)
-        rho, pval = _st.spearmanr(level[good], matrix[position][good])
-        clean = [v for v in per_level if v is not None]
-        monotonic = (all(x <= y for x, y in zip(clean, clean[1:]))
-                     or all(x >= y for x, y in zip(clean, clean[1:])))
-        table_rows.append([gene, str(per_level), round(float(rho), 4),
-                           float(pval), "yes" if monotonic else "no"])
-    order = [str(l) for l in labels]
-    return {
-        "answer": (f"{', '.join(wanted)} across {covariate} in {state}, "
-                   f"{int(good.sum())} donors. Levels in order: {', '.join(order)}. "
-                   "A stepwise change behaves like a progression marker; a change only "
-                   "at the extreme behaves like an end-stage marker."),
-        "status": "answered",
-        "table": {"columns": ["gene", "mean per level", "trend rho", "p", "monotonic"],
-                  "rows": table_rows},
-        "plot": {"kind": "combplot", "genes": wanted, "group_by": covariate},
-    }
+def _run_dose_response(ds, *args, **kwargs):
+    from altanalyze3.components.cellHarmony import chat_protocols
+    from altanalyze3.components.cellHarmony.webapp.chat_data import protocol_adapter
+    return chat_protocols._run_dose_response(protocol_adapter(ds), *args, **kwargs)
 
 
-def _run_pathway_program(assets: Dict[str, Any], ds, state: str, contrast: str,
-                         direction: str = "both", limit: int = 25) -> Dict[str, Any]:
-    """Enriched processes for one cell state, read from the shipped GO-Elite table.
-
-    A gene list is not a mechanism. GO-Elite is precomputed for each comparison,
-    so the enriched terms are read directly rather than re-derived, and the
-    genes driving each term come with them.
-
-    The table keys its rows as `<cell state>__<direction>`, so a question about
-    what is up in AT2 reads `AT2__up`.
-    """
-    import csv as _csv
-
-    # The assets record the file directly; an earlier version guessed at the
-    # directory layout with rglob and found nothing.
-    head = (contrast or "").split("::")[0]
-    differential = (assets or {}).get("differential") or {}
-    entry = differential.get(contrast) or {}
-    if not entry:
-        entry = next((v for k, v in differential.items() if k.startswith(head)), {})
-    path = str((entry or {}).get("goelite_tsv") or "")
-    if not path or not Path(path).exists():
-        return {"answer": f"No GO-Elite results are shipped for {head}.",
-                "status": "not_covered"}
-    candidates = [Path(path)]
-
-    wanted = set()
-    if direction in ("up", "both"):
-        wanted.add(f"{state}__up")
-    if direction in ("down", "both"):
-        wanted.add(f"{state}__down")
-
-    rows = []
-    with candidates[0].open() as handle:
-        for row in _csv.DictReader(handle, delimiter="\t"):
-            if row.get("population") in wanted:
-                try:
-                    z = float(row.get("z_score") or 0)
-                    fdr = float(row.get("fdr") or 1)
-                except ValueError:
-                    continue
-                rows.append((z, fdr, row))
-    if not rows:
-        return {
-            "answer": (f"GO-Elite is shipped for {head} but holds no terms for {state}. "
-                       "It covers the cell states with enough differential genes to test."),
-            "status": "not_covered",
-        }
-
-    # A term overlapping one gene can reach Z=27 and says nothing: the Z score
-    # rewards a small expected count. Terms are ranked by Z but must overlap at
-    # least two genes, and the count that was dropped is reported rather than
-    # hidden, because a state whose only terms are one-gene terms has no
-    # enrichment worth reading.
-    single = [item for item in rows if int(float(item[2].get("overlap") or 0)) < 2]
-    rows = [item for item in rows if int(float(item[2].get("overlap") or 0)) >= 2]
-    if not rows:
-        return {
-            "answer": (f"GO-Elite found {len(single)} terms for {state} in {head}, and every "
-                       "one overlaps a single gene. A one-gene term reaches a high Z score "
-                       "because the expected count is tiny, so there is no enrichment here "
-                       "worth reporting."),
-            "status": "not_covered",
-        }
-    rows.sort(key=lambda item: -item[0])
-    table_rows, chart = [], []
-    for z, fdr, row in rows[:limit]:
-        way = "up" if str(row.get("population", "")).endswith("__up") else "down"
-        genes = str(row.get("overlap_genes") or "").replace("|", ", ")[:70]
-        table_rows.append([row.get("term_name"), way, round(z, 3), fdr,
-                           int(float(row.get("overlap") or 0)), genes])
-        chart.append([f"{row.get('term_name')} ({way})", z if way == "up" else -z])
-
-    return {
-        "answer": (f"Enriched processes in {state} for {head}: {len(rows)} terms "
-                   f"overlapping two or more genes, ranked by Z score. "
-                   f"{len(single)} one-gene terms were left out, because a term with one "
-                   "overlapping gene reaches a high Z on a tiny expected count. The genes "
-                   "driving each term are listed beside it."),
-        "status": "answered",
-        "table": {"columns": ["term", "direction", "z", "fdr", "n overlap", "genes"],
-                  "rows": table_rows},
-        # Name the column explicitly: the last column here is the gene list, a
-        # string, so a bar chart guessing "rightmost column" drew nothing.
-        "plot": {"kind": "barchart", "value_column": "z",
-                 "label_column": "term", "sign_column": "direction"},
-        "chart": chart,
-    }
+def _run_pathway_program(ds, *args, **kwargs):
+    from altanalyze3.components.cellHarmony import chat_protocols
+    from altanalyze3.components.cellHarmony.webapp.chat_data import protocol_adapter
+    return chat_protocols._run_pathway_program(protocol_adapter(ds), *args, **kwargs)
 
 
 #: Words that mark the reference side of a comparison. A level carrying one of
@@ -3825,204 +3480,13 @@ def _frequency_payload(ds, covariate: str, states_in_order: Optional[List[str]] 
     }
 
 
-def _run_most_affected_state(ds, contrast: str, limit: int = 39) -> Dict[str, Any]:
-    """Rank cell states by how strongly they respond to a contrast.
-
-    The question is where the disease acts, not which genes move. Ranking the
-    states by the number of genes passing FDR, and by the median effect among
-    them, says which compartment to look at before any gene list is opened.
-
-    This used to be aliased to the generic differential, so it answered with a
-    gene volcano: the right numbers for a different question.
-    """
-    manifest = ds.deg_manifest() or {}
-    comparisons = manifest.get("comparisons", [])
-    chosen = next((c for c in comparisons if (c.get("id") or "") == contrast), None)
-    if chosen is None:
-        chosen = next((c for c in comparisons if "per_cell_state" in (c.get("id") or "")), None)
-    if chosen is None:
-        return {"answer": "This bundle carries no per-cell-state comparison.",
-                "status": "not_covered"}
-
-    table = ds.deg_table(chosen.get("id"), 1000000, 0.05, None) or {}
-    rows = table.get("rows") if isinstance(table, dict) else table
-    if not rows:
-        return {"answer": f"{chosen.get('id')} returned no genes below FDR 0.05.",
-                "status": "not_covered"}
-
-    per_state: Dict[str, List[float]] = {}
-    top_gene: Dict[str, tuple] = {}
-    for row in rows:
-        state = str(row.get("population") or row.get("cluster") or "")
-        if not state:
-            continue
-        try:
-            fold = float(row.get("log2fc") or 0.0)
-        except (TypeError, ValueError):
-            continue
-        per_state.setdefault(state, []).append(abs(fold))
-        best = top_gene.get(state)
-        if best is None or abs(fold) > best[1]:
-            top_gene[state] = (row.get("gene"), abs(fold), fold)
-
-    ranked = sorted(per_state.items(), key=lambda kv: (-len(kv[1]), -float(np.median(kv[1]))))
-    table_rows, chart = [], []
-    for state, folds in ranked[:limit]:
-        gene, _, signed = top_gene.get(state, ("", 0.0, 0.0))
-        table_rows.append([state, len(folds), round(float(np.median(folds)), 4),
-                           gene, round(float(signed), 4)])
-        chart.append([state, len(folds)])
-
-    covered = len(per_state)
-    # The abundance figure must split donors on the same variable the
-    # differential compared, so it is derived from the contrast id.
-    frequency = None
-    try:
-        categorical = bundle_meta._categorical_covariates(ds)
-        grouping, case_value, control_value = bundle_meta._contrast_group_field(
-            ds, chosen, categorical)
-    except Exception:                                    # noqa: BLE001
-        grouping, case_value, control_value = "", "", ""
-    if grouping:
-        frequency = _frequency_payload(ds, grouping, [r[0] for r in table_rows],
-                                       case_label=case_value,
-                                       control_label=control_value)
-        if frequency:
-            frequency.pop("_table", None)
-    return {
-        "answer": (f"Cell states ranked by how strongly they respond to "
-                   f"{chosen.get('id')}, counting genes below FDR 0.05. "
-                   f"{covered} of the {len(ds.states)} states have any, and the "
-                   "contrast is only computed for the states with enough cells. "
-                   + (f"The table ranks by differential genes. The bars show the "
-                      f"same states' abundance in each group, "
-                      f"{frequency['groups'][0]} against {frequency['groups'][1]}, "
-                      f"as each donor's share of their own cells, with one dot per "
-                      f"donor and standard error. A state can change in expression, "
-                      f"in abundance, or in both, and the two are confounded: a "
-                      f"depleted state looks changed in any pooled comparison."
-                      if frequency else
-                      "Where the disease acts, before any gene list is opened.")),
-        "status": "answered",
-        "table": {"columns": ["cell state", "n significant", "median |log2fc|",
-                              "top gene", "its log2fc"],
-                  "rows": table_rows},
-        # The question spans two things: which states change transcriptionally,
-        # and which change in abundance. The table ranks by differential genes;
-        # the figure shows each group's cell frequency for those same states, in
-        # the same order, so both are visible at once.
-        "plot": frequency or {"kind": "barchart", "value_column": "n significant",
-                              "label_column": "cell state"},
-    }
+def _run_most_affected_state(ds, *args, **kwargs):
+    from altanalyze3.components.cellHarmony import chat_protocols
+    from altanalyze3.components.cellHarmony.webapp.chat_data import protocol_adapter
+    return chat_protocols._run_most_affected_state(protocol_adapter(ds), *args, **kwargs)
 
 
-def _run_donor_heterogeneity(ds, state: str, contrast: str,
-                             n_genes: int = 40) -> Dict[str, Any]:
-    """Whether a signature is carried by most donors or by a few.
-
-    A significant fold change is a statement about group means. With 178 donors
-    a gene can clear FDR because a handful carry it strongly while the rest show
-    nothing, and that is a subtype rather than a disease mechanism.
-
-    So the signature is scored per donor: the genes up in the contrast minus the
-    genes down, each standardised across donors, inside the one cell state. A
-    heatmap of those genes with donors ordered by their score shows at a glance
-    whether the case donors form a block or scatter through the controls.
-
-    This used to answer with a gene volcano, which shows the group means the
-    question is asking to look past.
-    """
-    manifest = ds.deg_manifest() or {}
-    comparisons = manifest.get("comparisons", [])
-    chosen = next((c for c in comparisons if (c.get("id") or "") == contrast), None)
-    if chosen is None:
-        chosen = next((c for c in comparisons if "per_cell_state" in (c.get("id") or "")), None)
-    if chosen is None:
-        return {"answer": "This bundle carries no per-cell-state comparison.",
-                "status": "not_covered"}
-
-    table = ds.deg_table(chosen.get("id"), 100000, 0.05, state) or {}
-    rows = (table.get("rows") if isinstance(table, dict) else table) or []
-    if not rows:
-        return {"answer": f"{chosen.get('id')} is not computed for {state}.",
-                "status": "not_covered"}
-
-    ups, downs = [], []
-    for row in sorted(rows, key=lambda r: -abs(float(r.get("log2fc") or 0))):
-        gene = row.get("gene")
-        row_index = ds.resolve_gene(str(gene))
-        if row_index is None:
-            continue
-        if float(row.get("log2fc") or 0) > 0 and len(ups) < n_genes // 2:
-            ups.append((gene, row_index))
-        elif float(row.get("log2fc") or 0) < 0 and len(downs) < n_genes // 2:
-            downs.append((gene, row_index))
-        if len(ups) >= n_genes // 2 and len(downs) >= n_genes // 2:
-            break
-    signature = ups + downs
-    if len(signature) < 4:
-        return {"answer": f"Too few significant genes in {state} to score a signature.",
-                "status": "not_covered"}
-
-    indices = [i for _, i in signature]
-    matrix, donors, counts = _donor_pseudobulk(ds, indices, state)
-    if matrix is None or len(donors) < 8:
-        return {"answer": f"Too few donors contribute cells to {state}.",
-                "status": "not_covered"}
-
-    # Standardise each gene across donors so one loud gene cannot set the score.
-    centre = matrix.mean(axis=1, keepdims=True)
-    spread = matrix.std(axis=1, keepdims=True)
-    z = np.divide(matrix - centre, np.where(spread > 0, spread, 1.0))
-    up_rows = np.arange(len(ups))
-    down_rows = np.arange(len(ups), len(signature))
-    score = z[up_rows].mean(axis=0) - (z[down_rows].mean(axis=0) if down_rows.size else 0.0)
-
-    donor_code, donor_labels = _donor_axis(ds)
-    group_of = {}
-    case_name = (chosen.get("id") or "").split("::")[0].split("_vs_")[0].replace("_", " ")
-    for name in ("copd_status", "dx_category", "Group"):
-        if name in (ds.covariate_names() or {}):
-            kind, values, labels = ds.covariate_values(name)
-            if kind == "categorical" and labels is not None:
-                values = np.asarray(values, dtype=np.int64)
-                for donor in donors:
-                    mask = donor_code == donor_labels.index(donor)
-                    if mask.any():
-                        group_of[donor] = str(labels[int(np.bincount(values[mask]).argmax())])
-            break
-
-    order = np.argsort(-score)
-    ordered = [donors[int(i)] for i in order]
-    groups = [group_of.get(d, "") for d in ordered]
-    levels = sorted({g for g in groups if g})
-    # How far up the ranking the case donors sit: if the signature is universal
-    # they are spread through it, if it is a subtype they cluster at the top.
-    summary = ""
-    if len(levels) == 2:
-        case = next((l for l in levels if case_name.lower().split()[0] in l.lower()), levels[0])
-        positions = [i for i, g in enumerate(groups) if g == case]
-        n_case = len(positions)
-        top_half = sum(1 for i in positions if i < len(ordered) / 2)
-        summary = (f" {top_half} of the {n_case} {case} donors fall in the top half of the "
-                   f"ranking; an even split would put about {n_case // 2} there.")
-
-    return {
-        "answer": (f"The {chosen.get('id')} signature in {state}, scored per donor: "
-                   f"{len(ups)} up genes minus {len(downs)} down genes, each standardised "
-                   f"across the {len(donors)} donors with cells in this state.{summary} "
-                   "A fold change is a group mean; this is who carries it."),
-        "status": "answered",
-        "table": {"columns": ["donor", "signature score", "group", "n cells"],
-                  "rows": [[donors[int(i)], round(float(score[int(i)]), 4),
-                            group_of.get(donors[int(i)], ""), int(counts[int(i)])]
-                           for i in order]},
-        "plot": {"kind": "signature",
-                 "genes": [g for g, _ in signature],
-                 "n_up": len(ups),
-                 "donors": ordered,
-                 "groups": groups,
-                 "score": [round(float(score[int(i)]), 4) for i in order],
-                 "z": [[round(float(z[r][int(c)]), 3) for c in order]
-                       for r in range(len(signature))]},
-    }
+def _run_donor_heterogeneity(ds, *args, **kwargs):
+    from altanalyze3.components.cellHarmony import chat_protocols
+    from altanalyze3.components.cellHarmony.webapp.chat_data import protocol_adapter
+    return chat_protocols._run_donor_heterogeneity(protocol_adapter(ds), *args, **kwargs)

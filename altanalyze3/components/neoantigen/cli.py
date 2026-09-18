@@ -34,6 +34,15 @@ def filter_counts(source, output, min_reads=20):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
+    galaxy = commands.add_parser('galaxy-export', help='Export iPepGen inputs without rerunning prediction')
+    galaxy.add_argument('--candidates', nargs='+', required=True)
+    galaxy.add_argument('--hla', required=True)
+    galaxy.add_argument('--outdir', required=True)
+    galaxy.add_argument('--workflow', help='Optional Galaxy .ga; defaults to bundled OneClick contract')
+    galaxy.add_argument('--predictor', default='')
+    galaxy.add_argument('--sample', help='Export only this HLA sample')
+    galaxy.add_argument('--peptide-bed', help='Optional complete-peptide BED12 named by SNAF accession')
+    galaxy.add_argument('--assembly', default='hg38')
     export = commands.add_parser('export')
     export.add_argument('--candidates', nargs='+', required=True)
     export.add_argument('--outdir', required=True)
@@ -78,7 +87,11 @@ def main(argv=None):
     unpack.add_argument('--archive', required=True)
     unpack.add_argument('--outdir', required=True)
     args = parser.parse_args(argv)
-    if args.command == 'unpack':
+    if args.command == 'galaxy-export':
+        from .galaxy import export_galaxy
+        export_galaxy(args.candidates, args.hla, args.outdir, args.workflow, args.predictor,
+                      args.sample, args.peptide_bed, args.assembly)
+    elif args.command == 'unpack':
         from .archive import unpack_reference
         unpack_reference(args.archive, args.outdir)
     elif args.command == 'export':

@@ -29,71 +29,11 @@ from altanalyze3.components.visualization import NetPerspective, approximate_uma
 from .job_manager import JobStore
 
 
-_MODALITY_DEFINITIONS: Dict[str, Dict[str, object]] = {
-    "rna": {
-        "id": "rna",
-        "label": "RNA",
-        "feature_label": "gene",
-        "supports_marker_heatmap": True,
-        "supports_marker_network": True,
-        "supports_differential_network": True,
-        "supports_differential_go": True,
-    },
-    "lipids": {
-        "id": "lipids",
-        "label": "Lipids",
-        "feature_label": "lipid",
-        "supports_marker_heatmap": True,
-        "supports_marker_network": False,
-        "supports_differential_network": False,
-        "supports_differential_go": False,
-    },
-    "adt": {
-        "id": "adt",
-        "label": "ADT (CITE-seq)",
-        "feature_label": "ADT",
-        "supports_marker_heatmap": True,
-        "supports_marker_network": False,
-        "supports_differential_network": False,
-        "supports_differential_go": False,
-    },
-    "metabolite": {
-        "id": "metabolite",
-        "label": "Metabolite (AML)",
-        "feature_label": "metabolite",
-        "supports_marker_heatmap": True,
-        "supports_marker_network": False,
-        "supports_differential_network": False,
-        "supports_differential_go": False,
-    },
-    "lipid": {
-        "id": "lipid",
-        "label": "Lipid (AML)",
-        "feature_label": "lipid",
-        "supports_marker_heatmap": True,
-        "supports_marker_network": False,
-        "supports_differential_network": False,
-        "supports_differential_go": False,
-    },
-    "grn": {
-        "id": "grn",
-        "label": "GRN (TF activity)",
-        "feature_label": "TF",
-        "supports_marker_heatmap": True,
-        "supports_marker_network": False,
-        "supports_differential_network": False,
-        "supports_differential_go": False,
-    },
-    "cell_communication": {
-        "id": "cell_communication",
-        "label": "Cell communication",
-        "feature_label": "ligand-receptor interaction",
-        "supports_marker_heatmap": False,
-        "supports_marker_network": False,
-        "supports_differential_network": False,
-        "supports_differential_go": False,
-    },
-}
+from altanalyze3.components.cellHarmony.modalities import (
+    MODALITY_DEFINITIONS as _MODALITY_DEFINITIONS,
+    normalize_modality_id as _normalize_modality_id,
+    modality_artifacts as _modality_artifacts,
+)
 
 _POOLED_OVERALL_LABEL = "Pooled overall"
 
@@ -131,25 +71,6 @@ def _close_backed_adata(adata: Optional[ad.AnnData]) -> None:
         pass
 
 
-def _normalize_modality_id(value: object, *, default: str = "rna") -> str:
-    raw = str(value or "").strip().lower()
-    if not raw or raw in {"none", "null", "false", "off"}:
-        return default
-    if raw in {"lipids"}:
-        return "lipids"
-    if raw in {"lipid", "lipid_aml", "aml_lipid", "rna2lipid_aml"}:
-        return "lipid"
-    if raw in {"metabolite", "metabolites", "rna2metabolite"}:
-        return "metabolite"
-    if raw in {"grn", "grns", "regulon", "regulons", "gene_regulatory_network", "rna2grn", "tf_activity"}:
-        return "grn"
-    if raw in {"adt", "adts", "cite", "cite-seq", "citeseq"}:
-        return "adt"
-    if raw in {"cell_communication", "cell communication", "communication", "fastcomm", "fastcomm_network"}:
-        return "cell_communication"
-    if raw == "rna":
-        return "rna"
-    return raw
 
 
 def _modality_definition(modality_id: object) -> Dict[str, object]:
@@ -213,6 +134,8 @@ def _modalities_payload(selected_modalities: Optional[List[str]] = None) -> Dict
         normalized = _normalize_modality_id(modality_id, default="")
         if normalized and normalized not in ordered and normalized in _MODALITY_DEFINITIONS:
             ordered.append(normalized)
+    if "grn" in ordered and "grn_tf" not in ordered:
+        ordered.append("grn_tf")
     return {
         "default": "rna",
         "available": [_modality_definition(modality_id) for modality_id in ordered],
@@ -325,6 +248,11 @@ def _build_imputed_lipid_adata(
     prediction_df = prediction.predictions.reindex(query_adata.obs_names)
     prediction_matrix = np.asarray(prediction_df.to_numpy(dtype=np.float32), dtype=np.float32)
 
+    # Regressors can extrapolate below zero, but lipid abundance is nonnegative.
+    # Apply the floor before every exported matrix, mean, marker and differential.
+    clipped_negative_values = int(np.count_nonzero(prediction_matrix < 0))
+    prediction_matrix = np.maximum(prediction_matrix, 0.0)
+
     lipid_var_names = pd.Index([str(value) for value in prediction_df.columns], dtype=str)
     lipid_var = pd.DataFrame(index=lipid_var_names)
     lipid_var["features"] = lipid_var_names.astype(str)
@@ -355,6 +283,7 @@ def _build_imputed_lipid_adata(
     lipid_adata.uns["feature_label"] = "lipid"
     summary = dict(prediction.summary)
     summary.update(scale_info)
+    summary["clipped_negative_values"] = clipped_negative_values
     lipid_adata.uns["prediction_summary"] = summary
     return lipid_adata, summary
 
@@ -571,8 +500,8 @@ def _build_pseudobulk_differential_adata(query_adata, group_pred_df, cluster_obs
 
 
 def _build_imputed_grn_adata(query_adata, reference_entry, cluster_obs_col=None):
-    """Returns (tf_activity_adata, edges_pseudobulk_adata, summary). TF activity (per-cell
-    regulon enrichment) drives the viewer/exploration; per (sample x cell-state) pseudobulk
+    """Returns (tf_activity_adata, edges_pseudobulk_adata, tf_pseudobulk_adata, summary).
+    TF activity (per-cell summed predicted outgoing activity) drives the viewer/exploration; per (sample x cell-state) pseudobulk
     edge scores drive a correct edge differential (samples as replicates) and the GRN edge
     explorer."""
     cfg = _reference_impute_config(reference_entry, "grn")
@@ -599,12 +528,26 @@ def _build_imputed_grn_adata(query_adata, reference_entry, cluster_obs_col=None)
         if added and "_pb_group" in query_adata.obs.columns:
             del query_adata.obs["_pb_group"]
     edges = gres.predictions                                  # pseudobulk x edges (TF|Gene)
-    tf_df = _grn_tf_activity_per_cell(query_adata, list(edges.columns))
+    # Predict bounded chunks, collapse edges immediately, and retain only the
+    # per-cell factor matrix. Never broadcast a population value to every cell.
+    blocks = []
+    chunk_size = max(1, int(cfg.get("tf_activity_chunk_size", 256)))
+    for start in range(0, query_adata.n_obs, chunk_size):
+        prediction = bundle.predict_from_adata(
+            query_adata[start:start + chunk_size], groupby=None, layer=layer,
+            pseudobulk_statistic=pb_stat)
+        blocks.append(bundle.tf_activity(prediction.predictions, aggregation="sum"))
+    tf_df = pd.concat(blocks).reindex(query_adata.obs_names)
     tf_adata, summary = _finalize_imputed_adata(
-        query_adata, tf_df, modality_id="grn", feature_label="TF", feature_type="GRN-TF",
+        query_adata, tf_df, modality_id="grn_tf", feature_label="factor", feature_type="GRN-TF",
         expression_scale="linear", log_base=None, base_summary=dict(gres.summary))
     edges_adata = _build_pseudobulk_differential_adata(
         query_adata, edges, cluster_obs_col, feature_type="GRN-edge", modality_id="grn")
+    tf_pseudobulk = _build_pseudobulk_differential_adata(
+        query_adata, bundle.tf_activity(edges, aggregation="sum"), cluster_obs_col,
+        feature_type="GRN-TF", modality_id="grn_tf")
+    for matrix in (tf_adata, tf_pseudobulk):
+        matrix.uns["activity_statistic"] = "sum of predicted outgoing edge activity"
     summary["n_edges"] = int(edges.shape[1])
     summary["n_tfs"] = int(tf_df.shape[1])
     summary["n_pseudobulks"] = int(edges.shape[0])
@@ -613,30 +556,63 @@ def _build_imputed_grn_adata(query_adata, reference_entry, cluster_obs_col=None)
         value = (getattr(bundle, "metadata", {}) or {}).get(meta_key)
         if value:
             summary[f"grn_{meta_key}"] = str(value)
-    return tf_adata, edges_adata, summary
+    return tf_adata, edges_adata, tf_pseudobulk, summary
+
+
+def _marker_output_options(meta):
+    """Optional static exports; keep the compact cache for web heatmaps/PDF on demand.
+
+    scALABLE defaults to skipping the static PDF/SVG render. The compact cache stays on,
+    so interactive heatmaps and on-demand Download PDF are unaffected; only the packaged
+    static files change. The `marker_heatmap_h5ad` API and CLI keep their own defaults.
+    """
+    qc = meta.get("qc") or {}
+    return {
+        "render_heatmap": qc.get("marker_render_heatmap", False),
+        "write_svg": qc.get("marker_write_svg", True),
+        "heatmap_dpi": qc.get("marker_heatmap_dpi"),
+        "cells_per_cluster": qc.get("marker_cells_per_cluster", 100),
+        "write_heatmap_tsv": False,
+        "write_expression_tsv": False,
+        "write_heatmap_cache": True,
+    }
 
 
 def _emit_modality_marker_heatmap(modality_id, modality_adata, outputs_dir, query_cluster_key, meta):
-    """Per-cell-state marker heatmap for an imputed modality (mirrors the ADT marker block)."""
+    """Per-state markers on the original prediction scale; empty results are optional."""
+    file_label = "lipid" if modality_id == "lipids" else modality_id
     mdir = outputs_dir / f"marker_heatmap_{modality_id}"
     mdir.mkdir(parents=True, exist_ok=True)
-    outs = marker_mod.generate_marker_heatmap_from_adata(
-        modality_adata,
-        cluster_key=query_cluster_key,
-        out=str(mdir / f"cell_state_{modality_id}_marker_heatmap.pdf"),
-        top_n=5, marker_method="markerfinder", cells_per_cluster=100, seed=0,
-        export_networks=False, network_top_n=0, network_jobs=1,
-        species=meta.get("species"), write_heatmap_tsv=False,
-        write_expression_tsv=False, write_heatmap_cache=True,
-    )
-    archive = outputs_dir / f"cell_state_{modality_id}_markers.zip"
-    _write_selected_zip(mdir, archive, suffixes=(".pdf", ".tsv", ".png", ".npz"))
+    try:
+        outs = marker_mod.generate_marker_heatmap_from_adata(
+            modality_adata,
+            cluster_key=query_cluster_key,
+            out=str(mdir / f"cell_state_{file_label}_marker_heatmap.pdf"),
+            top_n=5, marker_method="markerfinder", seed=0,
+            # Imputed modalities are continuous predictions, not RNA counts. They
+            # already derive from the model's normalized input; enforcing RNA library
+            # totals on them rejects valid scores or changes their biological meaning.
+            validate_scaling=False,
+            centroid_method="mean",
+            export_networks=False, network_top_n=0, network_jobs=1,
+            species=meta.get("species"), **_marker_output_options(meta),
+        )
+    except marker_mod.NoMarkersSelectedError:
+        return {"enabled": False, "modality": modality_id, "cluster_key": query_cluster_key,
+                "message": "No markers passed selection; expression and differential views remain available."}
+    archive = outputs_dir / f"cell_state_{file_label}_markers.zip"
+    _write_selected_zip(mdir, archive, suffixes=(".pdf", ".tsv", ".png", ".npz"),
+                        exclude_paths=() if outs.get("pdf") else
+                        (mdir / f"cell_state_{file_label}_marker_heatmap.pdf",))
     analysis = {
         "enabled": True, "cluster_key": query_cluster_key,
-        "heatmap_pdf": str(outs["pdf"]), "centroids_tsv": str(outs["centroids_tsv"]),
+        "centroids_tsv": str(outs["centroids_tsv"]),
         "markers_tsv": str(outs["markers_tsv"]), "archive": str(archive),
         "networks": [], "modality": modality_id,
+        "output_options": _marker_output_options(meta), "timings": outs.get("timings", {}),
     }
+    if outs.get("pdf"):
+        analysis["heatmap_pdf"] = str(outs["pdf"])
     if outs.get("heatmap_tsv"):
         analysis["heatmap_tsv"] = str(outs["heatmap_tsv"])
     if outs.get("heatmap_cache"):
@@ -651,7 +627,7 @@ def _modality_h5ad_path(meta: Dict, modality: str) -> Path:
     if normalized == "rna":
         raw_path = str(meta.get("artifacts", {}).get("combined_h5ad", "")).strip()
     else:
-        raw_path = str(((meta.get("modality_artifacts") or {}).get(normalized) or {}).get("h5ad", "")).strip()
+        raw_path = str((_modality_artifacts(meta).get(normalized) or {}).get("h5ad", "")).strip()
     if not raw_path:
         raise FileNotFoundError(f"No AnnData artifact is available for modality '{normalized}'.")
     path = Path(raw_path)
@@ -661,10 +637,11 @@ def _modality_h5ad_path(meta: Dict, modality: str) -> Path:
 
 
 def _modality_differential_h5ad_path(meta: Dict, modality: str) -> Path:
-    """h5ad used for differential analysis. GRN compares edges directly, so it uses the
-    separate edge-level h5ad (``differential_h5ad``); all others use the viewer h5ad."""
+    """Use the modality's differential input, including sample-level GRN inputs."""
     normalized = _normalize_modality_id(modality)
-    diff = str(((meta.get("modality_artifacts") or {}).get(normalized) or {}).get("differential_h5ad", "")).strip()
+    if (_modality_artifacts(meta).get(normalized) or {}).get("legacy_enrichment"):
+        raise ValueError("This legacy job has TF enrichment only. Reprocess the upload with GRN imputation to compute predicted TF activity differentials.")
+    diff = str((_modality_artifacts(meta).get(normalized) or {}).get("differential_h5ad", "")).strip()
     if diff and Path(diff).exists():
         return Path(diff)
     return _modality_h5ad_path(meta, modality)
@@ -672,7 +649,7 @@ def _modality_differential_h5ad_path(meta: Dict, modality: str) -> Path:
 
 def _differential_runtime_params(modality: str, comparison_type: str) -> Dict[str, object]:
     normalized = _normalize_modality_id(modality)
-    if normalized == "grn":
+    if normalized in {"grn", "grn_tf"}:
         # GRN edges are imputed per (sample x cell-state) pseudobulk; the edge differential
         # is a moderated t-test with SAMPLES as replicates (not cells), 1.1 fold threshold
         # between matched cell states.
@@ -1178,11 +1155,15 @@ def _append_umap_to_assignments(assignments_path: Path, coordinates_path: Path) 
     return assignments_path
 
 
-def _write_selected_zip(source_dir: Path, archive_path: Path, *, suffixes: tuple[str, ...]) -> Path:
+def _write_selected_zip(source_dir: Path, archive_path: Path, *, suffixes: tuple[str, ...],
+                        exclude_paths=()) -> Path:
     archive_path.parent.mkdir(parents=True, exist_ok=True)
+    excluded = {Path(path).resolve() for path in exclude_paths}
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as handle:
         for file_path in sorted(source_dir.rglob("*")):
             if not file_path.is_file():
+                continue
+            if file_path.resolve() in excluded:
                 continue
             if suffixes and file_path.suffix.lower() not in suffixes:
                 continue
@@ -1497,17 +1478,18 @@ def run_cellharmony_pipeline(
     marker_archive_path: Optional[Path] = None
     marker_analysis: Dict[str, object] = {}
     marker_analysis_by_modality: Dict[str, Dict[str, object]] = {}
+    marker_output_options = _marker_output_options(meta)
     store.update_job(
         job_id,
         progress=72,
-        message="Identifying the top 50 unique markers for 100 cells per cell state.",
+        message="Identifying the top 50 unique markers per cell state using all aligned cells.",
     )
     store.append_log(job_id, "Identifying cell-state marker genes.")
     store.append_log(
         job_id,
         (
             "[params] markerfinder "
-            f"cluster_key={query_cluster_key} top_n=50 cells_per_cluster=100 "
+            f"cluster_key={query_cluster_key} top_n=50 output_options={marker_output_options} "
             "marker_method=markerfinder export_networks=True network_top_n=1000 "
             f"grn_species={meta.get('species')} "
             f"network_jobs={max(1, min(4, os.cpu_count() or 1))} "
@@ -1516,44 +1498,54 @@ def run_cellharmony_pipeline(
     )
     marker_dir = outputs_dir / "marker_heatmap"
     marker_dir.mkdir(parents=True, exist_ok=True)
-    marker_outputs = marker_mod.generate_marker_heatmap_from_adata(
-        combined_adata,
-        cluster_key=query_cluster_key,
-        out=str(marker_dir / "cell_state_marker_heatmap.pdf"),
-        top_n=50,
-        marker_method="markerfinder",
-        cells_per_cluster=100,
-        seed=0,
-        export_networks=True,
-        network_top_n=1000,
-        network_jobs=max(1, min(4, os.cpu_count() or 1)),
-        species=meta.get("species"),
-        write_heatmap_tsv=False,
-        write_expression_tsv=False,
-        write_heatmap_cache=True,
-    )
-    store.update_job(
-        job_id,
-        progress=78,
-        message="Exporting NetPerspective marker networks.",
-    )
-    marker_archive_path = outputs_dir / "cell_state_marker_genes.zip"
-    _write_selected_zip(marker_dir, marker_archive_path, suffixes=(".pdf", ".tsv", ".png", ".npz"))
-    marker_analysis = {
-        "enabled": True,
-        "cluster_key": query_cluster_key,
-        "heatmap_pdf": str(marker_outputs["pdf"]),
-        "centroids_tsv": str(marker_outputs["centroids_tsv"]),
-        "markers_tsv": str(marker_outputs["markers_tsv"]),
-        "archive": str(marker_archive_path),
-        "networks": marker_outputs.get("networks", []),
-    }
-    if marker_outputs.get("heatmap_tsv"):
-        marker_analysis["heatmap_tsv"] = str(marker_outputs["heatmap_tsv"])
-    if marker_outputs.get("heatmap_cache"):
-        marker_analysis["heatmap_cache"] = str(marker_outputs["heatmap_cache"])
-    if marker_outputs.get("heatmap_column_tsv"):
-        marker_analysis["expression_tsv"] = str(marker_outputs["heatmap_column_tsv"])
+    try:
+        marker_outputs = marker_mod.generate_marker_heatmap_from_adata(
+            combined_adata,
+            cluster_key=query_cluster_key,
+            out=str(marker_dir / "cell_state_marker_heatmap.pdf"),
+            top_n=50,
+            marker_method="markerfinder",
+            seed=0,
+            export_networks=True,
+            network_top_n=1000,
+            network_jobs=max(1, min(4, os.cpu_count() or 1)),
+            species=meta.get("species"),
+            **marker_output_options,
+        )
+    except marker_mod.NoMarkersSelectedError:
+        marker_outputs = None
+        marker_analysis = {
+            "enabled": False, "cluster_key": query_cluster_key,
+            "message": "No markers passed selection; expression and differential views remain available.",
+        }
+    if marker_outputs is not None:
+        store.update_job(
+            job_id,
+            progress=78,
+            message="Exporting NetPerspective marker networks.",
+        )
+        marker_archive_path = outputs_dir / "cell_state_marker_genes.zip"
+        _write_selected_zip(marker_dir, marker_archive_path, suffixes=(".pdf", ".tsv", ".png", ".npz"),
+                            exclude_paths=() if marker_outputs.get("pdf") else
+                            (marker_dir / "cell_state_marker_heatmap.pdf",))
+        marker_analysis = {
+            "enabled": True,
+            "cluster_key": query_cluster_key,
+            "centroids_tsv": str(marker_outputs["centroids_tsv"]),
+            "markers_tsv": str(marker_outputs["markers_tsv"]),
+            "archive": str(marker_archive_path),
+            "networks": marker_outputs.get("networks", []),
+            "output_options": marker_output_options,
+            "timings": marker_outputs.get("timings", {}),
+        }
+        if marker_outputs.get("pdf"):
+            marker_analysis["heatmap_pdf"] = str(marker_outputs["pdf"])
+        if marker_outputs.get("heatmap_tsv"):
+            marker_analysis["heatmap_tsv"] = str(marker_outputs["heatmap_tsv"])
+        if marker_outputs.get("heatmap_cache"):
+            marker_analysis["heatmap_cache"] = str(marker_outputs["heatmap_cache"])
+        if marker_outputs.get("heatmap_column_tsv"):
+            marker_analysis["expression_tsv"] = str(marker_outputs["heatmap_column_tsv"])
     marker_analysis_by_modality["rna"] = dict(marker_analysis)
     store.append_log(job_id, "Cell-state marker gene export complete.")
 
@@ -1630,43 +1622,8 @@ def run_cellharmony_pipeline(
             "h5ad": str(lipid_h5ad_path),
         }
 
-        lipid_marker_dir = outputs_dir / "marker_heatmap_lipids"
-        lipid_marker_dir.mkdir(parents=True, exist_ok=True)
-        lipid_marker_outputs = marker_mod.generate_marker_heatmap_from_adata(
-            lipid_adata,
-            cluster_key=query_cluster_key,
-            out=str(lipid_marker_dir / "cell_state_lipid_marker_heatmap.pdf"),
-            top_n=5,
-            marker_method="markerfinder",
-            cells_per_cluster=100,
-            seed=0,
-            export_networks=False,
-            network_top_n=0,
-            network_jobs=1,
-            species=meta.get("species"),
-            write_heatmap_tsv=False,
-            write_expression_tsv=False,
-            write_heatmap_cache=True,
-        )
-        lipid_marker_archive_path = outputs_dir / "cell_state_lipid_markers.zip"
-        _write_selected_zip(lipid_marker_dir, lipid_marker_archive_path, suffixes=(".pdf", ".tsv", ".png", ".npz"))
-        lipid_marker_analysis = {
-            "enabled": True,
-            "cluster_key": query_cluster_key,
-            "heatmap_pdf": str(lipid_marker_outputs["pdf"]),
-            "centroids_tsv": str(lipid_marker_outputs["centroids_tsv"]),
-            "markers_tsv": str(lipid_marker_outputs["markers_tsv"]),
-            "archive": str(lipid_marker_archive_path),
-            "networks": [],
-            "modality": "lipids",
-        }
-        if lipid_marker_outputs.get("heatmap_tsv"):
-            lipid_marker_analysis["heatmap_tsv"] = str(lipid_marker_outputs["heatmap_tsv"])
-        if lipid_marker_outputs.get("heatmap_cache"):
-            lipid_marker_analysis["heatmap_cache"] = str(lipid_marker_outputs["heatmap_cache"])
-        if lipid_marker_outputs.get("heatmap_column_tsv"):
-            lipid_marker_analysis["expression_tsv"] = str(lipid_marker_outputs["heatmap_column_tsv"])
-        marker_analysis_by_modality["lipids"] = lipid_marker_analysis
+        marker_analysis_by_modality["lipids"] = _emit_modality_marker_heatmap(
+            "lipids", lipid_adata, outputs_dir, query_cluster_key, meta)
         store.append_log(job_id, "rna2lipid lipid imputation complete.")
 
     if "adt" in selected_impute_modalities:
@@ -1700,43 +1657,8 @@ def run_cellharmony_pipeline(
             "h5ad": str(adt_h5ad_path),
         }
 
-        adt_marker_dir = outputs_dir / "marker_heatmap_adt"
-        adt_marker_dir.mkdir(parents=True, exist_ok=True)
-        adt_marker_outputs = marker_mod.generate_marker_heatmap_from_adata(
-            adt_adata,
-            cluster_key=query_cluster_key,
-            out=str(adt_marker_dir / "cell_state_adt_marker_heatmap.pdf"),
-            top_n=5,
-            marker_method="markerfinder",
-            cells_per_cluster=100,
-            seed=0,
-            export_networks=False,
-            network_top_n=0,
-            network_jobs=1,
-            species=meta.get("species"),
-            write_heatmap_tsv=False,
-            write_expression_tsv=False,
-            write_heatmap_cache=True,
-        )
-        adt_marker_archive_path = outputs_dir / "cell_state_adt_markers.zip"
-        _write_selected_zip(adt_marker_dir, adt_marker_archive_path, suffixes=(".pdf", ".tsv", ".png", ".npz"))
-        adt_marker_analysis = {
-            "enabled": True,
-            "cluster_key": query_cluster_key,
-            "heatmap_pdf": str(adt_marker_outputs["pdf"]),
-            "centroids_tsv": str(adt_marker_outputs["centroids_tsv"]),
-            "markers_tsv": str(adt_marker_outputs["markers_tsv"]),
-            "archive": str(adt_marker_archive_path),
-            "networks": [],
-            "modality": "adt",
-        }
-        if adt_marker_outputs.get("heatmap_tsv"):
-            adt_marker_analysis["heatmap_tsv"] = str(adt_marker_outputs["heatmap_tsv"])
-        if adt_marker_outputs.get("heatmap_cache"):
-            adt_marker_analysis["heatmap_cache"] = str(adt_marker_outputs["heatmap_cache"])
-        if adt_marker_outputs.get("heatmap_column_tsv"):
-            adt_marker_analysis["expression_tsv"] = str(adt_marker_outputs["heatmap_column_tsv"])
-        marker_analysis_by_modality["adt"] = adt_marker_analysis
+        marker_analysis_by_modality["adt"] = _emit_modality_marker_heatmap(
+            "adt", adt_adata, outputs_dir, query_cluster_key, meta)
         store.append_log(job_id, "rna2adt ADT imputation complete.")
 
     if "metabolite" in selected_impute_modalities:
@@ -1782,21 +1704,28 @@ def run_cellharmony_pipeline(
     if "grn" in selected_impute_modalities:
         store.update_job(job_id, progress=88, message="Imputing GRN / TF activity from aligned RNA (pseudobulk).")
         store.append_log(job_id, "Running rna2grn imputation.")
-        grn_tf_adata, grn_edges_adata, grn_summary = _build_imputed_grn_adata(
+        grn_tf_adata, grn_edges_adata, grn_tf_pseudobulk, grn_summary = _build_imputed_grn_adata(
             approx_result.query_adata, reference_entry, cluster_obs_col=query_cluster_key)
-        grn_h5ad_path = outputs_dir / "combined_with_umap_and_markers_grn.h5ad"
+        grn_h5ad_path = outputs_dir / "combined_with_umap_and_markers_grn_tf.h5ad"
+        grn_tf_diff_path = outputs_dir / "combined_with_umap_and_markers_grn_tf_pseudobulk.h5ad"
         grn_edges_path = outputs_dir / "combined_with_umap_and_markers_grn_edges.h5ad"
-        approx_result.query_adata.obsm["X_grn"] = np.asarray(grn_tf_adata.X, dtype=np.float32)
-        approx_result.query_adata.uns["grn_feature_names"] = grn_tf_adata.var_names.astype(str).tolist()
-        approx_result.query_adata.uns.setdefault("imputed_modalities", {})["grn"] = {
-            "obsm_key": "X_grn", "feature_names_key": "grn_feature_names", "summary": grn_summary}
+        approx_result.query_adata.obsm["X_grn_tf"] = np.asarray(grn_tf_adata.X, dtype=np.float32)
+        approx_result.query_adata.uns["grn_tf_feature_names"] = grn_tf_adata.var_names.astype(str).tolist()
+        approx_result.query_adata.uns.setdefault("imputed_modalities", {})["grn_tf"] = {
+            "obsm_key": "X_grn_tf", "feature_names_key": "grn_tf_feature_names", "summary": grn_summary}
         approx_mod.ensure_h5ad_compat_for_write(grn_tf_adata)
         grn_tf_adata.write(grn_h5ad_path, compression=resolved_h5ad_compression)
         approx_mod.ensure_h5ad_compat_for_write(grn_edges_adata)
         grn_edges_adata.write(grn_edges_path, compression=resolved_h5ad_compression)
-        modality_artifacts["grn"] = {"h5ad": str(grn_h5ad_path), "differential_h5ad": str(grn_edges_path)}
-        marker_analysis_by_modality["grn"] = _emit_modality_marker_heatmap(
-            "grn", grn_tf_adata, outputs_dir, query_cluster_key, meta)
+        approx_mod.ensure_h5ad_compat_for_write(grn_tf_pseudobulk)
+        grn_tf_pseudobulk.write(grn_tf_diff_path, compression=resolved_h5ad_compression)
+        modality_artifacts["grn"] = {
+            "h5ad": str(grn_edges_path), "differential_h5ad": str(grn_edges_path),
+            "network_h5ad": str(grn_edges_path)}
+        modality_artifacts["grn_tf"] = {
+            "h5ad": str(grn_h5ad_path), "differential_h5ad": str(grn_tf_diff_path)}
+        marker_analysis_by_modality["grn_tf"] = _emit_modality_marker_heatmap(
+            "grn_tf", grn_tf_adata, outputs_dir, query_cluster_key, meta)
         store.append_log(job_id, "rna2grn imputation complete.")
 
     approx_mod.ensure_h5ad_compat_for_write(approx_result.query_adata)
@@ -1850,7 +1779,7 @@ def run_cellharmony_pipeline(
                 zf.write(member, arcname=member.name)
         artifacts[f"imputed_{mod_id}_results_zip"] = zip_path
 
-    for _mod_id in ("lipids", "adt", "metabolite", "lipid", "grn"):
+    for _mod_id in ("lipids", "adt", "metabolite", "lipid", "grn", "grn_tf"):
         if _mod_id in modality_artifacts:
             _bundle_modality_zip(_mod_id)
 
@@ -2091,6 +2020,7 @@ def run_cellharmony_pipeline(
         selected_impute_modality=selected_impute_modality,
         selected_impute_modalities=selected_impute_modalities,
         differential_options=differential_options,
+        differential_history={},
         differential=_default_differential_state(
             differential_enabled,
             default_population_col,
@@ -2101,6 +2031,22 @@ def run_cellharmony_pipeline(
     )
     store.append_log(job_id, "cellHarmony-lite pipeline finished.")
     return artifacts
+
+
+def _trim_differential_working_data(adata):
+    """Release alignment-only matrices before DE makes per-population copies.
+
+    This object is freshly read for the worker; the stored alignment is unchanged.
+    Tests use X; pseudobulk aggregation additionally uses the counts layer.
+    """
+    for name in list(adata.layers):
+        if name != "counts":
+            del adata.layers[name]
+    for name in ("X_adt", "X_lipids", "X_lipid", "X_metabolite", "X_grn_tf"):
+        if name in adata.obsm:
+            del adata.obsm[name]
+    adata.uns.pop("imputed_modalities", None)
+    return adata
 
 
 def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, object]:
@@ -2127,7 +2073,7 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
     combined_h5ad = None if modality == "cell_communication" else _modality_differential_h5ad_path(meta, modality)
 
     comparison_tag = _comparison_tag(group1_samples, group2_samples)
-    run_id = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    run_id = datetime.utcnow().strftime("%Y%m%d-%H%M%S-%f")
     run_root = store.outputs_dir(job_id) / "cellHarmony_differential" / f"{run_id}_{NetPerspective.safe_component(comparison_tag)}"
     heatmap_dir = run_root / "heatmaps"
     deg_dir = run_root / "DEGs"
@@ -2180,7 +2126,7 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
             comparison_type=comparison_type,
         )
 
-    adata = ad.read_h5ad(combined_h5ad)
+    adata = _trim_differential_working_data(ad.read_h5ad(combined_h5ad))
     if population_col not in adata.obs.columns:
         raise ValueError(f"'{population_col}' is not present in the aligned AnnData observations.")
 
@@ -2222,7 +2168,8 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
     subset_mask = sample_values.isin(resolved_group1 + resolved_group2)
     if int(np.asarray(subset_mask).sum()) == 0:
         raise ValueError("No cells were found for the selected sample groups.")
-    adata = adata[subset_mask].copy()
+    if not bool(np.asarray(subset_mask).all()):
+        adata = adata[subset_mask].copy()
     web_group_col = "__cellharmony_web_group__"
     sample_values = adata.obs[sample_col].astype(str)
     adata.obs[web_group_col] = np.where(sample_values.isin(resolved_group1), case_label, control_label)

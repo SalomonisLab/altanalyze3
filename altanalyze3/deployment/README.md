@@ -76,6 +76,15 @@ joins preserve sample identity. Candidate rows without qualifying evidence are
 retained. If a search engine used different sample labels, map those labels before
 running this step. `--q-threshold` defaults to 0.01.
 
+## Optional Galaxy iPepGen exports
+
+Use `altanalyze3 snaf ... --galaxy_integration` or `altanalyze3-neo galaxy-export`
+to create the additional input datasets required by the supplied OneClick iPepGen
+workflow. The export is off by default and independent of pyNeoQuant. It includes
+search FASTA, matched per-sample PepQuery/IEDB collections, accession mappings,
+length eligibility, and annotation schemas. See [GALAXY_IPEPGEN.md](GALAXY_IPEPGEN.md)
+for exact files, workflow connections, coordinate handling and verification.
+
 ## HLA genotype and binding interfaces
 
 ```bash

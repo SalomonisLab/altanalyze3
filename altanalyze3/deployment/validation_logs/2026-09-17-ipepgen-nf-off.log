@@ -1,0 +1,6 @@
+Nextflow 26.04.6 is available - Please consider updating your version to it
+N E X T F L O W  ~  version 25.10.0
+Launching `/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/snaf/nextflow/main.nf` [fervent_visvesvaraya] DSL2 - revision: 3abbd908a6
+WARN: Task runtime metrics are not reported when using macOS without a container engine
+[75/a3c359] Submitted process > FILTER_COUNTS (1)
+[55/769f89] Submitted process > SNAF (cohort)

@@ -49,6 +49,10 @@ workflow {
                 error 'MS integration requires one cohort matrix'
             data
         }
+    if (params.galaxy_integration && (!(params.mode in ['bam', 'full']) || params.stop_after_counts))
+        error 'Galaxy integration requires full or bam prediction mode'
+    galaxyWorkflow = optionalPath(params.galaxy_workflow)
+    galaxyBed = optionalPath(params.galaxy_peptide_bed)
     genome = optionalPath(params.genome_fasta)
     canonical = optionalPath(params.canonical_fasta)
     mhcflurry = optionalPath(params.mhcflurry_models)
@@ -77,7 +81,7 @@ workflow {
                 ch_hla = Channel.value(checkedPath(params.hla))
             }
             ch_full = FILTER_COUNTS.out.counts.combine(ch_hla).map{ meta,jc,hla -> tuple(meta,jc,hla) }
-            SNAF(ch_full, checkedPath(params.db_dir), genome, canonical, mhcflurry)
+            SNAF(ch_full, checkedPath(params.db_dir), genome, canonical, mhcflurry, galaxyWorkflow, galaxyBed)
             if (params.with_pyneoquant) {
                 ch_psms = rows.flatMap{ it }.filter{ it.psm }.map{ tuple(it.id, sheetPath(sheetBase,it.psm)) }
                 PYNEOQUANT(ch_psms, SNAF.out.bundle.first())
@@ -94,7 +98,7 @@ workflow {
         FILTER_COUNTS(ch_counts)
         ch_hlas = rows.flatMap{ it }.map{ tuple([id: it.id], sheetPath(sheetBase,it.hla)) }
         ch_full = FILTER_COUNTS.out.counts.join(ch_hlas).map{ meta,jc,hla -> tuple(meta,jc,hla) }
-        SNAF(ch_full, checkedPath(params.db_dir), genome, canonical, mhcflurry)
+        SNAF(ch_full, checkedPath(params.db_dir), genome, canonical, mhcflurry, galaxyWorkflow, galaxyBed)
         if (params.with_pyneoquant) {
             ch_ms = Channel.fromPath(params.ms_input, checkIfExists:true).splitCsv(header:true)
                 .map{ tuple(checkedId(it.id), sheetPath(checkedPath(params.ms_input).parent,it.psm)) }

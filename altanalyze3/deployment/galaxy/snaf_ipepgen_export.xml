@@ -1,0 +1,62 @@
+<tool id="altanalyze3_snaf_ipepgen_export" name="SNAF iPepGen export" version="0.1.3+galaxy1" profile="24.0">
+    <description>create Galaxy search, verification and HLA inputs from candidate reports</description>
+    <requirements><container type="docker">altanalyze3-snaf:0.1.3</container></requirements>
+    <command detect_errors="exit_code"><![CDATA[
+python3 -m altanalyze3.components.neoantigen galaxy-export --candidates '$candidates' --hla '$hla' --outdir galaxy --predictor '$predictor'
+    ]]></command>
+    <inputs>
+        <param name="candidates" type="data" format="tabular" label="Combined SNAF candidate report"/>
+        <param name="hla" type="data" format="tabular" label="Sample HLA calls"/>
+        <param name="predictor" type="select" label="SNAF binding predictor"><option value="MHCflurry">MHCflurry</option><option value="netMHCpan">NetMHCpan</option></param>
+    </inputs>
+    <outputs>
+        <data name="ipepgen_database" format="fasta" from_work_dir="galaxy/snaf.database.fasta" label="SNAF FASTA for iPepGen database merge"></data>
+        <data name="ipepgen_map" format="tabular" from_work_dir="galaxy/candidate_map.tsv" label="SNAF accession and candidate map"></data>
+        <data name="ipepgen_annotations" format="tabular" from_work_dir="galaxy/annotations.tsv" label="SNAF peptide annotation schema"></data>
+        <data name="ipepgen_bed" format="bed" from_work_dir="galaxy/peptides.bed" label="SNAF supplied peptide BED12 mappings"></data>
+        <data name="ipepgen_lengths" format="tabular" from_work_dir="galaxy/length_eligibility.tsv" label="SNAF workflow length eligibility"></data>
+        <data name="ipepgen_samples" format="tabular" from_work_dir="galaxy/samples.tsv" label="SNAF Galaxy sample collection map"></data>
+        <data name="ipepgen_contract" format="json" from_work_dir="galaxy/integration.json" label="SNAF iPepGen contract and provenance"></data>
+        <collection name="sample_databases" type="list" label="Sample search databases">
+            <discover_datasets pattern="(?P&lt;designation&gt;.+)\.database\.fasta" directory="galaxy/by_sample" ext="fasta"/>
+        </collection>
+        <collection name="pepquery_inputs" type="list" label="Sample PepQuery peptides">
+            <discover_datasets pattern="(?P&lt;designation&gt;.+)\.pepquery\.txt" directory="galaxy/by_sample" ext="txt"/>
+        </collection>
+        <collection name="iedb_sequences" type="list" label="Sample IEDB peptides">
+            <discover_datasets pattern="(?P&lt;designation&gt;.+)\.iedb\.fasta" directory="galaxy/by_sample" ext="fasta"/>
+        </collection>
+        <collection name="iedb_alleles" type="list" label="Sample IEDB allele lists">
+            <discover_datasets pattern="(?P&lt;designation&gt;.+)\.alleles\.txt" directory="galaxy/by_sample" ext="txt"/>
+        </collection>
+    </outputs>
+    <tests>
+        <test>
+            <param name="candidates" value="ipepgen_candidates.tsv"/>
+            <param name="hla" value="ipepgen_hla.tsv"/>
+            <output name="ipepgen_database"><assert_contents><has_text text="generic|SNAF_"/><has_text text="SYFPEITHI"/></assert_contents></output>
+            <output name="ipepgen_contract"><assert_contents><has_text text="OneClick-iPepGen"/></assert_contents></output>
+            <output_collection name="pepquery_inputs" type="list" count="2"/>
+            <output_collection name="iedb_alleles" type="list" count="2"/>
+        </test>
+    </tests>
+    <help><![CDATA[
+Creates additional input files for the supplied OneClick iPepGen workflow.
+Add the database FASTA to the existing reference/nonreference/fusion FASTA merge.
+Keep reference proteins and downstream decoy generation in the search workflow.
+
+Map the sample peptide and allele collections together using their matching
+identifiers; samples.tsv maps each identifier to the original sample name.
+PepQuery inputs contain unique headerless 9-11 amino acid peptides. IEDB FASTA
+contains 8-12 amino acid peptides; allele files contain one HLA allele per line.
+Length eligibility is reported for every candidate. Empty outputs mean that a
+sample has no eligible candidates and should be skipped for that downstream tool.
+
+The annotation table uses the workflow's eight named columns. Missing peptide
+coordinates are left empty and explicitly marked; junction coordinates remain
+in candidate_map.tsv. The StringTie/variant positional parsing branch must be
+extended with a SNAF accession join. This tool does not create FragPipe reports,
+PepQuery validation calls, or IEDB prediction results.
+    ]]></help>
+    <citations><citation type="doi">10.1126/scitranslmed.ade2886</citation></citations>
+</tool>

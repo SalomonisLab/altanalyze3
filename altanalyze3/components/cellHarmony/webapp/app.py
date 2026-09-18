@@ -31,8 +31,11 @@ from altanalyze3.components.cellHarmony.flask import pipeline as pipeline_mod
 from altanalyze3.components.cellHarmony.flask.job_manager import JobStore
 from altanalyze3.components.cellHarmony.flask.tasks import JobRunner
 from altanalyze3.components.visualization import approximate_umap as approx_mod
+from altanalyze3.components.rna2metabolite import annotations as metabolite_annotations
 
 from .config import BASE_DIR, load_config
+from .grn_data import UploadedGrnData, completed_differentials, comparison_entry
+from altanalyze3.components.cellHarmony import grn_analysis as gnet
 
 _POOLED_OVERALL_LABEL = "Pooled overall"
 _GO_ELITE_HIGHLIGHT_KEYWORDS = (
@@ -63,6 +66,10 @@ class QCSettings(BaseModel):
     ambient_correction: str = Field(default="no", pattern="^(no|yes)$")
     impute_modality: Optional[str] = "none"          # legacy single-select
     impute_modalities: Optional[List[str]] = None    # multi-select
+    marker_render_heatmap: bool = False
+    marker_write_svg: bool = True
+    marker_heatmap_dpi: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
+    marker_cells_per_cluster: int = Field(default=100, ge=0)
 
 
 class JobConfigSettings(BaseModel):
@@ -162,97 +169,22 @@ def _normalize_h5ad_compression(value: Optional[str]) -> Optional[str]:
     return "lzf"
 
 
-_DEFAULT_MODALITY_DEFINITIONS: Dict[str, Dict[str, object]] = {
-    "rna": {
-        "id": "rna",
-        "label": "RNA",
-        "feature_label": "gene",
-        "supports_marker_heatmap": True,
-        "supports_marker_network": True,
-        "supports_differential_network": True,
-        "supports_differential_go": True,
-    },
-    "lipids": {
-        "id": "lipids",
-        "label": "Lipids",
-        "feature_label": "lipid",
-        "supports_marker_heatmap": True,
-        "supports_marker_network": False,
-        "supports_differential_network": False,
-        "supports_differential_go": False,
-    },
-    "adt": {
-        "id": "adt",
-        "label": "ADT (CITE-seq)",
-        "feature_label": "ADT",
-        "supports_marker_heatmap": True,
-        "supports_marker_network": False,
-        "supports_differential_network": False,
-        "supports_differential_go": False,
-    },
-    "metabolite": {
-        "id": "metabolite",
-        "label": "Metabolite (AML)",
-        "feature_label": "metabolite",
-        "supports_marker_heatmap": True,
-        "supports_marker_network": False,
-        "supports_differential_network": False,
-        "supports_differential_go": False,
-    },
-    "lipid": {
-        "id": "lipid",
-        "label": "Lipid (AML)",
-        "feature_label": "lipid",
-        "supports_marker_heatmap": True,
-        "supports_marker_network": False,
-        "supports_differential_network": False,
-        "supports_differential_go": False,
-    },
-    "grn": {
-        "id": "grn",
-        "label": "GRN (TF activity)",
-        "feature_label": "TF",
-        "supports_marker_heatmap": True,
-        "supports_marker_network": False,
-        "supports_differential_network": False,
-        "supports_differential_go": False,
-    },
-    "cell_communication": {
-        "id": "cell_communication",
-        "label": "Cell communication",
-        "feature_label": "ligand-receptor interaction",
-        "supports_marker_heatmap": False,
-        "supports_marker_network": False,
-        "supports_differential_network": False,
-        "supports_differential_go": False,
-    },
-}
-
-
-def _normalize_modality_id(value: object, *, default: str = "rna") -> str:
-    raw = str(value or "").strip().lower()
-    if not raw or raw in {"none", "null", "false", "off"}:
-        return default
-    if raw in {"lipids"}:
-        return "lipids"
-    if raw in {"lipid", "lipid_aml", "aml_lipid", "rna2lipid_aml"}:
-        return "lipid"
-    if raw in {"metabolite", "metabolites", "rna2metabolite"}:
-        return "metabolite"
-    if raw in {"grn", "grns", "regulon", "regulons", "gene_regulatory_network", "rna2grn", "tf_activity"}:
-        return "grn"
-    if raw in {"adt", "adts", "cite", "cite-seq", "citeseq"}:
-        return "adt"
-    if raw in {"cell_communication", "cell communication", "communication", "fastcomm", "fastcomm_network"}:
-        return "cell_communication"
-    if raw == "rna":
-        return "rna"
-    return raw
+from altanalyze3.components.cellHarmony.modalities import (
+    MODALITY_DEFINITIONS as _DEFAULT_MODALITY_DEFINITIONS,
+    normalize_modality_id as _normalize_modality_id,
+    modality_artifacts as _modality_artifacts,
+)
 
 
 def _modalities_state(meta: Dict) -> Dict[str, object]:
     stored = dict(meta.get("modalities") or {})
-    available_raw = stored.get("available") or []
+    available_raw = list(stored.get("available") or [])
+    artifacts = _modality_artifacts(meta)
+    if artifacts.get("grn_tf", {}).get("legacy_enrichment"):
+        available_raw = [dict(entry, **_DEFAULT_MODALITY_DEFINITIONS["grn"])
+                         if entry.get("id") == "grn" else entry for entry in available_raw]
+        available_raw.append(dict(_DEFAULT_MODALITY_DEFINITIONS["grn_tf"],
+                                  label="TF enrichment (legacy)", supports_differential=False))
     available: List[Dict[str, object]] = []
     seen: set[str] = set()
     for entry in available_raw:
@@ -295,6 +227,8 @@ def _modality_marker_analysis(meta: Dict, modality: object) -> Dict[str, object]
     by_modality = meta.get("marker_analysis_by_modality") or {}
     if isinstance(by_modality, dict):
         entry = by_modality.get(normalized)
+        if normalized == "grn_tf" and _modality_artifacts(meta).get("grn_tf", {}).get("legacy_enrichment"):
+            entry = by_modality.get("grn")
         if isinstance(entry, dict):
             return dict(entry)
     if normalized == "rna":
@@ -307,7 +241,7 @@ def _modality_h5ad_path(meta: Dict, modality: object) -> Path:
     if normalized == "rna":
         raw_path = str(meta.get("artifacts", {}).get("combined_h5ad", "")).strip()
     else:
-        raw_path = str(((meta.get("modality_artifacts") or {}).get(normalized) or {}).get("h5ad", "")).strip()
+        raw_path = str((_modality_artifacts(meta).get(normalized) or {}).get("h5ad", "")).strip()
     if not raw_path:
         raise FileNotFoundError(f"AnnData output unavailable for modality '{normalized}'.")
     path = Path(raw_path)
@@ -700,6 +634,15 @@ def _job_resources(app: FastAPI) -> tuple[JobStore, JobRunner]:
     return app.state.job_store, app.state.job_runner
 
 
+
+def _job_metadata_with_recovery(store, runner, job_id):
+    # Published viewers replace the upload store with a bundle-backed store.
+    # Their completed results have no upload worker or on-disk job.json to recover.
+    if getattr(runner, "store", None) is store:
+        return runner.recover_interrupted_differential(job_id)
+    return store.get_job(job_id)
+
+
 def _build_reference_preview_payload(app: FastAPI, species: str, reference_id: str) -> Dict:
     registry_path = Path(app.state.config["REFERENCE_REGISTRY"])
     reference_entry = pipeline_mod._lookup_reference(species, reference_id, registry_path)
@@ -920,7 +863,8 @@ def _differential_options(meta: Dict) -> Dict:
         pseudobulk_allowed = bool(upload_profile.get("single_h5ad") or upload_profile.get("total_files", 0) >= 4)
         comparison_types = ["cells", "pseudobulk"] if pseudobulk_allowed else ["cells"]
     modalities_state = _modalities_state(meta)
-    modalities_available = list(modalities_state["available"])
+    modalities_available = [entry for entry in modalities_state["available"]
+                            if entry.get("supports_differential", True)]
     # fastComm being available does NOT mean a cell-communication DIFFERENTIAL exists.
     # For a precomputed bundle fastComm scores communication per cell state for the
     # Explore tab; running cellHarmony-differential on it is a separate analysis. Adding
@@ -1021,10 +965,26 @@ def _build_differential_payload(app: FastAPI, job_id: str, meta: Dict, root_path
             {"value": "heatmap", "label": "Heatmap"},
             {"value": "volcano", "label": "Volcano"},
         ]
-        if bool(modality_info.get("supports_differential_network")):
+        # A view with no data must not be offered. `supports_differential_*` is a
+        # MODALITY capability, not a statement about this run, so RNA kept both flags and
+        # the menu listed Network and GO Terms for a contrast that ships neither.
+        # Selecting one printed "No network data are available for this differential run."
+        # Measured on the COPD bundle, contrast `cancer_vs_no_cancer`: 0 networks and 0 GO
+        # populations. A run still in progress keeps its entry, because its artifacts
+        # arrive later and the menu must not flicker while it computes.
+        run_completed = status == "completed"
+        if bool(modality_info.get("supports_differential_network")) and (
+                networks or not run_completed):
             visualization_modes.append({"value": "network", "label": "Network"})
-        if bool(modality_info.get("supports_differential_go")):
+        if bool(modality_info.get("supports_differential_go")) and (
+                visualization_populations.get("go") or not run_completed):
             visualization_modes.append({"value": "go", "label": "GO Terms"})
+        if selected_modality in {"rna", "grn", "grn_tf"}:
+            visualization_modes.append({"value": "integrated_network", "label": "Regulatory network"})
+            visualization_populations["integrated_network"] = result_populations
+        if selected_modality in {"lipid", "lipids", "metabolite"}:
+            visualization_modes.append({"value": "integrated_pathway", "label": "Pathway"})
+            visualization_populations["integrated_pathway"] = result_populations
     return {
         **options,
         "status": status,
@@ -1035,6 +995,7 @@ def _build_differential_payload(app: FastAPI, job_id: str, meta: Dict, root_path
             else "Differential gene analyses between biological groups (i.e., disease versus controls) are only enabled when two or more samples (multiple h5 files or a single h5ad) are uploaded for the job."
         ),
         "config": {**config, "modality": selected_modality},
+        "completed_comparisons": [comparison_entry(key, run) for key, run in completed_differentials(meta).items()],
         "selected_modality": selected_modality,
         "feature_label": str(differential.get("feature_label") or modality_info.get("feature_label") or "gene"),
         "visualization_modes": visualization_modes,
@@ -1490,6 +1451,11 @@ def _get_expression_cache(app: FastAPI, meta: Dict, modality: str = "rna") -> Di
         raise ValueError("Job metadata is missing a job_id.")
 
     normalized_modality = _normalize_modality_id(modality)
+    # Precomputed viewers own their expression stores and do not require the
+    # original analysis H5AD to remain available after a bundle is published.
+    bundle_cache = getattr(app.state.job_store, "get_expression_cache", None)
+    if callable(bundle_cache):
+        return bundle_cache(app, meta, normalized_modality)
     artifacts = meta.get("artifacts", {})
     h5ad_path = _modality_h5ad_path(meta, normalized_modality)
 
@@ -1498,6 +1464,10 @@ def _get_expression_cache(app: FastAPI, meta: Dict, modality: str = "rna") -> Di
         raise ValueError("Cluster assignments missing from AnnData output.")
 
     umap_path = artifacts.get("umap_coordinates")
+    is_bundle=hasattr(app.state.job_store,'dataset')
+    source_stamp=None
+    if not is_bundle and Path(h5ad_path).is_file():
+        stat=Path(h5ad_path).stat();source_stamp=(stat.st_mtime_ns,stat.st_size)
     cache = app.state.expression_cache
     cache_key = f"{job_id}:{normalized_modality}"
     cache_entry = cache.get(cache_key)
@@ -1507,6 +1477,7 @@ def _get_expression_cache(app: FastAPI, meta: Dict, modality: str = "rna") -> Di
         and cache_entry.get("umap_path") == str(umap_path or "")
         and cache_entry.get("cluster_key") == str(cluster_key)
         and cache_entry.get("modality") == normalized_modality
+        and (is_bundle or cache_entry.get("source_stamp") == source_stamp)
     ):
         return cache_entry
 
@@ -1519,6 +1490,7 @@ def _get_expression_cache(app: FastAPI, meta: Dict, modality: str = "rna") -> Di
             and cache_entry.get("umap_path") == str(umap_path or "")
             and cache_entry.get("cluster_key") == str(cluster_key)
             and cache_entry.get("modality") == normalized_modality
+            and (is_bundle or cache_entry.get("source_stamp") == source_stamp)
         ):
             return cache_entry
 
@@ -1632,6 +1604,7 @@ def _get_expression_cache(app: FastAPI, meta: Dict, modality: str = "rna") -> Di
             "job_id": job_id,
             "modality": normalized_modality,
             "h5ad_path": str(h5ad_path),
+            "source_stamp": source_stamp,
             "umap_path": str(umap_path or ""),
             "cluster_key": str(cluster_key),
             "adata": adata,
@@ -1761,9 +1734,9 @@ def _differential_fold_rows(app: FastAPI, meta: Dict) -> tuple[Dict[str, List[fl
         if len(set(labels)) != len(frame.columns):
             labels = [str(label) for label in frame.columns]
         # Vectorised: coerce every column once, then read whole rows out of one array.
-        # Same values as the old loop, which turned a non-finite entry into 0.0.
+        # Preserve unreported folds as missing; zero would imply a tested null change.
         numeric = frame.apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
-        numeric = np.where(np.isfinite(numeric), numeric, 0.0)
+        numeric = np.where(np.isfinite(numeric), numeric, np.nan)
         if source == "fold_matrix_tsv":
             keys = [str(label) for label in frame.index]
         else:
@@ -1811,7 +1784,7 @@ def _build_differential_heatmap_payload(app: FastAPI, meta: Dict, population: st
     if not fold_rows:
         column_labels = list(dict.fromkeys(detailed["population"].astype(str).tolist()))
 
-    detailed_matrix = detailed_matrix.reindex(columns=column_labels).fillna(0.0)
+    detailed_matrix = detailed_matrix.reindex(columns=column_labels)
 
     rows = []
     rows_from_fold = 0
@@ -1824,11 +1797,11 @@ def _build_differential_heatmap_payload(app: FastAPI, meta: Dict, population: st
             values = (
                 detailed_matrix.loc[gene].tolist()
                 if gene in detailed_matrix.index
-                else [0.0] * len(column_labels)
+                else [None] * len(column_labels)
             )
         else:
             rows_from_fold += 1
-        row_values = [float(value) if _is_finite_number(value) else 0.0 for value in values]
+        row_values = [float(value) if _is_finite_number(value) else None for value in values]
         rows.append(
             {
                 "row_key": f"{population}:{gene}",
@@ -1926,7 +1899,13 @@ def _build_differential_volcano_payload(app: FastAPI, meta: Dict, population: st
     subset["fdr"] = pd.to_numeric(subset.get("fdr"), errors="coerce")
     subset["pval"] = pd.to_numeric(subset.get("pval"), errors="coerce")
     subset = subset.dropna(subset=["gene", "log2fc"])
-    subset["fdr_clamped"] = subset["fdr"].fillna(subset["pval"]).clip(lower=1e-300)
+    valid_fdr = np.isfinite(subset["fdr"]) & subset["fdr"].between(0, 1)
+    statistic = "fdr" if valid_fdr.any() else "pval"
+    statistic_label = "FDR" if statistic == "fdr" else "p-value"
+    valid = np.isfinite(subset[statistic]) & subset[statistic].between(0, 1)
+    n_missing_statistic = int((~valid).sum())
+    subset = subset.loc[valid].copy()
+    subset["fdr_clamped"] = subset[statistic].clip(lower=1e-300)
     subset["score"] = -np.log10(subset["fdr_clamped"])
     subset["direction"] = np.where(subset["log2fc"] >= 0, "up", "down")
     subset = subset.sort_values(["fdr_clamped", "pval", "gene"], ascending=[True, True, True]).reset_index(drop=True)
@@ -1944,6 +1923,8 @@ def _build_differential_volcano_payload(app: FastAPI, meta: Dict, population: st
     ]
     return {
         "population": population,
+        "statistic": statistic, "statistic_label": statistic_label,
+        "n_missing_statistic": n_missing_statistic,
         "points": points,
         "default_gene": points[0]["gene"] if points else None,
     }
@@ -2319,7 +2300,7 @@ def _build_differential_network_payload(app: FastAPI, meta: Dict, population: st
                 "data": {
                     "id": source,
                     "label": source,
-                    "log2fc": float(source_fc) if _is_finite_number(source_fc) else 0.0,
+                    "log2fc": float(source_fc) if _is_finite_number(source_fc) else None,
                 }
             }
         for target in targets:
@@ -2329,7 +2310,7 @@ def _build_differential_network_payload(app: FastAPI, meta: Dict, population: st
                     "data": {
                         "id": target,
                         "label": target,
-                        "log2fc": float(target_fc) if _is_finite_number(target_fc) else 0.0,
+                        "log2fc": float(target_fc) if _is_finite_number(target_fc) else None,
                     }
                 }
             edges.append(
@@ -2421,10 +2402,11 @@ def _order_by_lineage(values, adata, meta: Dict) -> List[str]:
 
 
 def _build_grn_network_payload(meta: Dict, genes, *, sample: str = "", cell_state: str = "",
-                               threshold: float = 0.0, max_edges: int = 300) -> Dict:
+                               threshold: float = 0.0, max_edges: int = 25) -> Dict:
     """Cytoscape network of rna2grn edges (TF->target) involving the requested genes, scored
-    for a selected sample/cell-state (or any). Edge scores come from the (sample x cell-state)
-    pseudobulk edge h5ad; when no cell state is chosen the score is averaged across cell states."""
+    for a selected sample/cell-state. A blank state selects the first in lineage order;
+    blank genes select the TF with the largest summed absolute outgoing score in that state.
+    Scores average the selected sample x state pseudobulks, never unrelated cell states."""
     adata = _grn_edges_adata(meta)
     var_names = adata.var_names.astype(str).to_numpy()
     cluster_key = str(meta.get("cluster_key") or meta.get("reference_cluster_key") or "")
@@ -2435,18 +2417,22 @@ def _build_grn_network_payload(meta: Dict, genes, *, sample: str = "", cell_stat
     available_samples = sorted(set(adata.obs[disp_col].astype(str))) if disp_col else []
     cell_values = (set(adata.obs[cluster_key].astype(str)) if cluster_key and cluster_key in adata.obs.columns else set())
     available_cell_states = _order_by_lineage(cell_values, adata, meta)
+    cell_state = cell_state or (available_cell_states[0] if available_cell_states else '')
     req = {_normalize_gene_token(g) for g in (genes or []) if str(g).strip()}
     empty = {"sample": sample, "cell_state": cell_state, "threshold": threshold, "elements": [], "n_edges": 0,
-             "score_type": "edge score",
+             "score_type": "mean predicted edge score", "sample_field": disp_col,
+             "n_matching_edges": 0, "n_aggregates": 0, "max_edges": max_edges,
              "available_samples": available_samples, "available_cell_states": available_cell_states}
-    if not req:
-        return {**empty, "message": "Enter one or more genes."}
+    if not available_cell_states:
+        return {**empty, "message": "The GRN output has no cell-state annotations."}
+    if cell_state not in available_cell_states:
+        return {**empty, "message": f"Cell type '{cell_state}' not found."}
 
     mask = np.ones(adata.n_obs, dtype=bool)
     if sample:
         # match the requested value against whichever sample-like column actually holds it
         # (e.g. the user picks "AML" from Library, or "0" from sample)
-        scol = next((c for c in pipeline_mod._PB_SAMPLE_COLS
+        scol = next((c for c in dict.fromkeys([disp_col, *pipeline_mod._PB_SAMPLE_COLS]) if c
                      if c in adata.obs.columns and str(sample) in set(adata.obs[c].astype(str))), None)
         if scol is None:
             return {**empty, "message": f"Sample '{sample}' not found."}
@@ -2457,12 +2443,21 @@ def _build_grn_network_payload(meta: Dict, genes, *, sample: str = "", cell_stat
         return {**empty, "message": "No pseudobulks match the selected sample / cell type."}
 
     sub = adata.X[mask]
-    sub = sub.toarray() if hasattr(sub, "toarray") else np.asarray(sub)
-    # Absolute imputed edge score for the selected sample/cell state. These ARE strongly
-    # cell-state-specific (e.g. SPI1 edges ~0.3 in monocytes vs ~0.001 in erythroid; HLF high
-    # only in HSC) — the activity is encoded as edge score (rendered as edge width).
-    scores = np.asarray(sub, dtype=float).mean(axis=0)
-    score_type = "edge score"
+    # Average predicted scores across the selected aggregates, without a contrast
+    # or marker-enrichment calculation. Preserve their original scale and precision.
+    scores = np.asarray(sub.mean(axis=0), dtype=float).ravel()
+    factors = {}
+    for key, score in zip(var_names, scores):
+        if not np.isfinite(score):
+            continue
+        for tf in key.split('|')[:-1]:
+            factors[tf] = factors.get(tf, 0.0) + abs(float(score))
+    ranked_factors = sorted(factors, key=lambda tf: (-factors[tf], tf))
+    selected_genes = [str(g) for g in (genes or []) if str(g).strip()]
+    if not req and ranked_factors:
+        selected_genes = [ranked_factors[0]]
+        req = {_normalize_gene_token(ranked_factors[0])}
+    empty.update(genes=selected_genes, available_factors=ranked_factors, n_aggregates=int(mask.sum()))
 
     # keep edges whose TF or target matches a requested gene, above the |score| threshold
     keep = []
@@ -2470,14 +2465,15 @@ def _build_grn_network_payload(meta: Dict, genes, *, sample: str = "", cell_stat
         ev = var_names[j]
         if "|" not in ev:
             continue
-        tf, tgt = ev.split("|", 1)
-        if (_normalize_gene_token(tf) not in req) and (_normalize_gene_token(tgt) not in req):
-            continue
+        *tfs, tgt = ev.split("|")
         sc = float(scores[j])
-        if not np.isfinite(sc) or abs(sc) < float(threshold):
+        if not np.isfinite(sc) or sc == 0 or abs(sc) < float(threshold):
             continue
-        keep.append((j, tf, tgt, sc))
+        for tf in tfs:
+            if tf and tgt and (_normalize_gene_token(tf) in req or _normalize_gene_token(tgt) in req):
+                keep.append((j, tf, tgt, sc))
     keep.sort(key=lambda t: -abs(t[3]))
+    n_matching_edges = len(keep)
     keep = keep[:int(max_edges)]
 
     nodes: Dict[str, Dict] = {}
@@ -2488,14 +2484,14 @@ def _build_grn_network_payload(meta: Dict, genes, *, sample: str = "", cell_stat
                                                     "queried": _normalize_gene_token(nid) in req}})
             if role == "tf":
                 node["data"]["role"] = "tf"
-            # reuse the network renderer's log2fc->color mapping: TFs red, targets blue
-            node["data"]["log2fc"] = 1.0 if node["data"]["role"] == "tf" else -1.0
         edges_out.append({"data": {
-            "id": f"{tf}__{tgt}__{j}", "source": tf, "target": tgt, "score": round(sc, 4),
-            "interaction_type": "transcription", "direction": "up" if sc >= 0 else "down"}})
+            "id": f"{tf}__{tgt}__{j}", "source": tf, "target": tgt, "score": sc,
+            "interaction_type": "transcription", "direction": "neutral"}})
     msg = "" if edges_out else "No GRN edges matched the requested genes at this threshold."
-    return {"sample": sample, "cell_state": cell_state, "threshold": threshold, "score_type": score_type,
+    return {**empty, "sample": sample, "cell_state": cell_state, "threshold": threshold,
+            "n_matching_edges": n_matching_edges,
             "n_edges": len(edges_out), "elements": list(nodes.values()) + edges_out, "message": msg,
+            "genes": selected_genes, "available_factors": ranked_factors, "node_encoding": "role",
             "available_samples": available_samples, "available_cell_states": available_cell_states}
 
 
@@ -2512,8 +2508,12 @@ def _build_marker_network_payload(meta: Dict, population: str, modality: str = "
 
     marker_stats_path = Path(str(marker_analysis.get("markers_tsv", "")).strip())
     fc_map: Dict[str, float] = {}
-    if marker_stats_path.exists():
-        stats_df = pd.read_csv(marker_stats_path, sep="\t")
+    # Networks use redundant per-state markers, not only the unique top marker list.
+    redundant_path = Path(str(marker_analysis.get("redundant_markers_tsv") or
+                              marker_stats_path.with_name(marker_stats_path.stem.replace("_markers", "_redundant_markers") + ".tsv")))
+    paths = [path for path in (marker_stats_path, redundant_path) if path.is_file()]
+    if paths:
+        stats_df = pd.concat([pd.read_csv(path, sep="\t") for path in paths], ignore_index=True)
         if "cluster" in stats_df.columns:
             subset = stats_df.loc[stats_df["cluster"].astype(str) == str(population)].copy()
         else:
@@ -2539,12 +2539,12 @@ def _build_marker_network_payload(meta: Dict, population: str, modality: str = "
         if not source or not targets:
             continue
         if source not in nodes:
-            source_fc = fc_map.get(source, 0.0)
-            nodes[source] = {"data": {"id": source, "label": source, "log2fc": float(source_fc)}}
+            source_fc = fc_map.get(source)
+            nodes[source] = {"data": {"id": source, "label": source, "log2fc": source_fc}}
         for target in targets:
             if target not in nodes:
-                target_fc = fc_map.get(target, 0.0)
-                nodes[target] = {"data": {"id": target, "label": target, "log2fc": float(target_fc)}}
+                target_fc = fc_map.get(target)
+                nodes[target] = {"data": {"id": target, "label": target, "log2fc": target_fc}}
             edges.append(
                 {
                     "data": {
@@ -3347,7 +3347,7 @@ def _build_differential_gene_detail_payload(
         raise HTTPException(
             status_code=404,
             detail=("This comparison groups samples on a covariate the released "
-                    "metacells do not carry, so the per-replicate distribution cannot "
+                    "data do not carry, so the per-replicate distribution cannot "
                     "be drawn. The differential statistics above are unaffected."))
     population_col = _differential_population_col(meta)
     case_label, control_label = _differential_group_labels(meta)
@@ -3462,6 +3462,20 @@ def _build_differential_gene_detail_payload(
         adata = expression_cache["adata"]
         var_names = expression_cache["var_names"]
     resolved_gene = _resolve_gene_name(var_names, gene)
+    ragged_only = False
+    if not resolved_gene and modality == "grn":
+        # The per-cell-state GRN sidecar and the per-metacell ragged store hold DIFFERENT
+        # edge sets. The sidecar scores every edge in every state; the ragged store keeps
+        # only the edges significant in that state, which is what holds it near 0.6 GB.
+        # A GRN differential therefore names edges the sidecar lacks. Measured on the COPD
+        # bundle: `KLF6|NTN4` is 0 of 63,647 sidecar edges and 1 of the 4,035 edges in
+        # `imputed_v7_grn_ragged/AT1.h5ad`, so clicking that volcano point answered
+        # "Gene 'KLF6|NTN4' not found in the aligned AnnData output" while its p-value,
+        # FDR and fold change were on screen beside it.
+        # The ragged store supplies the violin in either branch, so resolve against it and
+        # take the values from it alone. A name in neither store still raises below.
+        if _grn_ragged_values(meta, population, gene, adata.obs.index) is not None:
+            resolved_gene, ragged_only = gene, True
     if not resolved_gene:
         raise KeyError(f"Gene '{gene}' not found in the aligned AnnData output.")
     if population_col not in adata.obs.columns:
@@ -3502,8 +3516,12 @@ def _build_differential_gene_detail_payload(
                     f"profiles in this atlas, so the distribution cannot be drawn. "
                     f"The comparison covers {len(present)} cell states with replicates."))
 
-    subset = adata[mask.to_numpy(), resolved_gene]
-    values = _flatten_expr(subset.X).astype(float)
+    if ragged_only:
+        # No sidecar column exists for this edge; every value comes from the ragged store.
+        values = np.full(int(mask.to_numpy().sum()), np.nan, dtype=float)
+    else:
+        subset = adata[mask.to_numpy(), resolved_gene]
+        values = _flatten_expr(subset.X).astype(float)
     if modality == "grn":
         # Prefer the per-metacell ragged store when it covers this state and edge. The
         # bundle sidecar holds one value per CELL STATE, which draws a flat line.
@@ -3552,6 +3570,8 @@ def _build_differential_gene_detail_payload(
         "population": population,
         "gene": resolved_gene,
         "modality": modality,
+        "value_label": ("Predicted TF activity (sum)" if modality == "grn_tf" else
+                        "GRN edge score" if modality == "grn" else "Normalized expression"),
         "feature_label": str(modality_info.get("feature_label") or "gene"),
         "groups": groups,
         "stats": stats_payload,
@@ -3835,9 +3855,7 @@ _CHAT_PROTOCOL_ALIAS = {
     "state_comparison": "compare",
     "expression_lookup": "expression",
     "state_contrast": "differential",
-    "donor_heterogeneity": "differential",
     "patient_stratification": "differential",
-    "most_affected_state": "differential",
     "shared_vs_state_specific": "differential",
     "contrast_specificity": "differential",
     "pathway_program": "goelite",
@@ -3845,16 +3863,6 @@ _CHAT_PROTOCOL_ALIAS = {
     "communication_rewiring": "ccc",
 }
 
-#: Protocols with a specification but no executor here. Naming the gap is the
-#: point: answering one of these with a neighbouring analysis would report a
-#: different statistic under the question the user asked.
-_CHAT_NOT_YET = {
-    "severity_gradient": "a Spearman correlation of per-donor pseudobulk against a clinical variable",
-    "dose_response": "a monotonic trend test across ordered stages",
-    "composition_shift": "per-donor cell-count composition",
-    "coexpression_module": "per-donor co-expression around a seed gene",
-    "annotation_concordance": "a cross-tabulation of the two annotations",
-}
 
 
 def _chat_states_by_size(cache: Dict[str, Any]) -> List[tuple]:
@@ -3870,8 +3878,8 @@ def _chat_contrast(meta: Dict) -> Dict[str, str]:
     if str(differential.get("status") or "").lower() != "completed":
         return {}
     config = differential.get("config") or {}
-    case = str(config.get("case_label") or "Group 1").strip()
-    control = str(config.get("control_label") or "Group 2").strip()
+    case = str(differential.get("case_label") or config.get("case_label") or "Group 1").strip()
+    control = str(differential.get("control_label") or config.get("control_label") or "Group 2").strip()
     return {"case": case, "control": control, "label": f"{case} versus {control}"}
 
 
@@ -3879,7 +3887,7 @@ def _chat_marker_table(meta: Dict, modality: str = "rna") -> pd.DataFrame:
     """The marker table cellHarmony wrote, or an empty frame."""
     marker_analysis = _modality_marker_analysis(meta, modality) or {}
     path = Path(str(marker_analysis.get("markers_tsv", "")).strip())
-    if not path.exists():
+    if not path.is_file():
         return pd.DataFrame()
     frame = pd.read_csv(path, sep="\t")
     if "cluster" not in frame.columns or "Gene" not in frame.columns:
@@ -3986,7 +3994,11 @@ def _chat_examples(app: FastAPI, meta: Dict) -> Dict[str, Any]:
     markers = _chat_markers_for_states(app, meta, cache, [first] if first else [], 6)
     genes = [str(row["gene"]) for row in markers][:2]
 
-    examples: List[str] = []
+    from .cross_modal import examples as cross_examples
+    examples: List[str] = cross_examples(_modality_artifacts(meta))
+    if first:
+        marker_state = next((s for s in states if s.casefold() == "hsc-1"), first)
+        examples.extend([f"What pathways have the best cross-modality {marker_state} representation?", f"What is the best modality marker of {marker_state}?"])
     if first:
         examples.append(f"What are the best marker genes of {first} cells?")
     if first and second:
@@ -3995,12 +4007,20 @@ def _chat_examples(app: FastAPI, meta: Dict) -> Dict[str, Any]:
         examples.append(f"Where is {genes[0]} expressed?")
     if len(genes) > 1:
         examples.append(f"Which cell states express {genes[1]}?")
+    if first and "grn_tf" in _modality_artifacts(meta):
+        examples.append(f"Which TFs are most active in {first} cells?")
+        examples.append(f"Show the regulatory network in {first} cells")
     contrast = _chat_contrast(meta)
     if contrast and first:
         examples.append(f"Which genes are significant in {contrast['case']} versus "
                         f"{contrast['control']} in {first} cells?")
         examples.append(f"Which cell type is most affected in {contrast['case']} versus "
                         f"{contrast['control']}?")
+    covariates=cache['adata'].obs
+    numeric=next((c for c in covariates if pd.api.types.is_numeric_dtype(covariates[c]) and c not in {'n_counts','n_genes','n_cells'}), '')
+    if first and numeric:examples.append(f"Which genes in {first} track {numeric}?")
+    if first and genes:examples.append(f"Which genes coexpress with {genes[0]} in {first}?")
+    if first and contrast:examples.append(f"Is the signature in {first} present in all donors or a subset?")
     return {"tissue": tissue, "reference": reference_label,
             "cluster_key": str(cache["cluster_key"]),
             "n_states": len(states), "has_contrast": bool(contrast),
@@ -4075,6 +4095,13 @@ def _chat_read_question(question: str, cache: Dict[str, Any], meta: Dict) -> Dic
     data, so it cannot invent a number: it chooses the reading, and the executors
     below compute the answer from the job's own files.
     """
+    reading = gnet.read_regulatory_question(question, [s for s, _ in _chat_states_by_size(cache)],
+                                            cache.get("var_names", []))
+    if reading is not None:
+        return reading
+    from .chat_service import read_question
+    local=read_question(question,[s for s,_ in _chat_states_by_size(cache)],cache.get('var_names',[]),cache['adata'].obs.columns)
+    if local is not None:return local
     contrast = _chat_contrast(meta)
     payload = json.dumps({
         "question": question,
@@ -4215,15 +4242,6 @@ def _build_reference_expression_payload(app: FastAPI, meta: Dict, gene: str) -> 
     reference_df = _load_reference_states_table(meta)
     resolved_gene = _resolve_gene_name(reference_df.index.astype(str), gene)
     if not resolved_gene:
-        combined_path = str(meta.get("artifacts", {}).get("combined_h5ad", "")).strip()
-        if combined_path and Path(combined_path).exists():
-            fallback_adata = ad.read_h5ad(combined_path, backed="r")
-            try:
-                if len(fallback_adata.var_names):
-                    fallback_gene = str(fallback_adata.var_names[0])
-                    return _build_expression_payload(app, meta, fallback_gene)
-            finally:
-                _close_backed_adata(fallback_adata)
         return {
             "gene": gene,
             "requested_gene": gene,
@@ -4317,6 +4335,19 @@ def split_gene_list(text: str, keep_pipe: bool = False) -> List[str]:
             seen.add(gene)
             out.append(gene)
     return out
+
+
+def _split_expression_features(text, cache):
+    """Preserve literal metabolite names before falling back to gene separators."""
+    raw = str(text or "").strip()
+    names = set(map(str, cache["var_names"]))
+    if raw in names:
+        return [raw]
+    for separator in (r"[\n\t]+", r"[,;\n\t]+"):
+        parts = [part.strip().strip('"').strip("'") for part in re.split(separator, raw) if part.strip()]
+        if parts and all(part in names for part in parts):
+            return list(dict.fromkeys(parts))
+    return split_gene_list(raw, keep_pipe=_names_have_pipe(cache))
 
 
 def _names_have_pipe(cache: Dict[str, Any]) -> bool:
@@ -4431,7 +4462,16 @@ def _subset_mask(cache: Dict[str, Any], subset_by: str = "",
     values = adata.obs[subset_by].astype(str).to_numpy()
     keep = set(str(v) for v in subset_values)
     mask = np.isin(values, list(keep))
-    return mask if mask.any() else None
+    return mask
+
+
+def _gene_set_filter_mask(cache, subset_by="", subset_values=None, subset2_by="", subset2_values=None):
+    mask = np.ones(cache["adata"].n_obs, dtype=bool)
+    for field, values in ((subset_by, subset_values), (subset2_by, subset2_values)):
+        selected = _subset_mask(cache, field, values)
+        if selected is not None:
+            mask &= selected
+    return mask
 
 
 def _group_axis(cache: Dict[str, Any], group_by: str = "") -> tuple:
@@ -4469,8 +4509,12 @@ def _groupable_columns(cache: Dict[str, Any], max_categories: int = 60) -> List[
     draw a column per cell, so it is left out.
     """
     adata = cache["adata"]
-    out = []
+    cluster_key = str(cache["cluster_key"])
+    _, states, _ = _group_axis(cache, cluster_key)
+    out = [{"field": cluster_key, "values": list(states), "n": len(states)}]
     for name in adata.obs.columns:
+        if str(name) == cluster_key:
+            continue
         series = adata.obs[name]
         if str(series.dtype) == "category":
             levels = [str(c) for c in series.cat.categories]
@@ -4486,7 +4530,8 @@ def _groupable_columns(cache: Dict[str, Any], max_categories: int = 60) -> List[
 def _gene_state_stats(cache: Dict[str, Any], wanted: List[str],
                       group_by: str = "", keep_groups: Optional[List[str]] = None,
                       subset_by: str = "",
-                      subset_values: Optional[List[str]] = None) -> Dict[str, Any]:
+                      subset_values: Optional[List[str]] = None,
+                      subset2_by: str = "", subset2_values: Optional[List[str]] = None) -> Dict[str, Any]:
     """Mean expression and detected fraction of each gene in each group.
 
     Groups are cell states by default. `group_by` regroups by any other
@@ -4497,8 +4542,8 @@ def _gene_state_stats(cache: Dict[str, Any], wanted: List[str],
     column, groups, values_of = _group_axis(cache, group_by)
     if keep_groups:
         chosen = [g for g in groups if g in set(keep_groups)]
-        groups = chosen or groups
-    restrict = _subset_mask(cache, subset_by, subset_values)
+        groups = chosen
+    restrict = _gene_set_filter_mask(cache, subset_by, subset_values, subset2_by, subset2_values)
     rows, labels, missing = _gene_rows(cache, wanted)
     masks = [(values_of == group) for group in groups]
     if restrict is not None:
@@ -4519,11 +4564,67 @@ def _gene_state_stats(cache: Dict[str, Any], wanted: List[str],
             "n_requested": len(wanted), "n_returned": len(labels),
             "n_missing": len(missing), "missing": missing}
 
+def _sample_plot_cells(cache, indices, cells_per_sample):
+    """Sample each sample × cell-type stratum, preserving the supplied plot order."""
+    from altanalyze3.components.visualization.cell_sampling import sample_cell_indices
+    obs = cache["adata"].obs
+    # Match the viewer's donor/sample identity order; a display-filter default
+    # can be a condition or sex and must not silently become a sample identity.
+    sample_field = next((c for c in ("meta_sample", "donor", "Donor", "Library", "sample", "sample_id", "pool") if c in obs), "")
+    samples = obs[sample_field].astype(str).to_numpy() if sample_field else np.repeat("dataset", len(obs))
+    ids = np.asarray(cache.get("obs_names", obs.index), dtype=str)
+    states = np.asarray(cache["populations"], dtype=str)
+    try:
+        keep = sample_cell_indices(ids[indices], samples[indices], limit=cells_per_sample, group_labels=states[indices])
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    description = (f"Up to {cells_per_sample} individual cells per sample per cell type"
+                   if cells_per_sample else "All individual cells")
+    description += f"; sample annotation: {sample_field}." if sample_field else "; no sample annotation, treating the dataset as one sample."
+    return indices[keep], {"cells_per_sample": cells_per_sample, "sample_field": sample_field,
+                           "n_available": len(indices), "n_selected": len(keep), "description": description}
+
+
+def _gene_cell_values(cache: Dict[str, Any], wanted: List[str], group_by: str = "",
+                      keep_groups: Optional[List[str]] = None, subset_by: str = "",
+                      subset_values: Optional[List[str]] = None,
+                      subset2_by: str = "", subset2_values: Optional[List[str]] = None, cells_per_sample: int = 0) -> Dict[str, Any]:
+    """Individual cell values in group order, without donor averaging or sampling."""
+    adata = cache["adata"]
+    column, groups, values_of = _group_axis(cache, group_by)
+    if keep_groups:
+        groups = [g for g in groups if g in set(keep_groups)]
+    valid = np.isin(values_of, groups)
+    for field, values in ((subset_by, subset_values), (subset2_by, subset2_values)):
+        if field and values and field in adata.obs.columns:
+            valid &= adata.obs[field].astype(str).isin(values).to_numpy()
+    order = {g: i for i, g in enumerate(groups)}
+    indices = np.flatnonzero(valid)
+    indices = indices[np.argsort([order[values_of[i]] for i in indices], kind="stable")]
+    indices, sampling = _sample_plot_cells(cache, indices, cells_per_sample)
+    sample = cache.get("sample_field")
+    donors = adata.obs[sample].astype(str).to_numpy() if sample in adata.obs.columns else None
+    names = cache.get("obs_names", adata.obs.index)
+    columns = [{"cell": str(names[i]), "group": str(values_of[i]), "state": str(values_of[i]),
+                "donor": str(donors[i]) if donors is not None else "", "n_cells": 1}
+               for i in indices]
+    rows, labels, missing = _gene_rows(cache, wanted)
+    series = [np.round(_dense_column(adata, row)[indices].astype(float), 5).tolist() for row in rows]
+    return {"genes": labels, "values": series, "columns": columns,
+            "colors": _state_colors(cache, [c["group"] for c in columns]),
+            "unit": "cells", "observation_unit": "cells", "sampling": sampling, "groups": groups, "states": groups,
+            "group_by": column, "group_label": column, "n_columns": len(columns),
+            "n_cells_kept": len(columns), "n_groups_dropped": 0,
+            "n_requested": len(wanted), "n_returned": len(labels),
+            "n_missing": len(missing), "missing": missing}
+
+
 def _gene_donor_state_means(cache: Dict[str, Any], wanted: List[str],
                             min_cells: int, group_by: str = "",
                             keep_groups: Optional[List[str]] = None,
                             subset_by: str = "",
-                            subset_values: Optional[List[str]] = None) -> Dict[str, Any]:
+                            subset_values: Optional[List[str]] = None,
+                            subset2_by: str = "", subset2_values: Optional[List[str]] = None) -> Dict[str, Any]:
     """Per-donor pseudobulk of each gene, within each group.
 
     One column per (group, donor). Groups are cell states by default; `group_by`
@@ -4543,7 +4644,7 @@ def _gene_donor_state_means(cache: Dict[str, Any], wanted: List[str],
     column, groups, values_of = _group_axis(cache, group_by)
     if keep_groups:
         chosen = [g for g in groups if g in set(keep_groups)]
-        groups = chosen or groups
+        groups = chosen
     donor_of = adata.obs[donor_field].astype(str).to_numpy()
     donors = sorted(set(donor_of))
     group_index = {g: i for i, g in enumerate(groups)}
@@ -4553,6 +4654,8 @@ def _gene_donor_state_means(cache: Dict[str, Any], wanted: List[str],
     codes = np.array([group_index.get(v, -1) for v in values_of], dtype=np.int64)
     if restrict is not None:
         codes = np.where(restrict, codes, -1)
+    if subset2_by and subset2_values and subset2_by in adata.obs.columns:
+        codes = np.where(adata.obs[subset2_by].astype(str).isin(subset2_values), codes, -1)
     donor_codes = np.array([donor_index[d] for d in donor_of], dtype=np.int64)
     group_id = codes * len(donors) + donor_codes
     valid = codes >= 0
@@ -4578,7 +4681,7 @@ def _gene_donor_state_means(cache: Dict[str, Any], wanted: List[str],
         means = np.where(per_group > 0, sums / np.maximum(per_group, 1), 0.0)
         series.append([round(float(v), 5) for v in means[keep]])
 
-    return {"genes": labels, "values": series, "columns": columns, "colors": colors,
+    return {"unit": "donor", "genes": labels, "values": series, "columns": columns, "colors": colors,
             "states": groups, "groups": groups,
             "subset_by": subset_by or "", "subset_values": list(subset_values or []),
             "group_by": column, "group_label": column, "donor_key": donor_field,
@@ -4694,67 +4797,22 @@ def _build_expression_payload(
         umap_x, umap_y = _ax, _ay
     display_mask = _apply_display_filter_mask(cache_entry, display_filters)
     resolved_gene = _resolve_gene_name(cache_entry["var_names"], gene)
+    if not resolved_gene and not str(gene or "").strip() and len(cache_entry["var_names"]):
+        resolved_gene = str(cache_entry["var_names"][0])
     if not resolved_gene:
-        if len(cache_entry["var_names"]):
-            fallback_gene = str(cache_entry["var_names"][0])
-            values = _flatten_expr(adata[:, fallback_gene].X)
-            global_min, global_max = _expression_global_range(values)
-            scatter_data = [
-                {"population": pop, "value": float(val)}
-                for pop, val in zip(populations, values)
-                if _is_finite_number(val)
-            ]
-
-            umap_points = [
-                {
-                    "barcode": barcode,
-                    "population": pop,
-                    "value": float(val),
-                    "x": float(x),
-                    "y": float(y),
-                }
-                for barcode, pop, val, x, y, keep in zip(obs_names, populations, values.astype(float), umap_x, umap_y, display_mask)
-                if keep and _is_finite_number(val) and _is_finite_number(x) and _is_finite_number(y)
-            ]
-            umap_points.sort(key=lambda point: (point["value"], point["population"], point["barcode"]))
-
-            violin_data = []
-            for pop in sorted(pd.unique(populations)):
-                mask = (populations == pop) & display_mask
-                pop_values = values[mask].astype(float)
-                finite_values = pop_values[np.isfinite(pop_values)]
-                violin_data.append(
-                    {
-                        "population": pop,
-                        "values": [float(v) for v in finite_values],
-                        "mean": float(np.mean(finite_values)) if len(finite_values) else 0.0,
-                    }
-                )
-            violin_data = sorted(violin_data, key=lambda x: x["mean"], reverse=True)[:violin_limit]
-
-            return {
-                "gene": fallback_gene,
-                "requested_gene": gene,
-                "resolved_gene": fallback_gene,
-                "source": "query",
-                "modality": normalized_modality,
-                "message": None if int(np.asarray(display_mask).sum()) else "No cells match the current Display only filters.",
-                "scatter": scatter_data,
-                "violin": violin_data,
-                "umap": umap_points,
-                "global_min": global_min,
-                "global_max": global_max,
-            }
         if normalized_modality == "rna":
-            return _build_reference_expression_payload(app, meta, gene)
+            try:
+                return _build_reference_expression_payload(app, meta, gene)
+            except (FileNotFoundError, KeyError, ValueError):
+                pass
         raise KeyError(f"Feature '{gene}' not found in the selected modality output.")
 
     values = _flatten_expr(adata[:, resolved_gene].X)
     global_min, global_max = _expression_global_range(values)
     scatter_data = [
         {"population": pop, "value": float(val)}
-        for pop, val in zip(populations, values)
-        if _is_finite_number(val)
+        for pop, val, keep in zip(populations, values, display_mask)
+        if keep and _is_finite_number(val)
     ]
 
     umap_points = [
@@ -4775,6 +4833,8 @@ def _build_expression_payload(
         mask = (populations == pop) & display_mask
         pop_values = values[mask].astype(float)
         finite_values = pop_values[np.isfinite(pop_values)]
+        if not len(finite_values):
+            continue
         violin_data.append(
             {
                 "population": pop,
@@ -4858,6 +4918,67 @@ def _apply_display_filter_mask(cache_entry: Dict[str, Any], display_filters: Opt
             continue
         mask &= np.isin(field_values, values)
     return mask
+
+
+def _sampled_marker_heatmap(app, meta, modality, display_filters, cells_per_sample):
+    from altanalyze3.components.visualization.cell_sampling import CELL_SAMPLE_LIMITS
+    if cells_per_sample not in (0, *CELL_SAMPLE_LIMITS):
+        raise HTTPException(400, "Cells per sample must be 5, 10, 20, 50, or 0 for all cells.")
+    try:
+        expression = _get_expression_cache(app, meta, modality=modality)
+        base = _get_marker_heatmap_cache_entry(app, meta, modality=modality)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, f"Cell-level expression and marker genes are required for sampling: {exc}")
+    # Reuse the same standardized values for HEAD, viewer GET, and PDF.
+    key = f"{meta['job_id']}:{modality}:sampled:{cells_per_sample}:" + json.dumps(display_filters or [], sort_keys=True)
+    cached = app.state.marker_heatmap_cache.get(key)
+    if cached and cached.get("base_signature") == base.get("signature") and cached.get("expression_entry") is expression:
+        return cached
+    mask = _apply_display_filter_mask(expression, display_filters)
+    indices = np.flatnonzero(mask)
+    states = np.asarray(expression["populations"], dtype=str)
+    row_ids = np.asarray(base["row_ids"], dtype=str)
+    genes = [row.split(":", 1)[-1] for row in row_ids]
+    group_order = list(dict.fromkeys(row.split(":", 1)[0] for row in row_ids))
+    order = {group: i for i, group in enumerate(group_order)}
+    indices = indices[np.argsort([order.get(states[i], len(order)) for i in indices], kind="stable")]
+    indices, sampling = _sample_plot_cells(expression, indices, cells_per_sample)
+    if not len(indices):
+        raise HTTPException(404, "No cells match the current display filters for the marker heatmap.")
+    adata = expression["adata"]
+    names = np.asarray(expression["var_names"], dtype=str)
+    lookup = {gene: i for i, gene in enumerate(names)}
+    found = [(row, gene, lookup[gene]) for row, gene in zip(row_ids, genes) if gene in lookup]
+    if not found:
+        raise HTTPException(404, "The stored marker genes are unavailable in the expression matrix.")
+    values = np.empty((len(found), len(indices)), dtype=np.float32)
+    # Slice/upload matrices once and use gene-major access; the viewer already has
+    # a gene-major sparse store. Avoid repeated scans of the full RNA CSR matrix.
+    selected_matrix = adata.X[:, [col for _, _, col in found]] if isinstance(adata, ad.AnnData) else None
+    if sp.issparse(selected_matrix):
+        selected_matrix = selected_matrix.tocsc()
+    for out, (_, gene, col) in enumerate(found):
+        raw = selected_matrix[:, out] if selected_matrix is not None else adata[:, gene].X
+        vector = _flatten_expr(raw).astype(float)
+        finite = vector[np.isfinite(vector)]
+        mean = float(finite.mean()) if finite.size else 0.
+        std = float(finite.std()) if finite.size else 0.
+        values[out] = np.nan_to_num((vector[indices] - mean) / std) if std > 0 else 0.
+    ids = np.asarray(expression["obs_names"], dtype=str)
+    entry = {"base_signature": base.get("signature"), "expression_entry": expression,
+             "matrix": values, "row_ids": np.asarray([r for r, _, _ in found]),
+             "col_ids": np.asarray([f"{states[i]}:{ids[i]}" for i in indices]),
+             "col_barcodes": ids[indices], "sampling": sampling}
+    # Bound interactive caches when readers try many filter/sample combinations.
+    prefix = f"{meta['job_id']}:{modality}:sampled:"
+    older = [k for k in app.state.marker_heatmap_cache if k.startswith(prefix)]
+    total_bytes = values.nbytes + sum(app.state.marker_heatmap_cache[k]["matrix"].nbytes for k in older)
+    while older and (len(older) >= 3 or total_bytes > 128 * 1024 * 1024):
+        old = older.pop(0)
+        removed = app.state.marker_heatmap_cache.pop(old)
+        total_bytes -= removed["matrix"].nbytes
+    app.state.marker_heatmap_cache[key] = entry
+    return entry
 
 
 def _filter_marker_heatmap_matrix(
@@ -5047,12 +5168,23 @@ def _render_expression_pdf(payload: Dict, mode: str) -> io.BytesIO:
     _configure_matplotlib_pdf_style()
     fig, ax = plt.subplots(figsize=(8.5, 8.5))
     gene = payload["gene"]
+    modality = _normalize_modality_id(payload.get("modality"), default="rna")
+    measurement = {"rna": "expression", "grn_tf": "imputed TF activity", "grn": "predicted edge score"}.get(modality, "abundance")
+    violin_data = [entry for entry in payload.get("violin", []) if len(entry.get("values", []))]
+    if (mode == "violin" and not violin_data) or (mode != "violin" and not payload.get("umap")):
+        ax.text(.5, .5, payload.get("message") or "No observations match the selected filters.",
+                ha="center", va="center", transform=ax.transAxes)
+        ax.axis("off")
+        buf = io.BytesIO()
+        fig.savefig(buf, format="pdf", bbox_inches="tight")
+        plt.close(fig)
+        buf.seek(0)
+        return buf
     global_min = float(payload.get("global_min", 0.0) or 0.0)
     global_max = float(payload.get("global_max", 0.0) or 0.0)
     if global_max <= global_min:
         global_max = global_min + 1e-9
     if mode == "violin":
-        violin_data = payload["violin"]
         positions = np.arange(1, len(violin_data) + 1)
         parts = ax.violinplot(
             [entry["values"] for entry in violin_data],
@@ -5071,13 +5203,13 @@ def _render_expression_pdf(payload: Dict, mode: str) -> io.BytesIO:
             ax.scatter(np.full(len(vals), idx) + jitter, vals, s=4, c="#0f172a", alpha=0.35, linewidths=0)
         ax.set_xticks(positions)
         ax.set_xticklabels([entry["population"] for entry in violin_data], rotation=45, ha="right")
-        ax.set_title(f"{gene} expression (top 10 states by mean)")
-        ax.set_ylabel("Expression")
+        ax.set_title(f"{gene} {measurement} (top {len(violin_data)} states by mean)")
+        ax.set_ylabel(measurement.capitalize())
         pad = max((global_max - global_min) * 0.04, 0.05)
         ax.set_ylim(global_min - pad, global_max + pad)
     else:
         umap_points = payload["umap"]
-        if _normalize_modality_id(payload.get("modality"), default="rna") in {"lipids", "adt", "metabolite", "lipid", "grn"}:
+        if _normalize_modality_id(payload.get("modality"), default="rna") in {"lipids", "adt", "metabolite", "lipid", "grn", "grn_tf"}:
             expression_cmap = matplotlib.colors.LinearSegmentedColormap.from_list(
                 "expression_blue_yellow_red",
                 [
@@ -5090,28 +5222,28 @@ def _render_expression_pdf(payload: Dict, mode: str) -> io.BytesIO:
             expression_cmap = matplotlib.colors.LinearSegmentedColormap.from_list(
                 "expression_grey_red",
                 [
-                    (0.0, "#e5e7eb"),
-                    (0.15, "#f3f4f6"),
-                    (0.35, "#fecaca"),
-                    (0.6, "#f87171"),
+                    (0.0, "#f3f4f6"),
+                    (0.15, "#fecaca"),
+                    (0.35, "#fca5a5"),
+                    (0.6, "#ef4444"),
                     (1.0, "#b91c1c"),
                 ],
             )
-        sc = ax.scatter(
-            [p["x"] for p in umap_points],
-            [p["y"] for p in umap_points],
-            s=4,
-            c=[p["value"] for p in umap_points],
-            cmap=expression_cmap,
-            vmin=global_min,
-            vmax=global_max,
-            linewidths=0,
-        )
-        cbar = fig.colorbar(sc, ax=ax)
-        cbar.set_label(gene)
+        zero_points = [p for p in umap_points if p["value"] == 0]
+        measured_points = [p for p in umap_points if p["value"] != 0]
+        if zero_points:
+            ax.scatter([p["x"] for p in zero_points], [p["y"] for p in zero_points],
+                       s=4, c="#e5e7eb", linewidths=0)
+        if measured_points:
+            sc = ax.scatter(
+                [p["x"] for p in measured_points], [p["y"] for p in measured_points],
+                s=4, c=[p["value"] for p in measured_points], cmap=expression_cmap,
+                vmin=global_min, vmax=global_max, linewidths=0)
+            cbar = fig.colorbar(sc, ax=ax)
+            cbar.set_label(gene)
         ax.set_xlabel("UMAP1")
         ax.set_ylabel("UMAP2")
-        ax.set_title(f"{gene} expression")
+        ax.set_title(f"{gene} {measurement}")
         _square_umap_axes(ax, [umap_points])
     fig.tight_layout()
     buf = io.BytesIO()
@@ -5151,7 +5283,7 @@ def _render_differential_gene_pdf(payload: Dict) -> io.BytesIO:
 
     ax.set_xticks(positions)
     ax.set_xticklabels([str(group.get("label", f"Group {idx}")) for idx, group in enumerate(groups, start=1)])
-    ax.set_ylabel("Normalized expression")
+    ax.set_ylabel(payload.get("value_label") or "Normalized expression")
     ax.set_title(f"{payload.get('gene', 'Gene')} in {payload.get('population', 'population')}")
     fig.tight_layout()
 
@@ -5177,10 +5309,11 @@ def _render_differential_heatmap_pdf(payload: Dict) -> io.BytesIO:
         "differential_heatmap",
         ["#00f0ff", "#000000", "#ffff00"],
     )
+    cmap.set_bad("#000000")
     figure_height = max(6.0, min(28.0, len(rows) * 0.18 + 2.0))
     figure_width = max(7.0, min(18.0, len(columns) * 0.65 + 2.5))
     fig, ax = plt.subplots(figsize=(figure_width, figure_height))
-    image = ax.imshow(matrix, aspect="auto", cmap=cmap, vmin=-color_extent, vmax=color_extent)
+    image = ax.imshow(np.ma.masked_invalid(matrix), aspect="auto", cmap=cmap, vmin=-color_extent, vmax=color_extent)
     ax.set_title(f"Heatmap: {payload.get('population', '')}")
     ax.set_xticks(np.arange(len(columns), dtype=float))
     ax.set_xticklabels([str(value) for value in columns], rotation=40, ha="right")
@@ -5297,7 +5430,7 @@ def _render_differential_volcano_pdf(payload: Dict) -> io.BytesIO:
         )
     ax.set_title(f"Volcano: {payload.get('population', '')}")
     ax.set_xlabel("log2 fold change")
-    ax.set_ylabel("-log10(FDR)")
+    ax.set_ylabel(f"-log10({payload.get('statistic_label', 'FDR')})")
     ax.axvline(0.0, color="#94a3b8", linewidth=0.8, alpha=0.6)
     if up or down:
         ax.legend(frameon=False)
@@ -5497,7 +5630,7 @@ def _render_network_pdf(payload: Dict, title: str) -> io.BytesIO:
         data = node_map[node_id]
         x, y = positions[node_id]
         log2fc = float(data.get("log2fc", 0.0) or 0.0)
-        color = str(data.get("color", "")).strip() or ("#fca5a5" if log2fc >= 0 else "#7dd3fc")
+        color = str(data.get("color", "")).strip() or ("#cbd5e1" if not _is_finite_number(data.get("log2fc")) or log2fc == 0 else "#fca5a5" if log2fc > 0 else "#7dd3fc")
         node_size = 460 if str(data.get("node_type", "")).strip() == "focus" else 320
         ax.scatter([x], [y], s=node_size, c=[color], edgecolors="white", linewidths=1.0, zorder=3)
         ax.text(x, y, str(data.get("label") or node_id), ha="center", va="center", fontsize=9, zorder=4)
@@ -5613,7 +5746,9 @@ def create_app(test_config: dict | None = None) -> FastAPI:
     async def index(request: Request):
         registry = _load_reference_registry(app)
         css_version = int((static_dir / "styles.css").stat().st_mtime) if (static_dir / "styles.css").exists() else 0
-        js_version = int((static_dir / "app.js").stat().st_mtime) if (static_dir / "app.js").exists() else 0
+        js_version = max((path.stat().st_mtime_ns for path in
+                          (static_dir / "app.js", static_dir / "integrated.js")
+                          if path.exists()), default=0)
         return templates.TemplateResponse(
             request,
             index_template,
@@ -5784,10 +5919,10 @@ def create_app(test_config: dict | None = None) -> FastAPI:
 
     @app.get("/api/jobs/{job_id}/status")
     async def status(job_id: str):
-        store, _ = _job_resources(app)
+        store, runner = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
-        meta = store.get_job(job_id)
+        meta = _job_metadata_with_recovery(store, runner, job_id)
         log_path = store.logs_dir(job_id) / "pipeline.log"
         log_head: List[str] = []
         log_tail: List[str] = []
@@ -5810,10 +5945,10 @@ def create_app(test_config: dict | None = None) -> FastAPI:
 
     @app.get("/api/jobs/{job_id}/differential/status")
     async def differential_status(job_id: str):
-        store, _ = _job_resources(app)
+        store, runner = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
-        meta = store.get_job(job_id)
+        meta = _job_metadata_with_recovery(store, runner, job_id)
         return JSONResponse(
             _build_differential_payload(app, job_id, meta, root_path=app.state.root_path),
             headers={"Cache-Control": "no-store"},
@@ -5824,7 +5959,12 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         store, runner = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
-        meta = store.get_job(job_id)
+        meta = _job_metadata_with_recovery(store, runner, job_id)
+        if (meta.get("differential") or {}).get("status") in {"queued", "processing"}:
+            raise HTTPException(409, "A differential analysis is already running.")
+        history = completed_differentials(meta)
+        if history:
+            store.update_job(job_id, differential_history=history)
         config = _validate_differential_request(meta, payload)
         options = _differential_options(meta)
         _invalidate_differential_cache(app, job_id)
@@ -5832,6 +5972,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             job_id,
             differential={
                 "status": "queued",
+                "worker_pid": os.getpid(),
                 "progress": 5,
                 "message": "Differential analysis queued.",
                 "config": config,
@@ -5920,14 +6061,57 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=500, detail=str(exc))
 
+    @app.get("/api/jobs/{job_id}/grn/regulator-network")
+    def regulator_network(job_id: str, cell_state: str = Query(""), contrast: str = Query(""),
+                          features: str = Query(""), limit: int = Query(200, ge=1, le=2000),
+                          edge_percentile: float = Query(50, ge=0, le=100),
+                          expression_percentile: float = Query(50, ge=0, le=100)):
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(404, "Job not found.")
+        ds = UploadedGrnData(app, store.get_job(job_id))
+        if contrast and contrast not in ds.runs:
+            raise HTTPException(404, "Unknown completed comparison.")
+        return gnet.regulator_network(ds, cell_state, contrast=contrast or ds.current_contrast,
+                                      features=features.replace(",", " ").split() or None,
+                                      limit=limit, edge_percentile=edge_percentile,
+                                      expression_percentile=expression_percentile)
+
+    @app.get("/api/jobs/{job_id}/grn/tf-activity")
+    def tf_activity(job_id: str, cell_state: str = Query(""), contrast: str = Query(""),
+                    factors: str = Query(""), limit: int = Query(25, ge=1, le=2000)):
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(404, "Job not found.")
+        ds = UploadedGrnData(app, store.get_job(job_id))
+        if contrast and contrast not in ds.runs:
+            raise HTTPException(404, "Unknown completed comparison.")
+        return gnet.tf_activity_profile(ds, cell_state=cell_state, contrast=contrast or ds.current_contrast,
+                                       factors=factors.replace(",", " ").split() or None, limit=limit)
+
+    @app.post("/api/jobs/{job_id}/differential/select")
+    def select_completed_differential(job_id: str, contrast: str = Query(...)):
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(404, "Job not found.")
+        meta = store.get_job(job_id)
+        if (meta.get("differential") or {}).get("status") in {"queued", "processing"}:
+            raise HTTPException(409, "Wait for the running comparison to finish.")
+        run = completed_differentials(meta).get(contrast)
+        if run is None:
+            raise HTTPException(404, "Unknown completed comparison.")
+        _invalidate_differential_cache(app, job_id)
+        store.update_job(job_id, differential=run)
+        return JSONResponse(_build_differential_payload(app, job_id, store.get_job(job_id), root_path=app.state.root_path))
+
     @app.get("/api/jobs/{job_id}/grn/network")
     def grn_network(
         job_id: str,
         genes: List[str] = Query(default=[]),
         sample: str = Query(default=""),
         cell_state: str = Query(default=""),
-        threshold: float = Query(default=0.0),
-        max_edges: int = Query(default=300),
+        threshold: float = Query(default=0.0, ge=0),
+        max_edges: int = Query(default=25, ge=1, le=1000),
     ):
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
@@ -5997,6 +6181,13 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=500, detail=str(exc))
 
+    @app.get("/api/jobs/{job_id}/feature-annotations")
+    def feature_annotations(job_id: str, modality: str = Query("metabolite")):
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        return JSONResponse(metabolite_annotations.for_dataset(store.get_job(job_id), modality))
+
     @app.get("/api/jobs/{job_id}/genes")
     def job_genes(job_id: str, modality: str = Query("rna")):
         store, _ = _job_resources(app)
@@ -6013,7 +6204,8 @@ def create_app(test_config: dict | None = None) -> FastAPI:
     @app.get("/api/jobs/{job_id}/dotplot")
     def dotplot(job_id: str, genes: str = Query(""), modality: str = Query("rna"),
                       group_by: str = Query(""), groups: List[str] = Query([]),
-                      subset_by: str = Query(""), subset_values: List[str] = Query([])):
+                      subset_by: str = Query(""), subset_values: List[str] = Query([]),
+                      subset2_by: str = Query(""), subset2_values: List[str] = Query([])):
         """Mean expression and detected fraction per (gene, cell state).
 
         Colour and dot size for the DotPlot. Cell states are returned in the
@@ -6024,45 +6216,46 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         cache = _get_expression_cache(app, store.get_job(job_id), modality=modality)
-        wanted = (split_gene_list(genes, keep_pipe=_names_have_pipe(cache))
+        wanted = (_split_expression_features(genes, cache)
                   or _default_marker_genes(cache, group_by))
         if not wanted:
             raise HTTPException(status_code=400, detail="Give at least one gene.")
         payload = _gene_state_stats(cache, wanted, group_by, list(groups),
-                                    subset_by, list(subset_values))
+                                    subset_by, list(subset_values), subset2_by, list(subset2_values))
         if not payload["genes"]:
             raise HTTPException(
                 status_code=404,
                 detail=f"none of the {len(wanted)} requested genes are in this dataset")
+        payload["modality"] = _normalize_modality_id(modality)
         return JSONResponse(payload)
 
     @app.get("/api/jobs/{job_id}/combplot")
     def combplot(job_id: str, genes: str = Query(""), modality: str = Query("rna"),
-                       min_cells: int = Query(5),
+                       min_cells: int = Query(5), cells_per_sample: int = Query(10), unit: str = Query("cells", pattern="^(cells|donor)$"),
                        group_by: str = Query(""), groups: List[str] = Query([]),
-                      subset_by: str = Query(""), subset_values: List[str] = Query([])):
-        """Per-donor pseudobulk for each gene, grouped by cell state.
-
-        One bar per (cell state, donor). Cell-level bars would number as many as
-        the dataset has cells and would hide the donor-to-donor spread the figure
-        exists to show. A donor contributing fewer than `min_cells` cells to a
-        state is left out rather than drawn from almost nothing.
-        """
+                      subset_by: str = Query(""), subset_values: List[str] = Query([]),
+                      subset2_by: str = Query(""), subset2_values: List[str] = Query([])):
+        """Individual cells by default, with opt-in per-donor means."""
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         cache = _get_expression_cache(app, store.get_job(job_id), modality=modality)
         # Blank means the marker gene of every group, the same default the
         # DotPlot uses, so switching between the two keeps the same gene set.
-        wanted = (split_gene_list(genes, keep_pipe=_names_have_pipe(cache))
+        wanted = (_split_expression_features(genes, cache)
                   or _default_marker_genes(cache, group_by))
         if not wanted:
             raise HTTPException(status_code=400, detail="Give at least one gene.")
-        payload = _gene_donor_state_means(cache, wanted, max(1, int(min_cells)),
-                                          group_by, list(groups),
-                                          subset_by, list(subset_values))
+        if unit == "cells":
+            payload = _gene_cell_values(cache, wanted, group_by, list(groups),
+                                        subset_by, list(subset_values), subset2_by, list(subset2_values), cells_per_sample)
+        else:
+            payload = _gene_donor_state_means(cache, wanted, max(1, int(min_cells)),
+                                            group_by, list(groups), subset_by, list(subset_values),
+                                            subset2_by, list(subset2_values))
         if payload.get("error"):
             raise HTTPException(status_code=404, detail=payload["error"])
+        payload["modality"] = _normalize_modality_id(modality)
         return JSONResponse(payload)
 
 
@@ -6160,7 +6353,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc))
         except ValueError as exc:
             raise HTTPException(status_code=500, detail=str(exc))
-        pdf = _render_expression_pdf(payload, mode)
+        pdf = _render_expression_pdf(metabolite_annotations.pdf_payload(payload, meta, modality), mode)
         return StreamingResponse(
             pdf,
             media_type="application/pdf",
@@ -6206,7 +6399,23 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         if not question:
             raise HTTPException(status_code=400, detail="question is required")
 
+        from .cross_pathways import answer_if_requested as pathway_answer
+        pathways = pathway_answer(app, meta, question)
+        if pathways is not None:
+            return JSONResponse(pathways)
+        from .modality_markers import answer_if_requested as marker_answer
+        markers = marker_answer(app, meta, question)
+        if markers is not None:
+            return JSONResponse(markers)
+        from .cross_modal import answer_if_requested
+        cross_answer = answer_if_requested(app, meta, question)
+        if cross_answer is not None:
+            return JSONResponse(cross_answer)
         cache = _get_expression_cache(app, meta)
+        from .integration_chat import read_question as read_integrated, answer as integrated_answer
+        integrated = read_integrated(question, [s for s, _ in _chat_states_by_size(cache)], cache.get("var_names", []))
+        if integrated is not None:
+            return JSONResponse(integrated_answer(app, meta, question, integrated))
         reading = _chat_read_question(question, cache, meta)
         intent = str(reading.get("intent") or "")
         state = str(reading.get("cell_state") or "")
@@ -6260,25 +6469,42 @@ def create_app(test_config: dict | None = None) -> FastAPI:
                 "where named genes are expressed, and what separates two cell states.")
             return JSONResponse(result)
 
-        if intent in _CHAT_NOT_YET:
-            result["answer"] = (
-                f"That is the {intent} protocol. It needs {_CHAT_NOT_YET[intent]}, which "
-                "cellHarmony web does not compute yet, so I am not going to answer it "
-                "with a different analysis.")
-            result["status"] = "not_implemented"
+        from .chat_service import execute as execute_protocol
+        protocol_result=execute_protocol(app,meta,question,reading)
+        if protocol_result is not None:return JSONResponse(protocol_result)
+
+        if intent in {"tf_activity", "regulator_activity", "regulatory_driver"}:
+            ds = UploadedGrnData(app, meta)
+            selected = ds.current_contrast
+            if intent != "regulatory_driver" or reading.get("modality") == "grn_tf":
+                answer = gnet.tf_activity_profile(ds, cell_state=state, contrast=selected,
+                                                 factors=genes or None, limit=int(reading.get("limit") or 25))
+                result.update(answer)
+                if answer.get("by_cell_state"):
+                    result.update(gnet.tf_activity_state_chat(answer))
+                    return JSONResponse(result)
+                rows = answer.get("rows") or []
+                result["table"] = {"columns": ["factor", "activity", "log2fc", "fdr"],
+                                   "rows": [[r[k] for k in ("factor", "activity", "log2fc", "fdr")] for r in rows]}
+                result["plot"] = {"kind": "barchart", "label_column": "factor",
+                                  "value_column": "activity", "sign_column": "log2fc"}
+                result["answer"] = (f"{len(rows)} factors in {answer.get('cell_state')}. "
+                                    f"Activity is {answer.get('statistic')}. "
+                                    "Reported differential changes are listed separately; missing statistics are not zero."
+                                    if rows else answer.get("note", "No TF activity available."))
+            else:
+                answer = gnet.regulator_network(ds, state, contrast=selected,
+                                                features=genes or None, limit=int(reading.get("limit") or 200))
+                result.update(answer)
+                result["plot"] = {"kind": "network"}
+                result["answer"] = (answer.get("note") or
+                                    f"{answer.get('n_regulators', 0)} factors and {answer.get('n_edges_drawn', 0)} regulatory edges in {state}. "
+                                    "Factor expression and activity changes are reported separately.")
             return JSONResponse(result)
 
-        if intent in ("regulatory_driver", "communication_rewiring", "pathway_program"):
-            label = {"regulatory_driver": "marker and differential networks",
-                     "communication_rewiring": "cell communication",
-                     "pathway_program": "GO Terms"}[intent]
-            tab = "Explore" if intent == "communication_rewiring" else "Differential"
-            result["answer"] = (
-                f"That is the {intent} protocol, answered by this job's {label} results "
-                f"for {state or 'the selected cell state'}. Open the {tab} tab for the "
-                "figure; the chat does not inline it.")
+        if intent in ("communication_rewiring", "pathway_program"):
+            result["answer"] = "Open the Explore or Differential tab for this job's communication or GO Terms results."
             result["status"] = "use_existing_view"
-            result["plot"] = {"kind": "network"}
             return JSONResponse(result)
 
         intent = _CHAT_PROTOCOL_ALIAS.get(intent, intent)
@@ -6347,6 +6573,15 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             return JSONResponse(result)
 
         if intent == "differential":
+            requested = _normalize_modality_id(reading.get("modality"), default="")
+            if requested and requested != (meta.get("differential", {}).get("config", {}).get("modality") or "rna"):
+                ds = UploadedGrnData(app, meta)
+                selected = gnet._sibling_comparison(ds, ds.current_contrast, requested)
+                if not selected:
+                    result.update(status="not_run", answer=f"No completed {requested} comparison matches the selected groups. Run it in the Differential tab first.")
+                    return JSONResponse(result)
+                meta = dict(meta, differential=ds.runs[selected])
+                contrast = _chat_contrast(meta)
             if not contrast:
                 result["answer"] = (
                     "This job has not run a differential comparison yet. Open the "
@@ -6377,7 +6612,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             frame = frame.dropna(subset=["log2fc"]).sort_values(["fdr", "pval"])
             top = frame.head(25)
             result["answer"] = (
-                f"Top genes for {contrast['label']}" + (f" in {state}" if state else "")
+                f"Top {_modality_definition(meta, meta.get('differential', {}).get('config', {}).get('modality', 'rna'))['feature_label']} results for {contrast['label']}" + (f" in {state}" if state else "")
                 + f", from this job's cellHarmony-differential result "
                   f"({len(frame)} genes reported{' in ' + state if state else ''}).")
             result["table"] = {
@@ -6401,6 +6636,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         # True keeps the 10-metacells-per-population run, which is the readable default.
         # False serves the all-column run when the bundle ships one.
         compact: bool = Query(True),
+        cells_per_sample: Optional[int] = Query(None),
         filter1_field: Optional[str] = Query(None),
         filter1_values: List[str] = Query([]),
         filter2_field: Optional[str] = Query(None),
@@ -6410,7 +6646,15 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
+        annotations = metabolite_annotations.for_dataset(meta, modality)
         display_filters = _display_filter_specs(filter1_field, filter1_values, filter2_field, filter2_values)
+        if cells_per_sample is not None:
+            matrix = _sampled_marker_heatmap(app, meta, modality, display_filters, cells_per_sample)
+            headers = {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+                       "Access-Control-Allow-Headers": "*", "X-Marker-Columns": str(len(matrix["col_ids"])),
+                       "X-Cells-Per-Sample": str(cells_per_sample), "X-Sample-Field": matrix["sampling"]["sample_field"]}
+            content = "" if request.method in {"HEAD", "OPTIONS"} else _marker_heatmap_subset_to_tsv(matrix["matrix"], matrix["row_ids"], matrix["col_ids"])
+            return Response(content=metabolite_annotations.label_tsv(content, annotations), media_type="text/tab-separated-values", headers=headers)
         try:
             matrix_entry = _get_marker_heatmap_cache_entry(app, meta, modality=modality, compact=compact)
         except FileNotFoundError:
@@ -6447,7 +6691,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
                     media_type="text/tab-separated-values",
                 )
             return Response(
-                content=filtered_tsv,
+                content=metabolite_annotations.label_tsv(filtered_tsv, annotations),
                 media_type="text/tab-separated-values",
                 headers={**common_headers, "X-Marker-Columns": str(kept_columns)},
             )
@@ -6459,7 +6703,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
                 media_type="text/tab-separated-values",
             )
         tsv_path = matrix_entry.get("tsv_path")
-        if isinstance(tsv_path, Path) and tsv_path.exists():
+        if isinstance(tsv_path, Path) and tsv_path.exists() and not annotations:
             return FileResponse(
                 tsv_path,
                 filename=tsv_path.name,
@@ -6472,7 +6716,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             matrix_entry["col_ids"],
         )
         return Response(
-            content=payload,
+            content=metabolite_annotations.label_tsv(payload, annotations),
             media_type="text/tab-separated-values",
             headers={**common_headers, "X-Marker-Columns": str(col_count)},
         )
@@ -6514,6 +6758,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         # True keeps the 10-metacells-per-population run, which is the readable default.
         # False serves the all-column run when the bundle ships one.
         compact: bool = Query(True),
+        cells_per_sample: Optional[int] = Query(None),
         filter1_field: Optional[str] = Query(None),
         filter1_values: List[str] = Query([]),
         filter2_field: Optional[str] = Query(None),
@@ -6524,19 +6769,25 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
         display_filters = _display_filter_specs(filter1_field, filter1_values, filter2_field, filter2_values)
-        try:
-            matrix_entry = _get_marker_heatmap_cache_entry(app, meta, modality=modality, compact=compact)
-        except FileNotFoundError:
-            raise HTTPException(status_code=404, detail="Marker heatmap matrix unavailable.")
-        if display_filters:
-            filtered_tsv, _ = _filter_marker_heatmap_matrix(app, meta, modality, display_filters)
-            frame = pd.read_csv(io.StringIO(filtered_tsv), sep="\t", index_col=0)
+        if cells_per_sample is not None:
+            matrix = _sampled_marker_heatmap(app, meta, modality, display_filters, cells_per_sample)
+            frame = pd.DataFrame(matrix["matrix"], index=matrix["row_ids"], columns=matrix["col_ids"])
         else:
-            frame = pd.DataFrame(
-                matrix_entry["matrix"],
-                index=matrix_entry["row_ids"],
-                columns=matrix_entry["col_ids"],
-            )
+            try:
+                matrix_entry = _get_marker_heatmap_cache_entry(app, meta, modality=modality, compact=compact)
+            except FileNotFoundError:
+                raise HTTPException(status_code=404, detail="Marker heatmap matrix unavailable.")
+            if display_filters:
+                filtered_tsv, _ = _filter_marker_heatmap_matrix(app, meta, modality, display_filters)
+                frame = pd.read_csv(io.StringIO(filtered_tsv), sep="\t", index_col=0)
+            else:
+                frame = pd.DataFrame(
+                    matrix_entry["matrix"],
+                    index=matrix_entry["row_ids"],
+                    columns=matrix_entry["col_ids"],
+                )
+        annotations = metabolite_annotations.for_dataset(meta, modality)
+        frame = frame.rename(index=lambda name: metabolite_annotations.display_name(name, annotations))
         pdf = _render_marker_heatmap_pdf(frame, title="MarkerHeatmap")
         return StreamingResponse(
             pdf,
@@ -6731,7 +6982,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
         payload = _build_differential_gene_detail_payload(app, meta, population, gene, feature=feature)
-        pdf = _render_differential_gene_pdf(payload)
+        pdf = _render_differential_gene_pdf(metabolite_annotations.pdf_payload(payload, meta))
         safe_gene = re.sub(r"[^A-Za-z0-9_.-]+", "_", gene).strip("._") or "gene"
         safe_population = re.sub(r"[^A-Za-z0-9_.-]+", "_", population).strip("._") or "population"
         filename = f"differential_gene_{safe_gene}_{safe_population}.pdf"
@@ -6753,7 +7004,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             pdf = _render_differential_summary_pdf(payload)
         elif mode_key == "heatmap":
             payload = _build_differential_heatmap_payload(app, meta, population)
-            pdf = _render_differential_heatmap_pdf(payload)
+            pdf = _render_differential_heatmap_pdf(metabolite_annotations.pdf_payload(payload, meta))
         elif mode_key == "volcano":
             payload = _build_differential_volcano_payload(app, meta, population)
             pdf = _render_differential_volcano_pdf(payload)
@@ -6898,6 +7149,8 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             }
         )
 
+    from .integration_routes import install as install_integrated_routes
+    install_integrated_routes(app)
     return app
 
 

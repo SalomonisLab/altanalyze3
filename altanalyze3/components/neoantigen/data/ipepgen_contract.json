@@ -1,0 +1,51 @@
+{
+  "schema_version": "1.0",
+  "name": "OneClick-iPepGen-Neoantigen-workflow",
+  "source_sha256": "bd42a760092e26ad387550fdea6281064e9d8543ca504077d26905480a8b40d3",
+  "source_filename": "Galaxy-Workflow-OneClick-iPepGen-Neoantigen-workflow.ga",
+  "bounds": {
+    "fragpipe": [
+      7,
+      25
+    ],
+    "pepquery": [
+      9,
+      11
+    ]
+  },
+  "iedb_lengths": [
+    8,
+    9,
+    10,
+    11,
+    12
+  ],
+  "tools": {
+    "fragpipe": {
+      "step": "11/6",
+      "tool_id": "toolshed.g2.bx.psu.edu/repos/galaxyp/fragpipe/fragpipe/23.0+galaxy0"
+    },
+    "pepquery": {
+      "step": "12/5",
+      "tool_id": "toolshed.g2.bx.psu.edu/repos/galaxyp/pepquery2/pepquery2/2.0.2+galaxy2"
+    },
+    "iedb": {
+      "step": "14/2",
+      "tool_id": "toolshed.g2.bx.psu.edu/repos/iuc/iedb_api/iedb_api/2.15.3+galaxy0"
+    }
+  },
+  "fasta_header": "generic|SNAF_<stable source hash>|description",
+  "pepquery_format": "one unmodified peptide per line; no header",
+  "iedb_alleles_format": "one HLA-A/B/C*NN:NN allele per line; no header",
+  "annotation_columns": [
+    "Peptide",
+    "Chromosome",
+    "Start",
+    "End",
+    "Strand",
+    "Annotation",
+    "IGV_Genome_Coordinate",
+    "UCSC_Genome_Browser"
+  ],
+  "annotation_requirement": "SNAF accession join required; existing StringTie/variant positional parser does not support SNAF"
+}

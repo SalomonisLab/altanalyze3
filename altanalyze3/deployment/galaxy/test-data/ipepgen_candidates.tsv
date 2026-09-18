@@ -1,0 +1,4 @@
+sample	peptide	uid	hla	binding_affinity	coord
+S1	SYFPEITHI	ENSG1:E1-E3	A0201	0.1	chr1:100-200(+)
+S1	PEPTIDEK	ENSG1:E2-E4	A0201	0.2	chr1:150-250(+)
+S2	SYFPEITHI	ENSG2:E1-E3	B0702	0.3	chr2:300-400(-)

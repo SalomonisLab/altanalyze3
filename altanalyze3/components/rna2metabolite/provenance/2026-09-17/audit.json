@@ -1,0 +1,33 @@
+{
+  "source_doi": "10.1038/s43018-026-01175-6",
+  "source_url": "https://media.springernature.com/original/springer-static/esm/art%3A10.1038%2Fs43018-026-01175-6/MediaObjects/43018_2026_1175_MOESM3_ESM.xlsx",
+  "inputs": {
+    "workbook": {
+      "path": "/Users/saljh8/Downloads/43018_2026_1175_MOESM3_ESM.xlsx",
+      "sha256": "d527bafcf395571504e178cff2075a5b0047567f553cdd8082eec1c2d8ea4d1d"
+    },
+    "training_selection": {
+      "path": "/Users/saljh8/Dropbox/Collaborations/Grimes/Human-MS-impute/data/metabolomics_unique_annotation.tsv",
+      "sha256": "88b44cc468c1d6c155dda8a6fd01606f858fd492835d53b493dee9ff52d80967"
+    },
+    "pdc_table": {
+      "path": "/Users/saljh8/Dropbox/LungMAP/LungMAP.net/Datasets/COPD-atlas/scalable_viewer/release_validation_20260917/metabolite_name_audit/source_files/cptac.metabo.table.csv",
+      "sha256": "8e0019810bb745e9094105df556b8d4ac0ef8155528aac34a5cd19ff858f7bff"
+    }
+  },
+  "source_measurements": 2655,
+  "pdc_measurements": 2655,
+  "pdc_samples": 91,
+  "source_pdc_feature_ids_identical": true,
+  "model_targets": 2533,
+  "named_targets": 418,
+  "unidentified_targets": 2115,
+  "unidentified_with_candidate_text": 1,
+  "unidentified_with_formula": 33,
+  "unidentified_with_kegg": 0,
+  "named_with_kegg": 205,
+  "paper_ica_measurements": 1780,
+  "paper_ica_unknown_measurements": 1347,
+  "selected_measurements_in_paper_ica": 1675,
+  "confirmed_unknown_renamings": 0
+}

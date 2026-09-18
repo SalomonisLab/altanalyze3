@@ -553,10 +553,10 @@ class Rna2LipidBundle:
                         f"{missing[:10]}"
                     )
 
+                lipid_frame = transformed_df.loc[:, selected_genes]
                 lipid_matrix = (
-                    transformed_df
-                    .loc[:, selected_genes]
-                    .to_numpy(dtype=float)
+                    lipid_frame if hasattr(estimator, "feature_names_in_")
+                    else lipid_frame.to_numpy(dtype=float)
                 )
 
                 expected_features = getattr(
@@ -628,9 +628,11 @@ class Rna2LipidBundle:
                     "Legacy model does not have predict()."
                 )
 
-            predicted = self.model.predict(
-                transformed
+            model_input = (
+                pd.DataFrame(transformed, index=aligned_matrix.index, columns=self.input_genes)
+                if hasattr(self.model, "feature_names_in_") else transformed
             )
+            predicted = self.model.predict(model_input)
 
             predicted = np.asarray(
                 predicted,

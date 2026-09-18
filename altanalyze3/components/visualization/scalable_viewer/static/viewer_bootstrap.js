@@ -589,26 +589,6 @@
   // ------------------------------------------------------------------ dot plot
 
 
-  /* Smallest number of cells a donor must contribute to a cell state before its
-   * bar is drawn. A donor with one cell in a state produces a mean from that
-   * single cell, which reads as a tall bar built on nothing: at the default of
-   * 1 the loudest SFTPC bars in this atlas are all n=1 groups. The control sits
-   * beside the gene set. */
-
-  /* The minimum-cells select, shown only for the CombPlot. */
-
-  /* The CombPlot: one bar per donor per cell state, one row per gene.
-   *
-   * Bars are coloured by cell state and run in the bundle's canonical order, so
-   * a block of colour is one state and its width is the number of donors that
-   * contributed cells to it. Hovering a bar names the donor and the state, and
-   * gives the cell count behind the mean.
-   *
-   * Values are per-donor pseudobulk, not per cell. Cell-level bars would number
-   * 123,076 here and would hide the donor-to-donor spread the plot exists to
-   * show.
-   */
-
   /* A gene-set box a spreadsheet column can be pasted into.
    *
    * scALABLE's gene field is a one-line <input> built for a single symbol. A
@@ -1003,7 +983,7 @@
           ? studyLink(study.protocol.url, study.protocol.name) : "—")
       + studyRow("Served in this viewer",
           viewer.n_cells
-            ? esc(`${Number(viewer.n_cells).toLocaleString()} metacells x `
+            ? esc(`${Number(viewer.n_cells).toLocaleString()} ${viewer.observation_unit || "cells"} x `
                   + `${Number(viewer.n_genes).toLocaleString()} genes, `
                   + `${viewer.n_states} cell states`)
             : "—")

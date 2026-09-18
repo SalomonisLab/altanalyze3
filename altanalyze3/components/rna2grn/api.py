@@ -366,15 +366,20 @@ class Rna2GrnBundle:
         return self.predict_from_adata(adata, **kw)
 
     # ------------------------------------------------- TF activity / differential
-    def tf_activity(self, predictions: pd.DataFrame) -> pd.DataFrame:
+    def tf_activity(self, predictions: pd.DataFrame, *, aggregation: str = "mean") -> pd.DataFrame:
         """Aggregate per-edge predictions into a per-TF activity matrix
-        (groups x TFs), the mean activity of each TF's outgoing edges."""
-        edge_tf = np.asarray(self.metadata.get("edge_tf"))
-        if edge_tf is None or len(edge_tf) != predictions.shape[1]:
+        (groups x TFs). Use aggregation='sum' for total outgoing activity.
+
+        The default remains 'mean' for existing API callers.
+        """
+        if aggregation not in {"mean", "sum"}:
+            raise ValueError("aggregation must be 'mean' or 'sum'")
+        edge_tf = np.asarray(self.metadata.get("edge_tf", []))
+        if edge_tf.ndim != 1 or len(edge_tf) != predictions.shape[1]:
             raise ValueError("bundle metadata lacks edge_tf aligned to outputs")
         vals = predictions.to_numpy()
         tfs = pd.unique(edge_tf)
-        out = {tf: vals[:, edge_tf == tf].mean(1) for tf in tfs}
+        out = {tf: getattr(vals[:, edge_tf == tf], aggregation)(axis=1) for tf in tfs}
         return pd.DataFrame(out, index=predictions.index)
 
     def differential_tf_ranking(

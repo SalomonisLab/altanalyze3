@@ -10,7 +10,9 @@ def normalize_class_i(value):
     value = str(value).strip().upper().removeprefix('HLA-')
     if not value:
         return ''
-    m = re.fullmatch(r'([ABC])\*?(\d{2}):?(\d{2})(?::\d{2})*(?:[NLSCAQ])?', value)
+    m = re.fullmatch(r'([ABC])\*?(\d{2,3}):(\d{2,3})(?::\d{2,3})*(?:[NLSCAQ])?', value)
+    if not m:
+        m = re.fullmatch(r'([ABC])\*?(\d{2})(\d{2})(?:[NLSCAQ])?', value)
     if not m:
         raise ValueError(f'Unsupported class-I allele {value!r}; expected HLA-A/B/C*NN:NN')
     if value[-1:].isalpha():

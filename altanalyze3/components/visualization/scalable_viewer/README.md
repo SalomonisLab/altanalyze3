@@ -81,7 +81,7 @@ restart.
 | Environment variable | Default | Effect |
 | --- | --- | --- |
 | `SCALABLE_ASSISTANT_URL` | `http://127.0.0.1:8001/api/assistant/viewer-intent` | the chat intent router |
-| `LUNGMAP_SITE_DB` | `/Users/saljh8/Dropbox/LungMAP/refactored_website/build/breath.sqlite` | the study records, opened read-only |
+| `LUNGMAP_SITE_DB` | `/Users/saljh8/Dropbox/LungMAP/refactored_website/lungmap-data/site/breath.sqlite` | the study records, opened read-only |
 | `LUNGMAP_SOURCE_TABLES` | `/Users/saljh8/Dropbox/LungMAP/refactored_website/build/lungmap-data-new/data/metadata` | fallback study tables |
 | `LUNGMAP_STUDY_IDS` | empty | deployment-wide study id list |
 | `LUNGMAP_SITE_BASE` | `http://127.0.0.1:8001` | base URL for links on the Study tab |
@@ -197,7 +197,7 @@ PYTHONPATH=/Users/saljh8/Documents/GitHub/altanalyze3 \
 | `--bundle-dir`, `--prefix`, `--out` | required | `--out` is never the bundle directory |
 | `--markers-tsv` | none | marker table with `Gene`, `Fold`, `cluster` |
 | `--marker-heatmap-npz` | `*_fold_matrix.npz` beside `--markers-tsv` | the MarkerFinder heatmap cache |
-| `--marker-heatmap-npz-full` | none | a second, all-column MarkerFinder run offered as the `All metacells` density |
+| `--marker-heatmap-npz-full` | none | a second, all-column MarkerFinder run offered as the `All cells` density |
 | `--marker-gct` | none | convert a per-cell GCT when the npz is gone |
 | `--no-marker-heatmap` | off | build without the marker heatmap, on purpose |
 | `--network-markers-tsv` | `*_redundant_markers.tsv` beside the marker table | 250 genes per state for the marker networks |
@@ -339,7 +339,7 @@ opened read-only, with the metadata tables as a fallback.
 | --- | --- |
 | DotPlot fast path | with no subset filter and the full state list, `mean` and `frac` come straight from `stats_mean` and `stats_frac`; otherwise the store is scanned, and `frac` counts stored non-zero entries |
 | DotPlot default genes | the marker table's top gene per state; an imputed modality without markers uses its first 12 features |
-| CombPlot | the same per-donor mean as the web app, `min_cells` default 5, plus covariate annotation bands from `copd_status`, `Group`, `sex`, `Smoking Status` when present; a covariate with more than 40 levels is skipped; `track_purity` is the modal level's share within a column |
+| CombPlot | individual cells by default, in cell-state order; `Display: Donor means` explicitly enables averaging (`unit=donor`, `min_cells` default 5). Covariate bands use each cell's annotations or the donor group's modal annotation. Column details appear on hover only. |
 | plot variables | categorical covariates with 2 to 60 levels; numeric axes exclude `n_counts`, `n_cells`, `n_cells_total`, `n_genes_detected`, `metacell`, `n_donors`, `meta_sample_n_donors`, any `*__n_obs`, and any field with a missing value |
 | state colours | the bundle's `cluster_colors` when every requested label is a cell state; otherwise the web app's ramp |
 | violin covariate | the violin groups by any categorical covariate; the default path goes through the web app's renderer so the default PDF is unchanged |
@@ -423,3 +423,27 @@ catalog to 29 ms for a gene overlay; nothing exceeded 30 ms.
 - A `per_state` modality store never appears in Explore.
 - Four helpers take `id.split("::")[0]` as the contrast name. For a four-part non-RNA id that yields the modality. The calls sit in `scalable_app.py` near lines 1413, 1473, 3634 and 3983 as of 2026-09-14.
 - The chat validation covers one RNA-only bundle and no browser rendering.
+
+
+### Shared GRN support for uploaded jobs
+
+Regulatory networks, factor profiles, comparison matching, and regulatory question
+routing are implemented in `cellHarmony/grn_analysis.py`. The viewer's
+`grn_network.py` is a compatibility import. Uploaded jobs adapt their own h5ad and
+completed differential files to the same functions; neither deployment needs the
+LungMAP database to draw regulatory results. See
+[GRN release validation](../../cellHarmony/webapp/GRN_RELEASE.md).
+
+CombPlot preserves the stored observations without further aggregation by default. For a bundle explicitly containing metacells, `sv.observation_unit = "metacells"` labels those observations accurately; the general default is `cells`. The sampling selector is shared by individual-cell CombPlot and MarkerHeatmap.
+
+CombPlot and MarkerHeatmap share **Cells per sample per cell type** controls in both panels: **5, 10 (default), 20, 50, All cells**. Sampling preserves individual observations and uses a reproducible cell-ID ranking within each sample × cell-type group. Groups smaller than the cap keep all available cells. The caption names the sample annotation; datasets without one are treated as one sample. Display filters apply before sampling. Donor means remain an explicit separate CombPlot mode.
+
+MarkerHeatmap uses the same fixed marker rows for every sample size and reads the selected cells from the underlying expression store. Per-gene standardization uses the full source dataset, so values stay comparable when changing sample size or display filters. Screen, TSV, and PDF receive the same sample-size parameter and cell selection. Original analysis matrices are preserved.
+# Unidentified metabolite descriptors
+
+The shared scALABLE presentation layer supports audited CPTAC AML unidentified
+metabolite descriptors (original ID, m/z, HILIC+/RP+ assay and retention time),
+including source-table provenance on hover and labels in PDF exports. Declare
+`annotation_source: "PDC000561"` in the metabolite modality manifest when using
+that source model. Existing `Metabolite (AML)` modality labels are recognized.
+Study-local Unknown IDs from unrelated assays are never mapped by ID alone.
