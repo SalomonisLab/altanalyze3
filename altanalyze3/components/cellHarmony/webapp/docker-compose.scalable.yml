@@ -1,0 +1,37 @@
+# scALABLE on devapp.lungmap.net/scalable/
+#
+# Apache proxies https://devapp.lungmap.net/scalable/ to 127.0.0.1:8006 and
+# passes the /scalable prefix through, so the app carries the same prefix in
+# CELLHARMONY_ROOT_PATH. This is the pattern /cellharmony/ (port 8001) and
+# /scalable-viewer/ (port 8005) already use.
+name: scalable-web
+
+services:
+  scalable-web:
+    build:
+      context: ../..
+      dockerfile: cellHarmony/webapp/Dockerfile
+    image: scalable-web:latest
+    container_name: scalable-web
+    ports:
+      - "127.0.0.1:8006:8000"
+    environment:
+      CELLHARMONY_ROOT_PATH: "/scalable"
+      CELLHARMONY_JOB_STORAGE: /srv/cellharmony/jobs
+      CELLHARMONY_REFERENCE_REGISTRY: /app/altanalyze3/components/cellHarmony/flask/reference_config.json
+      CELLHARMONY_JOB_WORKERS: "2"
+      # The chat router runs in the LungMAP site container, reachable as
+      # "site" on the lungmap_default network.
+      CELLHARMONY_ASSISTANT_URL: http://site:8001/lungmap.net/api/assistant/viewer-intent
+      # Not read by this app today (only scalable_viewer/scalable_app.py reads it),
+      # set so a site link added later points at the public base, not 127.0.0.1:8001.
+      LUNGMAP_SITE_BASE: https://devapp.lungmap.net/lungmap.net
+    volumes:
+      - ./jobs:/srv/cellharmony/jobs
+    networks:
+      - lungmap_default
+    restart: unless-stopped
+
+networks:
+  lungmap_default:
+    external: true
