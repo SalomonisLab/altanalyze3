@@ -603,6 +603,25 @@ def _contrast_labels(comparison: Dict[str, Any]) -> Tuple[str, str]:
     return name or "Group 1", "Group 2"
 
 
+def _resolve_deg_table(ds, comparison: Dict[str, Any]) -> str:
+    """Absolute path to one comparison's DEG table, on THIS host.
+
+    The manifest records two locations for the same file. `file` is relative to
+    `<bundle_dir>/<prefix>_deg/`; `path` is the absolute path of the machine that built
+    the bundle. A bundle built on a laptop and served from /srv therefore carries a
+    `path` that does not exist, and the viewer answered every differential request with
+    "Differential DEG detail table is unavailable." The relative field is resolved first
+    so a bundle stays portable, and the recorded absolute path remains the fallback for
+    an older manifest that carries no `file`.
+    """
+    relative = str(comparison.get("file") or "").strip()
+    if relative:
+        candidate = os.path.join(ds.paths.bundle_dir, f"{ds.paths.prefix}_deg", relative)
+        if os.path.isfile(candidate):
+            return candidate
+    return str(comparison.get("path") or "")
+
+
 def build_differential_block(ds, comparison, categorical: Dict[str, List[str]],
                              assets: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """meta['differential'] for one precomputed contrast, in the shape app.py:1524 reads."""
@@ -612,7 +631,9 @@ def build_differential_block(ds, comparison, categorical: Dict[str, List[str]],
     case, control = _contrast_labels(comparison)
     field, case_value, control_value = _contrast_group_field(ds, comparison, categorical)
     assets = assets or {}
-    artifacts: Dict[str, str] = {f"DEG_detailed_{comparison['comparison']}": comparison["path"]}
+    artifacts: Dict[str, str] = {
+        f"DEG_detailed_{comparison['comparison']}": _resolve_deg_table(ds, comparison)
+    }
     go_tsv = str(assets.get("goelite_tsv") or "")
     if go_tsv and os.path.isfile(go_tsv):
         artifacts["goelite_tsv"] = go_tsv

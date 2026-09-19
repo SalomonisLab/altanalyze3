@@ -13,4 +13,9 @@ matplotlib>=3.8,<4
 tqdm>=4.66,<5
 h5py>=3.10,<4
 igraph>=0.11,<1.1
+# ICGS.py imports nimfa at module scope, and cellHarmony_lite imports ICGS for its
+# expression-scale check, so every alignment job needs it. Nothing else in this file
+# pulls it in. Pinned to the version requirements.txt and the compiled container
+# requirements already use.
+nimfa==1.4.0
 cairocffi>=1.7,<2
