@@ -143,12 +143,17 @@ def create_scalable_app(
 
     # scALABLE's own template directory and static directory. Nothing is copied: the
     # viewer serves app.js, styles.css and index.html straight out of the webapp.
+    # SCALABLE_ROOT_PATH is the path prefix the viewer answers on, empty at an origin
+    # of its own and "/scalable-viewer" behind the LungMAP proxy. The web app already
+    # carries the prefix through: FastAPI routes under it, the template publishes it as
+    # `__APP_ROOT_PATH__`, and app.js `apiPath()` prefixes every call. The proxy must
+    # pass the prefix on rather than strip it, as it does for /cellharmony/.
     app = W.create_app({
         "JOB_STORAGE": state_dir,
         "TEMPLATE_DIR": str(WEBAPP_DIR / "templates"),
         "STATIC_DIR": str(WEBAPP_DIR / "static"),
         "INDEX_TEMPLATE": "index.html",
-        "ROOT_PATH": "",
+        "ROOT_PATH": os.environ.get("SCALABLE_ROOT_PATH", ""),
     })
 
     store = bundle_meta.BundleJobStore(catalog, Path(state_dir), assets)
@@ -831,7 +836,15 @@ def _install_index_override(app) -> None:
     @app.middleware("http")
     async def inject_bootstrap(request: Request, call_next):
         response = await call_next(request)
-        if request.url.path != "/" or response.status_code != 200:
+        # Under a prefix the shell arrives as "/scalable-viewer/", not "/": routing
+        # strips the root path, `request.url.path` keeps it. Comparing the raw path
+        # left the page un-renamed and the bootstrap script off the only page that
+        # loads it.
+        root = W._normalize_root_path(request.scope.get("root_path") or "")
+        path = request.url.path
+        if root and path.startswith(root):
+            path = path[len(root):] or "/"
+        if path != "/" or response.status_code != 200:
             return response
         chunks = [chunk async for chunk in response.body_iterator]
         body = b"".join(chunks).decode("utf-8")
@@ -840,8 +853,8 @@ def _install_index_override(app) -> None:
         for old, new in DOC_LINKS.items():
             body = body.replace(old, new)
         version = int(os.path.getmtime(bootstrap))
-        tag = (f'<link rel="stylesheet" href="/viewer-static/viewer.css?v={version}">'
-               f'<script src="/viewer-static/viewer_bootstrap.js?v={version}"></script></body>')
+        tag = (f'<link rel="stylesheet" href="{root}/viewer-static/viewer.css?v={version}">'
+               f'<script src="{root}/viewer-static/viewer_bootstrap.js?v={version}"></script></body>')
         return HTMLResponse(body.replace("</body>", tag), status_code=200)
 
 

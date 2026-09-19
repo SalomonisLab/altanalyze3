@@ -20,6 +20,14 @@
 
   // ---------------------------------------------------------------- utilities
 
+  // Behind a path prefix (SCALABLE_ROOT_PATH, /scalable-viewer today) a bare "/api/..."
+  // leaves the app: the browser resolves it against the origin, not the prefix, and the
+  // proxy hands it to whatever answers there. app.js solves this with apiPath(); the
+  // same root path reaches this file through the template's __APP_ROOT_PATH__, which is
+  // "" when the viewer is served at the origin.
+  const ROOT_PATH = String(window.__APP_ROOT_PATH__ || "").replace(/\/+$/, "");
+  const api = (path) => `${ROOT_PATH}${path}`;
+
   // scALABLE is the analysis tool; this deployment serves precomputed bundles, so the
   // page is named for what it is. The server already rewrites <title> and <h1> on the
   // way out (scalable_app.py _install_index_override); this repeats it in the DOM so a
@@ -407,7 +415,7 @@
     el("sv-contrast").addEventListener("change", async (event) => {
       const jobId = el("results-job-id").value.trim();
       if (!jobId) return;
-      await fetch(`/api/jobs/${jobId}/differential/select?contrast=${encodeURIComponent(event.target.value)}`,
+      await fetch(api(`/api/jobs/${jobId}/differential/select?contrast=${encodeURIComponent(event.target.value)}`),
         { method: "POST" });
       SV.contrast = event.target.value;
         // app.js:5106 setResultMode() hides BOTH result views and returns early
@@ -498,8 +506,8 @@
         // comparisons and a prefix telling them which was which.
         fillContrastSelector(SV.contrasts, match.id, wanted);
         try {
-          await fetch("/api/jobs/" + jobId + "/differential/select?contrast="
-            + encodeURIComponent(match.id), { method: "POST" });
+          await fetch(api("/api/jobs/" + jobId + "/differential/select?contrast="
+            + encodeURIComponent(match.id)), { method: "POST" });
           await pollStatus(jobId);
           if (typeof ensureExploreResultsReady === "function") {
             await ensureExploreResultsReady(jobId);
@@ -771,14 +779,14 @@
     installDifferentialModalitySwitch();
     pruneDifferentialModalities();
     try {
-      const stateColors = await getJson(`/api/jobs/${entry.id}/state-colors`);
+      const stateColors = await getJson(api(`/api/jobs/${entry.id}/state-colors`));
       SV.stateColors = stateColors.colors || null;
       SV.clusterKey = stateColors.cluster_key || "";
       installBundleStateColors();
     } catch (err) { console.warn("state colours unavailable", err); }
     try {
       // The same list the "Annotation 1" selector is built from (app.js:4430).
-      const filters = await getJson(`/api/jobs/${entry.id}/display-filters`);
+      const filters = await getJson(api(`/api/jobs/${entry.id}/display-filters`));
       SV.covariateFields = filters.fields || [];
       fillCovariateSelectors(SV.covariateFields, SV.clusterKey);
     } catch (err) { console.warn("covariate list unavailable", err); }
@@ -1122,7 +1130,7 @@
 
     let study = null;
     try {
-      study = await getJson("/api/study");
+      study = await getJson(api("/api/study"));
     } catch (err) {
       panel.innerHTML = `<p class="sv-study-error">The study record could not be read: `
         + `${esc(err.message)}</p>`;
@@ -1149,7 +1157,7 @@
     buildDatasetSelector();
     buildContrastSelector();
     installViolinCovariate();
-    const catalog = await getJson("/api/catalog");
+    const catalog = await getJson(api("/api/catalog"));
     SV.datasets = catalog.datasets || [];
     // Built only now: the default dot size depends on the atlas size, which the
     // catalog carries. Called before the catalog loads it would always see 0 cells.
