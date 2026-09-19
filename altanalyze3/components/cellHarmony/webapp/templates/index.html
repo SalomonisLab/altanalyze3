@@ -116,24 +116,6 @@
                     </select>
                   </label>
                 </div>
-                <details>
-                  <summary>Optional marker heatmap exports</summary>
-                  <p class="muted">Static heatmap files are skipped by default for speed. Interactive heatmaps, Download PDF, and marker results are unaffected; only the downloaded static files change. All cells are used to find markers.</p>
-                  <div class="two-col">
-                    <label class="field"><span>Static heatmap files</span>
-                      <select name="marker_render_heatmap"><option value="false" selected>Skip for faster analysis (default)</option><option value="true">Generate static PDF/SVG</option></select>
-                    </label>
-                    <label class="field"><span>Companion SVG</span>
-                      <select name="marker_write_svg"><option value="true" selected>Include (default)</option><option value="false">Skip</option></select>
-                    </label>
-                    <label class="field"><span>Static heatmap resolution</span>
-                      <select name="marker_heatmap_dpi"><option value="" selected>Default (2400 DPI)</option><option value="600">600 DPI</option><option value="300">300 DPI</option></select>
-                    </label>
-                    <label class="field"><span>Displayed cells per state</span>
-                      <select name="marker_cells_per_cluster"><option value="100" selected>100 (default)</option><option value="50">50</option><option value="25">25</option></select>
-                    </label>
-                  </div>
-                </details>
                 <button class="primary-btn" type="submit">Save QC and run</button>
               </form>
               <div class="progress-shell">

@@ -1904,7 +1904,6 @@ async function restoreJobFromUrl() {
       if (field && !Array.isArray(value)) field.value = value == null ? "" : String(value);
     }
     const imputed = data.qc?.impute_modalities || [];
-    updateMarkerExportControls();
     if (imputed.length) document.getElementById("qc-impute-modality-select").value = imputed.includes("all") ? "all" : imputed[0];
     applyJobStatus(jobId, data);
     if (["queued", "processing"].includes(data.status) ||
@@ -2065,18 +2064,9 @@ function addSampleRow() {
   sampleCount += 1;
 }
 
-function updateMarkerExportControls() {
-  const form = document.getElementById("qc-form");
-  const disabled = form.elements.marker_render_heatmap.value === "false";
-  form.elements.marker_write_svg.disabled = disabled;
-  form.elements.marker_heatmap_dpi.disabled = disabled;
-}
-
 function hookForms() {
   document.getElementById("job-form").addEventListener("submit", handleJobSubmit);
   document.getElementById("qc-form").addEventListener("submit", handleQcSubmit);
-  document.querySelector('#qc-form [name="marker_render_heatmap"]').addEventListener("change", updateMarkerExportControls);
-  updateMarkerExportControls();
   document.getElementById("differential-form").addEventListener("submit", handleDifferentialSubmit);
   document.getElementById("results-form").addEventListener("submit", handleResultsSubmit);
   document.getElementById("reset-data-btn").addEventListener("click", resetWorkspaceData);
@@ -2523,10 +2513,6 @@ async function handleQcSubmit(evt) {
     mit_percent: evt.target.mit_percent.value,
     align_cutoff: evt.target.align_cutoff.value,
     ambient_correction: evt.target.ambient_correction.value,
-    marker_render_heatmap: evt.target.marker_render_heatmap.value === "true",
-    marker_write_svg: evt.target.marker_write_svg.value === "true",
-    marker_heatmap_dpi: evt.target.marker_heatmap_dpi.value ? Number(evt.target.marker_heatmap_dpi.value) : null,
-    marker_cells_per_cluster: Number(evt.target.marker_cells_per_cluster.value),
     impute_modalities: (() => {
       const value = evt.target.impute_modality ? evt.target.impute_modality.value : "none";
       return value && value !== "none" ? [value] : [];   // "all" expands on the backend
