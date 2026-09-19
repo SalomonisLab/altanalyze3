@@ -2111,9 +2111,10 @@ def _install_dotplot_routes(app, store, assets: Dict[str, Dict[str, Any]]) -> No
 # own properties (a file's URL and size, a sample's age and sex) are read in a second
 # pass.
 
-SITE_DB = os.environ.get(
-    "LUNGMAP_SITE_DB",
-    "/Users/saljh8/Dropbox/LungMAP/refactored_website/lungmap-data/site/breath.sqlite")
+# No default. The previous one named a path inside one developer's Dropbox, so a
+# container answered every Study tab by looking for a database that host does not
+# have. Empty means "not configured", and the Study tab says so by name.
+SITE_DB = os.environ.get("LUNGMAP_SITE_DB", "")
 
 # EXACTLY ONE id, and it belongs to the DATASET, not to this module. There is
 # deliberately no fallback to another study: showing a different study's title,
@@ -2163,9 +2164,8 @@ def study_ids_for_dataset(assets: Dict[str, Dict[str, Any]], catalog: da.Catalog
 
 # The site database is built from these TSVs, so a row here is this study's real record
 # before publication. Columns are declared by the file's own #predicate header row.
-SOURCE_TABLES = os.environ.get(
-    "LUNGMAP_SOURCE_TABLES",
-    "/Users/saljh8/Dropbox/LungMAP/refactored_website/build/lungmap-data-new/data/metadata")
+# No default, for the same reason as SITE_DB above.
+SOURCE_TABLES = os.environ.get("LUNGMAP_SOURCE_TABLES", "")
 
 
 # Every source TSV carries three header rows. `#predicate` names the RDF predicate each
@@ -2294,6 +2294,11 @@ def read_study_record_from_tables(study_id, tables_root=SOURCE_TABLES):
     age_ranges, reference and raw_data - so the Study tab renders one way whichever
     source answered. It never invents a value: a field with no row stays empty.
     """
+    # Unset means this deployment ships no source tables. Returning nothing lets the
+    # caller keep the database's own error, instead of joining paths onto "" and
+    # reporting a file that was never configured.
+    if not tables_root:
+        return None
     bare = study_id.split(":", 1)[-1]
     head = _tsv_rows(os.path.join(tables_root, "lungmap_data", "dataset.tsv"),
                      where="NA", value=bare, limit=1)
@@ -2531,10 +2536,12 @@ def read_study_record_from_tables(study_id, tables_root=SOURCE_TABLES):
 # them relative makes the browser resolve them against the viewer's own origin, so
 # every tool link 404s here. They must carry the site's origin.
 #
-# That origin is the LOCAL redesign instance, not the public host: this machine holds
-# the data, and a public hostname can change. Override with LUNGMAP_SITE_BASE only to
-# point at a different deployment on purpose.
-SITE_BASE = os.environ.get("LUNGMAP_SITE_BASE", "http://127.0.0.1:8001").rstrip("/")
+# No default. Naming one host here pinned every link to whichever machine the author
+# ran. Empty means the site shares this origin, which is true behind one proxy: the
+# link stays root-relative and resolves against whatever host served the page. Set
+# LUNGMAP_SITE_BASE when the site answers on a different origin, as it does when the
+# viewer runs on its own port during development.
+SITE_BASE = os.environ.get("LUNGMAP_SITE_BASE", "").rstrip("/")
 
 _LINK_CLASS_FIELD = {
     "experiment_tool": "tools",
@@ -3243,6 +3250,9 @@ def _install_study_route(app, catalog: da.Catalog) -> None:
                     f"variable. The Study tab shows no record rather than another study's."),
             }, status_code=200)
         try:
+            if not SITE_DB:
+                raise sqlite3.OperationalError(
+                    "LUNGMAP_SITE_DB is not set, so this viewer has no site database to read")
             record = read_study_record(SITE_DB, candidates)
         except sqlite3.Error as err:
             # The site database is rebuilt in place by another process. A locked or

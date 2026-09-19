@@ -63,8 +63,17 @@ altanalyze3/components/fastComm/models/
 
 # Per-component artifacts/ folders. Each component owns a single artifacts/
 # directory used for intermediate benchmark outputs, scratch evaluation
-# TSVs, trained-bundle scratch space, etc. Not tracked.
-altanalyze3/components/*/artifacts/
+# TSVs, trained-bundle scratch space, etc. Not tracked. rna2adt/artifacts
+# alone holds 394,734,099 bytes in 94 files.
+#
+# The pattern ends in /* rather than /, because git cannot re-include a file
+# whose parent DIRECTORY is excluded. The exceptions below are the bundles a
+# deployed service loads at run time: a container built from this repository
+# has no other copy, and imputation fails with FileNotFoundError without them.
+altanalyze3/components/*/artifacts/*
+!altanalyze3/components/rna2metabolite/artifacts/rna2metabolite_aml_bundle.pkl.gz
+!altanalyze3/components/rna2psi/artifacts/rna2psi_leucegene_focused.pkl.gz
+!altanalyze3/components/rna2psi/artifacts/rna2psi_reclassifiers.pkl.gz
 
 # rna2adt: trained bundle bytes (~190 KB to ~55 MB each, many variants) are
 # regenerable from training scripts. Track adt_rna_map.py / build_whitelist.py
@@ -72,7 +81,10 @@ altanalyze3/components/*/artifacts/
 altanalyze3/components/rna2adt/mouse/rna2adt_mm_per_adt_metrics.tsv
 
 # rna2lipid: same pattern (large pickled bundles regenerable from training).
+# The lung bundle is the exception: api.py:28 loads it as DEFAULT_BUNDLE_PATH,
+# so lipid imputation cannot run in a container without it.
 altanalyze3/components/rna2lipid/*.pkl
+!altanalyze3/components/rna2lipid/rna2lipid_hs_lung_lipidwise_bundle.pkl
 
 # cellHarmony web app — per-user runtime job state. The local jobs/ tree
 # can grow to many GB of test runs; never belongs in version control.
