@@ -127,6 +127,45 @@ precompute read, which the viewer does not need: `2e98942` made the expression c
 so a bundle serves wherever it is copied. Mounting the file where it exists still gives the Gene
 Detail fallback for a gene the comparison does not carry.
 
+### Behind a path prefix
+
+`SCALABLE_ROOT_PATH` is the prefix the viewer answers on. FastAPI routes under it, the
+template publishes it as `__APP_ROOT_PATH__`, and both `app.js` (`apiPath`) and
+`viewer_bootstrap.js` (`api`) prefix every call, so the proxy must pass the prefix through
+rather than strip it:
+
+```apache
+ProxyPass        /scalable-viewer/ http://127.0.0.1:8005/scalable-viewer/ connectiontimeout=180
+ProxyPassReverse /scalable-viewer/ http://127.0.0.1:8005/scalable-viewer/
+RequestHeader set "X-Forwarded-Proto" expr=%{REQUEST_SCHEME}
+```
+
+That last header is not decoration. The template builds its three `/static/` URLs with
+Starlette's `url_for`, which is absolute and carries a scheme, so an https page whose app
+thinks it answered http blocks its own stylesheet and scripts as mixed content. The image
+sets `FORWARDED_ALLOW_IPS=*` for the same reason: uvicorn reads that header only from a
+peer it trusts, and its default, `127.0.0.1`, is never the peer of a container.
+
+### This deployment: devapp.lungmap.net/scalable-viewer/
+
+The COPD atlas, one dataset, from the release `fetch-release.sh` pulled into
+`/srv/scalable/copd` (`LungMAP-net-refactor/deploy/scalable`):
+
+```bash
+export SCALABLE_ROOT_PATH=/scalable-viewer
+export SCALABLE_ASSISTANT_URL=http://site:8001/lungmap.net/api/assistant/viewer-intent
+export LUNGMAP_SITE_BASE=https://devapp.lungmap.net/lungmap.net
+export LUNGMAP_SITE_DB=/source/lungmap-data/site/breath.sqlite
+PORT=8005 BIND=127.0.0.1 NETWORK=lungmap_default STATE=/srv/scalable/copd/viewer_runtime \
+  ./run.sh --catalog /srv/scalable/copd/viewer_release.json \
+           --assets  /srv/scalable/copd/assets_integrated
+```
+
+`NETWORK` joins the LungMAP site's compose network, which is the only way to reach the
+chat assistant: that service publishes on the host's loopback, so the container cannot
+reach it through the host, but `site:8001` resolves on `lungmap_default`. The release
+names its own `state_dir`, `viewer_runtime`, which is the one writable mount.
+
 `/fast/healthz` is the health check, on the binary API mounted at `/fast`. It answers
 `{"ok": true, "n_datasets": N, "loaded": [...], "load_errors": [...]}` without rendering a page;
 the container's own HEALTHCHECK calls it.
