@@ -1,0 +1,16 @@
+# Read by BuildKit for this Dockerfile only; paths are relative to the build
+# context, which is altanalyze3/components. The viewer's import closure is
+# cellHarmony, fastCNV, fastComm, rna2*, udon and visualization, so the three
+# largest unrelated trees stay out of the image. Without BuildKit the build still
+# succeeds; it just carries them.
+bam/
+snaf/
+long_read/
+
+**/__pycache__/
+**/*.pyc
+**/*.bak-*
+**/*.bak
+cellHarmony/webapp/jobs/
+cellHarmony/webapp/*.log
+visualization/scalable_viewer/*.bak-*
