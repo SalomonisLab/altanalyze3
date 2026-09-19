@@ -92,6 +92,89 @@ directory) plus `h5py`, `scikit-learn` and `umap-learn` for `precompute.py`. Its
 `requirements.txt` lists only the serving subset and omits `pandas`, which `bundle_meta.py` and
 `prepare_assets.py` import.
 
+## Run the server in Docker
+
+```bash
+./build.sh                                              # image: scalable-viewer:latest
+./run.sh --bundles /path/to/bundles --assets /path/to/assets
+./deploy.sh --tag 2026-09-16                            # build, then push to ECR
+```
+
+`run.sh` publishes port 8003 and replaces any container of the same name, so it is also the
+restart. It prints the URL, the health URL and the two commands for logs and stop.
+
+| Script | What it does |
+| --- | --- |
+| `build.sh` | builds with `altanalyze3/components` as the context, because the viewer imports the cellHarmony web app, then imports `create_scalable_app` inside the image so a missing component fails the build rather than a request |
+| `run.sh` | mounts the bundles and assets read-only, mounts a writable state directory, and starts the container detached with `--restart unless-stopped` |
+| `deploy.sh` | builds, creates the ECR repository when absent, logs in and pushes; it restarts nothing on the target host |
+
+| Path in the container | Source |
+| --- | --- |
+| `/data/bundles` | `--bundles`, read-only; `VIEWER_ROOT` inside |
+| `/data/assets` | `--assets`, read-only; `VIEWER_ASSETS` inside |
+| `/srv/scalable_viewer/state` | `--state`, writable, defaults to `viewer_runtime` beside the scripts |
+
+The image holds the code only. `PORT`, `BIND`, `IMAGE`, `NAME` and `STATE` override the
+defaults; `SCALABLE_ASSISTANT_URL`, `LUNGMAP_SITE_DB`, `LUNGMAP_SOURCE_TABLES`,
+`LUNGMAP_STUDY_IDS` and `LUNGMAP_SITE_BASE` pass through when set, and the two that name a
+host path are mounted at that same path inside.
+
+A bundle records two absolute paths, and `run.sh` mounts both read-only at those same paths
+when the host has them. A catalog's `bundle_dir` is the dataset itself, since `--catalog` mounts
+the file at its own path and relative entries resolve against it. `source_h5ad` is the h5ad
+precompute read, which the viewer does not need: `2e98942` made the expression cache bundle-owned,
+so a bundle serves wherever it is copied. Mounting the file where it exists still gives the Gene
+Detail fallback for a gene the comparison does not carry.
+
+### Behind a path prefix
+
+`SCALABLE_ROOT_PATH` is the prefix the viewer answers on. FastAPI routes under it, the
+template publishes it as `__APP_ROOT_PATH__`, and both `app.js` (`apiPath`) and
+`viewer_bootstrap.js` (`api`) prefix every call, so the proxy must pass the prefix through
+rather than strip it:
+
+```apache
+ProxyPass        /scalable-viewer/ http://127.0.0.1:8005/scalable-viewer/ connectiontimeout=180
+ProxyPassReverse /scalable-viewer/ http://127.0.0.1:8005/scalable-viewer/
+RequestHeader set "X-Forwarded-Proto" expr=%{REQUEST_SCHEME}
+```
+
+That last header is not decoration. The template builds its three `/static/` URLs with
+Starlette's `url_for`, which is absolute and carries a scheme, so an https page whose app
+thinks it answered http blocks its own stylesheet and scripts as mixed content. The image
+sets `FORWARDED_ALLOW_IPS=*` for the same reason: uvicorn reads that header only from a
+peer it trusts, and its default, `127.0.0.1`, is never the peer of a container.
+
+### This deployment: devapp.lungmap.net/scalable-viewer/
+
+The COPD atlas, one dataset, from the release `fetch-release.sh` pulled into
+`/srv/scalable/copd` (`LungMAP-net-refactor/deploy/scalable`):
+
+```bash
+export SCALABLE_ROOT_PATH=/scalable-viewer
+export SCALABLE_ASSISTANT_URL=http://site:8001/lungmap.net/api/assistant/viewer-intent
+export LUNGMAP_SITE_BASE=https://devapp.lungmap.net/lungmap.net
+export LUNGMAP_SITE_DB=/source/lungmap-data/site/breath.sqlite
+PORT=8005 BIND=127.0.0.1 NETWORK=lungmap_default STATE=/srv/scalable/copd/viewer_runtime \
+  ./run.sh --catalog /srv/scalable/copd/viewer_release.json \
+           --assets  /srv/scalable/copd/assets_integrated
+```
+
+`NETWORK` joins the LungMAP site's compose network, which is the only way to reach the
+chat assistant: that service publishes on the host's loopback, so the container cannot
+reach it through the host, but `site:8001` resolves on `lungmap_default`. The release
+names its own `state_dir`, `viewer_runtime`, which is the one writable mount.
+
+`/fast/healthz` is the health check, on the binary API mounted at `/fast`. It answers
+`{"ok": true, "n_datasets": N, "loaded": [...], "load_errors": [...]}` without rendering a page;
+the container's own HEALTHCHECK calls it.
+
+The entrypoint builds run.py's flags from the environment. Arguments passed to `docker run`
+replace them, so `docker run ... scalable-viewer --port 9000` re-flags the server and
+`docker run ... scalable-viewer python -m ...precompute --h5ad ...` builds a bundle with the
+image's own interpreter.
+
 ## Build a bundle: precompute.py
 
 ```bash
