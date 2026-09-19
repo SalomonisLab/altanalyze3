@@ -23,6 +23,9 @@ services:
       # The chat router runs in the LungMAP site container, reachable as
       # "site" on the lungmap_default network.
       CELLHARMONY_ASSISTANT_URL: http://site:8001/lungmap.net/api/assistant/viewer-intent
+      # Not read by this app today (only scalable_viewer/scalable_app.py reads it),
+      # set so a site link added later points at the public base, not 127.0.0.1:8001.
+      LUNGMAP_SITE_BASE: https://devapp.lungmap.net/lungmap.net
     volumes:
       - ./jobs:/srv/cellharmony/jobs
     networks:
