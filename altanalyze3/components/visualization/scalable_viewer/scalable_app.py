@@ -95,12 +95,18 @@ def _load_assets(assets_root: Optional[str], catalog: da.Catalog) -> Dict[str, D
             continue
         with open(manifest, "r") as fh:
             data = json.load(fh)
-        out[entry["id"]] = _absolutise_asset_paths(data)
+        # The release root is the folder that holds the tiers: <root>/assets_integrated,
+        # <root>/bundles_integrated, <root>/integrated_pseudobulk. It is the only root
+        # that is correct on every host, because the server was pointed at this assets
+        # directory. A path written on someone's laptop is not.
+        out[entry["id"]] = _absolutise_asset_paths(
+            data, release_root=os.path.abspath(os.path.join(assets_root, "..")))
     return out
 
 
-def _absolutise_asset_paths(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Resolve every relative path in a manifest against the project root.
+def _absolutise_asset_paths(data: Dict[str, Any],
+                            release_root: Optional[str] = None) -> Dict[str, Any]:
+    """Resolve every path in a manifest against the host it is running on.
 
     prepare_assets writes paths relative to the project it ran in, but the server
     runs from wherever launchd starts it. `Path(rel).exists()` then answers False
@@ -109,21 +115,46 @@ def _absolutise_asset_paths(data: Dict[str, Any]) -> Dict[str, Any]:
     unavailable", and marker networks returned an empty element list. Every one of
     those files existed.
 
-    `bundle_dir` is absolute, and every other path in the manifest is relative to
-    the project root three levels above it (<root>/scalable_viewer/bundles_*/<id>).
-    A path that already resolves is left alone, so nothing is rewritten twice.
+    AN ABSOLUTE PATH IS NOT A SAFE PATH. `stage_discover` wrote `integrated_root`
+    as the author's own directory,
+    `/Users/saljh8/Dropbox/LungMAP/LungMAP.net/Datasets/COPD-atlas/scalable_viewer/integrated_pseudobulk`,
+    and it was published to S3 that way. On devapp.lungmap.net, whose release is
+    mounted at /data, that directory does not exist, so
+    `webapp/integration_data.py:108` found no manifest, every comparison reported
+    both modalities missing, and the Regulatory network and Pathway panels printed
+    "both differential expression and grn imputed differentials are required".
+    The data was published and complete; only the path was wrong. Found 2026-09-20.
+
+    So an absolute path that does not resolve is retried under the release root by
+    its last component, which is how a tier is named in every release. A path that
+    already resolves is left alone, so nothing is rewritten twice, and a value that
+    resolves nowhere is returned unchanged for the caller to report.
     """
+    roots = []
+    if release_root:
+        roots.append(release_root)
     bundle_dir = str(data.get("bundle_dir") or "").strip()
-    if not bundle_dir or not os.path.isabs(bundle_dir):
+    if bundle_dir and os.path.isabs(bundle_dir):
+        roots.append(os.path.abspath(os.path.join(bundle_dir, "..", "..", "..")))
+    if not roots:
         return data
-    root = os.path.abspath(os.path.join(bundle_dir, "..", "..", ".."))
+
+    def under_roots(tail):
+        for root in roots:
+            candidate = os.path.join(root, tail)
+            if os.path.exists(candidate):
+                return candidate
+        return None
 
     def fix(value):
         if isinstance(value, str):
-            if not value or os.path.isabs(value) or os.path.exists(value):
+            if not value or os.path.exists(value):
                 return value
-            candidate = os.path.join(root, value)
-            return candidate if os.path.exists(candidate) else value
+            if os.path.isabs(value):
+                # A stale author path. Its last component names the tier or the
+                # file, which is what the release carries on this host.
+                return under_roots(os.path.basename(value.rstrip(os.sep))) or value
+            return under_roots(value) or value
         if isinstance(value, dict):
             return {k: fix(v) for k, v in value.items()}
         if isinstance(value, list):

@@ -87,11 +87,7 @@ async function mount(host, options) {
   const select = (name, label, values, value) => `<label>${label} <select data-setting="${name}">${values.map(v => `<option value="${esc(v[0])}" ${String(v[0])===String(value)?"selected":""}>${esc(v[1])}</option>`).join("")}</select></label>`;
   const vals = a => a.map(v => [v,v]);
   host.innerHTML = `<div class="integrated-controls">` +
-    (pathway || marker ? "" :
-      select("significance","Selection",[["reported","Reported calls"],["fdr","FDR"],["pval","Raw p"]],options.significance || "reported") +
-      select("max_fdr","p",vals([.001,.01,.05,.1,1]),.05)) +
     (pathway ? '<label>Pathway <select data-setting="id"></select></label>'  :
-      select("limit","Show",vals([25,50,100,200,500,1000,2000]),options.limit || 50) +
       select("gene_fold",marker ? "Marker fold" : "Gene fold",vals([1,1.2,1.5,2]),1.2) +
       (marker ? select("min_score","|Edge score| ≥",vals([0,.01,.05,.1,.25,.5,1]),0)
               : select("min_fold","Edge fold",vals([1,1.2,1.5,2]),1.2)) +
@@ -106,6 +102,16 @@ async function mount(host, options) {
     const p = new URLSearchParams({contrast: options.contrast || "", cell_state: options.cell_state || "", source: options.source || "differential"});
     if(pathway)p.set("modality",modality || "");
     host.querySelectorAll('[data-setting]').forEach(e => p.set(e.dataset.setting,e.value));
+    // No cap on genes or factors. The control that set one was removed: the fold and
+    // expression thresholds decide what is shown, and a second count-based cut on top
+    // of them only hid results without saying so. 2000 is the server's maximum.
+    p.set("limit", "2000");
+    // "Selection" and its companion "p" control were removed. Under "Reported calls"
+    // the significance test always passes, so max_fdr never bound anything: the panel
+    // offered a p-value threshold that did not exist. Pinned here so the request is
+    // exactly what the panel used to send.
+    p.set("significance", "reported");
+    p.set("max_fdr", "0.05");
     if (options.features?.length) p.set("features", options.features.join(","));
     return p;
   }
@@ -172,6 +178,13 @@ async function mount(host, options) {
   const pdfButton=host.querySelector('[data-action="pdf"]');
   if(pdfButton)pdfButton.onclick=async()=>{try{await host._integratedPdf();}catch(error){showDownloadError(error);}};
   const tsv=host.querySelector('[data-action="tsv"]');if(tsv)tsv.onclick=()=>{const a=document.createElement('a');a.href=url('network.tsv');a.click();};
+  // The page renders its own Download PDF above the plot. The TSV button belongs beside
+  // it, not inside the filter row: the two do the same kind of thing. The node keeps the
+  // handler attached above, so moving it does not unwire it.
+  if (tsv && options.externalPdf) {
+    const pdfRow = document.querySelector('.differential-head-download-row');
+    if (pdfRow) { tsv.classList.add('ghost-btn'); pdfRow.appendChild(tsv); }
+  }
   function drawCytoscape(node, d) {
     node.innerHTML = "";
     var span = 0;

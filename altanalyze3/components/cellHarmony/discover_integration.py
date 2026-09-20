@@ -281,7 +281,11 @@ def _discover_network(ds, cell_state: str, features: list[str], limit: int = 50,
         # SAY WHICH GATE REMOVED WHAT. Two rules now act, and a reader who cannot tell
         # them apart cannot tell "this connection did not change" from "this factor is not
         # expressed here" -- different findings with different consequences.
-        "note": (f"{covered} of the {len(wanted)} features shown are targets in the "
+        # The count cap was removed from the panel: the fold and expression thresholds
+        # decide what is shown. The caption states the totals so a reader can see the
+        # size of the network without a control that silently truncated it.
+        "note": (f"Showing {len(drawn_targets)} genes and {len(kept)} transcription "
+                 f"factors. {covered} of the {len(wanted)} features shown are targets in the "
                  f"{cell_state} regulatory model. An edge is drawn only when its own "
                  f"differential clears {_gate(significance,max_fdr)} and fold {min_fold} "
                  f"in this comparison, which leaves {len(edges)} of {n_edges_seen}. "
