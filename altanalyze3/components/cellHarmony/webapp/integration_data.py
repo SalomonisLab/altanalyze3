@@ -85,6 +85,33 @@ class UploadedIntegrationData(UploadedGrnData):
         return tuple(levels)
 
 
+def _resolve_integrated_root(recorded,ds):
+    """The integrated pseudobulk tier on THIS host, or None.
+
+    A bundle and its assets record this directory as an absolute path, written on the
+    machine that built them. A published bundle is then copied somewhere else - a
+    container, a server - where that path does not exist, and nothing says so: the
+    manifest simply fails to load, every `available()` returns False, and the Regulatory
+    network and integrated pathway views answer 200 with no nodes and a note claiming
+    the differentials are missing. They are not missing; they are beside the bundle.
+
+    The tier ships next to the bundle directory in a release, so the recorded path's own
+    name is looked for there before giving up. Same shape as `_resolve_deg_table` in
+    bundle_meta.py, which fixes the identical problem for the DEG tables.
+    """
+    if not recorded:
+        return None
+    path=Path(recorded)
+    if (path/'manifest.json').is_file():
+        return path
+    bundle=Path(ds.paths.bundle_dir)
+    for base in (bundle,*bundle.parents[:3]):
+        candidate=base/path.name
+        if (candidate/'manifest.json').is_file():
+            return candidate
+    return path
+
+
 class BundleIntegrationData:
     state_expression_scale = 'mean stored RNA expression in the cell state'
 
@@ -104,7 +131,7 @@ class BundleIntegrationData:
         self.current_contrast=(meta.get('differential') or {}).get('run_id','')
         self.states=ds.states
         root=assets.get('integrated_root') or ds.sv.get('integrated_root')
-        self.root=Path(root) if root else None
+        self.root=_resolve_integrated_root(root,ds)
         self.manifest=json.loads((self.root/'manifest.json').read_text()) if self.root and (self.root/'manifest.json').is_file() else {'comparisons':{}}
 
     def comparison(self,contrast):
