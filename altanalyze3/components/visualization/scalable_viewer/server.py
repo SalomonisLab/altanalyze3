@@ -14,6 +14,7 @@ import json
 import os
 import time
 from typing import List, Optional
+from urllib.parse import quote
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query
@@ -39,6 +40,16 @@ COLOR_SCHEMES = {
     "cyan_yellow": {"values": [-2, 2], "colors": ["#00FFFF", "#FFFF00"]},
 }
 FALLBACK_COLOR = "#BBBBBB"
+
+
+def _js_string(value: str) -> str:
+    """`value` as a JavaScript string literal, safe inside a <script> element.
+
+    json.dumps quotes and escapes for JavaScript, but an HTML parser ends the element at
+    the first `</script>` wherever it appears - inside a string literal too - so the
+    slash is escaped as well. Callers percent-encode first; this is the second lock.
+    """
+    return json.dumps(value).replace("</", "<\\/")
 
 
 def _ds(app: FastAPI, ds_id: str) -> da.Dataset:
@@ -241,12 +252,18 @@ def create_app(catalog: da.Catalog) -> FastAPI:
         cs = COLOR_SCHEMES.get(scheme, COLOR_SCHEMES["altanalyze"])
         qs = f"?top={int(top)}&row_scale={'true' if row_scale else 'false'}"
         if states:
-            qs += "&states=" + states.replace(" ", "%20")
-        url = f"/api/dataset/{ds_id}/heatmap.tsv{qs}"
+            # `states` is the caller's. Encoding only the spaces left the quotes, the
+            # angle brackets and the slash intact, and this string is then dropped into
+            # a JavaScript literal inside <script> below: `?states=x"></script><script>`
+            # closed the tag and ran whatever followed, in this origin, from a link.
+            # quote() encodes everything a URL does not need, and the comma stays
+            # because a state list is comma-separated.
+            qs += "&states=" + quote(states, safe=",")
+        url = f"/api/dataset/{quote(ds_id, safe='')}/heatmap.tsv{qs}"
         html = _MORPHEUS_PAGE.replace("__CSS__", MORPHEUS_CSS) \
                              .replace("__JS_EXT__", MORPHEUS_JS_EXT) \
                              .replace("__JS__", MORPHEUS_JS) \
-                             .replace("__DATASET_URL__", url) \
+                             .replace("__DATASET_URL__", _js_string(url)) \
                              .replace("__VALUES__", json.dumps(cs["values"])) \
                              .replace("__COLORS__", json.dumps(cs["colors"])) \
                              .replace("__TITLE__", f"{d.label} markers")
@@ -302,7 +319,7 @@ _MORPHEUS_PAGE = """<!doctype html>
 (async function(){
   const fail = (m)=>{const e=document.getElementById('err');e.hidden=false;e.textContent=m;};
   try{
-    const r = await fetch("__DATASET_URL__", {cache:"no-store"});
+    const r = await fetch(__DATASET_URL__, {cache:"no-store"});
     if(!r.ok){ fail("heatmap.tsv returned HTTP "+r.status); return; }
     const text = await r.text();
     if(!window.morpheus || !window.morpheus.HeatMap){
