@@ -233,6 +233,34 @@ def create_scalable_app(
     # "'BundleAnnData' object has no attribute 'X'" for every question the
     # bundle-backed executors answer. FastAPI matches the first route
     # registered, so the official one is removed here.
+    # ----------------------------------------------------------------- read only
+    #
+    # A bundle is already analysed. The viewer inherits scALABLE's whole route table,
+    # though, and that table belongs to an ANALYSIS tool: it uploads files, configures
+    # jobs and runs pipelines. Behind a login that is fine. This deployment answers the
+    # public internet with no authentication at all, so every one of those routes is a
+    # stranger's button. None of them is reachable from the viewer's own UI.
+    #
+    # `/api/tools/approximate-umap` is the sharp one: `outdir` and `output_h5ad` come
+    # from the request body, an absolute `output_h5ad` is used verbatim
+    # (app.py `_resolve_output_path`), and the process writes it. That is an arbitrary
+    # file write, and the container has been running as root.
+    #
+    # `/run` and `/configure` need no payload worth the name: `job_exists` is true for
+    # every catalog id, and both then reset the live meta - markers, modalities,
+    # differential - and clear the state directory. The bundle store keeps that meta in
+    # memory only, so there is nothing to restore it from until the process restarts.
+    #
+    # `POST /api/jobs` and `/qc` fail on their own today, because `BundleJobStore` has
+    # no `create_job`, but they fail by AttributeError deep inside a handler after
+    # accepting the upload. Removing them is the difference between "happens not to
+    # work" and "is not there".
+    _drop_official_route(app, "/api/tools/approximate-umap", "POST")
+    _drop_official_route(app, "/api/jobs/{job_id}/run", "POST")
+    _drop_official_route(app, "/api/jobs/{job_id}/configure", "POST")
+    _drop_official_route(app, "/api/jobs/{job_id}/qc", "POST")
+    _drop_official_route(app, "/api/jobs", "POST")
+
     _drop_official_route(app, "/api/jobs/{job_id}/chat", "POST")
     _drop_official_route(app, "/api/jobs/{job_id}/chat-examples")
     _drop_official_route(app, "/api/jobs/{job_id}/dotplot")
