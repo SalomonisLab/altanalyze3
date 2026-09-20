@@ -183,7 +183,16 @@ async function mount(host, options) {
   // handler attached above, so moving it does not unwire it.
   if (tsv && options.externalPdf) {
     const pdfRow = document.querySelector('.differential-head-download-row');
-    if (pdfRow) { tsv.classList.add('ghost-btn'); pdfRow.appendChild(tsv); }
+    if (pdfRow) {
+      tsv.classList.add('ghost-btn');
+      // MOVING IT OUT OF THE HOST TAKES IT OUT OF THE HOST'S TEARDOWN. `host.innerHTML`
+      // and resetVisualizationSurface clear the plot, but this button no longer lives
+      // there, so every render left the previous one behind in this shared row: the
+      // page grew one Download TSV per differential computed, ten of them on the dev
+      // viewer. Nathan found it on 2026-09-20. The row carries one at a time.
+      pdfRow.querySelectorAll('[data-action="tsv"]').forEach(stale => stale.remove());
+      pdfRow.appendChild(tsv);
+    }
   }
   function drawCytoscape(node, d) {
     node.innerHTML = "";
