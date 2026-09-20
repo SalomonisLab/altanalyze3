@@ -1115,10 +1115,20 @@ def _parse_heatmap_row_key(raw_key: object) -> Dict[str, str]:
     }
 
 
+def _cell_state_populations(ordered: List[str]) -> List[str]:
+    """Cell states only. `Pooled overall` is a whole-sample test, not a population.
+
+    It answers a different question from a per-cell-state test, and offering it in the
+    same selector made a reader treat it as a cell state: the network view then had
+    nothing to draw and reported a missing modality instead of a missing cell state.
+    """
+    return [value for value in ordered if value and value != _POOLED_OVERALL_LABEL]
+
+
 def _differential_result_populations(app: FastAPI, meta: Dict) -> List[str]:
     detailed = _get_differential_detail_table(app, meta)
-    ordered = list(dict.fromkeys(detailed["population"].astype(str).tolist()))
-    return [value for value in ordered if value]
+    return _cell_state_populations(
+        list(dict.fromkeys(detailed["population"].astype(str).tolist())))
 
 
 def _differential_heatmap_populations(app: FastAPI, meta: Dict) -> List[str]:
@@ -1126,8 +1136,8 @@ def _differential_heatmap_populations(app: FastAPI, meta: Dict) -> List[str]:
         detailed = _get_differential_detail_table(app, meta)
     except Exception:
         return []
-    ordered = list(dict.fromkeys(detailed["population"].astype(str).tolist()))
-    return [value for value in ordered if value]
+    return _cell_state_populations(
+        list(dict.fromkeys(detailed["population"].astype(str).tolist())))
 
 
 def _differential_go_populations(app: FastAPI, meta: Dict) -> List[str]:
@@ -1900,15 +1910,40 @@ def _build_differential_volcano_payload(app: FastAPI, meta: Dict, population: st
     subset["pval"] = pd.to_numeric(subset.get("pval"), errors="coerce")
     subset = subset.dropna(subset=["gene", "log2fc"])
     valid_fdr = np.isfinite(subset["fdr"]) & subset["fdr"].between(0, 1)
-    statistic = "fdr" if valid_fdr.any() else "pval"
-    statistic_label = "FDR" if statistic == "fdr" else "p-value"
-    valid = np.isfinite(subset[statistic]) & subset[statistic].between(0, 1)
-    n_missing_statistic = int((~valid).sum())
-    subset = subset.loc[valid].copy()
-    subset["fdr_clamped"] = subset[statistic].clip(lower=1e-300)
-    subset["score"] = -np.log10(subset["fdr_clamped"])
+    valid_pval = np.isfinite(subset["pval"]) & subset["pval"].between(0, 1)
+    # A run with no test has no statistic to put on the y axis. Cell communication with
+    # fewer than 2 samples a side is the case: it reports an effect and no p-value.
+    # Dropping every point left the panel saying "No volcano data were found", which
+    # reads as a broken view rather than an untested comparison. The effect still plots.
+    untested = not valid_fdr.any() and not valid_pval.any()
+    reason = None
+    if untested:
+        effect = pd.to_numeric(subset.get("abs_delta_score"), errors="coerce")
+        if not np.isfinite(effect).any():
+            effect = subset["log2fc"].abs()
+        subset = subset.loc[np.isfinite(effect)].copy()
+        subset["score"] = effect.loc[subset.index].astype(float)
+        statistic = "effect"
+        statistic_label = "effect size"
+        n_missing_statistic = 0
+        reason = str(subset.get("no_test_reason").iloc[0]) if (
+            "no_test_reason" in subset.columns and not subset.empty
+            and str(subset["no_test_reason"].iloc[0]).strip()) else (
+            "No statistical test was run for this comparison, so the y axis shows "
+            "effect size rather than significance.")
+    else:
+        statistic = "fdr" if valid_fdr.any() else "pval"
+        statistic_label = "FDR" if statistic == "fdr" else "p-value"
+        valid = np.isfinite(subset[statistic]) & subset[statistic].between(0, 1)
+        n_missing_statistic = int((~valid).sum())
+        subset = subset.loc[valid].copy()
+        subset["fdr_clamped"] = subset[statistic].clip(lower=1e-300)
+        subset["score"] = -np.log10(subset["fdr_clamped"])
     subset["direction"] = np.where(subset["log2fc"] >= 0, "up", "down")
-    subset = subset.sort_values(["fdr_clamped", "pval", "gene"], ascending=[True, True, True]).reset_index(drop=True)
+    if untested:
+        subset = subset.sort_values(["score", "gene"], ascending=[False, True]).reset_index(drop=True)
+    else:
+        subset = subset.sort_values(["fdr_clamped", "pval", "gene"], ascending=[True, True, True]).reset_index(drop=True)
     points = [
         {
             "gene": str(row.gene),
@@ -1925,6 +1960,8 @@ def _build_differential_volcano_payload(app: FastAPI, meta: Dict, population: st
         "population": population,
         "statistic": statistic, "statistic_label": statistic_label,
         "n_missing_statistic": n_missing_statistic,
+        "untested": bool(untested),
+        "reason": reason,
         "points": points,
         "default_gene": points[0]["gene"] if points else None,
     }

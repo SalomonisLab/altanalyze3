@@ -4359,6 +4359,10 @@ function renderDifferentialVolcano(payload, geneFilter = null) {
   const plot = document.getElementById("differential-plot-area");
   const modality = differentialFeatureModality();
   const statisticLabel = payload.statistic_label || "FDR";
+  // A comparison with no replicates carries no p-value, so the y axis shows the
+  // effect itself. Writing -log10(effect size) there would be a false label.
+  const untested = Boolean(payload.untested);
+  const yTitle = untested ? statisticLabel : `-log10(${statisticLabel})`;
   const allPoints = payload.points || [];
   const points = geneFilter
     ? allPoints.filter((point) => geneFilter.genes.has(String(point.gene)))
@@ -4371,7 +4375,9 @@ function renderDifferentialVolcano(payload, geneFilter = null) {
     renderDifferentialEmpty(
       geneFilter
         ? `No volcano point for ${geneFilter.gene} or its interacting genes in ${payload.population}.`
-        : `No volcano data were found for ${payload.population}.`,
+        : (payload.reason
+            ? `${payload.reason} No interaction in ${payload.population} carries an effect to plot.`
+            : `No volcano data were found for ${payload.population}.`),
     );
     return;
   }
@@ -4396,7 +4402,7 @@ function renderDifferentialVolcano(payload, geneFilter = null) {
         textfont: { size: 10, color: "#1e293b" },
         name: "Down",
         marker: { color: "#2563eb", size: 16, opacity: 0.72 },
-        hovertemplate: `%{hovertext}<br>log2FC=%{x:.3f}<br>-log10(${statisticLabel})=%{y:.3f}<extra></extra>`,
+        hovertemplate: `%{hovertext}<br>log2FC=%{x:.3f}<br>${yTitle}=%{y:.3f}<extra></extra>`,
       },
       {
         x: up.map((point) => point.log2fc),
@@ -4410,7 +4416,7 @@ function renderDifferentialVolcano(payload, geneFilter = null) {
         textfont: { size: 10, color: "#1e293b" },
         name: "Up",
         marker: { color: "#dc2626", size: 16, opacity: 0.72 },
-        hovertemplate: `%{hovertext}<br>log2FC=%{x:.3f}<br>-log10(${statisticLabel})=%{y:.3f}<extra></extra>`,
+        hovertemplate: `%{hovertext}<br>log2FC=%{x:.3f}<br>${yTitle}=%{y:.3f}<extra></extra>`,
       },
     ],
     {
@@ -4420,7 +4426,7 @@ function renderDifferentialVolcano(payload, geneFilter = null) {
       margin: { t: 56, l: 60, r: 20, b: 56 },
       height: 640,
       xaxis: { title: "log2 fold change", zeroline: true, zerolinecolor: "rgba(100,116,139,0.45)" },
-      yaxis: { title: `-log10(${statisticLabel})` },
+      yaxis: { title: yTitle },
       hovermode: "closest",
     },
     { responsive: true }

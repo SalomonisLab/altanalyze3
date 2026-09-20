@@ -528,25 +528,36 @@ def _build_imputed_grn_adata(query_adata, reference_entry, cluster_obs_col=None)
         if added and "_pb_group" in query_adata.obs.columns:
             del query_adata.obs["_pb_group"]
     edges = gres.predictions                                  # pseudobulk x edges (TF|Gene)
-    # Predict bounded chunks, collapse edges immediately, and retain only the
-    # per-cell factor matrix. Never broadcast a population value to every cell.
+    # Predict bounded chunks. The per-cell EDGE scores are kept, not discarded: a reader
+    # who selects "cells" must get a cell-level edge differential, and the pseudobulk
+    # matrix below cannot give one. Each cell keeps its own predicted value; nothing is
+    # broadcast from a population.
     blocks = []
+    edge_blocks = []
     chunk_size = max(1, int(cfg.get("tf_activity_chunk_size", 256)))
     for start in range(0, query_adata.n_obs, chunk_size):
         prediction = bundle.predict_from_adata(
             query_adata[start:start + chunk_size], groupby=None, layer=layer,
             pseudobulk_statistic=pb_stat)
+        edge_blocks.append(prediction.predictions.astype(np.float32))
         blocks.append(bundle.tf_activity(prediction.predictions, aggregation="sum"))
     tf_df = pd.concat(blocks).reindex(query_adata.obs_names)
+    edges_per_cell = pd.concat(edge_blocks).reindex(query_adata.obs_names)
+    del edge_blocks
     tf_adata, summary = _finalize_imputed_adata(
         query_adata, tf_df, modality_id="grn_tf", feature_label="factor", feature_type="GRN-TF",
         expression_scale="linear", log_base=None, base_summary=dict(gres.summary))
-    edges_adata = _build_pseudobulk_differential_adata(
+    edges_adata, _ = _finalize_imputed_adata(
+        query_adata, edges_per_cell, modality_id="grn", feature_label="edge",
+        feature_type="GRN-edge", expression_scale="linear", log_base=None,
+        base_summary=dict(gres.summary))
+    del edges_per_cell
+    edges_pseudobulk = _build_pseudobulk_differential_adata(
         query_adata, edges, cluster_obs_col, feature_type="GRN-edge", modality_id="grn")
     tf_pseudobulk = _build_pseudobulk_differential_adata(
         query_adata, bundle.tf_activity(edges, aggregation="sum"), cluster_obs_col,
         feature_type="GRN-TF", modality_id="grn_tf")
-    for matrix in (tf_adata, tf_pseudobulk):
+    for matrix in (tf_adata, tf_pseudobulk, edges_pseudobulk):
         matrix.uns["activity_statistic"] = "sum of predicted outgoing edge activity"
     summary["n_edges"] = int(edges.shape[1])
     summary["n_tfs"] = int(tf_df.shape[1])
@@ -556,7 +567,7 @@ def _build_imputed_grn_adata(query_adata, reference_entry, cluster_obs_col=None)
         value = (getattr(bundle, "metadata", {}) or {}).get(meta_key)
         if value:
             summary[f"grn_{meta_key}"] = str(value)
-    return tf_adata, edges_adata, tf_pseudobulk, summary
+    return tf_adata, edges_adata, edges_pseudobulk, tf_pseudobulk, summary
 
 
 def _marker_output_options(meta):
@@ -636,12 +647,25 @@ def _modality_h5ad_path(meta: Dict, modality: str) -> Path:
     return path
 
 
-def _modality_differential_h5ad_path(meta: Dict, modality: str) -> Path:
-    """Use the modality's differential input, including sample-level GRN inputs."""
+def _modality_differential_h5ad_path(meta: Dict, modality: str,
+                                     comparison_type: str = "") -> Path:
+    """The matrix a differential reads, chosen by what the reader selected.
+
+    A modality can register two matrices: one row per cell, and one row per
+    (sample x cell-state) pseudobulk. GRN edges used to register the pseudobulk under
+    both keys, so a "cells" comparison silently tested pseudobulks and every cell state
+    failed the minimum. `pseudobulk_h5ad` now carries the aggregate, and it is used only
+    when the reader asked for a pseudobulk comparison.
+    """
     normalized = _normalize_modality_id(modality)
-    if (_modality_artifacts(meta).get(normalized) or {}).get("legacy_enrichment"):
+    entry = _modality_artifacts(meta).get(normalized) or {}
+    if entry.get("legacy_enrichment"):
         raise ValueError("This legacy job has TF enrichment only. Reprocess the upload with GRN imputation to compute predicted TF activity differentials.")
-    diff = str((_modality_artifacts(meta).get(normalized) or {}).get("differential_h5ad", "")).strip()
+    if comparison_type == "pseudobulk":
+        pseudobulk = str(entry.get("pseudobulk_h5ad", "")).strip()
+        if pseudobulk and Path(pseudobulk).exists():
+            return Path(pseudobulk)
+    diff = str(entry.get("differential_h5ad", "")).strip()
     if diff and Path(diff).exists():
         return Path(diff)
     return _modality_h5ad_path(meta, modality)
@@ -649,26 +673,42 @@ def _modality_differential_h5ad_path(meta: Dict, modality: str) -> Path:
 
 def _differential_runtime_params(modality: str, comparison_type: str) -> Dict[str, object]:
     normalized = _normalize_modality_id(modality)
+    # These branches used to ignore `comparison_type` and always return pseudobulk
+    # settings. A reader who selected "cells" then got a test over (sample x cell-state)
+    # pseudobulks, one value per state per group, and every cell state failed the
+    # minimum. The selection now decides, for every modality.
     if normalized in {"grn", "grn_tf"}:
-        # GRN edges are imputed per (sample x cell-state) pseudobulk; the edge differential
-        # is a moderated t-test with SAMPLES as replicates (not cells), 1.1 fold threshold
-        # between matched cell states.
+        if comparison_type == "pseudobulk":
+            # Samples as replicates: 2 pseudobulks a side, raw p between matched states.
+            return {
+                "method": "wilcoxon",
+                "alpha": 0.05,
+                "fc_thresh": 1.1,
+                "min_cells_per_group": 2,
+                "use_rawp": True,
+            }
         return {
             "method": "wilcoxon",
             "alpha": 0.05,
             "fc_thresh": 1.1,
-            "min_cells_per_group": 2,
-            "use_rawp": True,
+            "min_cells_per_group": 20,
+            "use_rawp": False,
         }
     if normalized in ("metabolite", "lipid"):
-        # AML metabolite/lipid are imputed per (sample x cell-state) pseudobulk; the differential
-        # is a moderated t-test with samples as replicates (same as GRN).
+        if comparison_type == "pseudobulk":
+            return {
+                "method": "wilcoxon",
+                "alpha": 0.05,
+                "fc_thresh": 1.2,
+                "min_cells_per_group": 2,
+                "use_rawp": True,
+            }
         return {
             "method": "wilcoxon",
             "alpha": 0.05,
             "fc_thresh": 1.2,
-            "min_cells_per_group": 2,
-            "use_rawp": True,
+            "min_cells_per_group": 20,
+            "use_rawp": False,
         }
     if normalized in ("lipids", "adt"):
         return {
@@ -1030,13 +1070,21 @@ def _comparison_tag(group1_samples: List[str], group2_samples: List[str]) -> str
 def _bh_fdr(pvalues: List[float]) -> List[float]:
     if not pvalues:
         return []
-    arr = np.asarray([1.0 if not np.isfinite(value) else max(0.0, min(1.0, float(value))) for value in pvalues], dtype=float)
+    # A missing p-value stays missing. Treating it as 1.0 counted an untested feature
+    # as tested and not significant, and it shifted the BH ranks of everything else.
+    raw = np.asarray([float(value) for value in pvalues], dtype=float)
+    finite = np.isfinite(raw)
+    out = np.full(raw.shape, np.nan, dtype=float)
+    if not finite.any():
+        return out.tolist()
+    arr = np.clip(raw[finite], 0.0, 1.0)
     order = np.argsort(arr)
     ranked = arr[order]
     adjusted = ranked * float(len(ranked)) / np.arange(1, len(ranked) + 1, dtype=float)
     adjusted = np.minimum.accumulate(adjusted[::-1])[::-1]
-    out = np.empty_like(adjusted)
-    out[order] = np.clip(adjusted, 0.0, 1.0)
+    adj = np.empty_like(adjusted)
+    adj[order] = np.clip(adjusted, 0.0, 1.0)
+    out[finite] = adj
     return out.tolist()
 
 
@@ -1264,9 +1312,12 @@ def _run_cell_communication_differential(
             try:
                 pval = float(stats.mannwhitneyu(case_values, control_values, alternative="two-sided").pvalue)
             except Exception:
-                pval = 1.0
+                pval = float("nan")
         else:
-            pval = 1.0
+            # No test was run: either this group pair has fewer than 2 samples a side, or
+            # every value is identical. A placeholder of 1.0 reads as "tested and not
+            # significant", which is a different claim from "not tested".
+            pval = float("nan")
         pvalues.append(pval)
         ann = annotation.loc[interaction_id]
         sender = str(ann["sender_state"])
@@ -1303,12 +1354,31 @@ def _run_cell_communication_differential(
 
     detailed = pd.DataFrame(rows)
     detailed["abs_delta_score"] = detailed["delta_score"].abs()
-    if comparison_mode == "single_sample_direct_contrast":
-        detailed["pval"] = (
-            detailed["abs_delta_score"].rank(method="first", ascending=False) / max(float(detailed.shape[0]), 1.0)
-        )
-    detailed["fdr"] = _bh_fdr(pd.to_numeric(detailed["pval"], errors="coerce").fillna(1.0).tolist())
-    detailed = detailed.sort_values(["fdr", "abs_delta_score", "max_sample_score"], ascending=[True, False, False]).reset_index(drop=True)
+    # With one sample a side nothing is tested. The interactions are still ranked by
+    # effect, but that ranking goes in its own column: writing it into `pval` made a
+    # normalised rank look like a probability, and feeding it to Benjamini-Hochberg
+    # produced an `fdr` that carried no error rate at all.
+    tested = comparison_mode == "replicate_group_contrast"
+    detailed["effect_rank"] = (
+        detailed["abs_delta_score"].rank(method="first", ascending=False)
+        / max(float(detailed.shape[0]), 1.0)
+    )
+    detailed["test_applied"] = bool(tested)
+    detailed["no_test_reason"] = (
+        "" if tested else
+        "fewer than 2 cell-communication samples in a group, so no test was run; "
+        "rank by effect_rank and delta_score")
+    if tested:
+        detailed["fdr"] = _bh_fdr(pd.to_numeric(detailed["pval"], errors="coerce").tolist())
+        detailed = detailed.sort_values(
+            ["fdr", "abs_delta_score", "max_sample_score"],
+            ascending=[True, False, False]).reset_index(drop=True)
+    else:
+        detailed["pval"] = np.nan
+        detailed["fdr"] = np.nan
+        detailed = detailed.sort_values(
+            ["abs_delta_score", "max_sample_score"],
+            ascending=[False, False]).reset_index(drop=True)
 
     comparison_path = deg_dir / f"cell_communication_comparison_{comparison_tag}.tsv"
     detail_path = deg_dir / f"DEG_detailed_cell_communication_{comparison_tag}.tsv"
@@ -1316,7 +1386,8 @@ def _run_cell_communication_differential(
     detailed.to_csv(comparison_path, sep="\t", index=False)
     detailed.to_csv(detail_path, sep="\t", index=False)
     summary = (
-        detailed.assign(significant=(detailed["fdr"] <= 0.10) & (detailed["abs_delta_score"] >= 0.05))
+        detailed.assign(significant=(pd.to_numeric(detailed["fdr"], errors="coerce") <= 0.10)
+                        & (detailed["abs_delta_score"] >= 0.05))
         .groupby("population", as_index=False)
         .agg(num_DEG=("significant", "sum"), tested_genes=("gene", "count"), max_abs_delta_score=("abs_delta_score", "max"))
     )
@@ -1376,13 +1447,20 @@ def _run_cell_communication_differential(
         go_terms_included=False,
         feature_label="ligand-receptor interaction",
         message=(
-            "Cell-communication single-sample contrast finished."
+            # Say that nothing was tested. The reader otherwise sees a finished run with
+            # empty p-value and FDR columns and no reason given for either.
+            "Cell-communication contrast finished. Fewer than 2 samples in a group, so "
+            "no statistical test was run: interactions are ranked by effect size "
+            "(delta_score), and the p-value and FDR columns are empty."
             if comparison_mode == "single_sample_direct_contrast"
             else "Cell-communication differential comparison finished."
         ),
         progress=95,
     )
-    store.append_log(job_id, f"Cell-communication differential complete: interactions={detailed.shape[0]} output={comparison_path}")
+    store.append_log(
+        job_id,
+        f"Cell-communication differential complete: interactions={detailed.shape[0]} "
+        f"tested={bool(tested)} output={comparison_path}")
     return {
         "artifacts": artifacts,
         "networks": [],
@@ -1704,11 +1782,13 @@ def run_cellharmony_pipeline(
     if "grn" in selected_impute_modalities:
         store.update_job(job_id, progress=88, message="Imputing GRN / TF activity from aligned RNA (pseudobulk).")
         store.append_log(job_id, "Running rna2grn imputation.")
-        grn_tf_adata, grn_edges_adata, grn_tf_pseudobulk, grn_summary = _build_imputed_grn_adata(
+        (grn_tf_adata, grn_edges_adata, grn_edges_pseudobulk, grn_tf_pseudobulk,
+         grn_summary) = _build_imputed_grn_adata(
             approx_result.query_adata, reference_entry, cluster_obs_col=query_cluster_key)
         grn_h5ad_path = outputs_dir / "combined_with_umap_and_markers_grn_tf.h5ad"
         grn_tf_diff_path = outputs_dir / "combined_with_umap_and_markers_grn_tf_pseudobulk.h5ad"
         grn_edges_path = outputs_dir / "combined_with_umap_and_markers_grn_edges.h5ad"
+        grn_edges_pb_path = outputs_dir / "combined_with_umap_and_markers_grn_edges_pseudobulk.h5ad"
         approx_result.query_adata.obsm["X_grn_tf"] = np.asarray(grn_tf_adata.X, dtype=np.float32)
         approx_result.query_adata.uns["grn_tf_feature_names"] = grn_tf_adata.var_names.astype(str).tolist()
         approx_result.query_adata.uns.setdefault("imputed_modalities", {})["grn_tf"] = {
@@ -1717,13 +1797,27 @@ def run_cellharmony_pipeline(
         grn_tf_adata.write(grn_h5ad_path, compression=resolved_h5ad_compression)
         approx_mod.ensure_h5ad_compat_for_write(grn_edges_adata)
         grn_edges_adata.write(grn_edges_path, compression=resolved_h5ad_compression)
+        approx_mod.ensure_h5ad_compat_for_write(grn_edges_pseudobulk)
+        grn_edges_pseudobulk.write(grn_edges_pb_path, compression=resolved_h5ad_compression)
         approx_mod.ensure_h5ad_compat_for_write(grn_tf_pseudobulk)
         grn_tf_pseudobulk.write(grn_tf_diff_path, compression=resolved_h5ad_compression)
+        # `h5ad` is the per-cell edge matrix, so a cell comparison tests cells. The
+        # pseudobulk matrix stays available under its own key for the pseudobulk
+        # comparison; it is no longer the only thing a differential can read.
         modality_artifacts["grn"] = {
             "h5ad": str(grn_edges_path), "differential_h5ad": str(grn_edges_path),
-            "network_h5ad": str(grn_edges_path)}
+            "pseudobulk_h5ad": str(grn_edges_pb_path),
+            # The network draws one aggregate edge score per sample and cell state, so it
+            # keeps the pseudobulk matrix. Only the differential follows the reader's
+            # cells-or-pseudobulk selection.
+            "network_h5ad": str(grn_edges_pb_path)}
+        # TF activity is predicted per cell, so a cells comparison tests cells. The
+        # (sample x cell-state) aggregate stays available for a pseudobulk comparison.
+        # Pointing `differential_h5ad` at the aggregate made every cell state fail the
+        # cell-level minimum, exactly as it did for GRN edges.
         modality_artifacts["grn_tf"] = {
-            "h5ad": str(grn_h5ad_path), "differential_h5ad": str(grn_tf_diff_path)}
+            "h5ad": str(grn_h5ad_path), "differential_h5ad": str(grn_h5ad_path),
+            "pseudobulk_h5ad": str(grn_tf_diff_path)}
         marker_analysis_by_modality["grn_tf"] = _emit_modality_marker_heatmap(
             "grn_tf", grn_tf_adata, outputs_dir, query_cluster_key, meta)
         store.append_log(job_id, "rna2grn imputation complete.")
@@ -2070,7 +2164,8 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
     if overlap:
         raise ValueError(f"Samples cannot appear in both groups: {', '.join(overlap)}")
 
-    combined_h5ad = None if modality == "cell_communication" else _modality_differential_h5ad_path(meta, modality)
+    combined_h5ad = (None if modality == "cell_communication"
+                     else _modality_differential_h5ad_path(meta, modality, comparison_type))
 
     comparison_tag = _comparison_tag(group1_samples, group2_samples)
     run_id = datetime.utcnow().strftime("%Y%m%d-%H%M%S-%f")
@@ -2337,32 +2432,17 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
     assigned_deg = de_store.get("assigned_groups", pd.DataFrame())
     pooled_deg = de_store.get("pooled_overall")
     coreg_deg = de_store.get("coreg_pooled")
-    if detailed_deg is not None and detailed_deg.empty and pooled_deg is not None and not pooled_deg.empty:
-        pooled_detail = pooled_deg.reset_index().rename(columns={"index": "gene"}).copy()
-        pooled_detail["gene"] = pooled_detail["gene"].astype(str)
-        pooled_detail["population"] = _POOLED_OVERALL_LABEL
-        pooled_detail["case_label"] = case_label
-        pooled_detail["control_label"] = control_label
-        pooled_detail["n_case"] = int((adata.obs[web_group_col].astype(str) == case_label).sum())
-        pooled_detail["n_control"] = int((adata.obs[web_group_col].astype(str) == control_label).sum())
-        for column in ("pval", "case_mean_expr", "control_mean_expr"):
-            if column not in pooled_detail.columns:
-                pooled_detail[column] = np.nan
-        detailed_deg = pooled_detail
-        de_store["detailed_deg"] = detailed_deg
-        summary_deg = pd.DataFrame(
-            [
-                {
-                    "population": _POOLED_OVERALL_LABEL,
-                    "n_case": int(pooled_detail["n_case"].iloc[0]),
-                    "n_control": int(pooled_detail["n_control"].iloc[0]),
-                    "num_DEG": int(pd.to_numeric(pooled_detail.get("fdr"), errors="coerce").lt(float(de_params["alpha"])).sum()),
-                    "tested_genes": int(len(pooled_detail)),
-                }
-            ]
-        )
-        de_store["summary_per_population"] = summary_deg
-        store.append_log(job_id, "No cell-state-specific DE features passed filtering; exposing pooled overall differential results.")
+    # The differential shows CELL STATE results only. A pooled whole-sample test answers
+    # a different question, and substituting it here put `Pooled overall` in the
+    # population selector as though it were a cell state: the network view then had no
+    # population to draw and reported a missing modality instead of a missing result.
+    # An empty per-state table is now reported as what it is.
+    if detailed_deg is not None and detailed_deg.empty:
+        store.append_log(
+            job_id,
+            "No cell state produced a differential result for this comparison. "
+            "The per-cell-state table is empty, so nothing is shown rather than a "
+            "pooled whole-sample result in its place.")
 
     deg_artifacts: Dict[str, Path] = {}
     named_tables = {

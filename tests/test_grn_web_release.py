@@ -104,7 +104,7 @@ def uploaded(tmp_path, monkeypatch):
     a = query_data()
     bundle = SmallGrnModel()
     monkeypatch.setattr(pipeline, "load_rna2grn_bundle", lambda *args: bundle)
-    tf, edges, tf_pb, summary = pipeline._build_imputed_grn_adata(
+    tf, edges, edges_pb, tf_pb, summary = pipeline._build_imputed_grn_adata(
         a, {"impute_config": {"grn": {"tf_activity_chunk_size": 32}}}, "cell_type")
     app = web.create_app({"JOB_STORAGE": str(tmp_path / "jobs"), "JOB_WORKERS": 1})
     store = app.state.job_store
@@ -117,7 +117,8 @@ def uploaded(tmp_path, monkeypatch):
     job = response.json()["job_id"]
     root = store.outputs_dir(job)
     paths = {}
-    for name, matrix in (("rna", a), ("grn", edges), ("grn_tf", tf), ("grn_tf_pb", tf_pb)):
+    for name, matrix in (("rna", a), ("grn", edges), ("grn_pb", edges_pb),
+                         ("grn_tf", tf), ("grn_tf_pb", tf_pb)):
         path = root / f"{name}.h5ad"
         matrix.write_h5ad(path)
         paths[name] = str(path)
@@ -125,8 +126,10 @@ def uploaded(tmp_path, monkeypatch):
     pd.DataFrame({"CellBarcode": a.obs_names, "UMAP1": a.obsm["X_umap"][:, 0],
                   "UMAP2": a.obsm["X_umap"][:, 1]}).to_csv(coords, sep="\t", index=False)
     artifacts = {"rna": {"h5ad": paths["rna"]},
-                 "grn": {"h5ad": paths["grn"], "differential_h5ad": paths["grn"], "network_h5ad": paths["grn"]},
-                 "grn_tf": {"h5ad": paths["grn_tf"], "differential_h5ad": paths["grn_tf_pb"]}}
+                 "grn": {"h5ad": paths["grn"], "differential_h5ad": paths["grn"],
+                         "pseudobulk_h5ad": paths["grn_pb"], "network_h5ad": paths["grn_pb"]},
+                 "grn_tf": {"h5ad": paths["grn_tf"], "differential_h5ad": paths["grn_tf"],
+                            "pseudobulk_h5ad": paths["grn_tf_pb"]}}
     store.update_job(job, status="completed", cluster_key="cell_type", reference_cluster_key="cell_type",
                      artifacts={"combined_h5ad": paths["rna"], "umap_coordinates": str(coords)},
                      modality_artifacts=artifacts, modalities=pipeline._modalities_payload(["grn"]),
@@ -134,6 +137,7 @@ def uploaded(tmp_path, monkeypatch):
                                            "population_columns": [{"value": "cell_type", "label": "cell_type"}],
                                            "default_sample_field": "condition"})
     yield SimpleNamespace(app=app, store=store, job=job, root=root, a=a, tf=tf, edges=edges,
+                          edges_pb=edges_pb,
                           tf_pb=tf_pb, bundle=bundle, paths=paths, client=TestClient(app))
     app.state.job_runner.executor.shutdown(wait=True)
 
@@ -166,15 +170,20 @@ def test_uploaded_imputation_separates_cells_and_replicates(uploaded):
     assert max(u.bundle.batch_sizes) == 32
     assert u.tf.shape == (192, 2)
     assert u.tf_pb.shape == (16, 2)
-    assert u.edges.shape == (16, 3)
-    np.testing.assert_allclose(u.tf_pb.X[:, 0], u.edges.X[:, :2].sum(axis=1))
+    # Edges are per CELL now: a reader who selects "cells" gets a cell-level test.
+    assert u.edges.shape == (192, 3)
+    assert u.edges_pb.shape == (16, 3)
+    np.testing.assert_allclose(u.tf_pb.X[:, 0], u.edges_pb.X[:, :2].sum(axis=1))
     assert np.unique(u.tf.X[:, 0]).size > 100
     assert u.tf.uns["modality"] == "grn_tf"
     assert u.tf_pb.uns["pseudobulk_method"] == "pseudobulk"
     assert set(u.tf_pb.obs.Library) == {f"donor{i}" for i in range(8)}
     meta = u.store.get_job(u.job)
-    assert pipeline._modality_differential_h5ad_path(meta, "tf_activity") == Path(u.paths["grn_tf_pb"])
-    assert pipeline._modality_differential_h5ad_path(meta, "grn_edges") == Path(u.paths["grn"])
+    # The selection decides the matrix: cells reads per cell, pseudobulk reads the aggregate.
+    assert pipeline._modality_differential_h5ad_path(meta, "tf_activity", "cells") == Path(u.paths["grn_tf"])
+    assert pipeline._modality_differential_h5ad_path(meta, "tf_activity", "pseudobulk") == Path(u.paths["grn_tf_pb"])
+    assert pipeline._modality_differential_h5ad_path(meta, "grn_edges", "cells") == Path(u.paths["grn"])
+    assert pipeline._modality_differential_h5ad_path(meta, "grn_edges", "pseudobulk") == Path(u.paths["grn_pb"])
 
 
 def test_grn_edges_default_factor_state_and_honest_colours(uploaded):
