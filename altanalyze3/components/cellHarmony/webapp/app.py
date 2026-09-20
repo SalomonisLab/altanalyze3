@@ -123,6 +123,35 @@ def _secure_filename(filename: str) -> str:
     return cleaned or "upload"
 
 
+def _require_within(candidate: Path, root: Path, label: str) -> Path:
+    """Resolve `candidate` and refuse it unless it stays under `root`.
+
+    Every request-supplied path reaches this before it is opened or written.
+    `Path.resolve()` collapses ".." and follows symlinks, so the comparison is
+    made on the real location rather than on the text the caller sent.
+    """
+    resolved = Path(candidate).resolve()
+    base = Path(root).resolve()
+    if resolved != base and base not in resolved.parents:
+        raise HTTPException(status_code=400, detail=f"{label} must stay inside {base}.")
+    return resolved
+
+
+def _require_within_any(candidate: str, roots: List[Path], label: str) -> Path:
+    resolved = Path(candidate).resolve()
+    for root in roots:
+        base = Path(root).resolve()
+        if resolved == base or base in resolved.parents:
+            return resolved
+    raise HTTPException(status_code=400, detail=f"{label} is outside the permitted directories.")
+
+
+def _tool_input_roots(app: FastAPI) -> List[Path]:
+    """Where /api/tools/* may read from: job storage and the reference tree."""
+    cfg = app.state.config
+    return [Path(cfg["JOB_STORAGE"]), Path(cfg["REFERENCE_REGISTRY"]).parent]
+
+
 def _normalize_root_path(root_path: Optional[str]) -> str:
     value = str(root_path or "").strip()
     if not value or value == "/":
@@ -5840,13 +5869,21 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         _invalidate_fastcomm_cache(app, job_id)
         uploads_dir = store.uploads_dir(job_id)
         records = []
+        used_names: set[str] = set()
         for sample, upload in zip(normalized_samples, files):
             if not upload.filename:
                 raise HTTPException(status_code=400, detail="One uploaded file is missing a filename.")
             if not _allowed_file(app, upload.filename):
                 raise HTTPException(status_code=400, detail=f"Unsupported file extension for {upload.filename}.")
-            dest_name = f"{sample}_{_secure_filename(upload.filename)}"
-            dest_path = uploads_dir / dest_name
+            # The sample name reaches the filesystem, so it is sanitised the same
+            # way the uploaded filename is. Without this a name like "../../x"
+            # writes outside the job's uploads directory. The unsanitised value is
+            # still kept as sample_name, which is only ever displayed.
+            dest_name = f"{_secure_filename(sample)}_{_secure_filename(upload.filename)}"
+            if dest_name in used_names:
+                raise HTTPException(status_code=400, detail=f"Duplicate sample name '{sample}' detected.")
+            used_names.add(dest_name)
+            dest_path = _require_within(uploads_dir / dest_name, uploads_dir, "Upload destination")
             content = await upload.read()
             dest_path.write_bytes(content)
             records.append({"sample_name": sample, "filename": dest_name, "size": dest_path.stat().st_size})
@@ -7079,25 +7116,39 @@ def create_app(test_config: dict | None = None) -> FastAPI:
                 ),
             )
 
+        # Every path below arrives in the request body, so each one is pinned to
+        # the job storage or the reference tree before it is opened. Without this
+        # the route reads any file the process can reach and returns its contents.
+        input_roots = _tool_input_roots(app)
+        custom_colors_tsv = (
+            str(_require_within_any(payload.custom_colors_tsv, input_roots, "custom_colors_tsv"))
+            if payload.custom_colors_tsv
+            else None
+        )
+
         if payload.reference:
-            reference_source = ad.read_h5ad(payload.reference)
+            reference_source = ad.read_h5ad(
+                str(_require_within_any(payload.reference, input_roots, "reference"))
+            )
         else:
             reference_source = approx_mod._load_reference_from_tsv(
-                payload.reference_coords_tsv,
-                payload.reference_clusters_tsv,
+                str(_require_within_any(payload.reference_coords_tsv, input_roots, "reference_coords_tsv")),
+                str(_require_within_any(payload.reference_clusters_tsv, input_roots, "reference_clusters_tsv")),
                 umap_key=payload.umap_key,
                 cluster_key=payload.reference_cluster_key or payload.query_cluster_key,
             )
 
         if payload.query:
-            query_source = payload.query
-            query_path = Path(payload.query)
+            query_path = _require_within_any(payload.query, input_roots, "query")
+            query_source = str(query_path)
         else:
+            query_path = _require_within_any(
+                payload.query_clusters_tsv, input_roots, "query_clusters_tsv"
+            )
             query_source = approx_mod._load_query_from_tsv(
-                payload.query_clusters_tsv,
+                str(query_path),
                 cluster_key=payload.query_cluster_key,
             )
-            query_path = Path(payload.query_clusters_tsv)
 
         if payload.verbose:
             logging.getLogger().setLevel(logging.INFO)
@@ -7111,30 +7162,43 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             jitter=payload.jitter,
             num_reference_cells=payload.num_reference_cells,
             random_state=payload.random_state,
-            custom_color_tsv=payload.custom_colors_tsv,
+            custom_color_tsv=custom_colors_tsv,
             restrict_obs_field=payload.restrict_obs_field,
             restrict_obs_value=payload.restrict_obs_value,
             copy_query=False,
         )
 
-        out_dir = Path(payload.outdir)
+        # Outputs stay under job storage. outdir, output_prefix, output_h5ad and
+        # output_pdf are all caller-supplied, and _resolve_output_path returns an
+        # absolute candidate untouched, so each result is re-checked below.
+        job_storage = Path(app.state.config["JOB_STORAGE"])
+        job_storage.mkdir(parents=True, exist_ok=True)
+        out_dir = _require_within(Path(payload.outdir), job_storage, "outdir")
         out_dir.mkdir(parents=True, exist_ok=True)
-        prefix_name = payload.output_prefix or f"{query_path.stem}-approximate-umap"
-        prefix = out_dir / prefix_name
+        prefix_name = _secure_filename(
+            payload.output_prefix or f"{query_path.stem}-approximate-umap"
+        )
+        prefix = _require_within(out_dir / prefix_name, job_storage, "output_prefix")
 
         export_approx_pdfs = bool(app.state.config.get("EXPORT_APPROX_PDFS", False)) or bool(payload.output_pdf)
         output_pdf: Optional[Path] = None
         if export_approx_pdfs:
-            output_pdf = _resolve_output_path(
-                out_dir,
-                payload.output_pdf or f"{prefix_name}-comparison.pdf",
+            output_pdf = _require_within(
+                _resolve_output_path(
+                    out_dir,
+                    payload.output_pdf or f"{prefix_name}-comparison.pdf",
+                ),
+                job_storage,
+                "output_pdf",
             )
             output_pdf.parent.mkdir(parents=True, exist_ok=True)
 
         save_h5ad = bool(payload.save_updated_h5ad)
         output_h5ad: Optional[Path] = None
         if payload.output_h5ad:
-            output_h5ad = _resolve_output_path(out_dir, payload.output_h5ad)
+            output_h5ad = _require_within(
+                _resolve_output_path(out_dir, payload.output_h5ad), job_storage, "output_h5ad"
+            )
             save_h5ad = True
         elif save_h5ad:
             output_h5ad = out_dir / f"{prefix_name}.h5ad"

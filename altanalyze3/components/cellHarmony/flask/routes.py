@@ -123,8 +123,12 @@ def create_job():
             return jsonify({"error": "One of the selected files has no filename."}), 400
         if not _allowed_file(file.filename):
             return jsonify({"error": f"Unsupported file extension for {file.filename}."}), 400
-        dest_name = f"{sample}_{secure_filename(file.filename)}"
-        dest_path = uploads_dir / dest_name
+        # The sample name is part of the path, so it is sanitised like the
+        # filename; "../" in a sample name otherwise escapes the uploads dir.
+        dest_name = f"{secure_filename(sample)}_{secure_filename(file.filename)}"
+        dest_path = (uploads_dir / dest_name).resolve()
+        if uploads_dir.resolve() not in dest_path.parents:
+            return jsonify({"error": f"Invalid sample name '{sample}'."}), 400
         file.save(dest_path)
         records.append({"sample_name": sample, "filename": dest_name, "size": os.path.getsize(dest_path)})
 

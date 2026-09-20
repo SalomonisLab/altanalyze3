@@ -6762,15 +6762,22 @@ async function askChat() {
   }
 }
 
+// Chat answers carry labels read out of the uploaded file, so every value below
+// is escaped before it reaches innerHTML. Mirrors esc() in integrated.js.
+function escapeHtml(value) {
+  return String(value == null ? "" : value)
+    .replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
 function renderChatAnswer(data) {
   const reading = data.reading || {};
   const bits = [];
-  if (reading.cell_state) bits.push(`cell state <b>${reading.cell_state}</b>`);
-  if (reading.cell_state_2) bits.push(`and <b>${reading.cell_state_2}</b>`);
-  if (reading.contrast) bits.push(`comparison <b>${reading.contrast}</b>`);
-  if ((reading.genes || []).length) bits.push(`genes <b>${reading.genes.join(", ")}</b>`);
+  if (reading.cell_state) bits.push(`cell state <b>${escapeHtml(reading.cell_state)}</b>`);
+  if (reading.cell_state_2) bits.push(`and <b>${escapeHtml(reading.cell_state_2)}</b>`);
+  if (reading.contrast) bits.push(`comparison <b>${escapeHtml(reading.contrast)}</b>`);
+  if ((reading.genes || []).length) bits.push(`genes <b>${escapeHtml(reading.genes.join(", "))}</b>`);
   document.getElementById("chat-answer").innerHTML =
-    `<p>${data.answer || ""}</p><p class="panel-copy">Read as <b>${data.intent}</b>`
+    `<p>${escapeHtml(data.answer || "")}</p><p class="panel-copy">Read as <b>${escapeHtml(data.intent)}</b>`
     + (bits.length ? `, ${bits.join(", ")}.` : ".") + "</p>";
 
   // Follow-up questions: each is answerable by this dataset, so a click never
