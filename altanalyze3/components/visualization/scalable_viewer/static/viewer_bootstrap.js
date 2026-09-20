@@ -1179,22 +1179,42 @@
     // dataset by its accession and the catalog knows it by its bundle id.
     const wanted = new URLSearchParams(window.location.search);
     const askedBundle = (wanted.get("dataset") || "").trim();
-    const askedRecord = (wanted.get("dataset_id") || "").trim().toUpperCase();
+    const askedRecord = (wanted.get("dataset_id") || "").trim();
+
+    // A dataset goes by several names and a linking page may hold any of them: the
+    // catalog id, the bundle prefix, or the directory the bundle sits in. They differ -
+    // this release is `bundles_integrated/COPD-metacells/` with the id
+    // `Hs-Lung-COPD-metacells` - and matching the id alone sent a link that named the
+    // directory to whichever dataset happened to be first, with only a console warning.
+    // That is invisible while one dataset is served and wrong as soon as two are.
+    const norm = (value) => String(value || "").trim().toLowerCase();
+    const dirName = (value) => norm(value).split("/").filter(Boolean).pop() || "";
+    // An accession travels with or without its `lmdata:` prefix depending on who wrote
+    // it down, so compare the part that identifies the record.
+    const record = (value) => String(value || "").trim().toUpperCase().split(":").pop();
+
     let chosen = SV.datasets[0].id;
+    let hit = null;
     if (askedBundle) {
-      const hit = SV.datasets.filter((d) => d.id === askedBundle)[0];
-      if (hit) chosen = hit.id;
-      else console.warn("[scalable_viewer] no bundle named", askedBundle);
-    } else if (askedRecord) {
-      // The catalog entry carries the accession under whichever of these the
-      // bundle metadata happened to set.
-      const hit = SV.datasets.filter((d) =>
+      const asked = norm(askedBundle);
+      hit = SV.datasets.filter((d) =>
+        [norm(d.id), norm(d.prefix), dirName(d.bundle_dir)].indexOf(asked) >= 0)[0] || null;
+    }
+    // The accession is tried when the name missed, not only when it was absent: a link
+    // that carries both usually has the accession right, and reading it only in the
+    // `else` threw away the one identifier that could still resolve the link.
+    if (!hit && askedRecord) {
+      const asked = record(askedRecord);
+      hit = SV.datasets.filter((d) =>
         [d.dataset_id, d.lungmap_id, d.accession, d.study_id]
           .filter(Boolean)
-          .map((v) => String(v).toUpperCase())
-          .indexOf(askedRecord) >= 0)[0];
-      if (hit) chosen = hit.id;
-      else console.warn("[scalable_viewer] no bundle for record", askedRecord);
+          .map(record)
+          .indexOf(asked) >= 0)[0] || null;
+    }
+    if (hit) chosen = hit.id;
+    else if (askedBundle || askedRecord) {
+      console.warn("[scalable_viewer] no dataset matched",
+                   askedBundle || askedRecord, "- showing", chosen);
     }
     select.value = chosen;
     await loadDataset(chosen);

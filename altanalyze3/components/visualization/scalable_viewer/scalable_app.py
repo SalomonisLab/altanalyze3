@@ -933,6 +933,13 @@ def _install_catalog_routes(app, catalog: da.Catalog, store) -> None:
                 "n_states": entry["n_states"], "bundle_dir": entry["bundle_dir"],
                 "prefix": entry["prefix"], "built_utc": entry["built_utc"],
                 "contrasts": diff,
+                # The LungMAP accession this bundle belongs to, so a link that knows a
+                # dataset by its accession can find it. The bundle records it; the
+                # catalog did not pass it on, which left `?dataset_id=` in the front end
+                # matching against nothing. It comes from the BUNDLE's own block, `ds.sv`
+                # - `meta["scalable_viewer"]` is the block bundle_meta builds for the web
+                # app, and it carries no accession.
+                "study_id": (catalog.get(entry["id"]).sv or {}).get("study_id") or "",
                 "has_markers": entry["has_markers"],
                 "fastcomm": bool((meta.get("fastcomm_analysis") or {}).get("enabled")),
                 "default_gene": meta.get("default_gene"),
