@@ -90,6 +90,13 @@ if [ -n "$CATALOG" ]; then
     # goes in at its own path and the tree it names has to be reachable there too.
     mounts+=(-v "$CATALOG:$CATALOG:ro")
     envs+=(-e "VIEWER_CATALOG=$CATALOG")
+    # The release directory around that file, read-only. A release is more than its
+    # bundles: the integrated pseudobulk tier sits beside them, and the Regulatory
+    # network and integrated pathway views read it from there. Mounting only the
+    # bundles left those views answering "differentials are missing" for data that was
+    # on the host all along.
+    RELEASE_DIR="$(dirname "$CATALOG")"
+    mounts+=(-v "$RELEASE_DIR:$RELEASE_DIR:ro")
 fi
 
 # Two paths recorded inside a bundle resolve on the host, so they go in at those same
