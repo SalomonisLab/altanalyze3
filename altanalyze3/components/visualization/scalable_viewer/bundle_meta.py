@@ -845,7 +845,28 @@ class BundleJobStore:
             raise KeyError(job_id)
         return copy.deepcopy(meta)
 
+    # The keys the viewer itself writes. `differential` and `feature_display` follow a
+    # contrast switch (scalable_app.py `_install_differential_select`); the rest are the
+    # status fields a read path may refresh.
+    WRITABLE_KEYS = frozenset({"differential", "feature_display", "status", "message", "progress"})
+
     def update_job(self, job_id: str, **changes) -> Dict[str, Any]:
+        """Apply the viewer's own changes to a bundle's meta, and only those.
+
+        A bundle is already analysed, so this store exists to be READ. The meta it holds
+        lives in memory and has no file behind it: whatever is dropped here is gone until
+        the process restarts, and every public visitor sees the result.
+
+        scALABLE's own handlers call this to reset a job before re-running it -
+        `marker_analysis`, `modalities`, `differential` set back to empty. Those routes
+        are removed from the viewer (scalable_app.py `create_scalable_app`), and this is
+        the second lock on the same door: a route that is added back, or one that is
+        reached another way, cannot empty a served dataset by accident.
+        """
+        rejected = sorted(set(changes) - self.WRITABLE_KEYS)
+        if rejected:
+            raise PermissionError(
+                "a bundle is read-only; refusing to change " + ", ".join(rejected))
         with self._lock:
             meta = self._meta[str(job_id)]
             meta.update(changes)
