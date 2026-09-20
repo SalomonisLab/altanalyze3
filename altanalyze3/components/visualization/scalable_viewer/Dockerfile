@@ -14,6 +14,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     MPLBACKEND=Agg \
     MPLCONFIGDIR=/tmp/matplotlib \
+    NUMBA_CACHE_DIR=/tmp/numba \
+    CELLHARMONY_JOB_STORAGE=/tmp/cellharmony-jobs \
     PYTHONPATH=/app \
     VIEWER_ROOT=/data/bundles \
     VIEWER_ASSETS=/data/assets \
@@ -57,7 +59,15 @@ COPY . /app/altanalyze3/components
 
 # altanalyze3 itself is a package; components is copied under it, so the top level
 # needs an __init__ for `python -m altanalyze3.components...` to resolve.
-RUN mkdir -p /app/altanalyze3 /data/bundles /data/assets /srv/scalable_viewer/state /tmp/matplotlib \
+# Importing the web app builds a second, unused FastAPI at module scope, and that one
+# creates its job directory inside site-packages; CELLHARMONY_JOB_STORAGE moves it
+# somewhere writable. The viewer's own app uses the state directory regardless.
+# numba caches its compiled functions beside the library source unless told
+# otherwise, and site-packages belongs to root: scanpy's import died on that as soon as
+# the container stopped running as root. 1777 on the directories the process writes to: run.sh starts the container as the
+# invoking user rather than root, and these are created here, by root, at build time.
+RUN mkdir -p /app/altanalyze3 /data/bundles /data/assets /srv/scalable_viewer/state /tmp/matplotlib /tmp/numba /tmp/cellharmony-jobs \
+    && chmod 1777 /srv/scalable_viewer/state /tmp/matplotlib /tmp/numba /tmp/cellharmony-jobs \
     && touch /app/altanalyze3/__init__.py \
     && chmod +x /app/altanalyze3/components/visualization/scalable_viewer/docker-entrypoint.sh
 

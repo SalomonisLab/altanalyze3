@@ -105,6 +105,10 @@ fi
 # the host has it and say what is lost where it does not.
 while IFS="	" read -r kind path; do
     [ -n "$path" ] || continue
+    if [ "$kind" = "refused" ]; then
+        echo "Refused to mount $path: a bundle names it, but it is outside the bundle root (or is not an .h5ad file). Nothing that depends on it will load." >&2
+        continue
+    fi
     if [ ! -e "$path" ]; then
         case "$kind" in
             "source h5ad")
@@ -146,11 +150,33 @@ if catalog:
 
 emitted = set()
 
+# A bundle is a portable artifact: it is built elsewhere and copied here, so the paths
+# inside its metadata are a stranger's input, not this host's configuration. Mounting
+# one unchecked let a *_metadata.json choose what the container sees - name the docker
+# socket, or a home directory, and an unauthenticated internet-facing service gets it.
+# Nothing is mounted now unless it sits inside a root the operator named on the command
+# line, and a source h5ad must additionally be a real .h5ad file.
+roots = [os.path.realpath(p) for p in ([root] if root else [])]
+if catalog:
+    roots.append(os.path.realpath(os.path.dirname(os.path.abspath(catalog))))
+
+
+def contained(path):
+    real = os.path.realpath(path)
+    return any(real == r or real.startswith(r + os.sep) for r in roots)
+
 
 def emit(kind, path):
-    if path and path not in emitted:
-        emitted.add(path)
-        print(kind + "\t" + path)
+    if not path or path in emitted:
+        return
+    if not contained(path):
+        print("refused\t" + path, file=sys.stderr)
+        return
+    if kind == "source h5ad" and not (os.path.isfile(path) and path.endswith(".h5ad")):
+        print("refused\t" + path, file=sys.stderr)
+        return
+    emitted.add(path)
+    print(kind + "\t" + path)
 
 
 # The bundle tree goes in whole at /data/bundles, so only a catalog's directories
@@ -209,9 +235,17 @@ if [ -n "$NETWORK" ] && ! docker network inspect "$NETWORK" >/dev/null 2>&1; the
     exit 1
 fi
 
+# The viewer answers the public internet and only ever reads its data. Running it as
+# root bought nothing and made every other weakness worse: a file write anywhere in the
+# container, and root-owned directories left on the host through the one writable mount.
+# The state directory belongs to whoever runs this script, and everything else goes in
+# read-only, so the container has no reason to be anyone else.
 docker run -d \
     --name "$NAME" \
     --restart unless-stopped \
+    --user "$(id -u):$(id -g)" \
+    --cap-drop ALL \
+    --security-opt no-new-privileges \
     -p "$BIND:$PORT:8003" \
     ${envs[@]+"${envs[@]}"} \
     ${mounts[@]+"${mounts[@]}"} \
