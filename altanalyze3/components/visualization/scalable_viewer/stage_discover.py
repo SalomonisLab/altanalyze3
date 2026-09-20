@@ -31,8 +31,18 @@ def stage(release, evidence, edge_index):
             meta=json.loads((src/(prefix+'_metadata.json')).read_text())
             old=json.loads((src/(prefix+'_deg_manifest.json')).read_text())
             asset=json.loads((root/spec['assets_root']/(prefix+'_assets.json')).read_text())
-            asset['bundle_dir']=str(dst);asset['integrated_root']=str(evidence)
-            meta['scalable_viewer']['integrated_root']=str(evidence)
+            # RELATIVE TO THE RELEASE, NOT TO THIS MACHINE. These two fields were
+            # written as the author's own absolute paths and published to S3 that
+            # way, so a host whose release is mounted elsewhere, devapp at /data,
+            # found no manifest and the Regulatory network and Pathway panels
+            # reported both modalities missing while the data sat beside them.
+            # `scalable_app._absolutise_asset_paths` resolves a relative value
+            # against the release root on whatever host is serving it.
+            rel_bundle=str(dst.relative_to(root)) if dst.is_relative_to(root) else str(dst)
+            rel_evidence=(str(evidence.relative_to(root))
+                          if evidence.is_relative_to(root) else str(evidence))
+            asset['bundle_dir']=rel_bundle;asset['integrated_root']=rel_evidence
+            meta['scalable_viewer']['integrated_root']=rel_evidence
             comparisons=[];newassets={};template={}
             for entry in old['comparisons']:
                 if entry.get('kind')!='per_cell_state':continue
