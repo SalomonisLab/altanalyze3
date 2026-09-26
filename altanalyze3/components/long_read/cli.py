@@ -584,8 +584,82 @@ def run_blr_isoforms(args):
         str(args.metadata), exon_annot, str(args.ref_gff), str(args.genome_fasta),
         collapse_method=getattr(args, "collapse_method", "wta"), force_recollapse=True,
         min_total=int(getattr(args, "min_total", 3)),
+        sample_collapse=bool(getattr(args, "sample_collapse", False)),
+        tier1_dir=(str(args.tier1_dir) if getattr(args, "tier1_dir", None) else None),
+        reuse_tier1=bool(getattr(args, "reuse_tier1", False)),
     )
     logging.info("blr-isoforms: collapse catalog + combined.gff.gz + translation complete.")
+
+
+def run_blr_translate(args):
+    """Translate an EXISTING gff-output/combined.gff.gz into ORF / transcript / protein FASTAs.
+
+    A resume, not a recompute. Reads the catalog and molecule table the collapse already wrote and
+    runs the same pipeline.translate_combined the collapse itself calls, so the products are
+    identical to the ones a full `blr-isoforms` would have written. Nothing is re-extracted,
+    re-downloaded or re-collapsed.
+
+    Use it when translation failed (wrong assembly, missing Biopython, killed job) but the catalog
+    is sound, or to re-translate a finished catalog against a different reference GFF.
+    """
+    from altanalyze3.components.long_read.isoform_collapse import pipeline as collapse
+    from altanalyze3.components.long_read import io_utils as _io
+
+    gff_dir = os.path.abspath(str(args.gff_output))
+    if not os.path.isdir(gff_dir):
+        raise SystemExit(f"Not a directory: {gff_dir}")
+
+    combined = _io.resolve(os.path.join(gff_dir, "combined.gff"), missing_ok=True) or \
+               _io.resolve(os.path.join(gff_dir, "combined.gff.gz"), missing_ok=True)
+    if not combined:
+        raise SystemExit(f"No combined.gff[.gz] in {gff_dir}. Run blr-isoforms first.")
+
+    ta = _io.resolve(os.path.join(gff_dir, "transcript_associations.txt"), missing_ok=True)
+    if not ta:
+        raise SystemExit(f"No transcript_associations.txt[.gz] in {gff_dir}; "
+                         f"translation needs it to map isoform -> gene.")
+
+    logging.info("blr-translate: catalog %s (%s bytes)", combined, f"{os.path.getsize(combined):,}")
+    logging.info("blr-translate: molecule table %s", ta)
+    collapse.translate_combined(gff_dir, combined, ta, str(args.genome_fasta),
+                                ref_gff=str(args.ref_gff) if args.ref_gff else None,
+                                log=logging.info)
+    logging.info("blr-translate: complete -> %s", gff_dir)
+
+
+def run_blr_tier1(args):
+    """Tier 1 for ONE library: reads -> exon-id structures, then the consensus fold.
+
+    This is the per-library unit an LSF array runs, one element per library, so stage 1 is parallel
+    across all libraries instead of 12-at-a-time inside the collapse job. Every element writes into
+    the SAME --tier1_dir; the collapse job then reads those tables with --reuse_tier1.
+    """
+    import altanalyze3.components.long_read.isoform_automate as isoa
+    from altanalyze3.components.long_read.isoform_collapse import pipeline as collapse
+
+    sample_dict = isoa.import_metadata(str(args.metadata), include_hashed_samples=True)
+    wanted = str(args.library)
+    entry = None
+    for uid, libs in sample_dict.items():
+        for s in libs:
+            if s["library"] == wanted:
+                entry = s
+                break
+    if entry is None:
+        raise SystemExit(f"library {wanted!r} is not in {args.metadata}")
+
+    ta = os.path.join(os.path.dirname(str(entry["gff"])), "gff-output", "transcript_associations.txt")
+    tier1_dir = os.path.abspath(str(args.tier1_dir))
+    os.makedirs(tier1_dir, exist_ok=True)
+
+    sample, path = collapse._tier1_one_sample((
+        wanted, ta, tier1_dir,
+        bool(getattr(args, "sample_collapse", False)),
+        (str(args.enst_cache) if getattr(args, "enst_cache", None) else None),
+        getattr(args, "collapse_method", "wta"),
+        bool(getattr(args, "reuse", False)),
+    ))
+    logging.info("blr-tier1: %s -> %s", sample, path)
 
 
 def run_blr_quant(args):
@@ -613,8 +687,53 @@ def run_blr_quant(args):
     for uid, libs in sample_dict.items():
         isoa.export_sample_isoform(libs, gff_output_dir, barcode_sample_dict, uid=uid,
                                    collapse_method=getattr(args, "collapse_method", "wta"),
+                                   tier1_dir=(str(args.tier1_dir) if getattr(args, "tier1_dir", None) else None),
                                    compute_cpm=True)
     logging.info("blr-quant: per-sample isoform re-key + sample-level counts complete for %s.",
+                 args.sample if getattr(args, "sample", None) else "all samples")
+
+
+def run_blr_junctions(args):
+    """Bulk JUNCTION quantification (per sample): read GFF + molecule h5ad -> junction h5ad.
+
+    The single-cell workflow builds junctions as part of ``sclr``; bulk deliberately skipped them,
+    because bulk callers asked for isoform structures and isoform counts. This command adds them
+    for ANY long-read platform that the bulk extractor can read (PacBio CCS, ONT cDNA, ONT direct
+    RNA), using the SAME ``exportJunctionMatrix`` the single-cell path uses. No algorithm differs.
+
+    Writes, beside each library:
+      <library>-junction.h5ad   sparse CSR, cells x junctions. var_names carry the genomic
+                                coordinates (``GENE:E1.1-E2.1=chr1:123-456``), so the matrix is
+                                self-describing and needs no sidecar.
+      <library>-junction.txt.gz per-cluster pseudobulk of the same counts.
+
+    A uid with several BAM rows concatenates to one ``<uid>-junction.h5ad``, matching the isoform
+    path's multi-BAM behaviour.
+
+    Requires ``blr`` to have run (the read GFF and molecule h5ad must exist). Independent of
+    ``blr-isoforms``: junctions are counted from the reads, not from the collapsed catalog, so this
+    can run before, after or in parallel with the collapse.
+    """
+    import altanalyze3.components.long_read.isoform_automate as isoa
+    import altanalyze3.components.long_read.isoform_matrix as iso
+    import altanalyze3.components.long_read.bulk_longread as blk
+    if getattr(args, "force", False):
+        os.environ["ALTANALYZE3_FORCE_OVERWRITE"] = "1"
+
+    species = args.species
+    meta_dir = os.path.dirname(os.path.abspath(str(args.metadata))) or os.getcwd()
+    exon_annot = _resolve_default(getattr(args, "exon_annot", None), species, "exon_annot", meta_dir)
+
+    sample_dict = isoa.import_metadata(str(args.metadata), include_hashed_samples=True)
+    blk.assert_extract_complete(sample_dict)
+    if getattr(args, "sample", None):
+        sample_dict = _subset_metadata_to_sample(sample_dict, args.sample)
+
+    annot = blk.bulk_annotation_path(args.metadata, getattr(args, "cell_annot", None))
+    barcode_sample_dict = iso.import_barcode_clusters([annot])
+    for uid, libs in sample_dict.items():
+        isoa.export_sample_junctions(libs, exon_annot, barcode_sample_dict, uid=uid)
+    logging.info("blr-junctions: per-sample junction h5ad + pseudobulk complete for %s.",
                  args.sample if getattr(args, "sample", None) else "all samples")
 
 

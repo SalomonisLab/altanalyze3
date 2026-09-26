@@ -8,6 +8,7 @@
 - **10x Matrix Market directories** containing `matrix.mtx[.gz]`, `barcodes.tsv[.gz]`, and `features/genes.tsv[.gz]`
 - **Existing `.h5ad`** objects (skips raw file assembly and QC if already processed)
 - Mixed batches of the above; each run is tagged with a sample and group identifier automatically
+- **altanalyze3 sparse stream** (`--sparse_stream`): a cells x genes CSR matrix, names and cell annotations read from a pipe or file, so no intermediate `.h5ad` or `.mtx` is written. `sparse_stream.py` defines the layout and checks it; `sparse_stream_from_seurat.R` streams a Seurat assay (see "Streaming a Seurat object")
 
 ---
 
@@ -25,6 +26,10 @@ These switches cover the typical alignment workflow. Defaults are shown in paren
 | `--export_h5ad` | Write the QC-filtered, normalized AnnData object (`combined_qc_normalized.h5ad`). |
 | `--cptt` | Export a dense log-normalized expression matrix (`CPTT_matrix.txt`, genes × cells/metacells). |
 | `--metacell-align` | Aggregate cells into metacells prior to alignment; helpful for very large or noisy datasets. |
+| `--sparse_stream` | Read the input from an altanalyze3 sparse stream: a path, a named pipe, or `-` for standard input. An obs column `Library` sets the ambient correction unit. Replaces `--h5dir` and `--h5ad`. |
+| `--pseudobulk_sample_col` | After alignment, sum the aligned cells into sample x cell-state pseudobulks with `aggregate.pseudobulk_h5ad` (`build_pseudobulk_from_adata`), using this obs column as the sample. Writes `pseudobulk_counts.h5ad` and no single-cell h5ad. |
+| `--pseudobulk_min_cells` (10) | Minimum cells per pseudobulk. |
+| `--pseudobulk_layers` | Comma-separated extra layers to sum, for example `soupx_raw` for the uncorrected counts after `--ambient_correct_cutoff`. |
 
 > **Tip:** Provide either `--h5dir` or `--h5ad`. If both are supplied, the explicit `.h5ad` takes precedence.
 
@@ -77,6 +82,22 @@ When `--metacell-align` is active, the following knobs control metacell generati
 | `combined_with_umap_and_markers.h5ad` | `--save_adata` or `--generate_umap` | Annotated AnnData containing UMAP coordinates, optional Leiden labels, and marker rankings. |
 | `metacells.h5ad` | `--metacell-align` | AnnData describing generated metacells plus `uns["metacell_membership"]` for barcode → metacell mapping. |
 | `logs/cellHarmony-lite_<timestamp>.log` | Always | Execution log capturing console output and command-line parameters for reproducibility. |
+| `pseudobulk_counts.h5ad` | `--pseudobulk_sample_col` | Sample x cell-state pseudobulks: summed `layers["counts"]`, `X` = counts divided by each pseudobulk's total, one summed layer per `--pseudobulk_layers` name. |
+
+### Streaming a Seurat object
+R reads the RDS and writes the dgCMatrix slots unchanged; cellHarmony reads them from the pipe:
+
+```bash
+Rscript altanalyze3/components/cellHarmony/sparse_stream_from_seurat.R \
+    --zip archive.zip --member seurat_object.RDS --assay RNA --slot counts \
+    --obs-cols sample --library-col capture \
+  | python -m altanalyze3.components.cellHarmony.cellHarmony_lite --sparse_stream - \
+    --refdir Hs-MarrowAtlas-L3M.txt --outdir out --ambient_correct_cutoff auto \
+    --pseudobulk_sample_col sample --pseudobulk_layers soupx_raw
+```
+
+The reader checks the magic, the trailer, the row pointers, the column index range, and each
+cell's sum against the total the producer sent, so a truncated or corrupt stream stops the run.
 
 All outputs are written to `--outdir` (default `output/`). Console logs summarise file loading, gene translation, QC filters, alignment statistics, and optional metacell construction.
 

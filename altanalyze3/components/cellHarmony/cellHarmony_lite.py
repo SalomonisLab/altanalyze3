@@ -266,7 +266,11 @@ def combine_and_align_h5(
     verbose_import=False,
     return_adata=False,
     reference_genes_only=False,
+    adata=None,
 ):
+    """``adata`` is an in-memory cells x genes AnnData, for example one read by
+    ``sparse_stream.read_sparse_stream``. It takes the same path as ``h5ad_file``: gene
+    translation, unique names, ambient correction, then QC. Pass one of the two, not both."""
     start_time = time.time()
     output_dir = os.path.abspath(output_dir)
     os.makedirs(output_dir, exist_ok=True)
@@ -411,12 +415,23 @@ def combine_and_align_h5(
               f"{corrected.shape} (cells x genes)")
         return corrected
 
-    if h5ad_file is not None:
-        if reference_genes_only:
+    if adata is not None and h5ad_file is not None:
+        raise ValueError("Pass an in-memory adata or an h5ad_file, not both.")
+    if adata is not None and reference_genes_only:
+        raise ValueError("reference_genes_only reads a subset of an h5ad file; it does not apply "
+                         "to an in-memory adata.")
+
+    if h5ad_file is not None or adata is not None:
+        if adata is not None:
+            adata_combined = adata
+            source_label = "in-memory AnnData"
+        elif reference_genes_only:
             adata_combined = _read_h5ad_reference_genes(h5ad_file, cellharmony_ref)
+            source_label = os.path.basename(h5ad_file)
         else:
             adata_combined = sc.read_h5ad(h5ad_file)
-        apply_gene_translation(adata_combined, translation_map, os.path.basename(h5ad_file))
+            source_label = os.path.basename(h5ad_file)
+        apply_gene_translation(adata_combined, translation_map, source_label)
         adata_combined.var_names_make_unique()
         print(f"reimported adata shape: {adata_combined.shape} (cells x genes)")
         adata_combined = _apply_ambient_correction(adata_combined)
@@ -1599,6 +1614,19 @@ if __name__ == '__main__':
     parser.add_argument('--concat_on_disk', action='store_true', help='Concatenate inputs on disk to reduce peak memory usage')
     parser.add_argument('--concat_batch_size', type=int, default=50, help='Batch size for on-disk concatenation (default: 50)')
     parser.add_argument('--verbose_import', action='store_true', help='Log per-sample import timings during input loading')
+    parser.add_argument('--sparse_stream', type=str, default=None,
+                        help="Read the cells x genes matrix from an altanalyze3 sparse stream "
+                             "(sparse_stream.py): a path, a named pipe, or - for standard input. "
+                             "An obs column 'Library' sets the ambient correction unit.")
+    parser.add_argument('--pseudobulk_sample_col', type=str, default=None,
+                        help="After alignment, sum the aligned cells into sample x cell-state "
+                             "pseudobulks (aggregate.pseudobulk_h5ad) with this obs column as the "
+                             "sample; writes pseudobulk_counts.h5ad and no single-cell h5ad.")
+    parser.add_argument('--pseudobulk_min_cells', type=int, default=10,
+                        help='Minimum cells per pseudobulk (default 10, as pseudobulk_h5ad).')
+    parser.add_argument('--pseudobulk_layers', type=str, default="",
+                        help="Comma-separated extra layers to sum, e.g. soupx_raw for the "
+                             "uncorrected counts after ambient correction.")
 
     args = parser.parse_args()
 
@@ -1640,16 +1668,21 @@ if __name__ == '__main__':
     concat_batch_size = args.concat_batch_size
     verbose_import = args.verbose_import
 
-    if h5ad_file:
+    sparse_stream = args.sparse_stream
+    if sparse_stream and (h5ad_file or h5_directory):
+        print("--sparse_stream replaces --h5dir and --h5ad; pass it alone.")
+        sys.exit(1)
+
+    if h5ad_file or sparse_stream:
         h5_files = []
     else:
         if not h5_directory:
-            print("No --h5dir or --h5ad provided.")
+            print("No --h5dir, --h5ad or --sparse_stream provided.")
             sys.exit()
         h5_files = get_h5_and_mtx_files(h5_directory)
 
     if len(h5_files) == 0:
-        if not h5ad_file:
+        if not (h5ad_file or sparse_stream):
             print("No compatible h5, h5ad or .mtx files identified")
             sys.exit()
 
@@ -1670,7 +1703,17 @@ if __name__ == '__main__':
     sys.stderr = Tee(stderr_orig, log_file)
 
     try:
-        combine_and_align_h5(
+        stream_adata = None
+        if sparse_stream:
+            from altanalyze3.components.cellHarmony.sparse_stream import read_sparse_stream
+            stream_start = time.time()
+            stream_adata = read_sparse_stream(sparse_stream)
+            print(f"[stream] read {stream_adata.n_obs:,} cells x {stream_adata.n_vars:,} genes "
+                  f"in {time.time() - stream_start:.1f}s")
+        pseudobulk_sample_col = args.pseudobulk_sample_col
+        result = combine_and_align_h5(
+            adata=stream_adata,
+            return_adata=bool(pseudobulk_sample_col),
             h5_files=h5_files,
             h5ad_file=h5ad_file,
             reference_genes_only=args.reference_genes_only,
@@ -1710,6 +1753,23 @@ if __name__ == '__main__':
             concat_batch_size=concat_batch_size,
             verbose_import=verbose_import
         )
+        if pseudobulk_sample_col:
+            from altanalyze3.components.aggregate.pseudobulk_h5ad import build_pseudobulk_from_adata
+            del stream_adata
+            _, aligned = result
+            ref_name = os.path.basename(cellharmony_ref)[:-4]
+            if pseudobulk_sample_col not in aligned.obs.columns:
+                raise KeyError(f"--pseudobulk_sample_col '{pseudobulk_sample_col}' is not an obs column; "
+                               f"obs holds {list(aligned.obs.columns)}")
+            build_pseudobulk_from_adata(
+                aligned,
+                cluster_col=ref_name,
+                sample_col=pseudobulk_sample_col,
+                output_h5ad=Path(output_dir) / "pseudobulk_counts.h5ad",
+                min_cells=args.pseudobulk_min_cells,
+                count_layer="counts",
+                extra_layers=[n.strip() for n in args.pseudobulk_layers.split(",") if n.strip()],
+            )
     finally:
         sys.stdout.flush()
         sys.stderr.flush()

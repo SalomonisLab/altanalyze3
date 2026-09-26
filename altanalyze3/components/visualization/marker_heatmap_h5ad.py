@@ -1,4 +1,26 @@
 #!/usr/bin/env python3
+"""Marker heatmap and MarkerFinder marker table.
+
+This IS the module the cellHarmony-web harness uses for MarkerFinder. It calls
+`generate_marker_heatmap_from_adata(..., marker_method="markerfinder")` at
+`altanalyze3/components/cellHarmony/flask/pipeline.py:1580`.
+`altanalyze3.components.cellHarmony.markerFinder` is imported nowhere in flask/ or webapp/.
+
+Two outputs, two different scopes:
+
+  `*_markers.tsv`   EVERY gene assigned to a population at rho > 0 and FDR <= 0.05.
+                    Not bounded by --top-n.
+  the heatmap       --top-n markers per cluster, because a figure with one row per
+                    assigned gene is unreadable.
+
+Before 2026-09-25 these were one object, so --top-n silently truncated the marker table too.
+
+Harness parameters, for matching a web run from the CLI:
+  RNA                 --top-n 50 --cells-per-cluster 100 --export-networks
+                      --network-top-n 1000 --skip-expression-tsv
+  imputed modalities  --top-n 5 --no-scaling-check --centroid-method mean
+  (pipeline.py:1580 and pipeline.py:598)
+"""
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
@@ -396,6 +418,12 @@ def _select_unique_markers(pvals_df, cluster_order, top_n, effect_df=None, pval_
             kind="mergesort",
         )
 
+    if top_n is None:
+        # Unique markers are NOT capped. Every gene assignable to a population at rho > 0 and
+        # FDR <= pval_threshold is assigned (Nathan's directive, 2026-09-25). Capping here
+        # silently discarded genes that met the threshold and wrote no record of them.
+        # The heatmap takes its own top_n subset at the call site.
+        return markers.reset_index(drop=True)
     selected = markers.groupby("cluster", sort=False).head(top_n)
     return selected.reset_index(drop=True)
 
@@ -1704,21 +1732,29 @@ def generate_marker_heatmap_from_adata(
     )
 
     unique_select_started = time.perf_counter()
-    selected = _select_unique_markers(
+    # The marker TABLE keeps every assigned gene; the HEATMAP takes top_n per cluster, because
+    # a figure with one row per assigned gene is unreadable. The two were the same object, so
+    # the figure's size silently defined the table.
+    selected_all = _select_unique_markers(
         fdr_df,
         cluster_order,
-        top_n,
+        None,
         effect_df=effect_df,
         pval_threshold=pval_threshold,
     )
-    print(f"[INFO] Selected {selected.shape[0]} markers after FDR/effect filtering.")
+    selected = (
+        selected_all.groupby("cluster", sort=False).head(top_n).reset_index(drop=True)
+        if top_n is not None else selected_all
+    )
+    print(f"[INFO] Assigned {selected_all.shape[0]} unique markers after FDR/effect filtering "
+          f"(written to the marker TSV); {selected.shape[0]} go to the heatmap (top_n={top_n}).")
     _log_step_timing(
         "marker_heatmap.select_unique_markers",
         unique_select_started,
         timings=timings,
         key="select_unique_markers",
     )
-    if selected.empty:
+    if selected_all.empty:
         raise NoMarkersSelectedError("No markers were selected. Check inputs and parameters.")
 
     redundant_select_started = time.perf_counter()
@@ -1839,7 +1875,7 @@ def generate_marker_heatmap_from_adata(
     stat_genes = pd.Index(
         pd.concat(
             [
-                selected["gene"].astype(str),
+                selected_all["gene"].astype(str),
                 redundant_selected["gene"].astype(str),
             ],
             ignore_index=True,
@@ -1863,7 +1899,7 @@ def generate_marker_heatmap_from_adata(
     marker_stats = _compute_marker_stats(
         adata,
         cluster_key,
-        selected,
+        selected_all,
         fdr_df,
         use_raw,
         layer,
@@ -2082,7 +2118,14 @@ def _load_text_expression_inputs(matrix_tsv, groups_tsv, cluster_key):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Create a marker heatmap from an h5ad file or text expression inputs using unique markers per cluster."
+        description=(
+            "Marker heatmap and MarkerFinder marker table. This is the module the "
+            "cellHarmony-web harness uses for MarkerFinder (flask/pipeline.py:1580). "
+            "The *_markers.tsv carries every gene assigned to a population at rho > 0 and "
+            "FDR <= 0.05; --top-n bounds the HEATMAP only. Harness values: RNA --top-n 50 "
+            "--cells-per-cluster 100 --export-networks --network-top-n 1000; imputed "
+            "modalities --top-n 5 --no-scaling-check --centroid-method mean."
+        )
     )
     input_group = parser.add_mutually_exclusive_group(required=True)
     input_group.add_argument("--h5ad", help="Input h5ad file.")
@@ -2261,6 +2304,17 @@ def main():
         default=None,
         help="Comma-delimited h5ad obs columns to render as compact bottom covariate bars.",
     )
+    parser.add_argument(
+        "--centroid-method",
+        choices=["log2_cp10k", "mean"],
+        default="log2_cp10k",
+        help=(
+            "Centroid statistic. 'log2_cp10k' is a pseudobulk CPM and is defined only for "
+            "non-negative counts. 'mean' keeps signed per-cluster means and is what the "
+            "cellHarmony-web harness passes for imputed modalities such as dsb ADT, lipid and "
+            "GRN (flask/pipeline.py:601), whose values are legitimately negative."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=0, help="Random seed for cell sampling.")
     args = parser.parse_args()
     if args.render_from_cache and (args.markers_only or args.skip_heatmap_render):
@@ -2397,6 +2451,7 @@ def main():
             layer=layer,
             scale_data=args.scale_data,
             scale_factor=args.scale_factor,
+            centroid_method=args.centroid_method,
             validate_scaling=not args.no_scaling_check,
             cells_per_cluster=args.cells_per_cluster,
             seed=args.seed,

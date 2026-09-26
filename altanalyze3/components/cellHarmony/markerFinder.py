@@ -506,7 +506,11 @@ def _select_unique_markers(
 
     markers_df = pd.concat(frames, ignore_index=True)
     markers_df = markers_df.sort_values(["cluster", "direction", "score"], ascending=[True, True, False])
-    markers_df = markers_df.groupby(["cluster", "direction"]).head(top_n)
+    if top_n is not None:
+        # Unique markers are NOT capped when top_n is None. Every gene assignable to a
+        # population at |rho| >= rho_threshold is assigned (Nathan's directive, 2026-09-25).
+        # Capping here discarded genes that met the threshold and wrote no record of them.
+        markers_df = markers_df.groupby(["cluster", "direction"]).head(top_n)
     markers_df["rank"] = (
         markers_df.groupby(["cluster", "direction"])["score"]
         .rank(method="first", ascending=False)
@@ -704,14 +708,23 @@ def find_markers_from_adata(
         )
 
     r_df, p_df = marker_finder(expression_matrix, clusters.tolist(), gene_names=var_names)
-    markers_df = _select_unique_markers(
+    # The marker TABLE keeps every assigned gene; the HEATMAP takes n_markers per cluster,
+    # because a figure with one row per assigned gene is unreadable. These were one object,
+    # so the figure's size silently defined the table.
+    markers_df_all = _select_unique_markers(
         r_df=r_df,
         p_df=p_df,
         direction=direction,
         rho_threshold=rho_threshold,
-        top_n=n_markers,
+        top_n=None,
         min_markers_per_cluster=min_markers_per_cluster,
     )
+    markers_df = (
+        markers_df_all.groupby(["cluster", "direction"]).head(n_markers).reset_index(drop=True)
+        if n_markers is not None else markers_df_all
+    )
+    print("[MarkerFinder] Assigned %d unique markers (written to %s); %d go to the heatmap "
+          "(top_n=%s)." % (len(markers_df_all), marker_table_filename, len(markers_df), n_markers))
 
     resolved_order = _resolve_cluster_order(clusters, adata, lineage_order_key, cluster_order)
     heatmap_df, ordered_markers_df = _build_heatmap_dataframe(
@@ -727,7 +740,7 @@ def find_markers_from_adata(
         if output_dir is None:
             raise ValueError("output_dir must be provided when write_outputs=True.")
         output_dir = _ensure_output_dir(output_dir)
-        markers_df.to_csv(os.path.join(output_dir, marker_table_filename), sep="\t", index=False)
+        markers_df_all.to_csv(os.path.join(output_dir, marker_table_filename), sep="\t", index=False)
         heatmap_df.to_csv(os.path.join(output_dir, heatmap_table_filename), sep="\t")
         if not heatmap_df.empty and not ordered_markers_df.empty:
             _plot_marker_heatmap(

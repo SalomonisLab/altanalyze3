@@ -138,21 +138,28 @@ def write_summary(outdir, *, collapse_method, min_total, n_structures, catalog, 
     # ---- 2. overall counts (+ per-sample final-isoform / read conservation) ----
     n_kept = len(catalog)
     n_removed = n_structures - n_kept
-    tot_raw = sum(r[3] for r in h5ad_results) if h5ad_results else 0
-    tot_final = sum(r[4] for r in h5ad_results) if h5ad_results else 0
+    # The read totals come from stage 3 (the per-sample re-key). In the 4-phase cluster mode the
+    # collapse runs with write_h5ad=False and stage 3 happens LATER, in separate jobs, so
+    # h5ad_results is empty and these two totals are UNDEFINED here. Report them as NA.
+    # Writing 0 would state that the study has no reads, which is false, and a reader cannot
+    # tell an absent measurement from a measured zero.
+    have_reads = bool(h5ad_results)
+    tot_raw = sum(r[3] for r in h5ad_results) if have_reads else None
+    tot_final = sum(r[4] for r in h5ad_results) if have_reads else None
     overall = [
         ["collapse_method", collapse_method],
         ["min_total_filter", min_total],
-        ["total_reads_all_samples", tot_raw],
-        ["total_reads_retained_final", tot_final],
+        ["total_reads_all_samples", tot_raw if have_reads else "NA (per-sample re-key not run in this job)"],
+        ["total_reads_retained_final", tot_final if have_reads else "NA (per-sample re-key not run in this job)"],
         ["total_unique_isoform_structures", n_structures],
         ["collapsed_isoforms_kept", n_kept],
         ["isoforms_removed_low_detection", n_removed],
     ]
     _write_tsv(os.path.join(sdir, "overall_counts.tsv"), ["metric", "value"], overall)
-    # overall bar (the count metrics, not method/min_total)
-    obar = [("total reads", tot_raw), ("reads retained", tot_final),
-            ("unique structures", n_structures), ("collapsed kept", n_kept),
+    # overall bar (the count metrics, not method/min_total). The read bars are drawn only when
+    # they were measured; an undefined total gets no bar rather than a bar of height zero.
+    obar = ([("total reads", tot_raw), ("reads retained", tot_final)] if have_reads else []) + \
+           [("unique structures", n_structures), ("collapsed kept", n_kept),
             ("removed (<min_total)", n_removed)]
     _bar(os.path.join(sdir, "overall_counts.pdf"), [k for k, _ in obar],
          [v for _, v in obar], f"Overall isoform counts (method={collapse_method}, min_total={min_total})",

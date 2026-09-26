@@ -17,6 +17,32 @@ def _open_text(path):
 def normalize_chromosome_name(chromosome):
     return chromosome.replace('chr', '')
 
+
+def load_genome_dict(genome_fasta):
+    """Load a genome FASTA into a dict keyed under BOTH chromosome-naming conventions.
+
+    GRCh38 ships under two incompatible conventions and both are in routine use:
+      UCSC / ENCODE / GENCODE   >chr1  AC:CM000663.2 ...
+      Ensembl                   >1 dna:chromosome chromosome:GRCh38:1:1:248956422:1 REF
+
+    ``normalize_chromosome_name`` strips ``chr`` before the lookup, so a chr-PREFIXED genome
+    used to raise KeyError on every single transcript. Measured 2026-09-21 on the ENCODE atlas:
+    6,415,129 isoforms produced 0 proteins and three empty FASTAs, against a genome whose only
+    fault was being named the way ENCODE names it.
+
+    Keying every record under its own name, its stripped name and its chr-prefixed name makes
+    the lookup work whichever convention the caller's GFF and FASTA use, WITHOUT substituting a
+    different genome build. Swapping assemblies to dodge a naming mismatch would silently change
+    the sequence basis of the analysis.
+    """
+    raw = SeqIO.to_dict(SeqIO.parse(genome_fasta, "fasta"))
+    out = {}
+    for name, record in raw.items():
+        bare = name[3:] if name[:3].lower() == 'chr' else name
+        for key in (name, bare, f"chr{bare}"):
+            out.setdefault(key, record)
+    return out
+
 def parse_gff(gff_file):
     transcripts = {}
     with _open_text(gff_file) as file:
@@ -105,7 +131,7 @@ def _tx_pos_to_genomic(exons_sorted, strand, tx_pos):
 
 
 def extract_cds_and_protein(transcripts, genome_fasta, ref_first_exons=None, query_transcript_to_gene={}):
-    genome_seq = SeqIO.to_dict(SeqIO.parse(genome_fasta, "fasta"))
+    genome_seq = load_genome_dict(genome_fasta)
     cds_records = []
     transcript_records = []
     protein_records = []
@@ -374,8 +400,9 @@ def extract_splice_sequences(input_file, genome_fasta, output_file="splice_seque
     """
     # Load genome sequences
     # Load genome sequences and normalize chromosome names by removing 'chr' prefix if present
-    genome_seq = SeqIO.to_dict(SeqIO.parse(genome_fasta, "fasta"))
-    genome_seq = {f"chr{k.lstrip('chr')}": v for k, v in genome_seq.items()}
+    # load_genome_dict keys every record under both conventions. The previous line here used
+    # k.lstrip('chr'), a CHARACTER-SET strip: a contig named 'hs37d5' became 'chrs37d5'.
+    genome_seq = load_genome_dict(genome_fasta)
     results = []
 
     # Function to parse each line and return chromosome, start, end, and strand

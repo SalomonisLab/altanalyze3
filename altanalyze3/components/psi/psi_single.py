@@ -4,8 +4,19 @@ import numpy as np
 from copy import deepcopy
 import argparse
 import warnings
-import aiofiles  # Asynchronous file I/O
 import asyncio   # For async handling
+
+# aiofiles is imported LAZILY, inside write_to_file, the ONE function that uses it.
+#
+# A module-level `import aiofiles` made this file unimportable wherever aiofiles is absent,
+# and importing this file is unavoidable: isoform_automate.py and utilities/parser.py both
+# import it at module level, so a missing aiofiles took down the WHOLE altanalyze3 CLI,
+# including the bulk long-read commands, which never compute PSI.
+# Measured on the CCHMC cluster module python3/3.12.3 (2026-09-21): pysam, anndata, h5py,
+# numpy, pandas, scipy, tqdm and biopython are all present; aiofiles is not. `altanalyze3 blr`
+# failed with ModuleNotFoundError before it read a single BAM.
+# Deferring the import keeps PSI behaviour identical where aiofiles exists and makes the
+# failure land at the point of use, with a message that says what to install, where it does not.
 from tqdm import tqdm  # For the progress bar
 
 # Chunk size and batch size
@@ -124,6 +135,14 @@ def calculate_psi_core(clique, uid, count, sample_columns):
 
 # Asynchronously write to file
 async def write_to_file(file_path, data, write_header):
+    try:
+        import aiofiles  # Asynchronous file I/O; only PSI needs it
+    except ImportError as exc:
+        raise ImportError(
+            "PSI output needs the 'aiofiles' package, which is not installed in this "
+            "environment. Every other altanalyze3 command runs without it. Install aiofiles "
+            "to compute PSI, or use a command that does not."
+        ) from exc
     async with aiofiles.open(file_path, 'a') as f:
         header = '\t'.join(data.columns) + '\n' if write_header else ''
         await f.write(header)
@@ -206,6 +225,15 @@ def run_psi(args):
         f"  min_reads={args.min_reads} min_denominator={args.min_denominator} "
         f"min_dpsi_range={args.min_dpsi_range} min_junction_reads={args.min_read}"
     )
+    # DEFAULT: chromosome-parallel PSI for h5ad input (identical output; see psi_parallel.py). Serial when
+    # ALTANALYZE3_SERIAL_PSI=1, for text input, or for a single-gene query.
+    if (str(args.junctions).endswith('.h5ad') and not args.query_gene
+            and os.environ.get('ALTANALYZE3_SERIAL_PSI', '0') != '1'):
+        from . import psi_parallel
+        psi_parallel.run_psi_parallel(str(args.junctions), str(args.output), min_read=args.min_read,
+                                      min_reads=args.min_reads, min_denominator=args.min_denominator,
+                                      min_dpsi_range=args.min_dpsi_range)
+        return
     asyncio.run(main(
         junction_path=str(args.junctions),
         query_gene=args.query_gene,

@@ -30,6 +30,7 @@ import logging
 from pathlib import Path
 
 from . import gff_process
+from . import io_utils as _io
 from . import isoform_automate as isoa
 from . import isoform_matrix as iso
 
@@ -78,8 +79,14 @@ def write_bulk_cell_annotation(sample_dict, out_dir, cluster_label=BULK_CLUSTER)
         for s in libs:
             bc = bulk_barcode(s['library'])
             rows.append(f"{bc}.{bc}\t{cluster_label}")
-    with open(path, 'w') as handle:
+    # ATOMIC. `blr --sample <uid>` rewrites this whole file from the FULL metadata, so a cluster
+    # fan-out runs one writer per sample against one path. Writing in place would let a reader
+    # see a truncated file, and two writers interleave. Every writer produces identical bytes, so
+    # a temp file plus os.replace (atomic on POSIX within a directory) makes the race harmless.
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, 'w') as handle:
         handle.write("\n".join(rows) + "\n")
+    os.replace(tmp, path)
     logging.info("bulk: wrote %d library cluster label(s) -> %s", len(rows), path)
     return path
 
@@ -100,9 +107,13 @@ def annotate_sample_structures(sample_dict, exon_annot, force=False):
         for s in libs:
             gff = str(s['gff'])
             ta = os.path.join(os.path.dirname(gff), 'gff-output', 'transcript_associations.txt')
-            if os.path.exists(ta) and os.path.getsize(ta) > 0 and not force:
-                logging.info("bulk: structures exist for %s, reusing %s", s['library'], ta)
-                produced[s['library']] = ta
+            # Phase 1 gzips this table (io_utils.compress), so the file on disk may be
+            # transcript_associations.txt OR transcript_associations.txt.gz. Resolve either form;
+            # testing only the uncompressed name re-annotated every library on every re-run.
+            existing = _io.resolve(ta, missing_ok=True)
+            if existing and os.path.getsize(existing) > 0 and not force:
+                logging.info("bulk: structures exist for %s, reusing %s", s['library'], existing)
+                produced[s['library']] = existing
                 continue
             logging.info("bulk: annotating exon structures for %s from %s", s['library'], gff)
             written = gff_process.consolidateLongReadGFFs(gff, exon_annot, mode='collapse')
@@ -180,7 +191,10 @@ def assert_extract_complete(sample_dict):
             gff = str(s['gff'])
             ta = os.path.join(os.path.dirname(gff), 'gff-output', 'transcript_associations.txt')
             for path in (gff, str(s['matrix']), ta):
-                if not os.path.exists(path):
+                # io_utils.exists resolves <path> OR <path>.gz. Phase 1 compresses
+                # transcript_associations.txt, so os.path.exists alone reported every completed
+                # sample as missing and blocked the collapse.
+                if not _io.exists(path):
                     missing.append(path)
     if missing:
         raise FileNotFoundError(

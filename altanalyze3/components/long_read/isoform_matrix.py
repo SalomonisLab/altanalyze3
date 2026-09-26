@@ -1,5 +1,6 @@
 import os, sys, time
 import csv
+import re
 import anndata as ad
 import pandas as pd
 import numpy as np
@@ -19,6 +20,7 @@ from ctypes import wintypes
 sys.path.insert(1, os.path.join(sys.path[0], '..'))
 from joblib import Parallel, delayed
 from anndata import AnnData, concat, read_h5ad
+from . import io_utils as _io
 
 
 """
@@ -162,19 +164,49 @@ def mtx_to_adata(int_folder, gene_is_index, feature, feature_col, barcode, barco
     return adata
 
 
+#: A 10x cell barcode is a nucleotide string (16 bp in current chemistries). The ``-1`` lane
+#: suffix and the reverse-complement transform are conventions of THAT namespace and of nothing
+#: else. A BULK long-read library has one pseudo-barcode equal to the library name (see
+#: ``resolve_barcode``'s ``default_barcode`` in bam/isoform_structure_extract.py), which is not a
+#: nucleotide string; appending ``-1`` to it, or reverse-complementing it, produces an identifier
+#: that matches no annotation. The minimum length keeps a short library name that happens to spell
+#: nucleotides (say a sample called "ACGT") out of the 10x namespace too.
+_TENX_BARCODE = re.compile(r'^[ACGTNacgtn]{8,}$')
+
+
+def is_cell_barcode(barcode):
+    """True when ``barcode`` follows the 10x cell-barcode convention (a nucleotide string).
+
+    Used to decide whether the ``-1`` lane suffix and the reverse-complement transform apply.
+    Any other convention -- a bulk library name, an ONT run id, a plate well -- is left verbatim,
+    which is what makes the junction and isoform paths work on non-single-cell input.
+    """
+    return bool(_TENX_BARCODE.match(str(barcode)))
+
+
 def h5ad_to_adata(h5ad_path, rev=False):
     """Import isoform h5ad files and match mtx_to_adata conventions.
 
-    Cell barcodes carry the standard ``-1`` lane suffix (added at BAM extraction by
+    10x cell barcodes carry the standard ``-1`` lane suffix (added at BAM extraction by
     ``resolve_barcode``; see isoform_structure_extract.py). ``ensure_barcode_suffix`` keeps that
-    convention for any input that lacks it, so barcodes stay consistent with the cellHarmony /
-    external annotations and the reverse-complement path.
+    convention for any 10x-style input that lacks it, so barcodes stay consistent with the
+    cellHarmony / external annotations and the reverse-complement path.
+
+    A NON-nucleotide barcode is returned verbatim. BULK long-read libraries carry one pseudo-cell
+    whose barcode IS the library name, and ``resolve_barcode`` deliberately does not suffix it
+    ("a library name is not a 10x barcode and the suffix would only break the barcode->annotation
+    join"). Suffixing it here contradicted that and made bulk junction quantification fail with
+    "0 of 1 matrix barcodes match any of 1 annotation barcodes".
     """
     adata = read_h5ad(h5ad_path)
     def ensure_barcode_suffix(barcode):
+        if not is_cell_barcode(barcode):
+            return barcode
         return barcode if '-' in barcode else f"{barcode}-1"
 
     def reverse_complement_barcode(barcode):
+        if not is_cell_barcode(barcode):
+            return barcode
         if '-' in barcode:
             return reverse_complement_seq(barcode)
         complement = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G', 'N': 'N'}
@@ -753,10 +785,13 @@ def pseudo_cluster_counts_optimized(sample, combined_adata, cell_threshold=0, co
 def just_return_dense_count_files(sample, compute_cpm=False):
     # Bypass the above function to regenerate the counts and CPM files
 
-    output_file = f"{sample}.txt"
+    # The per-sample pseudobulk exports are gzipped after they are written (io_utils.compress), so
+    # the file on disk is <sample>.txt OR <sample>.txt.gz. Return whichever exists; naming only the
+    # uncompressed form made the cross-sample concat fail on a completed run.
+    output_file = _io.resolve(f"{sample}.txt")
     if compute_cpm:
-        cpm_output_file = f"{sample}_cpm.txt"
-        isoform_ratio_file = f"{sample}_ratio.txt"
+        cpm_output_file = _io.resolve(f"{sample}_cpm.txt")
+        isoform_ratio_file = _io.resolve(f"{sample}_ratio.txt")
         return output_file, cpm_output_file, isoform_ratio_file
     else:
         return output_file
@@ -773,7 +808,7 @@ def _sample_prefix(sample_file):
     return os.path.join(os.path.dirname(sample_file), _sample_stem(sample_file))
 
 def _read_pseudobulk_header(path):
-    with open(path, newline='') as handle:
+    with _io.smart_open(path, 'rt', newline='') as handle:
         reader = csv.reader(handle, delimiter='\t')
         header = next(reader, None)
     if not header or len(header) < 2:
@@ -784,7 +819,7 @@ def _collect_feature_order(paths):
     feature_to_row = {}
     features = []
     for path in paths:
-        with open(path, newline='') as handle:
+        with _io.smart_open(path, 'rt', newline='') as handle:
             reader = csv.reader(handle, delimiter='\t')
             _ = next(reader, None)
             for row in reader:
@@ -966,6 +1001,141 @@ def write_pseudobulk_h5ad_from_memmap(memmap_data, features, columns, full_path,
     del full, X
     return
 
+# ---------------------------------------------------------------------------------------------------
+# SPARSE cross-sample pseudobulk combine (DEFAULT since 2026-09-25).
+#
+# The dense path below fills a features x columns float32 memmap (163.8 GB for KINNEX-5 junctions:
+# 18,893,806 junctions x 2,168 columns, 0.9% non-zero), then converts it to CSR -- almost all of its I/O
+# moves zeros. The sparse path builds the SAME CSR directly from each per-sample file's non-zero cells:
+#   * value parsing identical to _fill_memmap_from_files (pd.read_csv defaults, float32);
+#   * feature order identical to _collect_feature_order (first occurrence over the files in order);
+#   * a feature repeated inside one file takes its LAST row's values (the dense row assignment);
+#   * NaN cells are kept, as the dense memmap stored them (NaN != 0);
+#   * h5ad layout and filter identical to write_pseudobulk_h5ad_from_memmap / _keep_mask_from_memmap.
+# Validated identical (obs, var, every value) to the dense path; see
+# MDS-AML-KINNEX-5/junction_combine_test_3samples/ and the sparse-default validation folder.
+# ALTANALYZE3_DENSE_COMBINE=1 restores the legacy dense path (kept unchanged below as the fallback).
+# ALTANALYZE3_COMBINE_WORKERS sets the reader threads (default min(8, cpu_count)).
+# ---------------------------------------------------------------------------------------------------
+def _dense_combine_requested():
+    return os.environ.get("ALTANALYZE3_DENSE_COMBINE", "0") == "1"
+
+
+def _read_pseudobulk_nonzero(path):
+    """One per-sample pseudobulk (features x columns text, .txt or .txt.gz) -> non-zero cells.
+    Returns (union_order_features, value_features, row_idx, col_idx, values)."""
+    first = pd.read_csv(path, sep='\t', nrows=0).columns[0]
+    df = pd.read_csv(path, sep='\t', dtype={first: str})
+    feats = df.iloc[:, 0].astype(str).to_numpy()
+    order_feats = pd.unique(feats)                           # first-occurrence order (union rule)
+    last = ~pd.Series(feats).duplicated(keep='last').to_numpy()
+    if not last.all():
+        print(f"[sparse-combine] {path}: {int((~last).sum())} repeated feature rows -> last row kept (dense rule)")
+    vals = df.iloc[:, 1:].to_numpy(dtype=np.float32, copy=False)[last]
+    r, c = np.nonzero(vals)
+    return order_feats, feats[last], r, c.astype(np.int32), vals[r, c]
+
+
+def _combine_workers(n_files):
+    try:
+        w = int(os.environ.get("ALTANALYZE3_COMBINE_WORKERS", "0"))
+    except ValueError:
+        w = 0
+    if w <= 0:
+        w = min(8, os.cpu_count() or 1)
+    return max(1, min(w, n_files))
+
+
+def _sparse_matrix_from_files(file_info, path_key, union=None):
+    """Read every sample's <path_key> file (threads) and assemble one CSR (features x total columns).
+    union=None -> build the feature order from these files (the counts files); else map onto it."""
+    from concurrent.futures import ThreadPoolExecutor
+    infos = [i for i in file_info if i.get(path_key)]
+    t0 = time.time()
+    with ThreadPoolExecutor(max_workers=_combine_workers(len(infos))) as ex:
+        parts = list(ex.map(lambda i: _read_pseudobulk_nonzero(i[path_key]), infos))
+    print(f"[sparse-combine] read {len(parts)} {path_key} files in {time.time() - t0:.1f}s", flush=True)
+    if union is None:
+        union = pd.Index(np.concatenate([p[0] for p in parts])).drop_duplicates(keep='first')
+    total_cols = sum(i["ncols"] for i in file_info)
+    rows, cols, vals = [], [], []
+    for info, (_, vfeats, r, c, v) in zip(infos, parts):
+        g = union.get_indexer(vfeats)
+        if (g < 0).any():
+            missing = vfeats[g < 0][:3]
+            raise KeyError(f"{info[path_key]}: features absent from the combined feature order, e.g. {list(missing)}")
+        rows.append(g[r]); cols.append(c.astype(np.int64) + info["col_offset"]); vals.append(v)
+    del parts
+    rows = np.concatenate(rows) if rows else np.zeros(0, np.int64)
+    cols = np.concatenate(cols) if cols else np.zeros(0, np.int64)
+    vals = np.concatenate(vals) if vals else np.zeros(0, np.float32)
+    Xvar = csr_matrix((vals, (rows, cols)), shape=(len(union), total_cols), dtype=np.float32)
+    del rows, cols, vals
+    print(f"[sparse-combine] {path_key}: {Xvar.shape[0]:,} features x {Xvar.shape[1]:,} columns, nnz={Xvar.nnz:,}", flush=True)
+    return union, Xvar
+
+
+def _keep_mask_from_sparse(Xvar, columns, min_group_size):
+    """Same rule as _keep_mask_from_memmap: keep a feature if ANY cell type has >= min_group_size
+    columns with value > 0.1."""
+    cell_types = np.array([c.split('.')[0] for c in columns])
+    uct = np.unique(cell_types)
+    onehot = csr_matrix((np.ones(len(columns), dtype=np.int32),
+                         (np.arange(len(columns)), np.searchsorted(uct, cell_types))),
+                        shape=(len(columns), len(uct)))
+    B = Xvar.copy()
+    B.data = (B.data > 0.1).astype(np.int32)
+    B.eliminate_zeros()
+    return np.asarray(((B @ onehot) >= min_group_size).sum(axis=1)).ravel() > 0
+
+
+def write_pseudobulk_h5ad_from_sparse(Xvar, features, columns, full_path, filtered_path=None,
+                                      cell_type_order=None, min_group_size=3):
+    """Sparse twin of write_pseudobulk_h5ad_from_memmap: same obs (cluster_sample), var (feature),
+    X (CSR, obs x var, float32), gzip, and the same filtered subset + column reorder."""
+    X = Xvar.T.tocsr()
+    obs = pd.DataFrame(index=pd.Index(list(columns), name='cluster_sample'))
+    var = pd.DataFrame(index=pd.Index(list(features), name='feature'))
+    full = ad.AnnData(X=X, obs=obs, var=var)
+    full.write_h5ad(full_path, compression='gzip')
+    if filtered_path is not None:
+        keep = _keep_mask_from_sparse(Xvar, columns, min_group_size)
+        out_idx = _column_reorder_indices(columns, cell_type_order)
+        filt = full[out_idx, :][:, keep].copy()
+        filt.write_h5ad(filtered_path, compression='gzip')
+        del filt
+    del full, X
+
+
+def _concatenate_pseudobulks_sparse(file_info, column_names, collection_name, compute_cpm,
+                                    cluster_order, min_group_size):
+    """Sparse body of concatenate_h5ad_and_compute_pseudobulks_optimized: writes the same h5ads and
+    returns the same values as the dense body."""
+    t0 = time.time()
+    union, Xc = _sparse_matrix_from_files(file_info, "pseudo_file")
+    write_pseudobulk_h5ad_from_sparse(
+        Xc, union, column_names, f'{collection_name}_combined_pseudo_cluster_counts.h5ad',
+        filtered_path=f'{collection_name}_combined_pseudo_cluster_counts-filtered.h5ad',
+        cell_type_order=cluster_order, min_group_size=min_group_size)
+    del Xc
+    _trim_memory()
+    combined_pseudo_file = f'{collection_name}_combined_pseudo_cluster_counts.txt'
+    if compute_cpm:
+        for key, stem in (("cpm_file", "cpm"), ("ratio_file", "ratio")):
+            _, Xm = _sparse_matrix_from_files(file_info, key, union=union)
+            write_pseudobulk_h5ad_from_sparse(
+                Xm, union, column_names, f'{collection_name}_combined_pseudo_cluster_{stem}.h5ad',
+                filtered_path=f'{collection_name}_combined_pseudo_cluster_{stem}-filtered.h5ad',
+                cell_type_order=cluster_order, min_group_size=min_group_size)
+            del Xm
+            _trim_memory()
+        print(f"[sparse-combine] {collection_name}: done in {time.time() - t0:.1f}s", flush=True)
+        return (combined_pseudo_file, f'{collection_name}_combined_pseudo_cluster_cpm.txt',
+                f'{collection_name}_combined_pseudo_cluster_ratio.txt')
+    print(f"[sparse-combine] {collection_name}: done in {time.time() - t0:.1f}s", flush=True)
+    return combined_pseudo_file
+
+
 def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_name='junction', compute_cpm=False, cpm_threshold=1, only_import_existing=False,
                                                        fused_filter=False, cluster_order=None, min_group_size=3):
     # only_import_existing=True: the per-sample pseudobulk <sample>.txt files were already produced
@@ -985,8 +1155,10 @@ def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_
             sample_prefix = _sample_prefix(sample_file)
             expected_path = f"{sample_prefix}.txt"
             print (expected_path)
-            if not os.path.exists(expected_path):
-                raise FileNotFoundError(f"Missing pseudobulk file: {expected_path}")
+            # _io.exists resolves <path> OR <path>.gz: phase 3 gzips these exports.
+            if not _io.exists(expected_path):
+                raise FileNotFoundError(
+                    f"Missing pseudobulk file: {expected_path} (neither it nor {expected_path}.gz)")
 
     # Process each sample file
     _memtrace("concat_start")
@@ -1048,6 +1220,10 @@ def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_
     if not file_info:
         raise ValueError("No pseudobulk files were generated.")
 
+    if not _dense_combine_requested():
+        # DEFAULT: sparse combine (identical outputs, no dense memmap). Dense path below = fallback.
+        return _concatenate_pseudobulks_sparse(file_info, column_names, collection_name, compute_cpm,
+                                               cluster_order, min_group_size)
     feature_to_row, features = _collect_feature_order([info["pseudo_file"] for info in file_info])
     _memtrace("after_collect_features")
 

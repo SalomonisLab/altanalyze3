@@ -379,7 +379,7 @@ def export_junction_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict):
 
 def export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, reference_gff, genome_fasta,
                         deleteGFF=False, collapse_method='wta', force_recollapse=False, write_h5ad=True,
-                        min_total=3):
+                        min_total=3, sample_collapse=False, tier1_dir=None, reuse_tier1=False):
     """Cross-sample isoform consolidation + per-sample isoform h5ad + protein prediction.
 
     Uses the memory/compute-optimized ``isoform_collapse`` pipeline instead of the legacy combined
@@ -432,7 +432,8 @@ def export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, refe
             ref=str(ensembl_exon_dir),
             write_h5ad=write_h5ad, genome_fasta=genome_fasta, ref_gff=reference_gff,
             enst_cache=enst_cache, barcode_clusters=barcode_sample_dict,
-            collapse_method=collapse_method,
+            collapse_method=collapse_method, sample_collapse=sample_collapse,
+            tier1_dir=tier1_dir, reuse_tier1=reuse_tier1,
         )
         # The collapse's stage3 already wrote each "<library>-isoform.h5ad" (keyed on the final clean
         # isoform set) next to the sample, plus protein_summary.txt / *sequences.fasta from the final
@@ -838,7 +839,7 @@ def export_sample_junctions(sample_entry_list, ensembl_exon_dir, barcode_sample_
 
 
 def export_sample_isoform(sample_entry_list, gff_output_dir, barcode_sample_dict, uid=None,
-                          collapse_method='wta', compute_cpm=True):
+                          collapse_method='wta', compute_cpm=True, tier1_dir=None):
     """P4 per-sample: re-key ONE uid's molecule h5ad onto the FINAL collapse catalog (loaded from disk
     in gff_output_dir) and build its per-sample isoform pseudobulk. Independent of the collapse
     process memory -- reads FINAL_structure_to_exemplar(.tsv/_soft.tsv). Handles multi-BAM uid by
@@ -851,6 +852,7 @@ def export_sample_isoform(sample_entry_list, gff_output_dir, barcode_sample_dict
         bc = barcode_sample_dict.get(s['library'])
         collapse.rekey_one_sample(s['library'], matrix, ta, str(gff_output_dir),
                                   barcode_clusters=bc, collapse_method=collapse_method,
+                                  tier1_dir=tier1_dir,
                                   write_dir=None)  # writes <matrix_stem>-isoform.h5ad next to sample
         out_h5ads.append(f"{matrix[:-5] if matrix.endswith('.h5ad') else matrix}-isoform.h5ad")
     if len(sample_entry_list) > 1:
@@ -988,13 +990,16 @@ def combine_junctions(metadata_file, barcode_cluster_dirs, ensembl_exon_dir, min
 
 
 def build_isoform_catalog(metadata_file, ensembl_exon_dir, gencode_gff, genome_fasta,
-                          collapse_method='wta', force_recollapse=True, min_total=3):
+                          collapse_method='wta', force_recollapse=True, min_total=3,
+                          sample_collapse=False, tier1_dir=None, reuse_tier1=False):
     """P3: cross-sample isoform COLLAPSE (catalog) + translation/FASTA only. Skips the per-sample
     stage3 re-key (that is P4, export_sample_isoform). Persists FINAL_isoform_catalog.tsv,
     FINAL_structure_to_exemplar.tsv and (EM) FINAL_structure_to_exemplar_soft.tsv so P4 can re-key
     from disk."""
     sample_dict = import_metadata(metadata_file)
     export_isoform_h5ad(sample_dict, ensembl_exon_dir, None, gencode_gff, genome_fasta,
+                        sample_collapse=sample_collapse, tier1_dir=tier1_dir,
+                        reuse_tier1=reuse_tier1,
                         collapse_method=collapse_method, force_recollapse=force_recollapse,
                         write_h5ad=False, min_total=min_total)
 
@@ -1019,8 +1024,16 @@ def run_psi_analysis(junction_path, outdir, write_h5ad=True, min_read=None):
     applies the ``min_read`` min-count filter internally -- no dense junction .txt needed) or the
     legacy filtered .txt. Validated PSI-value- and sample-order-identical between the two paths
     (PSI_validation_OLD/NEW.tsv; 50 genes / 197 events, max abs diff 0.0)."""
-    # Use asyncio.run to ensure event loop is properly created
-    asyncio.run(psi.main(junction_path=junction_path, query_gene=None, outdir=outdir, min_read=min_read))
+    # DEFAULT (2026-09-25): chromosome-parallel PSI for h5ad input (components/psi/psi_parallel.py), byte-identical
+    # to the serial psi_single.main: KINNEX-5 83,694 events serial == parallel (md5 57154995...), independent
+    # verifier 0 failures on 181,448,592 values, and 3,845 of 3,845 unchanged-clique events identical to the
+    # 2026-07-28 run. ALTANALYZE3_SERIAL_PSI=1 restores the serial path; text input always runs serial.
+    if str(junction_path).endswith('.h5ad') and os.environ.get('ALTANALYZE3_SERIAL_PSI', '0') != '1':
+        from ..psi import psi_parallel
+        psi_parallel.run_psi_parallel(str(junction_path), outdir, min_read=min_read)
+    else:
+        # Use asyncio.run to ensure event loop is properly created
+        asyncio.run(psi.main(junction_path=junction_path, query_gene=None, outdir=outdir, min_read=min_read))
     if not write_h5ad:
         return
     try:

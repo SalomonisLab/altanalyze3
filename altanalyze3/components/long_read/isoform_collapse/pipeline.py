@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import collections
 import os
+import shutil
 
 from .. import io_utils as _io
 import resource
@@ -63,8 +64,8 @@ def load_gene_chrom(ref):
     return gc
 
 
-def _run_parallel_or_serial(args, nproc):
-    """Cross-platform (Unix fork / Mac+Windows spawn) parallel map of _collapse_chrom over args,
+def _run_parallel_or_serial(args, nproc, fn=None):
+    """Cross-platform (Unix fork / Mac+Windows spawn) parallel map of ``fn`` over args,
     with an automatic SERIAL fallback whenever multiprocessing is unavailable or fails.
 
     - nproc <= 1 or a single partition  -> serial.
@@ -72,8 +73,9 @@ def _run_parallel_or_serial(args, nproc):
       platform default ('spawn' on Mac/Windows). Any failure (PicklingError, OSError, BrokenPool,
       frozen exe, etc.) -> log and run serially. Serial always produces identical results.
     """
+    fn = fn or _collapse_chrom
     if nproc <= 1 or len(args) <= 1:
-        return [_collapse_chrom(a) for a in args]
+        return [fn(a) for a in args]
     try:
         import multiprocessing as mp
         ctx = None
@@ -84,7 +86,7 @@ def _run_parallel_or_serial(args, nproc):
             ctx = None
         pool_factory = ctx.Pool if ctx is not None else mp.Pool
         with pool_factory(min(nproc, len(args))) as pool:
-            return pool.map(_collapse_chrom, args)
+            return pool.map(fn, args)
     except Exception as e:  # any mp failure -> deterministic serial fallback
         try:
             import warnings
@@ -92,15 +94,27 @@ def _run_parallel_or_serial(args, nproc):
                           f"falling back to single-processor mode.")
         except Exception:
             pass
-        return [_collapse_chrom(a) for a in args]
+        return [fn(a) for a in args]
 
 
 # ------------------------------------------------------------------ STAGE 1 --
-def _load_enst_for_genes(enst_cache, gset):
-    """Load {gene: {structure: ENST}} for the given gene set from the cached reference TSV."""
-    ref = collections.defaultdict(dict)
-    if not enst_cache or not os.path.exists(enst_cache):
-        return ref
+_ENST_FULL_CACHE = {}
+
+
+def _load_enst_all(enst_cache):
+    """Parse the whole {gene: {structure: ENST}} reference ONCE per process, memoized on
+    (path, mtime).
+
+    _collapse_chrom used to re-read and re-parse this file on every call. That cost ~25 reads for
+    Tier 2 partitions. The per-library Tier 1b pass calls _collapse_chrom once per library, which
+    would have made it 356 more full reads of a 26,242,238-byte, 244,521-row table. Pool workers
+    are reused, so this reduces it to one parse per worker process.
+    """
+    key = (enst_cache, os.path.getmtime(enst_cache))
+    hit = _ENST_FULL_CACHE.get(key)
+    if hit is not None:
+        return hit
+    ref = {}
     with open(enst_cache) as f:
         next(f, None)
         for line in f:
@@ -108,8 +122,26 @@ def _load_enst_for_genes(enst_cache, gset):
             if len(parts) != 3:
                 continue
             g, struct, enst = parts
-            if g in gset:
-                ref[g][struct] = enst
+            ref.setdefault(g, {})[struct] = enst
+    _ENST_FULL_CACHE.clear()          # only ever one reference in play; keep the footprint flat
+    _ENST_FULL_CACHE[key] = ref
+    return ref
+
+
+def _load_enst_for_genes(enst_cache, gset):
+    """Load {gene: {structure: ENST}} for the given gene set from the cached reference TSV.
+
+    Same content as before; it now selects from the memoized full table by iterating the (small)
+    gene set instead of rescanning every reference row.
+    """
+    ref = collections.defaultdict(dict)
+    if not enst_cache or not os.path.exists(enst_cache):
+        return ref
+    allref = _load_enst_all(enst_cache)
+    for g in gset:
+        d = allref.get(g)
+        if d:
+            ref[g] = d
     return ref
 
 
@@ -124,7 +156,14 @@ def _collapse_chrom(args):
     structures (Tier 1 already reduced reads->structures per sample)."""
     # collapse_method: 'wta' (default winner-takes-all) or 'em' (soft EM read allocation). The 5-tuple
     # form carries the method; the 4-tuple form (older callers) defaults to 'wta'.
-    if len(args) == 5:
+    # The 6-tuple form adds want_struct, set ONLY by the per-sample pass (_collapse_one_sample),
+    # which needs each representative's own structure string to serialize its table. Tier 2 sends
+    # the 5-tuple and gets no structure strings back: on a 6.4M-isoform atlas that payload would
+    # cross the worker process boundary for every gene and buy nothing.
+    want_struct = False
+    if len(args) == 6:
+        chrom, genes, sample_paths, enst_cache, collapse_method, want_struct = args
+    elif len(args) == 5:
         chrom, genes, sample_paths, enst_cache, collapse_method = args
     else:
         chrom, genes, sample_paths, enst_cache = args
@@ -206,6 +245,11 @@ def _collapse_chrom(args):
                                        else gene_mol_sample[g].get(gene_mol[g].get(r))) for r in reps},
             exemplar_known={exid(r): (r in enst_ids) for r in reps},
         )
+        # The representative's OWN structure string, only when the caller asked. The per-sample pass
+        # needs it to write its consensus table in the 5-column form Tier 2 reads. Tier 2 does not,
+        # so the default path returns exactly what it returned before this was added.
+        if want_struct:
+            entry['exemplar_struct'] = {exid(r): r for r in reps}
         # EM: carry the STRUCTURE-keyed soft map forward unchanged (child_structure -> {parent_structure:
         # weight}). It is NOT converted to ids here -- structure is the canonical, cross-sample-consistent
         # key (the same key stage3 uses), so the molecule->final re-link stays correct across all samples.
@@ -216,8 +260,131 @@ def _collapse_chrom(args):
     return chrom, out, _self_peak_mb()
 
 
+def _collapse_one_sample(sample, exemplars_path, enst_cache, collapse_method, log=print):
+    """SAMPLE-LEVEL collapse (Tier 1b), using the SAME worker Tier 2 uses.
+
+    ``collapse_sample`` (Tier 1a) reduces reads to the sample's DISTINCT exon-id structures. This
+    then folds those structures to the sample's LONGEST CONSENSUS isoforms by calling
+    ``_collapse_chrom`` with a one-sample list, so the fold is the validated
+    ``scored_collapse`` collapse -- no separate implementation exists or is used.
+
+    Writes, beside the Tier-1a table:
+      <sample>.exemplars.tsv          REWRITTEN at consensus level (gene, strand, structure,
+                                      count, rep_molecule_id) so Tier 2 consumes it unchanged.
+                                      ``count`` is the hard total (the consensus' own reads plus
+                                      the reads of every structure folded into it), so the sum
+                                      over consensus rows equals the sample's read total.
+      <sample>.struct2candidate.tsv   structure -> consensus exemplar id + its structure. Compose
+                                      with <sample>.mol2struct.tsv for the read-level mapping to
+                                      the consensus.
+      <sample>.exemplars.prefold.tsv  the Tier-1a table, kept (never deleted).
+
+    Returns the path Tier 2 should read.
+    """
+    t = time.time()
+    # ONE pass for both genes and strand. Two separate passes over a multi-million-row table, once
+    # per library, is pure I/O at 356 libraries.
+    strand = {}
+    n_struct_in = 0
+    with open(exemplars_path) as f:
+        next(f, None)
+        for line in f:
+            p = line.rstrip("\n").split("\t")
+            if len(p) >= 2:
+                strand[p[0]] = p[1]
+                n_struct_in += 1
+    genes = set(strand)
+    if not genes:
+        log(f"[tier1b:{sample}] no genes; sample-level collapse skipped")
+        return exemplars_path
+
+    # ONE call over all of this sample's genes. `chrom` is only a label inside the worker, and the
+    # memory ceiling is one sample's distinct structures, which Tier 1a already held. Partitioning
+    # by chromosome here would buy nothing and would force a gene->chromosome load per sample.
+    _chrom, gene_results, _rss = _collapse_chrom(
+        (sample, sorted(genes), [(sample, exemplars_path)], enst_cache, collapse_method, True))
+
+    # Always refresh the pre-fold copy. Guarding on existence left a PREVIOUS run's table in place
+    # while this run's Tier-1a output was overwritten, so the artifact described the wrong run.
+    prefold = exemplars_path.replace('.exemplars.tsv', '.exemplars.prefold.tsv')
+    shutil.move(exemplars_path, prefold)
+
+    s2c_path = exemplars_path.replace('.exemplars.tsv', '.struct2candidate.tsv')
+    n_out = 0
+    reads_out = 0
+    with open(exemplars_path, 'w') as o, open(s2c_path, 'w') as s2c:
+        o.write("gene\tstrand\tstructure\tcount\trep_molecule_id\n")
+        s2c.write("gene\tstructure\tcandidate_id\tcandidate_structure\n")
+        for g, entry in gene_results.items():
+            st = strand.get(g, '.')
+            ex_struct = entry.get('exemplar_struct', {})
+            for exid, total in entry.get('exemplar_hardtotal', {}).items():
+                if total < 1:
+                    continue
+                rep_struct = ex_struct.get(exid)
+                if rep_struct is None:
+                    continue
+                # Write the BARE molecule id. _collapse_chrom builds "<molecule>.<sample>" for a
+                # novel representative; writing that composite back would make Tier 2 append the
+                # sample a second time ("<mol>.<sample>.<sample>") and change every novel isoform id.
+                # A known representative is an ENST and carries no sample suffix, so it passes through.
+                rep_mol = exid[:-(len(sample) + 1)] if exid.endswith("." + sample) else exid
+                o.write(f"{g}\t{st}\t{rep_struct}\t{int(total)}\t{rep_mol}\n")
+                n_out += 1
+                reads_out += int(total)
+            for struct, exid in entry.get('struct2exemplar', {}).items():
+                s2c.write(f"{g}\t{struct}\t{exid}\t{ex_struct.get(exid, '')}\n")
+
+    log(f"[tier1b:{sample}] {n_struct_in:,} structures -> {n_out:,} consensus isoforms "
+        f"({reads_out:,} reads retained) {time.time()-t:.1f}s")
+    return exemplars_path
+
+
+def tier1_outputs_ready(sample, out_dir, sample_collapse):
+    """Path to this library's finished Tier-1 exemplars table, or None if it must be computed.
+
+    Lets an LSF array element skip a library another element already did, and lets the collapse job
+    consume tables the array produced instead of recomputing all 356.
+    """
+    ex = os.path.join(out_dir, f"{sample}.exemplars.tsv")
+    mol = os.path.join(out_dir, f"{sample}.mol2struct.tsv")
+    if not (os.path.exists(ex) and os.path.getsize(ex) > 0 and os.path.exists(mol)):
+        return None
+    if sample_collapse:
+        # .struct2candidate.tsv and .exemplars.prefold.tsv are written ONLY by the Tier-1b fold, so
+        # their presence is what distinguishes a folded table from a raw Tier-1a one.
+        for suffix in ('.struct2candidate.tsv', '.exemplars.prefold.tsv'):
+            if not os.path.exists(os.path.join(out_dir, sample + suffix)):
+                return None
+    return ex
+
+
+def _tier1_one_sample(args):
+    """Tier 1 for ONE library: 1a exact-structure reduction, then optionally 1b the consensus fold.
+
+    Module level and self-contained so it pickles under the 'spawn' start method. Every library is
+    independent (its own input table, its own output files), so this is embarrassingly parallel and
+    is what makes Tier 1 scale to 356 libraries.
+    """
+    from .collapse_sample import collapse_sample
+    reuse = False
+    if len(args) == 7:
+        sample, ta, out_dir, sample_collapse, enst_cache, collapse_method, reuse = args
+    else:
+        sample, ta, out_dir, sample_collapse, enst_cache, collapse_method = args
+    if reuse:
+        done = tier1_outputs_ready(sample, out_dir, sample_collapse)
+        if done:
+            print(f"[tier1:{sample}] reusing existing table {done}")
+            return sample, done
+    ex_path, _mol = collapse_sample(sample, ta, out_dir=out_dir, log=print)
+    if sample_collapse:
+        ex_path = _collapse_one_sample(sample, ex_path, enst_cache, collapse_method, log=print)
+    return sample, ex_path
+
+
 def stage1_collapse(sample_ta_paths, nproc=8, ref=DEFAULT_REF, enst_cache=None, tier1_dir=None,
-                    collapse_method='wta', log=print):
+                    collapse_method='wta', sample_collapse=False, reuse_tier1=False, log=print):
     """Two-tier cross-sample collapse.
 
     collapse_method: 'wta' (default winner-takes-all -- each ambiguous substring's reads go to its
@@ -232,19 +399,29 @@ def stage1_collapse(sample_ta_paths, nproc=8, ref=DEFAULT_REF, enst_cache=None, 
       structure) and run the validated containment collapse (_collapse_chrom). Summing Tier-1 counts
       reproduces the pooled per-read counts exactly -> identical result to the single pooled collapse.
 
+    sample_collapse: OFF by default. When True, each sample's distinct structures are additionally
+      folded to that sample's LONGEST CONSENSUS isoforms (Tier 1b) before Tier 2, using the same
+      _collapse_chrom worker Tier 2 uses. It moves most of the work upstream (measured 2.58x and
+      3.53x fewer structures reaching Tier 2 on one PacBio and one ONT ENCODE library) but it is
+      NOT output-identical: on that test 84 of 2,836 isoforms changed bin and 7 representatives
+      swapped. It stays off so the single-cell path reproduces prior analyses exactly.
+
     sample_ta_paths: list of (sample_name, transcript_associations_path).
     Returns (gene_results, wallclock_s, max_worker_rss_mb, n_partitions)."""
-    from .collapse_sample import collapse_sample
     t0 = time.time()
 
-    # --- TIER 1: per-sample reduction (series; each sample is bounded + independent) -------------
+    # --- TIER 1: per-sample reduction (PARALLEL across libraries; each is bounded + independent) -
     if tier1_dir is None:
         tier1_dir = os.path.join(os.path.dirname(sample_ta_paths[0][1]) or '.', 'tier1')
     os.makedirs(tier1_dir, exist_ok=True)
-    sample_exemplars = []   # (sample_name, exemplars_tsv_path)
-    for sample, ta in sample_ta_paths:
-        ex_path, _mol = collapse_sample(sample, ta, out_dir=tier1_dir, log=log)
-        sample_exemplars.append((sample, ex_path))
+    # Every library is independent, so Tier 1 runs across libraries in parallel. pool.map preserves
+    # input order, so sample_exemplars is ordered exactly as the serial loop built it.
+    t1args = [(sample, ta, tier1_dir, sample_collapse, enst_cache, collapse_method, reuse_tier1)
+              for sample, ta in sample_ta_paths]
+    sample_exemplars = _run_parallel_or_serial(t1args, nproc, fn=_tier1_one_sample)
+    log(f"[tier1] {len(sample_exemplars)} librar{'y' if len(sample_exemplars)==1 else 'ies'} "
+        f"reduced ({'with' if sample_collapse else 'without'} the sample-level consensus fold), "
+        f"nproc={nproc}")
 
     # --- TIER 2: merge per-sample exemplars + collapse, partitioned by chromosome ----------------
     gc = load_gene_chrom(ref)
@@ -494,42 +671,115 @@ def stage_protein(gene_results, kept_struct2exemplar, sample_gff_paths, outdir,
                 out.write(f"{g}\t.\t{ex_struct}\t{ex}\t{r['exemplar_sample'][ex]}\n")
     log(f"[protein] wrote {ta}")
 
-    # 4. run the EXISTING gff_translate -> protein_summary.txt (+ fastas) inside gff-output/.
-    # The downstream comparisons.compute_differentials reads these from gff-output/ (PROTEIN_DIR), so
-    # producer and consumer agree on the location. combined/ta are absolute paths, so cwd does not
-    # matter for reading them.
+    # 4. translate. Shared with the resume path (`blr-translate`) so both run identical code.
+    translate_combined(outdir, combined_gz, ta, genome_fasta, ref_gff=ref_gff, log=log)
+    return combined_gz, ta
+
+
+def genome_naming(genome_fasta, limit=200000):
+    """First sequence name in a FASTA, and whether it carries a 'chr' prefix.
+
+    Read as bytes so a plain or bgzf FASTA both work, and stop at the first record.
+    """
+    import gzip
+    opener = gzip.open if str(genome_fasta).endswith(('.gz', '.bgz')) else open
+    with opener(genome_fasta, 'rb') as h:
+        chunk = h.read(limit)
+    for line in chunk.split(b'\n'):
+        if line.startswith(b'>'):
+            name = line[1:].split()[0].decode('utf-8', 'replace')
+            return name, name.lower().startswith('chr')
+    return None, False
+
+
+def translate_combined(outdir, combined_gz, ta, genome_fasta, ref_gff=None, log=print):
+    """Translate an ALREADY-BUILT combined.gff.gz into ORF / transcript / protein FASTAs.
+
+    Split out of stage_protein so ONE implementation serves two callers: the full cross-sample
+    collapse, and a resume that translates an existing catalog without recomputing it. A resumed
+    translation therefore cannot drift from the pipeline's own.
+
+    Writes into ``outdir`` (the gff-output directory), because comparisons.compute_differentials
+    reads these from there as PROTEIN_DIR. ``combined_gz`` and ``ta`` are absolute, so the chdir
+    only steers where gff_translate drops its own products.
+
+    Raises when a non-empty catalog yields zero proteins. That pairing has one common cause and it
+    is silent: isoform_translation.normalize_chromosome_name strips a leading 'chr' before the
+    genome lookup, so a chr-prefixed FASTA matches no contig. On 2026-09-21 this wrote three
+    0-byte FASTAs and still reported success.
+    """
     from .. import isoform_translation as isot
+
+    name, prefixed = genome_naming(genome_fasta)
+    log(f"[protein] genome {genome_fasta} first contig {name!r} "
+        f"({'chr-prefixed' if prefixed else 'non-prefixed'})")
+
     cwd = os.getcwd()
     try:
         os.chdir(outdir)
         cds, transcripts, proteins = isot.gff_translate(combined_gz, genome_fasta, ref_gff, ta)
-        try:
-            from Bio import SeqIO
-            with open('protein_sequences.fasta', 'w') as f:
-                SeqIO.write(proteins, f, 'fasta')
-            with open('transcript_sequences.fasta', 'w') as f:
-                SeqIO.write(transcripts, f, 'fasta')
-            with open('orf_sequences.fasta', 'w') as f:
-                SeqIO.write(cds, f, 'fasta')
-            # BGZF, not plain gzip: isv_web/data_api.py seeks into these by offset to pull one
-            # record, and a plain gzip stream cannot be seeked. BGZF stays gzip-readable.
-            _io.compress_many(['protein_sequences.fasta', 'transcript_sequences.fasta',
-                               'orf_sequences.fasta'], log=log)
-        except Exception as e:
-            log(f"[protein] fasta export note: {type(e).__name__}: {e}")
+        if not proteins:
+            raise RuntimeError(
+                f"gff_translate returned 0 proteins from {combined_gz}. The catalog is not empty, "
+                f"so this is a lookup failure, not a biological result. Genome {genome_fasta} "
+                f"leads with contig {name!r}; the GFF seqids are compared after a leading 'chr' is "
+                f"stripped. Check the assembly before re-running.")
+        from Bio import SeqIO
+        for fname, records in (('protein_sequences.fasta', proteins),
+                               ('transcript_sequences.fasta', transcripts),
+                               ('orf_sequences.fasta', cds)):
+            with open(fname, 'w') as f:
+                SeqIO.write(records, f, 'fasta')
+            if os.path.getsize(fname) == 0:
+                raise RuntimeError(f"{os.path.join(outdir, fname)} is empty after writing "
+                                   f"{len(records):,} records")
+        # BGZF, not plain gzip: isv_web/data_api.py seeks into these by offset to pull one
+        # record, and a plain gzip stream cannot be seeked. BGZF stays gzip-readable.
+        _io.compress_many(['protein_sequences.fasta', 'transcript_sequences.fasta',
+                           'orf_sequences.fasta'], log=log)
     finally:
         os.chdir(cwd)
     _io.compress_many([os.path.join(outdir, n) for n in
                        ('protein_summary.txt', 'coding_regions.txt', 'transcript_associations.txt')],
                       log=log)
     log(f"[protein] gff_translate done -> {os.path.join(outdir, 'protein_summary.txt')} "
-        f"({len(proteins)} proteins)")
+        f"({len(proteins):,} proteins, {len(transcripts):,} transcripts, {len(cds):,} ORFs)")
     return combined_gz, ta
 
 
 # ------------------------------------------------------------------ STAGE 3 --
+def load_struct2candidate(tier1_dir, sample):
+    """{(gene, tier1a_structure): consensus_structure} for ONE library, or {} when absent.
+
+    REQUIRED whenever stage 1 ran the sample-level consensus fold. The per-molecule table maps each
+    molecule to its Tier-1a structure, but after the fold only the CONSENSUS structures reach stage 2,
+    so ``kept_struct2exemplar`` is keyed on those. Without this translation every molecule whose
+    structure was folded has no final isoform and is silently dropped: on the 356-library ENCODE run
+    that lost 448,600,172 of 593,009,017 reads (75.6%) and 62,343 of 6,415,129 isoforms.
+
+    Only NON-IDENTITY entries are stored. A structure that is its own consensus already resolves
+    through kept_struct2exemplar, so keeping it would just duplicate the map.
+    """
+    if not tier1_dir:
+        return {}
+    path = os.path.join(tier1_dir, f"{sample}.struct2candidate.tsv")
+    if not os.path.exists(path):
+        return {}
+    out = {}
+    with _io.smart_open(path) as f:
+        next(f, None)
+        for line in f:
+            p = line.rstrip("\n").split("\t")
+            if len(p) < 4:
+                continue
+            gene, struct, cand_struct = p[0], p[1], p[3]
+            if cand_struct and cand_struct != struct:
+                out[(gene, struct)] = cand_struct
+    return out
+
+
 def stage3_rekey_h5ad(sample, h5ad_path, ta_path, kept_struct2exemplar, outdir,
-                      barcode_clusters=None, kept_soft=None):
+                      barcode_clusters=None, kept_soft=None, struct2candidate=None):
     """Re-key one sample's per-read h5ad to final isoform ids via sparse grouping matrix.
     Memory-optimized: builds var->final only for surviving molecules (no full molecule->struct map).
 
@@ -583,6 +833,12 @@ def stage3_rekey_h5ad(sample, h5ad_path, ta_path, kept_struct2exemplar, outdir,
             if len(p) < 5:
                 continue
             key = (p[0], p[2])
+            # Translate a folded Tier-1a structure to its library's consensus structure before the
+            # lookup. Without this the molecule resolves to nothing and its reads are lost.
+            if struct2candidate:
+                cand = struct2candidate.get(key)
+                if cand is not None:
+                    key = (p[0], cand)
             if s2soft and key in s2soft:
                 var2final[f"{p[0]}:{p[3]}"] = s2soft[key]
             else:
@@ -685,7 +941,8 @@ def stage3_rekey_h5ad(sample, h5ad_path, ta_path, kept_struct2exemplar, outdir,
 # ------------------------------------------------------------------ DRIVER ---
 def run_pipeline(samples, outdir, nproc=8, min_total=3, ref=DEFAULT_REF, write_h5ad=True,
                  genome_fasta=None, ref_gff=None, enst_cache=None, barcode_clusters=None,
-                 collapse_method='wta', log=print):
+                 collapse_method='wta', sample_collapse=False, tier1_dir=None,
+                 reuse_tier1=False, log=print):
     """End-to-end. samples: list of (name, h5ad_path, transcript_associations_path[, raw_gff_path]).
     If genome_fasta is given AND samples include a raw_gff_path, protein prediction is run
     (final-isoform records -> existing gff_translate -> protein_summary.txt + *sequences.fasta).
@@ -697,6 +954,8 @@ def run_pipeline(samples, outdir, nproc=8, min_total=3, ref=DEFAULT_REF, write_h
     sample_ta = [(s[0], s[2]) for s in samples]
     sample_gff_paths = {s[0]: s[3] for s in samples if len(s) > 3}
     gene_results, t1, max_rss, nparts = stage1_collapse(sample_ta, nproc=nproc, ref=ref,
+                                                       sample_collapse=sample_collapse,
+                                                       tier1_dir=tier1_dir, reuse_tier1=reuse_tier1,
                                                         enst_cache=enst_cache,
                                                         collapse_method=collapse_method)
     n_final = sum(len(r['exemplar_total']) for r in gene_results.values())
@@ -757,6 +1016,7 @@ def run_pipeline(samples, outdir, nproc=8, min_total=3, ref=DEFAULT_REF, write_h
             name, h5, ta = s[0], s[1], s[2]
             bc = (barcode_clusters or {}).get(name)
             r = stage3_rekey_h5ad(name, h5, ta, kept, outdir=None, barcode_clusters=bc,
+                                  struct2candidate=load_struct2candidate(tier1_dir, name),
                                   kept_soft=(kept_soft if collapse_method == 'em' else None))
             raw_reads, final_reads = r[2], r[3]
             kept_frac = final_reads / raw_reads if raw_reads else 0.0
@@ -796,7 +1056,10 @@ def run_pipeline(samples, outdir, nproc=8, min_total=3, ref=DEFAULT_REF, write_h
             cand = stem + '-junction.h5ad'
             if os.path.exists(cand):
                 jh5[name] = cand
-            if ta and os.path.exists(str(ta)):
+            # _io.exists resolves <path> OR <path>.gz. Phase 1 gzips transcript_associations.txt,
+            # so testing the uncompressed name alone left this map EMPTY and summary/
+            # per_sample_counts.tsv came out with a header and no rows.
+            if ta and _io.exists(str(ta)):
                 tap[name] = str(ta)
         psum = os.path.join(outdir, 'protein_summary.txt')   # outdir is gff-output/
         # Write the summary/ folder at the RUN-DIR level (sibling of gff-output) for discoverability.
@@ -857,7 +1120,7 @@ def load_struct2exemplar_soft(outdir):
 
 
 def rekey_one_sample(name, h5ad_path, ta_path, outdir, barcode_clusters=None,
-                     collapse_method='wta', write_dir=None, log=print):
+                     collapse_method='wta', write_dir=None, tier1_dir=None, log=print):
     """P4 per-sample entry: re-key ONE sample's molecule h5ad onto the final catalog, loading the
     structure->final-id map (and EM soft weights) from disk -- no dependency on the collapse process's
     memory. Writes <h5ad_path stem>-isoform.h5ad next to the sample (stage3's default).
@@ -875,7 +1138,11 @@ def rekey_one_sample(name, h5ad_path, ta_path, outdir, barcode_clusters=None,
         if kept_soft is None:
             log(f"[rekey:{name}] WARNING: --collapse_method em but no EM soft map on disk "
                 f"({outdir}/FINAL_structure_to_exemplar_soft.tsv); falling back to WTA re-key.")
+    s2c = load_struct2candidate(tier1_dir, name)
+    if s2c:
+        log(f"[stage3:{name}] consensus map: {len(s2c):,} folded structures translated")
     r = stage3_rekey_h5ad(name, h5ad_path, ta_path, kept, outdir=write_dir,
+                          struct2candidate=s2c,
                           barcode_clusters=barcode_clusters, kept_soft=kept_soft)
     raw_reads, final_reads = r[2], r[3]
     kept_frac = final_reads / raw_reads if raw_reads else 0.0

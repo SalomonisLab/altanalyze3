@@ -25,7 +25,10 @@ from altanalyze3.components.long_read.cli import (
     run_sclr_iso2func_network,
     run_blr,
     run_blr_isoforms,
+    run_blr_translate,
+    run_blr_tier1,
     run_blr_quant,
+    run_blr_junctions,
     run_blr_combine,
     run_blr_compare,
     run_blr_junction_compare,
@@ -547,6 +550,9 @@ class ArgsParser():
         blr_iso_parser.add_argument("--genome_fasta", required=True, type=str, help="Genome FASTA. Required to emit gff-output/combined.gff.gz and the protein summary")
         blr_iso_parser.add_argument("--collapse_method", default="wta", choices=["wta", "em"], help="Ambiguous-substring allocation: wta (winner-takes-all, default) or em (fractional)")
         blr_iso_parser.add_argument("--min_total", default=3, type=int, help="Drop a final isoform below this many reads summed over all samples. Default 3 (the single-cell default). Lower it for a study with few samples.")
+        blr_iso_parser.add_argument("--tier1_dir", default=None, type=str, help="Directory holding the per-library Tier-1 tables. Set it to the SAME path the blr-tier1 array used.")
+        blr_iso_parser.add_argument("--reuse_tier1", action="store_true", help="Consume the per-library Tier-1 tables already in --tier1_dir instead of recomputing them (what the array produced).")
+        blr_iso_parser.add_argument("--sample_collapse", action="store_true", help="Fold each sample to its LONGEST CONSENSUS isoforms before the cross-sample collapse (Tier 1b), using the same collapse worker Tier 2 uses. Moves most of the work upstream (2.58x-3.53x fewer structures reaching Tier 2 on an ENCODE PacBio/ONT pair) but is NOT output-identical to the default, so it is off unless asked for.")
         blr_iso_parser.add_argument("--species", default="human", choices=["human", "mouse"], help="Default: human")
         blr_iso_parser.add_argument("--exon_annot", default=None, type=str, help="Ensembl exon annotation file. Default: bundled gzipped <species> Ensembl exon file")
         self.add_common_arguments(blr_iso_parser)
@@ -561,8 +567,54 @@ class ArgsParser():
         blr_quant_parser.add_argument("--sample", default=None, type=str, help="Process ONE uid. Omit to loop over all uids.")
         blr_quant_parser.add_argument("--collapse_method", default="wta", choices=["wta", "em"], help="Must match the method used for blr-isoforms. Default: wta")
         blr_quant_parser.add_argument("--cell_annot", default=None, type=str, help="Explicit library->cluster file. Default: the bulk_barcode_clusters.txt written by blr")
+        blr_quant_parser.add_argument("--tier1_dir", default=None, type=str, help="Directory holding the per-library Tier-1 tables. REQUIRED when stage 1 ran the sample-level consensus fold, so folded structures resolve to their consensus before the final lookup.")
         blr_quant_parser.add_argument("--force", action="store_true", help="Overwrite existing per-sample isoform outputs")
         self.add_common_arguments(blr_quant_parser)
+
+        # Bulk JUNCTION quantification. Independent of the collapse: junctions are counted from
+        # the reads, so this runs before, after or in parallel with blr-isoforms.
+        blr_junc_parser = subparsers.add_parser(
+            "blr-junctions",
+            help="BULK long-read junction quantification: per-sample sparse junction h5ad + pseudobulk",
+            description="Counts splice junctions per sample from the read GFF and molecule h5ad "
+                        "written by `blr`, using the same exportJunctionMatrix the single-cell path "
+                        "uses. Works for any long-read platform the bulk extractor can read.")
+        blr_junc_parser.set_defaults(func=run_blr_junctions)
+        blr_junc_parser.add_argument("--metadata", required=True, type=str, help="Metadata file (same one used for blr)")
+        blr_junc_parser.add_argument("--sample", default=None, type=str, help="Process ONE uid. Omit to loop over all uids.")
+        blr_junc_parser.add_argument("--species", default="human", choices=["human", "mouse"], help="Default: human")
+        blr_junc_parser.add_argument("--exon_annot", default=None, type=str, help="Ensembl exon annotation file. Default: bundled gzipped <species> Ensembl exon file")
+        blr_junc_parser.add_argument("--cell_annot", default=None, type=str, help="Explicit library->cluster file. Default: the bulk_barcode_clusters.txt written by blr")
+        blr_junc_parser.add_argument("--force", action="store_true", help="Rebuild existing junction h5ads instead of reloading them")
+        self.add_common_arguments(blr_junc_parser)
+
+        blr_tr_parser = subparsers.add_parser(
+            "blr-translate",
+            parents=[parent_parser],
+            help="Bulk long-read: translate an EXISTING combined.gff.gz (resume, no re-collapse)",
+            description="Runs the same translation `blr-isoforms` runs, on a catalog that already "
+                        "exists, so a failed or missing translation costs minutes instead of a full "
+                        "cross-sample recompute. Platform-agnostic: it reads only the collapse's own "
+                        "gff-output directory.")
+        blr_tr_parser.set_defaults(func=run_blr_translate)
+        blr_tr_parser.add_argument("--gff_output", required=True, type=str, help="The gff-output directory holding combined.gff.gz and transcript_associations.txt")
+        blr_tr_parser.add_argument("--genome_fasta", required=True, type=str, help="Genome FASTA. Chromosome names are compared after a leading 'chr' is stripped, so the assembly must match the one the BAMs were aligned to")
+        blr_tr_parser.add_argument("--ref_gff", default=None, type=str, help="Reference GFF/GTF for first-exon rescue. Optional but recommended: the same one blr-isoforms used")
+        self.add_common_arguments(blr_tr_parser)
+
+        blr_t1_parser = subparsers.add_parser(
+            "blr-tier1",
+            parents=[parent_parser],
+            help="Bulk long-read: Tier 1 for ONE library (the unit an LSF array runs in parallel)")
+        blr_t1_parser.set_defaults(func=run_blr_tier1)
+        blr_t1_parser.add_argument("--metadata", required=True, type=str, help="Metadata file (same one used for blr)")
+        blr_t1_parser.add_argument("--library", required=True, type=str, help="The ONE library to reduce")
+        blr_t1_parser.add_argument("--tier1_dir", required=True, type=str, help="Shared output directory; every array element writes here")
+        blr_t1_parser.add_argument("--enst_cache", default=None, type=str, help="ENST_reference_structures.tsv, so sample-level consensus isoforms get their Ensembl names")
+        blr_t1_parser.add_argument("--collapse_method", default="wta", choices=["wta", "em"], help="Must match blr-isoforms. Default: wta")
+        blr_t1_parser.add_argument("--sample_collapse", action="store_true", help="Also fold to the library's LONGEST CONSENSUS isoforms (Tier 1b)")
+        blr_t1_parser.add_argument("--reuse", action="store_true", help="Skip this library if its tables already exist")
+        self.add_common_arguments(blr_t1_parser)
 
         blr_combine_parser = subparsers.add_parser(
             "blr-combine",

@@ -81,6 +81,7 @@ def build_pseudobulk_h5ad(
     output_h5ad: Path,
     min_cells: int = 10,
     count_layer: str | None = None,
+    extra_layers: list[str] | None = None,
 ) -> ad.AnnData:
     total_started = time.perf_counter()
 
@@ -88,6 +89,36 @@ def build_pseudobulk_h5ad(
     adata = ad.read_h5ad(h5ad_path)
     _log_timing("pseudobulk.load_h5ad", started)
     print(f"[INFO] Loaded AnnData with {adata.n_obs} cells and {adata.n_vars} genes.")
+    result = build_pseudobulk_from_adata(
+        adata,
+        cluster_col=cluster_col,
+        sample_col=sample_col,
+        output_h5ad=output_h5ad,
+        min_cells=min_cells,
+        count_layer=count_layer,
+        extra_layers=extra_layers,
+    )
+    _log_timing("pseudobulk.total", total_started)
+    return result
+
+
+def build_pseudobulk_from_adata(
+    adata: ad.AnnData,
+    *,
+    cluster_col: str,
+    sample_col: str,
+    output_h5ad: Path,
+    min_cells: int = 10,
+    count_layer: str | None = None,
+    extra_layers: list[str] | None = None,
+) -> ad.AnnData:
+    """Same aggregation as ``build_pseudobulk_h5ad`` on an AnnData already in memory, so a
+    caller such as cellHarmony never writes the single-cell object. Each name in
+    ``extra_layers`` is summed with the same groups into a pseudobulk layer of that name."""
+    extra_layers = [name for name in (extra_layers or []) if name]
+    missing_layers = [name for name in extra_layers if name not in adata.layers]
+    if missing_layers:
+        raise KeyError(f"Requested extra layers were not found in the AnnData object: {missing_layers}")
 
     if cluster_col not in adata.obs.columns:
         raise KeyError(f"Cluster column '{cluster_col}' was not found in .obs.")
@@ -127,7 +158,25 @@ def build_pseudobulk_h5ad(
         ),
         shape=(n_valid_groups, remapped_codes.shape[0]),
     )
-    pseudobulk_counts = (design @ counts[valid_cell_mask]).tocsr()
+    retained_counts = counts[valid_cell_mask]
+    pseudobulk_counts = (design @ retained_counts).tocsr()
+    retained_sum = float(np.sum(retained_counts.data, dtype=np.float64))
+    del retained_counts
+    pseudobulk_sum = float(np.sum(pseudobulk_counts.data, dtype=np.float64))
+    if not np.isclose(pseudobulk_sum, retained_sum, rtol=1e-6, atol=1e-6):
+        raise AssertionError(
+            f"Pseudobulk counts sum to {pseudobulk_sum:.6g} but the retained cells sum to "
+            f"{retained_sum:.6g}; the aggregation lost or invented counts.")
+    extra_sums = {}
+    for name in extra_layers:
+        layer_counts = _to_csr(adata.layers[name])
+        extra_sums[name] = (design @ layer_counts[valid_cell_mask]).tocsr()
+        if not np.isclose(float(np.sum(extra_sums[name].data, dtype=np.float64)),
+                          float(np.sum(layer_counts[valid_cell_mask].data, dtype=np.float64)),
+                          rtol=1e-6, atol=1e-6):
+            raise AssertionError(f"Pseudobulk layer '{name}' does not conserve its cell counts.")
+    print(f"[INFO] Pseudobulks keep {int(valid_cell_mask.sum())} of {adata.n_obs} cells; "
+          f"'{matrix_name}' sum conserved ({pseudobulk_sum:.6g}).")
     total_counts = np.asarray(pseudobulk_counts.sum(axis=1)).ravel().astype(np.float64)
     inv_totals = np.divide(
         1.0,
@@ -171,6 +220,8 @@ def build_pseudobulk_h5ad(
         uns=dict(adata.uns),
     )
     pseudobulk_adata.layers["counts"] = pseudobulk_counts
+    for name, summed in extra_sums.items():
+        pseudobulk_adata.layers[name] = summed
     pseudobulk_adata.uns["pseudobulk"] = {
         "cluster_col": cluster_col,
         "sample_col": sample_col,
@@ -178,15 +229,16 @@ def build_pseudobulk_h5ad(
         "count_source": matrix_name,
         "normalization": "counts divided by total counts per pseudobulk",
     }
+    if extra_sums:
+        pseudobulk_adata.uns["pseudobulk"]["extra_layers"] = list(extra_sums)
     _log_timing("pseudobulk.build_h5ad", started)
 
     started = time.perf_counter()
+    output_h5ad = Path(output_h5ad)
     output_h5ad.parent.mkdir(parents=True, exist_ok=True)
     pseudobulk_adata.write_h5ad(output_h5ad, compression="lzf")
     _log_timing("pseudobulk.write_h5ad", started)
     print(f"[INFO] Wrote pseudobulk h5ad to: {output_h5ad}")
-
-    _log_timing("pseudobulk.total", total_started)
     return pseudobulk_adata
 
 
@@ -209,6 +261,11 @@ def main() -> int:
         default=None,
         help="Layer containing raw counts. Defaults to .layers['counts'] when present, else .X.",
     )
+    parser.add_argument(
+        "--extra-layers",
+        default="",
+        help="Comma-separated layers to sum into pseudobulk layers of the same name.",
+    )
     args = parser.parse_args()
 
     build_pseudobulk_h5ad(
@@ -218,6 +275,7 @@ def main() -> int:
         output_h5ad=Path(args.output_h5ad),
         min_cells=args.min_cells,
         count_layer=args.count_layer,
+        extra_layers=[name.strip() for name in args.extra_layers.split(",") if name.strip()],
     )
     return 0
 

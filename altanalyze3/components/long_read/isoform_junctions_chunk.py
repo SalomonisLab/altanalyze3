@@ -20,6 +20,7 @@ import resource
 sys.path.insert(1, os.path.join(sys.path[0], '..'))
 from . import isoform_matrix as iso
 from . import gff_process as gff_process
+from . import io_utils as _io
 
 _MEMTRACE_TAG = "MEMTRACE_TEMP"  # MEMTRACE_TEMP
 _MEMTRACE_ENABLED = os.environ.get("ISOFORM_JUNC_MEMTRACE") == "1"
@@ -91,7 +92,8 @@ def parse_exon_file(ensembl_exon_dir):
     """ Import Ensembl exon genomic information """
     exon_dict = {}
     gene_dict = {}
-    with open(ensembl_exon_dir, 'r') as file:
+    # The exon annotation may be supplied gzipped (the bundled resource is Hs_Ensembl_exon.txt.gz).
+    with _io.smart_open(ensembl_exon_dir, 'rt') as file:
         reader = csv.DictReader(file, delimiter='\t')
         for row in reader:
             key = (row['gene'], row['exon-id'])
@@ -111,9 +113,30 @@ def exportJunctionMatrix(matrix_dir, ensembl_exon_dir, gff_source, barcode_clust
 
     _memtrace("start")
     print(f"Reading GFF for junction-quantification: {gff_source}")
-    
-    # Annotate isoforms relative to ensembl exons
-    transcript_associations = gff_process.consolidateLongReadGFFs(gff_source, ensembl_exon_dir, mode="collapse")
+
+    # Annotate isoforms relative to ensembl exons -- but REUSE the table if one is already there.
+    #
+    # This call writes <gff dir>/gff-output/transcript_associations.txt(.gz) plus
+    # transcript_associations_raw and structure_coords.sqlite. The bulk long-read phase 1
+    # (bulk_longread.annotate_sample_structures) has ALREADY written exactly those files from
+    # exactly this GFF, and the cross-sample collapse READS them. Regenerating here therefore did
+    # two harmful things:
+    #   1. duplicated the most expensive per-library step, once per library;
+    #   2. rewrote files another job was reading. io_utils.compress writes <name>.txt.gz and then
+    #      removes <name>.txt, so an interrupted run leaves BOTH, and io_utils.resolve prefers the
+    #      uncompressed one -- feeding the collapse half-written PLAIN TEXT, which carries no CRC
+    #      to catch it. Measured 2026-09-21: 19 libraries left a shadowing .txt and 2 a truncated
+    #      .gz when the junction array was killed mid-write.
+    # Reusing the existing table removes the duplicated work AND the shared-write hazard, so
+    # junction counting can run concurrently with the collapse. Pass force=True (or set
+    # ALTANALYZE3_FORCE_OVERWRITE) to rebuild it deliberately.
+    _ta = os.path.join(os.path.dirname(str(gff_source)), 'gff-output', 'transcript_associations.txt')
+    _existing = _io.resolve(_ta, missing_ok=True)
+    if _existing and os.path.getsize(_existing) > 0 and os.environ.get("ALTANALYZE3_FORCE_OVERWRITE") != "1":
+        print(f"Reusing existing exon-structure table: {_existing}")
+        transcript_associations = _existing
+    else:
+        transcript_associations = gff_process.consolidateLongReadGFFs(gff_source, ensembl_exon_dir, mode="collapse")
     _memtrace("after_consolidate_gff")
 
     # Load the prior computed exon annotations and coordinates for junction mapping
@@ -148,13 +171,16 @@ def exportJunctionMatrix(matrix_dir, ensembl_exon_dir, gff_source, barcode_clust
         isoform_to_gene = {}
 
         print ('Mapping isoforms to junctions...',)
-        with open(isoform_mapping_file, 'r') as file:
+        # consolidateLongReadGFFs gzips this table (io_utils.compress), so the path it returns may
+        # be <name>.txt or <name>.txt.gz. smart_open resolves either; a plain open() on the gzipped
+        # form failed with "utf-8 codec can't decode byte 0x8b", the gzip magic byte.
+        with _io.smart_open(isoform_mapping_file, 'rt') as file:
             reader = csv.reader(file, delimiter='\t')
             for row in reader:
                 gene, strand, exon_structure, isoform, gff_name = row
                 # If multiple gff files used - restrict to isoforms to the appropriate gff
                 if 'UNK' not in gene: # (gff_source==gff_name or gff_source==None) and
-                    exons = exon_structure.split('|')[1:] #[1:-1] - consider APA
+                    exons = exon_structure.split('|') # no slice: gff_process.exon_str already removed the unreliable novel start/end tokens; [1:] dropped each read's first real junction
                     junctions = []
                     for exon in exons:
                         geneID = gene
