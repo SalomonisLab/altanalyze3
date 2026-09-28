@@ -61,8 +61,18 @@ def stage(release, evidence, edge_index):
                     comparisons.append(entry)
                     fold=evidence/'folds'/mod/(comp+'.tsv');fold.parent.mkdir(exist_ok=True,parents=True)
                     if not fold.exists():frame.pivot(index='gene',columns='population',values='log2fc').reindex(columns=cov['states']).to_csv(fold,sep='\t')
-                    newassets[cid]={'modality':mod,'fold_matrix_tsv':str(fold),'networks':[],
-                                    'provenance':'Existing LungMAP pseudobulk calls; unreported folds are missing, not zero.'}
+                    entry_assets={'modality':mod,'fold_matrix_tsv':str(fold),'networks':[],
+                                  'provenance':'Existing LungMAP pseudobulk calls; unreported folds are missing, not zero.'}
+                    # The source manifest ships a GO-Elite table and per-state differential
+                    # networks for these same contrast ids. Rebuilding the entry from the
+                    # pseudobulk database dropped both, so the Differential tab reported
+                    # "No go data" and "No network data" for every contrast while 13 GO
+                    # tables and 12 network sets sat in assets_v8grn (measured 2026-09-28).
+                    prior=asset['differential'].get(cid) or {}
+                    for key in ('goelite_tsv','goelite_info','goelite_provenance',
+                                'networks','networks_provenance','networks_source'):
+                        if prior.get(key):entry_assets[key]=prior[key]
+                    newassets[cid]=entry_assets
             # Keep unrelated released modalities (for example cell communication).
             for entry in old['comparisons']:
                 if entry.get('modality','rna') in ('rna','adt','lipid','grn','grn_tf'):continue

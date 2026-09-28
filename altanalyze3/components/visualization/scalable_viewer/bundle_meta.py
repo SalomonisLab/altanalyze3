@@ -368,6 +368,39 @@ def _with_grn_differential(artifacts, differential_assets, contrast_id, root="")
     return artifacts
 
 
+def _marker_analysis_by_modality(
+    rna_analysis: Dict[str, Any],
+    modality_assets: Optional[Dict[str, Dict[str, Any]]],
+) -> Dict[str, Dict[str, Any]]:
+    """`meta['marker_analysis_by_modality']`, one entry per modality the bundle ships.
+
+    flask/pipeline.py writes one entry per imputed modality, and webapp/app.py
+    `_modality_marker_analysis` reads it. A bundle hard-coded RNA, so the marker view of
+    `cross_pathways` scored RNA alone: on COPD, "best cross-modality AT1 representation"
+    listed 25 pathways with 0 lipid, ADT or TF-activity hits (2026-09-28). A path is
+    registered only when the file exists, so a bundle that ships no per-modality
+    MarkerFinder output keeps the previous RNA-only behaviour.
+    """
+    by_modality: Dict[str, Dict[str, Any]] = {"rna": rna_analysis}
+    for raw_id, entry in sorted((modality_assets or {}).items()):
+        modality_id = W._normalize_modality_id(raw_id, default="")
+        if not modality_id or modality_id == "rna" or not isinstance(entry, dict):
+            continue
+        markers_tsv = str(entry.get("markers_tsv") or "")
+        if not markers_tsv or not os.path.isfile(markers_tsv):
+            continue
+        analysis: Dict[str, Any] = {
+            "enabled": True, "status": "completed", "markers_tsv": markers_tsv,
+            "populations": list(entry.get("populations") or rna_analysis.get("populations") or []),
+        }
+        for key in ("redundant_markers_tsv", "centroids_tsv", "heatmap_cache", "heatmap_cache_full"):
+            value = str(entry.get(key) or "")
+            if value and os.path.isfile(value):
+                analysis[key] = value
+        by_modality[modality_id] = analysis
+    return by_modality
+
+
 def build_meta(
     ds: da.Dataset,
     *,
@@ -379,6 +412,7 @@ def build_meta(
     marker_networks: Optional[List[Dict[str, str]]] = None,
     differential_assets: Optional[Dict[str, Dict[str, Any]]] = None,
     contrast_id: Optional[str] = None,
+    marker_assets_by_modality: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """The job-metadata dict the scALABLE builders read, derived from one bundle."""
     obs, obs_filter_values, sample_field = build_obs(ds)
@@ -460,7 +494,8 @@ def build_meta(
             _modality_artifacts(ds), differential_assets, contrast_id,
             os.path.abspath(os.path.join(ds.paths.bundle_dir, "..", "..", ".."))),
         "marker_analysis": marker_analysis,
-        "marker_analysis_by_modality": {"rna": marker_analysis},
+        "marker_analysis_by_modality": _marker_analysis_by_modality(
+            marker_analysis, marker_assets_by_modality),
         "fastcomm_analysis": fastcomm_analysis or {"enabled": False},
         "scalable_viewer": {
             "bundle_dir": ds.paths.bundle_dir,
@@ -823,6 +858,7 @@ class BundleJobStore:
                 fastcomm_analysis=assets.get("fastcomm_analysis"),
                 marker_networks=assets.get("networks"),
                 differential_assets=assets.get("differential"),
+                marker_assets_by_modality=assets.get("markers_by_modality"),
             )
             self._meta[job_id] = meta
             seed_expression_cache(app, ds, meta)

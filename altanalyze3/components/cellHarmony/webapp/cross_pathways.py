@@ -26,6 +26,30 @@ def norm(value):
     return re.sub(r'\s+', ' ', str(value or '').strip()).casefold()
 
 
+def _label_tokens(text):
+    """Words of a comparison label or a question, so `cancer_vs_no_cancer` and
+    "cancer vs no cancer" compare equal. `versus` reads as `vs`; `_` and `-` split."""
+    words = re.findall(r'[a-z0-9]+', str(text or '').casefold())
+    return ['vs' if w == 'versus' else w for w in words]
+
+
+def comparison_matches(question, label):
+    """True when the label's words occur in order, contiguously, in the question.
+
+    The stored label is `cancer_vs_no_cancer`; a reader types "in cancer vs no cancer".
+    The old check needed the label verbatim, so that phrasing answered "Select a saved
+    comparison" and the contrast view, the one that carries the imputed modalities,
+    never ran (COPD viewer, 2026-09-28). An exact `norm` match still counts first.
+    """
+    q, lab = norm(question), norm(label)
+    if lab and lab in q:
+        return True
+    want, have = _label_tokens(label), _label_tokens(question)
+    if not want or len(want) > len(have):
+        return False
+    return any(have[i:i + len(want)] == want for i in range(len(have) - len(want) + 1))
+
+
 @lru_cache(maxsize=1)
 def pathway_index():
     result = {}
@@ -172,6 +196,20 @@ def diagram(result, pid):
                      'Each modality has its own numeric color scale. Each node stripe uses the strongest absolute retained score in that modality; hover for all feature scores.')
 
 
+def _example_comparison(app, meta):
+    """The selected comparison's label, spelt as a reader would type it, or ''."""
+    run_id = str((meta.get('differential') or {}).get('run_id') or '')
+    if not run_id:
+        return ''
+    from .integration_data import integration_data
+    adapter = integration_data(app, meta)
+    manifest_ds = getattr(adapter, 'ds', adapter)
+    entries = manifest_ds.deg_manifest().get('comparisons', [])
+    chosen = next((c for c in entries if c.get('id') == run_id), entries[0] if entries else None)
+    label = str((chosen or {}).get('comparison') or '')
+    return ' '.join(_label_tokens(label)) if label else ''
+
+
 def answer_if_requested(app, meta, question):
     if not requested(question): return None
     source = 'differential' if re.search(r'contrast|compariso|differential|\bversus\b|\bvs\b|regulated|changed', question, re.I) else 'marker'
@@ -190,7 +228,8 @@ def answer_if_requested(app, meta, question):
         adapter = integration_data(app, meta)
         manifest_ds = getattr(adapter, 'ds', adapter)
         entries = manifest_ds.deg_manifest().get('comparisons', [])
-        named = [c for c in entries if norm(c.get('comparison')) and norm(c['comparison']) in norm(question)]
+        named = sorted((c for c in entries if comparison_matches(question, c.get('comparison'))),
+                       key=lambda c: -len(_label_tokens(c.get('comparison'))))
         if named:
             contrast = named[0]['id']
         elif re.search(r'\bversus\b|\bvs\b', question, re.I):
@@ -214,7 +253,21 @@ def answer_if_requested(app, meta, question):
               'Counts are unique assay features within each modality; lipid species count individually. '
               'Checked modalities are all required to have at least one hit. This is representation, not statistical enrichment. '
               'Unidentified metabolites remain unmapped. GRN edges require both the regulators and target in the pathway.')
-    if missing: answer += ' No mapped retained hits for: ' + ', '.join(missing) + '.'
+    # A modality can be empty for two different reasons, and the reader must be told
+    # which. On a precomputed bundle only RNA has a MarkerFinder table, so the marker
+    # view cannot show the imputed modalities at all; the contrast view can. Listing
+    # them as "no mapped retained hits" read as though the data lacked them (COPD
+    # viewer, 2026-09-28), when the same question naming a comparison returned lipid
+    # hits in 68 of 68 pathways and TF activity in 17.
+    no_table = [c['label'] for c in data['coverage'] if c.get('status') != 'available' and c.get('label')] if source == 'marker' else []
+    unmapped = [m for m in missing if m not in no_table]
+    if unmapped: answer += ' No mapped retained hits for: ' + ', '.join(unmapped) + '.'
+    if no_table:
+        answer += (' This dataset carries marker tables for ' + ', '.join(m['label'] for m in mods if m['label'] not in no_table)
+                   + ' only, so ' + ', '.join(no_table) + ' cannot appear in the marker view.')
+        example = _example_comparison(app, meta)
+        if example:
+            answer += f" Name a comparison to rank pathways across every modality, for example \"{names[0]} in {example}\"."
     return dict(result, status='ok', answer=answer,
                 reading=dict(intent='cross_modality_pathways', source=source, cell_state=names[0]),
                 table=dict(columns=['pathway', 'modality_count', *[m['id'] for m in mods], 'balanced_coverage', 'combined_score'], rows=data['rows']),

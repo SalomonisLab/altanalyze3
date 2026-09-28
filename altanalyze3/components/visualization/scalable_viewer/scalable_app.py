@@ -133,7 +133,19 @@ def _absolutise_asset_paths(data: Dict[str, Any],
     roots = []
     if release_root:
         roots.append(release_root)
+        # stage_discover writes paths relative to the PROJECT, one level above the
+        # release folder that holds the tiers: `scalable_viewer/fastComm_v7/...` and
+        # `scalable_viewer/assets_v8grn/...`. Tried under the release folder alone they
+        # become scalable_viewer/scalable_viewer/... and miss, so fastComm answered
+        # "fastComm scores are unavailable" and every marker network came back empty
+        # while all of those files existed. Measured on the COPD release, 2026-09-28:
+        # 3 of 3 fastComm tables and 48 of 48 marker-network tables resolve one level up.
+        roots.append(os.path.dirname(os.path.abspath(release_root)))
     bundle_dir = str(data.get("bundle_dir") or "").strip()
+    if bundle_dir and not os.path.isabs(bundle_dir) and release_root:
+        # stage_discover also writes bundle_dir relative to the release, so the
+        # bundle-derived project root below was never added for a staged release.
+        bundle_dir = os.path.join(release_root, bundle_dir)
     if bundle_dir and os.path.isabs(bundle_dir):
         roots.append(os.path.abspath(os.path.join(bundle_dir, "..", "..", "..")))
     if not roots:
