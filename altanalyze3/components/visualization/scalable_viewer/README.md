@@ -209,6 +209,9 @@ PYTHONPATH=/Users/saljh8/Documents/GitHub/altanalyze3 \
 | `--seed` | `0` | |
 | `--row-block` | `8192` | rows per transpose block |
 | `--expr-dtype` | `float32` | `float32` copies the values; `float16` halves the store and rounds |
+| `--expr-builder` | `parallel` | `parallel` reads the layer once in worker processes (`fast_store.py`); `reference` runs the original single-process sort. Both write the same bytes |
+| `--workers` | `0` | worker processes for `parallel`; `0` uses min(8, CPUs), capped to half the RAM |
+| `--spill-dir` | bundle directory | temporary spill for `parallel`, 8 bytes per non-zero, removed at the end; use local disk when `--out` is a synced folder |
 | `--embedding-from` | none | `obsm:<key>` to reuse an embedding instead of computing one |
 | `--max-centroid-genes` | `4000` | rows in `<prefix>.txt`, marker genes first |
 | `--skip-expr` | off | reuse an existing store and statistics; needs `--embedding-from` |
@@ -224,6 +227,23 @@ state, or when no canonical order exists in `--order` or `uns['lineage_order']`.
 `--deg-modality`, is also an error. It returns 0 on success and raises when the bundle is
 incomplete at the end.
 
+### Build time of the expression store
+
+Measured 2026-09-28 on a 64 GB, 10-core Mac, through `precompute.py` with each builder.
+Every bundle file was byte-identical between the two builders. Logs and hash tables:
+`/Users/saljh8/Dropbox/LungMAP/LungMAP.net/Datasets/COPD-atlas/scalable_viewer/checks/fast_builder_20260928/`.
+
+| Dataset | Cells | Non-zeros | Reference (s) | Parallel, 8 workers (s) |
+| --- | ---: | ---: | ---: | ---: |
+| human marrow upload job, `X` | 42,796 | 124,430,079 | 21.6 | 3.7 |
+| COPD metacells, `lognorm` | 83,416 | 666,852,999 | 146.9 | 13.4 |
+| COVID lung, `X` (float64) | 302,922 | 1,216,355,183 | 247.5 | 24.3 |
+
+The parallel builder needs spill space equal to the store while it runs (8 bytes per
+non-zero). A caller that already holds the matrix in memory, such as the upload app at
+the end of a job, calls `fast_store.build_expression_store_from_csr`: 2.2 s on the marrow
+job, with byte-identical output.
+
 ### Methods
 
 | Quantity | Definition |
@@ -233,7 +253,7 @@ incomplete at the end.
 | `stats_n` | cells per state, the denominator |
 | highly variable genes | `dispersion = variance / mean` on the layer, 20 equal-count bins of mean, z-score inside each bin, top n; not `scanpy.pp.highly_variable_genes` |
 | embedding | z-score the HVG matrix, clip at plus or minus 10, randomised-SVD PCA, UMAP |
-| expression store | one gene-major CSC store, built by a two-pass counting sort, so one gene is one contiguous slice |
+| expression store | one gene-major CSC store, so one gene is one contiguous slice. The default builder transposes 8,192-row blocks with SciPy's `csr_tocsc` in parallel and reads the layer once; see the build-time table below |
 | cell-state order and colour | `--order`, else `uns['lineage_order']` and `uns['cluster_colors_json']`; the client never re-sorts |
 
 ## Add modalities to a bundle

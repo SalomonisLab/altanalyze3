@@ -34,6 +34,7 @@ from altanalyze3.components.visualization import approximate_umap as approx_mod
 from altanalyze3.components.rna2metabolite import annotations as metabolite_annotations
 
 from .config import BASE_DIR, load_config
+from . import job_bundle as _job_bundle
 from .grn_data import UploadedGrnData, completed_differentials, comparison_entry
 from altanalyze3.components.cellHarmony import grn_analysis as gnet
 
@@ -1291,8 +1292,10 @@ def _open_gene_detail_adata(app: FastAPI, meta: Dict, gene: str) -> tuple[ad.Ann
     cache_entry = _get_differential_cache_entry(app, meta)
     primary = _differential_gene_h5ad_path(meta)
     adata = cache_entry.get("primary_adata")
-    if not isinstance(adata, ad.AnnData):
-        adata = ad.read_h5ad(primary)
+    if not isinstance(adata, (ad.AnnData, _job_bundle.JobBundleAnnData)):
+        # LARGE_DATASET_DESIGN.md step B: a bundled job's per-cell matrix comes from its
+        # bundle; any other file is read as before.
+        adata = _job_bundle.view(meta, primary) or ad.read_h5ad(primary)
         cache_entry["primary_adata"] = adata
         cache_entry["primary_var_names"] = adata.var_names.astype(str).to_numpy()
     if gene in set(cache_entry["primary_var_names"]):
@@ -1302,8 +1305,8 @@ def _open_gene_detail_adata(app: FastAPI, meta: Dict, gene: str) -> tuple[ad.Ann
     if combined_path and Path(combined_path).exists():
         fallback = Path(combined_path)
         fallback_adata = cache_entry.get("fallback_adata")
-        if not isinstance(fallback_adata, ad.AnnData):
-            fallback_adata = ad.read_h5ad(fallback)
+        if not isinstance(fallback_adata, (ad.AnnData, _job_bundle.JobBundleAnnData)):
+            fallback_adata = _job_bundle.view(meta, fallback) or ad.read_h5ad(fallback)
             cache_entry["fallback_adata"] = fallback_adata
             cache_entry["fallback_var_names"] = fallback_adata.var_names.astype(str).to_numpy()
         if gene in set(cache_entry["fallback_var_names"]):
@@ -1533,7 +1536,13 @@ def _get_expression_cache(app: FastAPI, meta: Dict, modality: str = "rna") -> Di
         ):
             return cache_entry
 
-        adata = ad.read_h5ad(h5ad_path)
+        # LARGE_DATASET_DESIGN.md step B: a job that wrote a bundle serves its matrix
+        # from the bundle's memory-mapped store. obs, var, uns and the 2-D obsm maps are
+        # still read from this h5ad, so every field below is built exactly as before.
+        adata = _job_bundle.view(meta, h5ad_path)
+        expression_source = "h5ad" if adata is None else "bundle"
+        if adata is None:
+            adata = ad.read_h5ad(h5ad_path)
         if cluster_key not in adata.obs.columns:
             raise ValueError("Cluster assignments missing from AnnData output.")
 
@@ -1643,6 +1652,7 @@ def _get_expression_cache(app: FastAPI, meta: Dict, modality: str = "rna") -> Di
             "job_id": job_id,
             "modality": normalized_modality,
             "h5ad_path": str(h5ad_path),
+            "expression_source": expression_source,
             "source_stamp": source_stamp,
             "umap_path": str(umap_path or ""),
             "cluster_key": str(cluster_key),
@@ -2430,7 +2440,11 @@ def _grn_edges_adata(meta: Dict) -> ad.AnnData:
     mtime = Path(edges_path).stat().st_mtime
     cached = _GRN_EDGE_CACHE.get(edges_path)
     if not cached or cached[0] != mtime:
-        _GRN_EDGE_CACHE[edges_path] = (mtime, ad.read_h5ad(edges_path))
+        # LARGE_DATASET_DESIGN.md step B: the per-cell edge matrix of a bundled job comes
+        # from its bundle. The pseudobulk network file is not a bundle source and is read.
+        bundled = _job_bundle.view(meta, edges_path)
+        _GRN_EDGE_CACHE[edges_path] = (mtime, bundled if bundled is not None
+                                       else ad.read_h5ad(edges_path))
     return _GRN_EDGE_CACHE[edges_path][1]
 
 
@@ -6014,6 +6028,11 @@ def create_app(test_config: dict | None = None) -> FastAPI:
                     **meta["fastcomm_analysis"],
                     "populations": _fastcomm_populations(app, meta),
                 }
+            # The Per-sample comparison needs split_scores_long.tsv. A job or bundle
+            # without it offered the option anyway and answered "Per-sample fastComm
+            # scores are unavailable" (COPD viewer, 2026-09-28). The menu hides it now.
+            meta["fastcomm_analysis"] = {**meta["fastcomm_analysis"],
+                                         "per_sample_available": _fastcomm_split_scores_path(meta) is not None}
         meta["differential_ui"] = _build_differential_payload(app, job_id, meta, root_path=app.state.root_path)
         return JSONResponse(meta, headers={"Cache-Control": "no-store"})
 

@@ -1470,6 +1470,124 @@ def _run_cell_communication_differential(
     }
 
 
+# ------------------------------------------------------ LARGE_DATASET_DESIGN.md step A
+#
+# A job of CELLHARMONY_BUNDLE_MIN_CELLS cells or more (default 100,000) writes
+# outputs/bundle/ in the scalable_viewer format, through precompute.py's own command line
+# and its parallel builder (visualization/scalable_viewer/fast_store.py). webapp/app.py
+# then serves that job's matrices from the bundle's memory maps instead of reading each
+# result h5ad whole (webapp/job_bundle.py). A job below the threshold is unchanged. A
+# failed build leaves the job completed and served from its h5ad, and says why.
+
+_BUNDLE_PREFIX = "job"
+
+
+def _bundle_min_cells() -> Tuple[Optional[int], str]:
+    raw = os.environ.get("CELLHARMONY_BUNDLE_MIN_CELLS", "100000")
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        return None, f"CELLHARMONY_BUNDLE_MIN_CELLS={raw!r} is not an integer"
+    if value < 0:
+        return None, f"CELLHARMONY_BUNDLE_MIN_CELLS={value} is negative"
+    return value, ""
+
+
+def _build_job_bundle(store: JobStore, job_id: str, combined_h5ad_path: Path,
+                      cluster_key: str, modality_artifacts: Dict[str, Dict[str, object]],
+                      modalities_payload: Dict[str, object]) -> Dict[str, object]:
+    """Write outputs/bundle/ for a large job and return the record stored as meta['bundle']."""
+    import subprocess
+    import sys
+    import time as _time
+
+    import h5py
+
+    threshold, problem = _bundle_min_cells()
+    with h5py.File(str(combined_h5ad_path), "r") as fh:
+        x = fh["X"]
+        shape = (tuple(int(v) for v in x.attrs["shape"]) if isinstance(x, h5py.Group)
+                 else tuple(int(v) for v in x.shape))
+        has_umap = "obsm" in fh and "X_umap" in fh["obsm"]
+    n_cells = int(shape[0])
+    record: Dict[str, object] = {"status": "skipped", "n_cells": n_cells,
+                                 "threshold": threshold}
+    if threshold is None:
+        record["reason"] = problem
+        store.append_log(job_id, f"[bundle] skipped: {problem}")
+        return record
+    if n_cells < threshold:
+        record["reason"] = f"{n_cells:,} cells, below CELLHARMONY_BUNDLE_MIN_CELLS={threshold:,}"
+        store.append_log(job_id, f"[bundle] skipped: {record['reason']}")
+        return record
+    if not has_umap:
+        # precompute.py would otherwise compute its own embedding, which the job does not
+        # serve and which costs minutes; the job keeps its h5ad path instead.
+        record["reason"] = f"{combined_h5ad_path.name} carries no obsm['X_umap']"
+        store.append_log(job_id, f"[bundle] skipped: {record['reason']}")
+        return record
+
+    out_dir = store.outputs_dir(job_id) / "bundle"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    log_path = store.logs_dir(job_id) / "bundle_build.log"
+    labels = {str(e.get("id")): e for e in (modalities_payload or {}).get("available", [])}
+    sources: Dict[str, str] = {"rna": str(combined_h5ad_path)}
+    cmd = [sys.executable, "-m", "altanalyze3.components.visualization.scalable_viewer.precompute",
+           "--h5ad", str(combined_h5ad_path), "--out", str(out_dir),
+           "--prefix", _BUNDLE_PREFIX, "--dataset-id", str(job_id),
+           "--cluster-key", str(cluster_key), "--layer", "X",
+           "--embedding-from", "obsm:X_umap", "--expr-builder", "parallel"]
+    skipped_modalities: Dict[str, str] = {}
+    for modality_id, entry in sorted((modality_artifacts or {}).items()):
+        if modality_id == "rna":
+            continue
+        path = str((entry or {}).get("h5ad") or "").strip()
+        if not path or not Path(path).is_file():
+            skipped_modalities[modality_id] = "no per-cell h5ad"
+            continue
+        with h5py.File(path, "r") as fh:
+            x = fh["X"]
+            rows = int(x.attrs["shape"][0]) if isinstance(x, h5py.Group) else int(x.shape[0])
+        if rows != n_cells:
+            skipped_modalities[modality_id] = f"{rows:,} rows, not one per cell ({n_cells:,})"
+            continue
+        sources[modality_id] = path
+        info = labels.get(modality_id) or {}
+        cmd += ["--modality", f"{modality_id}={path}"]
+        if info.get("label"):
+            cmd += ["--modality-label", f"{modality_id}={info['label']}"]
+        if info.get("feature_label"):
+            cmd += ["--modality-feature-label", f"{modality_id}={info['feature_label']}"]
+    repo_root = Path(__file__).resolve().parents[4]      # the checkout holding altanalyze3/
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(repo_root) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    store.update_job(job_id, progress=97, message="Building the scalable bundle.")
+    store.append_log(job_id, f"[bundle] building for {n_cells:,} cells (threshold {threshold:,}): "
+                             f"{', '.join(sources)}; log {log_path}")
+    started = _time.time()
+    with open(log_path, "w", encoding="utf-8") as log_fh:
+        log_fh.write("$ " + " ".join(cmd) + "\n")
+        log_fh.flush()
+        proc = subprocess.run(cmd, stdout=log_fh, stderr=subprocess.STDOUT, env=env,
+                              cwd=str(repo_root))
+    seconds = round(_time.time() - started, 1)
+    record.update({"seconds": seconds, "log": str(log_path), "returncode": int(proc.returncode),
+                   "skipped_modalities": skipped_modalities})
+    if proc.returncode != 0:
+        tail = log_path.read_text(encoding="utf-8", errors="replace").strip().splitlines()[-5:]
+        record.update({"status": "failed", "message": " | ".join(tail)})
+        store.append_log(job_id, f"[bundle] FAILED after {seconds}s (exit {proc.returncode}); "
+                                 f"the job is served from its h5ad files. See {log_path}")
+        return record
+    record.update({"status": "completed", "dir": str(out_dir), "prefix": _BUNDLE_PREFIX,
+                   "sources": sources,
+                   "built_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                   "builder": "precompute.py --expr-builder parallel"})
+    store.append_log(job_id, f"[bundle] built in {seconds}s: {out_dir}"
+                             + (f"; not bundled: {skipped_modalities}" if skipped_modalities else ""))
+    return record
+
+
 def run_cellharmony_pipeline(
     job_id: str,
     store: JobStore,
@@ -2123,6 +2241,10 @@ def run_cellharmony_pipeline(
         ),
         message="Approximate UMAP completed.",
     )
+    # LARGE_DATASET_DESIGN.md step A: large jobs also write a bundle the app serves from.
+    bundle_record = _build_job_bundle(store, job_id, combined_h5ad_path, query_cluster_key,
+                                      modality_artifacts, modalities_payload)
+    store.update_job(job_id, bundle=bundle_record, message="Approximate UMAP completed.")
     store.append_log(job_id, "cellHarmony-lite pipeline finished.")
     return artifacts
 

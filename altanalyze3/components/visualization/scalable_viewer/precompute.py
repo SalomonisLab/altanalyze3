@@ -19,8 +19,11 @@ bundle described in bundle.py.
 Method notes that the README repeats, so a reader never has to guess:
 
 * Expression store. layers[--layer] is a cell-major CSR in the h5ad. This script
-  transposes it to a gene-major (CSC) triple of .npy files with a two-pass counting
-  sort. Values are copied at their source dtype (float32), so the store is bit-exact.
+  transposes it to a gene-major (CSC) triple of .npy files. The default builder
+  (--expr-builder parallel, fast_store.py) reads the layer once and transposes
+  --row-block row blocks with SciPy's csr_tocsc in worker processes; --expr-builder
+  reference runs the original two-pass counting sort. Both write the same bytes.
+  Values are copied as float32, so the store is bit-exact for a float32 layer.
   Pass --expr-dtype float16 to halve the size and accept the rounding.
 * Per-state statistics. mean is the UNWEIGHTED mean over the cells (or metacells) of a
   state, not a cell-count-weighted mean. frac is the fraction of those cells with a
@@ -811,6 +814,19 @@ def main(argv=None) -> int:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--row-block", type=int, default=8192)
     ap.add_argument("--expr-dtype", choices=["float32", "float16"], default="float32")
+    ap.add_argument("--expr-builder", choices=["parallel", "reference"], default="parallel",
+                    help="'parallel' (default, fast_store.py) reads the layer once and "
+                         "transposes row blocks with SciPy's C routine in worker processes. "
+                         "'reference' runs the original single-process sort, which reads the "
+                         "layer twice. Both write the same bytes; "
+                         "tests/test_fast_expression_store.py compares them.")
+    ap.add_argument("--workers", type=int, default=0,
+                    help="worker processes for --expr-builder parallel. 0 (default) uses "
+                         "min(8, CPUs), capped so the workers fit in half the RAM")
+    ap.add_argument("--spill-dir", default=None,
+                    help="directory for --expr-builder parallel's temporary spill, 8 bytes "
+                         "per non-zero, removed at the end. Default: the bundle directory. "
+                         "Point it at local disk when --out is a synced folder")
     ap.add_argument("--embedding-from", default=None,
                     help="obsm:<key> to reuse an existing embedding instead of computing one")
     ap.add_argument("--max-centroid-genes", type=int, default=4000,
@@ -974,6 +990,7 @@ def main(argv=None) -> int:
 
     if a.skip_expr and not paths.missing():
         log("--skip-expr: reusing the existing expression store and statistics")
+        expr_builder_used = "reused (--skip-expr)"
         mean_gs = np.load(paths.stats_mean)
         frac_gs = np.load(paths.stats_frac)
         nnz = int(np.load(paths.expr_indptr)[-1])
@@ -981,9 +998,18 @@ def main(argv=None) -> int:
         gene_var = None
     else:
         t0 = time.time()
-        sum_gs, cnt_gs, gene_sum, gene_sumsq, nnz = build_expression_store(
-            grp, n_cells, n_genes, state_code, n_states, paths, a.expr_dtype, a.row_block)
-        log(f"expression store built in {time.time() - t0:.1f}s")
+        expr_builder_used = a.expr_builder
+        if a.expr_builder == "reference":
+            sum_gs, cnt_gs, gene_sum, gene_sumsq, nnz = build_expression_store(
+                grp, n_cells, n_genes, state_code, n_states, paths, a.expr_dtype, a.row_block)
+        else:
+            from . import fast_store
+            group_path = "X" if a.layer == "X" else f"layers/{a.layer}"
+            sum_gs, cnt_gs, gene_sum, gene_sumsq, nnz = fast_store.build_expression_store_parallel(
+                fast_store.H5Source(a.h5ad, group_path), n_cells, n_genes, state_code, n_states,
+                paths, a.expr_dtype, a.row_block, workers=a.workers, log=log,
+                spill_dir=a.spill_dir)
+        log(f"expression store built in {time.time() - t0:.1f}s ({a.expr_builder} builder)")
         denom = state_n.astype(np.float64)[None, :]
         mean_gs = (sum_gs / denom).astype(np.float32)
         frac_gs = (cnt_gs / denom).astype(np.float32)
@@ -1124,6 +1150,7 @@ def main(argv=None) -> int:
             "built_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "layer": a.layer,
             "expr_dtype": a.expr_dtype,
+            "expr_builder": expr_builder_used,
             "nnz": int(nnz),
             "n_states": n_states,
             "states": ordered_states,

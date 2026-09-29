@@ -1038,7 +1038,10 @@ function updateExpressionModeOptions() {
     const modalityLabel = modalityField.querySelector("span");
     modalitySelect.innerHTML = "";
     if (mode === "fastcomm_network") {
-      FASTCOMM_PLOT_OPTIONS.forEach((entry) => {
+      // No per-sample table, no Per-sample option (status: fastcomm_analysis.per_sample_available).
+      const fastCommOptions = FASTCOMM_PLOT_OPTIONS.filter((entry) =>
+        entry.id !== "per_sample" || currentFastCommAnalysis?.per_sample_available !== false);
+      fastCommOptions.forEach((entry) => {
         const option = document.createElement("option");
         option.value = entry.id;
         option.textContent = entry.label;
@@ -1047,7 +1050,7 @@ function updateExpressionModeOptions() {
         }
         modalitySelect.appendChild(option);
       });
-      if (!FASTCOMM_PLOT_OPTIONS.some((entry) => entry.id === modalitySelect.value)) {
+      if (!fastCommOptions.some((entry) => entry.id === modalitySelect.value)) {
         modalitySelect.value = "focused_incoming";
       }
       if (modalityLabel) {
