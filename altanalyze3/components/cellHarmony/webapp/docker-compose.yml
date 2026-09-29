@@ -4,14 +4,16 @@ services:
       context: ../..
       dockerfile: cellHarmony/webapp/Dockerfile
     image: cellharmony-web:latest
-    container_name: cellharmony-web
+    container_name: cellharmony-web-8002
     ports:
-      - "8001:8000"
+      - "8002:8000"
     environment:
-      CELLHARMONY_ROOT_PATH: "/cellharmony"
+      CELLHARMONY_ROOT_PATH: ""
       CELLHARMONY_JOB_STORAGE: /srv/cellharmony/jobs
       CELLHARMONY_REFERENCE_REGISTRY: /app/altanalyze3/components/cellHarmony/flask/reference_config.json
       CELLHARMONY_JOB_WORKERS: "2"
     volumes:
       - ./jobs:/srv/cellharmony/jobs
+    mem_limit: 30g
+    memswap_limit: 30g
     restart: unless-stopped
