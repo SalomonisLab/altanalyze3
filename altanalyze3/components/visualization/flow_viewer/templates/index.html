@@ -1,0 +1,78 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<title>rna2flow concordance</title>
+<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+<style>
+:root{--bg:#ffffff;--fg:#1b1f24;--mut:#5b6572;--line:#d8dee6;--hi:#b2182b;--lo:#2166ac}
+body{font-family:Arial,Helvetica,sans-serif;margin:0;background:var(--bg);color:var(--fg);font-size:13px}
+header{padding:14px 20px;border-bottom:1px solid var(--line)}
+h1{font-size:16px;margin:0 0 3px}.sub{color:var(--mut);font-size:12px}
+main{padding:16px 20px;max-width:1400px}
+table{border-collapse:collapse;font-size:12px;margin-bottom:8px}
+th,td{border:1px solid var(--line);padding:4px 8px;text-align:right}
+th{background:#f4f6f9;text-align:left}td.l,th.l{text-align:left}
+tr.best td{font-weight:bold;background:#f0f7ff}
+.flag{color:var(--hi);font-weight:bold}
+select{font:inherit;padding:3px;margin-right:10px}
+.panel{margin-top:18px}.cap{color:var(--mut);margin:4px 0 8px;max-width:900px;line-height:1.45}
+.cell{stroke:#fff;stroke-width:.5}
+</style></head><body>
+<header><h1>rna2flow concordance</h1>
+<div class="sub">CITE-seq labels transferred onto flow events, scored against FlowSOM metaclusters.</div></header>
+<main>
+<div class="panel"><b>Method benchmark</b>
+<div class="cap">ARI against FlowSOM, with the controls that can invalidate it. <b>shuffled</b> must sit near 0:
+a method scoring well on permuted labels is reading cluster sizes, not markers. <b>held-out</b> is the
+CITE-to-CITE ceiling with no platform gap. <b>top</b> is the fraction of flow events taking one label;
+near 1.0 means collapse.</div>
+<div id="bench"></div></div>
+
+<div class="panel"><b>Transferred label vs FlowSOM metacluster</b>
+<div class="cap">Row-normalized. A clean transfer concentrates each row in few columns.</div>
+<div><select id="ls"></select><select id="mt"></select></div>
+<div id="heat"></div></div>
+</main>
+<script>
+const F=["ARI","AMI","n_labels_used","largest_label_fraction","shuffled_labels_ARI",
+         "held_out_cite_accuracy","marker_dropout_ARI_min","marker_dropout_ARI_max","seconds"];
+const H=["ARI","AMI","labels","top","shuffled","held-out","drop min","drop max","sec"];
+let BENCH=[];
+fetch("/api/benchmark").then(r=>r.json()).then(d=>{
+  BENCH=d.filter(r=>!r.error);
+  const best=Math.max(...BENCH.map(r=>+r.ARI||0));
+  let h="<table><tr><th class='l'>label set</th><th class='l'>method</th>"+H.map(x=>"<th>"+x+"</th>").join("")+"</tr>";
+  for(const r of d){
+    if(r.error){h+=`<tr><td class='l'>${r.label_set}</td><td class='l'>${r.method}</td><td colspan='${H.length}' class='l flag'>FAILED: ${r.error}</td></tr>`;continue;}
+    const sus=(+r.shuffled_labels_ARI>0.05)||(+r.largest_label_fraction>0.8);
+    h+=`<tr class="${+r.ARI===best?'best':''}"><td class='l'>${r.label_set}</td><td class='l'>${r.method}${sus?" <span class='flag'>&#9888;</span>":""}</td>`
+      +F.map(k=>{let v=r[k];if(v==="")return"<td></td>";v=+v;return "<td>"+(Math.abs(v)<1000?v.toFixed(k==="seconds"?1:(k.includes("labels")?0:4)):v)+"</td>";}).join("")+"</tr>";
+  }
+  document.getElementById("bench").innerHTML=h+"</table>";
+  const ls=[...new Set(BENCH.map(r=>r.label_set))], mt=[...new Set(BENCH.map(r=>r.method))];
+  d3.select("#ls").selectAll("option").data(ls).join("option").text(x=>x);
+  d3.select("#mt").selectAll("option").data(mt).join("option").text(x=>x);
+  draw();
+});
+document.getElementById("ls").onchange=draw;document.getElementById("mt").onchange=draw;
+function draw(){
+  const ls=document.getElementById("ls").value,mt=document.getElementById("mt").value;
+  if(!ls||!mt)return;
+  fetch(`/api/contingency?label_set=${encodeURIComponent(ls)}&method=${encodeURIComponent(mt)}`)
+   .then(r=>r.json()).then(d=>{
+    const el=d3.select("#heat");el.selectAll("*").remove();
+    if(d.error){el.append("div").attr("class","cap").text(d.error);return;}
+    const cw=22,chh=16,L=190,T=70;
+    const svg=el.append("svg").attr("width",L+d.cols.length*cw+30).attr("height",T+d.rows.length*chh+20);
+    const col=d3.scaleSequential(d3.interpolateBlues).domain([0,1]);
+    svg.append("g").selectAll("text").data(d.cols).join("text")
+      .attr("transform",(c,j)=>`translate(${L+j*cw+cw/2},${T-6}) rotate(-60)`)
+      .attr("font-size",9).attr("fill","#5b6572").text(c=>c);
+    d.rows.forEach((r,i)=>{
+      svg.append("text").attr("x",L-6).attr("y",T+i*chh+11).attr("text-anchor","end")
+         .attr("font-size",9).attr("fill","#1b1f24").text(r);
+      d.fraction[i].forEach((v,j)=>svg.append("rect").attr("class","cell")
+        .attr("x",L+j*cw).attr("y",T+i*chh).attr("width",cw).attr("height",chh)
+        .attr("fill",col(v)).append("title").text(`${r} / ${d.cols[j]}\n${(100*v).toFixed(1)}%  n=${d.counts[i][j]}`));
+    });
+  });
+}
+</script></body></html>

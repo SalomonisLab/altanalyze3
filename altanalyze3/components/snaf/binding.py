@@ -219,6 +219,25 @@ def predict_presentation_pairs(pairs):
     return out
 
 
+def mhcflurry_unsupported_alleles(alleles):
+    '''{allele: reason} for each allele MHCflurry would reject with "No sequences for allele(s)".
+    Mirrors Class1AffinityPredictor.predict_to_dataframe: canonicalize_allele_name, then
+    membership in allele_to_sequence when pan-allele models are loaded. Give the alleles in the
+    format run_MHCflurry receives (HLA-A*0201).'''
+    ap = _load_mhcflurry_predictor().affinity_predictor
+    known = ap.allele_to_sequence if ap.class1_pan_allele_models else set(ap.supported_alleles)
+    out = {}
+    for h in dict.fromkeys(alleles):
+        try:
+            name = ap.canonicalize_allele_name(h)
+        except Exception as exc:
+            out[h] = 'MHCflurry cannot parse the allele name: {}'.format(exc)
+            continue
+        if name not in known:
+            out[h] = 'MHCflurry has no pseudosequence for {}'.format(name)
+    return out
+
+
 def run_MHCflurry(peptides, hlas):
     import pandas as pd
     from collections import defaultdict

@@ -70,7 +70,7 @@ exclude = ["*.jobs", "*.jobs.*", "altanalyze3.tmp", "altanalyze3.tmp.*"]
 "altanalyze3.components.fastCNV" = ["resources/*.tsv"]
 "altanalyze3.components.fastComm" = ["resources/*.tsv", "configs/*.json"]
 "altanalyze3.components.long_read" = ["resources/*.gz"]
-"altanalyze3.components.snaf" = ["docs/*.md", "BayesTS/*.tsv.gz", "data/*.json", "HLA_Allele_frequency_21_populations.csv", "surface/data/*.json", "surface/TMHMM2.0.model", "nextflow/*.nf", "nextflow/*.json", "nextflow/tests/*.config", "nextflow/tests/*.nf", "nextflow/tests/*.py", "nextflow/tests/*.sh", "nextflow/tests/data/*", "nextflow/tests/data/snaf_db/*", "nextflow/*.config", "nextflow/conf/*", "nextflow/assets/*", "nextflow/modules/local/*/*"]
+"altanalyze3.components.snaf" = ["docs/*.md", "BayesTS/*.tsv.gz", "data/*.json", "HLA_Allele_frequency_21_populations.csv", "surface/data/*.json", "surface/data/SURFY_SurfaceGenie_union/*", "surface/data/SURFY_SurfaceGenie_union/sources/*", "surface/TMHMM2.0.model", "nextflow/*.nf", "nextflow/*.json", "nextflow/tests/*.config", "nextflow/tests/*.nf", "nextflow/tests/*.py", "nextflow/tests/*.sh", "nextflow/tests/data/*", "nextflow/tests/data/snaf_db/*", "nextflow/*.config", "nextflow/conf/*", "nextflow/assets/*", "nextflow/modules/local/*/*"]
 
 "altanalyze3.components.bam.bam2hla" = ["build/signatures_*.json.gz", "data/HLA_Allele_frequency_21_populations.csv"]
 "altanalyze3.components.snaf.deepimmuno" = ["data/*.txt", "models/cnn_model_331_3_7/*", "models/cnn_model_331_3_7/.*"]

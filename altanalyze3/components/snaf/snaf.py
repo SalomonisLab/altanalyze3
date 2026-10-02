@@ -614,6 +614,7 @@ class JunctionCountMatrixQuery():
             jcmq.run(hlas=hlas,outdir='result',name='after_prediction.p')
         '''
         import time as _t
+        hlas = self._drop_unsupported_hlas(hlas, outdir)
         _t0 = _t.time()
         self.parallelize_run(kind=1,strict=strict)
         print('[STAGE-TIMING] translation (kind=1): {:.1f}s'.format(_t.time()-_t0))
@@ -628,6 +629,35 @@ class JunctionCountMatrixQuery():
         self.parallelize_run(kind=3,hlas=hlas)
         print('[STAGE-TIMING] binding+immunogenicity (kind=3, cached): {:.1f}s'.format(_t.time()-_t1))
         self.serialize(outdir=outdir,name=name)
+
+    def _drop_unsupported_hlas(self, hlas, outdir):
+        '''Skip and report each HLA allele MHCflurry cannot score (Nathan, 2026-10-01), so one
+        rare allele no longer aborts the cohort. Writes hla_alleles_skipped.txt (sample, allele,
+        reason; header only when none is skipped) and refuses a sample left with no allele.
+        netMHCpan runs are unchanged.'''
+        if binding_method != 'MHCflurry':
+            return hlas
+        from . import binding as _binding
+        samples = list(self.junction_count_matrix.columns)
+        if len(samples) != len(hlas):
+            raise ValueError('{} HLA rows for {} samples'.format(len(hlas), len(samples)))
+        flat = list(dict.fromkeys(h for row in hlas for h in row))
+        bad = _binding.mhcflurry_unsupported_alleles(hla_formatting(flat, 'netMHCpan_output', 'deepimmuno'))
+        reason = {h: bad[c] for h, c in zip(flat, hla_formatting(flat, 'netMHCpan_output', 'deepimmuno')) if c in bad}
+        rows, kept = [], []
+        for s, row in zip(samples, hlas):
+            keep = [h for h in row if h not in reason]
+            rows.extend((s, h, reason[h]) for h in row if h in reason)
+            if row and not keep:
+                raise ValueError('sample {}: MHCflurry supports none of its HLA alleles ({})'.format(s, ', '.join(row)))
+            kept.append(keep)
+        os.makedirs(outdir, exist_ok=True)
+        report = os.path.join(outdir, 'hla_alleles_skipped.txt')
+        pd.DataFrame(rows, columns=['sample', 'allele', 'reason']).to_csv(report, sep='\t', index=False)
+        n_all = sum(len(row) for row in hlas)
+        print('[HLA] skipped {} of {} sample-allele entries that MHCflurry cannot score{} -> {}'.format(
+            len(rows), n_all, (': ' + ', '.join(sorted(reason))) if reason else '', report), flush=True)
+        return kept
 
     @staticmethod
     def generate_results(path,outdir,criterion=None):

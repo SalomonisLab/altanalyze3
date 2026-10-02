@@ -465,8 +465,8 @@ def run_snaf_b(args):
     over the membrane neojunctions, so SNAF-B runs WITHOUT SNAF-T and without HLA types.
     --validation_gtf (e.g. a long-read SQANTI GTF, plain or gzipped) enables the
     stringency-4/5 EST/long-read support gates; without it, stringency-3 candidates are
-    still produced fully offline. --surface_db replaces the built-in Alt91_db surfaceome
-    whitelist with a user database (e.g. SURFY).
+    still produced fully offline. --surface_db defaults to the bundled SURFY + SurfaceGenie
+    union; 'alt91' selects the built-in Alt91_db surfaceome, and a path selects a user database.
     """
     _ensure_fork_safety()
     from altanalyze3.components import snaf
@@ -478,9 +478,9 @@ def run_snaf_b(args):
     _require_file(args.juncounts, '--juncounts')
     freq_path = _require_file(args.freq_path, '--freq_path') \
         if getattr(args, 'freq_path', None) else None
-    surface_db = str(args.surface_db) if getattr(args, 'surface_db', None) else None
-    if surface_db is not None and not os.path.exists(surface_db):
-        raise FileNotFoundError('--surface_db not found: {}'.format(surface_db))
+    from altanalyze3.components.snaf.surface.surface_db import resolve_surface_db
+    surface_db = resolve_surface_db(getattr(args, 'surface_db', None))
+    logger.info('SNAF-B surface database: %s', surface_db or 'built-in Alt91_db surfaceome (alt91)')
     validation_gtf = _validation_gtf_paths(getattr(args, 'validation_gtf', None))
     if isinstance(validation_gtf, list):
         logger.info('SNAF-B validation catalogs (%d): %s', len(validation_gtf),
@@ -522,7 +522,9 @@ def run_snaf_b(args):
         tumor_prevalance_cutoff=args.tumor_prevalance_cutoff, add_control=add_control,
         genome_fasta=genome_fasta, gtex_db=gtex_db, download_ref=getattr(args, 'download_ref', False),
         control_stats_path=(str(args.control_stats) if getattr(args, 'control_stats', None) else None))
-    surface.initialize(db_dir=root, surface_db=surface_db)
+    # initialize() resolves its argument again, and there None means the default union, so the
+    # Alt91_db choice must travel as its keyword.
+    surface.initialize(db_dir=root, surface_db=(surface_db if surface_db is not None else 'alt91'))
 
     membrane_tuples, jcmq = snaf.JunctionCountMatrixQuery.get_membrane_tuples(
         df, return_jcmq=True,

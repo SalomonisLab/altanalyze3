@@ -70,6 +70,8 @@ def main(argv=None):
     hla.add_argument('--build', default='auto', choices=['auto', 'hg19', 'hg38'])
     hla.add_argument('--min-depth', type=int, default=8)
     hla.add_argument('--require-all', action='store_true')
+    hla.add_argument('--typer', default='v2', choices=['v2', 'v1'],
+                     help='v2 = bam2hla_reads (read-level, default); v1 = bam2hla pileup')
     combine = commands.add_parser('combine-hla')
     combine.add_argument('--inputs', nargs='+', required=True)
     combine.add_argument('--output', required=True)
@@ -105,7 +107,8 @@ def main(argv=None):
         run_pyneoquant(args.bundle, args.psm_table, args.sample, args.outdir, args.executable, args.search_format, args.q_threshold)
     elif args.command == 'hla':
         from .hla import prepare_hla
-        prepare_hla(args.sample, args.output, args.qc, args.bam, args.supplied, args.build, args.min_depth, args.require_all)
+        prepare_hla(args.sample, args.output, args.qc, args.bam, args.supplied, args.build, args.min_depth, args.require_all,
+                    typer=args.typer)
     elif args.command == 'combine-hla':
         from .hla import combine_hla
         combine_hla(args.inputs, args.output)

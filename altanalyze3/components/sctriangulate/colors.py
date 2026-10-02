@@ -112,7 +112,9 @@ def bg_greyed_cmap(cmap_str):
         :target: target    
     '''
     # give a matplotlib cmap str, for instance, 'viridis' or 'YlOrRd'
-    cmap = copy.copy(cm.get_cmap(cmap_str))
+    # matplotlib 3.9 removed cm.get_cmap. matplotlib.colormaps exists from 3.5, so this
+    # one spelling works on 3.7 and on 3.11.
+    cmap = copy.copy(mpl.colormaps[cmap_str])
     cmap.set_under('lightgrey')
     return cmap
 
@@ -235,9 +237,9 @@ def pick_n_colors(n,gradient=False,cmap=None):
         _colors = [to_hex(eval('cm.{}'.format(cmap))(round(i))) for i in np.linspace(0,255,n)]
     else:
         if n <= 10:
-            _colors = [to_hex(color) for color in cm.get_cmap('tab10').colors[:n]]
+            _colors = [to_hex(color) for color in mpl.colormaps['tab10'].colors[:n]]
         elif n > 10 and n <= 20:
-            _colors = [to_hex(color) for color in cm.get_cmap('tab20').colors[:n]]
+            _colors = [to_hex(color) for color in mpl.colormaps['tab20'].colors[:n]]
         elif n > 20 and n <= 28:
             _colors = _zeileis_28[:n]
         elif n > 28 and n <= 102:

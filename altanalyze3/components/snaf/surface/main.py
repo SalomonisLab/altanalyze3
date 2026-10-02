@@ -109,20 +109,25 @@ def initialize(db_dir, use_foundation='auto', foundation_path=None, surface_db=N
     :param use_foundation: 'auto' (default) serves gene sequences (dict_fa) from the precomputed
                            membrane subset with a lazy full-load fallback; False forces the full
                            2 GB FASTA into memory.
-    :param surface_db: optional path to a custom cell-surface gene database -- either a
-                       directory written by `altanalyze3 snaf-build-surface-db` or a bare gene
-                       table with an Ensembl-gene-ID column. It REPLACES the built-in
-                       Alt91_db surfaceome (both the whitelist and the reference protein
-                       sequences). Genes it lists with no reference protein are excluded and
-                       counted, because SNAF-B cannot score a gene it cannot compare against.
+    :param surface_db: the cell-surface gene database. None (default) uses the bundled SURFY +
+                       SurfaceGenie union (surface_db.DEFAULT_SURFACE_DB); 'alt91' uses the
+                       built-in Alt91_db surfaceome; any other value is a directory written by
+                       `altanalyze3 snaf-build-surface-db` or a bare gene table with an
+                       Ensembl-gene-ID column. The database sets both the whitelist and the
+                       reference protein sequences. Genes it lists with no reference protein are
+                       excluded and counted, because SNAF-B cannot score a gene it cannot compare
+                       against.
 
     Examples::
 
         from snaf import surface
-        surface.initialize(db_dir=db_dir)
+        surface.initialize(db_dir=db_dir)                       # SURFY + SurfaceGenie union
+        surface.initialize(db_dir=db_dir, surface_db='alt91')   # legacy Alt91_db surfaceome
         surface.initialize(db_dir=db_dir, surface_db='/path/to/SURFY_surface_db')
 
     '''
+    from .surface_db import resolve_surface_db
+    surface_db = resolve_surface_db(surface_db)
     global df_exonlist
     global dict_exonCoords
     global dict_fa
@@ -899,12 +904,15 @@ _GTF_INDEX_VERSION = 2
 
 def _gtf_index_path(gtf):
     '''Where the persistent parsed-GTF index lives. Default: next to the GTF (like a .fai/.tbi
-    sidecar). Overridable via SNAF_INDEX_DIR (keyed by GTF basename) when the reference dir is
-    read-only or shared.'''
+    sidecar). Overridable via SNAF_INDEX_DIR when the reference dir is read-only or shared; there
+    the name carries a hash of the GTF's absolute path, because long-read catalogues are often all
+    called combined.gff.gz and a basename key made them share one index.'''
     d = os.environ.get('SNAF_INDEX_DIR')
     if d:
         os.makedirs(d, exist_ok=True)
-        return os.path.join(d, os.path.basename(str(gtf)) + '.snaf_gtf_index.pkl')
+        import hashlib
+        key = hashlib.sha1(os.path.abspath(str(gtf)).encode()).hexdigest()[:10]
+        return os.path.join(d, '{}.{}.snaf_gtf_index.pkl'.format(os.path.basename(str(gtf)), key))
     return str(gtf) + '.snaf_gtf_index.pkl'
 
 

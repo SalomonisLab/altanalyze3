@@ -34,8 +34,12 @@ def read_hla_table(path):
     return result
 
 
-def prepare_hla(sample, output, qc, bam=None, supplied=None, build='auto', min_depth=8, require_all=False):
-    """Supplied alleles override inference; empty/no-call supplied rows can infer."""
+def prepare_hla(sample, output, qc, bam=None, supplied=None, build='auto', min_depth=8, require_all=False,
+                typer='v2'):
+    """Supplied alleles override inference; empty/no-call supplied rows can infer.
+
+    typer: 'v2' (default since 2026-10-01, bam2hla_reads, read-level, Nathan's decision after the
+    362-sample OptiType benchmark) or 'v1' (bam2hla pileup). min_depth applies to v1 only."""
     values = read_hla_table(supplied).get(sample, []) if supplied else []
     quality = []
     if values:
@@ -46,17 +50,32 @@ def prepare_hla(sample, output, qc, bam=None, supplied=None, build='auto', min_d
     else:
         if not bam:
             raise ValueError(f'{sample}: no supplied HLA alleles and no BAM for inference')
-        from altanalyze3.components.bam.bam2hla.bam2hla import type_bam
-        typed = type_bam(str(bam), build=build, min_depth=min_depth, verbose=False)
+        if typer == 'v1':
+            from altanalyze3.components.bam.bam2hla.bam2hla import type_bam
+            typed = type_bam(str(bam), build=build, min_depth=min_depth, verbose=False)
+            origin = 'bam2hla'
+        elif typer == 'v2':
+            from altanalyze3.components.bam.bam2hla.bam2hla_reads import type_bam_reads
+            typed = type_bam_reads(str(bam), build=build, verbose=False)
+            origin = 'bam2hla_v2'
+        else:
+            raise ValueError(f'unknown HLA typer {typer!r}; use v2 or v1')
         for gene, result in typed['genes'].items():
             alleles = [normalize_class_i(a) for a in result.get('call') or []]
             values.extend(alleles)
-            quality.append({**result, 'sample_id': sample, 'gene': gene, 'origin': 'bam2hla',
+            quality.append({**result, 'sample_id': sample, 'gene': gene, 'origin': origin,
                             'build': typed['build'], 'status': 'called' if alleles else 'no_call',
                             'alleles': ','.join(alleles)})
     values = list(dict.fromkeys(values))
     qc_fields = ['sample_id', 'gene', 'origin', 'build', 'status', 'alleles', 'reason',
                  'n_positions', 'mean_depth', 'explained_frac', 'minor_support']
+    if any(r.get('origin') == 'bam2hla_v2' for r in quality):
+        qc_fields = ['sample_id', 'gene', 'origin', 'build', 'status', 'alleles', 'reason',
+                     'n_assigned_reads', 'n_profiles', 'mismatch_per_read', 'het_gain_per_read',
+                     'joint_het_gain', 'gene_specific_call']
+        for r in quality:
+            if isinstance(r.get('gene_specific_call'), (list, tuple)):
+                r['gene_specific_call'] = '/'.join(r['gene_specific_call'])
     write_table(qc, quality, qc_fields)
     if not values or (require_all and any(r['status'] == 'no_call' for r in quality)):
         raise ValueError(f'{sample}: insufficient HLA calls; inspect {qc}')

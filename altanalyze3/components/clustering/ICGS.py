@@ -4693,6 +4693,28 @@ def run_canonical_heatmap(adata: ad.AnnData, config: ICGS3Config, outdir: str) -
                 work.data = np.expm1(work.data)
             else:
                 work = np.expm1(work)
+        # A signed matrix (dsb ADT, or any z-scored input) has no meaningful row sum: summing
+        # signed values gives a near-zero or negative total, and the 1e4/total step below then
+        # explodes it (measured on a 102-plex dsb panel: min -383469.6, max 513147.8), after
+        # which MarkerFinder's scaling check correctly refuses the negatives.
+        # Clamp the negatives of this TEMPORARY heatmap copy to 0 first. For dsb a negative
+        # value means at or below background, so 0 is that feature's floor, not lost signal.
+        # adata.X, the clustering, the NMF and the SVM are untouched: `work` is a copy built at
+        # heatmap time and dropped straight after. A non-negative matrix is unchanged, so RNA
+        # runs behave exactly as before.
+        if sp.issparse(work):
+            n_negative = int((work.data < 0).sum())
+            if n_negative:
+                work.data[work.data < 0] = 0.0
+                work.eliminate_zeros()
+        else:
+            n_negative = int((work < 0).sum())
+            if n_negative:
+                np.clip(work, 0.0, None, out=work)
+        if n_negative:
+            _log(f"heatmap: clamped {n_negative} negative values to 0 before depth "
+                 f"normalization; a signed matrix has no meaningful row sum")
+
         totals = np.asarray(work.sum(axis=1)).ravel()
         n_empty = int((totals <= 0).sum())
         totals[totals <= 0] = 1.0

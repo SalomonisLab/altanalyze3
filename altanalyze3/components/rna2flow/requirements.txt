@@ -1,0 +1,20 @@
+# rna2flow external dependencies.
+#
+# pyInfinityFlow is the reference implementation of the published CITE-seq to flow method
+# (FCS parsing, the Logicle transform and its T/W/M/A keyword handling). rna2flow imports it
+# as a standard dependency rather than vendoring a copy, so a fix upstream reaches us.
+#   source on this machine: /Users/saljh8/Dropbox/Code/pyInfinityFlow-main
+#   install:  /opt/homebrew/opt/python@3.11/bin/python3.11 -m pip install -e /Users/saljh8/Dropbox/Code/pyInfinityFlow-main
+pyInfinityFlow
+harmonypy>=0.0.9
+xgboost>=1.6
+umap-learn>=0.5
+scanpy>=1.9
+anndata
+numpy
+scipy
+scikit-learn
+pandas
+# Optional, each enabling one comparison arm. Absent on this machine as of 2026-10-01:
+#   mario-py      MARIO CCA matching arm
+#   cyCombine (R) cyCombine normalization arm

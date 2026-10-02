@@ -1,0 +1,51 @@
+Ensembl-91 symbol table : /Users/saljh8/Documents/GitHub/altanalyze/AltDatabase/EnsMart91/ensembl/Hs/Ensembl-Symbol.txt
+  symbols               : 65382
+  symbols naming >1 gene: 5657 / 65382
+UniProt fallback table  : /Users/saljh8/Desktop/Code/AltAnalyze/AltDatabase/EnsMart100/uniprot/Hs/Hs_Ensembl-UniProt.txt
+  accessions            : 62226
+
+SURFY /Users/saljh8/Dropbox/SNAF/SurfaceProtein-Database/SURFY-Ensembl.txt
+  data rows                          : 2882
+  rows with no Ensembl id in the file: 85
+  of those, recovered by symbol      : 39 / 85
+  unique Ensembl genes               : 2760
+  STILL unmapped (no Ensembl id in any table, cannot enter an ENSG-keyed database): 46
+    ACPT, C1orf101, C1orf233, C1orf85, CD97, ERVFC1, ERVK-18, ERVK-19, ERVK-21, ERVK-24, ERVK-25, ERVK-6, ERVK-7, ERVK-8, ERVK-9, ERVPABLB-1, ERVS71-1, FAM26E, FCGR1C, GPR111, GPR112, GPR113, GPR115, GPR123, GPR125, GPR128, GPR144, HERVK_113, HIAT1, HIDE1, KCT2, KIAA0247, LPHN2, LPPR1, LPPR4, MFI2, MFSD4, MUC3B, PCNX, PCNXL2, PPAP2C, PTCHD2, SLC22A20, TMEM194A, TMEM30C, UPK3BL
+
+SurfaceGenie /Users/saljh8/Dropbox/SNAF/SurfaceProtein-Database/SurfaceGenie.txt
+  data rows                : 2335
+  SPC distribution         : SPC=0:21, SPC=1:174, SPC=2:644, SPC=3:1018, SPC=4:478
+  mapped via genie_alias_symbol_ens91: 3
+  mapped via genie_primary_symbol_ens91: 2316
+  mapped via genie_uniprot_ensmart100: 12
+  rows naming >1 Ensembl gene (all kept): 218
+  rows with NO Ensembl link : 4 / 2335
+  unique Ensembl genes      : 3141
+  first unmapped (accession, symbol, SPC): [('P60507', 'ERVFC1', '2'), ('Q9N2K0', '', '2'), ('Q9N2J8', '', '2'), ('P60509', 'ERVPABLB-1', '2')]
+
+Multi-mapped symbols
+  symbols naming >1 Ensembl gene   : 205
+  additional Ensembl copies kept   : 830 (labelled ensembl_copy=additional)
+
+Union (denominator = unique Ensembl genes)
+  in both sources          : 1892
+  SURFY only               : 868
+  SurfaceGenie only        : 1249
+  UNION total              : 4009
+  NO threshold is applied: all 4009 genes are written to the database
+  SPC annotation across the union (informational only, nothing is excluded):
+    SPC=0                      29
+    SPC=1                      199
+    SPC=2                      753
+    SPC=3                      1311
+    SPC=4                      849
+    SPC=not-in-SurfaceGenie    868
+
+Ensembl-91 gene models (64661 genes in Alt91_db)
+  union genes with a v91 model : 3965 / 4009
+  (genes without one cannot be scored by SNAF-B whatever the whitelist says)
+
+Outputs
+  /Users/saljh8/Dropbox/SNAF/SurfaceProtein-Database/surface_union_annotated.txt   (4009 rows + header)
+  /Users/saljh8/Dropbox/SNAF/SurfaceProtein-Database/surface_union_all.txt    (4009 rows + header, ready for `snaf-b --surface_db`)
+  /Users/saljh8/Dropbox/SNAF/SurfaceProtein-Database/surface_union_report.txt

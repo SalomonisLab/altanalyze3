@@ -56,6 +56,34 @@ GENES_HEADER = ('ensg', 'symbol', 'has_reference', 'reference_source', 'n_refere
 
 _ENSG_RE = re.compile(r'^ENSG\d+')
 
+# Default SNAF-B surfaceome (set 2026-10-01 at Nathan's request): the SURFY + SurfaceGenie union,
+# 4,009 genes listed / 3,584 with a reference protein, shipped with altanalyze3. Its build inputs and
+# report are in data/SURFY_SurfaceGenie_union/sources/. Pass 'alt91' for the legacy Alt91_db list.
+DEFAULT_SURFACE_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data',
+                                  'SURFY_SurfaceGenie_union')
+ALT91_SURFACE_KEYWORDS = ('alt91', 'builtin', 'legacy')
+
+
+def resolve_surface_db(value=None):
+    """Return the surface database SNAF-B uses.
+
+    ``None``, ``''`` or ``'default'`` -> the bundled SURFY + SurfaceGenie union
+    (:data:`DEFAULT_SURFACE_DB`); ``'alt91'`` / ``'builtin'`` / ``'legacy'`` -> ``None``, which
+    :func:`surface.main.initialize` reads as the built-in Alt91_db surfaceome; anything else
+    must be an existing directory or gene table and is returned unchanged.
+    """
+    key = '' if value is None else str(value).strip()
+    if key.lower() in ('', 'default'):
+        if not os.path.isdir(DEFAULT_SURFACE_DB):
+            raise FileNotFoundError('bundled default surface database is missing: {}'.format(
+                DEFAULT_SURFACE_DB))
+        return DEFAULT_SURFACE_DB
+    if key.lower() in ALT91_SURFACE_KEYWORDS:
+        return None
+    if not os.path.exists(key):
+        raise FileNotFoundError('--surface_db not found: {}'.format(key))
+    return key
+
 
 def _open_text(path):
     """Open a plain or gzipped text file, tolerating CRLF and a UTF-8 BOM."""

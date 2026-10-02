@@ -749,12 +749,21 @@ def _build_marker_centroids_from_aggregates(genes, cluster_order, aggregates, me
     # gives negative cluster totals, and log2 of the resulting negative ratio is NaN, which
     # would write a silently unusable cellHarmony reference.
     if np.any(cluster_gene_sums < 0):
+        # A CITE-seq matrix carries signed AB_ columns beside non-negative RNA, so a few
+        # cluster x feature sums go negative while the RNA block is fine. Clamp those to 0,
+        # which is the floor of a background-subtracted protein measurement, and say how many.
+        # Nathan's directive, 2026-10-01: "make values compatible (if negative values,
+        # truncate to 0)". The check below stays in force for anything the clamp cannot fix.
         n_neg = int((cluster_gene_sums < 0).sum())
+        frac = n_neg / float(cluster_gene_sums.size)
+        print("[centroid] clamped %d of %d cluster x feature sums (%.4f%%) from negative to 0 "
+              "before the log2 CPM; a background-subtracted value has 0 as its floor"
+              % (n_neg, cluster_gene_sums.size, 100 * frac))
+        cluster_gene_sums = np.clip(cluster_gene_sums, 0.0, None)
+    if np.any(cluster_gene_sums < 0):
         raise ValueError(
-            "Centroid matrix cannot be built from mean-centred or z-scored input: "
-            "%d of %d cluster x gene sums are negative. The centroid step needs raw counts "
-            "(it applies its own log2 CPM). Point --layer at a counts matrix."
-            % (n_neg, cluster_gene_sums.size)
+            "Centroid matrix still holds negative cluster x gene sums after clamping; "
+            "the log2 CPM is undefined. Point --layer at a counts matrix."
         )
     totals = cluster_gene_sums.sum(axis=1, keepdims=True)
     normalized = np.zeros_like(cluster_gene_sums, dtype=float)
