@@ -6363,6 +6363,19 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         try:
+            return _plot_variables(store, job_id, modality)
+        except ValueError as exc:
+            # The RNA object exists before the run has written its cluster column
+            # into it: on 2026-10-01 the page asked 24 times in 10 s while a job
+            # wrote it, and each answer was a 500 ("Cluster assignments missing").
+            # Until the job is completed that is "not ready", a 404 like the missing
+            # file above; a completed job without clusters stays a 500, a real fault.
+            if str(store.get_job(job_id).get("status") or "") != "completed":
+                raise HTTPException(status_code=404, detail=str(exc))
+            raise
+
+    def _plot_variables(store, job_id: str, modality: str):
+        try:
             cache = _get_expression_cache(app, store.get_job(job_id), modality=modality)
         except FileNotFoundError:
             # A DEG-only modality stores no feature matrix. Cell communication is one: it
@@ -6370,7 +6383,15 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             # are obs columns, which every modality shares, so read them from RNA instead
             # of answering 500. Before this, plot-variables?modality=cell_communication
             # raised FileNotFoundError and the server returned 500.
-            cache = _get_expression_cache(app, store.get_job(job_id), modality="rna")
+            try:
+                cache = _get_expression_cache(app, store.get_job(job_id), modality="rna")
+            except FileNotFoundError as exc:
+                # No RNA object either: the job is still running, or it never wrote one.
+                # The results page asks for this while a run is under way, several
+                # times a second, and each answer was a 500 with a traceback (2026-09-30:
+                # 288 in five minutes for two running jobs). Not ready is a 404, as
+                # display-filters answers; the page treats both alike.
+                raise HTTPException(status_code=404, detail=str(exc))
         variables = _groupable_columns(cache)
         return JSONResponse({"cluster_key": str(cache["cluster_key"]),
                              "variables": variables,
