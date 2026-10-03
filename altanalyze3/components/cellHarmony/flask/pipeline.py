@@ -1595,6 +1595,9 @@ def _build_job_bundle(store: JobStore, job_id: str, combined_h5ad_path: Path,
         shape = (tuple(int(v) for v in x.attrs["shape"]) if isinstance(x, h5py.Group)
                  else tuple(int(v) for v in x.shape))
         has_umap = "obsm" in fh and "X_umap" in fh["obsm"]
+        # Compact only the serving copy of log-transformed RNA. Analytical matrices
+        # and linear imputed modalities retain their original precision.
+        rna_dtype = "float16" if "uns" in fh and "log1p" in fh["uns"] else "float32"
     n_cells = int(shape[0])
     record: Dict[str, object] = {"status": "skipped", "n_cells": n_cells,
                                  "threshold": threshold}
@@ -1622,7 +1625,8 @@ def _build_job_bundle(store: JobStore, job_id: str, combined_h5ad_path: Path,
            "--h5ad", str(combined_h5ad_path), "--out", str(out_dir),
            "--prefix", _BUNDLE_PREFIX, "--dataset-id", str(job_id),
            "--cluster-key", str(cluster_key), "--layer", "X",
-           "--embedding-from", "obsm:X_umap", "--expr-builder", "parallel"]
+           "--embedding-from", "obsm:X_umap", "--expr-builder", "parallel",
+           "--expr-dtype", rna_dtype]
     skipped_modalities: Dict[str, str] = {}
     for modality_id, entry in sorted((modality_artifacts or {}).items()):
         if modality_id == "rna":
@@ -1639,7 +1643,8 @@ def _build_job_bundle(store: JobStore, job_id: str, combined_h5ad_path: Path,
             continue
         sources[modality_id] = path
         info = labels.get(modality_id) or {}
-        cmd += ["--modality", f"{modality_id}={path}"]
+        cmd += ["--modality", f"{modality_id}={path}",
+                "--modality-expr-dtype", f"{modality_id}=float32"]
         if info.get("label"):
             cmd += ["--modality-label", f"{modality_id}={info['label']}"]
         if info.get("feature_label"):
@@ -1658,7 +1663,7 @@ def _build_job_bundle(store: JobStore, job_id: str, combined_h5ad_path: Path,
                               cwd=str(repo_root))
     seconds = round(_time.time() - started, 1)
     record.update({"seconds": seconds, "log": str(log_path), "returncode": int(proc.returncode),
-                   "skipped_modalities": skipped_modalities})
+                   "skipped_modalities": skipped_modalities, "rna_expr_dtype": rna_dtype})
     if proc.returncode != 0:
         tail = log_path.read_text(encoding="utf-8", errors="replace").strip().splitlines()[-5:]
         record.update({"status": "failed", "message": " | ".join(tail)})
@@ -2320,7 +2325,7 @@ def run_cellharmony_pipeline(
             sample_fields[0]["value"] if sample_fields else None,
         )
     max_group_values = max((len(values) for values in sample_values.values()), default=0)
-    pseudobulk_allowed = bool(upload_profile.get("single_h5ad") or upload_profile.get("total_files", 0) >= 4)
+    pseudobulk_allowed = bool(upload_profile.get("single_h5ad") or upload_profile.get("total_files", 0) >= 4 or max_group_values > 5)
     differential_enabled = bool(upload_profile["differential_eligible"])
     differential_modalities = list(modalities_payload["available"])
     if fastcomm_analysis.get("enabled"):
@@ -2432,6 +2437,32 @@ def _read_differential_h5ad(path, *, disk_backed=False):
         return ad.AnnData(**kwargs, layers=layers)
 
 
+def _sample_differential_cells(obs, population_col, sample_col, selected_samples, limit=500):
+    """Random, reproducible cell selection per state and selected sample for scALABLE."""
+    if not 1 <= int(limit) <= 500:
+        raise ValueError("scALABLE differential cell limit must be between 1 and 500.")
+    selected = obs[sample_col].astype(str).isin([str(v) for v in selected_samples])
+    positions = np.flatnonzero(selected.to_numpy())
+    annotations = obs.iloc[positions][[population_col, sample_col]].astype(str)
+    rng = np.random.default_rng(0)
+    rows = []
+    for indices in annotations.groupby([population_col, sample_col], sort=True, observed=True).indices.values():
+        chosen = rng.choice(indices, size=limit, replace=False) if len(indices) > limit else indices
+        rows.extend(positions[chosen])
+    return np.sort(np.asarray(rows, dtype=np.int64))
+
+
+def _materialize_differential_selection(adata, modality):
+    from ..disk_differential import root_and_rows, bounded_materialize
+    disk_input = root_and_rows(adata)
+    sparse_input = disk_input is not None and getattr(disk_input[0].X, 'format', None) in {'csr', 'csc'}
+    # Repeated sparse feature scans are much slower on HDF5. Read only the
+    # sampled rows once when their combined X/counts buffers fit this budget.
+    # Dense predictions retain the smaller serving/GRN-specific thresholds.
+    analysis_budget = 6 * 1024**3 if sparse_input else (4 * 1024**3 if modality == 'grn' else 256 * 1024**2)
+    return bounded_materialize(adata, max_bytes=analysis_budget)
+
+
 def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, object]:
     meta = store.get_job(job_id)
     differential_meta = dict(meta.get("differential") or {})
@@ -2454,7 +2485,9 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
         raise ValueError(f"Samples cannot appear in both groups: {', '.join(overlap)}")
 
     combined_h5ad = (None if modality == "cell_communication"
-                     else _modality_differential_h5ad_path(meta, modality, comparison_type))
+                     # Build pseudobulks from capped cells, not precomputed
+                     # aggregates that used every cell in the original job.
+                     else _modality_differential_h5ad_path(meta, modality, "cells"))
 
     comparison_tag = _comparison_tag(group1_samples, group2_samples)
     run_id = datetime.utcnow().strftime("%Y%m%d-%H%M%S-%f")
@@ -2510,21 +2543,9 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
             comparison_type=comparison_type,
         )
 
-    disk_differential = comparison_type == 'cells'
-    if disk_differential:
-        import h5py
-        with h5py.File(combined_h5ad, 'r') as handle:
-            if isinstance(handle['X'], h5py.Group):
-                nodes = [handle['X']]
-                if 'counts' in handle.get('layers', {}):
-                    nodes.append(handle['layers/counts'])
-                sparse_bytes = sum(node[key].size * node[key].dtype.itemsize
-                                   for node in nodes for key in ('data', 'indices', 'indptr'))
-                # Sparse matrices below this budget are quicker to read once;
-                # large inputs stay on disk. Dense imputed matrices use bounded reads.
-                disk_differential = sparse_bytes > 8 * 1024**3
-    adata = _read_differential_h5ad(combined_h5ad, disk_backed=disk_differential)
-    from ..disk_differential import bounded_materialize, root_and_rows, bind_broadcast_profiles, read_rows
+    # Read annotations first; select capped cells before loading expression buffers.
+    adata = _read_differential_h5ad(combined_h5ad, disk_backed=True)
+    from ..disk_differential import root_and_rows, bind_broadcast_profiles, read_rows
     if modality in {'metabolite', 'lipid'} and root_and_rows(adata) is not None and 'broadcast_profiles' not in adata.uns:
         # Existing jobs also have the compact sample/state predictions. Reuse
         # them after checking feature order, row mapping and sampled cell values.
@@ -2541,14 +2562,6 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
                         adata.uns['broadcast_profile_codes'] = codes
                         bind_broadcast_profiles(adata)
             del profiles
-    dense_budget = 4 * 1024**3 if modality == 'grn' else 256 * 1024**2
-    materialized = bounded_materialize(adata, max_bytes=dense_budget)
-    if materialized is adata and modality == 'grn' and root_and_rows(adata) is not None:
-        from ..disk_differential import bind_row_store
-        bind_row_store(adata)
-    if materialized is not adata:
-        adata._analysis_h5_handle.close()
-        adata = materialized
     if population_col not in adata.obs.columns:
         raise ValueError(f"'{population_col}' is not present in the aligned AnnData observations.")
 
@@ -2593,14 +2606,24 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
     web_group_col = "__cellharmony_web_group__"
     sample_values = adata.obs[sample_col].astype(str)
     adata.obs[web_group_col] = np.where(sample_values.isin(resolved_group1), case_label, control_label)
-    if not bool(np.asarray(subset_mask).all()):
-        from ..disk_differential import root_and_rows
-        adata = adata[subset_mask] if root_and_rows(adata) is not None else adata[subset_mask].copy()
-    # The GRN edge h5ad is already a (sample x cell-state) pseudobulk object; re-aggregating
-    # it (compute_pseudobulk_per_population sums counts) would distort the edge scores, so
-    # skip aggregation when the loaded h5ad is already pseudobulk-level — run_de_for_comparisons
-    # still uses the moderated t-test via uns['pseudobulk_method'].
+    # Cell abundance must count all selected cells, independent of DE sampling.
+    frequency_adata = ad.AnnData(obs=adata.obs.loc[subset_mask, [population_col, web_group_col]].copy())
     already_pseudobulk = str(adata.uns.get("pseudobulk_method", "")) == "pseudobulk"
+    limit = int(config.get("max_cells_per_state_sample", 500))
+    if not 1 <= limit <= 500:
+        raise ValueError("scALABLE differential cell limit must be between 1 and 500.")
+    rows = _sample_differential_cells(adata.obs, population_col, sample_col,
+                                      resolved_group1 + resolved_group2, limit) if not already_pseudobulk else np.flatnonzero(subset_mask)
+    before = int(np.asarray(subset_mask).sum())
+    store.append_log(job_id, f"[params] differential_sampling max_cells_per_state_sample={limit} random_seed=0 selected={len(rows)} available={before} sample_col={sample_col} population_col={population_col}")
+    handle = getattr(adata, '_analysis_h5_handle', None)
+    if len(rows) != adata.n_obs:
+        adata = adata[rows] if root_and_rows(adata) is not None else adata[rows].copy()
+    materialized = _materialize_differential_selection(adata, modality)
+    if materialized is not adata:
+        if handle is not None:
+            handle.close()
+        adata = materialized
     make_pseudobulk = (comparison_type == "pseudobulk") and not already_pseudobulk
     de_params = _differential_runtime_params(modality, comparison_type)
 
@@ -2670,7 +2693,7 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
             pop_order = []
 
     cellfreq_outputs = cellHarmony_differential._write_cell_frequency_plots(
-        adata=adata,
+        adata=frequency_adata,
         population_col=population_col,
         covariate_col=web_group_col,
         conditions=[control_label, case_label],

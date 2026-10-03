@@ -117,12 +117,33 @@ def assess_expression_scale(adata, *, random_state=0):
 
 def normalize_adata(adata, show_progress=False):
     """Log-normalize the AnnData object in-place."""
+    def normalize_total():
+        matrix = adata.X
+        if not sp.isspmatrix_csr(matrix) or adata.is_view or matrix.dtype.kind != 'f':
+            sc.pp.normalize_total(adata, target_sum=1e4)
+            return
+        # Scanpy expands each row's divisor to every stored count and creates
+        # a second full data buffer. Keep identical division arithmetic, but
+        # bound those temporaries to at most ~4M entries (one row minimum).
+        divisors = np.asarray(matrix.sum(axis=1)).ravel() / 1e4
+        if np.any(divisors == 0):
+            import warnings
+            warnings.warn("Some cells have zero counts", UserWarning, stacklevel=2)
+        divisors = divisors.copy() + (divisors == 0)
+        start = 0
+        while start < matrix.shape[0]:
+            end = min(matrix.shape[0], max(start + 1, int(np.searchsorted(
+                matrix.indptr, int(matrix.indptr[start]) + 4_000_000, side='right') - 1)))
+            lo, hi = int(matrix.indptr[start]), int(matrix.indptr[end])
+            factors = np.repeat(divisors[start:end], np.diff(matrix.indptr[start:end + 1]))
+            np.divide(matrix.data[lo:hi], factors, out=matrix.data[lo:hi])
+            start = end
     if show_progress:
         with tqdm(total=2, desc="Normalization steps") as pbar:
-            sc.pp.normalize_total(adata, target_sum=1e4); pbar.update(1)
+            normalize_total(); pbar.update(1)
             sc.pp.log1p(adata); pbar.update(1)
     else:
-        sc.pp.normalize_total(adata, target_sum=1e4)
+        normalize_total()
         sc.pp.log1p(adata)
 
 def save_marker_genes(adata, groupby, output_file):
@@ -460,6 +481,8 @@ def combine_and_align_h5(
         def _load_adata(path, sample_name_override=None):
             if path.endswith(".h5"):
                 sample_name = os.path.basename(path).replace(".h5", "")
+                from altanalyze3.components.cellHarmony.input_validation import validate_10x_h5
+                validate_10x_h5(path)
                 adata_local = sc.read_10x_h5(path)
             elif path.endswith(".h5ad"):
                 adata_local = sc.read_h5ad(path)

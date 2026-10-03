@@ -4,6 +4,8 @@ import h5py
 import numpy as np
 import scipy.sparse as sp
 
+from altanalyze3.components.cellHarmony.input_validation import validate_10x_h5
+
 
 def concat_matching_10x(entries, load_sample):
     """Return a merged AnnData, or None when bounded disk concat is required.
@@ -19,6 +21,7 @@ def concat_matching_10x(entries, load_sample):
         if not str(path).endswith(".h5"):
             return None
         with h5py.File(path, "r") as handle:
+            validate_10x_h5(handle, str(path))
             if "matrix/features/name" not in handle or "matrix/features/feature_type" not in handle:
                 return None
             features = handle["matrix/features"]

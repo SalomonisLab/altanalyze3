@@ -222,12 +222,13 @@ def test_bundle_counts_sum_matches_in_memory_across_blocks(tmp_path, dense):
     np.testing.assert_array_equal(_sample_counts(proxy, rows, path), _sample_counts(obj, rows))
 
 
-def test_empty_completed_differential_has_empty_detail_table(tmp_path):
+@pytest.mark.parametrize('artifact_key', ['DEG_summary_A_vs_B', 'fold_matrix_tsv'])
+def test_empty_completed_differential_has_empty_detail_table(tmp_path, artifact_key):
     from altanalyze3.components.cellHarmony.webapp.app import _get_differential_detail_table
     app = create_app(dict(JOB_STORAGE=str(tmp_path / 'jobs')))
     try:
         meta = {'job_id':'empty', 'differential': {'status':'completed',
-                'artifacts': {'DEG_summary_A_vs_B': str(tmp_path / 'summary.tsv')}}}
+                'artifacts': {artifact_key: str(tmp_path / 'summary.tsv')}}}
         frame = _get_differential_detail_table(app, meta)
         assert frame.empty and {'gene','population','fdr','log2fc'} <= set(frame.columns)
         meta['differential']['artifacts'] = {'DEG_detailed_A_vs_B': str(tmp_path / 'missing.tsv')}

@@ -155,3 +155,68 @@ def test_unbundled_job_reads_h5ad(tmp_path):
     store, job_id, rna_path, *_ = _job(tmp_path)
     assert JB.view(store.get_job(job_id), rna_path) is None
     assert JB.view({"bundle": {"status": "failed"}}, rna_path) is None
+
+
+def test_log_rna_bundle_uses_half_precision_only_for_serving(tmp_path, monkeypatch):
+    import hashlib
+
+    store, job_id, rna_path, mod_path, artifacts, payload = _job(tmp_path)
+    ref = ad.read_h5ad(rna_path)
+    ref.uns["log1p"] = {"base": None}
+    ref.layers["counts"] = ref.X.copy()
+    ref.write_h5ad(rna_path)
+    before = hashlib.sha256(rna_path.read_bytes()).hexdigest()
+    monkeypatch.setenv("CELLHARMONY_BUNDLE_MIN_CELLS", "0")
+    rec = P._build_job_bundle(store, job_id, rna_path, "state", artifacts, payload)
+    assert rec["status"] == "completed", rec
+    assert rec["rna_expr_dtype"] == "float16"
+    got = JB.view({"bundle": rec}, rna_path)
+    assert got is not None, JB.refusals()
+    assert got._data.dtype == np.float16
+    assert got.obs.equals(ref.obs) and got.var.equals(ref.var)
+    np.testing.assert_array_equal(got.obsm["X_umap"], ref.obsm["X_umap"])
+    rows = np.flatnonzero((ref.obs["state"] == "S2").to_numpy())
+    for cols in ([0], [3, 0, 7, 5], list(range(N_GENES))):
+        expected = ref.X[rows][:, cols].toarray().astype(np.float16).astype(np.float32)
+        actual = got.X[rows, cols].toarray()
+        np.testing.assert_array_equal(actual, expected)
+        assert actual.dtype == np.float32
+    quantized = ref.X.copy()
+    quantized.data = quantized.data.astype(np.float16).astype(np.float32)
+    np.testing.assert_array_equal(got.X.sum(axis=0), quantized.sum(axis=0))
+    # Linear imputed modalities still have exact values and float32 storage.
+    mod = JB.view({"bundle": rec}, mod_path)
+    assert mod._data.dtype == np.float32
+    np.testing.assert_array_equal(mod.X[rows, [0, 4]], ad.read_h5ad(mod_path).X[rows][:, [0, 4]])
+    assert hashlib.sha256(rna_path.read_bytes()).hexdigest() == before
+
+
+@pytest.mark.parametrize("encoding", ["categorical", "categorical_missing", "strings"])
+def test_bundle_build_decodes_gene_symbols(tmp_path, monkeypatch, encoding):
+    import h5py
+
+    store, job_id, rna_path, _mod, artifacts, payload = _job(tmp_path)
+    ref = ad.read_h5ad(rna_path)
+    symbols = [f"Symbol{i // 2}" for i in range(N_GENES)]
+    expected = list(symbols)
+    if encoding == "categorical_missing":
+        symbols[3] = None
+        expected[3] = str(ref.var_names[3])
+    if encoding.startswith("categorical"):
+        # Deliberately reverse categories: codes must be decoded in gene row order.
+        ref.var["gene_symbols"] = pd.Categorical(symbols,
+                                                 categories=sorted(set(expected) - {"G3"}, reverse=True))
+    else:
+        ref.var["gene_symbols"] = symbols
+    ref.write_h5ad(rna_path, convert_strings_to_categoricals=encoding != "strings")
+    with h5py.File(rna_path, "r") as fh:
+        assert isinstance(fh["var/gene_symbols"], h5py.Group) == encoding.startswith("categorical")
+    monkeypatch.setenv("CELLHARMONY_BUNDLE_MIN_CELLS", "0")
+    rec = P._build_job_bundle(store, job_id, rna_path, "state", artifacts, payload)
+    assert rec["status"] == "completed", rec
+    from pathlib import Path
+    genes = pd.read_csv(Path(rec["dir"]) / "job_genes.tsv", sep="\t")
+    assert genes["symbol"].tolist() == expected
+    got = JB.view({"bundle": rec}, rna_path)
+    assert got is not None, JB.refusals()
+    np.testing.assert_array_equal(got.X[:, [0, 3, 9]].toarray(), ref.X[:, [0, 3, 9]].toarray())

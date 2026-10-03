@@ -2193,6 +2193,7 @@ function hookForms() {
     if (!currentDifferentialState) {
       return;
     }
+    document.getElementById("differential-comparison-type").dataset.userSelected = "";
     currentDifferentialState = markDifferentialConfigDirty({
       ...currentDifferentialState,
       config: {
@@ -2200,9 +2201,30 @@ function hookForms() {
         sample_field: document.getElementById("differential-sample-field").value,
         group1_samples: [],
         group2_samples: [],
+        comparison_type: null,
       },
     });
     updateDifferentialUi(currentDifferentialState);
+  });
+  document.getElementById("differential-comparison-type").addEventListener("change", (event) => {
+    event.target.dataset.userSelected = "yes";
+    if (currentDifferentialState) currentDifferentialState = markDifferentialConfigDirty({
+      ...currentDifferentialState, config: {...currentDifferentialState.config, comparison_type: event.target.value},
+    });
+  });
+  ["differential-group1", "differential-group2"].forEach(id => {
+    document.getElementById(id).addEventListener("change", () => {
+      if (!currentDifferentialState) return;
+      const group1 = getMultiSelectValues(document.getElementById("differential-group1"));
+      const group2 = getMultiSelectValues(document.getElementById("differential-group2"));
+      const select = document.getElementById("differential-comparison-type");
+      const defaultType = new Set([...group1, ...group2]).size > 5 ? "pseudobulk" : "cells";
+      const comparisonType = select.dataset.userSelected ? select.value
+        : ((currentDifferentialState.comparison_types || []).includes(defaultType) ? defaultType : "cells");
+      currentDifferentialState = markDifferentialConfigDirty({...currentDifferentialState,
+        config: {...currentDifferentialState.config, group1_samples: group1, group2_samples: group2, comparison_type: comparisonType}});
+      updateDifferentialUi(currentDifferentialState);
+    });
   });
   document.getElementById("differential-result-population").addEventListener("change", () => {
     currentDifferentialGene = "";
@@ -2594,6 +2616,7 @@ async function handleDifferentialSubmit(evt) {
     group1_samples: getMultiSelectValues(document.getElementById("differential-group1")),
     group2_samples: getMultiSelectValues(document.getElementById("differential-group2")),
     comparison_type: document.getElementById("differential-comparison-type").value || "cells",
+    max_cells_per_state_sample: 500,
   };
 
   try {
@@ -2907,7 +2930,8 @@ function parseProgressPercent(value) {
 function getStatusLogLines(data) {
   const head = Array.isArray(data && data.log_head) ? data.log_head : [];
   const tail = Array.isArray(data && data.log_tail) ? data.log_tail : [];
-  return head.concat(tail).map((line) => String(line || ""));
+  const progress = Array.isArray(data && data.qc_progress_log) ? data.qc_progress_log : [];
+  return head.concat(tail, progress).map((line) => String(line || ""));
 }
 
 function formatPanelLogTail(headLines, tailLines) {
@@ -2947,10 +2971,18 @@ function extractQcThresholdState(lines) {
     minCountsThreshold: null,
     afterMinCounts: null,
     afterMito: null,
+    mapped: null,
+    alignmentThreshold: null,
   };
   const values = Array.isArray(lines) ? lines : [];
   for (const rawLine of values) {
     const line = String(rawLine || "");
+    const alignment = line.match(/Applied min_alignment_score=([+-]?[\d.eE+-]+)\.\s*Excluded\s+\d+\s+cells,\s*kept\s+(\d+)/i);
+    if (alignment) {
+      state.alignmentThreshold = Number(alignment[1]);
+      state.mapped = Number(alignment[2]);
+      continue;
+    }
     let match = line.match(/(?:reimported\s+)?adata shape:\s*\((\d+),/i);
     if (match) {
       state.total = Number(match[1]);
@@ -3081,6 +3113,8 @@ function renderQcLiveProgress(data) {
   const labels = rows.map((row) => row.label);
   const kept = rows.map((row) => Math.max(0, Math.min(total, Number(row.kept) || 0)));
   const filtered = kept.map((value) => Math.max(0, total - value));
+  const hasMapped = Number.isFinite(state.mapped);
+  const mapped = kept.map((value) => Math.min(value, Math.max(0, state.mapped || 0)));
   const maxLabelLength = labels.reduce((max, value) => Math.max(max, String(value).length), 0);
   const marginLeft = Math.min(210, Math.max(120, 18 + maxLabelLength * 6));
 
@@ -3089,10 +3123,11 @@ function renderQcLiveProgress(data) {
       type: "bar",
       orientation: "h",
       y: labels,
-      x: kept,
+      x: hasMapped ? kept.map((value, i) => value - mapped[i]) : kept,
       name: "retained",
       marker: { color: "rgba(5, 150, 105, 0.85)" },
-      hovertemplate: "%{y}<br>Retained: %{x:,}<extra></extra>",
+      customdata: kept,
+      hovertemplate: "%{y}<br>QC retained: %{customdata:,}<extra></extra>",
     },
     {
       type: "bar",
@@ -3104,6 +3139,13 @@ function renderQcLiveProgress(data) {
       hovertemplate: "%{y}<br>Filtered out: %{x:,}<extra></extra>",
     },
   ];
+  if (hasMapped) {
+    traces.unshift({
+      type: "bar", orientation: "h", y: labels, x: mapped,
+      name: "mapped above threshold", marker: { color: "#065f46" },
+      hovertemplate: "%{y}<br>Mapped above threshold: %{x:,}<extra></extra>",
+    });
+  }
 
   clearPlotEmptyState(plot);
   Plotly.react(
@@ -3113,8 +3155,8 @@ function renderQcLiveProgress(data) {
       barmode: "stack",
       paper_bgcolor: "rgba(0,0,0,0)",
       plot_bgcolor: "rgba(255,255,255,0.88)",
-      margin: { t: 10, l: marginLeft, r: 16, b: 48 },
-      height: 320,
+      margin: { t: hasMapped ? 80 : 50, l: marginLeft, r: 16, b: 48 },
+      height: hasMapped ? 390 : 360,
       xaxis: {
         title: { text: "Cells (relative to total detected)" },
         range: [0, total],
@@ -3128,13 +3170,15 @@ function renderQcLiveProgress(data) {
       legend: {
         orientation: "h",
         x: 0,
-        y: 1.15,
+        y: 1.02,
+        yanchor: "bottom",
       },
     },
     { responsive: true, displayModeBar: false }
   );
 
-  caption.textContent = `Total detected cells: ${total.toLocaleString()}.`;
+  caption.textContent = `Total detected cells: ${total.toLocaleString()}.` + (hasMapped
+    ? ` Mapped cells (alignment score \u2265 ${state.alignmentThreshold}): ${state.mapped.toLocaleString()}. Dark green is a subset of QC-retained cells.` : "");
   renderAmbientCorrectionProgress(ambientPlot, ambientCaption, ambientRows, data);
 }
 
@@ -3483,9 +3527,10 @@ function updateDifferentialUi(state) {
   const sampleValues = sampleValuesMap[sampleFieldSelect.value] || [];
   const comparisonTypes = (state && state.comparison_types) || ["cells"];
   const showComparisonType = comparisonTypes.includes("pseudobulk");
-  const selectedComparisonType = showComparisonType && comparisonTypes.includes(config.comparison_type)
-    ? (config.comparison_type || "cells")
-    : "cells";
+  const selectedSamples = new Set([...(config.group1_samples || []), ...(config.group2_samples || [])]);
+  const defaultComparisonType = (selectedSamples.size || sampleValues.length) > 5 ? "pseudobulk" : "cells";
+  const selectedComparisonType = showComparisonType && comparisonTypes.includes(config.comparison_type || defaultComparisonType)
+    ? (config.comparison_type || defaultComparisonType) : "cells";
   const showPanel = Boolean(state && state.enabled && populationOptions.length && sampleFieldOptions.length);
 
   panel.classList.toggle("hidden", !showPanel);
@@ -3551,7 +3596,7 @@ function updateDifferentialUi(state) {
   }
 
   intro.textContent = enabled
-    ? `Perform cell-state differential ${featureLabel} analysis.`
+    ? `Perform cell-state differential ${featureLabel} analysis. Both comparison types randomly select up to 500 cells per cell state per sample from the selected group field.`
     : "Differential analysis is only enabled when two or more samples were uploaded for the job.";
   if (detailTitle) {
     detailTitle.textContent = selectedModality === "grn"

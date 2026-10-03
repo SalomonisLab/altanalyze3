@@ -64,6 +64,22 @@ def _decode(arr) -> List[str]:
     return [x.decode("utf-8") if isinstance(x, (bytes, np.bytes_)) else str(x) for x in arr]
 
 
+def read_gene_symbols(var: h5py.Group, gene_ids: List[str]) -> List[str]:
+    """Decode only the symbol column, including AnnData categorical encodings."""
+    if "gene_symbols" not in var:
+        return list(gene_ids)
+    import pandas as pd
+    try:
+        from anndata.io import read_elem
+    except ImportError:
+        from anndata.experimental import read_elem
+    values = read_elem(var["gene_symbols"])
+    if len(values) != len(gene_ids):
+        raise ValueError("var/gene_symbols length does not match the gene index")
+    return [gid if pd.isna(value) else _decode([value])[0]
+            for gid, value in zip(gene_ids, values)]
+
+
 def read_obs_column(obs: h5py.Group, name: str):
     """Return ('categorical', codes int32, categories list) or ('numeric', values float64, None)
     or ('string', codes int32, categories list). Raises on an unreadable column."""
@@ -775,7 +791,7 @@ def _add_modalities_to_bundle(a, sources: Dict[str, str], labels: Dict[str, str]
             state_code=state_code, state_n=state_n,
             label=labels.get(modality_id, ""),
             feature_label=feature_labels.get(modality_id, "feature"),
-            expr_dtype=a.expr_dtype,
+            expr_dtype=a.modality_expr_dtypes.get(modality_id, a.expr_dtype),
             display_names=(display_names or {}).get(modality_id),
         )
         existing[modality_id] = info
@@ -837,6 +853,8 @@ def main(argv=None) -> int:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--row-block", type=int, default=8192)
     ap.add_argument("--expr-dtype", choices=["float32", "float16"], default="float32")
+    ap.add_argument("--modality-expr-dtype", action="append", default=[], metavar="ID=TYPE",
+                    help="Override expression storage precision for a modality (float32 or float16). Repeatable.")
     ap.add_argument("--expr-builder", choices=["parallel", "reference"], default="parallel",
                     help="'parallel' (default, fast_store.py) reads the layer once and "
                          "transposes row blocks with SciPy's C routine in worker processes. "
@@ -884,6 +902,10 @@ def main(argv=None) -> int:
 
     modality_sources = _parse_id_value(a.modality, "--modality")
     modality_labels = _parse_id_value(a.modality_label, "--modality-label")
+    a.modality_expr_dtypes = _parse_id_value(a.modality_expr_dtype, "--modality-expr-dtype")
+    for mid, dtype in a.modality_expr_dtypes.items():
+        if mid not in modality_sources or dtype not in {"float32", "float16"}:
+            raise SystemExit(f"--modality-expr-dtype requires a declared modality and float32/float16: {mid}={dtype}")
     modality_display = {
         mid: _read_display_names(path)
         for mid, path in _parse_id_value(
@@ -924,7 +946,7 @@ def main(argv=None) -> int:
     if isinstance(var_index_key, bytes):
         var_index_key = var_index_key.decode()
     gene_ids = _decode(var[var_index_key][:])
-    gene_syms = _decode(var["gene_symbols"][:]) if "gene_symbols" in var else list(gene_ids)
+    gene_syms = read_gene_symbols(var, gene_ids)
     n_genes = len(gene_ids)
     log(f"{n_cells:,} cells x {n_genes:,} genes")
 
@@ -1144,7 +1166,7 @@ def main(argv=None) -> int:
             state_code=state_code, state_n=state_n,
             label=modality_labels.get(modality_id, ""),
             feature_label=modality_feature_labels.get(modality_id, "feature"),
-            expr_dtype=a.expr_dtype,
+            expr_dtype=a.modality_expr_dtypes.get(modality_id, a.expr_dtype),
             display_names=modality_display.get(modality_id),
         )
     if modality_manifest:

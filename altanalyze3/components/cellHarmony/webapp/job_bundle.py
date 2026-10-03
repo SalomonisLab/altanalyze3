@@ -10,13 +10,14 @@ instead:
   * ``_open_gene_detail_adata`` the per-cell GRN edge h5ad behind the edge violin
   * ``_grn_edges_adata``        the per-cell GRN edge h5ad, when no pseudobulk network file
 
-PARITY BY CONSTRUCTION. Only the matrix moves. ``obs``, ``var``, ``uns`` and the first two
+Only the serving matrix moves. ``obs``, ``var``, ``uns`` and the first two
 columns of each ``obsm`` entry are still read from the same result h5ad, with anndata's own
 element reader, so every label, category order, sample field and embedding is the object
 ``ad.read_h5ad`` would have built. The matrix values come from a store that
-``precompute.py`` wrote from that same h5ad as float32, which is the h5ad's own dtype, so a
-column read from the bundle equals the column read from the h5ad. What the h5ad path never
-loaded here: ``X``, ``layers`` and the wide ``obsm`` modality copies.
+``precompute.py`` wrote from that same h5ad. Log-transformed RNA uses float16 storage
+and returns float32 slices with small quantization differences. Other stores retain
+float32 and exact values. Canonical analytical h5ads and raw counts are untouched.
+What the h5ad path never loaded here: ``X``, ``layers`` and the wide ``obsm`` modality copies.
 
 A bundle that does not line up with its h5ad (cell or feature order, counts) is refused,
 the refusal is logged, and the caller falls back to reading the h5ad.
@@ -199,8 +200,9 @@ class _StoreMatrix:
     app.py and its helpers apply to ``X``: ``X.shape``, ``indicator @ X`` (a sparse group
     indicator on the left), ``X.sum(axis=0)``, ``X[:, j]`` and ``X[:, cols]`` (dot and comb
     plots, cross_modal), and ``X[rows]`` (GRN network, grn_data, integration_data).
-    Each is computed in the order scipy or numpy uses on the h5ad's matrix, so the float
-    sums agree bit for bit (tests/test_job_bundle_serving.py). Anything else raises, so a
+    Each is computed in the order scipy or numpy uses on the h5ad's matrix. Float32
+    stores agree bit for bit; float16 RNA stores sum their quantized values in float32
+    (tests/test_job_bundle_serving.py). Anything else raises, so a
     new use surfaces instead of returning a wrong number."""
 
     __array_priority__ = 1000            # a numpy operand defers to __rmatmul__
@@ -405,8 +407,8 @@ class JobBundleAnnData:
 
         # ---- the store, and how its rows and columns line up with this h5ad ----------
         if self.store_id == "rna":
-            if str(ds.sv.get("expr_dtype") or "float32") != "float32":
-                raise ValueError(f"the bundle's RNA store is {ds.sv.get('expr_dtype')}, not float32")
+            if str(ds.sv.get("expr_dtype") or "float32") not in {"float16", "float32"}:
+                raise ValueError(f"unsupported RNA store dtype: {ds.sv.get('expr_dtype')}")
             store = None
             features = [str(v) for v in ds._gene_ids] if getattr(ds, "_gene_ids", None) else None
             if features is None:

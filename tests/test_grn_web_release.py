@@ -278,8 +278,8 @@ def test_real_tf_and_edge_differentials(uploaded):
     runner = u.app.state.job_runner
     for modality in ("grn", "grn_tf"):
         u.store.update_job(u.job, differential={"status": "queued", "config": {
-            "modality": modality, "population_col": "cell_type", "sample_field": "condition",
-            "group1_samples": ["case"], "group2_samples": ["control"], "comparison_type": "pseudobulk"}})
+            "modality": modality, "population_col": "cell_type", "sample_field": "Library",
+            "group1_samples": [f"donor{i}" for i in range(4)], "group2_samples": [f"donor{i}" for i in range(4, 8)], "comparison_type": "pseudobulk"}})
         runner._run_differential(u.job)
         run = u.store.get_job(u.job)["differential"]
         assert run["status"] == "completed", run.get("message")
@@ -353,3 +353,30 @@ def test_upload_alignment_registers_both_grn_modalities(tmp_path, monkeypatch, r
             assert Path(meta["artifacts"][key]).is_file()
     finally:
         app.state.job_runner.executor.shutdown(wait=True)
+
+
+@pytest.mark.parametrize('comparison_type', ['cells', 'pseudobulk'])
+def test_scalable_caps_cells_before_each_differential_mode(uploaded, monkeypatch, comparison_type):
+    u = uploaded
+    # 600 cells in each of 16 donor/state strata; each contributes at most 500.
+    expanded = u.edges[np.repeat(np.arange(u.edges.n_obs), 50)].copy()
+    expanded.obs_names = [f'expanded{i}' for i in range(expanded.n_obs)]
+    expanded.write_h5ad(u.paths['grn'])
+    observed = []
+    monkeypatch.setattr(pipeline.cellHarmony_differential, '_write_cell_frequency_plots',
+                        lambda **kwargs: observed.append(kwargs['adata'].n_obs) or {})
+    u.store.update_job(u.job, differential={'status':'queued','config':{
+        'modality':'grn','population_col':'cell_type','sample_field':'Library',
+        'group1_samples':[f'donor{i}' for i in range(4)],
+        'group2_samples':[f'donor{i}' for i in range(4,8)],
+        'comparison_type':comparison_type, 'max_cells_per_state_sample':500}})
+    u.app.state.job_runner._run_differential(u.job)
+    run=u.store.get_job(u.job)['differential']
+    assert run['status']=='completed',run.get('message')
+    detail=web._get_differential_detail_table(u.app,u.store.get_job(u.job))
+    assert not detail.empty
+    expected=2000 if comparison_type=='cells' else 4
+    assert set(detail.n_case)=={expected} and set(detail.n_control)=={expected}
+    assert observed==[9600]  # Abundance retains all cells.
+    log=(u.store.logs_dir(u.job)/'pipeline.log').read_text()
+    assert 'selected=8000 available=9600' in log

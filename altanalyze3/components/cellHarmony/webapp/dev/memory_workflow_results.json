@@ -1587,5 +1587,409 @@
     "worker_wait_gib": 15,
     "container_wait_gib": 27,
     "imputation_stream_min_cells": 20000
+  },
+  "additional_optimizations_2026_10_03": {
+    "baseline_revision": "d90104772e1df59e29e21503ef8336dc995aaf44",
+    "normalization": {
+      "scope": "Isolated CSR normalization including independently retained X/counts buffers; three timed trials after loading, full CSR hashes match. Not full pipeline time.",
+      "baseline": {
+        "mode": "baseline",
+        "shape": [
+          128388,
+          32738
+        ],
+        "nnz": 373290237,
+        "elapsed_seconds": 1.7524427223446157,
+        "round_seconds": [
+          1.9204038750031032,
+          1.6469799580227118,
+          1.6899443340080325
+        ],
+        "peak_rss_gib": 8.689865112304688,
+        "pre_normalization_peak_gib": 5.9081573486328125,
+        "hashes": {
+          "X": "ac07031dc31f1fd356d5f6629097e021ad9ec6d6a396a72d86becb96367ed551",
+          "counts": "4f5bc90e9dd0e10fa8cacf2c91e8ec9743c673e8d1031c6304871a1c2db4f906"
+        }
+      },
+      "bounded": {
+        "mode": "bounded",
+        "shape": [
+          128388,
+          32738
+        ],
+        "nnz": 373290237,
+        "elapsed_seconds": 1.3131574583336867,
+        "round_seconds": [
+          1.3049872500123456,
+          1.3135527499835007,
+          1.3209323750052135
+        ],
+        "peak_rss_gib": 5.9343109130859375,
+        "pre_normalization_peak_gib": 5.9040374755859375,
+        "hashes": {
+          "X": "ac07031dc31f1fd356d5f6629097e021ad9ec6d6a396a72d86becb96367ed551",
+          "counts": "4f5bc90e9dd0e10fa8cacf2c91e8ec9743c673e8d1031c6304871a1c2db4f906"
+        }
+      }
+    },
+    "log_polling": {
+      "scope": "20 unchanged reads of a generated 102 MB log; displayed head/tail/progress hashes match. Not whole HTTP time.",
+      "baseline": {
+        "mode": "baseline",
+        "log_bytes": 102000157,
+        "rounds": 20,
+        "first_read_seconds": 0.6572903749765828,
+        "total_seconds": 12.670114499895135,
+        "repeat_mean_seconds": 0.6322539013115027,
+        "peak_rss_gib": 0.69879150390625,
+        "snapshot_sha256": "9b4f978c32ba994127e6ecdce38e7de986e017406ad33d67503aff08cb6d8d34"
+      },
+      "cached": {
+        "mode": "bounded",
+        "log_bytes": 102000157,
+        "rounds": 20,
+        "first_read_seconds": 0.5186772079905495,
+        "total_seconds": 0.5188322080357466,
+        "repeat_mean_seconds": 8.157897115636029e-06,
+        "peak_rss_gib": 0.264007568359375,
+        "snapshot_sha256": "9b4f978c32ba994127e6ecdce38e7de986e017406ad33d67503aff08cb6d8d34"
+      }
+    },
+    "group_menus": {
+      "scope": "20 repeated group-menu builds from the real 128388-cell H5AD; output hashes match. No per-cell annotations cached.",
+      "baseline": {
+        "mode": "baseline",
+        "rounds": 20,
+        "total_seconds": 4.358676041010767,
+        "first_read_seconds": 0.24695408300613053,
+        "repeat_mean_seconds": 0.2164064188423493,
+        "peak_rss_gib": 0.7935333251953125,
+        "menu_sha256": "5e17ffc5850223f563699f171d37dfb59ef3dee1375ed87f2817a45d755c9272"
+      },
+      "cached": {
+        "mode": "cached",
+        "rounds": 20,
+        "total_seconds": 0.22909483200055547,
+        "first_read_seconds": 0.22779670800082386,
+        "repeat_mean_seconds": 6.832231577534817e-05,
+        "peak_rss_gib": 0.38568115234375,
+        "menu_sha256": "5e17ffc5850223f563699f171d37dfb59ef3dee1375ed87f2817a45d755c9272"
+      }
+    },
+    "sampled_rna_de": {
+      "selected_cells": 46461,
+      "input_cells": 128388,
+      "cell_limit_per_state_sample": 500,
+      "scope": "Same sampled cells, groups and analysis; bounded HDF5 versus reading selected sparse buffers once within 6 GiB. RAM path trades higher peak memory for speed.",
+      "disk": {
+        "peak_rss_gib": 4.3983306884765625,
+        "idle_rss_gib": 0.318756103515625,
+        "modality": "rna",
+        "comparison_type": "cells",
+        "elapsed_sec": 273.8374682079884,
+        "status": "completed",
+        "run_id": "20261003-143249-255717"
+      },
+      "bounded_ram": {
+        "peak_rss_gib": 8.420013427734375,
+        "idle_rss_gib": 0.319091796875,
+        "modality": "rna",
+        "comparison_type": "cells",
+        "elapsed_sec": 64.26562845800072,
+        "status": "completed",
+        "run_id": "20261003-144029-364891"
+      },
+      "tsv_parity": {
+        "DEG_assigned_groups_replica0_ND251_34__replica0_ND251_34_3k__replica0_ND251_HSC__replica0_ND251_HSC_3k__replic_be3c81fdfd90da5b": true,
+        "DEG_coreg_pooled_replica0_ND251_34__replica0_ND251_34_3k__replica0_ND251_HSC__replica0_ND251_HSC_3k__replic_be3c81fdfd90da5b": true,
+        "DEG_detailed_replica0_ND251_34__replica0_ND251_34_3k__replica0_ND251_HSC__replica0_ND251_HSC_3k__replic_be3c81fdfd90da5b": true,
+        "DEG_fold_matrix_replica0_ND251_34__replica0_ND251_34_3k__replica0_ND251_HSC__replica0_ND251_HSC_3k__replic_be3c81fdfd90da5b": true,
+        "DEG_pooled_overall_replica0_ND251_34__replica0_ND251_34_3k__replica0_ND251_HSC__replica0_ND251_HSC_3k__replic_be3c81fdfd90da5b": true,
+        "DEG_summary_replica0_ND251_34__replica0_ND251_34_3k__replica0_ND251_HSC__replica0_ND251_HSC_3k__replic_be3c81fdfd90da5b": true,
+        "cell_frequency_tsv": true,
+        "fold_matrix_tsv": true,
+        "goelite_tsv": true,
+        "heatmap_tsv": true
+      }
+    },
+    "full_workflow_validation": {
+      "scope": "Raw-count H5AD reconstructed from saved job because original 10x uploads unavailable; original 21 Library values retained. Whole-pipeline timing is not a paired comparison to prior 21-file run. RNA var adds gene_symbols alias through H5AD import route. All six X/counts matrices are bit-identical.",
+      "pipeline": {
+        "peak_rss_gib": 12.7547607421875,
+        "idle_rss_gib": 0.245635986328125,
+        "status": "completed",
+        "modalities": [
+          "adt",
+          "grn",
+          "grn_tf",
+          "lipid",
+          "metabolite",
+          "rna"
+        ],
+        "bundle_status": "completed",
+        "elapsed_sec": 297.1940872920095,
+        "final_rss_gib": 0.0765533447265625
+      },
+      "matrix_parity": {
+        "adt": {
+          "X": {
+            "X": true
+          },
+          "layers/counts": {
+            "layers/counts": true
+          },
+          "obs": {
+            "same_names": true,
+            "same_columns": true
+          },
+          "var": {
+            "same_names": true,
+            "same_columns": true
+          }
+        },
+        "grn": {
+          "X": {
+            "X": true
+          },
+          "layers/counts": {
+            "layers/counts": true
+          },
+          "obs": {
+            "same_names": true,
+            "same_columns": true
+          },
+          "var": {
+            "same_names": true,
+            "same_columns": true
+          }
+        },
+        "grn_tf": {
+          "X": {
+            "X": true
+          },
+          "layers/counts": {
+            "layers/counts": true
+          },
+          "obs": {
+            "same_names": true,
+            "same_columns": true
+          },
+          "var": {
+            "same_names": true,
+            "same_columns": true
+          }
+        },
+        "lipid": {
+          "X": {
+            "X": true
+          },
+          "layers/counts": {
+            "layers/counts": true
+          },
+          "obs": {
+            "same_names": true,
+            "same_columns": true
+          },
+          "var": {
+            "same_names": true,
+            "same_columns": true
+          }
+        },
+        "metabolite": {
+          "X": {
+            "X": true
+          },
+          "layers/counts": {
+            "layers/counts": true
+          },
+          "obs": {
+            "same_names": true,
+            "same_columns": true
+          },
+          "var": {
+            "same_names": true,
+            "same_columns": true
+          }
+        },
+        "rna": {
+          "X": {
+            "data": true,
+            "indices": true,
+            "indptr": true
+          },
+          "layers/counts": {
+            "data": true,
+            "indices": true,
+            "indptr": true
+          },
+          "obs": {
+            "same_names": true,
+            "same_columns": true
+          },
+          "var": {
+            "same_names": true,
+            "same_columns": false
+          }
+        }
+      },
+      "differential_runs": {
+        "differential_metabolite_cells": {
+          "peak_rss_gib": 1.9389801025390625,
+          "idle_rss_gib": 0.3172760009765625,
+          "modality": "metabolite",
+          "comparison_type": "cells",
+          "elapsed_sec": 9.499180625018198,
+          "status": "completed",
+          "run_id": "20261003-143734-014120"
+        },
+        "differential_adt_cells": {
+          "peak_rss_gib": 1.2968292236328125,
+          "idle_rss_gib": 0.3150634765625,
+          "modality": "adt",
+          "comparison_type": "cells",
+          "elapsed_sec": 6.016509042005055,
+          "status": "completed",
+          "run_id": "20261003-143725-810765"
+        },
+        "differential_rna_pseudobulk": {
+          "peak_rss_gib": 5.2049713134765625,
+          "idle_rss_gib": 0.3186492919921875,
+          "modality": "rna",
+          "comparison_type": "pseudobulk",
+          "elapsed_sec": 31.899694124993403,
+          "status": "completed",
+          "run_id": "20261003-143831-285490"
+        },
+        "differential_rna_cells": {
+          "peak_rss_gib": 8.420013427734375,
+          "idle_rss_gib": 0.319091796875,
+          "modality": "rna",
+          "comparison_type": "cells",
+          "elapsed_sec": 64.26562845800072,
+          "status": "completed",
+          "run_id": "20261003-144029-364891"
+        },
+        "differential_lipid_cells": {
+          "peak_rss_gib": 1.341949462890625,
+          "idle_rss_gib": 0.3176422119140625,
+          "modality": "lipid",
+          "comparison_type": "cells",
+          "elapsed_sec": 7.470904457994038,
+          "status": "completed",
+          "run_id": "20261003-143745-761835"
+        },
+        "differential_grn_tf_cells": {
+          "peak_rss_gib": 1.429046630859375,
+          "idle_rss_gib": 0.3174896240234375,
+          "modality": "grn_tf",
+          "comparison_type": "cells",
+          "elapsed_sec": 6.282253041979857,
+          "status": "completed",
+          "run_id": "20261003-143822-748712"
+        },
+        "differential_grn_cells": {
+          "peak_rss_gib": 5.175567626953125,
+          "idle_rss_gib": 0.318695068359375,
+          "modality": "grn",
+          "comparison_type": "cells",
+          "elapsed_sec": 25.020183124986943,
+          "status": "completed",
+          "run_id": "20261003-143755-420915"
+        }
+      },
+      "browser_checks": 57,
+      "browser_page_errors": [],
+      "browser_failed_api_requests": [],
+      "chat": {
+        "status": "ok",
+        "intent": "modality_markers"
+      },
+      "de_view_requests": 34,
+      "de_view_all_200": true,
+      "targeted_tests_passed": 96
+    },
+    "policy": {
+      "sparse_selected_buffer_budget_gib": 6,
+      "dense_grn_selected_buffer_budget_gib": 4,
+      "other_dense_selected_buffer_budget_mib": 256,
+      "normalization_block_nonzeros": 4000000,
+      "log_cache_bytes": 1048576,
+      "group_menu_cache_bytes": 1048576,
+      "cache_max_entries_each": 64,
+      "cache_ttl_seconds_each": 600
+    },
+    "limitations": [
+      "Full million-cell workflow remains unvalidated. Initial RNA loading and resident X/counts buffers still depend on nonzero density.",
+      "Sparse materialization budget bounds input buffers, not total worker RSS; existing worker/container admission policy remains active."
+    ]
+  },
+  "reduced_serving_precision_2026_10_03": {
+    "fixture_cells": 128388,
+    "fixture_genes": 32738,
+    "precision_comparison": {
+      "nonzeros": 373290237,
+      "float32_bytes": 1493160948,
+      "alternatives": {
+        "round_3_decimals": {
+          "value_bytes": 1493160948,
+          "seconds": 0.8771043749875389,
+          "max_absolute_error": 0.0005002021789550781,
+          "mean_absolute_error": 0.00025005535948453546,
+          "new_zeros": 0,
+          "nonfinite": 0
+        },
+        "float16": {
+          "value_bytes": 746580474,
+          "seconds": 1.459607833006885,
+          "max_absolute_error": 0.001953125,
+          "mean_absolute_error": 0.00017112062671738212,
+          "new_zeros": 0,
+          "nonfinite": 0
+        }
+      }
+    },
+    "float32_serving_scan": {
+      "dtype": "float32",
+      "round_seconds": [
+        2.29408362499089,
+        2.193613457988249,
+        2.2410226250067353
+      ],
+      "mean_seconds": 2.2429065693286248,
+      "peak_rss_gib": 4.2916717529296875,
+      "cells": 128388,
+      "genes": 32738
+    },
+    "float16_serving_scan": {
+      "dtype": "float16",
+      "round_seconds": [
+        2.4040530839993153,
+        2.293765959009761,
+        2.358645833010087
+      ],
+      "mean_seconds": 2.3521549586730544,
+      "peak_rss_gib": 3.786041259765625,
+      "cells": 128388,
+      "genes": 32738
+    },
+    "max_gene_mean_absolute_difference": 4.1484832763671875e-05,
+    "analytical_matrix_precision": "unchanged; canonical H5AD/counts and DE/MarkerFinder still use existing precision",
+    "modality_serving_precision": "float32; only log-transformed RNA serving values use float16",
+    "limitations": [
+      "No full-analysis memory reduction measured for this change.",
+      "SciPy float16 CSR slicing/conversion/column means failed; analytical CSR remains float32.",
+      "Existing bundles are not automatically rebuilt."
+    ],
+    "precision_serving_regression_tests_passed": 49,
+    "browser_validation": {
+      "checks": 57,
+      "page_errors": [],
+      "failed_api_requests": [],
+      "chat": {
+        "status": "ok",
+        "intent": "modality_markers"
+      }
+    }
   }
 }

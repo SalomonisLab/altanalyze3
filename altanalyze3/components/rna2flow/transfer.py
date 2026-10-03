@@ -25,7 +25,7 @@ def _scale_both(cite, flow, lo=1.0, hi=99.0):
 
 
 def kde_knn(cite, flow, labels, k=15, ties="first", lo=1.0, hi=99.0, seed=0, n_ref=20000):
-    """The published method: KDE quantile-map CITE onto the flow distribution, then kNN.
+    """KDE plus kNN alternative; the published five-stage transfer uses cellHarmony.
 
     The reference distribution is the FLOW channel, because the labels must land in flow space.
     """

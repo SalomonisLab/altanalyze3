@@ -28,10 +28,19 @@ def nearest_pearson(reference,query,batch_size=1024):
     return matches,rhos
 
 
-def communities(X,seed=0,resolution=1):
+def communities(X,seed=0,resolution=1,backend='igraph'):
     import scanpy as sc,anndata as ad,igraph as ig,random
-    a=ad.AnnData(np.asarray(X,np.float32));npcs=min(30,X.shape[1]-1,len(X)-1)
+    # Notebook slices AnnData and copies X before PCA, producing contiguous storage.
+    values=np.array(X,dtype=np.float32,order='C',copy=True) if backend=='published' else np.asarray(X,np.float32)
+    a=ad.AnnData(values);npcs=min(30,X.shape[1]-1,len(X)-1)
     if npcs<2:raise ValueError('At least three shared markers are required')
+    if backend=='published':
+        # Notebook computes default PCA (up to 50 PCs), then uses 30 for neighbors.
+        sc.tl.pca(a,random_state=seed)
+        sc.pp.neighbors(a,n_neighbors=min(15,len(X)-1),n_pcs=npcs,random_state=seed)
+        sc.tl.louvain(a,resolution=resolution,random_state=seed,flavor='vtraag')
+        return a.obs['louvain'].astype(str).to_numpy()
+    if backend!='igraph':raise ValueError('backend must be igraph or published')
     sc.tl.pca(a,n_comps=npcs,random_state=seed)
     sc.pp.neighbors(a,n_neighbors=min(15,len(X)-1),n_pcs=npcs,random_state=seed)
     graph=a.obsp['connectivities'].tocoo();keep=graph.row<graph.col
@@ -64,13 +73,23 @@ def assign_communities(C,F,labels,ref_groups,query_groups):
                             reference_communities=len(rlevels),query_communities=len(qlevels))
 
 
-def kde_cellharmony(cite,flow,labels,seed=0,lo=1,hi=99,n_ref=20000,return_details=False,**kwargs):
+def kde_cellharmony(cite,flow,labels,seed=0,lo=1,hi=99,n_ref=20000,return_details=False,
+                    integration='trapezoid',ties='first',community_backend='igraph',**kwargs):
+    """Transfer labels with explicitly selectable numerical conventions.
+
+    Notebook primitives require integration='published', ties='published', and
+    community_backend='published' (the optional louvain dependency). n_ref=None
+    disables reference subsampling. Match the original input preparation, clipping
+    thresholds, reference sample and feature links separately: choosing these
+    switches alone does not reproduce the original full preprocessing pipeline.
+    """
     C,F=_scale_both(cite,flow,lo,hi);rng=np.random.default_rng(seed);mapped=np.empty_like(C)
     for j in range(C.shape[1]):
         ref=F[:,j]
-        if len(ref)>n_ref:ref=ref[rng.choice(len(ref),n_ref,replace=False)]
-        mapped[:,j]=kde_quantile_map(C[:,j],None,spline=reference_spline(ref),ties='first')
-    r=communities(mapped,seed);q=communities(F,seed)
+        if n_ref is not None and len(ref)>n_ref:ref=ref[rng.choice(len(ref),n_ref,replace=False)]
+        mapped[:,j]=kde_quantile_map(C[:,j],None,spline=reference_spline(ref,integration=integration),ties=ties)
+    r=communities(mapped,seed,backend=community_backend);q=communities(F,seed,backend=community_backend)
     pred,details=assign_communities(mapped,F,labels,r,q)
-    details['community_backend']='igraph multilevel Louvain; notebook uses vtraag Louvain; PCA min(30,n_markers-1)'
+    details['community_backend']=community_backend
+    details['normalization']=dict(integration=integration,ties=ties,lo=lo,hi=hi,n_ref=n_ref)
     return (pred,details) if return_details else pred

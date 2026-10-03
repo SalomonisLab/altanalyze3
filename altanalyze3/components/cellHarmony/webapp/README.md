@@ -993,3 +993,102 @@ comparison, not chemical identification: retention times depend on the assay.
 Other metabolomics studies do not inherit this study's Unknown-ID annotations.
 Viewer manifests can explicitly identify this catalog with
 `annotation_source: "PDC000561"` on their metabolite modality.
+
+scALABLE differential comparisons now transmit `max_cells_per_state_sample=500`.
+Both cell-level DE and pseudobulk construction randomly select at most 500 cells
+per cell state per value of the selected **Group values from** observation field,
+within the selected groups. Seed 0 makes repeated selections reproducible;
+smaller strata keep every cell. Pseudobulks are rebuilt from these selected cells,
+including imputed modalities, rather than using uncapped saved aggregates.
+Sampling precedes expression materialization. Cell-frequency plots continue to
+count all selected cells. This cap is specific to scALABLE and does not change
+standalone cellHarmony CLI defaults.
+
+The comparison defaults to pseudobulk when more than five distinct samples are
+selected across the two groups; before groups are selected, it uses the number
+of available values in the selected group field. An explicit cell-level choice
+is preserved. The server also applies this default when the request omits a
+comparison type. Existing saved results are not recomputed.
+
+Additional optimizations validated on 2026-10-03:
+
+- CSR RNA normalization uses bounded divisions of at most four million nonzeros
+  per block (one row minimum) and the standard Scanpy log transform. On the saved
+  128,388-cell, 32,738-gene RNA matrix (373,290,237 nonzeros), three-trial mean
+  normalization time fell from 1.75 to 1.31 seconds and peak process memory from
+  8.69 to 5.93 GiB, including X and an independent counts layer. Both complete
+  CSR hashes matched. Dense, integer, CSC and AnnData views retain Scanpy's path.
+- Status logs are streamed into bounded head/tail snapshots, cached until the
+  file signature changes. Latest QC/alignment counts and each library's ambient
+  correction remain available even after later messages. A 102 MB stress log
+  required 0.52 instead of 12.67 seconds for 20 unchanged reads, with identical
+  displayed content. This measures log handling, not full HTTP response time.
+- H5AD group menus cache only their small field/value lists, not AnnData or cell
+  annotations, and invalidate when the file changes. Twenty menu requests on the
+  real 128k H5AD took 0.23 instead of 4.36 seconds with identical menus. Each of
+  the log/menu caches is independently bounded to 1 MiB, 64 entries and 10 minutes.
+- After the 500-cell sampling, sparse DE selections load their X/counts buffers
+  once when these fit 6 GiB; larger selections stay on disk. Dense GRN keeps its
+  4 GiB budget; other dense modalities keep 256 MiB. For 46,461 selected RNA cells
+  from the 128k fixture, cell-level DE fell from 273.84 to 64.27 seconds. Its peak
+  increased from 4.40 to 8.42 GiB; every shared result TSV matched byte for byte.
+  This intentionally trades bounded RAM for substantially fewer disk scans.
+
+The full six-modality workflow was rerun on a raw-count H5AD reconstructed from
+that saved job (original 10x uploads were no longer available). All six expression
+matrices and counts layers matched the prior run exactly; this input differs from
+that earlier 21-file benchmark, so its whole-pipeline timing is not a paired speed
+comparison. Validation also included all six cell-level differentials, RNA
+pseudobulk, 57 Explore checks and marker Chat in Chrome. The million-cell end-to-end
+workflow remains unvalidated. Reproduction tools are `dev/benchmark_normalization.py`,
+`dev/benchmark_log_polling.py` and `dev/benchmark_group_menus.py`; detailed metrics
+are appended to `dev/memory_workflow_results.json`.
+The final targeted suite passed 96 tests. All 34 DE/integrated view requests
+succeeded, including a completed pseudobulk run with pooled hits but no per-state
+hits; those views now receive an empty per-state table rather than failing.
+
+New serving bundles now store log-transformed RNA values as float16 and return
+float32 slices for SciPy operations. Rounding float32 to three decimal places
+kept the same memory footprint; float16 halved the value array. On the real
+128,388-cell, 373,290,237-nonzero RNA store, values occupied 0.747 instead of
+1.493 GB (decimal units), with maximum absolute error 0.001953125, mean error
+0.0001711, and no new zeros or nonfinite values. Including the unchanged uint32
+cell indices, the RNA expression store shrinks by about 25%, not 50%.
+Canonical H5AD matrices, raw counts, DE/MarkerFinder computations and saved
+statistics retain their existing precision. Linear imputed modality stores
+remain float32; RNA without a log1p marker also remains float32. Existing
+float32 bundles continue to work and are not automatically rebuilt. Deploy
+the pipeline, precompute and serving reader together; no new dependency or
+server setting is required.
+
+Three complete RNA serving column-sum scans averaged 2.24 seconds / 4.29 GiB
+peak RSS with float32 versus 2.35 seconds / 3.79 GiB with float16; maximum
+difference in the returned per-gene means was 0.0000415. These are isolated
+serving-process measurements, not whole-container or full-analysis memory.
+The installed SciPy rejects float16 CSR row slicing, dense conversion and
+column means, so canonical sparse analytical matrices remain float32.
+Reproduce the bounded precision comparison with
+`dev/benchmark_scaled_precision.py DATA.npy --output metrics.json`; add
+`--compact-data NEW.npy` to write a separate compact store.
+
+The precision change passed 49 targeted regression tests and 57 Explore checks
+plus marker Chat on the compact 128k bundle in Chrome, with no browser or API
+errors.
+
+The bundle builder reads `var/gene_symbols` with AnnData's element decoder,
+so both plain string arrays and categorical groups preserve gene row order.
+Missing categorical symbols fall back to their gene IDs. Only that metadata
+column is loaded; this does not load the expression matrix. For deployment,
+rebuild/redeploy the container with the updated precompute module. Existing
+completed jobs whose bundle failed need a bundle rebuild to switch from their
+H5AD fallback; the analytical results do not need to be rerun.
+
+Uploads with a 10x `molecule_info.h5` layout (root `count` and `barcode_idx`,
+without a count-matrix group) now receive HTTP 400 before a job is created.
+The message explains that this is a per-molecule file and requests
+`filtered_feature_bc_matrix.h5` from Cell Ranger's `outs` folder or an H5AD
+count matrix. Detection uses the file layout, so renaming it does not bypass
+validation. The same check protects existing-job reruns and CLI imports.
+It reads only HDF5 metadata and preserves an upload's file position; modern
+and legacy 10x matrix uploads remain supported. Deploy the shared
+`input_validation.py` with the updated app, loader and merge modules.

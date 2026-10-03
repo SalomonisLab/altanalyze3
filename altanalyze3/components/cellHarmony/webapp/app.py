@@ -87,7 +87,8 @@ class DifferentialSettings(BaseModel):
     sample_field: Optional[str] = None
     group1_samples: List[str]
     group2_samples: List[str]
-    comparison_type: str = "cells"
+    comparison_type: Optional[str] = None
+    max_cells_per_state_sample: int = Field(default=500, ge=1, le=500)
 
 
 class ApproximateUMAPRequest(BaseModel):
@@ -799,6 +800,7 @@ def _filter_qc_log_lines(lines: List[str]) -> List[str]:
         "Cells remaining after min_genes",
         "Cells remaining after min_counts",
         "Cells remaining after mito-percent",
+        "Applied min_alignment_score=",
         "Job failed:",
     )
     return [line for line in lines if any(marker in line for marker in qc_markers)]
@@ -866,7 +868,8 @@ def _differential_options(meta: Dict) -> Dict:
         else:
             combined_h5ad_path = None
         if combined_h5ad_path is not None and combined_h5ad_path.exists():
-            rebuilt_fields, rebuilt_values = pipeline_mod._candidate_group_fields(
+            from .metadata_options import cached_group_fields
+            rebuilt_fields, rebuilt_values = cached_group_fields(
                 combined_h5ad_path,
                 preferred=["Library", "group", "sample"],
                 max_categories=None,
@@ -895,6 +898,8 @@ def _differential_options(meta: Dict) -> Dict:
     if not isinstance(comparison_types, list) or not comparison_types:
         pseudobulk_allowed = bool(upload_profile.get("single_h5ad") or upload_profile.get("total_files", 0) >= 4)
         comparison_types = ["cells", "pseudobulk"] if pseudobulk_allowed else ["cells"]
+    if max_group_values > 5 and "pseudobulk" not in comparison_types:
+        comparison_types = [*comparison_types, "pseudobulk"]
     modalities_state = _modalities_state(meta)
     modalities_available = [entry for entry in modalities_state["available"]
                             if entry.get("supports_differential", True)]
@@ -1078,10 +1083,10 @@ def _get_differential_detail_table(app: FastAPI, meta: Dict) -> pd.DataFrame:
     raw_path = cache_entry["signature"]["detail_path"]
     if not raw_path and (meta.get("differential") or {}).get("status") == "completed":
         artifacts = (meta.get("differential") or {}).get("artifacts") or {}
-        if any(key.startswith("DEG_summary_") for key in artifacts):
-            # A successful comparison with zero per-state calls writes its summary
-            # but no detailed DEG file. Shared pathway/chat readers need an empty
-            # table here, rather than an exception for an analysis that completed.
+        if "fold_matrix_tsv" in artifacts or any(key.startswith("DEG_summary_") for key in artifacts):
+            # A successful comparison with zero per-state calls can have pooled
+            # results and a fold matrix but no summary or detailed DEG file.
+            # Shared pathway/chat readers need an empty per-state table.
             frame = pd.DataFrame(columns=["population", "gene", "log2fc", "fdr", "pval", "feature_key"])
             cache_entry["detail_table"] = frame
             app.state.differential_cache[str(meta["job_id"])] = cache_entry
@@ -3756,11 +3761,13 @@ def _validate_differential_request(meta: Dict, payload: DifferentialSettings) ->
     if overlap:
         raise HTTPException(status_code=400, detail=f"Samples cannot appear in both groups: {', '.join(overlap)}")
 
-    comparison_type = str(payload.comparison_type or "cells").strip().lower()
+    default_type = "pseudobulk" if len(set(group1_samples + group2_samples)) > 5 else "cells"
+    comparison_type = str(payload.comparison_type or default_type).strip().lower()
     if comparison_type not in {"cells", "pseudobulk"}:
         raise HTTPException(status_code=400, detail="Comparison Type must be either 'cells' or 'pseudobulk'.")
     upload_profile = dict((meta.get("differential_options") or {}).get("upload_profile") or pipeline_mod._upload_profile(meta))
-    pseudobulk_allowed = bool(upload_profile.get("single_h5ad") or upload_profile.get("total_files", 0) >= 4)
+    pseudobulk_allowed = bool(upload_profile.get("single_h5ad") or upload_profile.get("total_files", 0) >= 4
+                             or len(set(group1_samples + group2_samples)) > 5)
     if comparison_type == "pseudobulk" and not pseudobulk_allowed:
         comparison_type = "cells"
 
@@ -3771,6 +3778,7 @@ def _validate_differential_request(meta: Dict, payload: DifferentialSettings) ->
         "group1_samples": group1_samples,
         "group2_samples": group2_samples,
         "comparison_type": comparison_type,
+        "max_cells_per_state_sample": payload.max_cells_per_state_sample,
     }
 
 
@@ -5943,6 +5951,15 @@ def create_app(test_config: dict | None = None) -> FastAPI:
                 raise HTTPException(status_code=400, detail=f"Duplicate sample name '{clean_name}' detected.")
             normalized_samples.append(clean_name)
 
+        # Inspect the HDF5 layout before creating a job or copying upload bytes.
+        from altanalyze3.components.cellHarmony.input_validation import validate_10x_h5
+        for upload in files:
+            if str(upload.filename or "").lower().endswith(".h5"):
+                try:
+                    validate_10x_h5(upload.file, upload.filename)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+
         effective_ambient_option = ambient_option if ambient_option is not None else soupx_option
         metadata = store.create_job(species, reference, effective_ambient_option, files=[])
         job_id = metadata["job_id"]
@@ -6079,14 +6096,11 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = _job_metadata_with_recovery(store, runner, job_id)
         log_path = store.logs_dir(job_id) / "pipeline.log"
-        log_head: List[str] = []
-        log_tail: List[str] = []
-        if log_path.exists():
-            all_lines = log_path.read_text(encoding="utf-8").splitlines(True)
-            log_head = all_lines[:80]
-            log_tail = all_lines[-200:]
+        from .log_snapshot import read_pipeline_log
+        log_head, log_tail, qc_progress_log = read_pipeline_log(log_path)
         meta["log_head"] = log_head
         meta["log_tail"] = log_tail
+        meta["qc_progress_log"] = qc_progress_log
         meta["qc_log_tail"] = log_tail if meta.get("status") == "failed" else _filter_qc_log_lines(log_tail)
         meta["message"] = _derive_live_pipeline_message(meta.get("status"), log_tail, meta.get("message"))
         if isinstance(meta.get("fastcomm_analysis"), dict) and meta["fastcomm_analysis"].get("enabled"):

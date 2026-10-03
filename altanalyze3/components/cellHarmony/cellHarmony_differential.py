@@ -493,8 +493,8 @@ def compute_pseudobulk_per_population(adata, population_col, sample_col, covaria
     valid_groups = vc[vc >= int(min_cells)].index.tolist()
     print("[INFO] Valid pseudobulk groups: {} (min_cells={})".format(len(valid_groups), min_cells))
 
-    mat = adata.layers["counts"] if use_counts else adata.X
-    mat = _ensure_numeric_matrix(mat)
+    from .disk_differential import root_and_rows, read_rows
+    disk_rows = root_and_rows(adata)
 
     rows = []
     linear_rows = []
@@ -506,10 +506,24 @@ def compute_pseudobulk_per_population(adata, population_col, sample_col, covaria
         if idx.size == 0:
             continue
 
-        sub = adata[adata.obs_names.isin(idx), :].copy()
-        X = sub.layers["counts"] if use_counts else sub.X
+        if disk_rows is not None:
+            root, positions = disk_rows
+            positions = np.arange(root.n_obs) if isinstance(positions, slice) else positions
+            chosen = positions[np.asarray(adata.obs_names.isin(idx))]
+            source = root.layers["counts"] if use_counts else root.X
+            # Sum bounded row blocks, retaining only one feature vector per group.
+            summed = np.zeros(adata.n_vars, dtype=np.float64)
+            for start in range(0, len(chosen), 128):
+                block = read_rows(source, chosen[start:start + 128])
+                summed += np.asarray(block.sum(axis=0)).ravel()
+            X = None
+        else:
+            sub = adata[adata.obs_names.isin(idx), :].copy()
+            X = sub.layers["counts"] if use_counts else sub.X
 
-        if sps.issparse(X):
+        if disk_rows is not None:
+            pass
+        elif sps.issparse(X):
             summed = np.asarray(X.sum(axis=0)).ravel()
         else:
             X = _ensure_numeric_matrix(X)

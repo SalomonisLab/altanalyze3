@@ -7,9 +7,10 @@ kde_mapping_normalization.ipynb) maps each feature by rank onto a KDE-smoothed r
   2. reference spline     gaussian_kde -> integrate to a CDF -> monotone k=1 spline
   3. map by rank          rank the query, evaluate the spline at (r + 1) / (n + 2)
 
-This module reproduces that exactly in `kde_quantile_map_reference`, and provides a vectorized
-implementation that gives the same numbers far faster. Parity is asserted by
-`tests/test_kde_parity.py`, not claimed here.
+Compatibility with the notebook requires integration='published' and ties='published'.
+The defaults use trapezoid integration and stable ranks: these are approximations, especially
+for tied detector floors and clipped values. The older reference helper uses stable ranks
+and is not an independent reproduction of the notebook's tie behavior.
 
 Why the reference implementation is slow, measured rather than assumed:
   * the spline is evaluated one element at a time in a Python list comprehension
@@ -51,30 +52,32 @@ def scale_feature(x, min_pct: float = 0.0, max_pct: float = 100.0) -> np.ndarray
 def rank_plotting_positions(x, ties: str = "first") -> np.ndarray:
     """(rank + 1) / (n + 2) for each element.
 
-    ties='first'   reproduces the published behaviour: equal values receive DIFFERENT ranks,
-                   ordered by position, so two cells with an identical marker value map to
+    ties='published' uses numpy's default argsort, as in Kyle's notebook. Its ordering
+                   among ties depends on the NumPy version and is not stable.
+    ties='first'   equal values receive DIFFERENT ranks, ordered by position,
+                   so two cells with an identical marker value map to
                    different outputs. Percentile clipping in `scale_feature` manufactures such
                    ties at both bounds, and a flow detector floor manufactures many more.
     ties='average' gives equal values the same rank, so identical inputs map identically.
 
-    The published code computes the 'first' variant with argsort + a pandas sort. One
-    double-argsort gives the identical permutation and costs one pass less.
+    Inverting the argsort permutation avoids the notebook's extra pandas sort.
+    Use ties='published' to preserve its default (unstable) sorting convention.
     """
     a = np.asarray(x).ravel()
     n = a.size
     if ties == "average":
         from scipy.stats import rankdata
         ranks = rankdata(a, method="average") - 1.0
-    elif ties == "first":
-        order = np.argsort(a, kind="stable")
+    elif ties in {"first", "published"}:
+        order = np.argsort(a, kind="stable") if ties == "first" else np.argsort(a)
         ranks = np.empty(n, dtype=np.float64)
         ranks[order] = np.arange(n, dtype=np.float64)
     else:
-        raise ValueError("ties must be 'first' or 'average', got %r" % (ties,))
+        raise ValueError("ties must be 'first', 'published' or 'average', got %r" % (ties,))
     return (ranks + 1.0) / (n + 2.0)
 
 
-def reference_spline(reference_signal, n_grid: int = 100):
+def reference_spline(reference_signal, n_grid: int = 100, integration: str = "trapezoid"):
     """Monotone percentile -> value spline over a gaussian_kde of the reference.
 
     `reference_signal` must already sit in [0, 1] (i.e. be scale_feature output), because the
@@ -84,10 +87,15 @@ def reference_spline(reference_signal, n_grid: int = 100):
     kde = stats.gaussian_kde(ref)
     grid = np.linspace(0.0, 1.0, n_grid)
     total = kde.integrate_box_1d(0.0, 1.0)
-    # One vectorized evaluation plus a cumulative trapezoid replaces n_grid quadratures and
-    # agrees with them to within the same discretization the published code already accepts.
-    dens = kde(grid)
-    cum = np.concatenate(([0.0], np.cumsum((dens[1:] + dens[:-1]) * 0.5 * np.diff(grid))))
+    # Trapezoid integration is an approximation; published mode preserves exact integrals.
+    if integration == "published":
+        # Exact one-dimensional Gaussian integrals, as used by the notebook.
+        cum = np.array([kde.integrate_box_1d(0.0, g) for g in grid])
+    elif integration == "trapezoid":
+        dens = kde(grid)
+        cum = np.concatenate(([0.0], np.cumsum((dens[1:] + dens[:-1]) * 0.5 * np.diff(grid))))
+    else:
+        raise ValueError("integration must be 'published' or 'trapezoid'")
     pct = cum / total if total > 0 else cum
     keep = (pct > 0) & (pct < 1)
     xs, ys = pct[keep], grid[keep]
@@ -99,7 +107,7 @@ def reference_spline(reference_signal, n_grid: int = 100):
 
 
 def kde_quantile_map_reference(query_signal, reference_signal, n_grid: int = 100) -> np.ndarray:
-    """The published algorithm, transcribed. Kept so parity can be tested against it."""
+    """Exact KDE integrals with stable ranks; differs from the notebook at ties."""
     kde = stats.gaussian_kde(np.asarray(reference_signal, dtype=np.float64).ravel())
     total = kde.integrate_box_1d(0.0, 1.0)
     grid = np.linspace(0.0, 1.0, n_grid)
@@ -116,11 +124,11 @@ def kde_quantile_map_reference(query_signal, reference_signal, n_grid: int = 100
 
 
 def kde_quantile_map(query_signal, reference_signal, n_grid: int = 100,
-                     spline=None, ties: str = "first") -> np.ndarray:
-    """Vectorized equivalent of `kde_quantile_map_reference`.
+                     spline=None, ties: str = "first", integration: str = "trapezoid") -> np.ndarray:
+    """Rank-based KDE mapping, with explicit integration and tie conventions.
 
     Pass `spline` to reuse one reference fit across many query batches.
     """
     if spline is None:
-        spline = reference_spline(reference_signal, n_grid=n_grid)
+        spline = reference_spline(reference_signal, n_grid=n_grid, integration=integration)
     return np.asarray(spline(rank_plotting_positions(query_signal, ties=ties)), dtype=np.float64)
