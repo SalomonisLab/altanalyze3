@@ -10,6 +10,7 @@ import shutil
 import threading
 import time
 import urllib.request
+import weakref
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -33,6 +34,7 @@ from altanalyze3.components.cellHarmony.flask.tasks import JobRunner
 from altanalyze3.components.visualization import approximate_umap as approx_mod
 from altanalyze3.components.rna2metabolite import annotations as metabolite_annotations
 
+from .memory_cache import BoundedCache, CacheBudget
 from .config import BASE_DIR, load_config
 from . import job_bundle as _job_bundle
 from .grn_data import UploadedGrnData, completed_differentials, comparison_entry
@@ -669,6 +671,7 @@ def _job_metadata_with_recovery(store, runner, job_id):
     # Published viewers replace the upload store with a bundle-backed store.
     # Their completed results have no upload worker or on-disk job.json to recover.
     if getattr(runner, "store", None) is store:
+        runner.recover_interrupted_pipeline(job_id)
         return runner.recover_interrupted_differential(job_id)
     return store.get_job(job_id)
 
@@ -736,8 +739,8 @@ def _build_reference_preview_payload(app: FastAPI, species: str, reference_id: s
 
 def _get_cache_lock(app: FastAPI, lock_name: str, cache_key: str) -> threading.Lock:
     lock_map = getattr(app.state, lock_name, None)
-    if not isinstance(lock_map, dict):
-        lock_map = {}
+    if lock_map is None:
+        lock_map = weakref.WeakValueDictionary()
         setattr(app.state, lock_name, lock_map)
     global_lock = getattr(app.state, "cache_registry_lock", None)
     if global_lock is None:
@@ -1073,6 +1076,16 @@ def _get_differential_detail_table(app: FastAPI, meta: Dict) -> pd.DataFrame:
     if isinstance(cache_entry.get("detail_table"), pd.DataFrame):
         return cache_entry["detail_table"]
     raw_path = cache_entry["signature"]["detail_path"]
+    if not raw_path and (meta.get("differential") or {}).get("status") == "completed":
+        artifacts = (meta.get("differential") or {}).get("artifacts") or {}
+        if any(key.startswith("DEG_summary_") for key in artifacts):
+            # A successful comparison with zero per-state calls writes its summary
+            # but no detailed DEG file. Shared pathway/chat readers need an empty
+            # table here, rather than an exception for an analysis that completed.
+            frame = pd.DataFrame(columns=["population", "gene", "log2fc", "fdr", "pval", "feature_key"])
+            cache_entry["detail_table"] = frame
+            app.state.differential_cache[str(meta["job_id"])] = cache_entry
+            return frame
     if not raw_path:
         raise FileNotFoundError("Differential DEG detail table is unavailable.")
     path = Path(raw_path)
@@ -1098,6 +1111,7 @@ def _get_differential_detail_table(app: FastAPI, meta: Dict) -> pd.DataFrame:
     if isinstance(display, dict) and display:
         frame["gene"] = frame["gene"].map(lambda g: display.get(g, g))
     cache_entry["detail_table"] = frame
+    app.state.differential_cache[str(meta["job_id"])] = cache_entry
     return frame
 
 
@@ -1108,6 +1122,7 @@ def _get_differential_heatmap_table(app: FastAPI, meta: Dict) -> pd.DataFrame:
     path = _get_differential_artifact(meta, "heatmap_tsv")
     frame = pd.read_csv(path, sep="\t", index_col=0)
     cache_entry["heatmap_table"] = frame
+    app.state.differential_cache[str(meta["job_id"])] = cache_entry
     return frame
 
 
@@ -1122,6 +1137,7 @@ def _get_differential_go_table(app: FastAPI, meta: Dict) -> pd.DataFrame:
     if "term_name" in frame.columns:
         frame["term_name"] = frame["term_name"].astype(str)
     cache_entry["go_table"] = frame
+    app.state.differential_cache[str(meta["job_id"])] = cache_entry
     return frame
 
 
@@ -1229,7 +1245,8 @@ def _differential_gene_h5ad_path(meta: Dict) -> Path:
     raise FileNotFoundError("Aligned AnnData output is unavailable for differential gene detail.")
 
 
-_GRN_RAGGED_CACHE: Dict[str, Any] = {}
+_AUX_CACHE_BUDGET = CacheBudget(max_bytes=512 * 1024**2)
+_GRN_RAGGED_CACHE: Dict[str, Any] = BoundedCache(_AUX_CACHE_BUDGET)
 
 
 def _grn_ragged_values(meta: Dict, population: str, edge: str, obs_names):
@@ -1253,6 +1270,7 @@ def _grn_ragged_values(meta: Dict, population: str, edge: str, obs_names):
     entry = _GRN_RAGGED_CACHE.get(path)
     mtime = os.path.getmtime(path)
     if not entry or entry.get("mtime") != mtime:
+        _AUX_CACHE_BUDGET.make_room(_h5ad_memory_estimate(path))
         adata = ad.read_h5ad(path)
         entry = {"mtime": mtime, "adata": adata,
                  "edges": {str(e): i for i, e in enumerate(adata.var_names.astype(str))},
@@ -1295,9 +1313,10 @@ def _open_gene_detail_adata(app: FastAPI, meta: Dict, gene: str) -> tuple[ad.Ann
     if not isinstance(adata, (ad.AnnData, _job_bundle.JobBundleAnnData)):
         # LARGE_DATASET_DESIGN.md step B: a bundled job's per-cell matrix comes from its
         # bundle; any other file is read as before.
-        adata = _job_bundle.view(meta, primary) or ad.read_h5ad(primary)
+        adata = _job_bundle.view(meta, primary) or _read_cached_h5ad(primary, getattr(app.state.differential_cache, "budget", None))
         cache_entry["primary_adata"] = adata
         cache_entry["primary_var_names"] = adata.var_names.astype(str).to_numpy()
+        app.state.differential_cache[str(meta["job_id"])] = cache_entry
     if gene in set(cache_entry["primary_var_names"]):
         return adata, primary
 
@@ -1306,9 +1325,10 @@ def _open_gene_detail_adata(app: FastAPI, meta: Dict, gene: str) -> tuple[ad.Ann
         fallback = Path(combined_path)
         fallback_adata = cache_entry.get("fallback_adata")
         if not isinstance(fallback_adata, (ad.AnnData, _job_bundle.JobBundleAnnData)):
-            fallback_adata = _job_bundle.view(meta, fallback) or ad.read_h5ad(fallback)
+            fallback_adata = _job_bundle.view(meta, fallback) or _read_cached_h5ad(fallback, getattr(app.state.differential_cache, "budget", None))
             cache_entry["fallback_adata"] = fallback_adata
             cache_entry["fallback_var_names"] = fallback_adata.var_names.astype(str).to_numpy()
+            app.state.differential_cache[str(meta["job_id"])] = cache_entry
         if gene in set(cache_entry["fallback_var_names"]):
             return fallback_adata, fallback
     raise KeyError(f"Gene '{gene}' not found in the aligned AnnData output.")
@@ -1322,6 +1342,40 @@ def _close_backed_adata(adata: Optional[ad.AnnData]) -> None:
             adata.file.close()
     except Exception:
         pass
+
+
+def _h5ad_memory_estimate(path) -> int:
+    import h5py
+    size = 0
+    with h5py.File(path, "r") as fh:
+        def count(_name, node):
+            nonlocal size
+            # AnnData writes None metadata as HDF5 null datasets (size=None).
+            # They contain no payload and must not enter the byte estimate.
+            if isinstance(node, h5py.Dataset) and node.size is not None:
+                size += node.size * node.dtype.itemsize
+        fh.visititems(count)
+    return size
+
+
+def _read_cached_h5ad(path, budget=None):
+    if budget is not None:
+        budget.make_room(_h5ad_memory_estimate(path))
+    # Serving consumes X, annotations, counts for integrated pseudobulks, and
+    # the first two coordinates of obsm. Do not import raw/ambient copies or
+    # wide imputation matrices just to draw an expression view.
+    import h5py
+    from .job_bundle import _read_elem, _LazyObsm
+    with h5py.File(path, "r") as fh:
+        adata = ad.AnnData(X=_read_elem(fh["X"]), obs=_read_elem(fh["obs"]),
+                          var=_read_elem(fh["var"]),
+                          uns=_read_elem(fh["uns"]) if "uns" in fh else {})
+        if "counts" in fh.get("layers", {}):
+            adata.layers["counts"] = _read_elem(fh["layers"]["counts"])
+    maps = _LazyObsm(str(path))
+    for key in maps:
+        adata.obsm[key] = maps[key]
+    return adata
 
 
 def _invalidate_expression_cache(app: FastAPI, job_id: str) -> None:
@@ -1542,7 +1596,7 @@ def _get_expression_cache(app: FastAPI, meta: Dict, modality: str = "rna") -> Di
         adata = _job_bundle.view(meta, h5ad_path)
         expression_source = "h5ad" if adata is None else "bundle"
         if adata is None:
-            adata = ad.read_h5ad(h5ad_path)
+            adata = _read_cached_h5ad(h5ad_path, getattr(cache, "budget", None))
         if cluster_key not in adata.obs.columns:
             raise ValueError("Cluster assignments missing from AnnData output.")
 
@@ -1747,6 +1801,7 @@ def _get_differential_fold_matrix(app: FastAPI, meta: Dict) -> pd.DataFrame:
     frame.index = frame.index.astype(str)
     frame.columns = [str(label) for label in frame.columns]
     cache_entry["fold_matrix"] = frame
+    app.state.differential_cache[str(meta["job_id"])] = cache_entry
     return frame
 
 
@@ -1799,6 +1854,7 @@ def _differential_fold_rows(app: FastAPI, meta: Dict) -> tuple[Dict[str, List[fl
             result = (rows, labels, source)
             break
     cache_entry["fold_rows"] = result
+    app.state.differential_cache[str(meta["job_id"])] = cache_entry
     return result
 
 
@@ -2360,6 +2416,7 @@ def _build_differential_network_payload(app: FastAPI, meta: Dict, population: st
     if not isinstance(frame, pd.DataFrame):
         frame = pd.read_csv(tsv_path, sep="\t")
         network_tables[population] = frame
+        app.state.differential_cache[str(meta["job_id"])] = cache_entry
     nodes: Dict[str, Dict[str, object]] = {}
     edges = []
     edge_index = 0
@@ -2421,7 +2478,7 @@ def _build_differential_network_payload(app: FastAPI, meta: Dict, population: st
     }
 
 
-_GRN_EDGE_CACHE: Dict[str, Any] = {}
+_GRN_EDGE_CACHE: Dict[str, Any] = BoundedCache(_AUX_CACHE_BUDGET)
 
 
 def _grn_edges_adata(meta: Dict) -> ad.AnnData:
@@ -2443,12 +2500,13 @@ def _grn_edges_adata(meta: Dict) -> ad.AnnData:
         # LARGE_DATASET_DESIGN.md step B: the per-cell edge matrix of a bundled job comes
         # from its bundle. The pseudobulk network file is not a bundle source and is read.
         bundled = _job_bundle.view(meta, edges_path)
-        _GRN_EDGE_CACHE[edges_path] = (mtime, bundled if bundled is not None
-                                       else ad.read_h5ad(edges_path))
-    return _GRN_EDGE_CACHE[edges_path][1]
+        cached = (mtime, bundled if bundled is not None
+                  else _read_cached_h5ad(edges_path, _AUX_CACHE_BUDGET))
+        _GRN_EDGE_CACHE[edges_path] = cached
+    return cached[1]
 
 
-_LINEAGE_ORDER_CACHE: Dict[str, Any] = {}
+_LINEAGE_ORDER_CACHE: Dict[str, Any] = BoundedCache(_AUX_CACHE_BUDGET)
 
 
 def _as_str_list(value):   # uns['lineage_order'] may be a numpy array
@@ -2464,7 +2522,10 @@ def _combined_lineage_order(meta: Dict) -> List[str]:
     cached = _LINEAGE_ORDER_CACHE.get(cpath)
     if not cached or cached[0] != mtime:
         try:
-            order = _as_str_list(ad.read_h5ad(cpath, backed="r").uns.get("lineage_order"))
+            import h5py
+            from .job_bundle import _read_elem
+            with h5py.File(cpath, "r") as fh:
+                order = _as_str_list(_read_elem(fh["uns"]["lineage_order"])) if "lineage_order" in fh.get("uns", {}) else []
         except Exception:
             order = []
         _LINEAGE_ORDER_CACHE[cpath] = (mtime, order)
@@ -5052,11 +5113,14 @@ def _sampled_marker_heatmap(app, meta, modality, display_filters, cells_per_samp
     # Bound interactive caches when readers try many filter/sample combinations.
     prefix = f"{meta['job_id']}:{modality}:sampled:"
     older = [k for k in app.state.marker_heatmap_cache if k.startswith(prefix)]
-    total_bytes = values.nbytes + sum(app.state.marker_heatmap_cache[k]["matrix"].nbytes for k in older)
+    total_bytes = values.nbytes + sum(
+        item["matrix"].nbytes for k in older
+        if (item := app.state.marker_heatmap_cache.get(k)) is not None)
     while older and (len(older) >= 3 or total_bytes > 128 * 1024 * 1024):
         old = older.pop(0)
-        removed = app.state.marker_heatmap_cache.pop(old)
-        total_bytes -= removed["matrix"].nbytes
+        removed = app.state.marker_heatmap_cache.pop(old, None)
+        if removed is not None:
+            total_bytes -= removed["matrix"].nbytes
     app.state.marker_heatmap_cache[key] = entry
     return entry
 
@@ -5791,13 +5855,15 @@ def create_app(test_config: dict | None = None) -> FastAPI:
     app.state.config = cfg
     app.state.root_path = cfg["ROOT_PATH"]
     app.state.job_store = JobStore(Path(cfg["JOB_STORAGE"]))
-    app.state.expression_cache = {}
-    app.state.expression_cache_locks = {}
-    app.state.differential_cache = {}
-    app.state.marker_heatmap_cache = {}
-    app.state.fastcomm_cache = {}
-    app.state.reference_adata_cache = {}
-    app.state.reference_adata_cache_locks = {}
+    app.state.result_cache_budget = CacheBudget(
+        max_bytes=int(float(cfg["CACHE_MAX_GIB"]) * 1024**3),
+        ttl_seconds=cfg["CACHE_TTL_SECONDS"], max_entries=cfg["CACHE_MAX_ENTRIES"],
+    )
+    for name in ("expression_cache", "differential_cache", "marker_heatmap_cache",
+                 "fastcomm_cache", "reference_adata_cache"):
+        setattr(app.state, name, BoundedCache(app.state.result_cache_budget))
+    app.state.expression_cache_locks = weakref.WeakValueDictionary()
+    app.state.reference_adata_cache_locks = weakref.WeakValueDictionary()
     app.state.cache_registry_lock = threading.Lock()
     app.state.job_runner = JobRunner(
         app.state.job_store,
@@ -5805,6 +5871,9 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         max_workers=cfg["JOB_WORKERS"],
         export_approx_pdfs=cfg.get("EXPORT_APPROX_PDFS", False),
         h5ad_compression=cfg.get("H5AD_COMPRESSION", "lzf"),
+        isolate_jobs=cfg.get("ISOLATE_JOBS", True),
+        worker_memory_limit_gib=cfg.get("WORKER_MEMORY_LIMIT_GIB", 15),
+        total_memory_limit_gib=cfg.get("TOTAL_MEMORY_LIMIT_GIB", 27),
     )
 
     @app.exception_handler(RequestValidationError)
@@ -6001,8 +6070,6 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             differential={},
         )
         runner.submit(job_id)
-        store.append_log(job_id, "Job queued by user request.")
-        store.update_job(job_id, message="Job submitted to worker.", status="queued", progress=15)
         return JSONResponse({"job_id": job_id, "status": "queued"})
 
     @app.get("/api/jobs/{job_id}/status")

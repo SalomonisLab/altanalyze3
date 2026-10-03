@@ -3232,6 +3232,11 @@ function buildQcCellSummary(data) {
   const status = String(data.status || "").trim().toLowerCase();
   const message = String(data.message || "").trim();
   const progress = parseProgressPercent(data.progress);
+  // A rerun can still have stage logs from its previous analysis. Show the
+  // current queue message before consulting those logs.
+  if (status === "queued" && message) {
+    return message;
+  }
   let alignmentExcluded = null;
   for (const line of lines) {
     const match = line.match(/Applied min_alignment_score=.*?Excluded\s+(\d+)\s+cells,\s+kept\s+(\d+)/i);

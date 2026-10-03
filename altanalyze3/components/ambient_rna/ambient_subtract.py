@@ -18,8 +18,8 @@ Design goals
 3. Be much faster on filtered-only AnnData objects by:
    - removing the soupx dependency
    - avoiding per-library clustering as part of correction
-   - using direct sparse subtraction in CSC format
-   - avoiding AnnData concat for reconstruction
+   - using bounded CSR subtraction without sparse-format conversions
+   - writing library results into a single output buffer
 
 Important
 ---------
@@ -179,7 +179,19 @@ def status_scope(message: str, done_message: Optional[str] = None):
 
 
 def _subset_rows_csr(csr: sp.csr_matrix, row_idx: np.ndarray) -> sp.csr_matrix:
-    """Fast row subset helper with explicit CSR output."""
+    """Read-only row subset; contiguous libraries share data with the source."""
+    if row_idx.size and csr.has_canonical_format and np.all(np.diff(row_idx) == 1):
+        first, last = int(row_idx[0]), int(row_idx[-1]) + 1
+        lo, hi = csr.indptr[first], csr.indptr[last]
+        # SciPy's constructor prunes small views by copying when their base is
+        # much larger. Attach the buffers explicitly to preserve shared writes.
+        subset = sp.csr_matrix((last - first, csr.shape[1]), dtype=csr.dtype)
+        subset.data = csr.data[lo:hi]
+        subset.indices = csr.indices[lo:hi]
+        subset.indptr = csr.indptr[first:last + 1] - lo
+        subset.has_sorted_indices = True
+        subset.has_canonical_format = True
+        return subset
     return csr[row_idx, :].tocsr()
 
 
@@ -344,9 +356,13 @@ def _correct_counts_csc_subtraction(
     rho: float,
     *,
     round_to_int: bool = False,
+    output: Optional[sp.csr_matrix] = None,
+    eliminate_zeros: bool = True,
 ) -> sp.csr_matrix:
     """
-    Fast sparse subtraction on nonzero entries only.
+    Bounded CSR subtraction on nonzero entries only (historical function name).
+    An optional output buffer must have the same sparsity structure as the input.
+    It allows libraries to write directly into a single full-dataset allocation.
 
     Input:
         counts_csr: cells x genes
@@ -361,41 +377,42 @@ def _correct_counts_csc_subtraction(
     if counts_csr.shape[1] != soup_profile.shape[0]:
         raise ValueError("soup_profile length does not match number of genes.")
 
-    counts_csc = counts_csr.tocsc(copy=True)
-    indptr = counts_csc.indptr
-    indices = counts_csc.indices
-    data = counts_csc.data.astype(np.float32, copy=False)
-
+    corrected = counts_csr.astype(np.float32, copy=True) if output is None else output
     cell_totals = _compute_totals(counts_csr).astype(np.float32, copy=False)
     soup_profile = np.asarray(soup_profile, dtype=np.float32)
-
-    for gene_idx in range(counts_csc.shape[1]):
-        start = indptr[gene_idx]
-        end = indptr[gene_idx + 1]
-        if start == end:
-            continue
-
-        cell_idx = indices[start:end]
-        subtract_value = rho * soup_profile[gene_idx] * cell_totals[cell_idx]
-        corrected = data[start:end] - subtract_value
-        corrected[corrected < 0.0] = 0.0
-
+    # Match the original scalar multiplication order, including NumPy 1.x
+    # scalar promotion, before multiplying by the float32 cell totals.
+    coefficients = np.asarray([rho * value for value in soup_profile], dtype=np.float32)
+    start = 0
+    while start < counts_csr.shape[0]:
+        end = min(counts_csr.shape[0], max(start + 1, int(np.searchsorted(
+            counts_csr.indptr, counts_csr.indptr[start] + 1_000_000,
+        ))))
+        lo, hi = counts_csr.indptr[start], counts_csr.indptr[end]
+        removal = coefficients[counts_csr.indices[lo:hi]] * np.repeat(
+            cell_totals[start:end], np.diff(counts_csr.indptr[start:end + 1]),
+        )
+        values = corrected.data[lo:hi]
+        np.subtract(counts_csr.data[lo:hi].astype(np.float32, copy=False), removal, out=values)
+        np.maximum(values, 0, out=values)
         if round_to_int:
-            corrected = np.rint(corrected)
-
-        data[start:end] = corrected
-
-    counts_csc.data = data
-    counts_csc.eliminate_zeros()
-    return counts_csc.tocsr()
+            np.rint(values, out=values)
+        start = end
+    if eliminate_zeros:
+        corrected.eliminate_zeros()
+    return corrected
 
 
 def _summarize_matrix_change(
     before_csr: sp.csr_matrix,
     after_csr: sp.csr_matrix,
 ) -> Dict[str, float]:
-    before_sum = float(before_csr.sum())
-    after_sum = float(after_csr.sum())
+    # sum() canonicalizes duplicate coordinates. Keep the caller's buffers and
+    # row offsets intact until the complete corrected matrix is assembled.
+    before = before_csr if before_csr.has_canonical_format else before_csr.copy()
+    after = after_csr if after_csr.has_canonical_format else after_csr.copy()
+    before_sum = float(before.sum())
+    after_sum = float(after.sum())
     removed = before_sum - after_sum
     frac = 0.0
     if before_sum > 0:
@@ -406,8 +423,8 @@ def _summarize_matrix_change(
         "counts_after": after_sum,
         "counts_removed": removed,
         "fraction_removed": frac,
-        "nnz_before": int(before_csr.nnz),
-        "nnz_after": int(after_csr.nnz),
+        "nnz_before": int(before.nnz),
+        "nnz_after": int(np.count_nonzero(after.data)),
     }
 
 
@@ -515,6 +532,9 @@ def _process_library_matrix_only(
     empty_fraction: float,
     min_empty_cells: int,
     max_empty_cells: int,
+    output: Optional[sp.csr_matrix] = None,
+    eliminate_zeros: bool = True,
+    profile_and_meta: Optional[Tuple[np.ndarray, Dict[str, float]]] = None,
 ) -> Tuple[sp.csr_matrix, Dict[str, float]]:
     supported = set(["subtraction", "fastsub", "fast_subtraction"])
     if method not in supported:
@@ -524,19 +544,21 @@ def _process_library_matrix_only(
             )
         )
 
-    soup_profile, ambient_meta = _estimate_ambient_profile_from_filtered(
-        counts_csr,
-        empty_fraction=empty_fraction,
-        min_empty_cells=min_empty_cells,
-        max_empty_cells=max_empty_cells,
-        ambient_mode=ambient_mode,
-    )
+    if profile_and_meta is None:
+        soup_profile, ambient_meta = _estimate_ambient_profile_from_filtered(
+            counts_csr, empty_fraction=empty_fraction, min_empty_cells=min_empty_cells,
+            max_empty_cells=max_empty_cells, ambient_mode=ambient_mode,
+        )
+    else:
+        soup_profile, ambient_meta = profile_and_meta
 
     corrected_csr = _correct_counts_csc_subtraction(
         counts_csr,
         soup_profile,
         rho,
         round_to_int=round_to_int,
+        output=output,
+        eliminate_zeros=eliminate_zeros,
     )
 
     change = _summarize_matrix_change(counts_csr, corrected_csr)
@@ -566,6 +588,8 @@ def process_anndata(
     empty_fraction: float = 0.10,
     min_empty_cells: int = 64,
     max_empty_cells: int = 4000,
+    inplace: bool = False,
+    store_corrected_layer: bool = True,
 ) -> ad.AnnData:
     """
     Process libraries within an AnnData object and write corrected outputs.
@@ -573,21 +597,31 @@ def process_anndata(
     Notes
     -----
     - cluster_col is retained and propagated into metadata if present.
+    - inplace avoids copying the complete input object. The caller must own it.
+    - store_corrected_layer=False retains corrected counts only in X and requires
+      replace_x=True. Raw counts can still be retained independently.
     """
     rho_mapping = {} if rho_mapping is None else dict(rho_mapping)
     rho = _normalize_rho_spec(rho)
+    if not store_corrected_layer and not replace_x:
+        raise ValueError("store_corrected_layer=False requires replace_x=True.")
+    if inplace and (adata.is_view or adata.isbacked):
+        raise ValueError("inplace correction requires an in-memory AnnData that is not a view.")
 
     if library_col not in adata.obs:
         raise ValueError("obs column '{0}' not found in AnnData.".format(library_col))
+    if adata.obs[library_col].isna().any():
+        raise ValueError("Every cell must have a library label for ambient correction.")
 
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    working = adata.copy()
-    x_csr = _to_csr(working.X).astype(np.float32)
+    working = adata if inplace else adata.copy()
+    x_csr = _to_csr(working.X).astype(np.float32, copy=False)
 
     if store_raw_layer:
-        working.layers[RAW_LAYER_NAME] = x_csr.copy()
+        # Correction operates on library slices, so this source stays untouched.
+        working.layers[RAW_LAYER_NAME] = x_csr if replace_x else x_csr.copy()
 
     libraries = _iter_libraries(working.obs[library_col].tolist())
     if len(libraries) == 0:
@@ -602,8 +636,9 @@ def process_anndata(
         )
     )
 
-    corrected_blocks = []
-    row_order_blocks = []
+    # Preserve the sparsity structure until every library is processed. This
+    # avoids retaining library outputs, stacking them, then reordering a copy.
+    corrected_all = x_csr.copy()
     summary_rows = []
 
     all_library_values = working.obs[library_col].astype(str).to_numpy()
@@ -629,16 +664,19 @@ def process_anndata(
 
         t0 = time.perf_counter()
         subset_csr = _subset_rows_csr(x_csr, row_idx)
+        contiguous = x_csr.has_canonical_format and np.all(np.diff(row_idx) == 1)
+        output_subset = _subset_rows_csr(corrected_all, row_idx) if contiguous else None
+        profile_and_meta = None
         lib_rho_meta: Dict[str, float] = {}
         if lib_rho_spec == "auto":
-            lib_soup_profile, _ = _estimate_ambient_profile_from_filtered(
+            profile_and_meta = _estimate_ambient_profile_from_filtered(
                 subset_csr,
                 empty_fraction=empty_fraction,
                 min_empty_cells=min_empty_cells,
                 max_empty_cells=max_empty_cells,
                 ambient_mode=ambient_mode,
             )
-            lib_rho, lib_rho_meta = _auto_select_rho(subset_csr, lib_soup_profile)
+            lib_rho, lib_rho_meta = _auto_select_rho(subset_csr, profile_and_meta[0])
             report_status(
                 "[{0}/{1}] Auto-selected rho for library '{2}': {3:.2f} "
                 "(eval_cells={4}, baseline_residual={5:.5f}, corrected_residual={6:.5f}, fraction_removed={7:.4f})".format(
@@ -674,12 +712,18 @@ def process_anndata(
             empty_fraction=empty_fraction,
             min_empty_cells=min_empty_cells,
             max_empty_cells=max_empty_cells,
+            output=output_subset,
+            eliminate_zeros=False,
+            profile_and_meta=profile_and_meta,
         )
 
         elapsed = time.perf_counter() - t0
 
-        corrected_blocks.append(corrected_subset_csr)
-        row_order_blocks.append(row_idx)
+        if not contiguous:
+            for local_row, global_row in enumerate(row_idx):
+                corrected_all.data[corrected_all.indptr[global_row]:corrected_all.indptr[global_row + 1]] = (
+                    corrected_subset_csr.data[corrected_subset_csr.indptr[local_row]:corrected_subset_csr.indptr[local_row + 1]]
+                )
 
         summary_row = {
             "library": lib_label,
@@ -726,9 +770,14 @@ def process_anndata(
             subset_adata = working[row_idx, :].copy()
             if store_raw_layer:
                 subset_adata.layers[RAW_LAYER_NAME] = subset_csr.copy()
-            subset_adata.layers[CORRECTED_LAYER_NAME] = corrected_subset_csr
+            if store_corrected_layer:
+                subset_adata.layers[CORRECTED_LAYER_NAME] = corrected_subset_csr.copy()
+                subset_adata.layers[CORRECTED_LAYER_NAME].eliminate_zeros()
+            elif CORRECTED_LAYER_NAME in subset_adata.layers:
+                del subset_adata.layers[CORRECTED_LAYER_NAME]
             if replace_x:
                 subset_adata.X = corrected_subset_csr.copy()
+                subset_adata.X.eliminate_zeros()
 
             subset_adata.obs["soupx_rho"] = lib_rho
             subset_adata.obs["soupx_library"] = lib_label
@@ -754,21 +803,20 @@ def process_anndata(
             subset_adata.uns["soupx_correction"].update(lib_rho_meta)
 
             subset_adata.write_h5ad(out_file, compression="gzip")
+            del subset_adata
+        del subset_csr, corrected_subset_csr, output_subset
 
-    if len(corrected_blocks) == 0:
+    if not summary_rows:
         raise RuntimeError("No valid libraries processed.")
+    corrected_all.sum_duplicates()
+    corrected_all.eliminate_zeros()
 
-    stacked = sp.vstack(corrected_blocks, format="csr")
-    stacked_row_order = np.concatenate(row_order_blocks)
-
-    inverse = np.empty(stacked_row_order.shape[0], dtype=np.int64)
-    inverse[stacked_row_order] = np.arange(stacked_row_order.shape[0], dtype=np.int64)
-
-    corrected_all = stacked[inverse, :].tocsr()
-
-    working.layers[CORRECTED_LAYER_NAME] = corrected_all
+    if store_corrected_layer:
+        working.layers[CORRECTED_LAYER_NAME] = corrected_all
+    elif CORRECTED_LAYER_NAME in working.layers:
+        del working.layers[CORRECTED_LAYER_NAME]
     if replace_x:
-        working.X = corrected_all.copy()
+        working.X = corrected_all.copy() if store_corrected_layer else corrected_all
 
     summary_table = pd.DataFrame(summary_rows)
 

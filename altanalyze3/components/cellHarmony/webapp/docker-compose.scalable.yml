@@ -13,13 +13,23 @@ services:
       dockerfile: cellHarmony/webapp/Dockerfile
     image: scalable-web:latest
     container_name: scalable-web
+    mem_limit: 30g
     ports:
       - "127.0.0.1:8006:8000"
     environment:
       CELLHARMONY_ROOT_PATH: "/scalable"
       CELLHARMONY_JOB_STORAGE: /srv/cellharmony/jobs
       CELLHARMONY_REFERENCE_REGISTRY: /app/altanalyze3/components/cellHarmony/flask/reference_config.json
+      # Multiple visitors can use the API; heavy analyses share one queue within
+      # the 30 GB container budget. This also avoids competing BLAS workloads.
       CELLHARMONY_JOB_WORKERS: "2"
+      CELLHARMONY_WORKER_MEMORY_LIMIT_GIB: "15"
+      CELLHARMONY_TOTAL_MEMORY_LIMIT_GIB: "27"
+      CELLHARMONY_ISOLATE_JOBS: "1"
+      CELLHARMONY_CACHE_MAX_GIB: "2"
+      CELLHARMONY_CACHE_MAX_ENTRIES: "64"
+      CELLHARMONY_CACHE_TTL_SECONDS: "600"
+      CELLHARMONY_BUNDLE_MIN_CELLS: "10000"
       # The chat router runs in the LungMAP site container, reachable as
       # "site" on the lungmap_default network.
       CELLHARMONY_ASSISTANT_URL: http://site:8001/lungmap.net/api/assistant/viewer-intent

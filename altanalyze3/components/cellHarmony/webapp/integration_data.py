@@ -9,6 +9,42 @@ from altanalyze3.components.cellHarmony.grn_analysis import _sibling_comparison
 from .grn_data import UploadedGrnData
 
 
+def _sample_counts(adata, rows, h5ad_path=None):
+    """Sum a sample's raw counts, including when expression is bundle-backed."""
+    try:
+        layers = adata.layers
+    except AttributeError:
+        layers = {}
+    if 'counts' in layers:
+        return np.asarray(layers['counts'][rows].sum(axis=0)).ravel().astype(float)
+    if not h5ad_path:
+        raise ValueError('Integrated TF expression requires raw counts.')
+    import h5py
+    try:
+        from anndata.io import sparse_dataset
+    except ImportError:
+        from anndata.experimental import sparse_dataset
+    with h5py.File(h5ad_path, 'r') as fh:
+        if 'counts' not in fh.get('layers', {}):
+            raise ValueError('Integrated TF expression requires raw counts.')
+        node = fh['layers']['counts']
+        matrix = sparse_dataset(node) if isinstance(node, h5py.Group) else node
+        dtype = (node['data'] if isinstance(node, h5py.Group) else node).dtype
+        sum_dtype = np.zeros(1, dtype=dtype).sum().dtype
+        total = np.zeros(adata.n_vars, dtype=sum_dtype)
+        # Only one row block enters RAM; no counts matrix joins the serving cache.
+        for start in range(0, len(rows), 512):
+            block = matrix[rows[start:start + 512]]
+            if sparse.issparse(block):
+                block = block.tocsr()
+                # Preserve CSR sum's row order and dtype across block boundaries.
+                np.add.at(total, block.indices, block.data)
+            else:
+                for row in block:
+                    total += row
+        return total.astype(float)
+
+
 class UploadedIntegrationData(UploadedGrnData):
     state_expression_scale = 'mean stored RNA expression in the cell state'
 
@@ -69,7 +105,7 @@ class UploadedIntegrationData(UploadedGrnData):
         cfg=self.runs[selected]['config'];a=self.rna['adata'];obs=a.obs
         state_col=cfg['population_col'];group_col=cfg['sample_field']
         sample_col=next((c for c in ('sample','Sample','Library','library','Donor','donor') if c in obs),None)
-        if not sample_col or 'counts' not in a.layers:
+        if not sample_col:
             raise ValueError('Integrated TF expression requires raw counts and biological sample identifiers for RNA pseudobulks.')
         idx=np.flatnonzero(obs[state_col].astype(str).to_numpy()==state)
         levels=[];names=list(map(str,a.var_names));lookup={g:i for i,g in enumerate(names)}
@@ -78,7 +114,7 @@ class UploadedIntegrationData(UploadedGrnData):
             means=[]
             for sample in obs.iloc[arm][sample_col].astype(str).unique():
                 rows=arm[obs.iloc[arm][sample_col].astype(str).to_numpy()==sample]
-                counts=np.asarray(a.layers['counts'][rows].sum(axis=0)).ravel().astype(float)
+                counts=_sample_counts(a, rows, self.rna.get('h5ad_path'))
                 if counts.sum()>0:means.append(np.log2(1+10000*counts/counts.sum()))
             mean=np.mean(means,axis=0) if means else None
             levels.append({g:float(mean[lookup[g]]) for g in features if g in lookup} if mean is not None else {})

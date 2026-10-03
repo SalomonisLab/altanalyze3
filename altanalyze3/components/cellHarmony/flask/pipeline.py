@@ -204,11 +204,18 @@ def _attach_imputed_expression_metadata(
 ) -> Dict[str, object]:
     scale = _normalize_expression_scale(expression_scale, default="")
     info: Dict[str, object] = {"expression_scale": scale or "unknown"}
-    matrix64 = prediction_matrix.astype(np.float64, copy=False)
+    # Preserve the float64 transform's rounding without holding a float64 copy
+    # of a cells-by-features matrix. Only the final float32 layer is retained.
+    def linear_counts(transform):
+        result = np.empty(prediction_matrix.shape, dtype=np.float32)
+        step = max(1, 2_000_000 // max(1, prediction_matrix.shape[1]))
+        for start in range(0, len(result), step):
+            block = prediction_matrix[start:start + step].astype(np.float64)
+            result[start:start + step] = np.maximum(transform(block), 0.0)
+        return result
 
     if scale == "log2":
-        linear = np.maximum(np.exp2(matrix64) - 1.0, 0.0)
-        adata.layers["counts"] = linear.astype(np.float32)
+        adata.layers["counts"] = linear_counts(lambda block: np.exp2(block) - 1.0)
         adata.uns["log1p"] = {"base": 2.0}
         adata.uns["expression_scale"] = "log2"
         info["log_base"] = 2.0
@@ -217,17 +224,17 @@ def _attach_imputed_expression_metadata(
     if scale == "log1p":
         base = _resolve_log_base(log_base, default=float(np.e))
         if np.isclose(base, np.e):
-            linear = np.maximum(np.expm1(matrix64), 0.0)
+            transform = np.expm1
         else:
-            linear = np.maximum(np.power(base, matrix64) - 1.0, 0.0)
-        adata.layers["counts"] = linear.astype(np.float32)
+            transform = lambda block: np.power(base, block) - 1.0
+        adata.layers["counts"] = linear_counts(transform)
         adata.uns["log1p"] = {"base": float(base)}
         adata.uns["expression_scale"] = "log1p"
         info["log_base"] = float(base)
         return info
 
     if scale == "linear":
-        adata.layers["counts"] = np.maximum(matrix64, 0.0).astype(np.float32)
+        adata.layers["counts"] = linear_counts(lambda block: block)
         adata.uns["expression_scale"] = "linear"
         return info
 
@@ -363,7 +370,7 @@ def _pseudobulk_group_key(obs: pd.DataFrame, cluster_obs_col: Optional[str]) -> 
     return sample.str.cat(cstate, sep="|")
 
 
-def _impute_pseudobulk_predictions(query_adata, bundle, cluster_obs_col):
+def _impute_pseudobulk_predictions(query_adata, bundle, cluster_obs_col, *, broadcast=True):
     """Sum counts per (sample x cell-state) pseudobulk -> CP10k+log1p inside the bundle ->
     impute -> broadcast each pseudobulk's vector back to its cells. Returns (cells x features
     DataFrame, summary)."""
@@ -377,8 +384,9 @@ def _impute_pseudobulk_predictions(query_adata, bundle, cluster_obs_col):
     finally:
         if added and "_pb_group" in query_adata.obs.columns:
             del query_adata.obs["_pb_group"]
-    per_cell = result.predictions.reindex(key.values)
-    per_cell.index = query_adata.obs_names
+    per_cell = result.predictions.reindex(key.values) if broadcast else None
+    if per_cell is not None:
+        per_cell.index = query_adata.obs_names
     return per_cell, result.predictions, dict(result.summary)
 
 
@@ -408,32 +416,72 @@ def _finalize_imputed_adata(query_adata, per_cell_df, *, modality_id, feature_la
     return adata, summary
 
 
-def _build_imputed_metabolite_adata(query_adata, reference_entry, cluster_obs_col=None):
+def _stream_pseudobulk_viewer(query, predictions, cluster_col, cfg, modality, summary, path, compression):
+    from .disk_predictions import PredictionWriter
+    template, summary = _finalize_imputed_adata(
+        query[:0], predictions.iloc[:0], modality_id=modality, feature_label=modality,
+        feature_type=modality, expression_scale=cfg.get('expression_scale', 'log2'),
+        log_base=cfg.get('log_base', '2'), base_summary=summary)
+    keys = _pseudobulk_group_key(query.obs, cluster_col)
+    profiles = np.nan_to_num(predictions.to_numpy(dtype=np.float32), nan=0.0)
+    profile_codes = predictions.index.get_indexer(keys).astype(np.int32)
+    if np.any(profile_codes < 0):
+        profile_codes[profile_codes < 0] = len(profiles)
+        profiles = np.vstack([profiles, np.zeros((1, profiles.shape[1]), dtype=np.float32)])
+    template.uns['broadcast_profiles'] = profiles
+    template.uns['broadcast_profile_codes'] = profile_codes
+    writer = PredictionWriter(path, query.obs, template.var, dict(template.uns),
+                              {k: np.asarray(query.obsm[k]) for k in ('X_umap',) if k in query.obsm},
+                              compression=compression, expression_scale=template.uns['expression_scale'],
+                              log_base=cfg.get('log_base', '2'))
+    try:
+        for start in range(0, query.n_obs, 1024):
+            writer.append(predictions.reindex(keys.iloc[start:start + 1024]).to_numpy(dtype=np.float32))
+        writer.close()
+    except BaseException:
+        writer.abort()
+        raise
+    return _read_differential_h5ad(path, disk_backed=True), summary
+
+
+def _build_imputed_metabolite_adata(query_adata, reference_entry, cluster_obs_col=None,
+                                    *, output_path=None, compression='lzf'):
     """Returns (viewer_adata, diff_pseudobulk_adata, summary). Viewer = per-cell broadcast;
     differential = (sample x cell-state) pseudobulk so the group test has samples as replicates."""
     cfg = _reference_impute_config(reference_entry, "metabolite")
     bundle_path = cfg.get("bundle_path")
     bundle = load_rna2metabolite_bundle(bundle_path) if bundle_path else load_rna2metabolite_bundle()
-    per_cell, group_pred, summary = _impute_pseudobulk_predictions(query_adata, bundle, cluster_obs_col)
-    viewer, summary = _finalize_imputed_adata(
-        query_adata, per_cell, modality_id="metabolite", feature_label="metabolite",
-        feature_type="metabolite", expression_scale=cfg.get("expression_scale", "log2"),
-        log_base=cfg.get("log_base", "2"), base_summary=summary)
+    per_cell, group_pred, summary = _impute_pseudobulk_predictions(query_adata, bundle, cluster_obs_col,
+                                                               broadcast=output_path is None)
+    if output_path is None:
+        viewer, summary = _finalize_imputed_adata(
+            query_adata, per_cell, modality_id="metabolite", feature_label="metabolite",
+            feature_type="metabolite", expression_scale=cfg.get("expression_scale", "log2"),
+            log_base=cfg.get("log_base", "2"), base_summary=summary)
+    else:
+        viewer, summary = _stream_pseudobulk_viewer(query_adata, group_pred, cluster_obs_col, cfg,
+                                                   'metabolite', summary, output_path, compression)
     diff = _build_pseudobulk_differential_adata(
         query_adata, group_pred, cluster_obs_col, feature_type="metabolite", modality_id="metabolite")
     return viewer, diff, summary
 
 
-def _build_imputed_lipid_aml_adata(query_adata, reference_entry, cluster_obs_col=None):
+def _build_imputed_lipid_aml_adata(query_adata, reference_entry, cluster_obs_col=None,
+                                  *, output_path=None, compression='lzf'):
     """Returns (viewer_adata, diff_pseudobulk_adata, summary). See metabolite builder."""
     cfg = _reference_impute_config(reference_entry, "lipid")
     bundle_path = cfg.get("bundle_path")
     bundle = load_rna2lipid_aml_bundle(bundle_path) if bundle_path else load_rna2lipid_aml_bundle()
-    per_cell, group_pred, summary = _impute_pseudobulk_predictions(query_adata, bundle, cluster_obs_col)
-    viewer, summary = _finalize_imputed_adata(
-        query_adata, per_cell, modality_id="lipid", feature_label="lipid",
-        feature_type="lipid", expression_scale=cfg.get("expression_scale", "log2"),
-        log_base=cfg.get("log_base", "2"), base_summary=summary)
+    per_cell, group_pred, summary = _impute_pseudobulk_predictions(query_adata, bundle, cluster_obs_col,
+                                                               broadcast=output_path is None)
+    if output_path is None:
+        viewer, summary = _finalize_imputed_adata(
+            query_adata, per_cell, modality_id="lipid", feature_label="lipid",
+            feature_type="lipid", expression_scale=cfg.get("expression_scale", "log2"),
+            log_base=cfg.get("log_base", "2"), base_summary=summary)
+    else:
+        viewer, summary = _stream_pseudobulk_viewer(query_adata, group_pred, cluster_obs_col, cfg,
+                                                   'lipid', summary, output_path, compression)
     diff = _build_pseudobulk_differential_adata(
         query_adata, group_pred, cluster_obs_col, feature_type="lipid", modality_id="lipid")
     return viewer, diff, summary
@@ -499,7 +547,8 @@ def _build_pseudobulk_differential_adata(query_adata, group_pred_df, cluster_obs
     return adata
 
 
-def _build_imputed_grn_adata(query_adata, reference_entry, cluster_obs_col=None):
+def _build_imputed_grn_adata(query_adata, reference_entry, cluster_obs_col=None,
+                             *, edge_output_path=None, compression='lzf'):
     """Returns (tf_activity_adata, edges_pseudobulk_adata, tf_pseudobulk_adata, summary).
     TF activity (per-cell summed predicted outgoing activity) drives the viewer/exploration; per (sample x cell-state) pseudobulk
     edge scores drive a correct edge differential (samples as replicates) and the GRN edge
@@ -534,23 +583,49 @@ def _build_imputed_grn_adata(query_adata, reference_entry, cluster_obs_col=None)
     # broadcast from a population.
     blocks = []
     edge_blocks = []
+    writer = None
+    if edge_output_path is not None:
+        from .disk_predictions import PredictionWriter
+        template, _ = _finalize_imputed_adata(
+            query_adata[:0], edges.iloc[:0], modality_id='grn', feature_label='edge',
+            feature_type='GRN-edge', expression_scale='linear', log_base=None,
+            base_summary=dict(gres.summary))
+        writer = PredictionWriter(edge_output_path, query_adata.obs, template.var,
+                                  dict(template.uns),
+                                  {key: np.asarray(query_adata.obsm[key]) for key in ('X_umap',)
+                                   if key in query_adata.obsm}, compression=compression)
     chunk_size = max(1, int(cfg.get("tf_activity_chunk_size", 256)))
-    for start in range(0, query_adata.n_obs, chunk_size):
-        prediction = bundle.predict_from_adata(
-            query_adata[start:start + chunk_size], groupby=None, layer=layer,
-            pseudobulk_statistic=pb_stat)
-        edge_blocks.append(prediction.predictions.astype(np.float32))
-        blocks.append(bundle.tf_activity(prediction.predictions, aggregation="sum"))
+    try:
+        for start in range(0, query_adata.n_obs, chunk_size):
+            prediction = bundle.predict_from_adata(
+                query_adata[start:start + chunk_size], groupby=None, layer=layer,
+                pseudobulk_statistic=pb_stat)
+            edge_frame = prediction.predictions.astype(np.float32)
+            if writer is None:
+                edge_blocks.append(edge_frame)
+            else:
+                if not edge_frame.columns.equals(edges.columns):
+                    raise ValueError('GRN prediction feature order changed between blocks')
+                writer.append(edge_frame.to_numpy())
+            blocks.append(bundle.tf_activity(prediction.predictions, aggregation="sum").astype(np.float32))
+        if writer is not None:
+            writer.close()
+    except BaseException:
+        if writer is not None:
+            writer.abort()
+        raise
     tf_df = pd.concat(blocks).reindex(query_adata.obs_names)
-    edges_per_cell = pd.concat(edge_blocks).reindex(query_adata.obs_names)
+    edges_per_cell = pd.concat(edge_blocks).reindex(query_adata.obs_names) if writer is None else None
     del edge_blocks
     tf_adata, summary = _finalize_imputed_adata(
         query_adata, tf_df, modality_id="grn_tf", feature_label="factor", feature_type="GRN-TF",
         expression_scale="linear", log_base=None, base_summary=dict(gres.summary))
-    edges_adata, _ = _finalize_imputed_adata(
-        query_adata, edges_per_cell, modality_id="grn", feature_label="edge",
-        feature_type="GRN-edge", expression_scale="linear", log_base=None,
-        base_summary=dict(gres.summary))
+    edges_adata = None
+    if edges_per_cell is not None:
+        edges_adata, _ = _finalize_imputed_adata(
+            query_adata, edges_per_cell, modality_id="grn", feature_label="edge",
+            feature_type="GRN-edge", expression_scale="linear", log_base=None,
+            base_summary=dict(gres.summary))
     del edges_per_cell
     edges_pseudobulk = _build_pseudobulk_differential_adata(
         query_adata, edges, cluster_obs_col, feature_type="GRN-edge", modality_id="grn")
@@ -665,6 +740,10 @@ def _modality_differential_h5ad_path(meta: Dict, modality: str,
         pseudobulk = str(entry.get("pseudobulk_h5ad", "")).strip()
         if pseudobulk and Path(pseudobulk).exists():
             return Path(pseudobulk)
+    if comparison_type == "cells":
+        # Older lipid/metabolite jobs stored a pseudobulk under differential_h5ad.
+        # The cell-level selection must read the per-cell modality output.
+        return _modality_h5ad_path(meta, modality)
     diff = str(entry.get("differential_h5ad", "")).strip()
     if diff and Path(diff).exists():
         return Path(diff)
@@ -891,17 +970,23 @@ def _resolve_samples_for_adata(
     raise ValueError(f"Selected samples were not found in the aligned AnnData: {', '.join(missing)}{extra}")
 
 
+def _read_h5ad_obs(h5ad_path):
+    """Read annotations alone; backed AnnData still imports layers and obsm."""
+    import h5py
+    try:
+        from anndata.io import read_elem
+    except ImportError:
+        from anndata.experimental import read_elem
+    with h5py.File(h5ad_path, "r") as fh:
+        return read_elem(fh["obs"])
+
+
 def _candidate_population_columns(h5ad_path: Path, preferred: Optional[List[str]] = None) -> List[Dict[str, object]]:
     if not h5ad_path.exists():
         return []
 
-    adata = ad.read_h5ad(h5ad_path, backed="r")
-    try:
-        obs = adata.obs.copy()
-        n_obs = max(int(adata.n_obs), 1)
-    finally:
-        if getattr(adata, "file", None) is not None:
-            adata.file.close()
+    obs = _read_h5ad_obs(h5ad_path)
+    n_obs = max(len(obs), 1)
 
     max_categories = max(8, min(200, n_obs // 2 if n_obs > 1 else 2))
     excluded_columns = {
@@ -949,12 +1034,7 @@ def _candidate_group_fields(
     if not h5ad_path.exists():
         return [], {}
 
-    adata = ad.read_h5ad(h5ad_path, backed="r")
-    try:
-        obs = adata.obs.copy()
-    finally:
-        if getattr(adata, "file", None) is not None:
-            adata.file.close()
+    obs = _read_h5ad_obs(h5ad_path)
 
     excluded_columns = {
         "pct_counts_mt",
@@ -1064,7 +1144,13 @@ def _group_display_label(samples: List[str]) -> str:
 def _comparison_tag(group1_samples: List[str], group2_samples: List[str]) -> str:
     lhs = "__".join(NetPerspective.safe_component(sample, fallback="sample") for sample in group1_samples)
     rhs = "__".join(NetPerspective.safe_component(sample, fallback="sample") for sample in group2_samples)
-    return f"{lhs}_vs_{rhs}"
+    tag = f"{lhs}_vs_{rhs}"
+    if len(tag.encode("utf-8")) > 120:
+        import hashlib
+        digest = hashlib.sha256(tag.encode("utf-8")).hexdigest()[:16]
+        prefix = tag.encode("utf-8")[:90].decode("utf-8", errors="ignore")
+        tag = f"{prefix}_{digest}"
+    return tag
 
 
 def _bh_fdr(pvalues: List[float]) -> List[float]:
@@ -1472,7 +1558,7 @@ def _run_cell_communication_differential(
 
 # ------------------------------------------------------ LARGE_DATASET_DESIGN.md step A
 #
-# A job of CELLHARMONY_BUNDLE_MIN_CELLS cells or more (default 100,000) writes
+# A job of CELLHARMONY_BUNDLE_MIN_CELLS cells or more (default 10,000) writes
 # outputs/bundle/ in the scalable_viewer format, through precompute.py's own command line
 # and its parallel builder (visualization/scalable_viewer/fast_store.py). webapp/app.py
 # then serves that job's matrices from the bundle's memory maps instead of reading each
@@ -1483,7 +1569,7 @@ _BUNDLE_PREFIX = "job"
 
 
 def _bundle_min_cells() -> Tuple[Optional[int], str]:
-    raw = os.environ.get("CELLHARMONY_BUNDLE_MIN_CELLS", "100000")
+    raw = os.environ.get("CELLHARMONY_BUNDLE_MIN_CELLS", "10000")
     try:
         value = int(str(raw).strip())
     except ValueError:
@@ -1660,6 +1746,10 @@ def run_cellharmony_pipeline(
         gene_translation_file=None,
         metacell_align=False,
         ambient_correct_cutoff=ambient_rho,
+        ambient_memory_efficient=True,
+        concat_on_disk=True,
+        concat_batch_size=1,
+        stream_10x_inputs=True,
         return_adata=True,
     )
 
@@ -1780,6 +1870,7 @@ def run_cellharmony_pipeline(
         }
     }
     modalities_payload = _modalities_payload(selected_impute_modalities)
+    disk_imputation = approx_result.query_adata.n_obs >= int(os.getenv('CELLHARMONY_DISK_ANALYSIS_MIN_CELLS', '20000'))
 
     if "lipids" in selected_impute_modalities:
         store.update_job(job_id, progress=88, message="Imputing lipid profiles from aligned RNA.")
@@ -1838,7 +1929,8 @@ def run_cellharmony_pipeline(
             cluster_obs_col=query_cluster_key,
         )
         adt_h5ad_path = outputs_dir / "combined_with_umap_and_markers_adt.h5ad"
-        approx_result.query_adata.obsm["X_adt"] = np.asarray(adt_adata.X, dtype=np.float32)
+        if not disk_imputation:
+            approx_result.query_adata.obsm["X_adt"] = np.asarray(adt_adata.X, dtype=np.float32)
         approx_result.query_adata.uns["adt_feature_names"] = adt_adata.var_names.astype(str).tolist()
         approx_result.query_adata.uns["imputed_modalities"] = {
             "adt": {
@@ -1855,66 +1947,94 @@ def run_cellharmony_pipeline(
 
         marker_analysis_by_modality["adt"] = _emit_modality_marker_heatmap(
             "adt", adt_adata, outputs_dir, query_cluster_key, meta)
+        if disk_imputation:
+            approx_result.query_adata.uns['imputed_modalities']['adt'].pop('obsm_key', None)
+            approx_result.query_adata.uns['imputed_modalities']['adt']['h5ad'] = str(adt_h5ad_path)
+            adt_adata = None
         store.append_log(job_id, "rna2adt ADT imputation complete.")
 
     if "metabolite" in selected_impute_modalities:
         store.update_job(job_id, progress=88, message="Imputing metabolite abundance from aligned RNA (pseudobulk).")
         store.append_log(job_id, "Running rna2metabolite imputation.")
-        met_adata, met_diff_adata, met_summary = _build_imputed_metabolite_adata(
-            approx_result.query_adata, reference_entry, cluster_obs_col=query_cluster_key)
         met_h5ad_path = outputs_dir / "combined_with_umap_and_markers_metabolite.h5ad"
         met_diff_path = outputs_dir / "combined_with_umap_and_markers_metabolite_pseudobulk.h5ad"
-        approx_result.query_adata.obsm["X_metabolite"] = np.asarray(met_adata.X, dtype=np.float32)
+        met_adata, met_diff_adata, met_summary = _build_imputed_metabolite_adata(
+            approx_result.query_adata, reference_entry, cluster_obs_col=query_cluster_key,
+            output_path=met_h5ad_path if disk_imputation else None, compression=resolved_h5ad_compression)
+        if not disk_imputation:
+            approx_result.query_adata.obsm["X_metabolite"] = np.asarray(met_adata.X, dtype=np.float32)
         approx_result.query_adata.uns["metabolite_feature_names"] = met_adata.var_names.astype(str).tolist()
         approx_result.query_adata.uns.setdefault("imputed_modalities", {})["metabolite"] = {
             "obsm_key": "X_metabolite", "feature_names_key": "metabolite_feature_names", "summary": met_summary}
-        approx_mod.ensure_h5ad_compat_for_write(met_adata)
-        met_adata.write(met_h5ad_path, compression=resolved_h5ad_compression)
+        if not disk_imputation:
+            approx_mod.ensure_h5ad_compat_for_write(met_adata)
+            met_adata.write(met_h5ad_path, compression=resolved_h5ad_compression)
         approx_mod.ensure_h5ad_compat_for_write(met_diff_adata)
         met_diff_adata.write(met_diff_path, compression=resolved_h5ad_compression)
-        modality_artifacts["metabolite"] = {"h5ad": str(met_h5ad_path), "differential_h5ad": str(met_diff_path)}
+        modality_artifacts["metabolite"] = {"h5ad": str(met_h5ad_path),
+                                           "differential_h5ad": str(met_h5ad_path),
+                                           "pseudobulk_h5ad": str(met_diff_path)}
         marker_analysis_by_modality["metabolite"] = _emit_modality_marker_heatmap(
             "metabolite", met_adata, outputs_dir, query_cluster_key, meta)
+        if disk_imputation:
+            info = approx_result.query_adata.uns['imputed_modalities']['metabolite']
+            info.pop('obsm_key', None)
+            info['h5ad'] = str(met_h5ad_path)
+            met_adata._analysis_h5_handle.close()
+            met_adata = met_diff_adata = None
         store.append_log(job_id, "rna2metabolite imputation complete.")
 
     if "lipid" in selected_impute_modalities:
         store.update_job(job_id, progress=88, message="Imputing lipid abundance from aligned RNA (pseudobulk).")
         store.append_log(job_id, "Running rna2lipid (AML) imputation.")
-        lip_adata, lip_diff_adata, lip_summary = _build_imputed_lipid_aml_adata(
-            approx_result.query_adata, reference_entry, cluster_obs_col=query_cluster_key)
         lip_h5ad_path = outputs_dir / "combined_with_umap_and_markers_lipid.h5ad"
         lip_diff_path = outputs_dir / "combined_with_umap_and_markers_lipid_pseudobulk.h5ad"
-        approx_result.query_adata.obsm["X_lipid"] = np.asarray(lip_adata.X, dtype=np.float32)
+        lip_adata, lip_diff_adata, lip_summary = _build_imputed_lipid_aml_adata(
+            approx_result.query_adata, reference_entry, cluster_obs_col=query_cluster_key,
+            output_path=lip_h5ad_path if disk_imputation else None, compression=resolved_h5ad_compression)
+        if not disk_imputation:
+            approx_result.query_adata.obsm["X_lipid"] = np.asarray(lip_adata.X, dtype=np.float32)
         approx_result.query_adata.uns["lipid_feature_names"] = lip_adata.var_names.astype(str).tolist()
         approx_result.query_adata.uns.setdefault("imputed_modalities", {})["lipid"] = {
             "obsm_key": "X_lipid", "feature_names_key": "lipid_feature_names", "summary": lip_summary}
-        approx_mod.ensure_h5ad_compat_for_write(lip_adata)
-        lip_adata.write(lip_h5ad_path, compression=resolved_h5ad_compression)
+        if not disk_imputation:
+            approx_mod.ensure_h5ad_compat_for_write(lip_adata)
+            lip_adata.write(lip_h5ad_path, compression=resolved_h5ad_compression)
         approx_mod.ensure_h5ad_compat_for_write(lip_diff_adata)
         lip_diff_adata.write(lip_diff_path, compression=resolved_h5ad_compression)
-        modality_artifacts["lipid"] = {"h5ad": str(lip_h5ad_path), "differential_h5ad": str(lip_diff_path)}
+        modality_artifacts["lipid"] = {"h5ad": str(lip_h5ad_path),
+                                      "differential_h5ad": str(lip_h5ad_path),
+                                      "pseudobulk_h5ad": str(lip_diff_path)}
         marker_analysis_by_modality["lipid"] = _emit_modality_marker_heatmap(
             "lipid", lip_adata, outputs_dir, query_cluster_key, meta)
+        if disk_imputation:
+            info = approx_result.query_adata.uns['imputed_modalities']['lipid']
+            info.pop('obsm_key', None)
+            info['h5ad'] = str(lip_h5ad_path)
+            lip_adata._analysis_h5_handle.close()
+            lip_adata = lip_diff_adata = None
         store.append_log(job_id, "rna2lipid (AML) imputation complete.")
 
     if "grn" in selected_impute_modalities:
         store.update_job(job_id, progress=88, message="Imputing GRN / TF activity from aligned RNA (pseudobulk).")
         store.append_log(job_id, "Running rna2grn imputation.")
+        grn_edges_path = outputs_dir / "combined_with_umap_and_markers_grn_edges.h5ad"
         (grn_tf_adata, grn_edges_adata, grn_edges_pseudobulk, grn_tf_pseudobulk,
          grn_summary) = _build_imputed_grn_adata(
-            approx_result.query_adata, reference_entry, cluster_obs_col=query_cluster_key)
+            approx_result.query_adata, reference_entry, cluster_obs_col=query_cluster_key,
+            edge_output_path=grn_edges_path, compression=resolved_h5ad_compression)
         grn_h5ad_path = outputs_dir / "combined_with_umap_and_markers_grn_tf.h5ad"
         grn_tf_diff_path = outputs_dir / "combined_with_umap_and_markers_grn_tf_pseudobulk.h5ad"
         grn_edges_path = outputs_dir / "combined_with_umap_and_markers_grn_edges.h5ad"
         grn_edges_pb_path = outputs_dir / "combined_with_umap_and_markers_grn_edges_pseudobulk.h5ad"
-        approx_result.query_adata.obsm["X_grn_tf"] = np.asarray(grn_tf_adata.X, dtype=np.float32)
+        if not disk_imputation:
+            approx_result.query_adata.obsm["X_grn_tf"] = np.asarray(grn_tf_adata.X, dtype=np.float32)
         approx_result.query_adata.uns["grn_tf_feature_names"] = grn_tf_adata.var_names.astype(str).tolist()
         approx_result.query_adata.uns.setdefault("imputed_modalities", {})["grn_tf"] = {
             "obsm_key": "X_grn_tf", "feature_names_key": "grn_tf_feature_names", "summary": grn_summary}
         approx_mod.ensure_h5ad_compat_for_write(grn_tf_adata)
         grn_tf_adata.write(grn_h5ad_path, compression=resolved_h5ad_compression)
-        approx_mod.ensure_h5ad_compat_for_write(grn_edges_adata)
-        grn_edges_adata.write(grn_edges_path, compression=resolved_h5ad_compression)
+        # The edge matrix was written block by block during prediction.
         approx_mod.ensure_h5ad_compat_for_write(grn_edges_pseudobulk)
         grn_edges_pseudobulk.write(grn_edges_pb_path, compression=resolved_h5ad_compression)
         approx_mod.ensure_h5ad_compat_for_write(grn_tf_pseudobulk)
@@ -1938,6 +2058,11 @@ def run_cellharmony_pipeline(
             "pseudobulk_h5ad": str(grn_tf_diff_path)}
         marker_analysis_by_modality["grn_tf"] = _emit_modality_marker_heatmap(
             "grn_tf", grn_tf_adata, outputs_dir, query_cluster_key, meta)
+        if disk_imputation:
+            info = approx_result.query_adata.uns['imputed_modalities']['grn_tf']
+            info.pop('obsm_key', None)
+            info['h5ad'] = str(grn_h5ad_path)
+            grn_tf_adata = grn_edges_pseudobulk = grn_tf_pseudobulk = None
         store.append_log(job_id, "rna2grn imputation complete.")
 
     approx_mod.ensure_h5ad_compat_for_write(approx_result.query_adata)
@@ -1986,7 +2111,7 @@ def run_cellharmony_pipeline(
         if not members:
             return
         zip_path = outputs_dir / f"{mod_id}_results.zip"
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as zf:
             for member in members:
                 zf.write(member, arcname=member.name)
         artifacts[f"imputed_{mod_id}_results_zip"] = zip_path
@@ -2179,14 +2304,12 @@ def run_cellharmony_pipeline(
     )
     default_sample_field = None
     if sample_names:
-        adata_for_defaults = ad.read_h5ad(combined_h5ad_path, backed="r")
+        from types import SimpleNamespace
+        adata_for_defaults = SimpleNamespace(obs=_read_h5ad_obs(combined_h5ad_path))
         try:
             default_sample_field, _ = _resolve_samples_for_adata(adata_for_defaults, meta, sample_names)
         except Exception:
             default_sample_field = None
-        finally:
-            if getattr(adata_for_defaults, "file", None) is not None:
-                adata_for_defaults.file.close()
     if not default_sample_field:
         default_sample_field = next(
             (
@@ -2241,6 +2364,14 @@ def run_cellharmony_pipeline(
         ),
         message="Approximate UMAP completed.",
     )
+    # Everything needed below is on disk. Do not overlap the bundle builder's
+    # buffers with RNA layers and all of the per-cell imputation outputs.
+    combined_adata = approx_result = reference_adata = None
+    lipid_adata = adt_adata = met_adata = met_diff_adata = None
+    lip_adata = lip_diff_adata = None
+    grn_tf_adata = grn_edges_adata = grn_edges_pseudobulk = grn_tf_pseudobulk = None
+    import gc
+    gc.collect()
     # LARGE_DATASET_DESIGN.md step A: large jobs also write a bundle the app serves from.
     bundle_record = _build_job_bundle(store, job_id, combined_h5ad_path, query_cluster_key,
                                       modality_artifacts, modalities_payload)
@@ -2263,6 +2394,42 @@ def _trim_differential_working_data(adata):
             del adata.obsm[name]
     adata.uns.pop("imputed_modalities", None)
     return adata
+
+
+def _read_differential_h5ad(path, *, disk_backed=False):
+    """Read DE inputs without importing wide visualization/imputation copies."""
+    import h5py
+    try:
+        from anndata.io import read_elem
+    except ImportError:
+        from anndata.experimental import read_elem
+    if disk_backed:
+        fh = h5py.File(path, 'r')
+        if 'raw' not in fh:
+            try:
+                kwargs = {key: read_elem(fh[key]) for key in ('obs', 'var', 'uns') if key in fh}
+                try:
+                    from anndata.io import sparse_dataset
+                except ImportError:
+                    from anndata.experimental import sparse_dataset
+                def matrix(node):
+                    return node if isinstance(node, h5py.Dataset) else sparse_dataset(node)
+                layers = {'counts': matrix(fh['layers/counts'])} if 'counts' in fh.get('layers', {}) else {}
+                out = ad.AnnData(X=matrix(fh['X']), layers=layers, **kwargs)
+                out._analysis_h5_handle = fh
+                from ..disk_differential import bind_broadcast_profiles
+                bind_broadcast_profiles(out)
+                return out
+            except BaseException:
+                fh.close()
+                raise
+        fh.close()
+    with h5py.File(path, "r") as fh:
+        kwargs = {key: read_elem(fh[key]) for key in ("X", "obs", "var", "uns") if key in fh}
+        if "raw" in fh:
+            kwargs["raw"] = read_elem(fh["raw"])
+        layers = {"counts": read_elem(fh["layers"]["counts"])} if "counts" in fh.get("layers", {}) else {}
+        return ad.AnnData(**kwargs, layers=layers)
 
 
 def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, object]:
@@ -2343,7 +2510,45 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
             comparison_type=comparison_type,
         )
 
-    adata = _trim_differential_working_data(ad.read_h5ad(combined_h5ad))
+    disk_differential = comparison_type == 'cells'
+    if disk_differential:
+        import h5py
+        with h5py.File(combined_h5ad, 'r') as handle:
+            if isinstance(handle['X'], h5py.Group):
+                nodes = [handle['X']]
+                if 'counts' in handle.get('layers', {}):
+                    nodes.append(handle['layers/counts'])
+                sparse_bytes = sum(node[key].size * node[key].dtype.itemsize
+                                   for node in nodes for key in ('data', 'indices', 'indptr'))
+                # Sparse matrices below this budget are quicker to read once;
+                # large inputs stay on disk. Dense imputed matrices use bounded reads.
+                disk_differential = sparse_bytes > 8 * 1024**3
+    adata = _read_differential_h5ad(combined_h5ad, disk_backed=disk_differential)
+    from ..disk_differential import bounded_materialize, root_and_rows, bind_broadcast_profiles, read_rows
+    if modality in {'metabolite', 'lipid'} and root_and_rows(adata) is not None and 'broadcast_profiles' not in adata.uns:
+        # Existing jobs also have the compact sample/state predictions. Reuse
+        # them after checking feature order, row mapping and sampled cell values.
+        profile_path = (meta.get('modality_artifacts', {}).get(modality) or {}).get('pseudobulk_h5ad')
+        if profile_path and Path(profile_path).exists():
+            profiles = _read_differential_h5ad(profile_path)
+            if profiles.var_names.equals(adata.var_names):
+                codes = profiles.obs_names.get_indexer(_pseudobulk_group_key(adata.obs, population_col)).astype(np.int32)
+                values = np.asarray(profiles.X, dtype=np.float32)
+                if np.all(codes >= 0):
+                    checked = np.unique(np.linspace(0, adata.n_obs - 1, min(1024, adata.n_obs), dtype=int))
+                    if np.array_equal(read_rows(adata.X, checked), values[codes[checked]]):
+                        adata.uns['broadcast_profiles'] = values
+                        adata.uns['broadcast_profile_codes'] = codes
+                        bind_broadcast_profiles(adata)
+            del profiles
+    dense_budget = 4 * 1024**3 if modality == 'grn' else 256 * 1024**2
+    materialized = bounded_materialize(adata, max_bytes=dense_budget)
+    if materialized is adata and modality == 'grn' and root_and_rows(adata) is not None:
+        from ..disk_differential import bind_row_store
+        bind_row_store(adata)
+    if materialized is not adata:
+        adata._analysis_h5_handle.close()
+        adata = materialized
     if population_col not in adata.obs.columns:
         raise ValueError(f"'{population_col}' is not present in the aligned AnnData observations.")
 
@@ -2385,11 +2590,12 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
     subset_mask = sample_values.isin(resolved_group1 + resolved_group2)
     if int(np.asarray(subset_mask).sum()) == 0:
         raise ValueError("No cells were found for the selected sample groups.")
-    if not bool(np.asarray(subset_mask).all()):
-        adata = adata[subset_mask].copy()
     web_group_col = "__cellharmony_web_group__"
     sample_values = adata.obs[sample_col].astype(str)
     adata.obs[web_group_col] = np.where(sample_values.isin(resolved_group1), case_label, control_label)
+    if not bool(np.asarray(subset_mask).all()):
+        from ..disk_differential import root_and_rows
+        adata = adata[subset_mask] if root_and_rows(adata) is not None else adata[subset_mask].copy()
     # The GRN edge h5ad is already a (sample x cell-state) pseudobulk object; re-aggregating
     # it (compute_pseudobulk_per_population sums counts) would distort the edge scores, so
     # skip aggregation when the loaded h5ad is already pseudobulk-level — run_de_for_comparisons

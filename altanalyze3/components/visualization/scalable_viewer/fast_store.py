@@ -107,6 +107,30 @@ class ArraySource:
         return f"in-memory CSR ({int(self.indptr[-1]):,} non-zeros)"
 
 
+class DenseH5Source(H5Source):
+    """Dense modality X, mapped into the bundle's cell order in bounded blocks."""
+    def __init__(self, path, matched):
+        super().__init__(path, 'X')
+        self.matched = np.asarray(matched, dtype=np.int64)
+
+    def read_rows(self, start, end):
+        import h5py
+        mapping = self.matched[start:end]
+        present = mapping >= 0
+        with h5py.File(self.path, 'r') as fh:
+            data = fh[self.group]
+            result = np.zeros((end - start, data.shape[1]), dtype=np.float32)
+            selected = mapping[present]
+            if selected.size:
+                if np.array_equal(selected, np.arange(selected[0], selected[0] + len(selected))):
+                    values = data[int(selected[0]):int(selected[-1]) + 1]
+                else:
+                    unique, inverse = np.unique(selected, return_inverse=True)
+                    values = data[unique][inverse]
+                result[present] = values
+        return result
+
+
 # Each worker process opens the h5ad once and keeps the three datasets.
 _WORKER_H5: Dict[Tuple[str, str], Tuple[object, object, object]] = {}
 
@@ -285,8 +309,15 @@ def _scan_block(src, block: int, r0: int, r1: int, local_indptr: np.ndarray,
     compute the block's statistics."""
     tm = {}
     t0 = time.perf_counter()
-    s, e, gi, dv = _read_block(src, local_indptr)
-    rel = local_indptr - s
+    if isinstance(src, DenseH5Source):
+        csr = sp.csr_matrix(src.read_rows(r0, r1))
+        s, e = int(local_indptr[0]), int(local_indptr[-1])
+        gi, dv, rel = csr.indices, csr.data, csr.indptr
+        if not np.array_equal(np.diff(rel), np.diff(local_indptr)):
+            raise RuntimeError('Dense source changed between counting and writing')
+    else:
+        s, e, gi, dv = _read_block(src, local_indptr)
+        rel = local_indptr - s
     tm["read"] = time.perf_counter() - t0; t0 = time.perf_counter()
 
     bp, cells, bx = _transpose_block(block, r0, r1, rel, gi, dv, n_genes)
@@ -370,17 +401,21 @@ def _run_single_scan(ex, src, blocks, block_nnz, full_indptr, state16, n_genes, 
 
         # ---- phase A: read each block once --------------------------------------
         t0 = time.time()
-        futs = [ex.submit(_scan_block, src, i, blocks[i][0], blocks[i][1],
-                          full_indptr[blocks[i][0]:blocks[i][1] + 1].copy(),
-                          state16[blocks[i][0]:blocks[i][1]].copy(), n_genes, n_states,
-                          spill_prefix)
-                for i in live]
+        def submit_block(i):
+            return ex.submit(_scan_block, src, i, blocks[i][0], blocks[i][1],
+                             full_indptr[blocks[i][0]:blocks[i][1] + 1].copy(),
+                             state16[blocks[i][0]:blocks[i][1]].copy(), n_genes, n_states,
+                             spill_prefix)
+        window = max(1, n_workers * 2)
+        futs = [submit_block(i) for i in live[:window]]
+        remaining = iter(live[window:])
         bp_by_block: Dict[int, np.ndarray] = {}
         sum_gs = np.zeros(gs_len, dtype=np.float64)
         cnt_gs = np.zeros(gs_len, dtype=np.int64)
         gene_sumsq = np.zeros(n_genes, dtype=np.float64)
         scanned = 0
-        for fu in futs:                                # block order: the reference's order
+        while futs:                                   # block order: the reference's order
+            fu = futs.pop(0)
             bi, bp, sum_b, cnt_b, sq_b, nnz_b, tm = fu.result()
             sum_gs += sum_b
             cnt_gs += cnt_b
@@ -390,6 +425,10 @@ def _run_single_scan(ex, src, blocks, block_nnz, full_indptr, state16, n_genes, 
             r0, r1 = blocks[bi]
             log(f"phase A block {bi + 1}/{len(blocks)} cells {r0:,}-{r1:,} "
                 + " ".join(f"{k} {v:.1f}s" for k, v in tm.items()))
+            del fu, sum_b, cnt_b, sq_b
+            next_block = next(remaining, None)
+            if next_block is not None:
+                futs.append(submit_block(next_block))
         if scanned != nnz:
             raise RuntimeError(f"phase A read {scanned} entries, expected {nnz}")
         log(f"phase A done in {time.time() - t0:.1f}s (source read once)")
@@ -509,7 +548,14 @@ def build_expression_store_parallel(
     Returns (sum_gs, cnt_gs, gene_sum, gene_sumsq, nnz).
     """
     t_all = time.time()
-    if src.kind == "h5":
+    if isinstance(src, DenseH5Source):
+        full_indptr = np.zeros(n_cells + 1, dtype=np.int64)
+        for start in range(0, n_cells, row_block):
+            block = src.read_rows(start, min(start + row_block, n_cells))
+            full_indptr[start + 1:start + 1 + len(block)] = np.count_nonzero(block, axis=1)
+        np.cumsum(full_indptr, out=full_indptr)
+        log('dense source nonzeros counted in bounded row blocks')
+    elif src.kind == "h5":
         import h5py
         with h5py.File(src.path, "r") as fh:
             full_indptr = fh[src.group]["indptr"][:].astype(np.int64)

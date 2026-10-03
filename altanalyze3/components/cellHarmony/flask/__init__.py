@@ -33,7 +33,12 @@ def create_app(test_config: dict | None = None) -> Flask:
     job_root.mkdir(parents=True, exist_ok=True)
     registry_path = Path(app.config["REFERENCE_REGISTRY"])
     app.job_store = JobStore(job_root)
-    app.job_runner = JobRunner(app.job_store, registry_path)
+    app.job_runner = JobRunner(
+        app.job_store, registry_path, isolate_jobs=True,
+        max_workers=cfg.get("JOB_WORKERS", 2),
+        worker_memory_limit_gib=cfg.get("WORKER_MEMORY_LIMIT_GIB", 15),
+        total_memory_limit_gib=cfg.get("TOTAL_MEMORY_LIMIT_GIB", 27),
+    )
 
     register_routes(app)
     return app

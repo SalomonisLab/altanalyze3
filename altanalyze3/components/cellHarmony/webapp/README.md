@@ -1,3 +1,319 @@
+## Serving memory and full workflow validation (2026-10-02)
+
+### Alternate backend run: alignment through differential expression
+
+The saved 128,388-cell run already had serving bundles enabled. A fresh scratch
+job repeated the same 21 inputs, QC, all six modalities and cell-level comparison
+groups with `CELLHARMONY_BUNDLE_MIN_CELLS=1000000000`, disabling bundle generation.
+Each stage ran alone in a fresh child interpreter under the same 28 GiB watchdog.
+
+| Phase | Bundle enabled: seconds / peak GiB | Bundle disabled: seconds / peak GiB |
+| --- | ---: | ---: |
+| Pipeline including alignment, all imputation, exports | 551.42 / 20.69 | 402.41 / 20.06 |
+| Cell-level differential: RNA | 135.20 / 14.30 | 118.19 / 20.44 |
+| Cell-level differential: ADT | 7.15 / 1.78 | 8.69 / 1.81 |
+| Cell-level differential: metabolite | 15.63 / 14.95 | 16.59 / 14.91 |
+| Cell-level differential: lipid | 10.67 / 7.66 | 10.97 / 7.63 |
+| Cell-level differential: GRN | 76.75 / 18.12 | 72.96 / 18.68 |
+| Cell-level differential: TF | 11.32 / 2.20 | 7.89 / 2.09 |
+| Total measured stage time | 808.14 | 637.71 |
+
+All six expression matrices and obs/var annotations matched by streamed hashes.
+Cell labels and alignment scores matched; 50 differential result tables were
+byte-identical. UMAP coordinates differed between runs. Both jobs completed.
+
+The enabled baseline's bundle build took 134.6 seconds. The bundle stores
+expression on disk for subsequent queries; there is no SQLite execution switch
+in alignment, imputation or differential computation. These measurements do not
+establish a reduction in analysis memory from SQLite. The prior serving tests
+below establish the benefit during exploration. RNA differential peak RSS was
+higher in the alternate run despite identical tables, so peaks should not be
+treated as repeatable guarantees.
+
+This comparison uses the saved enabled baseline, as requested, rather than a
+new same-revision enabled run: the baseline preceded the final obs-only menu
+loading and pre-builder buffer-release changes. Each option was measured once
+on macOS; these are sampled process-tree RSS figures, not Docker measurements.
+The full data and parity hashes are in `dev/memory_workflow_results.json` under
+`backend_comparison_128k`. Reproduce with the existing full-workflow benchmark's
+`prepare`, `pipeline`, and six `differential --modality <id>` commands; set the
+threshold above the fixture's cell count for the disabled configuration.
+
+Completed jobs previously accumulated in an unbounded `expression_cache`. The app
+now gives expression, differential, marker-heatmap, communication and reference
+caches a **shared 2 GiB estimated retention budget**, at most 64 entries and a
+10-minute inactivity TTL (checked on cache access). Entries use LRU eviction;
+oversized entries are served without being retained. A new whole-file read first
+evicts idle buffers to make room. GRN/ragged/lineage caches share a separate 512 MiB
+budget, and bundle dataset/view caches share another 512 MiB. Mapped file pages
+are excluded from buffer estimates because they are reclaimable. Eviction never
+closes or mutates a value still held by an active request. Cache locks use weak
+references so completed requests do not leave an ever-growing lock dictionary.
+
+The serving H5AD fallback reads X, annotations, counts needed by integrated views,
+and only the first two obsm coordinates. It skips raw, ambient and wide modality
+copies. Population/sample menus read obs alone: `backed='r'` still loads layers
+and obsm. Integrated differential views can sum raw counts from disk in row
+blocks when their expression comes from a bundle.
+
+Both web apps run pipeline and differential analyses in **fresh child interpreters**
+by default. Two threads supervise the shared queue with memory admission checks;
+each child exits after its
+analysis, releasing its native allocations. A killed/nonzero child marks its job
+failed and leaves the supervisor available to run the next job. This avoids
+retaining pipeline allocations in the serving process. The bundle
+builder also starts after the pipeline releases its in-memory RNA and modality
+objects, avoiding overlap between those buffers and the builder's allocations.
+The default bundle
+threshold is now **10,000 cells**, down from 100,000, so jobs like the reported
+80,169-cell upload use disk-backed serving too. Existing unbundled jobs retain the
+bounded H5AD fallback until rebuilt; lowering the threshold does not migrate them.
+
+The full backend benchmark used 21 inputs: three computational replicas of the
+seven saved marrow uploads, 131,214 input cells × 32,738 genes, and 128,388 aligned
+cells. Replicas test scaling, not biological replication. It used the real marrow
+reference and every available imputation model, with ambient correction off,
+normal QC exclusions, marker discovery, approximate UMAP, fastComm, downloads
+and the serving bundle. Its RNA output contained 373,290,237 nonzeros; its per-cell
+GRN matrix contained 128,388 × 7,486 values. The input files were registered
+programmatically; the HTTP upload limit remains seven files.
+
+| Full workflow phase | Seconds | Sampled peak process-tree RSS (GiB) |
+| --- | ---: | ---: |
+| Upload analysis, all models, exports and bundle | 551.4 | 20.69 |
+| Cell-level differential: RNA | 135.2 | 14.30 |
+| Cell-level differential: ADT | 7.1 | 1.78 |
+| Cell-level differential: metabolite | 15.6 | 14.95 |
+| Cell-level differential: lipid | 10.7 | 7.66 |
+| Cell-level differential: GRN edges | 76.8 | 18.12 |
+| Cell-level differential: TF activity | 11.3 | 2.20 |
+| 90 Explore API requests + 9 Chat requests | 34.5 | 1.16 |
+| Two concurrent visitors, 150 view/Chat requests | 58.8 | 1.31 |
+| 27 available differential/detail/pathway requests | 4.4 | 0.90 |
+
+The upload supervisor returned to 0.07 GiB RSS after its child exited. Chrome
+also exercised 57 offered Explore views, one/two-window switching and marker
+Chat: no JavaScript exceptions or failed API responses. The GRN differential
+produced no retained per-state calls in this fixture; unavailable result views
+were skipped. Completed zero-call comparisons now expose an empty detail table
+to pathway/Chat readers instead of throwing a missing-file exception.
+
+Eight passes through four saved-job aliases (240 Explore + 24 Chat requests) took
+403.4 s / 6.24 GiB peak with the bounded H5AD fallback, versus 35.3 s / 0.93 GiB
+from a serving bundle. One 42,796-cell all-modality bundle took 37.4 s to build.
+The aliases referenced the same source files, with separate job cache keys;
+original jobs and outputs were read-only. The lower default threshold selects
+the faster bundle path for future jobs.
+
+Cell-level lipid/metabolite comparisons now select their per-cell matrices,
+including for older job metadata; aggregate matrices remain available for
+pseudobulk comparisons. Long comparison IDs are shortened with a stable hash
+so 21-sample comparisons no longer exceed filesystem filename limits.
+
+These are macOS measurements with a 28 GiB local process-tree RSS watchdog, not
+Docker/cgroup measurements. Browser-process memory is outside the serving RSS
+figures. The full run preceded the final obs-only menu-loading and pre-builder
+buffer-release optimizations;
+annotation parity and the web pipeline are additionally covered by regression
+tests. Actual hosted memory, disk-backed page-cache accounting, ambient-enabled
+all-modality jobs and independent biological cohorts still require deployment
+validation. The earlier million-cell test below covers ambient correction alone
+as part of the core workflow, rather than million-cell all-modality imputation.
+
+Use `dev/benchmark_full_workflow.py prepare /tmp/ch-full --source-job <saved-job-dir>
+--replicas 3`, then run `pipeline`, `differential --modality <id>`, `serve`,
+`serve-concurrent` and `differential-views` against that scratch root. `prepare-saved`
+creates read-only saved-job aliases for retention tests. Run
+`dev/validate_full_browser.py <saved-session-url>` against a local server for the
+Chrome checks. Benchmark dependencies include psutil, httpx and Playwright;
+the browser script uses the installed Chrome. None of these commands modify the
+source job. Summary measurements are in `dev/memory_workflow_results.json`.
+The focused regression suite passed 107 tests. Three additional signed-marker
+centroid rejection assertions in `tests/test_imputed_marker_scaling.py` fail on
+the unchanged HEAD pipeline too; that baseline failure was reproduced separately.
+
+## Pipeline memory and interrupted jobs (2026-10-02)
+
+The selected web path streams matching RNA-only 10x samples into one preallocated
+CSR matrix, loading and releasing each sample once. This preserves the normal
+loader's naming, gene translation, metadata and concatenation behavior, without
+holding all source matrices or writing intermediate copies. Old-format 10x files,
+multimodal inputs and different feature sets use AnnData on-disk concatenation
+with one sample per batch, LZF staging compression and a 50-million-element
+reindexing limit. The merged expression matrix still enters RAM for analysis.
+
+Ambient correction uses bounded NumPy CSR subtraction and a single output buffer,
+avoiding CSR/CSC conversions, corrected-library stacking and row-reorder copies.
+Contiguous libraries share buffer views; interleaved libraries scatter their
+results into the original row positions. Automatic rho selection reuses its
+estimated background for final subtraction. The correction equation and rho
+scoring rule are unchanged. The web pipeline retains `soupx_raw` and corrected
+counts in `X` (then `layers['counts']` when normalization applies), while omitting
+the duplicate `soupx_corrected` layer. Other cellHarmony callers retain that layer
+by default. Cosine alignment copies X alone and bounds the dense score matrix in
+row blocks. QC with no exclusions reuses its expression-scale assessment.
+
+Four alternatives were measured in separate macOS processes against commit
+`5d4dfd1`, with six 10x libraries, 218,000 cells, 32,000 genes and approximately
+215 million nonzero counts (1,000 generated entries per cell, variable depth).
+These measurements include import, ambient correction, QC, count retention,
+normalization and cosine alignment against 20 states and 512 reference genes.
+
+| Core pipeline | Seconds | Peak RSS (MiB) |
+| --- | ---: | ---: |
+| Original | 29.31 | 13,886 |
+| Optimized correction/alignment, in-memory merge | 12.61 | 10,464 |
+| Optimized correction/alignment, disk merge | 20.09 | 9,301 |
+| Selected: streamed matching 10x merge | 12.25 | 9,054 |
+
+All four produced identical expression and cell-assignment SHA-256 hashes. A
+separate correction-only benchmark with 215 million nonzeros fell from 22.54 s /
+10,954 MiB to 6.68 s / 4,820 MiB, also with identical hashes. CSC, bounded NumPy CSR
+and compiled CSR kernels were compared; NumPy removed conversion overhead and
+was close to the compiled kernel for automatic correction without JIT startup
+or an additional dependency. The selected path balances speed and memory;
+disk merging remains the general fallback.
+
+The larger validation used **32 10x files totaling 1,000,000 cells × 32,000
+genes**, with 790,098,724 nonzeros (800 generated entries per cell, variable
+depth), and a single h5ad containing the same cells and counts. The 10x inputs
+totaled 4.69 GB on disk; the h5ad was 4.65 GB. Each analysis ran in a fresh macOS
+process with a 28 GiB RSS watchdog and the same 512-gene, 20-state reference.
+
+| Million-cell core pipeline | Seconds | Peak RSS (MiB) | Peak RSS (GiB) |
+| --- | ---: | ---: | ---: |
+| 32 streamed 10x inputs | 54.66 | 21,505 | 21.00 |
+| Single h5ad input | 45.87 | 18,821 | 18.38 |
+
+Both completed automatic correction, count retention, normalization and alignment.
+Their expression hashes (including normalized X, corrected counts and raw counts)
+matched exactly: `33eff3162062cb41242ed1218c023c7591cd7558292730f7067428e04ff11329`.
+Cell-assignment hashes also matched:
+`b19b40c53f82a09d35de1a151f2c622a415ee39ac7c9c4dd14cf2864a7340534`.
+QC thresholds retained every cell and gene in these large runs; matrix subsetting
+and larger reference panels can require additional memory. The watchdog detects
+excess RSS and terminates the benchmark; it is not a Docker/cgroup memory limit.
+
+Reproduce this larger fixture in a fresh directory:
+
+```bash
+python dev/benchmark_pipeline_memory.py prepare /tmp/ch-million --cells 1000000 --samples 32 --nnz-per-cell 800
+python dev/benchmark_pipeline_memory.py stream /tmp/ch-million
+python dev/benchmark_pipeline_memory.py prepare-h5ad /tmp/ch-million
+python dev/benchmark_pipeline_memory.py h5ad /tmp/ch-million
+```
+
+Reproduce with `dev/benchmark_pipeline_memory.py prepare /tmp/ch-benchmark`, then
+run `baseline`, `memory`, `disk` and `stream` against that directory in separate
+processes. `dev/benchmark_ambient_memory.py before --nnz-per-cell 1000` and `after`
+with the same flag measure correction alone. Both scripts support `--baseline-ref`.
+These are synthetic core-pipeline measurements, not the visitor's dataset or a
+full web job: MarkerFinder, network export, approximate UMAP, viewer caches,
+SQLite queries and Docker/cgroup memory are outside the measured scope. Docker
+was unavailable for a local image build. Linux timing and larger references or
+denser matrices require separate measurement; no universal 30 GB guarantee is
+implied by these results.
+
+Large imputation jobs now stream predictions to ordinary H5AD files instead of
+accumulating full prediction DataFrames. At 20,000 cells and above
+(`CELLHARMONY_DISK_ANALYSIS_MIN_CELLS`, default `20000`), lipid and metabolite
+broadcasts are written in cell blocks; their sample/state profiles and cell indices
+also provide a lossless compact representation for cell-level DE. The individual
+cells still enter the same tests. GRN edge predictions stream at every size.
+Nonnegative linear predictions share an HDF5 hard link with their counts layer.
+Large combined RNA downloads retain modality names and artifact references;
+full imputed matrices are in the separate modality downloads instead of duplicate
+wide `obsm` arrays in the RNA file.
+
+MarkerFinder uses sequential row blocks, stable variance accumulation and group
+sums. Fold changes and moderated tests avoid whole-matrix dense copies; empirical
+Bayes shrinkage and FDR correction still operate across all features. Differential
+inputs omit visualization copies. Sparse RNA matrices up to 8 GiB of expression
+buffers load once; larger sparse matrices remain backed. Dense prediction DE uses
+bounded cell-state selections. GRN matrices whose unique buffers fit 4 GiB use a
+shared-array RAM path; larger matrices stage into an anonymous uncompressed memory
+map to avoid repeated HDF5 decompression. The map uses disk space proportional to
+the prediction matrix, drops resident pages between reads, and disappears when the
+worker exits, including after a kill. Empty-DE exports share immutable expression
+buffers and preserve identical X/counts via a hard link, avoiding another full copy.
+
+The complete 21-file marrow-replication pipeline (131,214 input cells, 128,388
+aligned cells, 32,738 genes, all six modalities, ambient correction off) fell from
+**551.42 s / 20.69 GiB** to **346.35 s / 14.35 GiB**. Bundle construction fell from
+134.6 s to 47.1 s. These are separate macOS runs; the baseline predates the final
+optimizations, and Docker/cgroup limits were not tested locally. All expression
+and counts matrices are checked against the saved baseline. Measurements and
+validation scopes are recorded in `dev/memory_workflow_results.json`.
+
+The final pipeline plus all six cell-level differentials took **602.18 s**
+versus 808.14 s for the saved baseline. Overall peak RSS fell from 20.69 to
+14.84 GiB. The optimized RNA run includes pooled tests that the baseline skipped
+because of the bug described below.
+
+| Cell-level differential | Baseline seconds / GiB | Optimized seconds / GiB |
+| --- | ---: | ---: |
+| RNA | 135.20 / 14.30 | 153.95 / 14.84 |
+| ADT | 7.15 / 1.78 | 7.16 / 1.44 |
+| Metabolite | 15.63 / 14.95 | 20.16 / 3.01 |
+| Lipid | 10.67 / 7.66 | 11.74 / 1.62 |
+| GRN | 76.75 / 18.12 | 55.34 / 11.10 |
+| TF activity | 11.32 / 2.20 | 7.48 / 1.52 |
+
+Shared feature reads and temporary uncompressed maps were also evaluated for
+128k GRN DE: 263.69 s / 1.63 GiB and 140.64 s / 5.85 GiB. The selected shared RAM
+path fits the worker budget at this size and is faster; the map is reserved for
+larger matrices. Browser validation passed all 57 offered Explore views and marker
+chat; all 27 available differential-view requests succeeded. Repeated exploration
+used 1.14 GiB, and two simultaneous visitors used 1.29 GiB. The focused regression
+suite passed 163 tests.
+
+A baseline sparse pooled-RNA bug raised `'Series' object has no attribute
+'nonzero'` and omitted overall/co-regulated tests. Bounded reads coerce boolean
+selectors correctly, so these tests now complete. This can change RNA global/local
+assignments, heatmap ordering and pathway results; it does not change the
+per-state DE statistics. Other modality differential tables are compared directly
+with the saved baseline.
+
+A separate component stress test used 1,000,000 rows × 7,486 GRN features (27.89 GiB
+of logical float32 values), replicating real saved predictions through HDF5 virtual
+datasets. MarkerFinder took 59.24 s and pooled moderated statistics took 160.13 s;
+peak RSS was 1.53 GiB. This excludes alignment, imputation and web views and is not
+a full million-cell workflow. Initial RNA loading/normalization still requires RAM;
+dense real million-cell inputs are not guaranteed to fit 30 GiB.
+
+```bash
+python dev/benchmark_disk_statistics.py /path/to/grn_edges.h5ad /tmp/grn-million --cluster-key cell_state --cells 1000000
+```
+
+Main pipeline status polling now marks orphaned queued/processing jobs as failed
+after a worker restart, without deleting uploaded inputs or saved outputs. Live
+local futures and other live owning processes are preserved. Submission persists
+queued state before starting the worker, preventing a late request-handler write
+from overwriting processing or completed status. Interrupted jobs require reruns;
+there is no checkpoint resume. Metadata updates atomically replace `job.json`,
+so a mid-write interruption or concurrent poll cannot read a truncated record.
+
+The app, image and scALABLE compose defaults now use `CELLHARMONY_JOB_WORKERS=2`.
+Pipeline and differential analyses share two worker slots. Before starting a
+disposable worker, the scheduler checks live RSS for every running worker and
+its descendants. New starts wait if any worker uses at least 15 GiB or total
+container memory reaches 27 GiB (or 90% of a smaller cgroup limit). Usage is
+rechecked every second while waiting, and the page explains the memory wait.
+Outside Linux cgroups, total usage falls back to the server process tree's RSS.
+Unavailable memory measurements hold starts until measurement succeeds.
+An open browser session does not occupy a worker slot.
+
+This is admission control, not a limit on running workers: two jobs admitted
+below the thresholds can subsequently grow past the 30 GiB container budget.
+Running jobs are not paused or killed at 15 GiB. The earlier large-workflow
+measurements below used one analysis worker; two full large workflows have not
+been validated together. Use `CELLHARMONY_JOB_WORKERS=1` for conservative serial
+execution. The scALABLE compose file
+explicitly enforces `mem_limit: 30g`, preserving the target on recreation.
+Rebuild and recreate the image/container to apply the code and
+environment changes. A SQLite query backend does not remove allocations in this
+import/correction path.
+
 ## Pathway color scales and window switching (2026-09-18)
 
 Cross-modality pathway diagrams now have a numeric color bar per modality:
@@ -120,7 +436,14 @@ route answers HTTP 503. See Chat below.
 | `CELLHARMONY_JOB_STORAGE` | `<webapp>/jobs` | where job folders live |
 | `CELLHARMONY_REFERENCE_REGISTRY` | `<webapp>/../flask/reference_config.json` | the reference registry |
 | `CELLHARMONY_MAX_FILES` | `7` | files per job |
-| `CELLHARMONY_JOB_WORKERS` | `2` | pipeline threads |
+| `CELLHARMONY_JOB_WORKERS` | `2` | shared pipeline/differential worker slots |
+| `CELLHARMONY_WORKER_MEMORY_LIMIT_GIB` | `15` | hold new starts when any active worker tree reaches this RSS |
+| `CELLHARMONY_TOTAL_MEMORY_LIMIT_GIB` | `27` | hold new starts at this container usage; also respect 90% of cgroup limit |
+| `CELLHARMONY_ISOLATE_JOBS` | `true` | disposable child interpreter for each heavy analysis |
+| `CELLHARMONY_CACHE_MAX_GIB` | `2` | shared estimated retained-buffer budget for serving caches |
+| `CELLHARMONY_CACHE_MAX_ENTRIES` | `64` | maximum total entries across serving caches |
+| `CELLHARMONY_CACHE_TTL_SECONDS` | `600` | inactivity expiry, checked on cache access |
+| `CELLHARMONY_BUNDLE_MIN_CELLS` | `10000` | build a disk-backed serving bundle at/above this size |
 | `CELLHARMONY_EXPORT_APPROX_PDFS` | `false` | write approximate UMAP comparison PDFs |
 | `CELLHARMONY_H5AD_COMPRESSION` | `lzf` | `lzf`, `gzip` or `none` for every h5ad the pipeline writes |
 | `CELLHARMONY_ASSISTANT_URL` | `http://127.0.0.1:8001/api/assistant/viewer-intent` | the chat intent router |

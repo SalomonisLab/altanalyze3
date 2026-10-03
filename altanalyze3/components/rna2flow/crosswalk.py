@@ -44,6 +44,12 @@ _NONALNUM = re.compile(r"[^a-z0-9]")
 # flow "CD117" are the same protein; "mouse_CD86" must NOT collapse onto "CD8". The optional
 # trailing a/b is the chain (CD8a vs CD8b), kept so the two chains stay distinct.
 _CDNUM = re.compile(r"cd(\d+)([ab])?(?![0-9])")
+# A bare "cd<number><letter>" token carries a real chain or isoform suffix: CD8a vs CD8b,
+# CD11b vs CD11c, CD49d vs CD49f, and CD62L (L-selectin) vs CD62P (P-selectin). Dropping
+# that letter merged CD62L onto CD62P, so flow CD62L paired with P-selectin on the Grimes
+# panel, which carries BOTH. The rule applies only when the letter ENDS the token, so
+# descriptive names such as "CD127-IL-7R" still reduce to cd127 and keep matching "IL-7R".
+_CDSUFFIX = re.compile(r"^cd(\d+)([a-z])$")
 
 
 def normalize_marker(name: str) -> str:
@@ -59,12 +65,21 @@ def normalize_marker(name: str) -> str:
         s = _STRIP.sub("", s).strip()
     for sp in ("mouse", "human", "rat"):
         s = re.sub(r"^%s[_\-\s]+" % sp, "", s, flags=re.I)
+    # Keep the antibody identity token before removing its descriptive suffix.
+    # CD62P-P-selectin and CD11c-Integrin-alpha-X retain P and c. An underscore
+    # before a description (CD117_c_kit) does not introduce a chain suffix.
+    token = re.match(r"^cd(\d+)([a-z])?(?=$|[-_\s(])", s, flags=re.I)
+    if token:
+        return ALIASES.get(token.group(0).lower(), token.group(0).lower())
     s = _NONALNUM.sub("", s.lower())
     s = ALIASES.get(s, s)
     if s in ALIASES:
         return ALIASES[s]
+    m_exact = _CDSUFFIX.match(s)
     m = _CDNUM.search(s)
-    if m:
+    if m_exact:
+        s = "cd" + m_exact.group(1) + m_exact.group(2)
+    elif m:
         s = "cd" + m.group(1) + (m.group(2) or "")
     elif "sca1" in s or s.startswith("ly6a"):
         s = "ly6a"

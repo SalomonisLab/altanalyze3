@@ -39,7 +39,7 @@ def _tiny_dataset(tmp_path, n_cells=400, n_genes=150):
     return h5ad_path, ref_path
 
 
-def _run(tmp_path, rho, capsys):
+def _run(tmp_path, rho, capsys, memory_efficient=False):
     h5ad_path, ref_path = _tiny_dataset(str(tmp_path))
     outdir = os.path.join(str(tmp_path), f"out_{rho}")
     chl.combine_and_align_h5(
@@ -47,12 +47,14 @@ def _run(tmp_path, rho, capsys):
         output_dir=outdir, min_genes=0, min_cells=0, min_counts=0, mit_percent=100,
         generate_umap=False, save_adata=False, export_h5ad=False, export_cptt=False,
         ambient_correct_cutoff=rho, return_adata=False,
+        ambient_memory_efficient=memory_efficient,
     )
     return capsys.readouterr().out
 
 
-def test_ambient_correction_runs_for_h5ad_input(tmp_path, capsys):
-    out = _run(tmp_path, "0.2", capsys)
+@pytest.mark.parametrize("memory_efficient", [False, True])
+def test_ambient_correction_runs_for_h5ad_input(tmp_path, capsys, memory_efficient):
+    out = _run(tmp_path, "0.2", capsys, memory_efficient)
     assert "Running ambient RNA correction (rho=0.2)" in out, out[-2000:]
     assert "Ambient RNA correction complete" in out
 
@@ -60,3 +62,33 @@ def test_ambient_correction_runs_for_h5ad_input(tmp_path, capsys):
 def test_no_ambient_correction_when_not_requested(tmp_path, capsys):
     out = _run(tmp_path, None, capsys)
     assert "Running ambient RNA correction" not in out
+
+
+@pytest.mark.parametrize("batch_size", [1, 2])
+def test_disk_merge_with_outer_gene_union_matches_in_memory(tmp_path, batch_size):
+    query, reference = _tiny_dataset(str(tmp_path))
+    source = ad.read_h5ad(query)
+    left = source[:200, :100].copy()
+    right = source[200:, 20:].copy()
+    left_path, right_path = tmp_path / "left.h5ad", tmp_path / "right.h5ad"
+    left.write_h5ad(left_path)
+    right.write_h5ad(right_path)
+    outputs = []
+    for disk in (False, True):
+        assignments, result = chl.combine_and_align_h5(
+            h5_files=[str(left_path), str(right_path)], cellharmony_ref=reference,
+            output_dir=str(tmp_path / f"out_{disk}"), min_genes=0, min_counts=0,
+            min_cells=0, mit_percent=100, generate_umap=False, save_adata=False,
+            export_h5ad=False, export_cptt=False, ambient_correct_cutoff="auto",
+            ambient_memory_efficient=True, concat_on_disk=disk,
+            concat_batch_size=batch_size if disk else None, return_adata=True,
+        )
+        outputs.append((assignments, result))
+    (expected_assignments, expected), (actual_assignments, actual) = outputs
+    pd.testing.assert_frame_equal(actual_assignments, expected_assignments, atol=1e-7, rtol=1e-7)
+    pd.testing.assert_index_equal(actual.obs_names, expected.obs_names)
+    pd.testing.assert_index_equal(actual.var_names, expected.var_names)
+    for key in ("counts", "soupx_raw"):
+        np.testing.assert_array_equal(actual.layers[key].toarray(), expected.layers[key].toarray())
+    np.testing.assert_array_equal(actual.X.toarray(), expected.X.toarray())
+    assert "soupx_corrected" not in actual.layers

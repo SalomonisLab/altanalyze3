@@ -427,7 +427,7 @@ def ingest_ccc(src: Optional[str], dst: str) -> Dict:
 # ------------------------------------------------------------------- modalities
 
 
-def _read_feature_matrix(path: str):
+def _read_feature_matrix(path: str, *, lazy_dense=False):
     """Read a modality prediction table as (row labels, feature names, float32 matrix).
 
     rna2adt, rna2lipid and rna2grn all write a delimited table through
@@ -440,14 +440,20 @@ def _read_feature_matrix(path: str):
     with open(path, "rb") as fh:
         head = fh.read(8)
     if head[:8] == b"\x89HDF\r\n\x1a\n":
-        import anndata as ad
-
-        adata = ad.read_h5ad(path)
-        matrix = adata.X
-        matrix = matrix.toarray() if hasattr(matrix, "toarray") else np.asarray(matrix)
-        return (np.asarray(adata.obs_names, dtype=str),
-                np.asarray(adata.var_names, dtype=str),
-                np.asarray(matrix, dtype=np.float32))
+        try:
+            from anndata.io import read_elem
+        except ImportError:
+            from anndata.experimental import read_elem
+        from types import SimpleNamespace
+        with h5py.File(path, 'r') as fh:
+            obs, var = read_elem(fh['obs']), read_elem(fh['var'])
+            if lazy_dense and isinstance(fh['X'], h5py.Dataset):
+                matrix = SimpleNamespace(shape=fh['X'].shape, dense_h5=True)
+            else:
+                matrix = read_elem(fh['X'])
+                matrix = matrix.toarray() if hasattr(matrix, 'toarray') else np.asarray(matrix)
+                matrix = np.asarray(matrix, dtype=np.float32)
+        return np.asarray(obs.index, dtype=str), np.asarray(var.index, dtype=str), matrix
 
     with open(path, "r", encoding="utf-8", errors="replace") as fh:
         header = fh.readline()
@@ -506,7 +512,8 @@ def ingest_modality(
     feature x cell-state matrix is stored. Nothing is interpolated in either case.
     """
     mpaths = paths.modality(modality_id)
-    rows, features, matrix = _read_feature_matrix(source)
+    rows, features, matrix = _read_feature_matrix(source, lazy_dense=True)
+    stream_dense = bool(getattr(matrix, 'dense_h5', False))
     n_features = len(features)
     n_states = len(states)
     n_cells = len(barcodes)
@@ -539,11 +546,16 @@ def ingest_modality(
             f"matched a row ({retention:.4f})")
         if retention < 0.90:
             log(f"[WARN] [{modality_id}] retention below 90%: {n_matched:,} of {n_cells:,}")
-        dense = np.zeros((n_cells, n_features), dtype=np.float32)
-        present = matched >= 0
-        dense[present] = matrix[matched[present]]
+        if not stream_dense:
+            dense = np.zeros((n_cells, n_features), dtype=np.float32)
+            present = matched >= 0
+            dense[present] = matrix[matched[present]]
         # A cell with no row in the table keeps zeros; the count above is the denominator.
     else:
+        if stream_dense:
+            with h5py.File(source, 'r') as fh:
+                matrix = np.asarray(fh['X'][:], dtype=np.float32)
+            stream_dense = False
         matched = np.full(n_states, -1, dtype=np.int64)
         for source_row, label_value in enumerate(rows):
             target = state_pos.get(str(label_value))
@@ -564,7 +576,17 @@ def ingest_modality(
     # ---- statistics, in the same definition the RNA store uses ----------------
     counts = np.asarray(state_n, dtype=np.int64)
     denominator = np.maximum(counts, 1)
-    if kind == "per_cell":
+    if kind == "per_cell" and stream_dense:
+        from . import fast_store
+        sums, nonzero, _, _, nnz = fast_store.build_expression_store_parallel(
+            fast_store.DenseH5Source(source, matched), n_cells, n_features,
+            np.asarray(state_code), n_states, mpaths, expr_dtype,
+            row_block=max(1, min(2048, 16_000_000 // max(1, n_features))),
+            workers=min(4, os.cpu_count() or 1), log=log,
+        )
+        mean_fs = (sums / denominator[None, :]).astype(np.float32)
+        frac_fs = (nonzero / denominator[None, :]).astype(np.float32)
+    elif kind == "per_cell":
         codes = np.asarray(state_code, dtype=np.int64)
         sums = np.zeros((n_states, n_features), dtype=np.float64)
         nonzero = np.zeros((n_states, n_features), dtype=np.int64)
@@ -607,8 +629,9 @@ def ingest_modality(
             log(f"[WARN] [{modality_id}] {len(missing)} of {n_features:,} features carry "
                 f"no display name and keep their key, first: {missing[:5]}")
 
-    nnz = 0
-    if kind == "per_cell":
+    if not stream_dense:
+        nnz = 0
+    if kind == "per_cell" and not stream_dense:
         dtype = np.float16 if expr_dtype == "float16" else np.float32
         columns = []
         indptr = np.zeros(n_features + 1, dtype=np.int64)

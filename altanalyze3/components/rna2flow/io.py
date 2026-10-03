@@ -127,7 +127,8 @@ def read_fcs(path: str) -> FlowData:
             names.append("%s :: %s" % (n, s) if s else n)
             meta["$P%dR" % (i + 1)] = text.get("$P%dR" % (i + 1))
         meta["text"] = text
-    return FlowData(X.astype(np.float32), names, path, meta)
+    meta['event_ids'] = np.arange(1, n_events + 1)
+    return FlowData(X.astype(np.float32, copy=False), names, path, meta)
 
 
 def read_flowjo_rds(path: str, rscript: str = RSCRIPT) -> FlowData:
@@ -149,7 +150,34 @@ def read_flowjo_rds(path: str, rscript: str = RSCRIPT) -> FlowData:
     return FlowData(X, channels, path, {"reader": "flowjo_rds"})
 
 
-def read_matrix_csv(path: str) -> FlowData:
+def read_matrix_csv(path: str, channels=None, event_id_column=None) -> FlowData:
     df = pd.read_csv(path)
-    num = df.select_dtypes(include=[np.number])
-    return FlowData(num.to_numpy(np.float32), list(num.columns), path, {"reader": "csv"})
+    event_id_column = event_id_column or next((c for c in ('EventNumberDP', 'event_id', 'EventID') if c in df), None)
+    ids = df[event_id_column].to_numpy() if event_id_column else np.arange(1,len(df)+1)
+    if pd.Index(ids).has_duplicates or pd.isna(ids).any():
+        raise ValueError('Event identifiers must be unique and nonmissing')
+    num = df[list(channels)] if channels else df.select_dtypes(include=[np.number]).drop(columns=[event_id_column],errors='ignore')
+    return FlowData(num.to_numpy(np.float32), list(num.columns), path,
+                    {"reader": "csv", 'event_ids': ids, 'event_id_column': event_id_column})
+
+
+def read_flow(path, format=None, **kwargs):
+    """Common reader entry point; preserve event identifiers when a CSV provides them."""
+    format = (format or os.path.splitext(path)[1].lstrip('.')).lower()
+    if format == 'fcs':return read_fcs(path)
+    if format == 'rds':return read_flowjo_rds(path)
+    if format == 'csv':return read_matrix_csv(path, **kwargs)
+    raise ValueError('Expected FCS, RDS, or events × channels CSV')
+
+
+def align_event_labels(flow, frame, label_column=None, event_id_column='EventNumberDP'):
+    """Join labels to event IDs; equal row counts alone cannot validate a cell-level join."""
+    label_column = label_column or next((c for c in frame if c != event_id_column), None)
+    if label_column is None:raise ValueError('No label column')
+    ids=np.asarray(flow.meta.get('event_ids',np.arange(1,len(flow.X)+1)))
+    if event_id_column not in frame:raise ValueError('Label table needs an event identifier column')
+    s=frame.set_index(event_id_column)[label_column]
+    if s.index.has_duplicates or not pd.Index(ids).is_unique:raise ValueError('Duplicate event identifiers')
+    out=s.reindex(ids)
+    if out.isna().any():raise ValueError('Label table is missing flow event IDs or labels')
+    return out.astype(str).to_numpy()

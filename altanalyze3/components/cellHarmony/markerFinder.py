@@ -382,6 +382,51 @@ def enforce_input_scaling(matrix, *, scale_data=False, scale_factor=None, verbos
     return scaled, report
 
 
+def _marker_finder_rows(matrix, groups, gene_names):
+    """One sequential pass with stable variance and group sufficient statistics."""
+    n_cells, n_genes = matrix.shape
+    if len(groups) != n_cells:
+        raise ValueError("Group labels must match the number of rows in the expression matrix.")
+    indicator, names = _build_cluster_indicator(groups)
+    mean = np.zeros(n_genes, dtype=np.float64)
+    m2 = np.zeros(n_genes, dtype=np.float64)
+    sum_xy = np.zeros((n_genes, len(names)), dtype=np.float64)
+    seen = 0
+    rows = max(1, min(8192, 8_000_000 // max(1, n_genes)))
+    if rows >= 256:
+        rows = rows // 256 * 256
+    for start in range(0, n_cells, rows):
+        block = matrix[start:start + rows]
+        block = block.astype(np.float64)
+        size = block.shape[0]
+        if sparse.issparse(block):
+            block_mean, block_var = mean_variance_axis(block.tocsr(), axis=0)
+            group_sum = block.T.dot(indicator[start:start + size])
+            group_sum = group_sum.toarray()
+        else:
+            block_mean, block_var = block.mean(axis=0), block.var(axis=0)
+            group_sum = np.asarray(indicator[start:start + size].T.dot(block)).T
+        total = seen + size
+        delta = block_mean - mean
+        m2 += block_var * size + delta * delta * seen * size / total
+        mean += delta * size / total
+        sum_xy += group_sum
+        seen = total
+    sum_y = np.asarray(indicator.sum(axis=0)).ravel()
+    numerator = sum_xy - np.outer(mean * n_cells, sum_y) / n_cells
+    ssy = np.maximum(sum_y - sum_y**2 / n_cells, 0)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        r = np.clip(numerator / np.sqrt(np.outer(np.maximum(m2, 0), ssy)), -1, 1)
+        r[m2 == 0] = np.nan
+        r[:, ssy == 0] = np.nan
+        t_stat = r * np.sqrt(n_cells - 2) / np.sqrt(1 - r**2)
+        p = t.sf(np.abs(t_stat), df=n_cells - 2) * 2
+    genes = pd.Index(range(n_genes)).astype(str) if gene_names is None else pd.Index(gene_names)
+    r_df = pd.DataFrame(r, index=genes, columns=names).dropna(axis=0, how='any')
+    p_df = pd.DataFrame(p, index=genes, columns=names).loc[r_df.index, r_df.columns]
+    return r_df, p_df
+
+
 def marker_finder(
     expression_matrix: sparse.spmatrix,
     groups: Sequence[str],
@@ -390,6 +435,8 @@ def marker_finder(
     scale_data: bool = False,
     scale_factor: Optional[float] = None,
     validate_scaling: bool = False,
+    feature_block_size: Optional[int] = None,
+    _indicator=None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Point-biserial Pearson r between every feature and every group indicator.
 
@@ -398,6 +445,37 @@ def marker_finder(
     cells x genes entry points switch it on, because only there does per-cell sequencing depth
     confound the statistic.
     """
+    import h5py
+    disk = isinstance(expression_matrix, h5py.Dataset)
+    n_cells, n_features = expression_matrix.shape
+    if (disk or n_cells >= 50_000) and feature_block_size is None:
+        if validate_scaling or scale_data:
+            if disk:
+                raise MarkerFinderInputError('Disk prediction matrices must already be scaled; use validate_scaling=False.')
+            expression_matrix, _ = enforce_input_scaling(expression_matrix, scale_data=scale_data,
+                                                          scale_factor=scale_factor)
+        return _marker_finder_rows(expression_matrix, groups, gene_names)
+    if feature_block_size is not None and feature_block_size <= 0:
+        raise ValueError('feature_block_size must be positive')
+    width = feature_block_size or max(1, min(256, 4_000_000 // max(1, n_cells)))
+    if (disk or n_cells >= 50_000 or feature_block_size is not None) and n_features > width:
+        if validate_scaling or scale_data:
+            if disk:
+                raise MarkerFinderInputError('Disk prediction matrices must already be scaled; use validate_scaling=False.')
+            expression_matrix, _ = enforce_input_scaling(expression_matrix, scale_data=scale_data,
+                                                          scale_factor=scale_factor)
+        if sparse.issparse(expression_matrix):
+            expression_matrix = expression_matrix.tocsc()
+        indicator = _build_cluster_indicator(groups) if _indicator is None else _indicator
+        names = pd.Index(range(n_features)).astype(str) if gene_names is None else pd.Index(gene_names)
+        r_parts, p_parts = [], []
+        for start in range(0, n_features, width):
+            stop = min(start + width, n_features)
+            r, p = marker_finder(expression_matrix[:, start:stop], groups, names[start:stop],
+                                 validate_scaling=False, _indicator=indicator)
+            r_parts.append(r)
+            p_parts.append(p)
+        return pd.concat(r_parts), pd.concat(p_parts)
     if not sparse.issparse(expression_matrix):
         expression_matrix = sparse.csr_matrix(expression_matrix)
     else:
@@ -415,7 +493,7 @@ def marker_finder(
     if len(groups) != n_cells:
         raise ValueError("Group labels must match the number of rows in the expression matrix.")
 
-    indicator, cluster_names = _build_cluster_indicator(groups)
+    indicator, cluster_names = _build_cluster_indicator(groups) if _indicator is None else _indicator
 
     # Imputed features can have a large baseline and very small variance.
     # float32 sums of squares lose that variance and can even turn it negative.

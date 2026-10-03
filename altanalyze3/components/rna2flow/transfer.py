@@ -88,7 +88,13 @@ def xgboost_transfer(cite, flow, labels, lo=1.0, hi=99.0, seed=0, **kw):
     return le.inverse_transform(clf.predict(F))
 
 
+def cellharmony_transfer(*args, **kwargs):
+    from .cellharmony import kde_cellharmony
+    return kde_cellharmony(*args, **kwargs)
+
+
 METHODS = {
+    'kde_cellharmony': cellharmony_transfer,
     "kde_knn": kde_knn,
     "kde_knn_avgties": lambda *a, **k: kde_knn(*a, ties="average", **k),
     "zscore_knn": zscore_knn,

@@ -1,6 +1,6 @@
 """Serve a finished upload job's matrices from its bundle (LARGE_DATASET_DESIGN.md, step B).
 
-A job of CELLHARMONY_BUNDLE_MIN_CELLS cells or more writes ``outputs/bundle/`` at the end of
+A job of CELLHARMONY_BUNDLE_MIN_CELLS cells or more (default 10,000) writes ``outputs/bundle/`` at the end of
 the pipeline (flask/pipeline.py ``_build_job_bundle``): the RNA store and one store per
 imputed modality, in the scalable_viewer's gene-major memory-mapped format. For such a
 job, the three places app.py used to read a result h5ad whole get a ``JobBundleAnnData``
@@ -39,12 +39,15 @@ try:                                     # anndata >= 0.11
 except ImportError:                      # anndata 0.10
     from anndata.experimental import read_elem as _read_elem
 
+from .memory_cache import BoundedCache, CacheBudget
+
 LOG = logging.getLogger(__name__)
+_BUDGET = CacheBudget(max_bytes=512 * 1024**2)
 
 _LOCK = threading.Lock()
-_DATASETS: Dict[Tuple[str, float], Any] = {}
-_VIEWS: Dict[Tuple[str, str, str, float], "JobBundleAnnData"] = {}
-_REFUSED: Dict[Tuple[str, str], str] = {}
+_DATASETS: Dict[Tuple[str, float], Any] = BoundedCache(_BUDGET)
+_VIEWS: Dict[Tuple[str, str, str, float], "JobBundleAnnData"] = BoundedCache(_BUDGET)
+_REFUSED: Dict[Tuple[str, str], str] = BoundedCache(_BUDGET)
 
 
 # ------------------------------------------------------------------ locating a bundle

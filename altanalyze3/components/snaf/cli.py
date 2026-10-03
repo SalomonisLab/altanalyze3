@@ -355,8 +355,52 @@ def run_snaf(args):
         path=os.path.join(outdir, 'after_prediction.p'), outdir=outdir)
     print('[STAGE-TIMING] generate_results (burden+freq+symbols): {:.1f}s'.format(_t.time()-_tg))
     _export_snaf_outputs(args, outdir, samples)
+    # The collapsed per-(peptide, junction) summary. SNAF-T's own output is one row per
+    # (sample, peptide, junction, HLA), which at cohort scale is millions of rows and does
+    # not answer "which neoantigens, in how many patients". Written by default; --no_t_summary
+    # skips it, and `snaf-t-summary` re-runs it on a finished output directory.
+    if not getattr(args, 'no_t_summary', False):
+        try:
+            from altanalyze3.components.snaf.t_summary import summarize_t_candidates
+            summarize_t_candidates(
+                os.path.join(outdir, 'T_candidates'),
+                event_annotation=(str(args.event_annotation)
+                                  if getattr(args, 'event_annotation', None) else None),
+                cohort_size=len(samples) if samples else None)
+        except Exception as exc:                      # noqa: BLE001 - reported, never hidden
+            logger.error('collapsed SNAF-T summary failed: %s: %s', type(exc).__name__, exc)
+            logger.error('the per-sample candidates are intact; re-run with: '
+                         'python -m altanalyze3 snaf-t-summary --candidate_dir %s',
+                         os.path.join(outdir, 'T_candidates'))
     print('SNAF T-antigen results written to {}'.format(outdir))
     return outdir
+
+
+# --------------------------------------------------------------------------- snaf-t-summary
+def run_snaf_t_summary(args):
+    """Collapse SNAF-T per-sample candidates into one row per (peptide, junction)."""
+    from altanalyze3.components.snaf.t_summary import summarize_t_candidates
+    cand = str(args.candidate_dir)
+    if not os.path.isdir(cand):
+        raise FileNotFoundError('--candidate_dir not found: {}'.format(cand))
+    for flag in ('event_annotation', 'survival', 'custom_peptide', 'custom_junction',
+                 'sample_filter'):
+        v = getattr(args, flag, None)
+        if v:
+            _require_file(v, '--' + flag)
+    samples = None
+    if getattr(args, 'sample_filter', None):
+        with open(str(args.sample_filter)) as fh:
+            samples = [l.strip() for l in fh if l.strip() and not l.startswith('#')]
+    out = summarize_t_candidates(
+        cand, out_path=(str(args.out) if getattr(args, 'out', None) else None),
+        event_annotation=(str(args.event_annotation) if getattr(args, 'event_annotation', None) else None),
+        survival=(str(args.survival) if getattr(args, 'survival', None) else None),
+        custom_peptide=(str(args.custom_peptide) if getattr(args, 'custom_peptide', None) else None),
+        custom_junction=(str(args.custom_junction) if getattr(args, 'custom_junction', None) else None),
+        sample_filter=samples, cohort_size=getattr(args, 'cohort_size', None))
+    print('collapsed SNAF-T summary written to {}'.format(out))
+    return out
 
 
 # --------------------------------------------------------------------------- snaf-precompute-control

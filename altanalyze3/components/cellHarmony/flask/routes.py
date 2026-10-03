@@ -159,17 +159,15 @@ def run_job(job_id: str):
     if not store.job_exists(job_id):
         return jsonify({"error": "Job not found."}), 404
     runner.submit(job_id)
-    store.append_log(job_id, "Job queued by user request.")
-    store.update_job(job_id, message="Job submitted to worker.", status="queued", progress=15)
     return jsonify({"job_id": job_id, "status": "queued"})
 
 
 @api_bp.get("/jobs/<job_id>/status")
 def status(job_id: str):
-    store, _ = _job_resources()
+    store, runner = _job_resources()
     if not store.job_exists(job_id):
         return jsonify({"error": "Job not found."}), 404
-    meta = store.get_job(job_id)
+    meta = runner.recover_interrupted_pipeline(job_id)
 
     log_path = store.logs_dir(job_id) / "pipeline.log"
     log_tail: List[str] = []

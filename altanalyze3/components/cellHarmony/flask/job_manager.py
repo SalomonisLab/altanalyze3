@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import tempfile
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -38,9 +40,19 @@ class JobStore:
             return json.load(handle)
 
     def _write_metadata(self, job_id: str, data: Dict) -> None:
-        tmp_path = self._metadata_path(job_id)
-        with tmp_path.open("w", encoding="utf-8") as handle:
-            json.dump(data, handle, indent=2, sort_keys=True)
+        path = self._metadata_path(job_id)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                             prefix=".job-", suffix=".tmp", delete=False) as handle:
+                temporary = Path(handle.name)
+                json.dump(data, handle, indent=2, sort_keys=True)
+            # Pollers always see a complete record, even if the worker dies
+            # during a metadata update. The replacement stays on one filesystem.
+            os.replace(temporary, path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
     def _parse_timestamp(self, raw: object) -> Optional[datetime]:
         if not raw:

@@ -1,0 +1,552 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>CITE-seq → flow: populations and virtual gates</title>
+<style>
+ :root{--bd:#d7dbe0;--bg:#fff;--ink:#1b1f24;--mut:#6b7280;--accent:#1f6feb;--head:#f6f8fa}
+ *{box-sizing:border-box}
+ body{margin:0;font:12.5px/1.45 -apple-system,Segoe UI,Helvetica,Arial,sans-serif;color:var(--ink);background:var(--bg)}
+ header{display:flex;gap:10px;align-items:center;padding:7px 12px;border-bottom:1px solid var(--bd);background:var(--head);flex-wrap:wrap}
+ header b{font-size:13px;margin-right:4px}
+ label.f{color:var(--mut)}
+ select,button{font:inherit;padding:2px 5px;border:1px solid var(--bd);border-radius:4px;background:#fff;color:var(--ink)}
+ button{cursor:pointer}
+ button.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+ #wrap{display:grid;grid-template-columns:300px 1fr 310px;height:calc(100vh - 44px)}
+ .pane{overflow:auto;border-right:1px solid var(--bd);padding:8px}
+ .pane:last-child{border-right:0;border-left:1px solid var(--bd)}
+ h3{margin:10px 0 5px;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut)}
+ #targetPanel select{max-width:100%;width:100%;margin:3px 0} #targetPanel button{margin:3px 2px} #targetPanel input{width:100%;padding:5px;border:1px solid var(--bd)} .notice{background:#fff8df;border:1px solid #e4d5a5;padding:7px;margin:7px 0} #optreport{overflow-wrap:anywhere} #plotbox{position:relative;padding:8px;display:flex;flex-direction:column;min-width:0}
+ #cvwrap{position:relative;flex:1;min-height:0}
+ canvas{position:absolute;inset:0;width:100%;height:100%}
+ #ov{cursor:crosshair}
+ .node{padding:1px 4px;border-radius:3px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+ .node:hover{background:#eef2f7}
+ .node.sel{background:var(--accent);color:#fff}
+ .node .n{color:var(--mut);font-variant-numeric:tabular-nums}
+ .node.sel .n{color:#dbe9ff}
+ table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
+ td,th{padding:1px 4px;text-align:left}
+ th{color:var(--mut);font-weight:600;border-bottom:1px solid var(--bd)}
+ td.r,th.r{text-align:right}
+ .hint{color:var(--mut);padding:2px 0}
+ .sw{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+ .bar{height:4px;background:var(--accent);border-radius:2px;display:inline-block;vertical-align:1px}
+</style>
+<header>
+ <b>CITE-seq → flow</b>
+ <label class="f">space <select id="space"></select></label>
+ <label class="f">plot <select id="mode"><option value="biaxial">biaxial</option><option value="embedding">embedding</option></select></label>
+ <span id="axsel"><label class="f">X <select id="xc"></select></label> <label class="f">Y <select id="yc"></select></label></span>
+ <span id="embsel" hidden><label class="f">embedding <select id="emb"></select></label></span>
+ <label class="f">colour <select id="col"></select></label>
+ <label class="f">dot size <select id="dotSize" title="Dot width in pixels; applies to flow and embedding plots"><option value="auto">Auto</option><option value="1">1 px</option><option value="3">3 px</option><option value="5">5 px</option><option value="7">7 px</option></select></label>
+ <span class="f">gate:</span>
+ <button id="t_none" class="tool on" data-t="none">off</button>
+ <button id="t_rect" class="tool" data-t="rect">rectangle</button>
+ <button id="t_poly" class="tool" data-t="poly">polygon</button>
+ <button id="t_ell" class="tool" data-t="ellipse">ellipse</button>
+ <button id="t_quad" class="tool" data-t="quad">quadrant</button>
+ <button id="clear">clear drawn gate</button><label class="f"><input type="checkbox" id="showSelection" checked>selection overlay</label><button id="clearSelection">clear selection</button>
+ <span id="n" class="f"></span>
+</header>
+<div id="wrap">
+ <div class="pane" id="left"></div>
+ <div id="plotbox"><div id="cvwrap"><canvas id="cv"></canvas><canvas id="ov"></canvas></div>
+   <div class="hint" id="axhint"></div></div>
+ <div class="pane" id="right"></div>
+</div>
+<script>
+const PAL=["#1f77b4","#d62728","#2ca02c","#ff7f0e","#9467bd","#8c564b","#e377c2","#17becf","#bcbd22","#7f7f7f",
+ "#aec7e8","#ff9896","#98df8a","#ffbb78","#c5b0d5","#c49c94","#f7b6d2","#9edae5","#dbdb8d","#c7c7c7"];
+// FlowJo-style pseudocolour ramp: low density blue -> high density red.
+const DENS=[[40,60,160],[20,120,200],[20,180,170],[90,200,90],[220,210,60],[240,150,40],[220,50,40]];
+const S={man:null,space:null,chan:{},lab:{},mask:{},active:null,poly:null,tool:"none",
+         gatesets:{},overlay:null,drag:null,tf:null,highlight:null,gateHighlight:null,optimization:null,drawVersion:0,embCache:{}};
+const bin=async u=>{const r=await fetch(u);if(!r.ok)throw new Error(await r.text());return r.arrayBuffer();};
+const esc=x=>String(x).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function post(url,body){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const q=await r.json();if(!r.ok)throw new Error(q.error||r.statusText);return q;}
+const qs=()=>"?space="+encodeURIComponent(S.space);
+const el=id=>document.getElementById(id);
+
+async function boot(){
+  el("dotSize").onchange=()=>draw();
+  S.man=await (await fetch("/api/manifest")).json();
+  S.gatesets=S.man.gatesets||{};
+  fill("space",Object.keys(S.man.spaces));
+  el("space").value=S.man.default_space; S.space=S.man.default_space;
+  el("space").onchange=()=>{S.space=el("space").value;S.chan={};S.lab={};S.mask={};S.active=null;S.poly=null;S.highlight=null;S.gateHighlight=null;S.optimization=null;stats();loadSpace();};
+  for(const b of document.querySelectorAll(".tool")) b.onclick=()=>{
+    document.querySelectorAll(".tool").forEach(x=>x.classList.remove("on"));
+    b.classList.add("on");S.tool=b.dataset.t;S.poly=null;S.drag=null;draw();};
+  el('showSelection').onchange=()=>draw();
+  el('clearSelection').onclick=()=>{S.highlight=null;S.gateHighlight=null;S.optimization=null;S.poly=null;stats();draw();};
+  el("clear").onclick=()=>{S.poly=null;S.drag=null;draw();stats();};
+  el("mode").onchange=()=>{const e=el("mode").value==="embedding";
+    el("embsel").hidden=!e;el("axsel").hidden=e;S.poly=null;draw();};
+  for(const id of ["xc","yc","emb","col"]) el(id).onchange=()=>{S.poly=null;draw();};
+  new ResizeObserver(()=>draw()).observe(el("cvwrap"));
+  loadSpace();
+}
+function fill(id,xs,keep){const s=el(id),prev=s.value;s.innerHTML="";
+  for(const x of xs){const o=document.createElement("option");o.value=x;o.textContent=x;s.appendChild(o);}
+  if(keep&&xs.includes(prev))s.value=prev;}
+
+function loadSpace(){
+  const sp=S.man.spaces[S.space];
+  fill("xc",sp.features);fill("yc",sp.features);
+  el("xc").selectedIndex=0;el("yc").selectedIndex=Math.min(1,sp.features.length-1);
+  const embs=Object.keys(sp.embeddings);
+  fill("emb",embs);if(sp.default_embedding)el("emb").value=sp.default_embedding;
+  const cols=["density"].concat(Object.keys(sp.labels)).concat(sp.features.map(f=>"marker:"+f));
+  fill("col",cols,true);if(sp.default_label&&cols.includes(sp.default_label))el("col").value=sp.default_label;
+  const hasEmb=embs.length>0;
+  el("mode").value=hasEmb&&S.space!=="flow"?"embedding":el("mode").value;
+  el("embsel").hidden=el("mode").value!=="embedding";el("axsel").hidden=!el("embsel").hidden;
+  el("n").textContent=sp.n.toLocaleString()+(S.space==="flow"?" events":" cells");
+  trees();draw();
+}
+
+/* ---------------- gate trees: the authors' strategy and the derived one -------------- */
+function trees(){
+  const L=el("left");const old=el("targetSet")?.value;L.innerHTML="";targetPanel(L,old);
+  const sets=Object.entries(S.gatesets).filter(([k,g])=>(g.space||"flow")===S.space);
+  if(!sets.length){const hint=document.createElement('div');hint.className='hint';hint.textContent='Draw a gate here, or select a population above to optimize its flow gate.';L.appendChild(hint);}
+  for(const [name,g] of sets){
+    const h=document.createElement("h3");
+    h.textContent=(g.kind==="virtual"?"virtual gates — ":"FlowJo gates — ")+name;
+    L.appendChild(h);
+    if(g.workspace){const d=document.createElement("div");d.className="hint";
+      d.textContent=g.workspace;L.appendChild(d);}
+    for(const nd of g.nodes){
+      const d=document.createElement("div");d.className="node";
+      d.style.paddingLeft=(4+12*(nd.depth||0))+"px";
+      const pct=nd.pct_of_parent!=null?nd.pct_of_parent.toFixed(1)+"%":"";
+      d.innerHTML=`<span>${nd.name}</span> <span class="n">${(nd.n||0).toLocaleString()} · ${pct}</span>`;
+      d.title=nd.path+"\n"+(nd.dims||"")+(nd.f1_vs_manual!=null?"\nF1 vs manual: "+nd.f1_vs_manual:"");
+      d.onclick=()=>selectPop(name,nd,d);
+      if(S.active&&S.active.gateset===name&&S.active.node.path===nd.path)d.classList.add("sel");
+      L.appendChild(d);
+    }
+  }
+  const cl=document.createElement("button");cl.textContent="show all events";
+  cl.style.marginTop="8px";cl.onclick=()=>{S.active=null;trees();draw();stats();};
+  L.appendChild(cl);
+}
+function childrenOf(setname,path){
+  const g=S.gatesets[setname];if(!g)return[];
+  return g.nodes.filter(x=>x.path!==path&&x.path.startsWith(path+"/")
+    &&x.path.slice(path.length+1).indexOf("/")<0);
+}
+function parentOf(setname,path){
+  if(path.indexOf("/")<0)return null;
+  const pp=path.slice(0,path.lastIndexOf("/"));
+  return (S.gatesets[setname].nodes.find(x=>x.path===pp))||null;
+}
+async function selectPop(setname,nd,node){
+  document.querySelectorAll(".node").forEach(x=>x.classList.remove("sel"));
+  node.classList.add("sel");
+  node.scrollIntoView({block:"nearest"});
+  const sp=S.man.spaces[S.space];
+  const kids=childrenOf(setname,nd.path);
+  // FlowJo behaviour: a gate is drawn on its PARENT's events. Selecting a population
+  // therefore shows that population's events with its CHILDREN's gates on them; a
+  // population with no children falls back to its parent's events carrying its own gate,
+  // so the outline is always inside the plotted range instead of off-screen.
+  let viewNode=nd, drawOn=kids.length?kids:[nd];
+  if(!kids.length){viewNode=parentOf(setname,nd.path);}   // null = the ungated sample
+  S.active={gateset:setname,node:nd,view:viewNode,show:drawOn.map(x=>x.path)};
+  const ch=(drawOn[0].channels)||[];
+  if(ch.length===2&&sp.features.includes(ch[0])&&sp.features.includes(ch[1])){
+    el("mode").value="biaxial";el("embsel").hidden=true;el("axsel").hidden=false;
+    el("xc").value=ch[0];el("yc").value=ch[1];
+  }
+  if(viewNode)await getMask(setname,viewNode.path);
+  S.poly=null;draw();stats();
+}
+async function getMask(setname,path){
+  const k=setname+"|"+path;
+  if(!S.mask[k])S.mask[k]=new Uint8Array(await bin("/api/gatemask/"+encodeURIComponent(setname)+"/"+path.split("/").map(encodeURIComponent).join("/")));
+  return S.mask[k];
+}
+/* parent of the active population, for FlowJo's "% of parent" and for drill-down */
+function parentMask(){
+  if(!S.active||!S.active.view)return null;    // a top-level gate is drawn on all events
+  const k=S.active.gateset+"|"+S.active.view.path;
+  return S.mask[k]||null;
+}
+
+/* ---------------- data ------------------------------------------------------------- */
+async function getChan(n){const k=S.space+"|"+n;
+  if(!S.chan[k])S.chan[k]=new Float32Array(await bin("/api/channel/"+encodeURIComponent(n)+qs()));
+  return S.chan[k];}
+async function getEmb(n){const k=S.space+"|"+n;if(!S.embCache[k])S.embCache[k]=new Float32Array(await bin("/api/embedding/"+encodeURIComponent(n)+qs()));return S.embCache[k];}
+async function getLab(n){const k=S.space+"|"+n;
+  if(!S.lab[k])S.lab[k]=new Int16Array(await bin("/api/labels/"+encodeURIComponent(n)+qs()));
+  return S.lab[k];}
+
+/* ---------------- drawing ---------------------------------------------------------- */
+function pct(a,p){const s=Float64Array.from(a).sort();return s[Math.max(0,Math.min(s.length-1,Math.floor(p*(s.length-1))))];}
+function range(v,idx){
+  // FlowJo auto-scale: ignore the extreme tails so a handful of outliers cannot flatten the plot.
+  const step=Math.max(1,Math.floor(idx.length/20000));const s=[];
+  for(let i=0;i<idx.length;i+=step)s.push(v[idx[i]]);
+  if(!s.length)return[0,1];
+  s.sort((a,b)=>a-b);
+  let lo=s[Math.floor(0.001*(s.length-1))],hi=s[Math.floor(0.999*(s.length-1))];
+  if(!(hi>lo)){hi=lo+1;}
+  const pad=(hi-lo)*0.04;return[lo-pad,hi+pad];
+}
+async function draw(){
+  if(el('highlightTarget'))el('highlightTarget').textContent=S.highlight||S.gateHighlight?'Unhighlight cells':'Highlight cells';
+  const version=++S.drawVersion;if(!S.man)return;
+  const sp=S.man.spaces[S.space],N=sp.n,mode=el("mode").value;
+  let xv,yv,xlab,ylab;
+  if(mode==="embedding"){
+    const name=el("emb").value;if(!name)return;
+    const E=await getEmb(name);xv=new Float32Array(N);yv=new Float32Array(N);
+    for(let i=0;i<N;i++){xv[i]=E[2*i];yv[i]=E[2*i+1];}
+    xlab=name+" 1";ylab=name+" 2";
+  }else{
+    xlab=el("xc").value;ylab=el("yc").value;if(!xlab||!ylab)return;
+    xv=await getChan(xlab);yv=await getChan(ylab);
+  }
+  if(version!==S.drawVersion)return;
+  const pm=parentMask();
+  const idx=[];for(let i=0;i<N;i++)if(!pm||pm[i])idx.push(i);
+  const [x0,x1]=range(xv,idx),[y0,y1]=range(yv,idx);
+
+  const wrap=el("cvwrap"),cv=el("cv"),ov=el("ov");
+  const dpr=window.devicePixelRatio||1;
+  const W=Math.max(50,Math.round(wrap.clientWidth)),H=Math.max(50,Math.round(wrap.clientHeight));
+  for(const c of [cv,ov]){c.width=Math.round(W*dpr);c.height=Math.round(H*dpr);
+    c.style.width=W+"px";c.style.height=H+"px";}
+  const M={l:58,r:14,t:10,b:42};
+  const px=v=>M.l+(v-x0)/((x1-x0)||1)*(W-M.l-M.r);
+  const py=v=>H-M.b-(v-y0)/((y1-y0)||1)*(H-M.t-M.b);
+  S.tf={px,py,x0,x1,y0,y1,W,H,M,xlab,ylab,mode,
+        ix:v=>x0+(v-M.l)/((W-M.l-M.r)||1)*(x1-x0),
+        iy:v=>y0+(H-M.b-v)/((H-M.t-M.b)||1)*(y1-y0)};
+
+  const g=cv.getContext("2d");g.setTransform(dpr,0,0,dpr,0,0);
+  g.clearRect(0,0,W,H);g.fillStyle="#fff";g.fillRect(0,0,W,H);
+
+  // colour source
+  const col=el("col").value;let lab=null,vals=null,vlo=0,vhi=1;
+  if(col.startsWith("marker:")){vals=await getChan(col.slice(7));
+    const s=[];const st=Math.max(1,Math.floor(idx.length/20000));
+    for(let i=0;i<idx.length;i+=st)s.push(vals[idx[i]]);s.sort((a,b)=>a-b);
+    vlo=s[Math.floor(0.02*(s.length-1))];vhi=s[Math.floor(0.98*(s.length-1))];}
+  else if(col!=="density")lab=await getLab(col);
+
+  if(version!==S.drawVersion)return;
+  // ---- points, written straight into an ImageData buffer (no per-point fillRect) ----
+  const iw=Math.round(W*dpr),ih=Math.round(H*dpr);
+  const img=g.getImageData(0,0,iw,ih),D=img.data;
+  const GB=256,gx=new Int32Array(GB*GB);
+  const bx=v=>Math.max(0,Math.min(GB-1,((v-x0)/((x1-x0)||1)*GB)|0));
+  const by=v=>Math.max(0,Math.min(GB-1,((v-y0)/((y1-y0)||1)*GB)|0));
+  for(const i of idx)gx[by(yv[i])*GB+bx(xv[i])]++;
+  let dmax=0;for(let i=0;i<gx.length;i++)if(gx[i]>dmax)dmax=gx[i];
+  const order=S.highlight||S.gateHighlight?idx.filter(i=>!S.highlight?.[i]&&!S.gateHighlight?.[i]).concat(idx.filter(i=>S.highlight?.[i]||S.gateHighlight?.[i])):idx;
+  const dotSize=el("dotSize").value;
+  const rad=dotSize==='auto'?(idx.length>40000?0:1):Math.max(0,Math.round((Number(dotSize)*dpr-1)/2));
+  // Cache circular pixel footprints with softened edges for each dot radius.
+  const footprints=new Map();
+  const footprint=radius=>{
+    if(!footprints.has(radius)){
+      const pixels=[];
+      for(let oy=-radius;oy<=radius;oy++)for(let ox=-radius;ox<=radius;ox++){
+        const coverage=Math.max(0,Math.min(1,radius+1-Math.hypot(ox,oy)));
+        if(coverage>0)pixels.push([ox,oy,coverage]);
+      }
+      footprints.set(radius,pixels);
+    }
+    return footprints.get(radius);
+  };
+  const put=(cx,cy,r,gg,b,a,radius=rad)=>{
+    for(const [ox,oy,coverage] of footprint(radius)){
+      const X=cx+ox,Y=cy+oy;if(X<0||Y<0||X>=iw||Y>=ih)continue;
+      const o=4*(Y*iw+X);const al=a*coverage;
+      D[o]=D[o]+(r-D[o])*al;D[o+1]=D[o+1]+(gg-D[o+1])*al;D[o+2]=D[o+2]+(b-D[o+2])*al;D[o+3]=255;}
+  };
+  for(let k=0;k<D.length;k+=4){D[k]=255;D[k+1]=255;D[k+2]=255;D[k+3]=255;}
+  for(const i of order){
+    const cx=Math.round(px(xv[i])*dpr),cy=Math.round(py(yv[i])*dpr);
+    if(cx<M.l*dpr||cy>(H-M.b)*dpr||cx>=iw||cy<0)continue;
+    let r,gg,b,a=0.75,pointRad=rad;
+    if(vals){const t=Math.max(0,Math.min(1,(vals[i]-vlo)/((vhi-vlo)||1)));
+      r=Math.round(30+225*t);gg=Math.round(60*(1-t)+40*t);b=Math.round(235-205*t);}
+    else if(lab){const c=lab[i];
+      if(c<0){r=gg=b=195;a=.5;}
+      else{const h=PAL[c%PAL.length];r=parseInt(h.slice(1,3),16);gg=parseInt(h.slice(3,5),16);b=parseInt(h.slice(5,7),16);}}
+    else{const d=gx[by(yv[i])*GB+bx(xv[i])];
+      const t=Math.min(1,Math.sqrt(d/(dmax||1)));
+      const u=t*(DENS.length-1),j=Math.min(DENS.length-2,Math.floor(u)),f=u-j;
+      r=Math.round(DENS[j][0]+(DENS[j+1][0]-DENS[j][0])*f);
+      gg=Math.round(DENS[j][1]+(DENS[j+1][1]-DENS[j][1])*f);
+      b=Math.round(DENS[j][2]+(DENS[j+1][2]-DENS[j][2])*f);a=.9;}
+    if(el('showSelection').checked&&(S.highlight||S.gateHighlight)){const h=!!S.highlight?.[i],gt=!!S.gateHighlight?.[i];
+      if(h||gt)pointRad=Math.max(rad,Math.round(2*dpr));
+      if(h&&gt){r=20;gg=150;b=75;a=1;}else if(h){r=235;gg=135;b=20;a=.95;}
+      else if(gt){r=30;gg=100;b=230;a=.95;}else{r=gg=b=190;a=.22;}}
+    put(cx,cy,r,gg,b,a,pointRad);
+  }
+  g.putImageData(img,0,0);
+
+  // ---- axes ----
+  g.strokeStyle="#333";g.lineWidth=1;g.beginPath();
+  g.moveTo(M.l,M.t);g.lineTo(M.l,H-M.b);g.lineTo(W-M.r,H-M.b);g.stroke();
+  g.fillStyle="#1b1f24";g.font="11px -apple-system,Segoe UI,Helvetica,Arial";
+  g.textAlign="center";
+  for(let k=0;k<=4;k++){const v=x0+(x1-x0)*k/4,X=px(v);
+    g.beginPath();g.moveTo(X,H-M.b);g.lineTo(X,H-M.b+4);g.stroke();
+    g.fillText(fmt(v),X,H-M.b+16);}
+  g.textAlign="right";
+  for(let k=0;k<=4;k++){const v=y0+(y1-y0)*k/4,Y=py(v);
+    g.beginPath();g.moveTo(M.l,Y);g.lineTo(M.l-4,Y);g.stroke();
+    g.fillText(fmt(v),M.l-7,Y+3);}
+  g.textAlign="center";g.font="12px -apple-system,Segoe UI,Helvetica,Arial";
+  g.fillText(xlab,M.l+(W-M.l-M.r)/2,H-6);
+  g.save();g.translate(14,M.t+(H-M.t-M.b)/2);g.rotate(-Math.PI/2);g.fillText(ylab,0,0);g.restore();
+
+  el("axhint").textContent=(S.active?("showing "+(S.active.view?S.active.view.path:"all events")
+      +" · gate "+S.active.node.name+"  ·  "):"")
+    +idx.length.toLocaleString()+" of "+N.toLocaleString()+" shown"
+    +(S.tool!=="none"?"  ·  drag to draw a "+S.tool+" gate":"  ·  choose a gate tool, or click a population at left");
+  const meta=mode==='embedding'?sp.embeddings[el('emb').value]:null;
+  el('axhint').textContent+=' · '+(mode==='embedding'?(meta?.method||'Existing embedding'):(sp.feature_scale||'Measured flow; logicle display'));
+  if(meta?.source_label)el('axhint').textContent+=' · '+meta.source_label;
+  if(meta?.independent_of_labels===false)el('axhint').textContent+=' · Label-conditioned placement; not independent validation';
+  overlay();legend();
+}
+function fmt(v){const a=Math.abs(v);
+  return a>=1e5?v.toExponential(1):(a>=100?v.toFixed(0):(a>=1?v.toFixed(1):v.toFixed(2)));}
+
+/* ---- gate outlines + the drawn gate, on the transparent overlay canvas ------------- */
+function overlay(){
+  const ov=el("ov"),dpr=window.devicePixelRatio||1,t=S.tf;if(!t)return;
+  const g=ov.getContext("2d");g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,t.W,t.H);
+  if(t.mode==="biaxial"){
+    for(const [name,gs] of Object.entries(S.gatesets)){
+      if((gs.space||"flow")!==S.space)continue;
+      const virt=gs.kind==="virtual";
+      for(const nd of gs.nodes){
+        const ch=nd.channels||[];
+        if(ch.length!==2||ch[0]!==t.xlab||ch[1]!==t.ylab)continue;
+        const shown=S.active&&S.active.gateset===name&&S.active.show;
+        if(shown&&!S.active.show.includes(nd.path)&&!virt)continue;
+        const pts=gatePoints(nd);if(!pts)continue;
+        const isSel=S.active&&S.active.node.path===nd.path&&S.active.gateset===name;
+        g.strokeStyle=virt?"#d62728":(isSel?"#1f6feb":"#111");g.lineWidth=virt?1.6:(isSel?2.2:1.4);
+        g.setLineDash(virt?[5,3]:[]);
+        g.beginPath();g.moveTo(t.px(pts[0][0]),t.py(pts[0][1]));
+        for(const p of pts.slice(1))g.lineTo(t.px(p[0]),t.py(p[1]));
+        g.closePath();g.stroke();g.setLineDash([]);
+        const lx=Math.max(t.M.l+3,Math.min(t.W-t.M.r-90,Math.min(...pts.map(p=>t.px(p[0])))));
+        const ly=Math.max(t.M.t+12,Math.min(t.H-t.M.b-4,Math.min(...pts.map(p=>t.py(p[1])))));
+        g.font="11px -apple-system,Segoe UI,Helvetica,Arial";
+        g.fillStyle=virt?"#d62728":(isSel?"#1f6feb":"#111");g.textAlign="left";
+        g.fillText(nd.name+"  "+(nd.pct_of_parent!=null?nd.pct_of_parent.toFixed(1)+"%":""),lx+3,ly-4);
+      }
+    }
+  }
+  if(S.poly&&S.poly.length>1){
+    g.strokeStyle="#1f6feb";g.lineWidth=1.6;g.fillStyle="rgba(31,111,235,.08)";
+    g.beginPath();g.moveTo(t.px(S.poly[0][0]),t.py(S.poly[0][1]));
+    for(const p of S.poly.slice(1))g.lineTo(t.px(p[0]),t.py(p[1]));
+    g.closePath();g.fill();g.stroke();
+  }
+}
+function gatePoints(nd){
+  if(nd.vertices_display&&nd.vertices_display.length&&nd.vertices_display[0][0]!=null)
+    return nd.vertices_display;
+  if(nd.bounds_display){const[[x0,x1],[y0,y1]]=nd.bounds_display;
+    if(x0==null||y0==null)return null;
+    const X0=isFinite(x0)?x0:S.tf.x0,X1=isFinite(x1)?x1:S.tf.x1;
+    const Y0=isFinite(y0)?y0:S.tf.y0,Y1=isFinite(y1)?y1:S.tf.y1;
+    return [[X0,Y0],[X1,Y0],[X1,Y1],[X0,Y1]];}
+  return null;
+}
+function legend(){
+  const col=el("col").value,R=el("right");
+  const sp=S.man.spaces[S.space];
+  let h="";
+  if(S.active){const nd=S.active.node;
+    h+=`<h3>population</h3><div><b>${nd.name}</b></div><div class="hint">${nd.path}</div>`;
+    h+=`<table><tr><td>events</td><td class="r">${(nd.n||0).toLocaleString()}</td></tr>`;
+    h+=`<tr><td>% of parent</td><td class="r">${nd.pct_of_parent!=null?nd.pct_of_parent.toFixed(2)+"%":"-"}</td></tr>`;
+    h+=`<tr><td>% of all</td><td class="r">${nd.pct_of_total!=null?nd.pct_of_total.toFixed(2)+"%":"-"}</td></tr>`;
+    if(nd.workspace_count!=null)h+=`<tr><td title="the count FlowJo recorded on the sample the workspace was built on, not on these events">count in workspace*</td><td class="r">${nd.workspace_count.toLocaleString()}</td></tr>`;
+    if(nd.dims)h+=`<tr><td>gate channels</td><td class="r">${(nd.channels||[]).join(" × ")||nd.dims}</td></tr>`;
+    if(nd.f1_vs_own_population!=null)h+=`<tr><td>F1 vs its population</td><td class="r">${nd.f1_vs_own_population}</td></tr>`;
+    if(nd.f1_vs_manual!=null)h+=`<tr><td>F1 vs manual</td><td class="r">${nd.f1_vs_manual}</td></tr>`;
+    if(nd.best_manual_match)h+=`<tr><td>closest manual</td><td class="r" style="font-size:11px">${nd.best_manual_match.split("/").pop()}</td></tr>`;
+    h+=`</table>`;
+    if(nd.workspace_count!=null)h+='<div class="hint">* recorded by FlowJo on the sample the workspace was built on; the rows above are recomputed on the events loaded here.</div>';
+  }
+  h+="<h3>colour</h3>";
+  if(col==="density")h+='<div class="hint">event density, low <span class="sw" style="background:#283ca0"></span>&rarr;<span class="sw" style="background:#dc3228"></span> high</div>';
+  else if(col.startsWith("marker:"))h+=`<div class="hint"><b>${col.slice(7)}</b> low <span class="sw" style="background:#1e3ceb"></span>&rarr;<span class="sw" style="background:#ff2828"></span> high</div>`;
+  else{const lv=sp.labels[col]?.levels||[];
+    h+='<div style="max-height:220px;overflow:auto">'+lv.map((x,i)=>
+      `<div title="${x}" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><span class="sw" style="background:${PAL[i%PAL.length]}"></span>${String(x).split("/").pop()}</div>`).join("")+"</div>";}
+  h+='<h3>gate outlines</h3><div class="hint"><span class="sw" style="background:#111"></span>FlowJo (drawn by the authors) &nbsp; <span class="sw" style="background:#d62728"></span>virtual (MarkerFinder-derived)</div>';
+  if(S.highlight||S.gateHighlight)h+='<h3>selection overlay</h3><div>Orange: target only · blue: gate only · green: overlap · gray: remaining cells</div>';
+  h+='<div class="notice">'+esc(S.man.audit?.scientific_interpretation||'Transferred annotations are predictions. Gate capture and purity describe agreement with these labels, not functional stem-cell identity.')+'</div>';
+  h+='<div id="optreport">'+optimizationReport()+'</div>';
+  h+='<div id="stats"></div>';
+  R.innerHTML=h;
+  if(S._lastStats)el("stats").innerHTML=S._lastStats;
+}
+
+/* ---------------- interactive gating ------------------------------------------------ */
+const ov=()=>el("ov");
+function toData(ev){const r=ov().getBoundingClientRect();
+  return [S.tf.ix(ev.clientX-r.left),S.tf.iy(ev.clientY-r.top)];}
+document.addEventListener("mousedown",e=>{
+  if(e.target!==ov()||S.tool==="none"||!S.tf)return;
+  const p=toData(e);
+  if(S.tool==="poly"){S.poly=S.poly&&S.poly._open?S.poly:Object.assign([],{_open:true});
+    S.poly.push(p);S.poly._open=true;overlay();return;}
+  S.drag=p;S.poly=null;});
+document.addEventListener("mousemove",e=>{
+  if(!S.drag||!S.tf)return;const p=toData(e);S.poly=shape(S.drag,p);overlay();});
+document.addEventListener("mouseup",e=>{
+  if(!S.drag||!S.tf)return;const p=toData(e);S.poly=shape(S.drag,p);S.drag=null;overlay();apply();});
+document.addEventListener("dblclick",e=>{
+  if(e.target!==ov()||S.tool!=="poly"||!S.poly)return;
+  S.poly._open=false;overlay();apply();});
+function shape(a,b){
+  if(S.tool==="rect"||S.tool==="quad"){
+    if(S.tool==="quad")return quad(a);
+    return [[a[0],a[1]],[b[0],a[1]],[b[0],b[1]],[a[0],b[1]]];}
+  if(S.tool==="ellipse"){const cx=(a[0]+b[0])/2,cy=(a[1]+b[1])/2,rx=Math.abs(b[0]-a[0])/2,ry=Math.abs(b[1]-a[1])/2;
+    const out=[];for(let k=0;k<48;k++){const t=2*Math.PI*k/48;out.push([cx+rx*Math.cos(t),cy+ry*Math.sin(t)]);}return out;}
+  return [[a[0],a[1]],[b[0],a[1]],[b[0],b[1]],[a[0],b[1]]];
+}
+function quad(a){ // upper-right quadrant from the click point, FlowJo's quadrant tool
+  return [[a[0],a[1]],[S.tf.x1,a[1]],[S.tf.x1,S.tf.y1],[a[0],S.tf.y1]];}
+async function apply(){
+  if(!S.poly||S.poly.length<3)return;
+  const mode=el("mode").value;
+  const body={polygon:S.poly.map(p=>[p[0],p[1]]),mode:mode,space:S.space,
+    label_sets:pickLabelSets(),x:el("xc").value,y:el("yc").value,embedding:el("emb").value};
+  if(S.active?.view)body.parent={gateset:S.active.gateset,path:S.active.view.path};
+  const r=await (await fetch("/api/gate",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify(body)})).json();
+  render(r);
+}
+function pickLabelSets(){
+  const sp=S.man.spaces[S.space],col=el("col").value,out=[];
+  if(sp.labels[col])out.push(col);
+  for(const k of Object.keys(sp.labels)){if(out.length>=3)break;if(!out.includes(k))out.push(k);}
+  return out;
+}
+function render(r){
+  let h=`<h3>drawn gate</h3><div><b>${r.n_gated.toLocaleString()}</b> events · ${r.percent}% of all`;
+  if(r.n_parent&&r.n_parent!==r.n_total)h+=` · ${r.percent_of_parent}% of parent`;
+  h+="</div>";
+  for(const [ls,rows] of Object.entries(r.composition||{})){
+    h+=`<h3>${ls}</h3><table><tr><th>label</th><th class="r">n</th><th class="r">%</th></tr>`;
+    for(const x of rows)h+=`<tr><td>${x.label}</td><td class="r">${x.n.toLocaleString()}</td><td class="r">${x.percent}</td></tr>`;
+    h+="</table>";
+  }
+  S._lastStats=h;const s=el("stats");if(s)s.innerHTML=h;
+}
+function stats(){S._lastStats="";const s=el("stats");if(s)s.innerHTML="";}
+
+/* Population-driven workflow: select any annotation, then fit gates on FLOW events. */
+function targetPanel(L,old){
+ const sp=S.man.spaces[S.space];const div=document.createElement('div');div.id='targetPanel';
+ div.innerHTML='<h3>Select a cell population</h3><div class="hint">Choose an annotation and one or more labels. Optimize fits measured flow channels to the transferred target.</div><select id="targetSet"></select><input id="targetSearch" placeholder="Search labels, e.g. MultiLin, ML-, DN"><select id="targetPop" multiple size="6"></select><label>Flow transfer method <select id="targetMethod"></select></label><label>Gate objective <select id="gateBeta"><option value="1">Balance purity and capture (F1)</option><option value="0.5">Favor purity (F0.5)</option><option value="2">Favor capture (F2)</option></select></label><button id="highlightTarget">Highlight cells</button><button id="compareProfiles">Compare marrow / thymus RNA</button><button id="compareProtein">Compare measured ADT / PU.1 / IRFs</button><button id="viewValidation">Review transfer validation</button><label>Required signs (optional)<input id="signedGate" placeholder="CD4-, CD8-, CD117+, CD25-, CD11c-, CD11b-, CD27+, Sca-1+"></label><button id="useExampleGate">Use ML / CLP gate example</button><button id="optimizeTarget">Optimize flow gate</button><div id="targetStatus" class="hint"></div><h3>Compare annotations on these cells</h3><select id="compareA"></select><select id="compareB"></select><button id="compareLabels">Compare with ARI and counts</button>';
+ L.appendChild(div);
+ const sets=Object.keys(sp.labels);fill('targetSet',sets);fill('compareA',sets);fill('compareB',sets);
+ if(old&&sets.includes(old))el('targetSet').value=old;else if(sp.default_label&&sets.includes(sp.default_label))el('targetSet').value=sp.default_label;else if(S.space==='flow'&&sets.includes('transfer_grimes_Ferchen_L4_kde_knn'))el('targetSet').value='transfer_grimes_Ferchen_L4_kde_knn';
+ el('compareB').selectedIndex=Math.min(1,sets.length-1);
+ el('targetSet').onchange=loadTargets;el('targetSearch').oninput=filterTargets;
+ el('highlightTarget').onclick=()=>highlightTarget().catch(showTargetError);
+ el('compareProtein').onclick=async()=>{try{const populations=selectedTargets(),set=el('targetSet').value;if(!['Population','Mm-MarrowAtlas-L4','Ferchen_L4'].includes(set)&&!set.includes('Ferchen_L4')&&!set.includes('cite_marrow'))throw Error('Select marrow-state annotations for a matched cross-panel comparison.');
+ const q=await post('/api/marker_profiles',{populations});let h='<h3>Measured ADT and RNA: population profiles</h3><div class="hint">Values are within-panel percentiles of population medians. Hover for native values, quartiles and cell counts.</div><table><tr><th>Panel / state</th><th>Marker</th><th>Percentile</th></tr>';
+ for(const r of q.rows){h+='<tr><td>'+esc(r.space+' / '+r.population)+'</td><td>'+esc(r.marker)+'</td><td title="'+esc(r.available?('n='+r.n_cells+'; Q25='+r.q25.toFixed(3)+'; median='+r.median.toFixed(3)+'; Q75='+r.q75.toFixed(3)):'unavailable')+'">'+(r.available?r.median_percentile_within_panel.toFixed(1):'unavailable')+'</td></tr>';}
+ h+='</table><div class="notice">'+esc(q.limitation)+'</div>';S._lastStats=h;legend();}catch(e){showTargetError(e);}};
+ el('compareProfiles').onclick=async()=>{try{const populations=selectedTargets(),set=el('targetSet').value;
+ if(!['Population','Mm-MarrowAtlas-L4','Ferchen_L4'].includes(set)&&!set.includes('Ferchen_L4'))throw Error('For a matched marrow/thymus RNA comparison, select marrow-state labels. Other cluster definitions can be inspected by marker coloring.');
+ const q=await post('/api/profiles',{populations});let h='<h3>Measured RNA: '+esc(populations.join(' + '))+'</h3><table><tr><th>Gene</th><th>Marrow median</th><th>Grimes median</th><th>Chinese median</th></tr>';
+ const genes=[...new Set(q.rows.map(r=>r.gene))];for(const gene of genes){h+='<tr><td>'+esc(gene)+'</td>';for(const sp of ['marrow_reference_RNA','cite_grimes','cite_chinese']){const r=q.rows.find(x=>x.gene===gene&&x.space===sp);h+='<td title="'+(r?('n='+r.n_cells+' cells; '+(100*r.fraction_detected).toFixed(1)+'% detected'):'unavailable')+'">'+(r?.median==null?'unavailable':r.median.toFixed(2))+'</td>';}h+='</tr>';}h+='</table><div class="notice">'+esc(q.limitation)+'</div>';S._lastStats=h;legend();}catch(e){showTargetError(e);}};
+ el('viewValidation').onclick=async()=>{try{const q=await (await fetch('/api/validation')).json();let h='<h3>Antibodies withheld from transfer</h3><div class="hint">'+esc(q.limitation)+'</div><table><tr><th>Dataset / labels / method / fold</th><th>Marker agreement</th></tr>';
+ for(const r of q.rows)h+='<tr><td>'+esc(r.dataset+' / '+r.annotation+' / '+r.method+' / '+r.fold)+'</td><td>'+r.populations_passing+' / '+r.populations_compared+'</td></tr>';h+='</table>';S._lastStats=h;legend();}catch(e){showTargetError(e);}};
+ el('optimizeTarget').onclick=()=>optimizeTarget().catch(showTargetError);el('useExampleGate').onclick=()=>{el('signedGate').value='CD4-, CD8-, CD117+, CD25-, CD11c-, CD11b-, CD27+, Sca-1+';};
+ el('compareLabels').onclick=async()=>{try{const q=await post('/api/concordance',{space:S.space,a:el('compareA').value,b:el('compareB').value});
+ let h='<h3>Annotation concordance</h3><div>ARI '+q.ARI?.toFixed(4)+' · '+q.n_compared.toLocaleString()+' cells/events · '+q.n_excluded+' missing excluded</div><table><tr><th>First annotation</th><th>Largest matching second label</th><th>n</th></tr>';
+ q.counts.forEach((row,i)=>{const mx=Math.max(...row),j=row.indexOf(mx);h+='<tr><td>'+esc(q.rows[i])+'</td><td>'+esc(q.cols[j])+'</td><td>'+mx+'</td></tr>';});h+='</table><div class="hint">ARI compares partitions; it does not validate transferred identities.</div>';
+ S._lastStats=h;legend();}catch(e){showTargetError(e);}};
+ loadTargets();
+}
+function showTargetError(e){el('targetStatus').textContent=e.message;el('optimizeTarget').disabled=false;}
+async function loadTargets(){
+ const space=S.space,sp=S.man.spaces[space],set=el('targetSet').value;const counts=await (await fetch('/api/populations/'+encodeURIComponent(set)+qs())).json();if(S.space!==space||!el('targetSet')||el('targetSet').value!==set)return;S.targetCounts=counts;filterTargets();
+ const prefix=sp.transfer_links?.[set];const keys=Object.keys(S.man.spaces.flow.labels);
+ const methods=prefix?keys.filter(k=>k.startsWith(prefix)).map(k=>k.slice(prefix.length)):[];
+ fill('targetMethod',methods.length?methods:['current flow annotation']);
+ el('optimizeTarget').disabled=S.space!=='flow'&&!prefix;
+ el('targetStatus').textContent=prefix?'Transfers CITE-seq labels onto separate flow events.':(S.space==='flow'?'Optimize against the selected flow annotation.':'No transfer available for this annotation; choose a mapped annotation to optimize.');
+}
+function filterTargets(){
+ const norm=x=>x.toLowerCase().replace(/multilin/g,'ml').replace(/[\s_-]/g,'');const search=norm(el('targetSearch').value),p=el('targetPop'),prev=[...p.selectedOptions].map(o=>o.value);p.innerHTML='';
+ for(const row of S.targetCounts||[]){if(!norm(row.label).includes(search))continue;const o=document.createElement('option');o.value=row.label;o.textContent=row.label+' ('+row.n.toLocaleString()+')';o.selected=prev.includes(row.label);p.appendChild(o);}
+}
+function selectedTargets(){const v=[...el('targetPop').selectedOptions].map(o=>o.value);if(!v.length)throw Error('Select at least one population label.');return v;}
+async function highlightTarget(){
+ if(S.highlight||S.gateHighlight){S.highlight=null;S.gateHighlight=null;stats();await draw();return;}
+ const populations=selectedTargets(),set=el('targetSet').value,sp=S.man.spaces[S.space];
+ const levels=sp.labels[set].levels,ids=populations.map(p=>levels.indexOf(p)),lab=await getLab(set);
+ S.highlight=Uint8Array.from(lab,v=>ids.includes(v)?1:0);S.active=null;S.poly=null;stats();await draw();
+}
+async function optimizeTarget(){
+ const populations=selectedTargets(),source=S.space,set=el('targetSet').value,beta=Number(el('gateBeta').value);
+ const prefix=S.man.spaces[source].transfer_links?.[set];const targetSet=source==='flow'?set:prefix+el('targetMethod').value;
+ el('optimizeTarget').disabled=true;el('targetStatus').textContent='Testing marker pairs and sequential gates; fitting and selection use separate event splits…';
+ const signs={};const text=el('signedGate').value.trim();if(text)for(const token of text.split(',')){const m=token.trim().match(/^(.+)([+-])$/);if(!m)throw Error('Use comma-separated channel names ending in + or -, for example Sca-1+.');signs[m[1].trim()]=m[2]==='+'?'>':'<=';}
+ const start=performance.now();const result=await post('/api/optimize',{space:'flow',label_set:targetSet,populations,beta,...(text?{signs}:{} )});
+ result.seconds=(performance.now()-start)/1000;result.label_set=targetSet;result.source_space=source;result.source_annotation=set;
+ S.space='flow';el('space').value='flow';S.active=null;S.highlight=null;S.gateHighlight=null;S.poly=null;S.optimization=result;stats();loadSpace();
+ el('targetSet').value=targetSet;await loadTargets();
+ for(const o of el('targetPop').options)o.selected=populations.includes(o.value);
+ await showCandidate(0);
+}
+async function showCandidate(i){
+ const result=S.optimization,c=result.candidates[i];result.selected=i;
+ const lev=S.man.spaces.flow.labels[result.label_set].levels,ids=result.populations.map(p=>lev.indexOf(p)),lab=await getLab(result.label_set);
+ S.highlight=Uint8Array.from(lab,v=>ids.includes(v)?1:0);
+ let mask=new Uint8Array(lab.length).fill(1);
+ for(const condition of c.conditions){const v=await getChan(condition.channel);for(let j=0;j<v.length;j++)mask[j]&=condition.operator==='>'?v[j]>condition.threshold:v[j]<=condition.threshold;}
+ S.gateHighlight=mask;el('mode').value='biaxial';el('embsel').hidden=true;el('axsel').hidden=false;
+ el('xc').value=c.channels[0];el('yc').value=c.channels[1]||c.channels[0];
+ const xc=el('xc').value,yc=el('yc').value;let box=[-Infinity,Infinity,-Infinity,Infinity];
+ for(const cond of c.conditions){const j=cond.channel===xc?0:cond.channel===yc?2:-1;if(j<0)continue;
+ if(cond.operator==='>')box[j]=Math.max(box[j],cond.threshold);else box[j+1]=Math.min(box[j+1],cond.threshold);}
+ const vx=await getChan(xc),vy=await getChan(yc);const rx=range(vx,Array.from(vx,(_,k)=>k)),ry=range(vy,Array.from(vy,(_,k)=>k));
+ S.poly=[[Number.isFinite(box[0])?box[0]:rx[0],Number.isFinite(box[2])?box[2]:ry[0]], [Number.isFinite(box[1])?box[1]:rx[1],Number.isFinite(box[2])?box[2]:ry[0]], [Number.isFinite(box[1])?box[1]:rx[1],Number.isFinite(box[3])?box[3]:ry[1]], [Number.isFinite(box[0])?box[0]:rx[0],Number.isFinite(box[3])?box[3]:ry[1]]];
+ await draw();const q=await post('/api/strategy',{space:'flow',conditions:c.conditions,label_sets:[result.label_set,'FlowSOM_J8DW','FlowJo_manual_gates'].filter(k=>S.man.spaces.flow.labels[k])});render(q);
+}
+function optimizationReport(){
+ const r=S.optimization;if(!r)return '';
+ const b=r.best,c=r.candidates[r.selected||0],pct=v=>(100*v).toFixed(1)+'%';
+ let h='<h3>Optimized gate: '+esc(r.populations.join(' + '))+'</h3><div class="hint">'+esc(r.label_set)+' · '+r.n_candidates+' candidates · '+r.seconds.toFixed(2)+' s</div>';
+ if(r.edited)h+='<div class="notice">User-edited thresholds: fit and test scores refer to the original gate. Composition updates for the edited gate.</div>';
+ h+='<table><tr><th>Selected strategy</th><td>'+c.method+'</td></tr><tr><th>Validation purity</th><td>'+pct(c.validation.precision)+'</td></tr><tr><th>Validation capture</th><td>'+pct(c.validation.recall)+'</td></tr></table>';
+ if((r.selected||0)===0&&!r.edited)h+='<h3>Untouched test events</h3><table><tr><th>Target / events</th><td>'+b.test.n_target+' / '+b.test.n_events+'</td></tr><tr><th>Purity</th><td>'+pct(b.test.precision)+'</td></tr><tr><th>Capture</th><td>'+pct(b.test.recall)+'</td></tr><tr><th>F1</th><td>'+b.test.f1.toFixed(3)+'</td></tr><tr><th>Shuffled-test F1</th><td>'+b.shuffled_test_labels.f1.toFixed(3)+'</td></tr></table>';
+ h+='<div class="hint">'+esc(r.split_unit)+'. Test metrics are reported only for the validation-selected winner. Shuffled-test control randomizes target membership for a fixed gate.</div><h3>Sorting conditions (AND)</h3><table>';
+ c.conditions.forEach((x,j)=>{h+='<tr><td>'+esc(x.channel)+'</td><td>'+esc(x.operator)+' <input type="number" step="0.001" style="width:100px" value="'+x.threshold+'" onchange="editThreshold('+j+',this.value)"></td></tr>';});
+ h+='</table><div class="hint">Thresholds use the measured flow logicle display scale. For sequential gates, the outline shows only the current two axes; membership applies every condition.</div><button onclick="exportStrategy()">Export gate JSON</button><button onclick="exportEvents()">Export event IDs</button><h3>Alternative gates (validation only)</h3>';
+ r.candidates.slice(0,8).forEach((x,i)=>{h+='<div><button onclick="showCandidate('+i+').catch(showTargetError)">'+(i+1)+'. '+esc(x.channels.join(' × '))+'</button> F'+r.beta+' '+x.validation.fbeta.toFixed(3)+'</div>';});
+ h+='<div class="notice">'+esc(r.limitation)+'</div>';return h;
+}
+async function editThreshold(j,value){const v=Number(value);if(!Number.isFinite(v))return;S.optimization.edited=true;S.optimization.candidates[S.optimization.selected||0].conditions[j].threshold=v;await showCandidate(S.optimization.selected||0);}
+function download(blob,name){const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+function exportStrategy(){const r=S.optimization;download(new Blob([JSON.stringify({...r,selected_strategy:r.candidates[r.selected||0]},null,2)],{type:'application/json'}),'flow_gate.json');}
+async function exportEvents(){try{const r=S.optimization,c=r.candidates[r.selected||0];const response=await fetch('/api/export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({space:'flow',label_set:r.label_set,conditions:c.conditions})});if(!response.ok)throw Error(await response.text());download(await response.blob(),'gated_events.tsv');}catch(e){showTargetError(e);}}
+
+window.S=S;   // the render check reads gate sets off this
+boot().catch(e=>{el('right').textContent=e.message;});
+</script>

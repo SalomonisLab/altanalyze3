@@ -519,7 +519,11 @@ def _prepare_marker_stats_aggregates(adata, cluster_key, genes, use_raw, layer):
         return None
 
     selected_genes = pd.Index(ordered_genes)[valid_gene_mask].astype(str).tolist()
-    matrix = matrix[:, gene_indexer[valid_gene_mask]]
+    import h5py
+    disk_matrix = isinstance(matrix, h5py.Dataset)
+    selected_columns = gene_indexer[valid_gene_mask]
+    if not disk_matrix:
+        matrix = matrix[:, selected_columns]
 
     cluster_obs = adata.obs[cluster_key]
     cluster_series = cluster_obs.astype(str)
@@ -543,13 +547,23 @@ def _prepare_marker_stats_aggregates(adata, cluster_key, genes, use_raw, layer):
         shape=(len(cluster_series), len(cluster_order)),
     )
 
-    sums_matrix = indicator.T.dot(matrix)
-    if sparse.issparse(sums_matrix):
-        sums_values = sums_matrix.toarray()
+    if disk_matrix:
+        unique, inverse = np.unique(selected_columns, return_inverse=True)
+        sums_values = np.zeros((len(cluster_order), len(selected_columns)), dtype=matrix.dtype)
+        total = np.zeros(len(selected_columns), dtype=matrix.dtype)
+        for start in range(0, matrix.shape[0], 512):
+            block = matrix[start:start + 512, unique][:, inverse]
+            keep = valid_cells[start:start + len(block)]
+            values = block[keep]
+            np.add.at(sums_values, cluster_codes[start:start + len(block)][keep], values)
+            if len(values):
+                total = np.cumsum(np.vstack([total, values]), axis=0, dtype=matrix.dtype)[-1]
+        total_sum_values = total.astype(float)
     else:
-        sums_values = np.asarray(sums_matrix)
+        sums_matrix = indicator.T.dot(matrix)
+        sums_values = sums_matrix.toarray() if sparse.issparse(sums_matrix) else np.asarray(sums_matrix)
+        total_sum_values = np.asarray(matrix[valid_cells, :].sum(axis=0)).ravel().astype(float)
     counts_values = np.bincount(col_idx, minlength=len(cluster_order)).astype(float)
-    total_sum_values = np.asarray(matrix[valid_cells, :].sum(axis=0)).ravel().astype(float)
     total_count = float(np.sum(valid_cells))
 
     return {

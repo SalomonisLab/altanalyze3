@@ -267,10 +267,14 @@ def combine_and_align_h5(
     return_adata=False,
     reference_genes_only=False,
     adata=None,
+    ambient_memory_efficient=False,
+    stream_10x_inputs=False,
 ):
     """``adata`` is an in-memory cells x genes AnnData, for example one read by
     ``sparse_stream.read_sparse_stream``. It takes the same path as ``h5ad_file``: gene
-    translation, unique names, ambient correction, then QC. Pass one of the two, not both."""
+    translation, unique names, ambient correction, then QC. Pass one of the two, not both.
+    ``ambient_memory_efficient`` omits the duplicate soupx_corrected layer; corrected
+    counts are retained in X and subsequently in layers['counts']."""
     start_time = time.time()
     output_dir = os.path.abspath(output_dir)
     os.makedirs(output_dir, exist_ok=True)
@@ -407,6 +411,8 @@ def combine_and_align_h5(
             write_individual=False,
             write_merged=False,
             merged_filename="ambient_corrected_merged.h5ad",
+            inplace=True,
+            store_corrected_layer=not ambient_memory_efficient,
         )
         if corrected is None:
             raise RuntimeError("Ambient RNA correction did not return a corrected AnnData object.")
@@ -435,7 +441,9 @@ def combine_and_align_h5(
         adata_combined.var_names_make_unique()
         print(f"reimported adata shape: {adata_combined.shape} (cells x genes)")
         adata_combined = _apply_ambient_correction(adata_combined)
-        if assess_expression_scale(adata_combined)["skip_qc"]:
+        pre_qc_scale = assess_expression_scale(adata_combined)
+        pre_qc_shape = adata_combined.shape
+        if pre_qc_scale["skip_qc"]:
             print("...skipping QC: input is already scaled and log-transformed")
         else:
             print("...performing QC")
@@ -577,7 +585,19 @@ def combine_and_align_h5(
             adata_local.obs["Library"] = sample_name
             return adata_local, sample_name
 
-        if use_on_disk:
+        used_stream = False
+        if stream_10x_inputs:
+            from altanalyze3.components.cellHarmony.merge_inputs import concat_matching_10x
+            streamed = concat_matching_10x(h5_files, _load_adata)
+            if streamed is not None:
+                used_stream = True
+                adata_combined = streamed
+                _log_step("streamed matching 10x inputs", elapsed=time.time() - load_start)
+            elif not use_on_disk:
+                raise ValueError("Nonmatching 10x inputs require concat_on_disk=True for bounded import.")
+            del streamed
+
+        if not used_stream and use_on_disk:
             combined_path = os.path.join(output_dir, "combined_raw.h5ad")
             batch_size = int(concat_batch_size) if concat_batch_size else 50
             if batch_size <= 0:
@@ -593,7 +613,7 @@ def combine_and_align_h5(
                     ad.experimental.concat_on_disk(
                         inputs,
                         output_path,
-                        max_loaded_elems=12000000000,
+                        max_loaded_elems=50_000_000,
                         label="sample",
                         join="outer",
                         fill_value=0
@@ -627,10 +647,13 @@ def combine_and_align_h5(
                         )
                     progress.update(1)
                 batch_concat_start = time.time()
-                batch_adata = ad.concat(adata_list, label="sample", join="outer", fill_value=0)
+                # A one-sample batch needs no concatenation or duplicate matrix.
+                batch_adata = adata_list[0] if len(adata_list) == 1 else ad.concat(
+                    adata_list, label="sample", join="outer", fill_value=0,
+                )
                 batch_path = os.path.join(concat_tmpdir.name, f"batch_concat_{batch_index}.h5ad")
                 write_start = time.time()
-                batch_adata.write(batch_path, compression="gzip")
+                batch_adata.write(batch_path, compression="lzf")
                 if verbose_import:
                     _log_step(
                         f"wrote batch {batch_index} -> {batch_path}",
@@ -638,6 +661,7 @@ def combine_and_align_h5(
                     )
                 del batch_adata
                 del adata_list
+                del adata
                 batch_files.append(batch_path)
                 batch_index += 1
             progress.close()
@@ -656,7 +680,7 @@ def combine_and_align_h5(
             adata_combined = sc.read_h5ad(combined_path)
             _log_step("reloaded combined h5ad", elapsed=time.time() - read_start)
             concat_tmpdir.cleanup()
-        else:
+        elif not used_stream:
             for entry in tqdm(h5_files, desc="Loading input files"):
                 sample_start = time.time()
                 if isinstance(entry, (tuple, list)) and len(entry) >= 2:
@@ -672,16 +696,20 @@ def combine_and_align_h5(
                     )
             _log_step("completed input loading", elapsed=time.time() - load_start)
 
-        if not use_on_disk:
+        if not used_stream and not use_on_disk:
             concat_start = time.time()
             _log_step("start in-memory concat")
             adata_combined = ad.concat(adata_list, label="sample", join="outer", fill_value=0)
+            adata_list.clear()
+            del adata
             _log_step("completed in-memory concat", elapsed=time.time() - concat_start)
         print(f"adata shape: {adata_combined.shape} (cells x genes)")
 
         adata_combined = _apply_ambient_correction(adata_combined)
 
-        if assess_expression_scale(adata_combined)["skip_qc"]:
+        pre_qc_scale = assess_expression_scale(adata_combined)
+        pre_qc_shape = adata_combined.shape
+        if pre_qc_scale["skip_qc"]:
             print("[qc] skipped: input is already scaled and log-transformed")
         else:
             adata_combined = _apply_qc_filters(adata_combined)
@@ -754,7 +782,9 @@ def combine_and_align_h5(
         cell_to_metacell_map = membership_df[['cell_barcode', 'metacell_id']].set_index('cell_barcode')['metacell_id']
 
     # retain the original counts in the h5ad in the new counts slot
-    _scale = assess_expression_scale(adata_combined)
+    # If QC kept every row and column, X is unchanged. Reclassifying it would
+    # repeat sampling/quantile allocations over tens of millions of values.
+    _scale = pre_qc_scale if not metacell_align and adata_combined.shape == pre_qc_shape else assess_expression_scale(adata_combined)
     if _scale["x_verdict"] == "counts" or "counts" in adata_combined.layers:
         # only store X as "counts" when X really holds counts; otherwise a log matrix would be
         # labelled counts and every count-based step downstream would silently read log values
@@ -773,7 +803,9 @@ def combine_and_align_h5(
         adata_combined.write(output_dir+"/combined_qc_normalized.h5ad", compression="gzip")
 
     marker_genes = reference_df.index
-    adata_filtered, genes_present, missing_genes = subset_to_reference_genes(adata_combined, marker_genes)
+    adata_filtered, genes_present, missing_genes = subset_to_reference_genes(
+        adata_combined, marker_genes, copy_layers=alignment_mode != "cosine",
+    )
 
     if missing_genes:
         print(f"Warning: {len(missing_genes)} marker genes not found in dataset and will be excluded out of {len(marker_genes)}.")
@@ -794,27 +826,7 @@ def combine_and_align_h5(
     query_index = adata_filtered.obs_names
 
     if alignment_mode == "cosine":
-        # Cosine method: L2 normalization + cosine similarity
-        query_X = adata_filtered.X
-        if sp.issparse(query_X):
-            query_X = query_X.tocsr()
-            row_norms = np.sqrt(query_X.multiply(query_X).sum(axis=1)).A1
-            row_norms[row_norms == 0] = 1.0
-            query_norm = sp.diags(1.0 / row_norms).dot(query_X)
-        else:
-            row_norms = np.linalg.norm(query_X, axis=1)
-            row_norms[row_norms == 0] = 1.0
-            query_norm = query_X / row_norms[:, None]
-
-        ref_values = ref_matrix.values
-        ref_norms = np.linalg.norm(ref_values, axis=1)
-        ref_norms[ref_norms == 0] = 1.0
-        ref_norm = ref_values / ref_norms[:, None]
-
-        similarities = query_norm.dot(ref_norm.T)
-        similarities = np.asarray(similarities)
-        alignment_scores = similarities[np.arange(len(similarities)), np.argmax(similarities, axis=1)]
-        best_matches = np.argmax(similarities, axis=1)
+        best_matches, alignment_scores = _cosine_best_matches(adata_filtered.X, ref_matrix.values)
         assignments = ref_matrix.index[best_matches]
         z_diff = None  # not computed
 
@@ -865,6 +877,10 @@ def combine_and_align_h5(
         ref_name: assignments,
         "AlignmentScore": alignment_scores
     })
+    if alignment_mode == "cosine" and not export_cptt:
+        # The reference subset is no longer needed, including before a possible
+        # full-matrix cell filter below. UMAP builds its own feature subset.
+        del adata_filtered
 
     if min_alignment_score is not None:
         before = match_df.shape[0]
@@ -1306,7 +1322,34 @@ def apply_gene_translation(adata, translation_map, sample_label=None):
     return updated_count
 
 
-def subset_to_reference_genes(adata, reference_genes):
+def _cosine_best_matches(query, reference, chunk_size=4096):
+    """Align in row blocks, bounding the dense cells-by-reference score matrix."""
+    ref_norms = np.linalg.norm(reference, axis=1)
+    ref_norms[ref_norms == 0] = 1.0
+    ref_norm = reference / ref_norms[:, None]
+    chunk_size = min(chunk_size, max(1, 4_000_000 // max(1, reference.shape[0])))
+    matches = np.empty(query.shape[0], dtype=np.int64)
+    scores = np.empty(query.shape[0], dtype=np.result_type(query.dtype, ref_norm.dtype, np.float32))
+    for start in range(0, query.shape[0], chunk_size):
+        end = min(start + chunk_size, query.shape[0])
+        block = query[start:end]
+        if sp.issparse(block):
+            block = block.tocsr()
+            norms = np.sqrt(block.multiply(block).sum(axis=1)).A1
+            norms[norms == 0] = 1.0
+            normalized = sp.diags(1.0 / norms).dot(block)
+        else:
+            norms = np.linalg.norm(block, axis=1)
+            norms[norms == 0] = 1.0
+            normalized = block / norms[:, None]
+        similarities = np.asarray(normalized.dot(ref_norm.T))
+        best = np.argmax(similarities, axis=1)
+        matches[start:end] = best
+        scores[start:end] = similarities[np.arange(end - start), best]
+    return matches, scores
+
+
+def subset_to_reference_genes(adata, reference_genes, *, copy_layers=True):
     """Subset AnnData to genes present in the reference, using gene symbols when available."""
     if isinstance(reference_genes, pd.Index):
         reference_genes = reference_genes.tolist()
@@ -1333,7 +1376,14 @@ def subset_to_reference_genes(adata, reference_genes):
         raise ValueError("No overlapping genes between the dataset and the reference after translation.")
 
     selected_var_names = [symbol_to_var[gene] for gene in matched_symbols]
-    filtered = adata[:, selected_var_names].copy()
+    if copy_layers:
+        filtered = adata[:, selected_var_names].copy()
+    else:
+        # Alignment consumes X alone. AnnData.copy also copies every count layer
+        # and raw, often tripling the reference-gene subset's memory footprint.
+        columns = adata.var_names.get_indexer(selected_var_names)
+        filtered = ad.AnnData(X=adata.X[:, columns], obs=adata.obs.copy(),
+                            var=adata.var.iloc[columns].copy())
     filtered.var_names = pd.Index(matched_symbols)
     filtered.var["gene_symbols"] = matched_symbols
 

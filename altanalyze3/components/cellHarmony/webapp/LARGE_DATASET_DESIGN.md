@@ -1,5 +1,13 @@
 # scALABLE web: serving large datasets without loading them into RAM
 
+Status update, 2026-10-02: steps A/B are implemented; step C now runs each heavy
+analysis in a disposable subprocess supervised by the shared thread queue.
+Serving caches have byte/entry/TTL limits, and the default bundle threshold is
+10,000 cells. Full all-modality validation at 128,388 aligned cells, repeated
+saved-job opens, concurrent visitors and Chrome view checks are documented in
+`README.md` and `dev/memory_workflow_results.json`. The original design below is
+retained as the proposal and records its original threshold and validation goals.
+
 Design, 2026-09-28. Implemented: the fast expression-store builder of step A (section 3,
 "Build time, measured"). Not implemented: the step A call in `flask/pipeline.py`, step B
 and step C. Covers the scALABLE upload app
@@ -131,3 +139,17 @@ setting the threshold to 0 leaves one path.
   imputation, which needs its own measurement first.
 - cellHarmony-differential reads the h5ad when a comparison runs. It runs in the job
   process, so step C bounds it; moving it onto the bundle is a later step.
+
+
+Analysis retention now uses streamed prediction H5ADs, lossless sample/state
+profile indices for broadcast modalities, row-block MarkerFinder statistics and
+bounded differential reads. GRN X/counts hard links avoid duplicate buffers;
+small enough GRN inputs use shared RAM and larger inputs use an anonymous
+uncompressed memory map. The map is temporary and is released by the OS when a
+worker exits. A job's combined RNA file omits duplicate wide imputation `obsm`
+arrays above 20,000 cells; separate modality artifacts remain portable H5ADs.
+
+The 128k-cell full pipeline and million-row statistics measurements are in the
+README and `dev/memory_workflow_results.json`. These establish bounded prediction
+and statistical processing, not a guarantee for a full million-cell upload.
+Initial sparse RNA import and normalization still materialize the RNA matrix.

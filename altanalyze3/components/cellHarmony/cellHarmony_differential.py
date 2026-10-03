@@ -684,6 +684,10 @@ def _independent_filter_mask(matrix):
 
 
 def _rank_genes_scanpy(two_group_adata, groupby, case_label, control_label, method):
+    from .disk_differential import root_and_rows, rank_features
+    if root_and_rows(two_group_adata) is not None:
+        return rank_features(two_group_adata, groupby, case_label, control_label, method,
+                             _rank_genes_scanpy, _bh_fdr, _independent_filter_mask)
     # Run Scanpy DE and return names, pvals_adj, log2fc, raw pvals as Series for the case vs control
     two_for_rank = _prepare_scanpy_rank_input(two_group_adata)
 
@@ -764,6 +768,10 @@ def _prepare_scanpy_rank_input(two_group_adata):
 
 def _extract_expression_matrix(pop_data):
     """Return matrix, gene names, and logging metadata for fold-change computation."""
+    from .disk_differential import expression_reader
+    disk_input = expression_reader(pop_data)
+    if disk_input is not None:
+        return disk_input
     if getattr(pop_data, "raw", None) is not None:
         matrix = pop_data.raw.X
         genes = np.asarray(pop_data.raw.var_names.astype(str))
@@ -809,19 +817,23 @@ def _compute_pseudobulk_log2fc(pop_data, covariate_col, case_label, control_labe
         return pd.DataFrame(columns=["log2fc", "case_mean", "control_mean"])
 
     matrix, genes, logged, log_base = _extract_expression_matrix(pop_data)
-    matrix = _matrix_to_numpy(matrix)
-
-    if logged:
-        if log_base is None or np.isclose(log_base, np.e):
-            linear = np.expm1(matrix)
+    # Fold changes depend on each feature's means, not a dense matrix containing
+    # every feature. CSC makes these bounded feature reads fast for sparse RNA.
+    if sps.issparse(matrix):
+        matrix = matrix.tocsc()
+    width = max(1, min(256, 8_000_000 // max(1, matrix.shape[0])))
+    case_means, control_means = [], []
+    for start in range(0, len(genes), width):
+        block = _matrix_to_numpy(matrix[:, start:start + width])
+        if logged:
+            linear = np.expm1(block) if log_base is None or np.isclose(log_base, np.e) else np.power(log_base, block) - 1.0
         else:
-            linear = np.power(log_base, matrix) - 1.0
-    else:
-        linear = matrix
-
+            linear = block
+        case_means.append(linear[case_mask].mean(axis=0))
+        control_means.append(linear[ctrl_mask].mean(axis=0))
+    mean_case = np.concatenate(case_means) if case_means else np.array([])
+    mean_ctrl = np.concatenate(control_means) if control_means else np.array([])
     eps = 1.0
-    mean_case = linear[case_mask].mean(axis=0)
-    mean_ctrl = linear[ctrl_mask].mean(axis=0)
     log2fc = np.log2((mean_case + eps) / (mean_ctrl + eps))
     case_mean_log2 = np.log2(mean_case + eps)
     control_mean_log2 = np.log2(mean_ctrl + eps)
@@ -843,7 +855,7 @@ def _compute_pseudobulk_log2fc(pop_data, covariate_col, case_label, control_labe
     return df
 
 
-def _moderated_t_test(adata, covariate_col, case_label, control_label, pop):
+def _moderated_t_test(adata, covariate_col, case_label, control_label, pop, *, store_full_log=True):
     """
     Limma-like moderated t-test with empirical Bayes shrinkage.
     Now performs independent filtering: expression filtering only
@@ -857,21 +869,38 @@ def _moderated_t_test(adata, covariate_col, case_label, control_label, pop):
     case_mask = cond == str(case_label)
     ctrl_mask = cond == str(control_label)
 
-    X_case = np.asarray(adata.X[case_mask, :].todense() if hasattr(adata.X, "todense") else adata.X[case_mask, :])
-    X_ctrl = np.asarray(adata.X[ctrl_mask, :].todense() if hasattr(adata.X, "todense") else adata.X[ctrl_mask, :])
+    from .disk_differential import root_and_rows, FeatureReader
+    found = root_and_rows(adata)
+    matrix = FeatureReader(found[0].X, found[1]) if found is not None else adata.X
+    if sps.issparse(matrix):
+        matrix = matrix.tocsc()
     genes = np.asarray(adata.var_names)
 
-    n_case, n_ctrl = X_case.shape[0], X_ctrl.shape[0]
+    n_case, n_ctrl = int(case_mask.sum()), int(ctrl_mask.sum())
     if n_case < 2 or n_ctrl < 2:
         if diagnostic_report:
             print(f"[DEBUG] Skipping {pop} (insufficient pseudobulks per condition after case/control filtering)")
         return pd.DataFrame(columns=["gene","log2fc","t","pval","fdr"]), 0
 
     # --- Compute t/p for all genes first (no filtering yet) ---
-    mean_case = X_case.mean(0)
-    mean_ctrl = X_ctrl.mean(0)
-    var_case = X_case.var(0, ddof=1)
-    var_ctrl = X_ctrl.var(0, ddof=1)
+    if found is not None:
+        from .disk_differential import moderated_inputs
+        mean_case, mean_ctrl, var_case, var_ctrl, filter_mask = moderated_inputs(
+            adata, case_mask, ctrl_mask, INDEPENDENT_FILTER_EXPR_THRESHOLD, INDEPENDENT_FILTER_MIN_SAMPLES)
+    else:
+        means_case, means_ctrl, vars_case, vars_ctrl, masks = [], [], [], [], []
+        width = max(1, min(256, 8_000_000 // max(1, matrix.shape[0])))
+        for start in range(0, len(genes), width):
+            block = matrix[:, start:start + width]
+            block = block.toarray() if sps.issparse(block) else np.asarray(block)
+            X_case, X_ctrl = block[np.asarray(case_mask)], block[np.asarray(ctrl_mask)]
+            means_case.append(X_case.mean(0))
+            means_ctrl.append(X_ctrl.mean(0))
+            vars_case.append(X_case.var(0, ddof=1))
+            vars_ctrl.append(X_ctrl.var(0, ddof=1))
+            masks.append(_independent_filter_mask(np.vstack([X_case, X_ctrl])))
+        mean_case, mean_ctrl = np.concatenate(means_case), np.concatenate(means_ctrl)
+        var_case, var_ctrl = np.concatenate(vars_case), np.concatenate(vars_ctrl)
     s2 = (var_case + var_ctrl) / 2
 
     # Empirical Bayes shrinkage
@@ -885,19 +914,25 @@ def _moderated_t_test(adata, covariate_col, case_label, control_label, pop):
 
     # --- NEW: persist full (unfiltered) log2FC for this population ---
     # Note: this is a side-effect; we collect these across populations later.
-    if "full_log2fc" not in adata.uns:
-        adata.uns["full_log2fc"] = {}
-    # store as a Series aligned to adata.var_names
-    adata.uns["full_log2fc"][str(pop)] = pd.Series(
-        np.asarray(diff).ravel(), index=np.asarray(adata.var_names), dtype=float
-    )
+    if store_full_log:
+        if found is not None or adata.is_view:
+            target_uns = getattr(adata, '_analysis_transient_uns', {})
+            adata._analysis_transient_uns = target_uns
+        else:
+            target_uns = adata.uns
+        if "full_log2fc" not in target_uns:
+            target_uns["full_log2fc"] = {}
+        target_uns["full_log2fc"][str(pop)] = pd.Series(
+            np.asarray(diff).ravel(), index=np.asarray(adata.var_names), dtype=float
+        )
 
     tvals = diff / se
 
     pvals = 2 * stats.t.sf(np.abs(tvals), df=n_case + n_ctrl - 2)
 
     # --- Independent filtering for FDR correction ---
-    filter_mask = _independent_filter_mask(np.vstack([X_case, X_ctrl]))
+    if found is None:
+        filter_mask = np.concatenate(masks)
 
     # Apply BH-FDR to filtered subset only
     filt_mask = filter_mask & np.isfinite(pvals)
@@ -921,7 +956,12 @@ def _moderated_t_test(adata, covariate_col, case_label, control_label, pop):
 
     # --- Diagnostics ---
     tested_genes = int(np.sum(filt_mask))
-    adata.uns[f"tested_genes_{pop}"] = tested_genes
+    if found is not None or adata.is_view:
+        target_uns = getattr(adata, '_analysis_transient_uns', {})
+        adata._analysis_transient_uns = target_uns
+    else:
+        target_uns = adata.uns
+    target_uns[f"tested_genes_{pop}"] = tested_genes
 
     if diagnostic_report:
         print(f"[DEBUG] {pop} moderated t-test (EB):")
@@ -964,7 +1004,7 @@ def run_de_for_comparisons(adata,
 
     # Filter to cells with both labels present
     keep = adata.obs[covariate_col].isin([case_label, control_label])
-    sub = adata[keep].copy()
+    sub = adata if bool(np.asarray(keep).all()) else adata[keep]
     total_cells = sub.n_obs
 
     # Under pseudobulk the rows of sub.obs are SAMPLES, not cells, so the size
@@ -1032,13 +1072,17 @@ def run_de_for_comparisons(adata,
     all_genes = set(sub.var_names.astype(str))
     corrected_fc = None
 
-    if not sps.issparse(sub.X):
+    from .disk_differential import root_and_rows, bounded_materialize
+    disk_dense = root_and_rows(sub) is not None
+    if not disk_dense and not sps.issparse(sub.X):
         sub.X = _ensure_numeric_matrix(sub.X)
+
+    disk_root = root_and_rows(sub)[0] if disk_dense else None
 
     # Per-population DE
     all_fold_values = {}
     for pop, pop_mask in de_units:
-        pop_data = sub[pop_mask].copy()
+        pop_data = sub[pop_mask] if disk_dense else sub[pop_mask].copy()
 
         # size checks
         grp_sizes = pop_data.obs[covariate_col].value_counts()
@@ -1052,7 +1096,7 @@ def run_de_for_comparisons(adata,
 
 
         # --- Perform DE for individual population ---
-        two = pop_data.copy()
+        two = bounded_materialize(pop_data, max_bytes=(2 * 1024**3 if hasattr(disk_root.X, '_analysis_row_store') else 1024**3)) if disk_dense else pop_data
 
         # --- Choose test method based on pseudobulk flag ---
         if "pseudobulk" in adata.uns.get("pseudobulk_method", ""):
@@ -1127,7 +1171,7 @@ def run_de_for_comparisons(adata,
             p_base = fdr_values
 
         # --- Correct fold computation: true mean-based log2 fold (per gene across cells) ---
-        corrected_stats = _compute_pseudobulk_log2fc(pop_data, covariate_col, case_label, control_label)
+        corrected_stats = _compute_pseudobulk_log2fc(two, covariate_col, case_label, control_label)
         if not corrected_stats.empty:
             all_fold_values[str(pop)] = corrected_stats["log2fc"]
             updated_fc = df["gene"].map(corrected_stats["log2fc"])
@@ -1225,7 +1269,7 @@ def run_de_for_comparisons(adata,
     )
 
     # Pooled overall test pO (all cells case vs control, regardless of population)
-    pooled = sub.copy()
+    pooled = sub
     # Ensure both groups present
     gvc = pooled.obs[covariate_col].value_counts()
     if int(gvc.get(case_label, 0)) >= min_cells and int(gvc.get(control_label, 0)) >= min_cells:
@@ -1240,7 +1284,7 @@ def run_de_for_comparisons(adata,
                 }).set_index("gene")
             else:
                 # Pseudobulk mode
-                df_o, _ = _moderated_t_test(pooled, covariate_col, case_label, control_label, "pooled_overall")
+                df_o, _ = _moderated_t_test(pooled, covariate_col, case_label, control_label, "pooled_overall", store_full_log=False)
                 pooled_overall = df_o.set_index("gene")[["log2fc", "fdr"]]
         except Exception as e:
             print(f"[WARN] Overall pooled DE failed: {e}")
@@ -1317,7 +1361,7 @@ def run_de_for_comparisons(adata,
         mask_ctrl = (sub.obs[covariate_col] == control_label) & (sub.obs[population_col].isin(pops_sel))
         if int(mask_case.sum()) < min_cells or int(mask_ctrl.sum()) < min_cells:
             continue
-        pooled_pat = sub[mask_case | mask_ctrl].copy()
+        pooled_pat = sub[mask_case | mask_ctrl]
         coreg_name = _pattern_to_label(pat, pop_order)
         try:
             if method == "scanpy":
@@ -1331,7 +1375,7 @@ def run_de_for_comparisons(adata,
                     "pval": pvals_c.values,
                 })
             else:
-                dfc, _ = _moderated_t_test(pooled_pat, covariate_col, case_label, control_label, coreg_name)
+                dfc, _ = _moderated_t_test(pooled_pat, covariate_col, case_label, control_label, coreg_name, store_full_log=False)
                 keep_cols = [c for c in ["gene", "log2fc", "fdr", "pval"] if c in dfc.columns]
                 dfc = dfc.loc[:, keep_cols]
             if diagnostic_report:
@@ -2722,6 +2766,25 @@ def run_goelite_for_clusters_directional(de_store,
 
 def write_differentials_only_h5ad(adata, de_store, out_path):
     detailed = de_store["detailed_deg"]
+    from .disk_differential import root_and_rows, write_selection
+    if root_and_rows(adata) is not None and adata.raw is None:
+        selected = adata
+        if not detailed.empty:
+            keep = np.isin(adata.var_names.astype(str), detailed['gene'].astype(str).unique())
+            if keep.any():
+                selected = adata[:, keep]
+        _sanitize_de_store(de_store)
+        uns = dict(adata.uns)
+        uns['cellHarmony_DE'] = de_store
+        write_selection(selected, out_path, uns)
+        print("[INFO] Wrote differentials h5ad: {}".format(out_path))
+        return
+    if detailed.empty and adata.raw is None:
+        from .disk_differential import write_unfiltered
+        _sanitize_de_store(de_store)
+        write_unfiltered(adata, de_store, out_path)
+        print("[INFO] Wrote differentials h5ad: {}".format(out_path))
+        return
     if detailed.empty:
         print("[WARN] No DEGs; writing a copy of input with DE container only.")
         adx = adata.copy()
@@ -2744,6 +2807,12 @@ def write_differentials_only_h5ad(adata, de_store, out_path):
     keep_mask = np.isin(var_names, np.array(deg_union, dtype=str))
     if keep_mask.sum() == 0:
         print("[WARN] None of the DEG genes match var_names; writing input with DE container only.")
+        if adata.raw is None:
+            from .disk_differential import write_unfiltered
+            _sanitize_de_store(de_store)
+            write_unfiltered(adata, de_store, out_path)
+            print("[INFO] Wrote differentials h5ad: {}".format(out_path))
+            return
         adx = adata.copy()
         _sanitize_de_store(de_store)
         if "cellHarmony_DE" in adx.uns:
