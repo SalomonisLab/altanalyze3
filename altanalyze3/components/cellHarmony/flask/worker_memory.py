@@ -39,6 +39,22 @@ def tree_rss(processes, root):
     return total
 
 
+def _working_set(base, used):
+    """Usage minus inactive file cache, as docker stats and the kubelet count it.
+
+    memory.current includes page cache from reading and writing h5ad files. The
+    kernel frees it only under pressure, so after a few large jobs an idle
+    container could sit above the admission ceiling and hold every new job
+    (2026-10-03: 0.17 GiB anon + 3.4 GiB cache held admission indefinitely).
+    """
+    try:
+        stat = dict(line.split() for line in (base / 'memory.stat').read_text().splitlines())
+        inactive = int(stat.get('inactive_file', stat.get('total_inactive_file', 0)))
+    except (OSError, ValueError):
+        return used
+    return max(used - inactive, 0)
+
+
 def container_memory():
     """Read our cgroup v2/v1 usage and limit; return None outside a cgroup."""
     try:
@@ -59,7 +75,7 @@ def container_memory():
             try:
                 used, limit = ((base / name).read_text().strip() for name in names)
                 if limit != 'max':
-                    return int(used), int(limit)
+                    return _working_set(base, int(used)), int(limit)
             except (OSError, ValueError):
                 continue
     return None
