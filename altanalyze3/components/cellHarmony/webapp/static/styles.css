@@ -839,6 +839,30 @@ select:disabled {
   min-height: 320px;
 }
 
+/* Keep the QC key on one row independently of Plotly's legend wrapping. */
+.qc-live-legend {
+  display: flex;
+  flex-flow: row nowrap;
+  align-items: center;
+  gap: 16px;
+  overflow-x: auto;
+  margin: 14px 0 4px;
+  font-size: 12px;
+  color: #444;
+}
+.qc-live-legend[hidden], .qc-legend-item[hidden] { display: none; }
+.qc-legend-item {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+.qc-legend-item i { width: 12px; height: 12px; flex: 0 0 12px; }
+.qc-swatch-filtered { background: rgba(59, 130, 246, 0.35); }
+.qc-swatch-retained { background: rgba(5, 150, 105, 0.85); }
+.qc-swatch-mapped { background: #065f46; }
+
 #qc-live-caption {
   min-height: 36px;
   margin-top: 8px;

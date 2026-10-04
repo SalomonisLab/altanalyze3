@@ -72,3 +72,9 @@ def test_generic_adt_bundle_preserves_cell_order_and_labels(tmp_path):
     decoded=[bundle.levels('state')[v] for v in bundle.labels('state')]
     assert decoded==['CLP','HSC','CLP']
     with pytest.raises(ValueError,match='already exists'):export_cite(data,tmp_path,name='experiment',labels=['state'],scale='DSB')
+
+
+def test_saved_study_lookup_is_scoped_to_prediction_artifacts(client):
+    assert client.get('/api/isolation/studies').json=={'studies':[]}
+    assert client.get('/api/isolation/studies/manifest.json').status_code==400
+    assert client.get('/api/isolation/studies/selected__balanced_F1__missing.json').status_code==404

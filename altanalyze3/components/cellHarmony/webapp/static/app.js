@@ -2382,6 +2382,8 @@ function resetWorkspaceData() {
     // Ignore Plotly cleanup errors when the plot is not initialized.
   }
   qcLivePlot.innerHTML = "";
+  const qcLiveLegend = document.getElementById("qc-live-legend");
+  if (qcLiveLegend) qcLiveLegend.hidden = true;
   const qcLiveCaption = document.getElementById("qc-live-caption");
   if (qcLiveCaption) {
     qcLiveCaption.textContent = "Live counts parsed from alignment log.";
@@ -3054,6 +3056,8 @@ function clearPlotEmptyState(plot) {
 function renderQcLiveProgress(data) {
   const plot = document.getElementById("qc-live-plot");
   const caption = document.getElementById("qc-live-caption");
+  const legend = document.getElementById("qc-live-legend");
+  if (legend) legend.hidden = true;
   const ambientPlot = document.getElementById("ambient-live-plot");
   const ambientCaption = document.getElementById("ambient-live-caption");
   if (!plot || !caption) {
@@ -3114,6 +3118,9 @@ function renderQcLiveProgress(data) {
   const kept = rows.map((row) => Math.max(0, Math.min(total, Number(row.kept) || 0)));
   const filtered = kept.map((value) => Math.max(0, total - value));
   const hasMapped = Number.isFinite(state.mapped);
+  if (legend) legend.hidden = false;
+  const mappedLegend = document.getElementById("qc-legend-mapped");
+  if (mappedLegend) mappedLegend.hidden = !hasMapped;
   const mapped = kept.map((value) => Math.min(value, Math.max(0, state.mapped || 0)));
   const maxLabelLength = labels.reduce((max, value) => Math.max(max, String(value).length), 0);
   const marginLeft = Math.min(210, Math.max(120, 18 + maxLabelLength * 6));
@@ -3155,8 +3162,9 @@ function renderQcLiveProgress(data) {
       barmode: "stack",
       paper_bgcolor: "rgba(0,0,0,0)",
       plot_bgcolor: "rgba(255,255,255,0.88)",
-      margin: { t: hasMapped ? 80 : 50, l: marginLeft, r: 16, b: 48 },
-      height: hasMapped ? 390 : 360,
+      margin: { t: 16, l: marginLeft, r: 16, b: 48 },
+      height: 326,
+      showlegend: false,
       xaxis: {
         title: { text: "Cells (relative to total detected)" },
         range: [0, total],
@@ -3166,12 +3174,6 @@ function renderQcLiveProgress(data) {
       },
       yaxis: {
         autorange: "reversed",
-      },
-      legend: {
-        orientation: "h",
-        x: 0,
-        y: 1.02,
-        yanchor: "bottom",
       },
     },
     { responsive: true, displayModeBar: false }
@@ -3354,14 +3356,13 @@ function buildQcCellSummary(data) {
     if (!referenceRerunPending && !areExploreResultsReady()) {
       return "Alignment completed. Finalizing Explore results and loading the combined h5ad for interactive viewing...";
     }
-    const createdAt = Date.parse(data.created_at || "");
-    const updatedAt = Date.parse(data.updated_at || "");
+    const duration = data.analysis_duration_seconds;
     const exclusionSuffix =
       alignmentExcluded !== null
         ? ` ${alignmentExcluded.toLocaleString()} cells excluded due to poor alignment.`
         : "";
-    if (Number.isFinite(createdAt) && Number.isFinite(updatedAt) && updatedAt >= createdAt) {
-      const elapsedSeconds = Math.max(0, Math.round((updatedAt - createdAt) / 1000));
+    if (typeof duration === "number" && Number.isFinite(duration) && duration >= 0) {
+      const elapsedSeconds = Math.round(duration);
       return `Analysis completed and results saved in ${elapsedSeconds} seconds.${exclusionSuffix}`;
     }
     return `Analysis completed and results saved.${exclusionSuffix}`.trim();

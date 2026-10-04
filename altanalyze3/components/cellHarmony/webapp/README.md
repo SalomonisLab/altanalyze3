@@ -1092,3 +1092,12 @@ validation. The same check protects existing-job reruns and CLI imports.
 It reads only HDF5 metadata and preserves an upload's file position; modern
 and legacy 10x matrix uploads remain supported. Deploy the shared
 `input_validation.py` with the updated app, loader and merge modules.
+
+Completed-job duration uses dedicated main-worker timing, not `updated_at`,
+which changes after differential analyses and other metadata updates. Queue
+and upload time are excluded. Existing jobs recover their main duration from
+cached log start/completion markers; when those markers are unavailable,
+the UI omits the duration instead of reporting an unrelated timestamp span.
+On saved job `9f99458185134da58f1167687acd818b`, the erroneous 844-second
+label becomes 67 seconds (66.87 seconds in the worker, 73.59 seconds from
+upload creation to completion). This timing fix passed 14 targeted tests.

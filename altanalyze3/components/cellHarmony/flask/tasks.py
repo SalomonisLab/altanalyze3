@@ -9,6 +9,7 @@ import threading
 import time
 import traceback
 from concurrent.futures import Future, ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict
 
@@ -251,8 +252,11 @@ class JobRunner:
         return summary
 
     def _run_pipeline(self, job_id: str) -> None:
+        started = time.perf_counter()
         try:
-            self.store.update_job(job_id, status="processing", message="Preparing inputs…", progress=10, worker_pid=os.getpid())
+            self.store.update_job(job_id, status="processing", message="Preparing inputs…", progress=10,
+                                  worker_pid=os.getpid(), analysis_started_at=datetime.now(timezone.utc).isoformat(),
+                                  analysis_completed_at=None, analysis_duration_seconds=None)
             self.store.append_log(job_id, "Job accepted by worker.")
             time.sleep(0.1)
             log_stream = _JobLogStream(self.store, job_id)
@@ -265,7 +269,9 @@ class JobRunner:
                     h5ad_compression=self.h5ad_compression,
                 )
             log_stream.flush()
-            self.store.update_job(job_id, status="completed", message="Job finished successfully.", progress=100, worker_pid=None)
+            self.store.update_job(job_id, status="completed", message="Job finished successfully.", progress=100, worker_pid=None,
+                                  analysis_completed_at=datetime.now(timezone.utc).isoformat(),
+                                  analysis_duration_seconds=time.perf_counter() - started)
             self.store.append_log(job_id, "Job completed.")
         except Exception as exc:  # pragma: no cover - defensive
             summary = self._log_failure(job_id, "Job failed", exc)

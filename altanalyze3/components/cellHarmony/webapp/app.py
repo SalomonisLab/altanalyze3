@@ -6096,11 +6096,12 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = _job_metadata_with_recovery(store, runner, job_id)
         log_path = store.logs_dir(job_id) / "pipeline.log"
-        from .log_snapshot import read_pipeline_log
+        from .log_snapshot import read_pipeline_log, analysis_duration_seconds
         log_head, log_tail, qc_progress_log = read_pipeline_log(log_path)
         meta["log_head"] = log_head
         meta["log_tail"] = log_tail
         meta["qc_progress_log"] = qc_progress_log
+        meta["analysis_duration_seconds"] = analysis_duration_seconds(meta, qc_progress_log)
         meta["qc_log_tail"] = log_tail if meta.get("status") == "failed" else _filter_qc_log_lines(log_tail)
         meta["message"] = _derive_live_pipeline_message(meta.get("status"), log_tail, meta.get("message"))
         if isinstance(meta.get("fastcomm_analysis"), dict) and meta["fastcomm_analysis"].get("enabled"):

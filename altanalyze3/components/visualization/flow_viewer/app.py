@@ -202,6 +202,27 @@ def create_app(bundle_root: str) -> Flask:
         for i in np.flatnonzero(sel):w.writerow([int(i)+1,levels[int(codes[i])] if 0<=codes[i]<len(levels) else 'unassigned'])
         return Response(buf.getvalue(),mimetype='text/tab-separated-values',headers={'Content-Disposition':'attachment; filename=gated_events.tsv'})
 
+    @app.route('/api/isolation/studies')
+    def isolation_studies():
+        from pathlib import Path
+        root=Path(bundle.root)/'validation_20261003'/'ML_CLP_prospective'
+        rows=[]
+        for path in sorted(root.glob('selected__balanced_F1__*.json')):
+            result=json.loads(path.read_text())
+            rows.append(dict(file=path.name,space=result['space'],population=result['populations'][0],
+                             source=result.get('source_space',result['space']),panel=result.get('panel','flow_panel'),
+                             hypothesis=result['hypothesis'],test=result['best']['test']))
+        return jsonify(studies=rows)
+
+    @app.route('/api/isolation/studies/<filename>')
+    def isolation_study(filename):
+        from pathlib import Path
+        if not filename.startswith('selected__balanced_F1__') or not filename.endswith('.json') or Path(filename).name!=filename:
+            raise ValueError('Select an available study strategy')
+        path=Path(bundle.root)/'validation_20261003'/'ML_CLP_prospective'/filename
+        if not path.is_file():raise KeyError('Study strategy not found')
+        return jsonify(json.loads(path.read_text()))
+
     @app.route('/api/isolation/audit', methods=['POST'])
     def isolation_audit():
         """Descriptive virtual experiment; edited thresholds never inherit held-out scores."""

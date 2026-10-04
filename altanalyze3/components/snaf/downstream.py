@@ -974,10 +974,19 @@ def ensemblgene_to_symbol(query,species):
     if todo:
         import mygene
         mg = mygene.MyGeneInfo()
-        out = mg.querymany(todo,scopes='ensemblgene',fileds='symbol',species=species,returnall=True,as_dataframe=True,df_index=True)
+        # `fileds` was a typo for `fields`, so mygene was never asked for the symbol field and
+        # returned only its defaults.
+        out = mg.querymany(todo,scopes='ensemblgene',fields='symbol',species=species,returnall=True,as_dataframe=True,df_index=True)
         df = out['out']
-        df_unique = df.loc[~df.index.duplicated(),:]
-        df_unique['symbol'].fillna('unknown_gene',inplace=True)
+        df_unique = df.loc[~df.index.duplicated(),:].copy()
+        # mygene omits the column entirely when EVERY query term misses, and the next line then
+        # raised KeyError: 'symbol' and killed the whole SNAF-T run. A cohort whose junctions
+        # resolve to no known gene is a RESULT, not a crash: name them unknown_gene and carry on.
+        if 'symbol' not in df_unique.columns:
+            print("mygene returned no 'symbol' column for %d query terms (no hits); "
+                  "all are recorded as unknown_gene" % len(todo))
+            df_unique['symbol'] = 'unknown_gene'
+        df_unique['symbol'] = df_unique['symbol'].fillna('unknown_gene')
         mapping = df_unique['symbol'].to_dict()
         for g in todo:
             # missing key can only happen if mygene dropped a term; fall back to

@@ -1,5 +1,7 @@
 """Bounded pipeline log snapshots, reused until the file changes."""
 from collections import deque
+from datetime import datetime, timezone
+import math
 from pathlib import Path
 import re
 import threading
@@ -36,6 +38,10 @@ def read_pipeline_log(path):
                     if marker in line:
                         key = marker
                         break
+                if line.rstrip().endswith('] Job accepted by worker.'):
+                    key = 'analysis_start'
+                elif line.rstrip().endswith('] Job completed.'):
+                    key = 'analysis_end'
                 if 'Auto-selected rho for library' in line:
                     # Preserve each library's latest correction, not all repetitions.
                     match = _AMBIENT.search(line)
@@ -47,3 +53,32 @@ def read_pipeline_log(path):
         snapshot = dict(signature=signature, head=head, tail=list(tail), progress=list(progress.values()))
         _CACHE[str(path)] = snapshot
         return snapshot['head'], snapshot['tail'], snapshot['progress']
+
+
+def analysis_duration_seconds(meta, progress_lines):
+    """Main worker duration, independent of uploads, queue waits and later analyses."""
+    if meta.get("status") != "completed":
+        return None
+    saved = meta.get("analysis_duration_seconds")
+    if isinstance(saved, (int, float)) and math.isfinite(saved) and saved >= 0:
+        return saved
+    # Older jobs have no dedicated timing fields. The bounded log snapshot keeps
+    # the latest main-run markers even after many differential/interaction logs.
+    start = end = None
+    for line in progress_lines:
+        match = re.match(r"^\[([^]]+)\] (Job accepted by worker\.|Job completed\.)\s*$", line)
+        if not match:
+            continue
+        try:
+            stamp = datetime.fromisoformat(match[1].replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        if match[2] == "Job accepted by worker.":
+            start, end = stamp, None
+        else:
+            end = stamp
+    if start is not None and end is not None and end >= start:
+        return (end - start).total_seconds()
+    return None

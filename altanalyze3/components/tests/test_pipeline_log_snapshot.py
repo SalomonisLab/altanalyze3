@@ -40,3 +40,53 @@ def test_replaced_truncated_deleted_and_partial_logs(tmp_path):
     assert read_pipeline_log(path)[0]==['replacement\n']
     path.unlink()
     assert read_pipeline_log(path)==([],[],[])
+
+
+def test_main_duration_ignores_later_differentials_and_reruns(tmp_path):
+    from altanalyze3.components.cellHarmony.webapp.log_snapshot import analysis_duration_seconds
+
+    path = tmp_path / 'pipeline.log'
+    path.write_text('[2026-10-03T01:18:22.054320] Job accepted by worker.\n'
+                    '[2026-10-03T01:19:28.925823] Job completed.\n'
+                    + 'later work\n' * 600
+                    + '[2026-10-03T01:32:19.266739] Differential analysis completed.\n')
+    meta = {'status': 'completed', 'created_at': '2026-10-03T01:18:15.332648Z',
+            'updated_at': '2026-10-03T01:32:19.262797Z'}
+    progress = read_pipeline_log(path)[2]
+    assert round(analysis_duration_seconds(meta, progress)) == 67
+    assert analysis_duration_seconds(dict(meta, analysis_duration_seconds=12.5), progress) == 12.5
+    with path.open('a') as stream:
+        stream.write('[2026-10-03T02:00:00] Job accepted by worker.\n')
+    assert analysis_duration_seconds(meta, read_pipeline_log(path)[2]) is None
+    with path.open('a') as stream:
+        stream.write('[2026-10-03T02:00:20] Job completed.\n')
+    assert analysis_duration_seconds(meta, read_pipeline_log(path)[2]) == 20
+    assert analysis_duration_seconds({'status': 'processing', 'analysis_duration_seconds': 67}, progress) is None
+    assert analysis_duration_seconds(meta, []) is None
+
+
+def test_worker_duration_survives_differential_metadata_updates(tmp_path, monkeypatch):
+    from altanalyze3.components.cellHarmony.flask import tasks
+    from altanalyze3.components.cellHarmony.flask.job_manager import JobStore
+
+    store = JobStore(tmp_path / 'jobs')
+    job = store.create_job('human', 'test', None, files=[])['job_id']
+    runner = tasks.JobRunner(store, tmp_path / 'registry.json', max_workers=1, isolate_jobs=False)
+    calls = []
+    def fake_pipeline(job_id, *args, **kwargs):
+        state = store.get_job(job_id)
+        assert state['analysis_duration_seconds'] is None
+        assert state['analysis_completed_at'] is None
+        assert state['analysis_started_at']
+        calls.append(job_id)
+    monkeypatch.setattr(tasks, 'run_cellharmony_pipeline', fake_pipeline)
+    try:
+        runner._run_pipeline(job)
+        first = store.get_job(job)
+        assert first['status'] == 'completed' and first['analysis_duration_seconds'] >= 0
+        store.update_job(job, differential={'status': 'completed'})
+        assert store.get_job(job)['analysis_duration_seconds'] == first['analysis_duration_seconds']
+        runner._run_pipeline(job)
+        assert len(calls) == 2
+    finally:
+        runner.executor.shutdown(wait=True)
