@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from altanalyze3.components.model_registry import write_provenance
+
 import argparse
 import json
 from pathlib import Path
@@ -16,6 +18,7 @@ from .training import run_training
 def _write_outputs(predictions: pd.DataFrame, output_path: Path, summary, summary_path: Path | None) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     predictions.to_csv(output_path)
+    write_provenance(output_path, summary)
     if summary_path is not None:
         summary_path.parent.mkdir(parents=True, exist_ok=True)
         summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")

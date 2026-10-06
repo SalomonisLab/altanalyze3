@@ -1,0 +1,244 @@
+{
+  "training_cases": 84,
+  "all_source_cases": 95,
+  "targets": [
+    {
+      "target": "Dimethylglycine",
+      "observed_training_values": 5,
+      "observed_all_source_values": 5
+    },
+    {
+      "target": "PPG n9",
+      "observed_training_values": 8,
+      "observed_all_source_values": 8
+    },
+    {
+      "target": "Unknown0 325",
+      "observed_training_values": 3,
+      "observed_all_source_values": 3
+    },
+    {
+      "target": "Unknown0 559",
+      "observed_training_values": 7,
+      "observed_all_source_values": 8
+    },
+    {
+      "target": "Unknown0 950",
+      "observed_training_values": 9,
+      "observed_all_source_values": 9
+    },
+    {
+      "target": "Unknown0 999",
+      "observed_training_values": 1,
+      "observed_all_source_values": 1
+    },
+    {
+      "target": "Unknown0 1113",
+      "observed_training_values": 2,
+      "observed_all_source_values": 2
+    },
+    {
+      "target": "Unknown0 1184",
+      "observed_training_values": 0,
+      "observed_all_source_values": 0
+    },
+    {
+      "target": "Unknown0 1264",
+      "observed_training_values": 2,
+      "observed_all_source_values": 2
+    },
+    {
+      "target": "Unknown0 1287",
+      "observed_training_values": 11,
+      "observed_all_source_values": 13
+    },
+    {
+      "target": "Unknown0 1305",
+      "observed_training_values": 3,
+      "observed_all_source_values": 3
+    },
+    {
+      "target": "Unknown0 1307",
+      "observed_training_values": 0,
+      "observed_all_source_values": 0
+    },
+    {
+      "target": "Unknown0 1315",
+      "observed_training_values": 3,
+      "observed_all_source_values": 3
+    },
+    {
+      "target": "Unknown0 1411",
+      "observed_training_values": 0,
+      "observed_all_source_values": 0
+    },
+    {
+      "target": "Unknown0 1433",
+      "observed_training_values": 10,
+      "observed_all_source_values": 10
+    },
+    {
+      "target": "Unknown0 1441",
+      "observed_training_values": 1,
+      "observed_all_source_values": 1
+    },
+    {
+      "target": "Unknown0 1442",
+      "observed_training_values": 4,
+      "observed_all_source_values": 4
+    },
+    {
+      "target": "Unknown0 1444",
+      "observed_training_values": 7,
+      "observed_all_source_values": 9
+    },
+    {
+      "target": "Unknown0 1495",
+      "observed_training_values": 4,
+      "observed_all_source_values": 4
+    },
+    {
+      "target": "Unknown0 1504",
+      "observed_training_values": 0,
+      "observed_all_source_values": 0
+    },
+    {
+      "target": "Unknown0 1601",
+      "observed_training_values": 3,
+      "observed_all_source_values": 3
+    },
+    {
+      "target": "Azithromycin",
+      "observed_training_values": 7,
+      "observed_all_source_values": 8
+    },
+    {
+      "target": "Doxycycline",
+      "observed_training_values": 1,
+      "observed_all_source_values": 1
+    },
+    {
+      "target": "Ofloxacin",
+      "observed_training_values": 10,
+      "observed_all_source_values": 11
+    },
+    {
+      "target": "Unknown 0285",
+      "observed_training_values": 0,
+      "observed_all_source_values": 0
+    },
+    {
+      "target": "Unknown 0319",
+      "observed_training_values": 0,
+      "observed_all_source_values": 0
+    },
+    {
+      "target": "Unknown 0372",
+      "observed_training_values": 0,
+      "observed_all_source_values": 0
+    },
+    {
+      "target": "Unknown 0399",
+      "observed_training_values": 0,
+      "observed_all_source_values": 0
+    },
+    {
+      "target": "Unknown 0484",
+      "observed_training_values": 0,
+      "observed_all_source_values": 0
+    },
+    {
+      "target": "Unknown 0506",
+      "observed_training_values": 3,
+      "observed_all_source_values": 3
+    },
+    {
+      "target": "Unknown 0526",
+      "observed_training_values": 0,
+      "observed_all_source_values": 0
+    },
+    {
+      "target": "Unknown 0545",
+      "observed_training_values": 9,
+      "observed_all_source_values": 9
+    },
+    {
+      "target": "Unknown 0569",
+      "observed_training_values": 2,
+      "observed_all_source_values": 2
+    },
+    {
+      "target": "Unknown 0625",
+      "observed_training_values": 8,
+      "observed_all_source_values": 8
+    },
+    {
+      "target": "Unknown 0644",
+      "observed_training_values": 9,
+      "observed_all_source_values": 10
+    },
+    {
+      "target": "Unknown 0651",
+      "observed_training_values": 10,
+      "observed_all_source_values": 11
+    },
+    {
+      "target": "Unknown 0652",
+      "observed_training_values": 7,
+      "observed_all_source_values": 9
+    },
+    {
+      "target": "Unknown 0666",
+      "observed_training_values": 7,
+      "observed_all_source_values": 9
+    },
+    {
+      "target": "Unknown 0674",
+      "observed_training_values": 10,
+      "observed_all_source_values": 11
+    },
+    {
+      "target": "Unknown 0693",
+      "observed_training_values": 8,
+      "observed_all_source_values": 10
+    },
+    {
+      "target": "Unknown 0698",
+      "observed_training_values": 10,
+      "observed_all_source_values": 11
+    },
+    {
+      "target": "Unknown 0702",
+      "observed_training_values": 7,
+      "observed_all_source_values": 8
+    },
+    {
+      "target": "Unknown 0709",
+      "observed_training_values": 2,
+      "observed_all_source_values": 2
+    },
+    {
+      "target": "Unknown 0719",
+      "observed_training_values": 8,
+      "observed_all_source_values": 10
+    },
+    {
+      "target": "Unknown 0730",
+      "observed_training_values": 11,
+      "observed_all_source_values": 13
+    },
+    {
+      "target": "Unknown 0731",
+      "observed_training_values": 10,
+      "observed_all_source_values": 11
+    },
+    {
+      "target": "Unknown 0750",
+      "observed_training_values": 10,
+      "observed_all_source_values": 11
+    }
+  ],
+  "model_changed": false,
+  "values_filled": false,
+  "targets_excluded": false
+}

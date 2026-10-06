@@ -96,7 +96,12 @@ class SmallGrnModel:
         values = frame.to_numpy()
         edges = pd.DataFrame(np.column_stack([values[:, 0] / 10, values[:, 0] / 20, values[:, 1] / 10]),
                              index=frame.index, columns=["TF1|TARGET1", "TF1|TARGET2", "TF2|TARGET3"])
-        return SimpleNamespace(predictions=edges, summary={})
+        return SimpleNamespace(predictions=edges, summary={
+            # Synthetic provenance satisfies the same output requirement as
+            # real bundles; do not bypass the runtime provenance gate.
+            "model_version_id": "synthetic-grn-test-v1",
+            "model_family": "rna2grn",
+        })
 
 
 @pytest.fixture

@@ -13,7 +13,7 @@ from pathlib import Path
 
 from ._impute import PerTargetImputeBundle, PredictionResult, cp10k_log1p  # noqa: F401
 
-DEFAULT_BUNDLE_PATH = Path(__file__).with_name("artifacts") / "rna2metabolite_aml_bundle.pkl.gz"
+DEFAULT_BUNDLE_PATH = Path(__file__).with_name("artifacts") / "rna2metabolite_aml_NA30_20261006_bundle.pkl.gz"
 
 
 class Rna2MetaboliteBundle(PerTargetImputeBundle):

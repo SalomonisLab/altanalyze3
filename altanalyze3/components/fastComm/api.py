@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from altanalyze3.components.model_registry import describe_model, write_provenance
+from altanalyze3.components.model_registry.registry import sha256_file
+
 from dataclasses import dataclass
 from pathlib import Path
 import re
@@ -452,8 +455,15 @@ def summarize_state_pairs(scores: pd.DataFrame) -> pd.DataFrame:
 
 def run_fastcomm(params: FastCommParams) -> FastCommResult:
     resolved_lr_table, resolved_response_path, inferred_species = _resolve_default_resource_paths(params)
+    resource_paths = {"ligand_receptor": resolved_lr_table}
+    if resolved_response_path is not None:
+        resource_paths["response_matrix"] = resolved_response_path
+    model_provenance = describe_model("fastComm", resource_paths)
     lr_table = _filter_lr_sources(pd.read_csv(resolved_lr_table, sep="\t"), params.lr_sources)
     response_matrix = load_response_matrix(str(resolved_response_path)) if resolved_response_path else None
+    for role, path in resource_paths.items():
+        if sha256_file(path) != model_provenance["artifacts"][role]["sha256"]:
+            raise RuntimeError("fastComm resource changed while loading; retry with immutable files")
     required_genes = _required_genes(lr_table, response_matrix)
     if params.adata is not None or params.h5ad is not None:
         if params.adata is not None:
@@ -519,6 +529,7 @@ def run_fastcomm(params: FastCommParams) -> FastCommResult:
         state.expression.to_csv(params.state_expression_output, sep="\t")
 
     summary = {
+        **model_provenance,
         "output": str(params.output),
         "n_cells": n_input_cells,
         "n_genes": n_input_genes,
@@ -539,6 +550,10 @@ def run_fastcomm(params: FastCommParams) -> FastCommResult:
         "state_pair_output": str(params.state_pair_output) if params.state_pair_output else None,
         "state_expression_output": str(params.state_expression_output) if params.state_expression_output else None,
     }
+    write_provenance(params.output, summary)
+    for companion in (params.state_pair_output, params.state_expression_output):
+        if companion:
+            write_provenance(companion, summary)
     return FastCommResult(
         scores=scores,
         state_expression=state.expression,

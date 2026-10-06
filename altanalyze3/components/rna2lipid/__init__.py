@@ -1,5 +1,6 @@
 from .api import (
     DEFAULT_BUNDLE_PATH,
+    PREVIOUS_BUNDLE_PATH,
     LEGACY_MULTITASK_BUNDLE_PATH,
     PredictionResult,
     Rna2LipidBundle,
@@ -8,6 +9,7 @@ from .api import (
 
 __all__ = [
     "DEFAULT_BUNDLE_PATH",
+    "PREVIOUS_BUNDLE_PATH",
     "LEGACY_MULTITASK_BUNDLE_PATH",
     "PredictionResult",
     "Rna2LipidBundle",

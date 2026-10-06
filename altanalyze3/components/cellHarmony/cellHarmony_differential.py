@@ -697,7 +697,9 @@ def _independent_filter_mask(matrix):
     return np.asarray(detected).ravel() >= INDEPENDENT_FILTER_MIN_SAMPLES
 
 
-def _rank_genes_scanpy(two_group_adata, groupby, case_label, control_label, method):
+def _rank_genes_scanpy(two_group_adata, groupby, case_label, control_label, method, *, _adjust_fdr=True):
+    from .lipid_scale import full_imputed_bh_mask
+    from .imputed_scale import uses_imputed_scale
     from .disk_differential import root_and_rows, rank_features
     if root_and_rows(two_group_adata) is not None:
         return rank_features(two_group_adata, groupby, case_label, control_label, method,
@@ -729,25 +731,42 @@ def _rank_genes_scanpy(two_group_adata, groupby, case_label, control_label, meth
     # It was tested and has a raw p; failing independent filtering means it cannot be called
     # significant, which is an adjusted p of 1, not an absent one. Both branches must agree,
     # or the same gene would be non-significant under one unit and missing under the other.
-    keep = pd.Series(_independent_filter_mask(two_group_adata.X),
-                     index=pd.Index(two_group_adata.var_names).astype(str))
+    lipid_mask = full_imputed_bh_mask(two_group_adata) if _adjust_fdr else None
+    mask = (np.ones(two_group_adata.n_vars, dtype=bool) if uses_imputed_scale(two_group_adata)
+            else _independent_filter_mask(two_group_adata.X))
+    keep = pd.Series(mask, index=pd.Index(two_group_adata.var_names).astype(str))
     keep = keep.reindex(names).fillna(False).to_numpy()
     finite = np.isfinite(pvals_raw.to_numpy())
+    if lipid_mask is not None and not finite.all():
+        raise ValueError("An imputed raw p value is nonfinite; stop rather than shrink the BH family.")
     selected = keep & finite
     adjusted = np.ones(len(names), dtype=float)
-    if selected.any():
+    if _adjust_fdr and selected.any():
         adjusted[selected] = _bh_fdr(pvals_raw.to_numpy()[selected])
     pvals_adj = pd.Series(adjusted, index=names, name="fdr")
     if diagnostic_report:
-        print(f"[INFO] Scanpy FDR corrected over {int(selected.sum())} detected genes "
+        print(f"[INFO] Scanpy FDR corrected over {int(selected.sum())} eligible features "
               f"of {len(names)}")
     logfc_ln = pd.Series(rg["logfoldchanges"][case_label], index=names, name="logfc_ln").astype(float)
     logfc = pd.Series(_ln_to_log2(logfc_ln.values), index=names, name="log2fc")
+    if uses_imputed_scale(two_group_adata):
+        exact = _compute_pseudobulk_log2fc(two_group_adata, groupby, case_label, control_label)
+        logfc = exact["log2fc"].reindex(names)
+        # Any consumer of stored Scanpy results must see the same corrected
+        # folds as the exported differential table. Preserve its approximation
+        # separately for audit; scores and raw p values are untouched.
+        rg["scanpy_logfoldchanges_approximate"] = rg["logfoldchanges"].copy()
+        rg["logfoldchanges"] = np.rec.fromarrays([logfc.to_numpy(dtype=float)], names=[case_label])
+        rg["params"]["logfoldchange_definition"] = "log2_ratio_of_arithmetic_mean_linear_predictions_no_added_pseudocount"
     return names, pvals_adj, logfc, pvals_raw
 
 
 def _prepare_scanpy_rank_input(two_group_adata):
     """Ensure matrix is log-transformed before calling Scanpy rank_genes_groups."""
+    from .imputed_scale import uses_imputed_scale, prediction_encoding
+    if uses_imputed_scale(two_group_adata):
+        prediction_encoding(two_group_adata)
+        return two_group_adata
     if "log1p" in two_group_adata.uns:
         return two_group_adata
 
@@ -823,12 +842,65 @@ def _matrix_to_numpy(matrix):
     return np.asarray(matrix, dtype=float)
 
 
+def _imputed_abundance_folds(pop_data, case_mask, ctrl_mask):
+    """Exact abundance ratios from declared X, independent of raw/counts layers."""
+    from scipy.special import logsumexp
+    from .imputed_scale import prediction_encoding, inverse_predictions, fold_convention
+    from .disk_differential import root_and_rows, FeatureReader
+    encoding = prediction_encoding(pop_data)
+    scale, base, offset = encoding
+    found = root_and_rows(pop_data)
+    source = FeatureReader(found[0].X, found[1]) if found else pop_data.X
+    if sps.issparse(source):
+        source = source.tocsc()
+    case_log, control_log = [], []
+    width = max(1, min(256, 8_000_000 // max(1, pop_data.n_obs)))
+    for start in range(0, pop_data.n_vars, width):
+        block = _matrix_to_numpy(source[:, start:start + width])
+        if not np.isfinite(block).all():
+            raise ValueError("Nonfinite imputed values; stop rather than fill values or reduce the panel.")
+        if base is not None and offset == 0:
+            # A plain log has no +1. Log-sum-exp preserves very low native
+            # baselines without underflowing the ratio or adding an offset.
+            lc = (logsumexp(block[case_mask] * np.log(base), axis=0)
+                  - np.log(case_mask.sum())) / np.log(2)
+            ln = (logsumexp(block[ctrl_mask] * np.log(base), axis=0)
+                  - np.log(ctrl_mask.sum())) / np.log(2)
+        else:
+            linear = inverse_predictions(block, encoding)
+            if np.any(linear < 0):
+                raise ValueError("Signed activity scores do not define abundance fold changes. "
+                                 "Discuss the effect statistic; do not shift or clip the scores.")
+            with np.errstate(divide="ignore"):
+                lc = np.log2(linear[case_mask].mean(axis=0))
+                ln = np.log2(linear[ctrl_mask].mean(axis=0))
+        case_log.append(lc)
+        control_log.append(ln)
+    lc, ln = np.concatenate(case_log), np.concatenate(control_log)
+    with np.errstate(invalid="ignore", over="ignore", under="ignore"):
+        folds = lc - ln
+        case_mean, control_mean = np.exp2(lc), np.exp2(ln)
+    status = np.full(pop_data.n_vars, "finite", dtype=object)
+    status[np.isneginf(ln) & np.isfinite(lc)] = "control_mean_zero"
+    status[np.isneginf(lc) & np.isfinite(ln)] = "case_mean_zero"
+    status[np.isneginf(lc) & np.isneginf(ln)] = "both_means_zero"
+    result = pd.DataFrame({"log2fc": folds, "case_mean_log2": lc, "control_mean_log2": ln,
+                           "case_mean_linear": case_mean, "control_mean_linear": control_mean,
+                           "fold_status": status}, index=pop_data.var_names.astype(str))
+    result.attrs["fold_convention"] = fold_convention(pop_data)
+    return result
+
+
 def _compute_pseudobulk_log2fc(pop_data, covariate_col, case_label, control_label):
     cond = pop_data.obs[covariate_col].astype(str).values
     case_mask = cond == str(case_label)
     ctrl_mask = cond == str(control_label)
     if case_mask.sum() == 0 or ctrl_mask.sum() == 0:
         return pd.DataFrame(columns=["log2fc", "case_mean", "control_mean"])
+
+    from .imputed_scale import uses_imputed_scale
+    if uses_imputed_scale(pop_data):
+        return _imputed_abundance_folds(pop_data, case_mask, ctrl_mask)
 
     matrix, genes, logged, log_base = _extract_expression_matrix(pop_data)
     # Fold changes depend on each feature's means, not a dense matrix containing
@@ -878,6 +950,13 @@ def _moderated_t_test(adata, covariate_col, case_label, control_label, pop, *, s
     from scipy import stats
     import numpy as np, pandas as pd
     from statsmodels.stats.multitest import multipletests
+    from .lipid_scale import full_imputed_bh_mask
+    from .imputed_scale import uses_imputed_scale, prediction_encoding
+
+    if uses_imputed_scale(adata):
+        prediction_encoding(adata)
+
+    lipid_mask = full_imputed_bh_mask(adata)
 
     cond = adata.obs[covariate_col].astype(str)
     case_mask = cond == str(case_label)
@@ -925,6 +1004,8 @@ def _moderated_t_test(adata, covariate_col, case_label, control_label, pop, *, s
     se = np.maximum(se, 1e-12)
 
     diff = mean_case - mean_ctrl
+    reported_fold = (_compute_pseudobulk_log2fc(adata, covariate_col, case_label, control_label)["log2fc"].to_numpy()
+                     if uses_imputed_scale(adata) else diff)
 
     # --- NEW: persist full (unfiltered) log2FC for this population ---
     # Note: this is a side-effect; we collect these across populations later.
@@ -937,7 +1018,7 @@ def _moderated_t_test(adata, covariate_col, case_label, control_label, pop, *, s
         if "full_log2fc" not in target_uns:
             target_uns["full_log2fc"] = {}
         target_uns["full_log2fc"][str(pop)] = pd.Series(
-            np.asarray(diff).ravel(), index=np.asarray(adata.var_names), dtype=float
+            np.asarray(reported_fold).ravel(), index=np.asarray(adata.var_names), dtype=float
         )
 
     tvals = diff / se
@@ -947,6 +1028,10 @@ def _moderated_t_test(adata, covariate_col, case_label, control_label, pop, *, s
     # --- Independent filtering for FDR correction ---
     if found is None:
         filter_mask = np.concatenate(masks)
+    if lipid_mask is not None:
+        filter_mask = lipid_mask
+        if not np.isfinite(pvals).all():
+            raise ValueError("An imputed raw p value is nonfinite; stop rather than shrink the BH family.")
 
     # Apply BH-FDR to filtered subset only
     filt_mask = filter_mask & np.isfinite(pvals)
@@ -991,7 +1076,7 @@ def _moderated_t_test(adata, covariate_col, case_label, control_label, pop, *, s
     # --- Output for all genes ---
     df_out = pd.DataFrame({
         "gene": genes.astype(str),
-        "log2fc": diff.astype(float),
+        "log2fc": reported_fold.astype(float),
         "t": tvals.astype(float),
         "pval": pvals.astype(float),
         "fdr": fdr.astype(float)
@@ -1195,6 +1280,10 @@ def run_de_for_comparisons(adata,
             ctrl_map = corrected_stats.get("control_mean_log2", corrected_stats.get("control_mean"))
             df["case_mean_expr"] = df["gene"].map(case_map) if case_map is not None else np.nan
             df["control_mean_expr"] = df["gene"].map(ctrl_map) if ctrl_map is not None else np.nan
+            if "fold_status" in corrected_stats:
+                df["fold_status"] = df["gene"].map(corrected_stats["fold_status"])
+                df["case_mean_linear"] = df["gene"].map(corrected_stats["case_mean_linear"])
+                df["control_mean_linear"] = df["gene"].map(corrected_stats["control_mean_linear"])
         else:
             if diagnostic_report:
                 print(f"[WARN] No corrected fold-change computed for population {pop} (insufficient data).")
@@ -1555,6 +1644,9 @@ def run_de_for_comparisons(adata,
         "min_cells_per_group": int(min_cells),
         "per_population_deg": {k: v.copy() for k, v in per_pop_de.items()},
     }
+    from .imputed_scale import uses_imputed_scale, fold_convention
+    if uses_imputed_scale(adata):
+        de_store["prediction_scale"] = fold_convention(adata)
 
     # --- NEW: build a complete fold-change matrix from per-population stored vectors ---
     try:

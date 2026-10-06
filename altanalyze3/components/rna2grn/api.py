@@ -20,6 +20,9 @@ retrieval average, that is the statistically correct unit of prediction.
 """
 from __future__ import annotations
 
+from altanalyze3.components.model_registry import describe_model
+from altanalyze3.components.model_registry.registry import sha256_file
+
 import gzip
 import pickle
 import warnings
@@ -144,6 +147,7 @@ class Rna2GrnBundle:
         existing callers keep their behaviour.
         """
         bundle_path = resolve_bundle_path(bundle_path, reference)
+        provenance = describe_model("rna2grn", {"bundle": bundle_path})
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             with _open_bundle(bundle_path) as handle:
@@ -152,13 +156,17 @@ class Rna2GrnBundle:
         missing = required.difference(bundle)
         if missing:
             raise ValueError(f"GRN bundle is missing required keys: {sorted(missing)}")
-        return cls(
+        bundle = cls(
             bundle_path=bundle_path,
             model=bundle["model"],
             input_genes=bundle["X_columns"],
             output_edges=bundle["Y_columns"],
             metadata=bundle.get("metadata"),
         )
+        if sha256_file(bundle_path) != provenance["artifacts"]["bundle"]["sha256"]:
+            raise RuntimeError("Model artifact changed while loading; retry with immutable files")
+        bundle.model_provenance = provenance
+        return bundle
 
     @property
     def pseudobulk_statistic(self) -> str:
@@ -169,6 +177,7 @@ class Rna2GrnBundle:
     def model_info(self) -> Dict[str, object]:
         info = {
             "bundle_path": str(self.bundle_path),
+            **getattr(self, "model_provenance", {}),
             "n_input_genes": len(self.input_genes),
             "n_output_edges": len(self.output_edges),
             "model_class": type(self.model).__name__,
@@ -409,6 +418,7 @@ class Rna2GrnBundle:
         df = pd.DataFrame(np.asarray(P), index=index, columns=list(self.output_edges))
         summary = {
             "bundle_path": str(self.bundle_path),
+            **getattr(self, "model_provenance", {}),
             "input_kind": kind,
             "n_groups": int(df.shape[0]),
             "matched_genes": int(matched),

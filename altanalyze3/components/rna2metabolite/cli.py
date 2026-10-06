@@ -7,6 +7,8 @@ Subcommands:
 """
 from __future__ import annotations
 
+from altanalyze3.components.model_registry import write_provenance
+
 import argparse
 import json
 from pathlib import Path
@@ -59,6 +61,7 @@ def main(argv=None) -> int:
             df = df.T
         res = bundle.predict_from_dataframe(df, normalized=args.normalized)
         res.predictions.to_csv(args.output)
+        write_provenance(args.output, {k: v for k, v in res.summary.items() if k != "n_cells_per_group"})
         _summary(res.summary)
     elif args.cmd == "predict-h5ad":
         import anndata as ad
@@ -68,11 +71,13 @@ def main(argv=None) -> int:
             gene_symbol_col=args.gene_symbol_col, min_cells=args.min_cells,
             normalized=args.normalized)
         res.predictions.to_csv(args.output)
+        write_provenance(args.output, {k: v for k, v in res.summary.items() if k != "n_cells_per_group"})
         if args.h5ad_out:
             out = bundle.impute_anndata(
                 adata, groupby=args.groupby, layer=args.layer,
                 gene_symbol_col=args.gene_symbol_col, min_cells=args.min_cells,
                 normalized=args.normalized)
+            out.uns["model_provenance"] = {k: v for k, v in res.summary.items() if k != "n_cells_per_group"}
             out.write_h5ad(args.h5ad_out)
             res.summary["h5ad_out"] = args.h5ad_out
         _summary(res.summary)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from altanalyze3.components.model_registry.registry import write_run_provenance, read_result_provenance
+
 from datetime import datetime
 import json
 import os
@@ -143,16 +145,8 @@ def _modalities_payload(selected_modalities: Optional[List[str]] = None) -> Dict
 
 
 def _normalize_expression_scale(value: object, *, default: str = "") -> str:
-    raw = str(value or "").strip().lower()
-    if not raw:
-        return default
-    if raw in {"log1p", "ln", "loge", "natural_log1p"}:
-        return "log1p"
-    if raw in {"log2", "log2p1", "log_2"}:
-        return "log2"
-    if raw in {"linear", "raw", "none"}:
-        return "linear"
-    return raw
+    from ..imputed_scale import normalize_scale
+    return normalize_scale(value) or default
 
 
 def _strip_modality_prefix(name: object) -> str:
@@ -180,19 +174,8 @@ def _make_unique_feature_names(values: List[str]) -> List[str]:
 
 
 def _resolve_log_base(value: object, *, default: float) -> float:
-    if value is None:
-        return float(default)
-    raw = str(value).strip().lower()
-    if raw in {"", "none", "null"}:
-        return float(default)
-    if raw in {"e", "natural", "ln", "loge"}:
-        return float(np.e)
-    if raw == "2":
-        return 2.0
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return float(default)
+    from ..imputed_scale import log_base_value
+    return log_base_value(value, default=default)
 
 
 def _attach_imputed_expression_metadata(
@@ -201,43 +184,55 @@ def _attach_imputed_expression_metadata(
     *,
     expression_scale: object,
     log_base: object = None,
+    log_pseudocount: object = None,
 ) -> Dict[str, object]:
+    from ..imputed_scale import prediction_encoding, inverse_predictions
     scale = _normalize_expression_scale(expression_scale, default="")
     info: Dict[str, object] = {"expression_scale": scale or "unknown"}
+    adata.uns["expression_scale"] = scale or "unknown"
+    if scale in {"native_relative_log2", "log2", "log2p1"}:
+        base = _resolve_log_base(log_base, default=2.0)
+        adata.uns["log_base"] = base
+        info["log_base"] = base
+        if scale != "log2" or log_pseudocount is not None:
+            offset = (0.0 if scale == "native_relative_log2" else 1.0 if scale == "log2p1"
+                      else float(log_pseudocount))
+            adata.uns["log_pseudocount"] = offset
+        if log_pseudocount is not None:
+            adata.uns["log_pseudocount"] = float(log_pseudocount)
+    elif scale == "log1p":
+        base = _resolve_log_base(log_base, default=float(np.e))
+        adata.uns["log1p"] = {"base": base}
+        adata.uns["log_base"] = base
+        adata.uns["log_pseudocount"] = 1.0 if log_pseudocount is None else float(log_pseudocount)
+    elif scale != "linear":
+        info["target_encoding_complete"] = False
+        adata.uns["target_encoding_complete"] = False
+        return info
+    if scale == "log2" and log_pseudocount is None:
+        # A model can still be displayed on its supplied scale, but a bare
+        # "log2" declaration does not justify a fabricated linear layer.
+        info["target_encoding_complete"] = False
+        adata.uns["target_encoding_complete"] = False
+        return info
+    encoding = prediction_encoding(adata)
+    adata.uns["target_encoding_complete"] = True
+    info.update(target_encoding_complete=True)
+    if encoding[1] is not None:
+        info.update(log_base=encoding[1], log_pseudocount=encoding[2])
     # Preserve the float64 transform's rounding without holding a float64 copy
     # of a cells-by-features matrix. Only the final float32 layer is retained.
-    def linear_counts(transform):
-        result = np.empty(prediction_matrix.shape, dtype=np.float32)
-        step = max(1, 2_000_000 // max(1, prediction_matrix.shape[1]))
-        for start in range(0, len(result), step):
-            block = prediction_matrix[start:start + step].astype(np.float64)
-            result[start:start + step] = np.maximum(transform(block), 0.0)
-        return result
-
-    if scale == "log2":
-        adata.layers["counts"] = linear_counts(lambda block: np.exp2(block) - 1.0)
-        adata.uns["log1p"] = {"base": 2.0}
-        adata.uns["expression_scale"] = "log2"
-        info["log_base"] = 2.0
-        return info
-
-    if scale == "log1p":
-        base = _resolve_log_base(log_base, default=float(np.e))
-        if np.isclose(base, np.e):
-            transform = np.expm1
-        else:
-            transform = lambda block: np.power(base, block) - 1.0
-        adata.layers["counts"] = linear_counts(transform)
-        adata.uns["log1p"] = {"base": float(base)}
-        adata.uns["expression_scale"] = "log1p"
-        info["log_base"] = float(base)
-        return info
-
-    if scale == "linear":
-        adata.layers["counts"] = linear_counts(lambda block: block)
-        adata.uns["expression_scale"] = "linear"
-        return info
-
+    result = np.empty(prediction_matrix.shape, dtype=np.float32)
+    step = max(1, 2_000_000 // max(1, prediction_matrix.shape[1]))
+    for start in range(0, len(result), step):
+        result[start:start + step] = inverse_predictions(prediction_matrix[start:start + step], encoding)
+    if not np.isfinite(result).all() or (encoding[1] is not None and encoding[2] == 0 and np.any(result <= 0)):
+        raise ValueError("Abundance export overflow/underflow; do not clip or fill predictions.")
+    adata.layers["counts"] = result
+    if scale == "native_relative_log2":
+        adata.uns["abundance_units"] = "relative; lipid-specific reference baselines"
+        adata.uns["BH_policy"] = "full_panel_no_abundance_filter"
+        info.update(abundance_units=adata.uns["abundance_units"], BH_policy=adata.uns["BH_policy"])
     return info
 
 
@@ -251,14 +246,30 @@ def _build_imputed_lipid_adata(
     impute_config = _reference_impute_config(reference_entry or {}, "lipids")
     bundle_path = impute_config.get("bundle_path")
     bundle = load_rna2lipid_bundle(bundle_path) if bundle_path else load_rna2lipid_bundle()
-    prediction = bundle.predict_from_adata(query_adata)
+    native_log2 = getattr(bundle, "metadata", {}).get("target_scale") == "native_relative_log2"
+    configured_scale = _normalize_expression_scale(impute_config.get("expression_scale"))
+    if configured_scale and ((configured_scale == "native_relative_log2") != native_log2):
+        raise ValueError("The selected lipid bundle and reference target encoding disagree. "
+                         "Use the matching bundle and its target preprocessing metadata; do not relabel predictions.")
+    prediction_kwargs = {}
+    if native_log2 and "log1p" in query_adata.uns:
+        # scALABLE normalizes counts to CP10k and records the actual log base.
+        # Convert only that declared log representation, preserving counts,
+        # observations and every gene. Natural log uses Scanpy's base=None.
+        declared_base = query_adata.uns["log1p"].get("base")
+        prediction_kwargs["input_log_base"] = float(np.e if declared_base is None else declared_base)
+    prediction = bundle.predict_from_adata(query_adata, **prediction_kwargs)
     prediction_df = prediction.predictions.reindex(query_adata.obs_names)
     prediction_matrix = np.asarray(prediction_df.to_numpy(dtype=np.float32), dtype=np.float32)
 
-    # Regressors can extrapolate below zero, but lipid abundance is nonnegative.
-    # Apply the floor before every exported matrix, mean, marker and differential.
-    clipped_negative_values = int(np.count_nonzero(prediction_matrix < 0))
-    prediction_matrix = np.maximum(prediction_matrix, 0.0)
+    if not np.isfinite(prediction_matrix).all():
+        raise ValueError("Nonfinite lipid predictions; do not silently fill or discard them.")
+    negative_values = int(np.count_nonzero(prediction_matrix < 0))
+    clipped_negative_values = 0
+    if not native_log2:
+        # Retain the explicitly selected historical bundle's export behavior.
+        clipped_negative_values = negative_values
+        prediction_matrix = np.maximum(prediction_matrix, 0.0)
 
     lipid_var_names = pd.Index([str(value) for value in prediction_df.columns], dtype=str)
     lipid_var = pd.DataFrame(index=lipid_var_names)
@@ -276,10 +287,11 @@ def _build_imputed_lipid_adata(
     scale_info = _attach_imputed_expression_metadata(
         lipid_adata,
         prediction_matrix,
-        expression_scale=_normalize_expression_scale(
+        expression_scale="native_relative_log2" if native_log2 else _normalize_expression_scale(
             impute_config.get("expression_scale", "log2"), default="log2"
         ),
         log_base=impute_config.get("log_base", 2.0),
+        log_pseudocount=impute_config.get("log_pseudocount"),
     )
     for key in ("X_umap",):
         if key in query_adata.obsm:
@@ -291,6 +303,7 @@ def _build_imputed_lipid_adata(
     summary = dict(prediction.summary)
     summary.update(scale_info)
     summary["clipped_negative_values"] = clipped_negative_values
+    summary["negative_log2_values_preserved"] = negative_values if native_log2 else 0
     lipid_adata.uns["prediction_summary"] = summary
     return lipid_adata, summary
 
@@ -337,6 +350,7 @@ def _build_imputed_adt_adata(
         prediction_matrix,
         expression_scale=expression_scale,
         log_base=impute_config.get("log_base", "e"),
+        log_pseudocount=impute_config.get("log_pseudocount"),
     )
     for key in ("X_umap",):
         if key in query_adata.obsm:
@@ -391,7 +405,7 @@ def _impute_pseudobulk_predictions(query_adata, bundle, cluster_obs_col, *, broa
 
 
 def _finalize_imputed_adata(query_adata, per_cell_df, *, modality_id, feature_label,
-                            feature_type, expression_scale, log_base, base_summary):
+                            feature_type, expression_scale, log_base, base_summary, log_pseudocount=None):
     matrix = np.nan_to_num(np.asarray(per_cell_df.to_numpy(dtype=np.float32), dtype=np.float32), nan=0.0)
     var_names = pd.Index(_make_unique_feature_names([str(v) for v in per_cell_df.columns]), dtype=str)
     var = pd.DataFrame(index=var_names)
@@ -402,7 +416,7 @@ def _finalize_imputed_adata(query_adata, per_cell_df, *, modality_id, feature_la
     scale_info = _attach_imputed_expression_metadata(
         adata, matrix,
         expression_scale=_normalize_expression_scale(expression_scale, default="linear"),
-        log_base=log_base)
+        log_base=log_base, log_pseudocount=log_pseudocount)
     for key in ("X_umap",):
         if key in query_adata.obsm:
             adata.obsm[key] = np.asarray(query_adata.obsm[key]).copy()
@@ -421,7 +435,7 @@ def _stream_pseudobulk_viewer(query, predictions, cluster_col, cfg, modality, su
     template, summary = _finalize_imputed_adata(
         query[:0], predictions.iloc[:0], modality_id=modality, feature_label=modality,
         feature_type=modality, expression_scale=cfg.get('expression_scale', 'log2'),
-        log_base=cfg.get('log_base', '2'), base_summary=summary)
+        log_base=cfg.get('log_base', '2'), log_pseudocount=cfg.get('log_pseudocount'), base_summary=summary)
     keys = _pseudobulk_group_key(query.obs, cluster_col)
     profiles = np.nan_to_num(predictions.to_numpy(dtype=np.float32), nan=0.0)
     profile_codes = predictions.index.get_indexer(keys).astype(np.int32)
@@ -457,12 +471,15 @@ def _build_imputed_metabolite_adata(query_adata, reference_entry, cluster_obs_co
         viewer, summary = _finalize_imputed_adata(
             query_adata, per_cell, modality_id="metabolite", feature_label="metabolite",
             feature_type="metabolite", expression_scale=cfg.get("expression_scale", "log2"),
-            log_base=cfg.get("log_base", "2"), base_summary=summary)
+            log_base=cfg.get("log_base", "2"), log_pseudocount=cfg.get("log_pseudocount"), base_summary=summary)
     else:
         viewer, summary = _stream_pseudobulk_viewer(query_adata, group_pred, cluster_obs_col, cfg,
                                                    'metabolite', summary, output_path, compression)
     diff = _build_pseudobulk_differential_adata(
-        query_adata, group_pred, cluster_obs_col, feature_type="metabolite", modality_id="metabolite")
+        query_adata, group_pred, cluster_obs_col, feature_type="metabolite", modality_id="metabolite",
+        expression_scale=cfg.get("expression_scale", "log2"), log_base=cfg.get("log_base", 2),
+        log_pseudocount=cfg.get("log_pseudocount"))
+    diff.uns["prediction_summary"] = dict(summary)
     return viewer, diff, summary
 
 
@@ -478,12 +495,15 @@ def _build_imputed_lipid_aml_adata(query_adata, reference_entry, cluster_obs_col
         viewer, summary = _finalize_imputed_adata(
             query_adata, per_cell, modality_id="lipid", feature_label="lipid",
             feature_type="lipid", expression_scale=cfg.get("expression_scale", "log2"),
-            log_base=cfg.get("log_base", "2"), base_summary=summary)
+            log_base=cfg.get("log_base", "2"), log_pseudocount=cfg.get("log_pseudocount"), base_summary=summary)
     else:
         viewer, summary = _stream_pseudobulk_viewer(query_adata, group_pred, cluster_obs_col, cfg,
                                                    'lipid', summary, output_path, compression)
     diff = _build_pseudobulk_differential_adata(
-        query_adata, group_pred, cluster_obs_col, feature_type="lipid", modality_id="lipid")
+        query_adata, group_pred, cluster_obs_col, feature_type="lipid", modality_id="lipid",
+        expression_scale=cfg.get("expression_scale", "log2"), log_base=cfg.get("log_base", 2),
+        log_pseudocount=cfg.get("log_pseudocount"))
+    diff.uns["prediction_summary"] = dict(summary)
     return viewer, diff, summary
 
 
@@ -518,7 +538,8 @@ def _grn_tf_activity_per_cell(query_adata, edge_ids) -> pd.DataFrame:
 
 
 def _build_pseudobulk_differential_adata(query_adata, group_pred_df, cluster_obs_col, *,
-                                         feature_type, modality_id):
+                                         feature_type, modality_id, expression_scale="linear",
+                                         log_base=None, log_pseudocount=None):
     """Pseudobulk-level AnnData (one row per sample x cell-state pseudobulk) for a CORRECT
     group differential with SAMPLES as replicates (not cells). group_pred_df: index = group
     keys 'sample|cellstate', columns = features. Carries uns['pseudobulk_method']='pseudobulk'
@@ -537,7 +558,8 @@ def _build_pseudobulk_differential_adata(query_adata, group_pred_df, cluster_obs
     X = np.nan_to_num(group_pred_df.to_numpy(dtype=np.float32), nan=0.0)
     adata = ad.AnnData(X=X, obs=grp_obs.copy(), var=var)
     adata.obs_names = [str(g) for g in group_pred_df.index]
-    adata.layers["counts"] = X.copy()
+    _attach_imputed_expression_metadata(adata, X, expression_scale=expression_scale,
+                                        log_base=log_base, log_pseudocount=log_pseudocount)
     adata.uns["pseudobulk_method"] = "pseudobulk"
     adata.uns["pseudobulk_unit"] = "sample_x_cellstate"
     adata.uns["modality"] = modality_id
@@ -642,6 +664,8 @@ def _build_imputed_grn_adata(query_adata, reference_entry, cluster_obs_col=None,
         value = (getattr(bundle, "metadata", {}) or {}).get(meta_key)
         if value:
             summary[f"grn_{meta_key}"] = str(value)
+    edges_pseudobulk.uns["prediction_summary"] = dict(summary)
+    tf_pseudobulk.uns["prediction_summary"] = dict(summary)
     return tf_adata, edges_adata, edges_pseudobulk, tf_pseudobulk, summary
 
 
@@ -1501,6 +1525,9 @@ def _run_cell_communication_differential(
         ),
         "n_interactions": int(detailed.shape[0]),
     }
+    write_run_provenance(run_root, meta.get("model_versions", {}), application="scALABLE-differential")
+    manifest["model_version_ids"] = {key: record["model_version_id"]
+                                     for key, record in meta.get("model_versions", {}).items()}
     manifest_path = run_root / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
     archive_path = run_root.parent / f"{run_root.name}.zip"
@@ -1670,6 +1697,10 @@ def _build_job_bundle(store: JobStore, job_id: str, combined_h5ad_path: Path,
         store.append_log(job_id, f"[bundle] FAILED after {seconds}s (exit {proc.returncode}); "
                                  f"the job is served from its h5ad files. See {log_path}")
         return record
+    provenance_source = store.outputs_dir(job_id) / "model_provenance.json"
+    if provenance_source.exists():
+        import shutil
+        shutil.copy2(provenance_source, out_dir / "model_provenance.json")
     record.update({"status": "completed", "dir": str(out_dir), "prefix": _BUNDLE_PREFIX,
                    "sources": sources,
                    "built_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
@@ -2291,6 +2322,21 @@ def run_cellharmony_pipeline(
     for key, path in artifacts.items():
         store.add_artifact(job_id, key, path)
 
+    model_versions = {}
+    for modality_id, modality_files in modality_artifacts.items():
+        if modality_id == "rna":
+            continue
+        summary = read_result_provenance(modality_files["h5ad"])
+        if not summary.get("model_version_id"):
+            raise RuntimeError(f"Missing model version provenance for {modality_id} output")
+        model_versions[modality_id] = summary
+    if fastcomm_analysis.get("enabled"):
+        model_versions["fastComm"] = fastcomm_analysis["summary"]
+    provenance_path = write_run_provenance(outputs_dir, model_versions, application="scALABLE")
+    artifacts["model_provenance"] = provenance_path
+    store.add_artifact(job_id, "model_provenance", provenance_path)
+    store.update_job(job_id, model_versions=model_versions)
+
     sample_names = _job_sample_names(meta)
     upload_profile = _upload_profile(meta)
     all_population_columns = _candidate_population_columns(
@@ -2654,6 +2700,13 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
         adata = materialized
     make_pseudobulk = (comparison_type == "pseudobulk") and not already_pseudobulk
     de_params = _differential_runtime_params(modality, comparison_type)
+    from ..imputed_scale import uses_imputed_scale, fold_convention
+    if uses_imputed_scale(adata):
+        # Gate both selectors before aggregation/testing; bare log2 metadata
+        # cannot establish a scientifically defensible abundance inverse.
+        convention = fold_convention(adata)
+        (run_root / "prediction_scale_audit.json").write_text(json.dumps(convention, indent=2) + "\n")
+        store.append_log(job_id, "[params] imputed_fold " + json.dumps(convention, sort_keys=True))
 
     if make_pseudobulk:
         pseudobulk_dir = run_root / "pseudobulk"
@@ -2672,15 +2725,21 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
                 f"covariate_col={web_group_col} min_cells=10"
             ),
         )
-        _, pb_h5ad = cellHarmony_differential.compute_pseudobulk_per_population(
-            adata,
-            population_col=population_col,
-            sample_col=sample_col,
-            covariate_col=web_group_col,
-            min_cells=10,
-            outdir=str(pseudobulk_dir),
-        )
-        adata = ad.read_h5ad(pb_h5ad)
+        from ..imputed_pseudobulk import IMPUTED_MODALITIES, aggregate_imputed_predictions
+        if modality in IMPUTED_MODALITIES:
+            adata, aggregation_audit = aggregate_imputed_predictions(
+                adata, population_col=population_col, sample_col=sample_col,
+                covariate_col=web_group_col, min_cells=10)
+            pb_h5ad = pseudobulk_dir / f"{modality}_mean_existing_predictions.h5ad"
+            approx_mod.ensure_h5ad_compat_for_write(adata)
+            adata.write_h5ad(pb_h5ad, compression="lzf")
+            (pseudobulk_dir / "aggregation_audit.json").write_text(json.dumps(aggregation_audit, indent=2) + "\n")
+            store.append_log(job_id, "[params] imputed_pseudobulk statistic=mean_existing_linear_predictions feature_panel_total_normalized=False model_recomputed=False")
+        else:
+            _, pb_h5ad = cellHarmony_differential.compute_pseudobulk_per_population(
+                adata, population_col=population_col, sample_col=sample_col,
+                covariate_col=web_group_col, min_cells=10, outdir=str(pseudobulk_dir))
+            adata = ad.read_h5ad(pb_h5ad)
 
     _update_differential_state(
         store,
@@ -2947,6 +3006,9 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
         "go_terms_included": show_go_terms,
         "network_count": len(networks),
     }
+    write_run_provenance(run_root, meta.get("model_versions", {}), application="scALABLE-differential")
+    manifest["model_version_ids"] = {key: record["model_version_id"]
+                                     for key, record in meta.get("model_versions", {}).items()}
     manifest_path = run_root / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
 

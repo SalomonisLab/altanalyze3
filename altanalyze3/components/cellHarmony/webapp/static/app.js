@@ -3432,7 +3432,22 @@ async function populateDownloadLinks(jobId, statusData = null) {
     }
   }
   const artifacts = data.artifacts || {};
+  const versions = Object.entries(data.model_versions || {});
+  if (versions.length) {
+    const details = document.createElement("details");
+    const title = document.createElement("summary");
+    title.textContent = "Model versions used in this analysis";
+    details.appendChild(title);
+    versions.forEach(([modality, record]) => {
+      const row = document.createElement("div");
+      row.textContent = `${modality}: ${record.model_version_id}`;
+      row.style.overflowWrap = "anywhere";
+      details.appendChild(row);
+    });
+    container.appendChild(details);
+  }
   const labelMap = {
+    model_provenance: "Download model versions and provenance",
     assignments: "Download assignments",
     combined_h5ad: "Download combined_h5ad",
     marker_genes_zip: "Download marker genes ZIP",

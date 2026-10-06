@@ -5,10 +5,25 @@ import anndata as ad
 import h5py
 import numpy as np
 import scipy.sparse as sp
+from types import SimpleNamespace
+
+from ..imputed_scale import normalize_scale, prediction_encoding, inverse_predictions, log_base_value
 
 
 class PredictionWriter:
     def __init__(self, path, obs, var, uns, obsm, *, compression='lzf', expression_scale='linear', log_base=None):
+        uns = dict(uns)
+        self.expression_scale = normalize_scale(expression_scale)
+        if 'expression_scale' in uns and normalize_scale(uns['expression_scale']) != self.expression_scale:
+            raise ValueError('Conflicting prediction encodings in writer and metadata')
+        uns['expression_scale'] = self.expression_scale
+        if log_base is not None:
+            if 'log_base' in uns and not np.isclose(log_base_value(uns['log_base'], default=np.e),
+                                                   log_base_value(log_base, default=np.e)):
+                raise ValueError('Conflicting declared log bases in writer and metadata')
+            uns['log_base'] = log_base
+        self.encoding = (None if self.expression_scale == 'log2' and 'log_pseudocount' not in uns
+                         else prediction_encoding(SimpleNamespace(uns=uns)))
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         shape = (len(obs), len(var))
@@ -22,27 +37,27 @@ class PredictionWriter:
                                             compression=compression)
         self.x.attrs.update({'encoding-type': 'array', 'encoding-version': '0.2.0'})
         self.counts = None
-        self.expression_scale, self.log_base = expression_scale, log_base
+        self.log_base = log_base
         self.position = 0
 
     def _linear(self, values):
-        if self.expression_scale == 'log2':
-            return np.maximum(np.exp2(values.astype(np.float64)) - 1, 0).astype(np.float32)
-        if self.expression_scale == 'log1p':
-            base = self.log_base
-            base = np.e if base is None or str(base).lower() in ('e', 'ln', 'natural') else float(base)
-            values64 = values.astype(np.float64)
-            converted = np.expm1(values64) if np.isclose(base, np.e) else np.power(base, values64) - 1
-            return np.maximum(converted, 0).astype(np.float32)
-        return np.maximum(values, 0)
+        linear = inverse_predictions(values, self.encoding).astype(np.float32)
+        if not np.isfinite(linear).all() or (self.encoding[1] is not None and self.encoding[2] == 0 and np.any(linear <= 0)):
+            raise ValueError('Abundance export overflow/underflow; do not clip or fill predictions')
+        return linear
 
     def append(self, values):
-        values = np.nan_to_num(np.asarray(values, dtype=np.float32), copy=True)
+        values = np.asarray(values, dtype=np.float32)
+        if self.expression_scale == 'native_relative_log2':
+            if not np.isfinite(values).all():
+                raise ValueError('Nonfinite native-log2 predictions; do not silently fill values')
+        else:
+            values = np.nan_to_num(values, copy=True)
         end = self.position + len(values)
         if values.shape[1] != self.x.shape[1] or end > self.x.shape[0]:
             raise ValueError('Prediction block does not fit the output matrix')
         self.x[self.position:end] = values
-        if self.counts is None and (self.expression_scale != 'linear' or np.any(values < 0)):
+        if self.encoding is not None and self.counts is None and self.expression_scale != 'linear':
             self.counts = self.handle.create_dataset('layers/counts', shape=self.x.shape,
                                                      dtype=np.float32, chunks=self.x.chunks,
                                                      compression=self.x.compression)
@@ -58,8 +73,8 @@ class PredictionWriter:
         try:
             if self.position != self.x.shape[0]:
                 raise ValueError('Prediction output is incomplete')
-            if self.counts is None:
-                # Nonnegative linear predictions and their counts are identical.
+            if self.counts is None and self.encoding is not None:
+                # Linear predictions (including signed scores) and their layer are identical.
                 # A hard link saves a second full disk matrix; ordinary H5AD
                 # readers still see both X and layers/counts.
                 self.handle['layers/counts'] = self.x

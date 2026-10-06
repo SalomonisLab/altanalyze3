@@ -20,6 +20,15 @@ Nature Cancer 2026). Only the **final** held-out-optimal classifiers are shipped
 - **CV**: 5-fold over cases; all selection/standardization within the training fold (leakage-free).
 
 ## Held-out results (out-of-fold)
+
+These are historical results for the original target panels. On 2026-10-06 the
+user authorized removing AML metabolite targets with strictly more than 30% NA
+values across all 84 original matched training cases. This removes 510 of 2,533
+targets and retains 2,023. Every retained learned coefficient/intercept and RNA
+scaler is unchanged, so retained predictions are identical to the original.
+No new CV, fitting or classification analysis was performed for this panel
+update. Historical per-target metrics are preserved for retained targets.
+
 | | median Spearman | imputable (Sp>0.3) | Sp>0.5 | class. acc / AUROC (imputable) |
 |---|---|---|---|---|
 | metabolites (2,478 eval) | 0.267 | 1,084 | 313 | 0.663 / 0.718 |

@@ -508,6 +508,12 @@ def build_meta(
             ],
         },
     }
+    meta["model_versions"] = ds.meta.get("model_versions", {})
+    provenance_path = os.path.join(ds.paths.bundle_dir, "model_provenance.json")
+    if os.path.isfile(provenance_path):
+        with open(provenance_path) as handle:
+            meta["model_versions"] = json.load(handle).get("models", {})
+        meta["artifacts"]["model_provenance"] = provenance_path
     meta["artifacts"] = {k: v for k, v in meta["artifacts"].items() if v}
 
     meta["differential_options"] = {

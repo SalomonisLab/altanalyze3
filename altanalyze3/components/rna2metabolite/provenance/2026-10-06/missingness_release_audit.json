@@ -1,0 +1,58 @@
+{
+  "authorization": {
+    "granted_by": "user",
+    "user_message": "If >30% values are NA, remove that feature",
+    "scope": "AML metabolite targets; evaluate original normalized-log2 training table before filling",
+    "threshold": "strictly greater than 30% missing",
+    "denominator": "all 84 original matched training cases",
+    "comparison": "missing_count * 10 > training_case_count * 3",
+    "preserve_training_cases": true,
+    "preserve_RNA_inputs": true,
+    "preserve_retained_models": true
+  },
+  "result": {
+    "model": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/rna2metabolite/artifacts/rna2metabolite_aml_NA30_20261006_bundle.pkl.gz",
+    "model_sha256": "0e492cda787c5c1385437332296c5e7b751e7b5d92e6fc2fcf5409ade7105a6d",
+    "manifest": "components/rna2metabolite/missingness_release.json",
+    "target_policy_table": "components/rna2metabolite/provenance/2026-10-06/target_missingness_policy.tsv",
+    "retained_targets": 2023,
+    "removed_targets": 510,
+    "removed_previously_fitted_targets": 463,
+    "removed_unfitted_targets": 47,
+    "training_cases": 84,
+    "RNA_inputs": 12416,
+    "retained_weights_unchanged": true,
+    "retained_predictions_identical": true,
+    "local_API_and_scALABLE_defaults_updated": true,
+    "tests_passed": 132,
+    "tests_failed": 0,
+    "service_restarted": false,
+    "clinical_data_rerun": false,
+    "encoding": "Normalized relative log2; invert as 2**Y, zero offset in normalized space; no panel-total normalization"
+  },
+  "original_rollback_sha256_verified": "232e9b56d72e3efacad1830aae2fd432f21d90b2e9dda5e723f09b2692db15c2",
+  "source_values_changed": false,
+  "source_samples_excluded": false,
+  "NA_filling_executed": false,
+  "new_fitting_executed": false,
+  "raw_test_algorithms_changed": false,
+  "BH_testing_family": "Complete newly declared 2023-target metabolite panel",
+  "new_CV_executed": false,
+  "historical_retained_target_CV_median_spearman": 0.282,
+  "checks": {
+    "pytest_passed": 132,
+    "pytest_failed": 0,
+    "retained_prediction_equality": "Exact equality for every retained target on three deterministic independent gene z-score profiles",
+    "threshold_boundary": "Exactly 30% retained; >30% removed; 84-case boundary is 25 versus 26 NA",
+    "API_prediction_test": "Two RNA profiles yield finite 2 x 2023 predictions",
+    "scALABLE_linear_export_test": "Counts layer equals 2**normalized_log2_predictions"
+  },
+  "files_sha256": {
+    "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/rna2metabolite/api.py": "0476eb82b2f3fbce869084c768315d34cca77c326ed17234cacc24820d99c362",
+    "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/rna2metabolite/_impute.py": "21974b2569f42566664534584ec3b508d0ee925cec94cbe4b5ce737f1f4f4578",
+    "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/rna2metabolite/missingness_release.py": "a3624e7b66422f6744d2bf34dcf9daeb315fd99d5c923e2097459a6c18422c0a",
+    "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/rna2metabolite/missingness_release.json": "edffc4f88107d6fbcaba19196b0bf6ce6173dce21cb53ed129aac7dd3ee6f32b",
+    "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/flask/reference_config.json": "ed203b7df85985d3d98adc1b1fd8cf39d55c6558cefe3ad032b960e14b8ccfe0",
+    "/Users/saljh8/Documents/GitHub/altanalyze3/tests/test_metabolite_missingness_release.py": "5ae88e0f2b7fc8e783f07c6ece2130fec9f41b072057db1b17f7b4b01ab2be47"
+  }
+}

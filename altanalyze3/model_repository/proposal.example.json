@@ -1,0 +1,60 @@
+{
+  "name": "example-only-do-not-submit-unchanged",
+  "status": "proposed",
+  "component": "rna2adt",
+  "model_version_id": "rna2adt:sha256:c984116eb143426903c43ebb2f7a7794e1da8afec0a31d1dac4f07554b8f2713",
+  "submitter": "example-contributor",
+  "license": "Apache-2.0",
+  "species": "human",
+  "tissue": "example tissue",
+  "trained_at": "2026-10-06",
+  "training_sources": [
+    "https://example.org/training-data"
+  ],
+  "input_roster": {
+    "url": "https://example.org/releases/ordered-identifiers.txt",
+    "sha256": "0c8a4ac5054c4c08f79acd107cf38ebb19b33dcdb3a8d9c2ede4779b6b95dc4e",
+    "count": 2
+  },
+  "output_roster": {
+    "url": "https://example.org/releases/ordered-identifiers.txt",
+    "sha256": "0c8a4ac5054c4c08f79acd107cf38ebb19b33dcdb3a8d9c2ede4779b6b95dc4e",
+    "count": 2
+  },
+  "sample_roster": {
+    "url": "https://example.org/releases/ordered-identifiers.txt",
+    "sha256": "0c8a4ac5054c4c08f79acd107cf38ebb19b33dcdb3a8d9c2ede4779b6b95dc4e",
+    "count": 2
+  },
+  "artifacts": {
+    "bundle": {
+      "sha256": "0c8a4ac5054c4c08f79acd107cf38ebb19b33dcdb3a8d9c2ede4779b6b95dc4e",
+      "url": "https://example.org/releases/example-bundle.pkl",
+      "filename": "example-bundle.pkl"
+    }
+  },
+  "method": {
+    "estimator": "ExampleEstimator",
+    "preprocessing": "describe exact normalization",
+    "feature_selection": "none",
+    "hyperparameters": {
+      "example_parameter": 1
+    },
+    "target_transform": "none",
+    "missing_input_handling": "describe exact handling",
+    "code_url": "https://example.org/model-code",
+    "code_commit": "replace-with-immutable-commit"
+  },
+  "evaluation": {
+    "report_url": "https://example.org/heldout-report",
+    "split": "describe held-out donors and leakage checks"
+  },
+  "baseline_comparison": {
+    "model_version_id": "replace-with-baseline-version",
+    "coverage_report_url": "https://example.org/coverage",
+    "method_differences": [
+      "describe all differences"
+    ],
+    "evaluation_report_url": "https://example.org/comparison"
+  }
+}

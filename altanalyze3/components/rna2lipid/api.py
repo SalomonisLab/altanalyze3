@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from altanalyze3.components.model_registry import describe_model
+from altanalyze3.components.model_registry.registry import sha256_file
+
 from collections import defaultdict
 from dataclasses import dataclass
 import warnings
@@ -24,8 +27,11 @@ except ImportError:  # pragma: no cover
 import pickle
 
 
-# Default lung bundle. Sparse lipid-by-lipid ElasticNetCV, one model per lipid.
-DEFAULT_BUNDLE_PATH = Path(__file__).with_name("rna2lipid_hs_lung_lipidwise_bundle.pkl")
+# Promoted, complete-panel native-log2 model. The prior bundle stays byte intact.
+from .release import RELEASE_BUNDLE_PATH, verify_release_bundle
+
+DEFAULT_BUNDLE_PATH = RELEASE_BUNDLE_PATH
+PREVIOUS_BUNDLE_PATH = Path(__file__).with_name("rna2lipid_hs_lung_lipidwise_bundle.pkl")
 
 # Prior lung bundle. Single MultiTaskElasticNetCV over all lipids. Kept for
 # provenance and for reproducing results published before 2026-08-30.
@@ -150,6 +156,7 @@ class Rna2LipidBundle:
     ) -> "Rna2LipidBundle":
 
         bundle_path = Path(bundle_path)
+        provenance = describe_model("rna2lipid", {"bundle": bundle_path})
 
         with warnings.catch_warnings():
             warnings.simplefilter(
@@ -203,6 +210,17 @@ class Rna2LipidBundle:
             bundle.get("metadata") or {}
         )
 
+        if bundle_path.resolve() == DEFAULT_BUNDLE_PATH.resolve():
+            release = verify_release_bundle(bundle_path, bundle)
+            # The source pickle is retained byte-for-byte, including its old
+            # candidate labels. Promotion is recorded in the release manifest.
+            metadata.update(candidate_only=False, production_default_changed=True,
+                            release_id=release["release_id"],
+                            bundle_sha256=release["bundle_sha256"],
+                            target_scale=release["target_scale"],
+                            linear_inverse=release["linear_inverse"],
+                            BH_policy=release["BH_policy"])
+
         # Preserve useful metadata from newer bundles.
         for key in (
             "model_name",
@@ -225,7 +243,7 @@ class Rna2LipidBundle:
                     bundle[key],
                 )
 
-        return cls(
+        bundle = cls(
             bundle_path=bundle_path,
             model=bundle.get("model"),
             models=bundle.get("models"),
@@ -235,11 +253,16 @@ class Rna2LipidBundle:
             output_lipids=bundle["Y_columns"],
             metadata=metadata,
         )
+        if sha256_file(bundle_path) != provenance["artifacts"]["bundle"]["sha256"]:
+            raise RuntimeError("Model artifact changed while loading; retry with immutable files")
+        bundle.model_provenance = provenance
+        return bundle
 
 
     def model_info(self) -> Dict[str, object]:
         info = {
             "bundle_path": str(self.bundle_path),
+            **getattr(self, "model_provenance", {}),
             "n_input_genes": len(self.input_genes),
             "n_output_lipids": len(self.output_lipids),
             "architecture": self.architecture,
@@ -341,6 +364,7 @@ class Rna2LipidBundle:
         gene_symbol_col: Optional[str] = None,
         groupby: Optional[str] = None,
         chunk_size: int = 2048,
+        input_log_base: Optional[float] = None,
     ) -> PredictionResult:
         obs_names = _clean_labels(adata.obs_names)
         if len(set(obs_names)) != len(obs_names):
@@ -356,12 +380,23 @@ class Rna2LipidBundle:
             raise ValueError("No model genes were found in the provided AnnData")
 
         predictions: List[pd.DataFrame] = []
+        # An explicit caller declaration converts logged RNA to the log2
+        # representation used in the validated LungMAP inference. No scale is
+        # guessed, and callers supplying the established numeric input retain
+        # its exact behavior when this argument is omitted.
+        input_scale_factor = 1.0
+        if input_log_base is not None:
+            if not np.isfinite(input_log_base) or input_log_base <= 0 or np.isclose(input_log_base, 1):
+                raise ValueError("RNA log base must be a finite positive number other than 1.")
+            input_scale_factor = float(np.log(input_log_base) / np.log(2))
         # Only row labels need cleaning. Copying AnnData also duplicates all RNA,
         # counts, raw and other modalities before otherwise bounded prediction.
         # Read the caller's matrices without modifying its annotations or values.
         for start in range(0, adata.n_obs, chunk_size):
             stop = min(start + chunk_size, adata.n_obs)
             matrix = self._read_matrix_chunk(adata, start=start, stop=stop, layer=layer)
+            if input_scale_factor != 1.0:
+                matrix = matrix.astype(np.float64) * input_scale_factor
             aligned = self._align_matrix_chunk(matrix, matched_positions)
             predicted = self._predict_aligned_matrix(aligned)
             predicted.index = prediction_index[start:stop]
@@ -375,6 +410,11 @@ class Rna2LipidBundle:
         )
         summary["layer"] = layer or "X"
         summary["gene_symbol_source"] = gene_symbol_col or "var_names"
+
+        if input_log_base is not None:
+            summary["RNA_input_log_base"] = float(input_log_base)
+            summary["RNA_model_log_base"] = 2.0
+            summary["RNA_log_base_conversion_factor"] = input_scale_factor
 
         if groupby is not None:
             groups = adata.obs[groupby].astype(str).str.strip().copy()
@@ -753,6 +793,7 @@ class Rna2LipidBundle:
     def _build_summary(self, *, input_rows: int, matched_genes: int, input_kind: str) -> Dict[str, object]:
         return {
             "bundle_path": str(self.bundle_path),
+            **getattr(self, "model_provenance", {}),
             "input_kind": input_kind,
             "input_rows": input_rows,
             "matched_genes": matched_genes,
@@ -761,6 +802,8 @@ class Rna2LipidBundle:
             "output_lipid_count": len(self.output_lipids),
             "target_scaling_mode": self.target_scaling_mode,
             "architecture": self.architecture,
+            "prediction_scale": self.metadata.get("target_scale", "legacy_log2"),
+            "release_id": self.metadata.get("release_id", "explicit_bundle_override"),
         }
 
 

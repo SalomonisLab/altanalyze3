@@ -18,6 +18,9 @@ baseline see ``training.KnnAdtRegressor``.
 
 from __future__ import annotations
 
+from altanalyze3.components.model_registry import describe_model
+from altanalyze3.components.model_registry.registry import sha256_file
+
 from collections import defaultdict
 from dataclasses import dataclass
 import pickle
@@ -115,6 +118,7 @@ class Rna2AdtBundle:
     @classmethod
     def load(cls, bundle_path: Path | str = DEFAULT_BUNDLE_PATH) -> "Rna2AdtBundle":
         bundle_path = Path(bundle_path)
+        provenance = describe_model("rna2adt", {"bundle": bundle_path})
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", InconsistentVersionWarning)
             with bundle_path.open("rb") as handle:
@@ -125,7 +129,7 @@ class Rna2AdtBundle:
         if missing:
             raise ValueError(f"Model bundle is missing required keys: {sorted(missing)}")
 
-        return cls(
+        bundle = cls(
             bundle_path=bundle_path,
             model=bundle["model"],
             scaler_x=bundle.get("scaler_x"),
@@ -134,10 +138,15 @@ class Rna2AdtBundle:
             output_adts=bundle["Y_columns"],
             metadata=bundle.get("metadata"),
         )
+        if sha256_file(bundle_path) != provenance["artifacts"]["bundle"]["sha256"]:
+            raise RuntimeError("Model artifact changed while loading; retry with immutable files")
+        bundle.model_provenance = provenance
+        return bundle
 
     def model_info(self) -> Dict[str, object]:
         info = {
             "bundle_path": str(self.bundle_path),
+            **getattr(self, "model_provenance", {}),
             "n_input_genes": len(self.input_genes),
             "n_output_adts": len(self.output_adts),
             "model_class": type(self.model).__name__,
@@ -352,6 +361,7 @@ class Rna2AdtBundle:
     def _build_summary(self, *, input_rows: int, matched_genes: int, input_kind: str) -> Dict[str, object]:
         return {
             "bundle_path": str(self.bundle_path),
+            **getattr(self, "model_provenance", {}),
             "input_kind": input_kind,
             "input_rows": input_rows,
             "matched_genes": matched_genes,

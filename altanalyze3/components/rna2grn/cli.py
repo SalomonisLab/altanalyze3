@@ -12,6 +12,8 @@ or an explicit ``--bundle <path>``; passing both is an error.
 """
 from __future__ import annotations
 
+from altanalyze3.components.model_registry import write_provenance
+
 import argparse
 import json
 from pathlib import Path
@@ -24,6 +26,7 @@ from .api import (DEFAULT_REFERENCE, REFERENCE_BUNDLES, Rna2GrnBundle,
 
 def _write(result, output: str, summary_json: str | None):
     result.predictions.to_csv(output)
+    write_provenance(output, {k: v for k, v in result.summary.items() if k != "neighbors"})
     summ = {k: v for k, v in result.summary.items() if k != "neighbors"}
     if "neighbors" in result.summary:
         nbr_path = str(Path(output).with_suffix("")) + ".neighbors.csv"

@@ -29,9 +29,12 @@ def test_signed_predictions_make_markers_without_count_normalization(tmp_path, m
     assert set(markers.Gene) == set(a.var_names)
     assert (markers.rho > .99).all()
     aggregates = pipeline.marker_mod._prepare_marker_stats_aggregates(a, 'state', list(a.var_names), False, None)
-    # Default RNA/count centroid export keeps its guard as well.
-    with pytest.raises(ValueError, match='Centroid matrix cannot be built'):
-        pipeline.marker_mod._build_marker_centroids_from_aggregates(list(a.var_names), ['A', 'B'], aggregates)
+    # The current RNA/count centroid contract floors background-subtracted
+    # negative sums (explicit user directive recorded in that implementation).
+    # The imputed mean path above must continue to preserve signed values.
+    count_centroids = pipeline.marker_mod._build_marker_centroids_from_aggregates(
+        list(a.var_names), ['A', 'B'], aggregates)
+    np.testing.assert_array_equal(count_centroids, np.zeros((2, 2)))
 
 
 @pytest.mark.parametrize('modality', ['lipids', 'adt', 'grn_tf', 'metabolite', 'lipid'])
@@ -106,7 +109,7 @@ def test_lipid_prediction_preserves_model_feature_names(architecture):
     np.testing.assert_allclose(result.predictions['PC'], estimator.predict(transformed))
 
 
-def test_lipid_predictions_are_floored_before_export_and_analysis(monkeypatch):
+def test_historical_lipid_flooring_preserved_but_undeclared_inverse_is_not_fabricated(monkeypatch):
     from types import SimpleNamespace
     query = ad.AnnData(np.ones((2, 2)), obs=pd.DataFrame(index=['cell1', 'cell2']))
     predictions = pd.DataFrame([[-3.5, 20.], [1.5, -0.01]], index=query.obs_names,
@@ -115,7 +118,8 @@ def test_lipid_predictions_are_floored_before_export_and_analysis(monkeypatch):
     monkeypatch.setattr(pipeline, 'load_rna2lipid_bundle', lambda *args: fake)
     result, summary = pipeline._build_imputed_lipid_adata(query)
     np.testing.assert_array_equal(result.X, [[0., 20.], [1.5, 0.]])
-    assert (result.layers['counts'] >= 0).all()
+    assert 'counts' not in result.layers
+    assert result.uns['target_encoding_complete'] is False
     assert summary['clipped_negative_values'] == 2
     assert result.uns['prediction_summary']['clipped_negative_values'] == 2
     assert predictions.iloc[0, 0] == -3.5  # source/model predictions are not mutated

@@ -158,13 +158,18 @@ def write_selection(adata, path, uns):
 
 
 def rank_features(adata, groupby, case, control, method, reference_rank, bh_fdr, filter_mask):
+    from .lipid_scale import full_imputed_bh_mask
+    from .imputed_scale import uses_imputed_scale, prediction_encoding
+    if uses_imputed_scale(adata):
+        prediction_encoding(adata)
+    lipid_mask = full_imputed_bh_mask(adata)
     root, rows = root_and_rows(adata)
     reader = FeatureReader(root.X, rows)
     n_rows, n_genes = reader.shape
     metadata = copy.deepcopy(dict(adata.uns))
     normalize = False
     totals = None
-    if 'log1p' not in metadata:
+    if 'log1p' not in metadata and not uses_imputed_scale(adata):
         maximum = -np.inf
         totals = np.empty(n_rows, dtype=np.float64)
         positions = np.arange(root.n_obs) if isinstance(rows, slice) else rows
@@ -201,11 +206,13 @@ def rank_features(adata, groupby, case, control, method, reference_rank, bh_fdr,
                 block = np.log1p(block / divisor[:, None])
             uns['log1p'] = {'base': None}
         current = ad.AnnData(X=block, obs=adata.obs.copy(), var=root.var.iloc[start:stop].copy(), uns=uns)
-        names, _, logfc, pvals = reference_rank(current, groupby, case, control, method)
+        names, _, logfc, pvals = reference_rank(current, groupby, case, control, method, _adjust_fdr=False)
         scores = current.uns['rank_genes_groups']['scores'][case]
         frame_parts.append(pd.DataFrame({'pval': pvals.values, 'logfc': logfc.values, 'score': scores}, index=names))
     frame = pd.concat(frame_parts).reindex(root.var_names.astype(str))
-    keep = np.concatenate(keep_parts) & np.isfinite(frame['pval'].to_numpy())
+    if lipid_mask is not None and not np.isfinite(frame['pval'].to_numpy()).all():
+        raise ValueError('An imputed raw p value is nonfinite; do not shrink the BH testing family')
+    keep = (lipid_mask if lipid_mask is not None else np.concatenate(keep_parts)) & np.isfinite(frame['pval'].to_numpy())
     adjusted = np.ones(n_genes, dtype=float)
     adjusted[keep] = bh_fdr(frame['pval'].to_numpy()[keep])
     frame['fdr'] = adjusted
@@ -293,17 +300,8 @@ def bind_broadcast_profiles(adata):
         raise ValueError('Invalid broadcast prediction profile metadata')
     adata.X._analysis_profiles = values, codes
     if 'counts' in adata.layers:
-        scale = str(adata.uns.get('expression_scale', 'linear'))
-        info = adata.uns.get('log1p', {})
-        if scale == 'log2':
-            counts = np.maximum(np.exp2(values.astype(np.float64)) - 1, 0).astype(np.float32)
-        elif scale == 'log1p':
-            base = info.get('base')
-            base = np.e if base is None else float(base)
-            linear = np.expm1(values.astype(np.float64)) if np.isclose(base, np.e) else np.power(base, values.astype(np.float64)) - 1
-            counts = np.maximum(linear, 0).astype(np.float32)
-        else:
-            counts = np.maximum(values, 0)
+        from .imputed_scale import prediction_encoding, inverse_predictions
+        counts = inverse_predictions(values, prediction_encoding(adata)).astype(np.float32)
         adata.layers['counts']._analysis_profiles = counts, codes
 
 

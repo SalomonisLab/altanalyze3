@@ -37,6 +37,8 @@ Method notes that the README repeats, so a reader never has to guess:
 """
 from __future__ import annotations
 
+from altanalyze3.components.model_registry.registry import read_result_provenance, write_run_provenance
+
 import argparse
 import json
 import os
@@ -527,6 +529,7 @@ def ingest_modality(
     granularity, so every cell of a state carries that state's value and only the
     feature x cell-state matrix is stored. Nothing is interpolated in either case.
     """
+    model_provenance = read_result_provenance(source)
     mpaths = paths.modality(modality_id)
     rows, features, matrix = _read_feature_matrix(source, lazy_dense=True)
     stream_dense = bool(getattr(matrix, 'dense_h5', False))
@@ -675,6 +678,7 @@ def ingest_modality(
             f"of {n_cells * n_features:,} ({nnz / max(n_cells * n_features, 1):.4f} dense)")
 
     info = {
+        "model_provenance": model_provenance,
         "id": modality_id,
         "label": label or modality_id.upper(),
         "feature_label": feature_label,
@@ -817,6 +821,12 @@ def _add_modalities_to_bundle(a, sources: Dict[str, str], labels: Dict[str, str]
         log(f"DEG manifest: {len(manifest['comparisons'])} tables "
             f"({len(kept)} kept, {len(added['comparisons'])} added)")
 
+    model_versions = {key: record for key, record in meta.get("model_versions", {}).items()
+                      if key not in existing}
+    model_versions.update({key: record["model_provenance"] for key, record in existing.items()
+                           if record.get("model_provenance")})
+    meta["model_versions"] = model_versions
+    write_run_provenance(os.path.dirname(paths.metadata), model_versions, application="scALABLE-viewer")
     block["modalities_updated_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     with open(paths.metadata, "w") as fh:
         json.dump(meta, fh, indent=2)
@@ -1172,6 +1182,14 @@ def main(argv=None) -> int:
     if modality_manifest:
         log(f"modalities: {sorted(modality_manifest)}")
 
+    model_versions = {key: record["model_provenance"] for key, record in modality_manifest.items()
+                      if record.get("model_provenance")}
+    if a.ccc and os.path.isfile(a.ccc):
+        ccc_provenance = read_result_provenance(a.ccc)
+        if ccc_provenance:
+            model_versions["fastComm"] = ccc_provenance
+    write_run_provenance(os.path.dirname(paths.metadata), model_versions, application="scALABLE-viewer")
+
     # ---- metadata + config snippet -------------------------------------------
     ds_id = a.dataset_id or a.prefix
     meta = {
@@ -1218,6 +1236,7 @@ def main(argv=None) -> int:
             "warnings": warn_log,
         },
     }
+    meta["model_versions"] = model_versions
     with open(paths.metadata, "w") as fh:
         json.dump(meta, fh, indent=2)
     with open(paths.config_snippet, "w") as fh:

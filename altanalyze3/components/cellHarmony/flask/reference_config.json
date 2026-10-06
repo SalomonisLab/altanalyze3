@@ -31,9 +31,10 @@
        "log_base": "e"
       },
       "lipids": {
-       "bundle_path": "../../rna2lipid/rna2lipid_hs_lung_lipidwise_bundle.pkl",
-       "expression_scale": "log2",
-       "log_base": "2"
+       "bundle_path": "../../rna2lipid/rna2lipid_hs_lung_native_log2_20261005_bundle.pkl",
+       "expression_scale": "native_relative_log2",
+       "log_base": "2",
+       "log_pseudocount": 0
       }
      }
     },
@@ -64,9 +65,10 @@
        "log_base": "e"
       },
       "lipids": {
-       "bundle_path": "../../rna2lipid/rna2lipid_hs_lung_lipidwise_bundle.pkl",
-       "expression_scale": "log2",
-       "log_base": "2"
+       "bundle_path": "../../rna2lipid/rna2lipid_hs_lung_native_log2_20261005_bundle.pkl",
+       "expression_scale": "native_relative_log2",
+       "log_base": "2",
+       "log_pseudocount": 0
       }
      }
     },
@@ -90,14 +92,16 @@
        "log_base": "e"
       },
       "metabolite": {
-       "bundle_path": "../../rna2metabolite/artifacts/rna2metabolite_aml_bundle.pkl.gz",
+       "bundle_path": "../../rna2metabolite/artifacts/rna2metabolite_aml_NA30_20261006_bundle.pkl.gz",
        "expression_scale": "log2",
-       "log_base": "2"
+       "log_base": "2",
+       "log_pseudocount": 0.0
       },
       "lipid": {
        "bundle_path": "../../rna2lipid/aml/artifacts/rna2lipid_aml_bundle.pkl.gz",
        "expression_scale": "log2",
-       "log_base": "2"
+       "log_base": "2",
+       "log_pseudocount": 0.0
       },
       "grn": {
        "bundle_path": "../../rna2grn/rna2grn_bundle.pkl.gz",
@@ -136,9 +140,10 @@
        "log_base": "e"
       },
       "lipids": {
-       "bundle_path": "../../rna2lipid/rna2lipid_hs_lung_lipidwise_bundle.pkl",
-       "expression_scale": "log2",
-       "log_base": "2"
+       "bundle_path": "../../rna2lipid/rna2lipid_hs_lung_native_log2_20261005_bundle.pkl",
+       "expression_scale": "native_relative_log2",
+       "log_base": "2",
+       "log_pseudocount": 0
       }
      }
     },
@@ -169,9 +174,10 @@
        "log_base": "e"
       },
       "lipids": {
-       "bundle_path": "../../rna2lipid/rna2lipid_hs_lung_lipidwise_bundle.pkl",
-       "expression_scale": "log2",
-       "log_base": "2"
+       "bundle_path": "../../rna2lipid/rna2lipid_hs_lung_native_log2_20261005_bundle.pkl",
+       "expression_scale": "native_relative_log2",
+       "log_base": "2",
+       "log_pseudocount": 0
       }
      }
     },
@@ -202,9 +208,10 @@
        "log_base": "e"
       },
       "lipids": {
-       "bundle_path": "../../rna2lipid/rna2lipid_hs_lung_lipidwise_bundle.pkl",
-       "expression_scale": "log2",
-       "log_base": "2"
+       "bundle_path": "../../rna2lipid/rna2lipid_hs_lung_native_log2_20261005_bundle.pkl",
+       "expression_scale": "native_relative_log2",
+       "log_base": "2",
+       "log_pseudocount": 0
       }
      }
     }

@@ -1,0 +1,56 @@
+{
+  "scALABLE_pipeline": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/flask/pipeline.py",
+  "config": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/flask/reference_config.json",
+  "checks": [
+    {
+      "reference": "hs_lung_cellref2_reference",
+      "modality": "lipids",
+      "bundle": "rna2lipid_hs_lung_native_log2_20261005_bundle.pkl",
+      "targets": 202,
+      "sha256_verified": true,
+      "finite_test_predictions": true
+    },
+    {
+      "reference": "hs_lung_cellref_reference",
+      "modality": "lipids",
+      "bundle": "rna2lipid_hs_lung_native_log2_20261005_bundle.pkl",
+      "targets": 202,
+      "sha256_verified": true,
+      "finite_test_predictions": true
+    },
+    {
+      "reference": "hs_bm_reference",
+      "modality": "metabolite",
+      "bundle": "rna2metabolite_aml_NA30_20261006_bundle.pkl.gz",
+      "targets": 2023,
+      "sha256_verified": true,
+      "finite_test_predictions": true
+    },
+    {
+      "reference": "hs_lung_hlca_reference",
+      "modality": "lipids",
+      "bundle": "rna2lipid_hs_lung_native_log2_20261005_bundle.pkl",
+      "targets": 202,
+      "sha256_verified": true,
+      "finite_test_predictions": true
+    },
+    {
+      "reference": "hs_lung_natri_reference",
+      "modality": "lipids",
+      "bundle": "rna2lipid_hs_lung_native_log2_20261005_bundle.pkl",
+      "targets": 202,
+      "sha256_verified": true,
+      "finite_test_predictions": true
+    },
+    {
+      "reference": "hs_lung_bpd_sun_reference",
+      "modality": "lipids",
+      "bundle": "rna2lipid_hs_lung_native_log2_20261005_bundle.pkl",
+      "targets": 202,
+      "sha256_verified": true,
+      "finite_test_predictions": true
+    }
+  ],
+  "test_data": "Two synthetic expression profiles per reference; no clinical-data rerun",
+  "service_restarted": false
+}

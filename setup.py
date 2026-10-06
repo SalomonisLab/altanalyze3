@@ -17,6 +17,8 @@ setup(
     license="Apache-2.0",
     include_package_data=True,
     package_data={
+        "altanalyze3.components.model_registry": ["catalog.json"],
+        "altanalyze3.components.rna2metabolite": ["resources/*.json", "missingness_release.json", "artifacts/rna2metabolite_aml_bundle.pkl.gz", "artifacts/rna2metabolite_aml_NA30_20261006_bundle.pkl.gz"],
         "altanalyze3.components.snaf": ["docs/*.md", "surface/data/*.json"],
         "altanalyze3.components.fastCNV": ["resources/*.tsv"],
         "altanalyze3.components.long_read": ["resources/*.gz"],

@@ -1,0 +1,126 @@
+{
+  "source_root": "/Users/saljh8/Dropbox/Collaborations/Grimes/Human-MS-impute",
+  "model_or_dataset_changed": false,
+  "fit_executed": false,
+  "missing_values_filled": false,
+  "targets_excluded": false,
+  "workbook": {
+    "path": "/Users/saljh8/Downloads/43018_2026_1175_MOESM3_ESM.xlsx",
+    "sha256": "d527bafcf395571504e178cff2075a5b0047567f553cdd8082eec1c2d8ea4d1d"
+  },
+  "modalities": {
+    "lipid": {
+      "targets": 1009,
+      "training_cases": 87,
+      "RNA_genes": 12472,
+      "target_identities_and_sample_roster_verified": true,
+      "source_model_matches_packaged_arrays": true,
+      "source_workbook_matches_all_saved_targets": true,
+      "maximum_target_reconstruction_error": 3.552713678800501e-15,
+      "target_file": {
+        "path": "/Users/saljh8/Dropbox/Collaborations/Grimes/Human-MS-impute/data/lipidomics_unique_matched.txt.gz",
+        "sha256": "dbb12f34c184473048f56aabecc9da7f3ceca6a436b0c3d4ec4b41d4e4cb9204"
+      },
+      "source_model": {
+        "path": "/Users/saljh8/Dropbox/Collaborations/Grimes/Human-MS-impute/models/rna2lipid_aml.pkl",
+        "sha256": "64140390fdd41ce9be72ba70add8ba731134b77994ee83a9eda727fe9546f2c8"
+      },
+      "packaged_model": {
+        "path": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/rna2lipid/aml/artifacts/rna2lipid_aml_bundle.pkl.gz",
+        "sha256": "e4739c82f00b8a60d4a44d71711e7a6d68b0f5e6fa87a730bdbce64f321f8f46"
+      },
+      "fitted_targets": 1009,
+      "unfitted_targets": 0,
+      "unfitted_target_ids": [],
+      "saved_target_transform": "log2(max(raw_intensity, 0) + 1) - sample_median_within_ion_mode",
+      "upstream_metabolite_scale_evidence": null,
+      "training_target_transform_after_loading": "none; ridge fitted directly to saved Y",
+      "normalized_linear_representation": "2**saved_target",
+      "subtract_one_after_exponentiating_centered_targets": false
+    },
+    "metabolite": {
+      "targets": 2533,
+      "training_cases": 84,
+      "RNA_genes": 12416,
+      "target_identities_and_sample_roster_verified": true,
+      "source_model_matches_packaged_arrays": true,
+      "source_workbook_matches_all_saved_targets": true,
+      "maximum_target_reconstruction_error": 1.7763568394002505e-15,
+      "target_file": {
+        "path": "/Users/saljh8/Dropbox/Collaborations/Grimes/Human-MS-impute/data/metabolomics_unique_matched.txt.gz",
+        "sha256": "02bb281fe0482f36c63b553c51864be808c30ed182e0f90a6b7e566976748dd9"
+      },
+      "source_model": {
+        "path": "/Users/saljh8/Dropbox/Collaborations/Grimes/Human-MS-impute/models/rna2metabolite_aml.pkl",
+        "sha256": "7877fff7e316dd2c3e9bf139b4c6beda33fc68dd1ac7bba270f3a264cc2baedd"
+      },
+      "packaged_model": {
+        "path": "/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/rna2metabolite/artifacts/rna2metabolite_aml_bundle.pkl.gz",
+        "sha256": "232e9b56d72e3efacad1830aae2fd432f21d90b2e9dda5e723f09b2692db15c2"
+      },
+      "fitted_targets": 2486,
+      "unfitted_targets": 47,
+      "unfitted_target_ids": [
+        "Dimethylglycine",
+        "PPG n9",
+        "Unknown0 325",
+        "Unknown0 559",
+        "Unknown0 950",
+        "Unknown0 999",
+        "Unknown0 1113",
+        "Unknown0 1184",
+        "Unknown0 1264",
+        "Unknown0 1287",
+        "Unknown0 1305",
+        "Unknown0 1307",
+        "Unknown0 1315",
+        "Unknown0 1411",
+        "Unknown0 1433",
+        "Unknown0 1441",
+        "Unknown0 1442",
+        "Unknown0 1444",
+        "Unknown0 1495",
+        "Unknown0 1504",
+        "Unknown0 1601",
+        "Azithromycin",
+        "Doxycycline",
+        "Ofloxacin",
+        "Unknown 0285",
+        "Unknown 0319",
+        "Unknown 0372",
+        "Unknown 0399",
+        "Unknown 0484",
+        "Unknown 0506",
+        "Unknown 0526",
+        "Unknown 0545",
+        "Unknown 0569",
+        "Unknown 0625",
+        "Unknown 0644",
+        "Unknown 0651",
+        "Unknown 0652",
+        "Unknown 0666",
+        "Unknown 0674",
+        "Unknown 0693",
+        "Unknown 0698",
+        "Unknown 0702",
+        "Unknown 0709",
+        "Unknown 0719",
+        "Unknown 0730",
+        "Unknown 0731",
+        "Unknown 0750"
+      ],
+      "saved_target_transform": "identity import of workbook Tables21/22",
+      "upstream_metabolite_scale_evidence": "Original extraction script declares log2/median-centered; workbook values imported verbatim. This audit does not establish an upstream absolute-intensity inverse.",
+      "training_target_transform_after_loading": "none; ridge fitted directly to saved Y",
+      "normalized_linear_representation": "2**saved_target",
+      "subtract_one_after_exponentiating_centered_targets": false
+    }
+  },
+  "scripts": {
+    "/Users/saljh8/Dropbox/Collaborations/Grimes/Human-MS-impute/code/extract_ms_matrices.py": "dab818df909cdda231ea1cf3f2143b7efec9ad213950bf543c2112e5c7685606",
+    "/Users/saljh8/Dropbox/Collaborations/Grimes/Human-MS-impute/code/build_unique_ms_tables.py": "1ce17fd21e541a5718cd23de7bdca27e8901e077823ed0dca98d11861ef1bb72",
+    "/Users/saljh8/Dropbox/Collaborations/Grimes/Human-MS-impute/code/evaluate_imputation.py": "46c1f1b3ff84e734360989aad200214d8c07764c55f343778f1618a6d297165d",
+    "/Users/saljh8/Dropbox/Collaborations/Grimes/Human-MS-impute/code/build_imputation_model.py": "a5a8f83d7a07a0e5db57fb875d179c7692585f01aa9ea613c842c10932f0edfb",
+    "/Users/saljh8/Dropbox/Collaborations/Grimes/Human-MS-impute/code/make_altanalyze3_bundles.py": "4a47181c0e7d98ded6e59635ec81efc6c4603838a95efc3b4fd67dd2c78f1171"
+  }
+}

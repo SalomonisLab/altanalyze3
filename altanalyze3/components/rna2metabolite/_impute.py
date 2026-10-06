@@ -26,6 +26,9 @@ genes (metabolite 0.268 vs 0.223, lipid 0.355 vs 0.308 median Spearman).
 """
 from __future__ import annotations
 
+from altanalyze3.components.model_registry import describe_model
+from altanalyze3.components.model_registry.registry import sha256_file
+
 import gzip
 import pickle
 from collections import defaultdict
@@ -86,21 +89,31 @@ class PerTargetImputeBundle:
     @classmethod
     def load(cls, bundle_path) -> "PerTargetImputeBundle":
         bundle_path = Path(bundle_path)
+        provenance = describe_model("rna2metabolite", {"bundle": bundle_path})
         with _open(bundle_path) as fh:
             b = pickle.load(fh)
+        from .missingness_release import validate_release
+        validate_release(bundle_path, b)
         req = {"X_columns", "Y_columns", "mu", "sd", "sel_idx", "coef", "intercept"}
         miss = req.difference(b)
         if miss:
             raise ValueError(f"imputation bundle is missing keys: {sorted(miss)}")
-        return cls(bundle_path=bundle_path, X_columns=b["X_columns"], Y_columns=b["Y_columns"],
+        bundle = cls(bundle_path=bundle_path, X_columns=b["X_columns"], Y_columns=b["Y_columns"],
                    mu=b["mu"], sd=b["sd"], sel_idx=b["sel_idx"], coef=b["coef"],
                    intercept=b["intercept"], metadata=b.get("metadata"))
+        if sha256_file(bundle_path) != provenance["artifacts"]["bundle"]["sha256"]:
+            raise RuntimeError("Model artifact changed while loading; retry with immutable files")
+        bundle.model_provenance = provenance
+        return bundle
 
     def model_info(self) -> Dict[str, object]:
-        info = {"bundle_path": str(self.bundle_path), "n_input_genes": len(self.input_genes),
+        info = {"bundle_path": str(self.bundle_path),
+            **getattr(self, "model_provenance", {}), "n_input_genes": len(self.input_genes),
                 "n_molecules": len(self.targets), "model_class": "PerTargetRidge"}
         for k in ("modality", "estimator", "normalization", "gene_filter", "nfeat", "alpha",
-                  "n_train_cases", "heldout_median_spearman", "n_imputable_sp_gt_0p3"):
+                  "n_train_cases", "heldout_median_spearman", "n_imputable_sp_gt_0p3",
+                  "expression_scale", "log_base", "log_pseudocount", "target_scale",
+                  "missingness_release", "evaluation_status"):
             if k in self.metadata:
                 info[k] = self.metadata[k]
         return info
@@ -236,6 +249,12 @@ class PerTargetImputeBundle:
         out.obs_names = [str(x) for x in index]
         out.uns["imputation"] = {**self.model_info(),
                                   "matched_genes": int(matched), "n_molecules": int(valid.sum())}
+        for key in ("expression_scale", "log_base", "log_pseudocount"):
+            if key in self.metadata:
+                out.uns[key] = self.metadata[key]
+        if self.metadata.get("expression_scale") == "log2":
+            out.uns["log1p"] = {"base": 2.0}
+        out.uns["modality"] = "metabolite"
         if kept is not None:
             out.obs["n_cells_group"] = [kept.get(str(x), np.nan) for x in index]
         return out
@@ -244,13 +263,17 @@ class PerTargetImputeBundle:
     def _wrap(self, Yhat, index, matched, kind, valid) -> PredictionResult:
         df = pd.DataFrame(np.asarray(Yhat), index=index, columns=list(self.targets))
         summary = {
-            "bundle_path": str(self.bundle_path), "input_kind": kind,
+            "bundle_path": str(self.bundle_path),
+            **getattr(self, "model_provenance", {}), "input_kind": kind,
             "n_samples": int(df.shape[0]), "matched_genes": int(matched),
             "missing_genes": len(self.input_genes) - int(matched),
             "model_gene_count": len(self.input_genes),
             "n_molecules": len(self.targets), "n_molecules_imputed": int(np.asarray(valid).sum()),
             "modality": self.metadata.get("modality"),
         }
+        for key in ("expression_scale", "log_base", "log_pseudocount", "target_scale", "missingness_release"):
+            if key in self.metadata:
+                summary[key] = self.metadata[key]
         return PredictionResult(predictions=df, summary=summary)
 
 

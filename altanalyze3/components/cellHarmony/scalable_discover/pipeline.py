@@ -23,6 +23,8 @@ No differential expression and no modality imputation run here.
 """
 from __future__ import annotations
 
+from altanalyze3.components.model_registry.registry import write_run_provenance
+
 import gc
 import json
 import os
@@ -564,6 +566,11 @@ def run_discover_pipeline(job_id: str, store: JobStore, *, h5ad_compression: Opt
             store.append_log(job_id, f"fastComm analysis skipped ({layer_key}): "
                                      f"{fastcomm_by_layer[layer_key]['message']}")
     fastcomm_analysis = fastcomm_by_layer[DEFAULT_LAYER]
+    model_versions = {"fastComm:" + key: record["summary"]
+                      for key, record in fastcomm_by_layer.items() if record.get("enabled")}
+    provenance_path = write_run_provenance(outputs_dir, model_versions, application="scALABLE-discover")
+    artifacts["model_provenance"] = provenance_path
+    store.update_job(job_id, model_versions=model_versions)
 
     parameters_path = outputs_dir / "scalable_discover_parameters.json"
     repo_root = Path(__file__).resolve().parents[4]
@@ -607,6 +614,7 @@ def run_discover_pipeline(job_id: str, store: JobStore, *, h5ad_compression: Opt
                      "lr_sources": ["CellChatDB"], "min_cells": 5, "min_lr_expression_score": 0.2,
                      "max_lr_candidates_per_state_pair": 5,
                      "status": {k: v.get("status", "disabled") for k, v in fastcomm_by_layer.items()}},
+        "model_versions": model_versions,
         "versions": {"altanalyze3_commit": _git_commit(repo_root), "python": platform.python_version(),
                      "anndata": ad.__version__, "numpy": np.__version__, "pandas": pd.__version__},
     }

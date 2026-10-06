@@ -33,3 +33,33 @@ python -m components.rna2lipid.aml.cli predict-h5ad --input pb.h5ad --output imp
 ```
 Genes match by symbol; absent genes take the training mean; CP10k+log1p + z-score applied internally
 (pass `--normalized` for pre-normalized input).
+
+## Verified target scale (source trace, 2026-10-06)
+
+The original source project is
+`/Users/saljh8/Dropbox/Collaborations/Grimes/Human-MS-impute`.
+`code/build_unique_ms_tables.py:84` prepares each ion mode as
+`log2(max(intensity, 0) + 1) - sample_median_of_that_log2_mode`, then applies the
+existing best-detected measurement rule. `code/evaluate_imputation.py` loads the
+saved targets directly, and `code/build_imputation_model.py:61` fits ridge to
+those values without another target transformation or target z-score.
+
+All **1,009 lipids × 87 training cases** were reconstructed from the original
+source workbook, preserving the complete target and case rosters. Maximum
+absolute disagreement with the saved training targets was **3.55e-15**. All
+packaged gene IDs, target IDs, selected indices, coefficients, intercepts and
+RNA scaler arrays match the original saved model after its documented packaging
+casts. No training or source data were changed.
+
+For prediction `y`, `2**y` is a normalized relative signal: in the measured
+reference it equals `(intensity + 1) / 2**sample_mode_median`. It is positive
+even when `y` is negative. Subtracting one from `2**y` would undo the source
+pseudocount in the wrong units after median centering. Arithmetic means and
+folds in this normalized signal space use `2**y` without that subtraction or
+a second total normalization. These are relative normalized signal folds,
+not restored absolute MS intensities.
+
+The complete reproducible audit is
+`../../rna2metabolite/provenance/2026-10-06/target_scale_trace.json`, produced by
+the adjacent `trace_target_scale.py` without fitting or model writes. Runtime
+scale metadata wiring was not changed during this read-only trace.
