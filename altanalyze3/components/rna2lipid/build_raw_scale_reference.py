@@ -3,6 +3,15 @@
 This is a common per-lipid multiplicative calibration, not concentration
 calibration. Raw replication QC and model support remain separate requirements.
 """
+
+try:
+    from .candidate_integrity import reject_retired_workflow
+except ImportError:
+    from candidate_integrity import reject_retired_workflow
+
+if __name__ == "__main__":
+    reject_retired_workflow('build_raw_scale_reference.py')
+
 import argparse
 import json
 from pathlib import Path
@@ -14,6 +23,7 @@ from reference_normalization import fit_bundle, preservation_gate, population_di
 
 
 def run(reference_dir,raw_dir,out):
+    reject_retired_workflow('build_raw_scale_reference.py:run')
     reference=Path(reference_dir);rawdir=Path(raw_dir);out=Path(out);out.mkdir(parents=True,exist_ok=True)
     quality=pd.read_csv(rawdir/'per_lipid_replication.csv')
     quality['raw_replication_support']=(quality.isobaric_targets.isna()&(quality.ms2_support_scans>0)&

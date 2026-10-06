@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "analysis_status": "blocked",
+  "authorized_operations": [
+    "safeguard_implementation",
+    "safeguard_tests"
+  ],
+  "questions": [
+    {
+      "id": "D071_source",
+      "status": "resolved",
+      "question": "Where can I find the D071 lipidomics data, including the upstream table or script that produced its training targets?",
+      "user_answer": "We are removing D071 as it is a 60 year old donor. Repeat all steps with this workflow and evaluate",
+      "resolution_evidence": "User explicitly excludes D071 based on donor age. Upstream measurement origin remains unknown, but is no longer required for this candidate roster; this is not a claim that provenance was recovered."
+    },
+    {
+      "id": "corrected_target_provenance",
+      "status": "pending",
+      "question": "For the 45-profile, 202-lipid corrected reference, how should the four multi-mode lipid names be handled? NA filling is now authorized separately.",
+      "user_answer": null,
+      "resolution_evidence": null,
+      "partial_resolution": "The user approved established per-lipid median NA filling on log2 values; multi-mode reconciliation remains pending."
+    },
+    {
+      "id": "raw_target_annotations",
+      "status": "pending",
+      "question": "Where is the identification export with lipid names, ion modes, adducts and retention times needed for unresolved raw-MS mappings?",
+      "user_answer": null,
+      "resolution_evidence": null
+    },
+    {
+      "id": "review_full_proposal",
+      "status": "pending",
+      "question": "After source reconciliation, does the user approve the concrete complete-panel target transformation and comparison settings?",
+      "user_answer": null,
+      "resolution_evidence": null
+    }
+  ],
+  "approval": null,
+  "note": "D071 exclusion is explicitly authorized. Other pending decisions are not answered by this message. The immutable production baseline still documents its original 50 profiles; the candidate has an approved 45-profile scope.",
+  "approved_scope_change": {
+    "excluded_donor": "D071",
+    "excluded_profiles": [
+      "D071_PMX",
+      "D071_MIC",
+      "D071_END",
+      "D071_MES",
+      "D071_EPI"
+    ],
+    "reason": "60-year-old donor, as stated by user",
+    "granted_by": "user",
+    "user_message": "We are removing D071 as it is a 60 year old donor. Repeat all steps with this workflow and evaluate",
+    "conversation_reference": "Current thread, user message on 2026-10-05 authorizing D071 removal",
+    "required_training_profiles": 45,
+    "required_lipid_outputs": 202,
+    "required_RNA_inputs": 1303,
+    "required_estimator": "Deployed lipid-wise ElasticNetCV; original hyperparameters and method retained"
+  },
+  "requested_work": "Repeat candidate training, full pseudobulk/metacell imputation, cellHarmony differentials and experimental IPF validation after resolving the remaining target/calibration dependencies.",
+  "approved_na_handling": {
+    "granted_by": "user",
+    "user_message": "Yes, use the established method for NA filling, but on the log2 values, that is up to you. Do not worried that the older mehtod from 7 months ago uses `MultiTaskElasticNetCV`. We will not use that.",
+    "conversation_reference": "Current thread, 2026-10-05 approval of log2 NA filling",
+    "policy": "Per-lipid median of observed log2 training values across the 45 authorized training profiles; fill missing entries only, preserve observed negative log2 values. Retain all 202 lipid outputs.",
+    "estimator": "Established deployed lipidwise ElasticNetCV; not the ZIP MultiTaskElasticNetCV"
+  },
+  "required_local_COPD_inputs": {
+    "user_requirement": "Real uncensored per-sample pseudobulks and metacells for local imputation and differentials; multi-donor censored metacells are for later online release only.",
+    "verification": "Confirmed real per-sample inputs: 4781 pseudobulks and 84646 metacells, 141 donors. All 1678054 COPD metacell memberships mapped with zero mixed-donor metacells or donor-label mismatches. See COPD_real_input_audit_20261005.json."
+  },
+  "approved_work_sequence": {
+    "granted_by": "user",
+    "conversation_reference": "Current thread, 2026-10-05 request for IPF validation followed by RNA scale correction and all-covariate differentials",
+    "user_message": "After the following validation, correct the RNA log1p issue when generating the lipid imputation associated DEGs for all covariates currently in the LungMAP database for metacells and pseudobulks. The first validation is, re-run the IPF differentials and confirm that the new updated model with the realistic MASSIVE inferred lipid profiles gives good equivalent or improved results over the prior version.",
+    "first": "Full-panel corrected candidate IPF differential comparison against established production version, retaining baseline ElasticNetCV and matched differential parameters. Report observed performance; equivalence or improvement is not assumed.",
+    "then": "After successful IPF validation, correct the COPD RNA log-scale mismatch and regenerate lipid-associated differentials for all current LungMAP covariates for both real per-sample metacells and pseudobulks.",
+    "publication": "No replacement of official model or database publication authorized by this record.",
+    "pending_dependencies": "Existing unresolved full-panel raw-MS identifications and four multi-mode target mappings still require resolution before training."
+  }
+}

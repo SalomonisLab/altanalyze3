@@ -606,6 +606,6 @@ def run_snaf_b(args):
                 isoform_top_k=getattr(args, 'isoform_top_k', 5),
                 software_path=(str(args.tmhmm_path) if getattr(args, 'tmhmm_path', None) else None))
     surface.generate_full_results(outdir=outdir, freq_path=freq_path, mode=mode,
-                                  validation_gtf=validation_gtf)
+                                  validation_gtf=validation_gtf, cores=args.cpus)
     print('SNAF-B surface results written to {}'.format(os.path.join(outdir, 'B_candidates')))
     return outdir

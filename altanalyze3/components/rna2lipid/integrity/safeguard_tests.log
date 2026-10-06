@@ -1,0 +1,36 @@
+test_agent_cannot_self_authorize (__main__.IntegrityTests.test_agent_cannot_self_authorize) ... ok
+test_algorithm_and_parameter_changes_rejected (__main__.IntegrityTests.test_algorithm_and_parameter_changes_rejected) ... ok
+test_approval_not_transferable_to_another_run (__main__.IntegrityTests.test_approval_not_transferable_to_another_run) ... ok
+test_changed_source_rejected (__main__.IntegrityTests.test_changed_source_rejected) ... ok
+test_complete_manifest_validation_without_training (__main__.IntegrityTests.test_complete_manifest_validation_without_training) ... ok
+test_exact_coverage_passes (__main__.IntegrityTests.test_exact_coverage_passes) ... ok
+test_gateway_checks_actual_tables_before_estimator (__main__.IntegrityTests.test_gateway_checks_actual_tables_before_estimator) ... ok
+test_input_gene_loss_rejected (__main__.IntegrityTests.test_input_gene_loss_rejected) ... ok
+test_missing_D071_rejected (__main__.IntegrityTests.test_missing_D071_rejected) ... ok
+test_missing_provenance_record_rejected (__main__.IntegrityTests.test_missing_provenance_record_rejected) ... ok
+test_missing_source_requires_question (__main__.IntegrityTests.test_missing_source_requires_question) ... ok
+test_missing_state_fails_closed (__main__.IntegrityTests.test_missing_state_fails_closed) ... ok
+test_narrowed_contract_cannot_redefine_expected_panel (__main__.IntegrityTests.test_narrowed_contract_cannot_redefine_expected_panel) ... ok
+test_new_target_imputation_requires_decision (__main__.IntegrityTests.test_new_target_imputation_requires_decision) ... ok
+test_nonfinite_cannot_be_silently_filled (__main__.IntegrityTests.test_nonfinite_cannot_be_silently_filled) ... ok
+test_pending_question_blocks_even_with_approval_label (__main__.IntegrityTests.test_pending_question_blocks_even_with_approval_label) ... ok
+test_reconstructed_legacy_not_accepted_as_corrected (__main__.IntegrityTests.test_reconstructed_legacy_not_accepted_as_corrected) ... ok
+test_reduced_lipid_panel_rejected (__main__.IntegrityTests.test_reduced_lipid_panel_rejected) ... ok
+test_resolved_label_without_answer_rejected (__main__.IntegrityTests.test_resolved_label_without_answer_rejected) ... ok
+test_row_order_mismatch_rejected (__main__.IntegrityTests.test_row_order_mismatch_rejected) ... ok
+test_same_count_duplicate_identity_rejected (__main__.IntegrityTests.test_same_count_duplicate_identity_rejected) ... ok
+test_same_count_wrong_identity_rejected (__main__.IntegrityTests.test_same_count_wrong_identity_rejected) ... ok
+test_silence_or_missing_approval_never_passes (__main__.IntegrityTests.test_silence_or_missing_approval_never_passes) ... ok
+test_unresolved_provenance_rejected (__main__.IntegrityTests.test_unresolved_provenance_rejected) ... ok
+test_unverified_mapping_rejected (__main__.IntegrityTests.test_unverified_mapping_rejected) ... ok
+test_actual_reduced_candidate_is_rejected (__main__.RealWorkflowGuards.test_actual_reduced_candidate_is_rejected) ... ok
+test_all_retired_CLIs_block_without_writes_or_bypass_flags (__main__.RealWorkflowGuards.test_all_retired_CLIs_block_without_writes_or_bypass_flags) ... ok
+test_candidate_gateway_blocks_before_loading_tables (__main__.RealWorkflowGuards.test_candidate_gateway_blocks_before_loading_tables) ... ok
+test_current_production_contract_and_paused_state (__main__.RealWorkflowGuards.test_current_production_contract_and_paused_state) ... ok
+test_imported_orchestrators_also_block (__main__.RealWorkflowGuards.test_imported_orchestrators_also_block) ... ok
+test_reconstruction_diagnostic_stays_paused (__main__.RealWorkflowGuards.test_reconstruction_diagnostic_stays_paused) ... ok
+
+----------------------------------------------------------------------
+Ran 31 tests in 2.800s
+
+OK

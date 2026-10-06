@@ -14,6 +14,14 @@ venv/
 .gitignore
 tests/
 cellHarmony/webapp/jobs/
+# scALABLE-discover's job folders: its compose file binds this directory as the job volume,
+# so every upload and result would otherwise enter the next image build (5.1 GB locally).
+cellHarmony/scalable_discover/jobs/
+# Per-module Python environments. ".venv/" above matches only at the context root, so
+# Daedalus/.venv (1.8 GB) and Proteus/.proteus_venv (1.4 GB) entered every image. The image
+# installs its own packages from cellHarmony/webapp/requirements.docker.txt.
+**/.venv/
+**/.proteus_venv/
 cellHarmony/webapp/__pycache__/
 cellHarmony/flask/__pycache__/
 visualization/__pycache__/

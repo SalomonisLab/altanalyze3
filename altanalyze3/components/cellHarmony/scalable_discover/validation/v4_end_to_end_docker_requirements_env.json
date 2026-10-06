@@ -1,0 +1,500 @@
+{
+  "inputs": [
+    {
+      "name": "BOS_BOS.h5",
+      "sha256": "e5d64734a68701930593e0028329f84173bee1b5c99944cfb537ef017b08db9c",
+      "sample": "BOS"
+    },
+    {
+      "name": "Healthy_D071.h5",
+      "sha256": "fd95f34e85697df34b62b667f37edd3c7facbf97212f4d2014f5e7b6477ceabd",
+      "sample": "Healthy"
+    }
+  ],
+  "species": "human",
+  "ambient_correction": "yes",
+  "job_id": "4a4f740766ab459b81480dca6343da72",
+  "pipeline_seconds": 130.2,
+  "icgs3": {
+    "qc_cells": 8485,
+    "qc_genes": 32738,
+    "clustered_cells": 8099,
+    "unassigned_cells": 386,
+    "n_clusters": 25,
+    "clusters": [
+      "C1",
+      "C2",
+      "C3",
+      "C4",
+      "C5",
+      "C6",
+      "C7",
+      "C8",
+      "C9",
+      "C10",
+      "C11",
+      "C12",
+      "C13",
+      "C14",
+      "C15",
+      "C16",
+      "C17",
+      "C18",
+      "C19",
+      "C20",
+      "C21",
+      "C22",
+      "C23",
+      "C24",
+      "C25"
+    ]
+  },
+  "cell_state_predictions": [
+    "AT2 Cells_cC11",
+    "AT2 cell_cC12",
+    "Adventitial Fibroblast_cC8",
+    "Alveolar macrophages sub-cluster 1_cC15",
+    "CD8+ Memory-Effector T_cC22",
+    "Capillary Aerocyte_cC4",
+    "Classical Monocyte_cC19",
+    "Dendritic Cells_cC16",
+    "Endothelial cell_VWF high_cC3",
+    "Endothelial cell_cC2",
+    "Epithelial Subtype ciliated_cC1",
+    "Epithelial subtype AT1 cells_cC9",
+    "Fibroblast_cC7",
+    "GallBladder Unknown_cC24",
+    "Intestine Immune-B.Bcells_cC21",
+    "Macrophage_CCL20 high_cC17",
+    "Macrophage_cC13",
+    "Macrophages_cC14",
+    "Mast Cells_cC20",
+    "Mesothelial_cC5",
+    "Mucous_cC10",
+    "Natural Killer_cC25",
+    "Nonclassical Monocyte_cC18",
+    "Pericyte-Smooth muscle cell_cC6",
+    "T-NKT Cells_cC23"
+  ],
+  "marker_heatmap_rows_sampled_view": 1500,
+  "marker_networks": 24,
+  "fastcomm": {
+    "status": "completed",
+    "sample_key": "Library",
+    "summary_counts": {
+      "max_lr_candidates_per_state_pair": 5,
+      "min_ligand_expr": 0.01,
+      "min_lr_expression_score": 0.2,
+      "min_receptor_expr": 0.01,
+      "n_cells": 8099,
+      "n_genes": 1341,
+      "n_loaded_columns": 1341,
+      "n_loaded_genes": 1341,
+      "n_lr_edges": 3217,
+      "n_matched_required_genes": 1341,
+      "n_missing_required_genes": 42,
+      "n_required_genes": 1383,
+      "n_scored_edges": 2041,
+      "n_states": 25
+    }
+  },
+  "bundle": {
+    "n_cells": 8099,
+    "reason": "8,099 cells, below CELLHARMONY_BUNDLE_MIN_CELLS=10,000",
+    "status": "skipped",
+    "threshold": 10000
+  },
+  "checks_passed": 50,
+  "checks_total": 50,
+  "failed_checks": [],
+  "checks": [
+    {
+      "check": "upload",
+      "status": 200,
+      "ok": true,
+      "bytes": 65,
+      "detail": ""
+    },
+    {
+      "check": "save_qc",
+      "status": 200,
+      "ok": true,
+      "bytes": 303,
+      "detail": ""
+    },
+    {
+      "check": "qc_refuses_imputation",
+      "status": 400,
+      "ok": true,
+      "bytes": 59,
+      "detail": "{\"detail\":\"scALABLE-discover runs no modality imputation.\"}"
+    },
+    {
+      "check": "run",
+      "status": 200,
+      "ok": true,
+      "bytes": 63,
+      "detail": ""
+    },
+    {
+      "check": "pipeline_completed",
+      "status": 200,
+      "ok": true,
+      "bytes": 0,
+      "detail": "completed: Job finished successfully."
+    },
+    {
+      "check": "umap_clusters",
+      "status": 200,
+      "ok": true,
+      "bytes": 980585,
+      "detail": "query points equal ICGS3-clustered cells; no reference points"
+    },
+    {
+      "check": "umap_color_by_prediction",
+      "status": 200,
+      "ok": true,
+      "bytes": 1139749,
+      "detail": ""
+    },
+    {
+      "check": "expression_umap",
+      "status": 200,
+      "ok": true,
+      "bytes": 1226784,
+      "detail": "gene C1orf194"
+    },
+    {
+      "check": "genes",
+      "status": 200,
+      "ok": true,
+      "bytes": 358861,
+      "detail": ""
+    },
+    {
+      "check": "dotplot_default_markers",
+      "status": 200,
+      "ok": true,
+      "bytes": 12425,
+      "detail": ""
+    },
+    {
+      "check": "combplot",
+      "status": 200,
+      "ok": true,
+      "bytes": 45366,
+      "detail": ""
+    },
+    {
+      "check": "plot_variables",
+      "status": 200,
+      "ok": true,
+      "bytes": 3222,
+      "detail": ""
+    },
+    {
+      "check": "display_filters",
+      "status": 200,
+      "ok": true,
+      "bytes": 1440,
+      "detail": ""
+    },
+    {
+      "check": "marker_heatmap_tsv_sampled",
+      "status": 200,
+      "ok": true,
+      "bytes": 5046520,
+      "detail": "1500 marker rows"
+    },
+    {
+      "check": "marker_heatmap_tsv_all_columns",
+      "status": 200,
+      "ok": true,
+      "bytes": 98479204,
+      "detail": ""
+    },
+    {
+      "check": "marker_heatmap_viewer",
+      "status": 200,
+      "ok": true,
+      "bytes": 10288,
+      "detail": ""
+    },
+    {
+      "check": "marker_heatmap_pdf",
+      "status": 200,
+      "ok": true,
+      "bytes": 783540,
+      "detail": ""
+    },
+    {
+      "check": "marker_network",
+      "status": 200,
+      "ok": true,
+      "bytes": 14505,
+      "detail": "24 of 25 clusters have a network"
+    },
+    {
+      "check": "marker_network_pdf",
+      "status": 200,
+      "ok": true,
+      "bytes": 31782,
+      "detail": ""
+    },
+    {
+      "check": "umap_pdf_clusters",
+      "status": 200,
+      "ok": true,
+      "bytes": 143671,
+      "detail": ""
+    },
+    {
+      "check": "expression_pdf_umap",
+      "status": 200,
+      "ok": true,
+      "bytes": 137172,
+      "detail": ""
+    },
+    {
+      "check": "expression_pdf_violin",
+      "status": 200,
+      "ok": true,
+      "bytes": 51307,
+      "detail": ""
+    },
+    {
+      "check": "fastcomm_enabled",
+      "status": 200,
+      "ok": true,
+      "bytes": 0,
+      "detail": "{\"max_lr_candidates_per_state_pair\": 5, \"min_ligand_expr\": 0.01, \"min_lr_expression_score\": 0.2, \"min_receptor_expr\": 0.01, \"n_cells\": 8099, \"n_genes\": 1341, \"n_loaded_columns\": 1341, \"n_loaded_genes\""
+    },
+    {
+      "check": "fastcomm_focused_incoming",
+      "status": 200,
+      "ok": true,
+      "bytes": 31915,
+      "detail": ""
+    },
+    {
+      "check": "fastcomm_focused_outgoing",
+      "status": 200,
+      "ok": true,
+      "bytes": 36874,
+      "detail": ""
+    },
+    {
+      "check": "fastcomm_cell_state_network",
+      "status": 200,
+      "ok": true,
+      "bytes": 122367,
+      "detail": ""
+    },
+    {
+      "check": "fastcomm_state_heatmap",
+      "status": 200,
+      "ok": true,
+      "bytes": 55795,
+      "detail": ""
+    },
+    {
+      "check": "fastcomm_lr_dotplot",
+      "status": 200,
+      "ok": true,
+      "bytes": 11330,
+      "detail": ""
+    },
+    {
+      "check": "fastcomm_top_table",
+      "status": 200,
+      "ok": true,
+      "bytes": 13662,
+      "detail": ""
+    },
+    {
+      "check": "fastcomm_per_sample",
+      "status": 200,
+      "ok": true,
+      "bytes": 2585,
+      "detail": ""
+    },
+    {
+      "check": "regulatory_network_marker",
+      "status": 200,
+      "ok": true,
+      "bytes": 354,
+      "detail": "{\"available\": false, \"note\": \"GRN edge scores are unavailable for C1: 'grn'\", \"status\": \"missing_edges\", \"edges\": 0}"
+    },
+    {
+      "check": "download_assignments",
+      "status": 200,
+      "ok": true,
+      "bytes": 1119768,
+      "detail": ""
+    },
+    {
+      "check": "download_combined_h5ad",
+      "status": 200,
+      "ok": true,
+      "bytes": 260679935,
+      "detail": ""
+    },
+    {
+      "check": "download_fastcomm_archive",
+      "status": 200,
+      "ok": true,
+      "bytes": 1018886,
+      "detail": ""
+    },
+    {
+      "check": "download_fastcomm_scores",
+      "status": 200,
+      "ok": true,
+      "bytes": 690059,
+      "detail": ""
+    },
+    {
+      "check": "download_fastcomm_significant_interactions",
+      "status": 200,
+      "ok": true,
+      "bytes": 27686,
+      "detail": ""
+    },
+    {
+      "check": "download_fastcomm_significant_report",
+      "status": 200,
+      "ok": true,
+      "bytes": 8331,
+      "detail": ""
+    },
+    {
+      "check": "download_fastcomm_state_expression",
+      "status": 200,
+      "ok": true,
+      "bytes": 383601,
+      "detail": ""
+    },
+    {
+      "check": "download_fastcomm_state_pairs",
+      "status": 200,
+      "ok": true,
+      "bytes": 37770,
+      "detail": ""
+    },
+    {
+      "check": "download_icgs3_results_zip",
+      "status": 200,
+      "ok": true,
+      "bytes": 16621892,
+      "detail": ""
+    },
+    {
+      "check": "download_marker_genes_zip",
+      "status": 200,
+      "ok": true,
+      "bytes": 9122633,
+      "detail": ""
+    },
+    {
+      "check": "download_parameters_json",
+      "status": 200,
+      "ok": true,
+      "bytes": 4228,
+      "detail": ""
+    },
+    {
+      "check": "download_umap_coordinates",
+      "status": 200,
+      "ok": true,
+      "bytes": 507646,
+      "detail": ""
+    },
+    {
+      "check": "download_log",
+      "status": 200,
+      "ok": true,
+      "bytes": 22629,
+      "detail": ""
+    },
+    {
+      "check": "chat_examples",
+      "status": 200,
+      "ok": true,
+      "bytes": 526,
+      "detail": ""
+    },
+    {
+      "check": "chat_answers",
+      "status": 200,
+      "ok": true,
+      "bytes": 0,
+      "detail": "6 of 6 answered 200"
+    },
+    {
+      "check": "removed /api/jobs/{job}/differential/status",
+      "status": 404,
+      "ok": true,
+      "bytes": 22,
+      "detail": "removed route answers 404"
+    },
+    {
+      "check": "removed /api/jobs/{job}/differential/interactive/summary",
+      "status": 404,
+      "ok": true,
+      "bytes": 22,
+      "detail": "removed route answers 404"
+    },
+    {
+      "check": "removed /api/meta/reference-preview",
+      "status": 404,
+      "ok": true,
+      "bytes": 22,
+      "detail": "removed route answers 404"
+    },
+    {
+      "check": "removed POST differential",
+      "status": 404,
+      "ok": true,
+      "bytes": 22,
+      "detail": "removed route"
+    }
+  ],
+  "chat": [
+    {
+      "question": "What pathways have the best cross-modality C15 representation?",
+      "status": 200,
+      "intent": "cross_modality_pathways",
+      "answer": "50 pathways contain retained positive cell-state markers for C15; 68 bundled WikiPathways diagrams evaluated. Ranked by modality breadth, then equally weighted coverage: each count is divided by that modality\u2019s maximum pathway count across "
+    },
+    {
+      "question": "What is the best modality marker of C15?",
+      "status": 200,
+      "intent": "modality_markers",
+      "answer": "Among the retained marker results for C15, the strongest marker is FABP4 (RNA, MarkerFinder r=0.6098). Best per modality: RNA: FABP4 (r=0.6098). Ranked by positive Pearson correlation with cell-state membership (that state versus all others"
+    },
+    {
+      "question": "What are the best marker genes of C15 cells?",
+      "status": 200,
+      "intent": "markers",
+      "answer": "25 top marker genes of C15, from the marker table analysis."
+    },
+    {
+      "question": "What distinguishes C15 from C11 cells?",
+      "status": 200,
+      "intent": "compare",
+      "answer": "Marker genes separating C15 and C11."
+    },
+    {
+      "question": "Where is LYZ expressed?",
+      "status": 200,
+      "intent": "expression",
+      "answer": "Highest-expressing cell states for LYZ, by mean expression across the 25 states of this dataset."
+    },
+    {
+      "question": "Which cell states express ALDH2?",
+      "status": 200,
+      "intent": "expression",
+      "answer": "Highest-expressing cell states for ALDH2, by mean expression across the 25 states of this dataset."
+    }
+  ]
+}

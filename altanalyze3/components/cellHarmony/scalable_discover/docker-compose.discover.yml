@@ -1,0 +1,47 @@
+# scALABLE-discover behind a reverse proxy at /scalable-discover/
+#
+# Its own image (cellHarmony/scalable_discover/Dockerfile), container, port and job volume,
+# separate from scALABLE-web. The proxy must pass the /scalable-discover prefix through, as it
+# does for /scalable/ (port 8006) and /cellharmony/ (port 8001), because the app carries the
+# same prefix in SCALABLE_DISCOVER_ROOT_PATH.
+#
+# Build and start, from this directory:
+#   docker compose -f docker-compose.discover.yml up -d --build
+name: scalable-discover
+
+services:
+  scalable-discover:
+    build:
+      context: ../..
+      dockerfile: cellHarmony/scalable_discover/Dockerfile
+    image: scalable-discover:latest
+    container_name: scalable-discover
+    mem_limit: 30g
+    ports:
+      - "127.0.0.1:8007:8000"
+    environment:
+      SCALABLE_DISCOVER_ROOT_PATH: "/scalable-discover"
+      SCALABLE_DISCOVER_JOB_STORAGE: /srv/scalable-discover/jobs
+      # minimal: final h5ad + MarkerFinder outputs only; full: every ICGS3 file and archive.
+      SCALABLE_DISCOVER_EXPORTS: minimal
+      # The job runner passes this path to its worker; ICGS3 reads no reference from it.
+      CELLHARMONY_REFERENCE_REGISTRY: /app/altanalyze3/components/cellHarmony/flask/reference_config.json
+      CELLHARMONY_JOB_WORKERS: "2"
+      CELLHARMONY_WORKER_MEMORY_LIMIT_GIB: "15"
+      CELLHARMONY_TOTAL_MEMORY_LIMIT_GIB: "27"
+      CELLHARMONY_ISOLATE_JOBS: "1"
+      CELLHARMONY_CACHE_MAX_GIB: "2"
+      CELLHARMONY_CACHE_MAX_ENTRIES: "64"
+      CELLHARMONY_CACHE_TTL_SECONDS: "600"
+      CELLHARMONY_BUNDLE_MIN_CELLS: "10000"
+      # The chat router runs in the LungMAP site container, reachable as "site".
+      CELLHARMONY_ASSISTANT_URL: http://site:8001/lungmap.net/api/assistant/viewer-intent
+    volumes:
+      - ./jobs:/srv/scalable-discover/jobs
+    networks:
+      - lungmap_default
+    restart: unless-stopped
+
+networks:
+  lungmap_default:
+    external: true

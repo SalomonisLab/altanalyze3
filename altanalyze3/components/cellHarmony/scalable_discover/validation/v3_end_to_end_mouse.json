@@ -1,0 +1,473 @@
+{
+  "inputs": [
+    {
+      "name": "GSM5916440_17422filtered_feature_bc_matrix.h5",
+      "sha256": "186fa10705390da65594b011cbc9d98527d6476e70a2c7df1955525942a4159d",
+      "sample": "Mavium_17422"
+    },
+    {
+      "name": "GSM5916441_17423filteredfiltered_feature_bc_matrix.h5",
+      "sha256": "51bb72751f0a560a909eef16e7ddba641e89b28903decdd1b828f45a7b2ad129",
+      "sample": "Mavium_17423"
+    }
+  ],
+  "species": "mouse",
+  "ambient_correction": "no",
+  "job_id": "d62f2917e8034cc49366181087f7f558",
+  "pipeline_seconds": 300.5,
+  "icgs3": {
+    "qc_cells": 26048,
+    "qc_genes": 28692,
+    "clustered_cells": 25261,
+    "unassigned_cells": 787,
+    "n_clusters": 11,
+    "clusters": [
+      "C1",
+      "C2",
+      "C3",
+      "C4",
+      "C5",
+      "C6",
+      "C7",
+      "C8",
+      "C9",
+      "C10",
+      "C11"
+    ]
+  },
+  "cell_state_predictions": [
+    "Lung B cell_cC5",
+    "Lung leukocyte_cC3",
+    "Polychromatic-Erythroblast_cC8",
+    "Pro-B_cC6",
+    "Stage I neutrophil_cC1",
+    "T cell_cC7",
+    "Thymus DN4-DP in transition Cd69 negative rapidly dividing thymocytes_cC10",
+    "Thymus ETP-A-c0_cC9",
+    "UNK-cC11",
+    "granulocyte_cC2",
+    "macrophage_cC4"
+  ],
+  "marker_heatmap_rows_sampled_view": 660,
+  "marker_networks": 11,
+  "fastcomm": {
+    "status": "completed",
+    "sample_key": "Library",
+    "summary_counts": {
+      "max_lr_candidates_per_state_pair": 5,
+      "min_ligand_expr": 0.01,
+      "min_lr_expression_score": 0.2,
+      "min_receptor_expr": 0.01,
+      "n_cells": 25261,
+      "n_genes": 1389,
+      "n_loaded_columns": 1389,
+      "n_loaded_genes": 1389,
+      "n_lr_edges": 3361,
+      "n_matched_required_genes": 1389,
+      "n_missing_required_genes": 50,
+      "n_required_genes": 1439,
+      "n_scored_edges": 251,
+      "n_states": 11
+    }
+  },
+  "bundle": {
+    "n_cells": 25261,
+    "returncode": 0,
+    "seconds": 4.1,
+    "status": "completed",
+    "threshold": 10000
+  },
+  "checks_passed": 50,
+  "checks_total": 50,
+  "failed_checks": [],
+  "checks": [
+    {
+      "check": "upload",
+      "status": 200,
+      "ok": true,
+      "bytes": 65,
+      "detail": ""
+    },
+    {
+      "check": "save_qc",
+      "status": 200,
+      "ok": true,
+      "bytes": 302,
+      "detail": ""
+    },
+    {
+      "check": "qc_refuses_imputation",
+      "status": 400,
+      "ok": true,
+      "bytes": 59,
+      "detail": "{\"detail\":\"scALABLE-discover runs no modality imputation.\"}"
+    },
+    {
+      "check": "run",
+      "status": 200,
+      "ok": true,
+      "bytes": 63,
+      "detail": ""
+    },
+    {
+      "check": "pipeline_completed",
+      "status": 200,
+      "ok": true,
+      "bytes": 0,
+      "detail": "completed: Job finished successfully."
+    },
+    {
+      "check": "umap_clusters",
+      "status": 200,
+      "ok": true,
+      "bytes": 3371311,
+      "detail": "query points equal ICGS3-clustered cells; no reference points"
+    },
+    {
+      "check": "umap_color_by_prediction",
+      "status": 200,
+      "ok": true,
+      "bytes": 4107574,
+      "detail": ""
+    },
+    {
+      "check": "expression_umap",
+      "status": 200,
+      "ok": true,
+      "bytes": 4009769,
+      "detail": "gene Orm1"
+    },
+    {
+      "check": "genes",
+      "status": 200,
+      "ok": true,
+      "bytes": 271943,
+      "detail": ""
+    },
+    {
+      "check": "dotplot_default_markers",
+      "status": 200,
+      "ok": true,
+      "bytes": 5160,
+      "detail": ""
+    },
+    {
+      "check": "combplot",
+      "status": 200,
+      "ok": true,
+      "bytes": 26720,
+      "detail": ""
+    },
+    {
+      "check": "plot_variables",
+      "status": 200,
+      "ok": true,
+      "bytes": 2207,
+      "detail": ""
+    },
+    {
+      "check": "display_filters",
+      "status": 200,
+      "ok": true,
+      "bytes": 928,
+      "detail": ""
+    },
+    {
+      "check": "marker_heatmap_tsv_sampled",
+      "status": 200,
+      "ok": true,
+      "bytes": 1142064,
+      "detail": "660 marker rows"
+    },
+    {
+      "check": "marker_heatmap_tsv_all_columns",
+      "status": 200,
+      "ok": true,
+      "bytes": 131881698,
+      "detail": ""
+    },
+    {
+      "check": "marker_heatmap_viewer",
+      "status": 200,
+      "ok": true,
+      "bytes": 10288,
+      "detail": ""
+    },
+    {
+      "check": "marker_heatmap_pdf",
+      "status": 200,
+      "ok": true,
+      "bytes": 567340,
+      "detail": ""
+    },
+    {
+      "check": "marker_network",
+      "status": 200,
+      "ok": true,
+      "bytes": 3443,
+      "detail": "11 of 11 clusters have a network"
+    },
+    {
+      "check": "marker_network_pdf",
+      "status": 200,
+      "ok": true,
+      "bytes": 17340,
+      "detail": ""
+    },
+    {
+      "check": "umap_pdf_clusters",
+      "status": 200,
+      "ok": true,
+      "bytes": 404434,
+      "detail": ""
+    },
+    {
+      "check": "expression_pdf_umap",
+      "status": 200,
+      "ok": true,
+      "bytes": 408795,
+      "detail": ""
+    },
+    {
+      "check": "expression_pdf_violin",
+      "status": 200,
+      "ok": true,
+      "bytes": 210005,
+      "detail": ""
+    },
+    {
+      "check": "fastcomm_enabled",
+      "status": 200,
+      "ok": true,
+      "bytes": 0,
+      "detail": "{\"max_lr_candidates_per_state_pair\": 5, \"min_ligand_expr\": 0.01, \"min_lr_expression_score\": 0.2, \"min_receptor_expr\": 0.01, \"n_cells\": 25261, \"n_genes\": 1389, \"n_loaded_columns\": 1389, \"n_loaded_genes"
+    },
+    {
+      "check": "fastcomm_focused_incoming",
+      "status": 200,
+      "ok": true,
+      "bytes": 11725,
+      "detail": ""
+    },
+    {
+      "check": "fastcomm_focused_outgoing",
+      "status": 200,
+      "ok": true,
+      "bytes": 12265,
+      "detail": ""
+    },
+    {
+      "check": "fastcomm_cell_state_network",
+      "status": 200,
+      "ok": true,
+      "bytes": 88514,
+      "detail": ""
+    },
+    {
+      "check": "fastcomm_state_heatmap",
+      "status": 200,
+      "ok": true,
+      "bytes": 10783,
+      "detail": ""
+    },
+    {
+      "check": "fastcomm_lr_dotplot",
+      "status": 200,
+      "ok": true,
+      "bytes": 3546,
+      "detail": ""
+    },
+    {
+      "check": "fastcomm_top_table",
+      "status": 200,
+      "ok": true,
+      "bytes": 4378,
+      "detail": ""
+    },
+    {
+      "check": "fastcomm_per_sample",
+      "status": 200,
+      "ok": true,
+      "bytes": 2600,
+      "detail": ""
+    },
+    {
+      "check": "regulatory_network_marker",
+      "status": 200,
+      "ok": true,
+      "bytes": 270,
+      "detail": "{\"available\": false, \"note\": \"GRN edge scores are unavailable for C1: 'grn'\", \"status\": \"missing_edges\", \"edges\": 0}"
+    },
+    {
+      "check": "download_assignments",
+      "status": 200,
+      "ok": true,
+      "bytes": 4033505,
+      "detail": ""
+    },
+    {
+      "check": "download_combined_h5ad",
+      "status": 200,
+      "ok": true,
+      "bytes": 779884239,
+      "detail": ""
+    },
+    {
+      "check": "download_fastcomm_archive",
+      "status": 200,
+      "ok": true,
+      "bytes": 209490,
+      "detail": ""
+    },
+    {
+      "check": "download_fastcomm_scores",
+      "status": 200,
+      "ok": true,
+      "bytes": 84186,
+      "detail": ""
+    },
+    {
+      "check": "download_fastcomm_significant_interactions",
+      "status": 200,
+      "ok": true,
+      "bytes": 18812,
+      "detail": ""
+    },
+    {
+      "check": "download_fastcomm_significant_report",
+      "status": 200,
+      "ok": true,
+      "bytes": 5643,
+      "detail": ""
+    },
+    {
+      "check": "download_fastcomm_state_expression",
+      "status": 200,
+      "ok": true,
+      "bytes": 181702,
+      "detail": ""
+    },
+    {
+      "check": "download_fastcomm_state_pairs",
+      "status": 200,
+      "ok": true,
+      "bytes": 6783,
+      "detail": ""
+    },
+    {
+      "check": "download_icgs3_results_zip",
+      "status": 200,
+      "ok": true,
+      "bytes": 13761165,
+      "detail": ""
+    },
+    {
+      "check": "download_marker_genes_zip",
+      "status": 200,
+      "ok": true,
+      "bytes": 6441457,
+      "detail": ""
+    },
+    {
+      "check": "download_parameters_json",
+      "status": 200,
+      "ok": true,
+      "bytes": 4163,
+      "detail": ""
+    },
+    {
+      "check": "download_umap_coordinates",
+      "status": 200,
+      "ok": true,
+      "bytes": 1751521,
+      "detail": ""
+    },
+    {
+      "check": "download_log",
+      "status": 200,
+      "ok": true,
+      "bytes": 19987,
+      "detail": ""
+    },
+    {
+      "check": "chat_examples",
+      "status": 200,
+      "ok": true,
+      "bytes": 528,
+      "detail": ""
+    },
+    {
+      "check": "chat_answers",
+      "status": 200,
+      "ok": true,
+      "bytes": 0,
+      "detail": "6 of 6 answered 200"
+    },
+    {
+      "check": "removed /api/jobs/{job}/differential/status",
+      "status": 404,
+      "ok": true,
+      "bytes": 22,
+      "detail": "removed route answers 404"
+    },
+    {
+      "check": "removed /api/jobs/{job}/differential/interactive/summary",
+      "status": 404,
+      "ok": true,
+      "bytes": 22,
+      "detail": "removed route answers 404"
+    },
+    {
+      "check": "removed /api/meta/reference-preview",
+      "status": 404,
+      "ok": true,
+      "bytes": 22,
+      "detail": "removed route answers 404"
+    },
+    {
+      "check": "removed POST differential",
+      "status": 404,
+      "ok": true,
+      "bytes": 22,
+      "detail": "removed route"
+    }
+  ],
+  "chat": [
+    {
+      "question": "What pathways have the best cross-modality C9 representation?",
+      "status": 200,
+      "intent": "cross_modality_pathways",
+      "answer": "63 pathways contain retained positive cell-state markers for C9; 68 bundled WikiPathways diagrams evaluated. Ranked by modality breadth, then equally weighted coverage: each count is divided by that modality\u2019s maximum pathway count across t"
+    },
+    {
+      "question": "What is the best modality marker of C9?",
+      "status": 200,
+      "intent": "modality_markers",
+      "answer": "Among the retained marker results for C9, the strongest marker is Ifitm2 (RNA, MarkerFinder r=0.4313). Best per modality: RNA: Ifitm2 (r=0.4313). Ranked by positive Pearson correlation with cell-state membership (that state versus all other"
+    },
+    {
+      "question": "What are the best marker genes of C9 cells?",
+      "status": 200,
+      "intent": "markers",
+      "answer": "25 top marker genes of C9, from the marker table analysis."
+    },
+    {
+      "question": "What distinguishes C9 from C10 cells?",
+      "status": 200,
+      "intent": "compare",
+      "answer": "Marker genes separating C10 and C9."
+    },
+    {
+      "question": "Where is Clec4a3 expressed?",
+      "status": 200,
+      "intent": "expression",
+      "answer": "Highest-expressing cell states for Clec4a3, by mean expression across the 11 states of this dataset."
+    },
+    {
+      "question": "Which cell states express Wfdc17?",
+      "status": 200,
+      "intent": "expression",
+      "answer": "Highest-expressing cell states for Wfdc17, by mean expression across the 11 states of this dataset."
+    }
+  ]
+}

@@ -3407,6 +3407,7 @@ async function populateDownloadLinks(jobId, statusData = null) {
     assignments: "Download assignments",
     combined_h5ad: "Download combined_h5ad",
     marker_genes_zip: "Download marker genes ZIP",
+    unaligned_cells_h5ad: "Download unaligned QC-passed cells (h5ad)",
     imputed_lipids_h5ad: "Download imputed_lipids_h5ad",
     lipid_marker_genes_zip: "Download lipid marker ZIP",
     imputed_lipids_results_zip: "Download Lipids results ZIP",
@@ -5976,7 +5977,9 @@ function renderPanelUmap(panelKey, umapData, mode, dotScale) {
       }))
       .sort((a, b) => b.meanFraction - a.meanFraction || a.population.localeCompare(b.population));
     const maxLabelLength = ranked.reduce((maxLength, entry) => Math.max(maxLength, String(entry.population || "").length), 0);
-    const leftMargin = Math.max(70, Math.min(120, 36 + maxLabelLength * 5));
+    // 120 px held reference cell types; predicted state names such as
+    // "Alveolar macrophages sub-cluster 1_c13" need about 5.6 px per character at 9 px.
+    const leftMargin = Math.max(70, Math.min(360, 24 + maxLabelLength * 5.6));
 
     Plotly.newPlot(panelPlotId(panelKey), [
       {
@@ -6270,6 +6273,12 @@ function renderVisualizationPanel(panelKey) {
   if (mode.startsWith("integrated_")) {
     document.getElementById(panelPlotId(panelKey))?._integratedResize?.();
     return;
+  }
+  // Leaving an integrated view: its controls and figure live in this panel's host, and the
+  // UMAP and Cell frequency branches below draw with Plotly without clearing it, so a
+  // pathway opened from Chat stayed under the next plot. Clear it first.
+  if (document.getElementById(panelPlotId(panelKey))?.classList.contains("integrated-view")) {
+    resetVisualizationSurface(panelKey);
   }
   const data = panelPlotData[panelKey];
 

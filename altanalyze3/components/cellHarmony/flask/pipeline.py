@@ -1732,6 +1732,10 @@ def run_cellharmony_pipeline(
     )
     ambient_correction = str(qc.get("ambient_correction", "no") or "no").strip().lower()
     ambient_rho = "auto" if ambient_correction == "yes" else None
+    # QC-passed cells below the alignment cutoff, written for scALABLE-discover. Only a file this
+    # run wrote is offered: a rerun that drops no cell must not list the previous run's file.
+    unaligned_h5ad_path = outputs_dir / "qc_passed_unaligned_cells.h5ad"
+    alignment_started = datetime.now().timestamp()
     _, combined_adata = cellHarmony_lite.combine_and_align_h5(
         h5_files=h5_files,
         h5ad_file=h5ad_file,
@@ -1756,6 +1760,7 @@ def run_cellharmony_pipeline(
         concat_batch_size=1,
         stream_10x_inputs=True,
         return_adata=True,
+        unaligned_h5ad=str(unaligned_h5ad_path),
     )
 
     assignments_path = outputs_dir / "cellHarmony_lite_assignments.txt"
@@ -2101,6 +2106,8 @@ def run_cellharmony_pipeline(
         artifacts["umap_pdf_plain"] = Path(plain_pdf)
     if marker_archive_path is not None:
         artifacts["marker_genes_zip"] = marker_archive_path
+    if unaligned_h5ad_path.is_file() and unaligned_h5ad_path.stat().st_mtime >= alignment_started:
+        artifacts["unaligned_cells_h5ad"] = unaligned_h5ad_path
     # One consolidated download per modality (h5ad(s) + marker outputs) so multiple selected
     # modalities don't flood the download list with separate files.
     def _bundle_modality_zip(mod_id):

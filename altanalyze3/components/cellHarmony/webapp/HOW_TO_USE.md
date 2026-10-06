@@ -193,6 +193,7 @@ button saves the pipeline's own heatmap PDF. A `Cell communication` network save
 | combined h5ad | the aligned dataset with approximate UMAP |
 | marker genes ZIP | MarkerFinder tables, heatmap PDF and marker networks |
 | `<modality>_results.zip` | the imputed h5ad and its marker outputs, one per imputed modality |
+| unaligned QC-passed cells (h5ad) | the cells that passed QC but scored below the cosine cutoff: counts in X (ambient-corrected when correction ran), raw counts in `soupx_raw`, each cell's best reference match and score; offered only when at least one cell fell below the cutoff. Upload it to scALABLE-discover to cluster those cells without a reference. |
 
 ## Differential tab
 

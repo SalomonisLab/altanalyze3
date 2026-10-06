@@ -191,7 +191,7 @@ def initialize(db_dir, use_foundation='auto', foundation_path=None, surface_db=N
             logger.warning('could not cache membrane foundation (%s)', e)
     print('{} {} finished surface antigen initialization'.format(date.today(),datetime.now().strftime('%H:%M:%S')))
 
-def generate_full_results(outdir,freq_path,mode,validation_gtf):
+def generate_full_results(outdir,freq_path,mode,validation_gtf,cores=None):
     '''
     preferred api for wraping both generate_results and report_candiates, good for general usage
 
@@ -200,6 +200,13 @@ def generate_full_results(outdir,freq_path,mode,validation_gtf):
     :param mode: string, either long_read or short_read
     :param validation_gtf: path, comma-separated paths, or a list of paths to the validation
                             long_read catalogs when mode=short_read
+    :param cores: int, workers for the is_support pre-warm. None means mp.cpu_count(), which is
+                  the NODE's core count and ignores any job allocation: on a 56-core node the
+                  pre-warm forked 57 processes at ~5.9 GB each (Melanoma job 1375782, 363.5 GB),
+                  while the same code on a 16-core node used ~100 GB. Peak memory therefore
+                  tracked the machine, not the cohort, and every memory tier set from the counts
+                  file was meaningless -- Eye_and_Orbit reserved 16,000 MB and peaked at
+                  196,086 MB with 33 processes (job 1375754). Pass the job's --cpus.
 
     Examples::
 
@@ -226,7 +233,7 @@ def generate_full_results(outdir,freq_path,mode,validation_gtf):
         if validation_gtf is not None:
             try:
                 with open(prediction_path, 'rb') as fh:
-                    prewarm_support_cache(pickle.load(fh), validation_gtf)
+                    prewarm_support_cache(pickle.load(fh), validation_gtf, cores=cores)
             except Exception as exc:
                 logger.warning('is_support pre-warm skipped (%s); passes will compute lazily', exc)
         stringencies = [5, 4, 3] if validation_gtf is not None else [3]
@@ -1186,12 +1193,107 @@ def process_est_or_long_read_with_id(gtf):
         key = _gtf_cache_key(gtf)
         if key is not None and key in _GTF_PARSE_CACHE:
             return _GTF_PARSE_CACHE[key]
-        merged, starts = _merge_gtf_dicts([_process_one_gtf_with_id(p) for p in paths])
+        # The MERGE of a catalog set is identical for every cohort that names the same GTFs, and
+        # it was memoised only in this process: 47 concurrent POSEIDON jobs each rebuilt the same
+        # 10,442,330-transcript structure, 10+ hours apiece, and not one finished. Persist it next
+        # to the per-GTF sidecars so the first job builds it and the rest load it.
+        idx = _merged_index_path(paths)
+        if idx is not None:
+            merged, starts = _load_merged_index(idx, paths)
+            if merged is not None:
+                if key is not None:
+                    _GTF_PARSE_CACHE[key] = merged
+                    _GTF_STARTS_CACHE[key] = starts
+                return merged
+        # dedup=False. The dedup pass built a set of 10,620,479 (chrom, strand, exon-chain)
+        # tuples to drop 178,149 duplicates -- 1.7% -- and that set is the cost: hours of
+        # wall clock and hundreds of GB on the POSEIDON cohorts. It cannot change a result:
+        # the support query asks whether ANY catalog carries a matching exon chain, so a
+        # chain present in two catalogs answers the same either way. Only the logged
+        # duplicate count and the list length differ.
+        merged, starts = _merge_gtf_dicts([_process_one_gtf_with_id(p) for p in paths],
+                                          dedup=False)
+        if idx is not None:
+            _save_merged_index(idx, merged, starts, paths)
         if key is not None:
             _GTF_PARSE_CACHE[key] = merged
             _GTF_STARTS_CACHE[key] = starts
         return merged
     return _process_one_gtf_with_id(paths[0] if paths else gtf)
+
+
+def _merged_index_path(paths):
+    '''Sidecar for the MERGE of several catalogs, keyed by the sorted absolute paths.
+
+    Lives in SNAF_INDEX_DIR when set (the per-GTF sidecars already go there), otherwise beside
+    the first catalog. Returns None when no directory is writable, in which case the merge is
+    simply rebuilt in memory as before.'''
+    import hashlib
+    try:
+        abspaths = sorted(os.path.abspath(p) for p in paths)
+        key = hashlib.sha1('|'.join(abspaths).encode()).hexdigest()[:12]
+        d = os.environ.get('SNAF_INDEX_DIR') or os.path.dirname(abspaths[0])
+        os.makedirs(d, exist_ok=True)
+        # No os.access(W_OK) pre-check: on this cluster's NFS it returns False on a compute node
+        # for a directory the job can demonstrably write, so the sidecar was never created and
+        # every job rebuilt the merge. _save_merged_index already handles a failed write by
+        # falling back to the in-memory merge, so attempting it is both correct and cheaper.
+        return os.path.join(d, 'snaf_gtf_merged.{}.{}cat.pkl'.format(key, len(abspaths)))
+    except Exception:
+        return None
+
+
+def _load_merged_index(idx, paths):
+    '''Return (merged, starts) from the sidecar, or (None, None) when it is absent, stale,
+    the wrong version, or still being written by another job.'''
+    try:
+        if not os.path.exists(idx):
+            return None, None
+        age = os.path.getmtime(idx)
+        for p in paths:                      # any catalog newer than the merge invalidates it
+            if os.path.getmtime(p) > age:
+                return None, None
+        with open(idx, 'rb') as f:
+            obj = pickle.load(f)
+        if obj.get('version') != _GTF_INDEX_VERSION:
+            return None, None
+        if obj.get('paths') != sorted(os.path.abspath(p) for p in paths):
+            return None, None
+        # len(gtf_dict) is the number of CONTIGS, not transcripts: the dict is keyed by chromosome
+        # and each value is {'+': [...], '-': [...]}. Logging it as "transcripts" printed
+        # "loaded 60 transcripts" for a 10,620,479-transcript index and read as a broken load.
+        _ntx = sum(len(sd.get('+', [])) + len(sd.get('-', [])) for sd in obj['gtf_dict'].values())
+        print('SNAF-B GTF merge: loaded {} transcripts over {} contigs from the shared index {}'.format(
+            _ntx, len(obj['gtf_dict']), idx), flush=True)
+        return obj['gtf_dict'], obj.get('starts')
+    except Exception:                        # truncated or half-written -> rebuild, never crash
+        return None, None
+
+
+def _save_merged_index(idx, merged, starts, paths):
+    '''Write the merge atomically. Concurrent jobs race here by design: each writes its own
+    temp file and renames, so a reader sees either the previous complete file or the new one,
+    never a partial. A failure to write is not fatal -- the merge is already in memory.'''
+    import tempfile
+    try:
+        d = os.path.dirname(idx)
+        fd, tmp = tempfile.mkstemp(dir=d, prefix='.snaf_gtf_merged.', suffix='.tmp')
+        try:
+            with os.fdopen(fd, 'wb') as f:
+                pickle.dump({'version': _GTF_INDEX_VERSION, 'gtf_dict': merged,
+                             'starts': starts,
+                             'paths': sorted(os.path.abspath(q) for q in paths)},
+                            f, protocol=pickle.HIGHEST_PROTOCOL)
+            os.replace(tmp, idx)
+            print('SNAF-B GTF merge: wrote the shared index {}'.format(idx), flush=True)
+        except Exception:
+            try: os.unlink(tmp)
+            except Exception: pass
+            raise
+    except Exception as e:
+        print('SNAF-B GTF merge: could not write the shared index ({}); '
+              'continuing with the in-memory merge'.format(e), flush=True)
+
 
 
 def _process_one_gtf_with_id(gtf):

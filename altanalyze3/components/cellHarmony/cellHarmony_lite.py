@@ -290,6 +290,7 @@ def combine_and_align_h5(
     adata=None,
     ambient_memory_efficient=False,
     stream_10x_inputs=False,
+    unaligned_h5ad=None,
 ):
     """``adata`` is an in-memory cells x genes AnnData, for example one read by
     ``sparse_stream.read_sparse_stream``. It takes the same path as ``h5ad_file``: gene
@@ -387,9 +388,19 @@ def combine_and_align_h5(
         adata = adata[keep_mt].copy()
         print(f"Cells remaining after mito-percent filtering: {adata.n_obs}")
         return adata
-    reference_df = pd.read_csv(cellharmony_ref, sep='\t', index_col=0)
-    cell_populations = reference_df.columns.tolist()
-    ref_name = os.path.basename(cellharmony_ref)[:-4]
+    # cellharmony_ref=None is QC-only mode: load, ambient-correct, QC and normalize, then
+    # return before alignment. scALABLE-discover uses it so its QC is this exact code.
+    qc_only = cellharmony_ref is None
+    if qc_only and (metacell_align or reference_genes_only or unsupervised_cluster
+                    or generate_umap or export_cptt):
+        raise ValueError("cellharmony_ref=None runs QC only; metacell_align, reference_genes_only, "
+                         "unsupervised_cluster, generate_umap and export_cptt need a reference.")
+    if qc_only:
+        reference_df = cell_populations = ref_name = None
+    else:
+        reference_df = pd.read_csv(cellharmony_ref, sep='\t', index_col=0)
+        cell_populations = reference_df.columns.tolist()
+        ref_name = os.path.basename(cellharmony_ref)[:-4]
 
     # Optional gene translation table (e.g., Ensembl → Symbol)
     translation_map = None
@@ -825,6 +836,11 @@ def combine_and_align_h5(
     if export_h5ad:
         adata_combined.write(output_dir+"/combined_qc_normalized.h5ad", compression="gzip")
 
+    if qc_only:
+        print(f"[qc-only] no reference given; returning {adata_combined.n_obs} QC-retained cells "
+              f"x {adata_combined.n_vars} genes without alignment")
+        return (None, adata_combined) if return_adata else None
+
     marker_genes = reference_df.index
     adata_filtered, genes_present, missing_genes = subset_to_reference_genes(
         adata_combined, marker_genes, copy_layers=alignment_mode != "cosine",
@@ -907,10 +923,34 @@ def combine_and_align_h5(
 
     if min_alignment_score is not None:
         before = match_df.shape[0]
+        all_matches = match_df
         match_df = match_df[match_df["AlignmentScore"] >= min_alignment_score].copy()
         after = match_df.shape[0]
         print(f"[INFO] Applied min_alignment_score={min_alignment_score}. "
             f"Excluded {before - after} cells, kept {after}.")
+        if unaligned_h5ad and before > after and not metacell_align:
+            # The QC-passed cells the alignment cutoff drops, kept as their own h5ad so they can be
+            # clustered without a reference (scALABLE-discover). X holds the counts the alignment
+            # used (ambient-corrected when correction ran); soupx_raw, when present, the raw ones.
+            dropped = ~adata_combined.obs_names.astype(str).isin(match_df["CellBarcode"].astype(str))
+            excluded = adata_combined[dropped]
+            holds_counts = "counts" in excluded.layers
+            out = ad.AnnData(X=(excluded.layers["counts"] if holds_counts else excluded.X).copy(),
+                             obs=excluded.obs.copy(), var=excluded.var.copy())
+            if "soupx_raw" in excluded.layers:
+                out.layers["soupx_raw"] = excluded.layers["soupx_raw"].copy()
+            scores = all_matches.set_index("CellBarcode").loc[out.obs_names]
+            out.obs[f"{ref_name}_best_match"] = scores[ref_name].astype(str).values
+            out.obs["AlignmentScore"] = scores["AlignmentScore"].astype(float).values
+            out.uns["cellHarmony_unaligned"] = {
+                "reference": ref_name, "min_alignment_score": float(min_alignment_score),
+                "cells": int(out.n_obs), "x": "counts" if holds_counts else "X as loaded (no counts layer)",
+                "ambient_corrected": bool(ambient_correct_cutoff is not None),
+            }
+            out.write_h5ad(unaligned_h5ad, compression="lzf")
+            print(f"[INFO] Wrote {out.n_obs} QC-passed cells below min_alignment_score="
+                  f"{min_alignment_score} to {unaligned_h5ad}")
+            del out, excluded, scores
 
     if metacell_align:
         if metacell_membership is None or original_cell_adata is None:

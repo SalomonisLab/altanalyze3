@@ -164,6 +164,17 @@ class ICGS3Config:
     heatmap_covariates: Optional[str] = None
     heatmap_goelite_terms: bool = True
     heatmap_goelite_max_terms: int = 30
+    # NetPerspective interaction networks per cluster, built by the same MarkerFinder heatmap
+    # call from its redundant marker table. Off by default; scALABLE-discover turns it on
+    # for its MarkerNetwork view.
+    export_marker_networks: bool = False
+    marker_network_top_n: int = 1000
+    # Write only the final h5ad, the MarkerFinder marker set (markers, redundant markers,
+    # centroids, fold-matrix cache, networks), the GO-Elite BioMarkers tables,
+    # icgs3_config.json and the log. Skips the sNMF/ and UMAPs/ intermediate tables, the
+    # static heatmap PDF/SVG and the UMAP PDFs. Every value still computes. Off by default.
+    minimal_outputs: bool = False
+    marker_network_jobs: int = 1
     umap_feature_mode: str = "markerfinder"
     umap_covariates: Optional[str] = None
     umap_genes: Optional[str] = None
@@ -228,6 +239,11 @@ class Tee:
 
 def _shell_join(parts: Sequence[object]) -> str:
     return " ".join(shlex.quote(str(p)) for p in parts if p is not None)
+
+
+def _keep_intermediates(config) -> bool:
+    """False under --minimal-outputs: intermediate tables and figures are not written."""
+    return not bool(getattr(config, "minimal_outputs", False))
 
 
 def cli_equivalent(config: ICGS3Config) -> str:
@@ -320,6 +336,11 @@ def cli_equivalent(config: ICGS3Config) -> str:
         cmd.append("--write-heatmap-fold-matrix-tsv")
     if not config.heatmap_goelite_terms:
         cmd.append("--no-heatmap-goelite-terms")
+    if config.minimal_outputs:
+        cmd.append("--minimal-outputs")
+    if config.export_marker_networks:
+        cmd.extend(["--export-marker-networks", "--marker-network-top-n", config.marker_network_top_n,
+                     "--marker-network-jobs", config.marker_network_jobs])
     cmd.extend(["--umap-feature-mode", config.umap_feature_mode])
     if config.umap_covariates:
         cmd.extend(["--umap-covariates", config.umap_covariates])
@@ -1091,7 +1112,7 @@ def build_h5ad_downsample_matrix(path: str, config: "ICGS3Config", *, output_dir
         "feature_detection_cutoff": 5,
     }
     outdir = output_dir or config.output_dir
-    if outdir:
+    if outdir and _keep_intermediates(config):
         os.makedirs(os.path.join(outdir, "sNMF"), exist_ok=True)
         pd.DataFrame({
             "feature": reduced.var_names.astype(str),
@@ -1828,11 +1849,12 @@ def apply_expression_batch_adjustment(adata: ad.AnnData, config: ICGS3Config, ou
         "negative_values_clipped": negative,
         "scope": "analysis matrix for PageRank/NMF/MarkerFinder/SVM/optional UMAP only",
     }
-    pd.DataFrame(rows).to_csv(
-        os.path.join(outdir, "sNMF", "icgs3_expression_batch_adjustment_groups.tsv"),
-        sep="\t",
-        index=False,
-    )
+    if _keep_intermediates(config):
+        pd.DataFrame(rows).to_csv(
+            os.path.join(outdir, "sNMF", "icgs3_expression_batch_adjustment_groups.tsv"),
+            sep="\t",
+            index=False,
+        )
     _log(
         f"expression batch adjustment for unsupervised analysis: keys={', '.join(keys)}, "
         f"groups={combo.nunique()}, clipped_negative_values={negative}"
@@ -2949,7 +2971,10 @@ def write_retention_audit(
         return audit
     audit = audit.sort_values(["obs_column", "post_qc_cells", "annotation"], kind="mergesort")
     path = os.path.join(outdir, "sNMF", "icgs3_rare_population_retention_audit.tsv")
-    audit.to_csv(path, sep="\t", index=False)
+    if _keep_intermediates(config):
+        audit.to_csv(path, sep="\t", index=False)
+    else:
+        path = "this log (table not written under --minimal-outputs)"
     failures = audit[audit["sampled_below_20"]]
     if not failures.empty:
         _log(
@@ -3638,7 +3663,7 @@ def apply_rna_unsupervised_gene_filter(adata: ad.AnnData, config: ICGS3Config, o
         f"RNA unsupervised gene filter before graph/PageRank/NMF: {before} -> {after} features "
         f"(protein-coding lower-case symbol/id match when available; removed RPL/RPS, MT-, dotted, GM, XIS/TSI, RSP, HLA, *Y)"
     )
-    if outdir:
+    if outdir and _keep_intermediates(config):
         pd.DataFrame({"feature": filtered.var_names.astype(str)}).to_csv(
             os.path.join(outdir, "sNMF", "icgs3_rna_unsupervised_filtered_genes.tsv"),
             sep="\t",
@@ -3766,11 +3791,12 @@ def run_nmf_marker_svm(sampled: ad.AnnData, full: ad.AnnData, config: ICGS3Confi
     marker_dir = os.path.join(outdir, "MarkerFinder")
     os.makedirs(snmf_dir, exist_ok=True)
     os.makedirs(marker_dir, exist_ok=True)
-    pd.DataFrame({"feature": pd.Index(expr_sampled.index).astype(str)}).to_csv(
-        os.path.join(snmf_dir, "icgs3_nmf_variable_features.tsv"),
-        sep="\t",
-        index=False,
-    )
+    if _keep_intermediates(config):
+        pd.DataFrame({"feature": pd.Index(expr_sampled.index).astype(str)}).to_csv(
+            os.path.join(snmf_dir, "icgs3_nmf_variable_features.tsv"),
+            sep="\t",
+            index=False,
+        )
     _log(f"NMF variable features: {_feature_selection_label(config, expr_sampled.shape[0], sampled.n_vars)}")
     rank = config.rank
     rank_rows = []
@@ -3811,7 +3837,8 @@ def run_nmf_marker_svm(sampled: ad.AnnData, full: ad.AnnData, config: ICGS3Confi
         _log(f"manual NMF k override: rank={rank}")
     rank = min(int(rank), max(2, sampled.n_obs - 1))
     rank_rows[0]["final_rank"] = int(rank)
-    pd.DataFrame(rank_rows).to_csv(os.path.join(snmf_dir, "icgs3_nmf_rank_selection.tsv"), sep="\t", index=False)
+    if _keep_intermediates(config):
+        pd.DataFrame(rank_rows).to_csv(os.path.join(snmf_dir, "icgs3_nmf_rank_selection.tsv"), sep="\t", index=False)
     assignment_norm = str(config.nmf_assignment_normalization or "auto").lower()
     if assignment_norm == "auto":
         assignment_norm = "rowsum" if config.modality.lower() in {"adt", "grn", "metabolite", "lipid", "psi"} else "raw"
@@ -3837,7 +3864,8 @@ def run_nmf_marker_svm(sampled: ad.AnnData, full: ad.AnnData, config: ICGS3Confi
     keep_clusters = keep_counts[keep_counts > int(config.min_group_size)].index
     nmf_clusters = nmf_clusters[nmf_clusters["cluster"].isin(keep_clusters)]
     _log(f"pre-SVM NMF clusters after min_group_size>{config.min_group_size}: {nmf_clusters['cluster'].nunique()} clusters across {nmf_clusters.shape[0]} sampled cells")
-    nmf_clusters.to_csv(os.path.join(snmf_dir, "icgs3_nmf_presvm_sampled_clusters.tsv"), sep="\t")
+    if _keep_intermediates(config):
+        nmf_clusters.to_csv(os.path.join(snmf_dir, "icgs3_nmf_presvm_sampled_clusters.tsv"), sep="\t")
 
     # ICGS2 fidelity: MarkerFinder scores the FULL filtered expression matrix, not the
     # NMF guide genes. AltAnalyze2 NMF_Analysis.py:147 copies filteredInputExpFile to
@@ -3926,7 +3954,8 @@ def run_nmf_marker_svm(sampled: ad.AnnData, full: ad.AnnData, config: ICGS3Confi
             cluster_key=config.cluster_key,
             min_decision_score=float(config.svm_min_decision_score),
         )
-    final_clusters.to_csv(os.path.join(snmf_dir, "icgs3_svm_reclassification_scores.tsv"), sep="\t")
+    if _keep_intermediates(config):
+        final_clusters.to_csv(os.path.join(snmf_dir, "icgs3_svm_reclassification_scores.tsv"), sep="\t")
 
     # Second MarkerFinder pass, on the same ICGS2-faithful pool. Previously this scored
     # only centroids.index (the first-pass markers), an even narrower pool than the NMF
@@ -3987,14 +4016,15 @@ def run_nmf_marker_svm(sampled: ad.AnnData, full: ad.AnnData, config: ICGS3Confi
         config.cluster_key,
         cluster_centroids=post_svm_centroids,
     )
-    final_clusters.to_csv(os.path.join(snmf_dir, "icgs3_svm_reclassification_scores.final.tsv"), sep="\t")
-    markers_all2.to_csv(os.path.join(marker_dir, "icgs3_markers_all_correlations.tsv"), sep="\t")
-    markers_top2.to_csv(os.path.join(marker_dir, "icgs3_markers.tsv"), sep="\t", index=False)
-    _write_marker_heatmap_h5ad(heat2, os.path.join(marker_dir, "icgs3_marker_heatmap_altanalyze_format.h5ad"))
-    if config.write_heatmap_altanalyze_tsv:
-        _write_marker_heatmap_tsv(heat2, os.path.join(marker_dir,
-                                  "icgs3_marker_heatmap_altanalyze_format.tsv"))
-    centroids.to_csv(os.path.join(snmf_dir, "icgs3_svm_centroids.tsv"), sep="\t")
+    if _keep_intermediates(config):
+        final_clusters.to_csv(os.path.join(snmf_dir, "icgs3_svm_reclassification_scores.final.tsv"), sep="\t")
+        markers_all2.to_csv(os.path.join(marker_dir, "icgs3_markers_all_correlations.tsv"), sep="\t")
+        markers_top2.to_csv(os.path.join(marker_dir, "icgs3_markers.tsv"), sep="\t", index=False)
+        _write_marker_heatmap_h5ad(heat2, os.path.join(marker_dir, "icgs3_marker_heatmap_altanalyze_format.h5ad"))
+        if config.write_heatmap_altanalyze_tsv:
+            _write_marker_heatmap_tsv(heat2, os.path.join(marker_dir,
+                                      "icgs3_marker_heatmap_altanalyze_format.tsv"))
+        centroids.to_csv(os.path.join(snmf_dir, "icgs3_svm_centroids.tsv"), sep="\t")
     return final_clusters, markers_top2, heat2
 
 
@@ -4284,7 +4314,7 @@ def compute_umap_outputs(
                     "min_dist": float(config.umap_min_dist),
                     "metric": "correlation",
                 }
-                if len(features) > 0:
+                if len(features) > 0 and _keep_intermediates(config):
                     pd.DataFrame({"feature": features}).to_csv(
                         os.path.join(umap_dir, "icgs3_umap_features.tsv"),
                         sep="\t",
@@ -4305,7 +4335,10 @@ def compute_umap_outputs(
                 _log(f"Scanpy UMAP skipped: {exc}")
         else:
             feature_path = os.path.join(umap_dir, "icgs3_umap_features.tsv")
-            pd.DataFrame({"feature": features}).to_csv(feature_path, sep="\t", index=False)
+            if _keep_intermediates(config):
+                pd.DataFrame({"feature": features}).to_csv(feature_path, sep="\t", index=False)
+            else:
+                feature_path = None
             X = adata[:, features].X
             X = X.toarray() if sp.issparse(X) else np.asarray(X)
             # --umap-n-neighbors overrides; 0 keeps the historical cap of 50.
@@ -4339,11 +4372,12 @@ def compute_umap_outputs(
         for col in list(dict.fromkeys(["sample", "Library", config.cluster_key, "ICGS3_cell_state_prediction"] + covariate_cols)):
             if col in adata.obs:
                 umap[col] = adata.obs[col].astype(str).values
-        umap.rename_axis("barcode").reset_index().to_csv(os.path.join(umap_dir, "icgs3_umap.tsv"), sep="\t", index=False)
+        if _keep_intermediates(config):
+            umap.rename_axis("barcode").reset_index().to_csv(os.path.join(umap_dir, "icgs3_umap.tsv"), sep="\t", index=False)
 
 
 def write_umap_plots(adata: ad.AnnData, config: ICGS3Config, outdir: str) -> None:
-    if "X_umap" not in adata.obsm:
+    if "X_umap" not in adata.obsm or not _keep_intermediates(config):
         return
     plt.rcParams.update(
         {
@@ -4651,7 +4685,8 @@ def run_canonical_heatmap(adata: ad.AnnData, config: ICGS3Config, outdir: str) -
     missing_covariates = [c for c in _heatmap_covariates(config) if c not in adata.obs]
     if missing_covariates:
         _log(f"heatmap covariates not found in adata.obs: {', '.join(missing_covariates)}")
-    go_terms = _load_goelite_heatmap_terms(outdir, config)
+    # GO-Elite labels only decorate the static figure, which --minimal-outputs does not draw.
+    go_terms = _load_goelite_heatmap_terms(outdir, config) if _keep_intermediates(config) else {}
     # MarkerFinder's enforce_input_scaling requires a depth-normalized matrix. adata.X is
     # depth-normalized over the FULL gene space, but ICGS3 has since dropped genes (min_cells,
     # then the RNA nuisance/protein-coding filter), so per-cell sums over the surviving genes no
@@ -4764,20 +4799,47 @@ def run_canonical_heatmap(adata: ad.AnnData, config: ICGS3Config, outdir: str) -
             covariate_columns=covariates,
             go_terms=go_terms,
             go_terms_max=config.heatmap_goelite_max_terms,
+            render_heatmap=_keep_intermediates(config),
+            export_networks=bool(config.export_marker_networks),
+            network_top_n=int(config.marker_network_top_n),
+            network_jobs=max(1, int(config.marker_network_jobs)),
         )
     finally:
         if temp_layer and temp_layer in adata.layers:
             del adata.layers[temp_layer]
 
 
+BIOMARKER_DIR_ENV = "ICGS3_BIOMARKER_DIR"
+BUNDLED_BIOMARKER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "biomarkers")
+
+
 def _default_biomarker_file(species: str) -> Optional[str]:
-    base = "/Users/saljh8/Documents/GitHub/altanalyze/AltDatabase/EnsMart72/goelite"
-    candidates = {
-        "Hs": os.path.join(base, "Hs", "gene-mapp", "Ensembl-BioMarkers.txt"),
-        "Mm": os.path.join(base, "Mm", "gene-mapp", "Ensembl-BioMarkers.txt"),
-    }
-    path = candidates.get(species)
-    return path if path and os.path.exists(path) else None
+    """The GO-Elite BioMarkers gene sets for a species, from inside the package.
+
+    biomarkers/<Hs|Mm>/Ensembl-BioMarkers.txt.gz are the AltDatabase EnsMart72
+    goelite/<species>/gene-mapp/Ensembl-BioMarkers.txt files, gzipped without change, so a
+    container or a web deployment carries them. This used to read an absolute path on one
+    workstation, so every other host silently produced UNK cell-state predictions.
+    $ICGS3_BIOMARKER_DIR, holding <species>/Ensembl-BioMarkers.txt[.gz], takes precedence.
+    """
+    for root in (os.environ.get(BIOMARKER_DIR_ENV), BUNDLED_BIOMARKER_DIR):
+        if not root:
+            continue
+        for name in ("Ensembl-BioMarkers.txt", "Ensembl-BioMarkers.txt.gz"):
+            path = os.path.join(root, str(species), name)
+            if os.path.exists(path):
+                return path
+    return None
+
+
+def _cluster_suffix(cluster) -> str:
+    """The cluster number in a label suffix: "C18" -> "18", so labels read "<label>_c18".
+
+    ICGS3 cluster ids are already "C<n>", and the suffix prefixed another "c", which gave
+    "Fibroblast_cC18" (Nathan, 2026-10-05). Ids of any other form pass through unchanged.
+    """
+    text = str(cluster)
+    return text[1:] if len(text) > 1 and text[0] == "C" and text[1:].isdigit() else text
 
 
 def clean_biomarker_prediction_labels(labels: pd.DataFrame) -> pd.DataFrame:
@@ -4814,7 +4876,7 @@ def clean_biomarker_prediction_labels(labels: pd.DataFrame) -> pd.DataFrame:
         label = label.strip(" -_")
         if not label:
             label = original.strip() or "UNK"
-        cleaned.append(f"{label}_c{cluster}")
+        cleaned.append(f"{label}_c{_cluster_suffix(cluster)}")
     labels["cell_type_prediction"] = cleaned
     return labels
 
@@ -4824,7 +4886,11 @@ def biomarker_enrichment(markers: pd.DataFrame, background: Sequence[str], confi
     os.makedirs(goelite_dir, exist_ok=True)
     path = config.biomarker_file or _default_biomarker_file(config.species)
     if not path or not os.path.exists(path) or markers.empty:
+        _log(f"GO-Elite BioMarkers enrichment skipped: "
+             f"{'no markers' if markers.empty else f'no BioMarkers file for species {config.species} ({path})'}; "
+             "cell-state predictions fall back to UNK-c<cluster>")
         return pd.DataFrame()
+    _log(f"GO-Elite BioMarkers gene sets: {path}")
     bm = pd.read_csv(path, sep="\t")
     gene_col = "Gene" if "Gene" in bm.columns else ("System" if "System" in bm.columns else bm.columns[1])
     term_col = "Term" if "Term" in bm.columns else ("GeneSet" if "GeneSet" in bm.columns else bm.columns[-1])
@@ -4864,6 +4930,8 @@ def biomarker_enrichment(markers: pd.DataFrame, background: Sequence[str], confi
     out = pd.DataFrame(rows)
     out["fdr"] = multipletests(out["p_value"].values, method="fdr_bh")[1]
     out = out.sort_values(["cluster", "fdr", "p_value", "term_name"])
+    # Written under --minimal-outputs too: these are results (the BioMarkers evidence behind
+    # each cell-state label), and scALABLE-discover draws its GO-Elite plot from them.
     out.to_csv(os.path.join(goelite_dir, "icgs3_biomarker_enrichment.tsv"), sep="\t", index=False)
     labels = out.groupby("cluster").head(1)[["cluster", "term_name", "fdr", "overlap"]]
     labels = clean_biomarker_prediction_labels(labels)
@@ -5037,7 +5105,8 @@ def _run_icgs3_logged(config: ICGS3Config, outdir: str, log_path: str, start_tim
         pagerank_scores = pd.DataFrame({"barcode": present.astype(str), "selected_final": True})
     else:
         sampled, pagerank_scores = pagerank_downsample_adata(adata_for_sampling, config)
-    pagerank_scores.to_csv(os.path.join(outdir, "sNMF", "icgs3_pagerank_downsampling.tsv"), sep="\t", index=False)
+    if _keep_intermediates(config):
+        pagerank_scores.to_csv(os.path.join(outdir, "sNMF", "icgs3_pagerank_downsampling.tsv"), sep="\t", index=False)
     _log(f"downsampling summary: retained {sampled.n_obs} sampled cells for NMF from {adata_for_sampling.n_obs} candidates")
     # Close the downsampling timer HERE. Timing the occupancy filter first made its number
     # swallow the whole PageRank/Louvain step and reported that step as 0.0s.
@@ -5121,12 +5190,12 @@ def _run_icgs3_logged(config: ICGS3Config, outdir: str, log_path: str, start_tim
         label_col = "cell_type_prediction" if "cell_type_prediction" in biomarker_predictions.columns else "term_name"
         label_map = biomarker_predictions.set_index("cluster")[label_col].astype(str).to_dict()
         adata.obs["ICGS3_cell_state_prediction"] = [
-            label_map.get(str(cluster), f"UNK-c{cluster}")
+            label_map.get(str(cluster), f"UNK-c{_cluster_suffix(cluster)}")
             for cluster in adata.obs[config.cluster_key].astype(str)
         ]
     else:
         adata.obs["ICGS3_cell_state_prediction"] = [
-            f"UNK-c{cluster}" for cluster in adata.obs[config.cluster_key].astype(str)
+            f"UNK-c{_cluster_suffix(cluster)}" for cluster in adata.obs[config.cluster_key].astype(str)
         ]
     t = step_time("GO-Elite BioMarkers enrichment", t)
 
@@ -5151,12 +5220,13 @@ def _run_icgs3_logged(config: ICGS3Config, outdir: str, log_path: str, start_tim
     for col in list(dict.fromkeys(["sample", "Library"] + covariate_cols)):
         if col in adata.obs and col not in clusters:
             clusters.insert(0, col, adata.obs[col].astype(str).values)
-    clusters.to_csv(os.path.join(outdir, "icgs3_clusters.tsv"), sep="\t")
-    clusters.rename_axis("barcode").reset_index().to_csv(
-        os.path.join(outdir, "icgs3_cell_barcode_clusters.tsv"),
-        sep="\t",
-        index=False,
-    )
+    if _keep_intermediates(config):
+        clusters.to_csv(os.path.join(outdir, "icgs3_clusters.tsv"), sep="\t")
+        clusters.rename_axis("barcode").reset_index().to_csv(
+            os.path.join(outdir, "icgs3_cell_barcode_clusters.tsv"),
+            sep="\t",
+            index=False,
+        )
 
     if bool(getattr(config, "skip_canonical_heatmap", False)):
         # The canonical heatmap hands MarkerFinder a count-like matrix so it can apply its own
@@ -5168,6 +5238,11 @@ def _run_icgs3_logged(config: ICGS3Config, outdir: str, log_path: str, start_tim
         heatmap_outputs = {"skipped": "skip_canonical_heatmap"}
     else:
         heatmap_outputs = run_canonical_heatmap(adata, config, outdir)
+        if heatmap_outputs.get("networks"):
+            # --export-marker-networks returns one dict per network. h5ad cannot store a list
+            # of mappings, so the record becomes a table: one row per network.
+            heatmap_outputs = dict(heatmap_outputs,
+                                   networks=pd.DataFrame(heatmap_outputs["networks"]).astype(str))
     adata.uns["icgs3_heatmap_outputs"] = heatmap_outputs
     t = step_time("MarkerFinder heatmap", t)
 
@@ -5562,6 +5637,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=30,
         help="Maximum GO-Elite terms considered per cluster block for MarkerFinder heatmap labels.",
     )
+    parser.add_argument("--minimal-outputs", action="store_true",
+                        help="Write only the final h5ad, the MarkerFinder marker set (markers, "
+                             "redundant markers, centroids, fold-matrix cache, networks), the "
+                             "GO-Elite BioMarkers tables, icgs3_config.json and the log. Skips "
+                             "intermediate sNMF/ and UMAPs/ tables, the static heatmap PDF/SVG "
+                             "and the UMAP PDFs.")
+    parser.add_argument("--export-marker-networks", action="store_true",
+                        help="Also export NetPerspective interaction networks for each cluster's "
+                             "MarkerFinder markers, beside the marker heatmap. Off by default.")
+    parser.add_argument("--marker-network-top-n", type=int, default=1000,
+                        help="Markers per cluster passed to NetPerspective with --export-marker-networks.")
+    parser.add_argument("--marker-network-jobs", type=int, default=1,
+                        help="Parallel NetPerspective network builds with --export-marker-networks.")
     parser.add_argument(
         "--umap-feature-mode",
         choices=["markerfinder", "variable", "pca"],
@@ -5662,6 +5750,10 @@ def main(argv: Optional[Sequence[str]] = None) -> ICGS3Result:
         heatmap_covariates=args.heatmap_covariates,
         heatmap_goelite_terms=args.heatmap_goelite_terms,
         heatmap_goelite_max_terms=args.heatmap_goelite_max_terms,
+        export_marker_networks=args.export_marker_networks,
+        minimal_outputs=args.minimal_outputs,
+        marker_network_top_n=args.marker_network_top_n,
+        marker_network_jobs=args.marker_network_jobs,
         umap_feature_mode=args.umap_feature_mode,
         umap_covariates=args.umap_covariates,
         umap_genes=args.umap_genes,

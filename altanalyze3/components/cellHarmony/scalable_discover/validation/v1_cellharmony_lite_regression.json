@@ -1,0 +1,77 @@
+{
+  "inputs": {
+    "h5": [
+      {
+        "name": "BOS_BOS.h5",
+        "sha256": "e5d64734a68701930593e0028329f84173bee1b5c99944cfb537ef017b08db9c",
+        "sample": "BOS"
+      },
+      {
+        "name": "Healthy_D071.h5",
+        "sha256": "fd95f34e85697df34b62b667f37edd3c7facbf97212f4d2014f5e7b6477ceabd",
+        "sample": "Healthy"
+      }
+    ],
+    "reference": {
+      "name": "Hs-CellRef2.txt",
+      "sha256": "44964a9e119670030c08640eecda5465a4cea522e92b65703b3a6cd585262a40"
+    },
+    "original_module": {
+      "name": "cellHarmony_lite.py",
+      "sha256": "2e0b4a17992514a7c32d1fe807592493ce1469f72e64fcfe5b78632768b7d30c"
+    }
+  },
+  "reference_path_identical": {
+    "assignments_file_sha256_equal": true,
+    "assignments_rows": 7445,
+    "adata_digest_equal": true,
+    "orig": {
+      "shape": [
+        7445,
+        32738
+      ],
+      "X": "a8f9e24e4ce7a01688ddcbc3b6ce34dfd3779261973aea613eb5d62a101141b4",
+      "layers": {
+        "counts": "5024192c326be3b6e945f8bdba4677c18357f8f6ca9405d3a29ed4d62d21c394",
+        "soupx_raw": "46c9642cc3762868f5d51a5c65914a71f798de6203f88ccb7b4b11fa99cddee8"
+      },
+      "obs_names": "0a9f76ed405bf57ec8ef2106a557925bbfed8b454e8859008c0938ee5424f50a",
+      "var_names": "d3b0876bae21b1cec26558c670e662aad0cdf24eb177fe5b3376cb3ff47b880f",
+      "obs": "5a45cc23586afa0e68aa1782b7b497252058e0844bb386f1838425636dd4e4d9"
+    },
+    "new": {
+      "shape": [
+        7445,
+        32738
+      ],
+      "X": "a8f9e24e4ce7a01688ddcbc3b6ce34dfd3779261973aea613eb5d62a101141b4",
+      "layers": {
+        "counts": "5024192c326be3b6e945f8bdba4677c18357f8f6ca9405d3a29ed4d62d21c394",
+        "soupx_raw": "46c9642cc3762868f5d51a5c65914a71f798de6203f88ccb7b4b11fa99cddee8"
+      },
+      "obs_names": "0a9f76ed405bf57ec8ef2106a557925bbfed8b454e8859008c0938ee5424f50a",
+      "var_names": "d3b0876bae21b1cec26558c670e662aad0cdf24eb177fe5b3376cb3ff47b880f",
+      "obs": "5a45cc23586afa0e68aa1782b7b497252058e0844bb386f1838425636dd4e4d9"
+    }
+  },
+  "qc_only_mode": {
+    "returned_frame_is_none": true,
+    "qc_only_shape": [
+      8485,
+      32738
+    ],
+    "aligned_shape": [
+      7445,
+      32738
+    ],
+    "aligned_cells_contained_in_qc_only": 7445,
+    "aligned_cells": 7445,
+    "matrices_equal_on_aligned_cells": {
+      "X": true,
+      "layers/soupx_raw": true,
+      "layers/counts": true
+    },
+    "var_names_equal": true,
+    "first_50_barcodes_identical_order": true
+  }
+}

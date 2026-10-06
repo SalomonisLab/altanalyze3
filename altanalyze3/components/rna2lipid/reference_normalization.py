@@ -5,6 +5,15 @@ validation exclude the held-out donor. Raw cohort MS is not a prerequisite.
 """
 from __future__ import annotations
 
+try:
+    from .candidate_integrity import reject_retired_workflow
+except ImportError:
+    from candidate_integrity import reject_retired_workflow
+
+if __name__ == "__main__":
+    reject_retired_workflow('reference_normalization.py')
+
+
 import argparse
 import hashlib
 from itertools import combinations
@@ -50,6 +59,7 @@ def rna_id(sample):
 
 
 def load_data(source, out):
+    reject_retired_workflow('reference_normalization.py:load_data')
     source, out = Path(source), Path(out)
     extract(source / "LMEX0000003692_data_table.xlsx", out / "source_targets")
     cell = pd.read_csv(out / "source_targets/targets_native_log2.csv", index_col=0)
@@ -406,6 +416,7 @@ def evaluate(X, Y, meta, cell, bulk, out):
 
 
 def fit_bundle(X, Y, method, offsets, alpha, out, supported_lipids=()):
+    reject_retired_workflow('reference_normalization.py:fit_bundle')
     sx, sy = StandardScaler().fit(X), StandardScaler().fit(Y)
     model = KernelRidge(alpha=alpha, kernel="linear").fit(sx.transform(X), sy.transform(Y))
     bundle = {"model": model, "scaler_x": sx, "scaler_y": sy, "X_columns": list(X.columns),
@@ -507,6 +518,7 @@ def external_validation(X, Y, meta, cell, bulk, crna, reference_path, out):
 
 
 def run(args):
+    reject_retired_workflow('reference_normalization.py:run')
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
     X, Y, meta, cell, bulk, crna, manifest = load_data(args.source_dir, out)
@@ -580,6 +592,7 @@ def run(args):
 
 
 def predict(args):
+    reject_retired_workflow('reference_normalization.py:predict')
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
     from altanalyze3.components.rna2lipid.api import load_bundle
     bundle = load_bundle(args.bundle)

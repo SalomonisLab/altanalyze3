@@ -18,4 +18,8 @@ igraph>=0.11,<1.1
 # pulls it in. Pinned to the version requirements.txt and the compiled container
 # requirements already use.
 nimfa==1.4.0
+# ICGS3 PageRank/Louvain downsampling raises ImportError without it (ICGS.py
+# _icgs2_community_sampling). scALABLE-discover runs ICGS3 in this image. Pinned to the
+# version the local ICGS3 validation ran with.
+python-louvain==0.16
 cairocffi>=1.7,<2

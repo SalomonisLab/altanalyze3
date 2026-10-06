@@ -44,6 +44,9 @@ class _JobLogStream(io.TextIOBase):
 class JobRunner:
     """Fire-and-forget background executor for processing jobs."""
 
+    # The module each isolated analysis runs in; a subclass with its own pipeline names its own.
+    WORKER_MODULE = "altanalyze3.components.cellHarmony.flask.worker"
+
     def __init__(
         self,
         store: JobStore,
@@ -133,7 +136,7 @@ class JobRunner:
             env = dict(os.environ)
             root = str(Path(__file__).resolve().parents[4])
             env["PYTHONPATH"] = root + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
-            cmd = [sys.executable, "-m", "altanalyze3.components.cellHarmony.flask.worker",
+            cmd = [sys.executable, "-m", self.WORKER_MODULE,
                    str(self.store.root.resolve()), str(self.registry_path.resolve()), job_id, task_name,
                    self.h5ad_compression, str(int(self.export_approx_pdfs))]
             with log_path.open("w") as log:

@@ -1,4 +1,13 @@
 """Donor-nested ridge/PLS tuning for fold magnitudes without post-hoc inflation."""
+
+try:
+    from .candidate_integrity import reject_retired_workflow
+except ImportError:
+    from candidate_integrity import reject_retired_workflow
+
+if __name__ == "__main__":
+    reject_retired_workflow('train_fold_magnitude_model.py')
+
 import argparse
 import json
 from pathlib import Path
@@ -20,6 +29,7 @@ ENGINE='ridge'
 
 
 def candidate_predictions(xtrain,ytrain,xtest,parameters):
+    reject_retired_workflow('train_fold_magnitude_model.py:candidate_predictions')
     if ENGINE=='ridge':return fast_predict(xtrain,ytrain,xtest,parameters)
     sx,sy=StandardScaler().fit(xtrain),StandardScaler().fit(ytrain)
     model=PLSRegression(n_components=int(max(parameters)),scale=False,max_iter=1000)
@@ -61,6 +71,7 @@ def summary(a,b):
 
 
 def run(reference,ms1_reference,raw,out):
+    reject_retired_workflow('train_fold_magnitude_model.py:run')
     reference,ms1_reference,raw,out=map(Path,[reference,ms1_reference,raw,out]);out.mkdir(parents=True,exist_ok=True)
     truth=pd.read_csv(ms1_reference/'combined_reference_MS1_log2.csv',index_col=0)
     X=pd.read_csv(reference/'paired_RNA.csv',index_col=0)

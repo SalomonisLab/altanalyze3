@@ -1,0 +1,38 @@
+{
+  "evaluate_lungmap_elasticnet_ms1.py": [
+    "train"
+  ],
+  "infer_lungmap_elasticnet_ms1.py": [
+    "run"
+  ],
+  "differential_lungmap_elasticnet_ms1.py": [
+    "run"
+  ],
+  "report_lungmap_elasticnet_ms1.py": [
+    "report"
+  ],
+  "evaluate_lungmap_ipf.py": [
+    "fit_candidates",
+    "infer",
+    "main"
+  ],
+  "evaluate_lungmap_whole_lung.py": [
+    "run"
+  ],
+  "validate_ipf_candidate.py": [
+    "run"
+  ],
+  "reference_normalization.py": [
+    "load_data",
+    "fit_bundle",
+    "run",
+    "predict"
+  ],
+  "build_raw_scale_reference.py": [
+    "run"
+  ],
+  "train_fold_magnitude_model.py": [
+    "run",
+    "candidate_predictions"
+  ]
+}

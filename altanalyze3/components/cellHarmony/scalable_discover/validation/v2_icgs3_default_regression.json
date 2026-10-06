@@ -1,0 +1,76 @@
+{
+  "inputs": {
+    "h5": [
+      {
+        "name": "BOS_BOS.h5",
+        "sha256": "e5d64734a68701930593e0028329f84173bee1b5c99944cfb537ef017b08db9c",
+        "sample": "BOS"
+      },
+      {
+        "name": "Healthy_D071.h5",
+        "sha256": "fd95f34e85697df34b62b667f37edd3c7facbf97212f4d2014f5e7b6477ceabd",
+        "sample": "Healthy"
+      }
+    ],
+    "icgs3_input_counts": {
+      "name": "icgs3_input_counts.h5ad",
+      "sha256": "bbb8bac86e8499232b40468610cb9074850fe58ad6af2fbc5517fb958f9e386a"
+    },
+    "original_module": {
+      "name": "ICGS.py",
+      "sha256": "70c1ef0292a76637635c679b2aa01e50843f367cc6b7bb0dde40738d80b9f329"
+    }
+  },
+  "files": {
+    "icgs3_clusters.tsv": {
+      "orig": "9a1946a6dafb99a54587094f161f39f0295aba6aacd7b8620933a10cb3ff3d6b",
+      "new": "9a1946a6dafb99a54587094f161f39f0295aba6aacd7b8620933a10cb3ff3d6b",
+      "networks": "9a1946a6dafb99a54587094f161f39f0295aba6aacd7b8620933a10cb3ff3d6b"
+    },
+    "icgs3_cell_barcode_clusters.tsv": {
+      "orig": "ef5d93fc7617ef262e75af9567c924db3f6cebc1e3776d7b2d2e317684650aa3",
+      "new": "ef5d93fc7617ef262e75af9567c924db3f6cebc1e3776d7b2d2e317684650aa3",
+      "networks": "ef5d93fc7617ef262e75af9567c924db3f6cebc1e3776d7b2d2e317684650aa3"
+    },
+    "sNMF/icgs3_pagerank_downsampling.tsv": {
+      "orig": "74647b9af820d6047231478050f24854f4434052761dcf543574ca5bdbdc91b1",
+      "new": "74647b9af820d6047231478050f24854f4434052761dcf543574ca5bdbdc91b1",
+      "networks": "74647b9af820d6047231478050f24854f4434052761dcf543574ca5bdbdc91b1"
+    },
+    "MarkerFinder/icgs3_marker_heatmap_markers.tsv": {
+      "orig": "3db0cefa07ef599de3ecf3b3b652185dd6a7bc2d999d47fb94598963f9eb2e23",
+      "new": "3db0cefa07ef599de3ecf3b3b652185dd6a7bc2d999d47fb94598963f9eb2e23",
+      "networks": "3db0cefa07ef599de3ecf3b3b652185dd6a7bc2d999d47fb94598963f9eb2e23"
+    },
+    "MarkerFinder/icgs3_marker_heatmap_redundant_markers.tsv": {
+      "orig": "e952561dc300bf7ec36d8af6a52aa01ccc6213a3369fdf719e8caf20754ca6e1",
+      "new": "e952561dc300bf7ec36d8af6a52aa01ccc6213a3369fdf719e8caf20754ca6e1",
+      "networks": "e952561dc300bf7ec36d8af6a52aa01ccc6213a3369fdf719e8caf20754ca6e1"
+    },
+    "MarkerFinder/icgs3_marker_heatmap_fold_matrix.centroids.tsv": {
+      "orig": "9eb6a5c391406839743f57157ef1069ff2063faaabe295c0b72999162471593f",
+      "new": "9eb6a5c391406839743f57157ef1069ff2063faaabe295c0b72999162471593f",
+      "networks": "9eb6a5c391406839743f57157ef1069ff2063faaabe295c0b72999162471593f"
+    },
+    "UMAPs/icgs3_umap.tsv": {
+      "orig": "b2d4d89f4c12b1ff9d96b082f53986b0e9d17f2a58f043a5b68d0e5476c9bad4",
+      "new": "b2d4d89f4c12b1ff9d96b082f53986b0e9d17f2a58f043a5b68d0e5476c9bad4",
+      "networks": "b2d4d89f4c12b1ff9d96b082f53986b0e9d17f2a58f043a5b68d0e5476c9bad4"
+    },
+    "GO-Elite/icgs3_biomarker_enrichment.tsv": {
+      "orig": "1c2d4676f3d38ba1141192d1ee508d8723e2591950d4d05d5c0c0669685b3e6e",
+      "new": "1c2d4676f3d38ba1141192d1ee508d8723e2591950d4d05d5c0c0669685b3e6e",
+      "networks": "1c2d4676f3d38ba1141192d1ee508d8723e2591950d4d05d5c0c0669685b3e6e"
+    },
+    "GO-Elite/icgs3_cell_state_predictions.tsv": {
+      "orig": "4efce5c72f4e9a7ed26fdd67a525ecfcdb9f27841d374fe004ad1a91e1bf9bc0",
+      "new": "4efce5c72f4e9a7ed26fdd67a525ecfcdb9f27841d374fe004ad1a91e1bf9bc0",
+      "networks": "4efce5c72f4e9a7ed26fdd67a525ecfcdb9f27841d374fe004ad1a91e1bf9bc0"
+    }
+  },
+  "orig_equals_new_all_files": true,
+  "new_equals_networks_all_files": true,
+  "network_tsv_files": 24,
+  "clusters_with_biomarker_prediction": 25,
+  "default_runs_wrote_networks": false
+}
