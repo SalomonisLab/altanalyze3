@@ -1,6 +1,10 @@
 """Fast checks of the scALABLE-discover app; the end-to-end runs live in validation/."""
 import io
+from pathlib import Path
+import tempfile
 
+import anndata as ad
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
@@ -40,8 +44,13 @@ def test_differential_and_reference_routes_are_gone(client, path):
 
 
 def _upload(client, species="human", reference="icgs3"):
+    # Upload validation inspects the H5AD header before accepting a job.
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "s1.h5ad"
+        ad.AnnData(np.array([[1, 2], [3, 4]], dtype=np.float32)).write_h5ad(path)
+        payload = path.read_bytes()
     return client.post("/api/jobs", data={"species": species, "reference": reference, "sample_names": ["s1"]},
-                       files={"files": ("s1.h5ad", io.BytesIO(b"placeholder"), "application/octet-stream")})
+                       files={"files": ("s1.h5ad", io.BytesIO(payload), "application/octet-stream")})
 
 
 def test_upload_refuses_other_species_and_references(client):

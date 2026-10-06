@@ -40,11 +40,12 @@ from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFi
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import Field, StrictInt
 
 from altanalyze3.components.cellHarmony.flask.job_manager import JobStore
 from altanalyze3.components.goelite.structures import compute_z_score
 
-from .pipeline import DISCOVER_REFERENCE_ID, SPECIES_TO_ICGS, discover_registry
+from .pipeline import DEFAULT_UMAP_FIT_MODE, DISCOVER_REFERENCE_ID, SPECIES_TO_ICGS, discover_registry
 from .tasks import DiscoverJobRunner
 
 # The webapp package re-exports a FastAPI instance named `app`; import the module.
@@ -64,6 +65,11 @@ EMBEDDING_LABEL = "UMAP"
 GOELITE_MAX_FDR = 0.05
 GOELITE_MIN_Z = 2.0
 
+
+class DiscoverQCSettings(W.QCSettings):
+    umap_fit_mode: str = Field(default=DEFAULT_UMAP_FIT_MODE, pattern="^(full|landmark)$")
+    max_k: StrictInt | None = Field(default=None, ge=2)
+
 # (anchor in webapp/templates/index.html, replacement, required count). A count mismatch
 # raises, so a template edit that moves an anchor stops the page instead of silently
 # serving scALABLE-web's controls under the discover name.
@@ -77,8 +83,39 @@ INDEX_REWRITES: Tuple[Tuple[str, str, int], ...] = (
     ('<label class="field">\n                  <span>Reference</span>',
      '<label class="field hidden">\n                  <span>Reference</span>', 1),
     ("<h2>2. QC and alignment</h2>", "<h2>2. QC and ICGS3 clustering</h2>", 1),
-    ('<label class="field">\n                    <span>Minimum cosine similarity score</span>',
-     '<label class="field hidden">\n                    <span>Minimum cosine similarity score</span>', 1),
+    ('''                  <label class="field">
+                    <span>Ambient RNA correction</span>
+                    <select name="ambient_correction">
+                      <option value="no" selected>No</option>
+                      <option value="yes">Yes</option>
+                    </select>
+                  </label>''',
+     '''                  <label class="field">
+                    <span>UMAP fitting</span>
+                    <select name="umap_fit_mode" id="discover-umap-fit-mode">
+                      <option value="landmark" selected>Accelerated</option>
+                      <option value="full">All cells</option>
+                    </select>
+                  </label>''', 1),
+    ('''                  <label class="field">
+                    <span>Minimum cosine similarity score</span>
+                    <input name="align_cutoff" value="0.4">
+                  </label>''',
+     '''                  <label class="field">
+                    <span>Ambient RNA correction</span>
+                    <input name="align_cutoff" type="hidden" value="0.4">
+                    <select name="ambient_correction">
+                      <option value="no" selected>No</option>
+                      <option value="yes">Yes</option>
+                    </select>
+                  </label>''', 1),
+    ('                  <label class="field hidden" id="qc-impute-modality-field">',
+     '''                  <label class="field">
+                    <span>Max K</span>
+                    <input name="max_k" id="discover-max-k" type="number" min="2" step="1"
+                           placeholder="—" title="Target NMF K; leave blank for automatic selection.">
+                  </label>
+                  <label class="field hidden" id="qc-impute-modality-field">''', 1),
     ("Live counts parsed from alignment log.", "Live counts parsed from the QC log.", 1),
     # The ICGS3 workflow figure fills this panel and carries its own title.
     ("<h2>Reference Preview</h2>", "", 1),
@@ -394,7 +431,7 @@ def create_discover_app(overrides: Optional[Dict] = None) -> FastAPI:
                                          sample_names=sample_names, files=files)
 
     @app.post("/api/jobs/{job_id}/qc")
-    async def update_qc(job_id: str, qc: W.QCSettings):
+    async def update_qc(job_id: str, qc: DiscoverQCSettings):
         store, _ = W._job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")

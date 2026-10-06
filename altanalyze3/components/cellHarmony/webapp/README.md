@@ -1,3 +1,118 @@
+## Large saved-job Explore performance (2026-10-05)
+
+The shared scALABLE-web/Discover serving adapter now accepts floating-point RNA
+sources, including ICGS3 float64 matrices, for the existing reduced-precision display
+bundle. Previously it rejected float64, reloaded the whole H5AD and exceeded the
+expression-cache budget, so every interaction paid the load cost again. Source H5ADs,
+raw counts and analytical outputs remain unchanged. Non-RNA precision checks remain.
+
+The shared browser requests lossless column-encoded points with dictionary-encoded
+labels, and expression requests ask for the visible UMAP or violin only. Every cell
+is retained. Legacy API requests still return all views in the original row format;
+PDF endpoints remain unchanged. The viewer's covariate wrapper forwards both options.
+Expression building and serialization run off the event loop, so a cache lock does
+not stall other visitors' status requests.
+
+On Discover job `d5fee6ea361e4ee2bdfce51b9c6ee312` (149,745 plotted cells), separate
+fresh-process tests produced:
+
+| Measure | Previous path | Updated path |
+| --- | ---: | ---: |
+| Peak process RSS | 9.45 GiB | 0.87 GiB |
+| First UMAP response | 10.12 s | 1.50 s |
+| Repeated UMAP response | 9.92 s | 0.39 s |
+| Repeated gene UMAP response | 10.85 s | 0.61 s |
+| Coordinate response bytes | 24.64 MB | 12.38 MB |
+| Gene response bytes | 30.55 MB | 12.75 MB |
+
+Every returned cell identity was verified against the H5AD. Local browser reload to
+usable Explore measured 3.2 s; filters, gene changes, coloring, frequency and violin
+views were exercised. This is one paired macOS measurement, not a production SLA or
+validation of every view/modality. Reproduce with `dev/benchmark_explore.py JOB_JSON
+--mode baseline|optimized --report OUTPUT_JSON`; raw measurements and phase timings
+are in `dev/explore_performance_results.json`.
+
+**Deployment:** update Python and static assets together and restart each web, viewer
+and Discover service. Existing completed bundles need no rebuild. Keep the source
+H5AD available for canonical downloads and analyses. Reload browser assets after the
+restart. The large/multiple-H5AD ingestion changes below additionally require the
+new Docker dependencies; the serving fix itself adds none.
+
+### Analysis cost and next alternatives
+
+The original 1,377.6 s was real: UMAP consumed 700.3 s, NMF/MarkerFinder/SVM 286.4 s,
+and initial graph/sampling 174.2 s. The serving bundle took only 11.9 s. Faster
+Explore therefore does not establish a faster full analysis.
+
+ICGS3 now constructs the exact float32 matrix UMAP already consumes in bounded row
+blocks and avoids copying every gene/layer just to attach final coordinates. Tests
+check byte-identical UMAP input, cell/feature ordering and unchanged parameters. PCA
+and Harmony paths keep their existing behavior. The complete 149k-cell analysis has
+not been rerun to time this allocation change.
+
+The next substantial speed comparison should target UMAP neighborhood construction
+and layout, with fixed input cell/marker rosters. An explicit landmark-fit plus
+all-cell transform mode could bound fitting cost; every cell would still receive
+coordinates, but local geometry can change. Alternative accelerated UMAP backends
+would also require neighbor/rare-state preservation checks, timing, peak memory and
+reproducibility comparisons before changing defaults. Neither is enabled here.
+For million-cell browser views, a future coordinate/value cache and viewport tiles
+can avoid retransmitting all cells on each change, while keeping individual-cell
+inspection and full-resolution exports. These are proposed follow-ups, not measured
+or implemented improvements.
+
+## Large and multiple H5AD uploads (2026-10-05)
+
+The web pipeline accepts multiple H5AD files. It merges them on disk with an outer
+feature join before alignment/MarkerFinder/approximate UMAP; all uploaded cells and
+features enter the configured QC. QC scans bounded blocks with the original global
+`min_cells` ordering, rather than applying independent per-file gene filters that
+could change the result. The existing alignment cutoff still applies. Cell IDs gain
+`::upload_name` suffixes, and `obs['scalable_upload']` identifies each uploaded library.
+Original `obs` annotations remain available, and source `var`/`uns` metadata is retained
+in `uns['scalable_sources']`. Counts layers, raw measurements and pairwise cell graphs
+are retained. Files with inconsistent layer/raw schemas or different expression scales
+receive actionable errors instead of silently combining incompatible measurements.
+
+Multiple uploads always use disposable memory-mapped work arrays. A single H5AD uses
+this path above 100,000 cells or at least 1 GiB of uncompressed matrix storage. Upload
+copying uses 8 MiB chunks. Header inspection after upload reports cell counts and
+uncompressed storage, and warns when a rough conventional import/QC estimate exceeds
+the analysis budget. This is an estimate, not a prediction of peak use across all
+modalities. The supplied matrices are not downsampled or rounded by this backend.
+
+### Deployment on the 30 GiB server
+
+- Rebuild the Docker image using `requirements.docker.txt`: multiple-H5AD merging
+  requires AnnData 0.12 and dense merging requires Dask. A source-only update with the
+  older AnnData installation is insufficient. Local installations from the root
+  package's older dependency pin also need the web requirements.
+- Keep `CELLHARMONY_ISOLATE_JOBS=true`, `CELLHARMONY_JOB_WORKERS=2`,
+  `CELLHARMONY_WORKER_MEMORY_LIMIT_GIB=15`, and
+  `CELLHARMONY_TOTAL_MEMORY_LIMIT_GIB=27`. Small jobs can overlap; 15 GiB controls new
+  admissions. Running-worker supervision stops the largest worker at 27 GiB or 90%
+  of the container limit, whichever is lower, and marks its job failed with a clear
+  message. The 0.5-second polling interval cannot prevent every abrupt OOM allocation.
+- Provide fast writable disk on the job-storage volume. Work arrays live under each
+  job's `outputs/.h5ad_work`, alongside merged input and intermediate matrices. Budget
+  for several uncompressed matrix copies plus inputs and final results; compressed
+  upload size substantially understates this requirement. Work-array allocation checks
+  available disk with a 512 MiB reserve. Supervised success/failure removes the scratch
+  directory; uploaded files remain subject to the existing job-retention policy.
+- Ensure reverse-proxy/body limits and upload timeouts accept the intended input sizes;
+  header inspection occurs after multipart upload. Mixed H5AD/10x selections are rejected
+  by the browser before upload. This change does not increase site upload limits.
+
+Validation and reproducible stress measurements are recorded in
+`dev/h5ad_memory_results.json`. Regression tests compare the original and bounded
+paths for CSR, CSC and dense inputs, raw/logged data, normalization, QC, alignment,
+ambient correction and MarkerFinder outputs. A four-H5AD integration test runs the
+pipeline through approximate UMAP and checks saved results plus expression/UMAP APIs.
+The synthetic large runs measure import through MarkerFinder; the eight-file million-cell
+run also includes approximate UMAP and H5AD serialization. They do not measure a full multimodal,
+differential, Chat or browser workload, and are not a Docker/cgroup capacity guarantee.
+Large ambient libraries and downstream modalities can still require substantial memory.
+
 ## Serving memory and full workflow validation (2026-10-02)
 
 ### Alternate backend run: alignment through differential expression
@@ -438,7 +553,7 @@ route answers HTTP 503. See Chat below.
 | `CELLHARMONY_MAX_FILES` | `7` | files per job |
 | `CELLHARMONY_JOB_WORKERS` | `2` | shared pipeline/differential worker slots |
 | `CELLHARMONY_WORKER_MEMORY_LIMIT_GIB` | `15` | hold new starts when any active worker tree reaches this RSS |
-| `CELLHARMONY_TOTAL_MEMORY_LIMIT_GIB` | `27` | hold new starts at this container usage; also respect 90% of cgroup limit |
+| `CELLHARMONY_TOTAL_MEMORY_LIMIT_GIB` | `27` | hold new starts and stop the largest worker at this usage; also respect 90% of cgroup limit |
 | `CELLHARMONY_ISOLATE_JOBS` | `true` | disposable child interpreter for each heavy analysis |
 | `CELLHARMONY_CACHE_MAX_GIB` | `2` | shared estimated retained-buffer budget for serving caches |
 | `CELLHARMONY_CACHE_MAX_ENTRIES` | `64` | maximum total entries across serving caches |
@@ -451,8 +566,9 @@ route answers HTTP 503. See Chat below.
 | `CELLHARMONY_FASTCNV_EXPORT_PDF` | `true` | write the fastCNV clone PDF |
 
 Boolean variables accept `1 true t yes y on` and `0 false f no n off`. Any other value keeps
-the default. The server accepts at most 1 GiB per request and only the extensions `.h5` and
-`.h5ad`.
+the default. Allowed extensions are `.h5` and `.h5ad`. Configure request-size limits
+at the reverse proxy; the legacy `MAX_CONTENT_LENGTH` setting is not enforced by
+the FastAPI upload route.
 
 ### Docker
 
@@ -1101,3 +1217,83 @@ the UI omits the duration instead of reporting an unrelated timestamp span.
 On saved job `9f99458185134da58f1167687acd818b`, the erroneous 844-second
 label becomes 67 seconds (66.87 seconds in the worker, 73.59 seconds from
 upload creation to completion). This timing fix passed 14 targeted tests.
+
+## Large normalized-H5AD memory fixes (2026-10-06)
+
+The bounded importer now releases Linux clean scratch-file cache as well as
+mapped resident pages. Ambient correction flushes/releases completed library
+ranges; the pipeline also releases work pages after analytical H5AD export and
+before building the serving bundle. `MADV_DONTNEED` alone did not reclaim the
+active scratch-file cache charged to the container. On other platforms, normal
+mapped-page release remains available.
+
+For normalized H5AD input with a verified raw `layers/counts`, ambient correction
+uses those counts and regenerates RNA with the standard CP10k + log1p procedure.
+The ambient subtraction and automatic per-library rho selection are unchanged.
+This fixes the wrapper's use of logged X; it does not replace the ambient method.
+A logged input without verified raw counts cannot support this correction.
+
+Lipid inference extracts the complete production RNA panel in batches and fuses
+the deployed per-lipid linear predictions, preserving each estimator's selected
+inputs, transformations and intercept. Unsupported estimators retain their
+existing prediction path. The production model is not retrained or reduced.
+MarkerFinder uses bounded sparse row batches with its existing statistics.
+
+Per-library fastComm now reads only the requested H5AD expression matrix and
+annotations. AnnData's backed reader loaded unrelated counts/raw layers eagerly,
+and the old benchmark additionally constructed a dense table of all cells.
+Aggregation now processes 128 gene symbols at a time through the original pandas
+mean/detection operations. Every cell and requested symbol remains included;
+duplicate symbols, missing values, floating arithmetic and ranking are preserved.
+A 4,096-cell real-data probe produced identical values and ordering for all 9,372
+scored interactions. The matrix, ambient, marker and lipid tests (80), fastComm
+tests (20), and serving/readiness tests (25) passed on both native macOS and Linux.
+
+Explore requests during queued/running analysis now return "not ready" before
+opening expression matrices. Previously, an early plot request could load the
+entire analytical H5AD while the serving bundle was still being built, blocking
+later requests behind the expression-cache lock. A completed bundle also
+invalidates any older H5AD fallback cache entry. Standalone viewer stores retain
+their own cache/readiness hook.
+
+The full Natri H5AD (635,456 cells, 33,723 genes, 127 libraries) completed in a
+Docker container capped at 30 GiB with no swap and four CPUs. Peak sampled cgroup
+working set was 22.43 GiB, with no OOM kill or unexpected analysis restart.
+Working set excludes inactive file cache; total charged memory reached the cap
+as reclaimable file cache accumulated. The existing 27 GiB working-set guard did
+not trigger. The initial import, ambient correction and centroid alignment took
+379.69 seconds; the lipid inference/save/marker stage took 43.25 seconds. Full
+completion, including RNA/count export, communication and the serving bundle,
+took 1,052.93 seconds (17.55 minutes). Canonical RNA/count export took 299.76
+seconds and remains a major bottleneck. Most initial processing used roughly one
+CPU core; lipid inference and bundle construction used up to the four-core cap.
+
+Verification preserved the complete gene panel and source cell roster across
+aligned and below-cutoff outputs, all 202 production lipid targets and the
+unchanged model identity. For 128 sampled aligned cells, raw counts matched
+the source exactly, normalized RNA matched corrected-count CP10k/log1p, and
+saved lipid predictions matched the original individual estimators exactly
+after float32 storage (maximum float64 difference 1.07e-14). All lipid outputs
+were finite and nonnegative. All 127 ambient summaries matched the preceding
+count-space run, and global communication tables matched it byte for byte.
+
+Sixteen RNA/lipid Explore API checks passed on the 552,880 aligned cells,
+including exact cell membership checks. Browser checks confirmed cell-state,
+RNA and lipid UMAPs and a library-filtered lipid violin. Serving peak RSS was
+1.74 GiB; unfiltered UMAP requests took 1.91–6.86 seconds, expression UMAPs
+3.41–3.55 seconds, and library-filtered expression requests about 0.08 seconds.
+The test server was deliberately restarted after analysis to load the readiness
+fix; completed outputs were retained. This benchmark does not establish
+million-cell or two-heavy-job concurrency performance, or validate every other
+modality on this source.
+
+Deploy `mapped_h5ad.py`, the ambient wrapper/subtraction modules, MarkerFinder,
+`rna2lipid/api.py`, both fastComm API/benchmark modules, `flask/pipeline.py` and
+the web `app.py`
+together. Rebuild the web container with the existing web Docker requirements.
+This patch introduces no additional production dependency. Keep isolated workers,
+the 15 GiB admission threshold, the 27 GiB total guard and the 30 GiB container cap.
+Provide fast writable scratch storage for uncompressed work arrays and canonical
+outputs. Benchmark details and validation scope are recorded in
+`dev/natri_memory_benchmark_20261006.json`. The full real-data benchmark is
+complete, including communication, serving bundle and scientific output checks.

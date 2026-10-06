@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "analysis_status": "blocked",
+  "analysis_status": "approved",
   "authorized_operations": [
     "safeguard_implementation",
     "safeguard_tests"
@@ -15,10 +15,10 @@
     },
     {
       "id": "corrected_target_provenance",
-      "status": "pending",
+      "status": "resolved",
       "question": "For the 45-profile, 202-lipid corrected reference, how should the four multi-mode lipid names be handled? NA filling is now authorized separately.",
-      "user_answer": null,
-      "resolution_evidence": null,
+      "user_answer": "Proceed and if you can't do anything the original model did or want deviate in any way that I haven't authorized, stop and discuss.",
+      "resolution_evidence": "Original upstream maximum rule is retained, numerically verified for all 202 source names; authorized log2 median filling handles missing entries. No new ion-mode policy.",
       "partial_resolution": "The user approved established per-lipid median NA filling on log2 values; multi-mode reconciliation remains pending."
     },
     {
@@ -26,18 +26,43 @@
       "status": "pending",
       "question": "Where is the identification export with lipid names, ion modes, adducts and retention times needed for unresolved raw-MS mappings?",
       "user_answer": null,
-      "resolution_evidence": null
+      "resolution_evidence": null,
+      "required_for": [
+        "full_MS1_abundance_calibration"
+      ]
     },
     {
       "id": "review_full_proposal",
-      "status": "pending",
+      "status": "resolved",
       "question": "After source reconciliation, does the user approve the concrete complete-panel target transformation and comparison settings?",
-      "user_answer": null,
-      "resolution_evidence": null
+      "user_answer": "Do it",
+      "resolution_evidence": "Explicit response to the 45-profile, 202-lipid, original ElasticNetCV native-log2 IPF comparison proposal. This is not approval of full MS1 abundance calibration.",
+      "required_for": [
+        "full202_native_log2_IPF_validation"
+      ]
+    },
+    {
+      "id": "relative_log2_BH_eligibility",
+      "status": "resolved",
+      "required_for": [
+        "full202_lipid_BH_correction",
+        "RNA_scale_corrected_all_covariate_differentials"
+      ],
+      "question": "May BH correction for imputed lipids use the same full 202-lipid testing family for both models, while retaining the original raw tests, folds and ElasticNetCV? The existing >0.1 expression filter excludes present lipids with negative relative-log2 values.",
+      "user_answer": "Yes, fix your continued screwups",
+      "resolution_evidence": "Explicit response to the proposal to recalculate BH over all 202 lipids for both models, preserving existing raw tests and fold calculations.",
+      "proposed_change": "Imputed-lipid BH eligibility would be fixed to the prespecified 202-lipid panel with finite raw p values; RNA, ADT and other modalities would keep their original filtering. No implementation of this change has occurred."
     }
   ],
-  "approval": null,
-  "note": "D071 exclusion is explicitly authorized. Other pending decisions are not answered by this message. The immutable production baseline still documents its original 50 profiles; the candidate has an approved 45-profile scope.",
+  "approval": {
+    "manifest_sha256": "050e2432e6b967b0d81bf4b681edc18493cf70dc334cf83257e3a607003c44f9",
+    "analysis_phase": "full202_native_log2_IPF_validation",
+    "granted_by": "user",
+    "user_message": "Do it",
+    "conversation_reference": "Current thread, explicit approval immediately after the stated full202 native-log2 IPF comparison; followed by restored-drive confirmation.",
+    "binding_note": "Digest records the implemented authorized inputs; no claim that user read the digest."
+  },
+  "note": "Native-log2 IPF validation is explicitly authorized. Full MS1 abundance calibration remains incomplete and has a separate pending identification question.",
   "approved_scope_change": {
     "excluded_donor": "D071",
     "excluded_profiles": [
@@ -75,6 +100,106 @@
     "first": "Full-panel corrected candidate IPF differential comparison against established production version, retaining baseline ElasticNetCV and matched differential parameters. Report observed performance; equivalence or improvement is not assumed.",
     "then": "After successful IPF validation, correct the COPD RNA log-scale mismatch and regenerate lipid-associated differentials for all current LungMAP covariates for both real per-sample metacells and pseudobulks.",
     "publication": "No replacement of official model or database publication authorized by this record.",
-    "pending_dependencies": "Existing unresolved full-panel raw-MS identifications and four multi-mode target mappings still require resolution before training."
+    "pending_dependencies": "Full native-log2 IPF comparison is complete. All-covariate continuation requires discussion of the actual BH eligibility difference; the original filter was retained in the completed comparison. Raw-MS annotation questions remain separate from native validation."
+  },
+  "latest_authorization": {
+    "granted_by": "user",
+    "user_message": "Do it",
+    "conversation_reference": "Current thread, following explicit proposal to run approved 45-profile / 202-lipid / 1303-gene native-log2 IPF comparison with the established lipidwise ElasticNetCV."
+  },
+  "calibration_review": {
+    "saved_calibration_offsets": 47,
+    "existing_exact_name_raw_targets": 108,
+    "production_lipids": 202,
+    "finding": "Saved MS1 calibration provides 47 per-lipid offsets, not a completed full-panel abundance calibration. Existing raw targets are not synonymous with approved anchors. No requirement for raw MS from every training sample.",
+    "proposed_question": "May the full-panel IPF fold-change evaluation use native log2 targets with authorized median NA filling, while per-lipid MS1 output baselines remain separately incomplete? A common per-lipid log2 offset cancels under the established target StandardScaler and in predicted log2 differences. This would not be reported as completed full-panel MS1 abundance calibration."
+  },
+  "current_execution_dependency": {
+    "status": "resolved",
+    "path": "/Volumes/salomonis2/LungMAP/CellRef2",
+    "observed": "The /Volumes/salomonis2 mount path is unavailable in this turn (df reports No such file or directory).",
+    "required_inputs": [
+      "inputs/cellref2_v8_pbsample_ALL_log2cp10k.h5ad",
+      "inputs/cellref2_v8_mc_persample_log2cp10k.h5ad",
+      "imputed_v8/cellref2_v8_pseudobulk_lipid_forDE.h5ad",
+      "imputed_v8/cellref2_v8_metacell_lipid_forDE.h5ad"
+    ],
+    "question": "Can you mount salomonis2, or provide the current location of its LungMAP/CellRef2 directory?",
+    "stopped_work": "Inference and IPF differential comparison dependent on these RNA inputs and production comparator. No substitute dataset or dropped samples.",
+    "user_answer": "its back",
+    "resolution_evidence": "Original input files accessible after user restored salomonis2; full predictions and comparisons completed."
+  },
+  "completed_native_validation": {
+    "report": "components/rna2lipid/artifacts/LungMAP_full202_native_log2_20261005/EVALUATION_SUMMARY.md",
+    "model": "components/rna2lipid/artifacts/LungMAP_full202_native_log2_20261005/candidate_bundle.pkl",
+    "pseudobulk_profiles": 26639,
+    "metacell_profiles": 230057,
+    "lipid_outputs": 202,
+    "training_profiles": 45,
+    "RNA_inputs": 1303,
+    "integrity_tests_passed": 35,
+    "raw_p_metacell_Adams_prior_candidate": [
+      87,
+      91
+    ],
+    "raw_p_metacell_Natri_prior_candidate": [
+      90,
+      91
+    ],
+    "BH_testing_family_gate": {
+      "full_training_panel_preserved": true,
+      "same_trainer_verified": true,
+      "raw_p_comparison_complete": true,
+      "BH_testing_families_identical": false,
+      "population_comparisons_with_different_BH_families": 578,
+      "all_covariate_stage_ready": false,
+      "reason": "Original >0.1 detection filter depends on the relative target baseline. No filter change made."
+    },
+    "production_bundle_changed": false
+  },
+  "next_stage_status": "Authorized full-panel BH correction completed and testing-family gate passed. At BH<0.1, candidate concordant recovery exceeds the prior in Adams/Natri metacells and pseudobulks; other thresholds remain mixed. The previously requested all-covariate RNA-scale correction has not been executed by this BH-only correction.",
+  "BH_correction_approval": {
+    "analysis_phase": "full202_lipid_BH_correction",
+    "manifest_sha256": "a806f24f4e59551ed86c820f0f06fd855c922665d7255713548fe1913dc438c9",
+    "granted_by": "user",
+    "user_message": "Yes, fix your continued screwups",
+    "conversation_reference": "Current thread, 2026-10-06, direct response to the full-202-lipid BH correction proposal",
+    "binding_note": "Manifest binds the implemented correction to the explicitly approved scope; no claim that the user read the digest."
+  },
+  "completed_BH_correction": {
+    "report": "components/rna2lipid/artifacts/LungMAP_full202_BH_corrected_20261006/EVALUATION_SUMMARY.md",
+    "audit": "components/rna2lipid/artifacts/LungMAP_full202_BH_corrected_20261006/BH_correction_audit.json",
+    "user_authorized": true,
+    "panel_size": 202,
+    "complete_model_comparisons": 1156,
+    "paired_testing_families": 578,
+    "all_233512_BH_values_finite": true,
+    "raw_p_values_and_folds_unchanged": true,
+    "raw_p_concordance_counts_unchanged": true,
+    "production_and_candidate_models_unchanged": true,
+    "tests_passed": 40,
+    "BH010_concordant_prior_candidate": {
+      "Adams_MC": [
+        92,
+        96
+      ],
+      "Natri_MC": [
+        96,
+        97
+      ],
+      "Adams_PB": [
+        58,
+        61
+      ],
+      "Natri_PB": [
+        76,
+        82
+      ]
+    },
+    "BH010_Adams_Natri_metacell_intersection_prior_candidate": [
+      91,
+      96
+    ],
+    "all_covariate_RNA_scale_correction_started": false
   }
 }

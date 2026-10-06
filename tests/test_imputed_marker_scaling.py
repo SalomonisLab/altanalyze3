@@ -2,6 +2,7 @@
 import numpy as np
 import pandas as pd
 import anndata as ad
+import scipy.sparse as sp
 import pytest
 from altanalyze3.components.cellHarmony.flask import pipeline
 
@@ -119,6 +120,61 @@ def test_lipid_predictions_are_floored_before_export_and_analysis(monkeypatch):
     assert result.uns['prediction_summary']['clipped_negative_values'] == 2
     assert predictions.iloc[0, 0] == -3.5  # source/model predictions are not mutated
     assert list(result.var_names) == list(predictions.columns)
+
+
+@pytest.mark.parametrize('architecture', ['lipidwise', 'single_model'])
+@pytest.mark.parametrize('layer', [None, 'counts'])
+@pytest.mark.parametrize('groupby', [None, 'sample'])
+def test_lipid_adata_prediction_reads_batches_without_copying_source(monkeypatch, architecture, layer, groupby):
+    from pathlib import Path
+    from sklearn.linear_model import LinearRegression
+    from sklearn.preprocessing import StandardScaler
+    from altanalyze3.components.rna2lipid.api import Rna2LipidBundle
+
+    training = pd.DataFrame({'A': [1., 4., 2., 3.], 'B': [2., 1., 3., 4.]})
+    scaler = StandardScaler().fit(training)
+    transformed = pd.DataFrame(scaler.transform(training), columns=training.columns)
+    model = LinearRegression().fit(transformed, np.array([1., 2., 4., 3.]))
+    kwargs = ({'models': {'PC': {'genes': ['A', 'B'], 'model': model}}}
+              if architecture == 'lipidwise' else {'model': model})
+    bundle = Rna2LipidBundle(bundle_path=Path('test.pkl'), scaler_x=scaler,
+                            input_genes=['A', 'B'], output_lipids=['PC'], **kwargs)
+    values = np.array([[1., 2., 3.], [4., 1., 6.], [2., 3., 4.], [3., 4., 5.]])
+    query = ad.AnnData(sp.csr_matrix(values),
+                      obs=pd.DataFrame({'sample': [' a ', 'b', 'a', 'b']},
+                                       index=[' c1 ', 'c1', 'c2', 'c3']),
+                      var=pd.DataFrame(index=[' A ', 'B', 'A']))
+    query.layers['counts'] = sp.csr_matrix(values * 2)
+    query.raw = query
+    original_obs = query.obs.copy()
+    original_var = query.var.copy()
+    selected = values if layer is None else values * 2
+    expected_input = pd.DataFrame({'A': selected[:, [0, 2]].mean(axis=1), 'B': selected[:, 1]},
+                                  index=['c1', 'c1.1', 'c2', 'c3'])
+    expected = bundle.predict_from_dataframe(expected_input).predictions
+    if groupby:
+        expected = expected.groupby(['a', 'b', 'a', 'b']).mean()
+        expected.index.name = groupby
+
+    def forbid_copy(*args, **kwargs):
+        raise AssertionError('Prediction must not duplicate the full AnnData or its layers.')
+    monkeypatch.setattr(ad.AnnData, 'copy', forbid_copy)
+    original_reader = bundle._read_matrix_chunk
+    reads = []
+    def bounded_reader(adata, *, start, stop, layer):
+        assert adata is query and stop - start <= 2
+        reads.append((start, stop))
+        return original_reader(adata, start=start, stop=stop, layer=layer)
+    monkeypatch.setattr(bundle, '_read_matrix_chunk', bounded_reader)
+    result = bundle.predict_from_adata(query, layer=layer, groupby=groupby, chunk_size=2)
+    pd.testing.assert_frame_equal(result.predictions, expected, atol=1e-12, rtol=1e-12)
+    assert result.summary['matched_genes'] == 2 and result.summary['missing_genes'] == 0
+    assert reads == [(0, 2), (2, 4)]
+    pd.testing.assert_frame_equal(query.obs, original_obs)
+    pd.testing.assert_frame_equal(query.var, original_var)
+    np.testing.assert_array_equal(query.X.toarray(), values)
+    np.testing.assert_array_equal(query.layers['counts'].toarray(), values * 2)
+    np.testing.assert_array_equal(query.raw.X.toarray(), values)
 
 
 def test_single_cluster_has_no_defined_marker_correlations():

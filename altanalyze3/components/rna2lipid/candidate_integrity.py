@@ -43,9 +43,10 @@ def read_json(path):
 
 def exact_ids(expected, actual, label):
     expected, actual = list(expected), list(actual)
+    expected_set, actual_set = set(expected), set(actual)
     duplicates = [key for key, count in Counter(actual).items() if count > 1]
-    missing = [key for key in expected if key not in set(actual)]
-    extra = [key for key in actual if key not in set(expected)]
+    missing = [key for key in expected if key not in actual_set]
+    extra = [key for key in actual if key not in expected_set]
     if duplicates or missing or extra:
         raise IntegrityError(f'{label} mismatch: missing={missing}, extra={extra}, duplicates={duplicates}. '
                              'STOP and ask for the source/mapping; do not intersect or discard records.')
@@ -86,10 +87,12 @@ def validate_contract(contract):
         raise IntegrityError('The baseline must pin trainer, API and delivered trainer code.')
 
 
-def require_review(state, manifest_digest):
+def require_review(state, manifest_digest, analysis_phase=None):
     if state.get('schema_version') != 1:
         raise IntegrityError('Missing or unsupported decision-state schema.')
-    pending = [x for x in state.get('questions', []) if x.get('status') != 'resolved']
+    relevant = [x for x in state.get('questions', [])
+                if analysis_phase is None or analysis_phase in x.get('required_for', [analysis_phase])]
+    pending = [x for x in relevant if x.get('status') != 'resolved']
     if state.get('analysis_status') != 'approved' or pending:
         question = pending[0].get('question', '') if pending else 'The user has not approved resuming this analysis.'
         raise IntegrityError('ANALYSIS BLOCKED. ' + question +
@@ -102,9 +105,32 @@ def require_review(state, manifest_digest):
             raise IntegrityError('Approval requires the actual user message and conversation reference; never fabricate them.')
     if approval.get('granted_by') != 'user':
         raise IntegrityError('Only the user can authorize this paused analysis.')
-    for item in state.get('questions', []):
+    if analysis_phase is not None and approval.get('analysis_phase') != analysis_phase:
+        raise IntegrityError('User approval does not cover this analysis phase.')
+    for item in relevant:
         if not item.get('user_answer') or not item.get('resolution_evidence'):
             raise IntegrityError('A resolved question lacks its user answer or supporting evidence.')
+
+
+def candidate_contract(contract, manifest, state):
+    """Apply only the explicitly authorized D071 exclusion; never edit the baseline."""
+    scope = manifest.get('approved_scope_change')
+    if scope is None:
+        return contract
+    approved = state.get('approved_scope_change')
+    if scope != approved or approved.get('granted_by') != 'user' or not approved.get('user_message'):
+        raise IntegrityError('Candidate scope has no matching explicit user authorization.')
+    expected = [s for s in contract['samples'] if s.startswith('D071_')]
+    if (approved.get('excluded_donor') != 'D071' or
+            set(approved.get('excluded_profiles', [])) != set(expected) or
+            len(expected) != 5 or approved.get('required_lipid_outputs') != 202 or
+            approved.get('required_RNA_inputs') != 1303):
+        raise IntegrityError('Candidate scope differs from the specifically approved D071 exclusion.')
+    result = dict(contract)
+    result['samples'] = [s for s in contract['samples'] if s not in expected]
+    if len(result['samples']) != approved.get('required_training_profiles'):
+        raise IntegrityError('Approved training roster count does not match its explicit identities.')
+    return result
 
 
 def validate_provenance(provenance, contract):
@@ -153,11 +179,13 @@ def validate_run_manifest(manifest_path):
     if sha256(CONTRACT) != BASELINE_CONTRACT_SHA256:
         raise IntegrityError('Baseline contract changed; discuss and review it instead of narrowing it to fit a candidate.')
     manifest = read_json(manifest_path)
-    require_review(state, sha256(manifest_path))
+    require_review(state, sha256(manifest_path), manifest.get('analysis_phase'))
     validate_contract(contract)
     if manifest.get('schema_version') != 1 or manifest.get('baseline_contract_sha256') != sha256(CONTRACT):
         raise IntegrityError('Run manifest does not reference the reviewed baseline contract.')
     require_method(contract['method'], manifest.get('method'))
+    for label, source in manifest.get('evaluation_sources', {}).items():
+        checked_file(source, 'Evaluation source: ' + label)
     inputs = manifest.get('inputs', {})
     if set(inputs) != {'RNA', 'corrected_targets', 'provenance'}:
         raise IntegrityError('Run inputs must include RNA, corrected targets and complete provenance.')
@@ -166,11 +194,12 @@ def validate_run_manifest(manifest_path):
     paths = {key: checked_file(value, key) for key, value in inputs.items()}
     if inputs['corrected_targets'].get('data_role') != 'corrected_training_targets':
         raise IntegrityError('Legacy targets cannot stand in for corrected targets.')
+    effective = candidate_contract(contract, manifest, state)
     provenance = read_json(paths['provenance'])
     if provenance.get('target_sha256') != inputs['corrected_targets']['sha256']:
         raise IntegrityError('Provenance is not bound to this target table.')
-    validate_provenance(provenance, contract)
-    return contract, paths
+    validate_provenance(provenance, effective)
+    return effective, paths
 
 
 def fit_verified_candidate(manifest_path):

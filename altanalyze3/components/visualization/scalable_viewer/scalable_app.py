@@ -700,7 +700,7 @@ def _install_violin_covariate(app) -> None:
                 display_filters=display_filters, **extra
             )
             covariate = str(_VIOLIN_COVARIATE.get("") or "").strip()
-            if not covariate:
+            if not covariate or extra.get("view") == "umap":
                 return payload
             return _regroup_violin(app_, meta, payload, covariate, modality, display_filters)
 
@@ -757,6 +757,8 @@ def _install_expression_covariate_routes(app) -> None:
         violin_limit: int = Query(10),
         x_field: str = Query(""),
         y_field: str = Query(""),
+        compact: bool = Query(False),
+        view: str = Query("all", pattern="^(all|umap|violin)$"),
     ):
         token = _VIOLIN_COVARIATE.set(str(covariate or "").strip())
         try:
@@ -779,6 +781,8 @@ def _install_expression_covariate_routes(app) -> None:
                 # reader's choice, the way violin_limit once was.
                 x_field=x_field,
                 y_field=y_field,
+                compact=compact,
+                view=view,
             )
             # THE TITLE NAMES THE FEATURE THE WAY THE READER DOES.
             #

@@ -69,10 +69,12 @@ def assess_expression_scale(adata, *, random_state=0):
     # So the classifier always runs now, and a stored verdict is reported, never obeyed.
     stored = getattr(adata, "uns", {}).get("cellharmony_expression_scale")
 
-    reports = {"X": infer_expression_scale(adata.X, name="X", random_state=random_state)}
+    workspace = getattr(adata, '_matrix_workspace', None)
+    probe = workspace.scale_probe(adata, random_state) if workspace is not None else adata
+    reports = {"X": infer_expression_scale(probe.X, name="X", random_state=random_state)}
     if "counts" in getattr(adata, "layers", {}):
         reports["counts"] = infer_expression_scale(
-            adata.layers["counts"], name="layers['counts']", random_state=random_state
+            probe.layers["counts"], name="layers['counts']", random_state=random_state
         )
     for r in reports.values():
         if r["verdict"] == "empty":
@@ -119,6 +121,9 @@ def normalize_adata(adata, show_progress=False):
     """Log-normalize the AnnData object in-place."""
     def normalize_total():
         matrix = adata.X
+        workspace = getattr(adata, '_matrix_workspace', None)
+        if workspace is not None and matrix.dtype.kind != 'f':
+            adata.X = matrix = workspace.copy_matrix(matrix, dtype=np.float32)
         if not sp.isspmatrix_csr(matrix) or adata.is_view or matrix.dtype.kind != 'f':
             sc.pp.normalize_total(adata, target_sum=1e4)
             return
@@ -137,14 +142,29 @@ def normalize_adata(adata, show_progress=False):
             lo, hi = int(matrix.indptr[start]), int(matrix.indptr[end])
             factors = np.repeat(divisors[start:end], np.diff(matrix.indptr[start:end + 1]))
             np.divide(matrix.data[lo:hi], factors, out=matrix.data[lo:hi])
+            if workspace is not None and start % 16384 < end - start:
+                workspace.release_pages()
             start = end
+    def log_transform():
+        workspace = getattr(adata, '_matrix_workspace', None)
+        if workspace is None:
+            sc.pp.log1p(adata)
+            return
+        matrix = adata.X
+        values = matrix.data if sp.issparse(matrix) else matrix.reshape(-1)
+        for start in range(0, values.size, 4_000_000):
+            np.log1p(values[start:start + 4_000_000], out=values[start:start + 4_000_000])
+            if start % 32_000_000 == 0:
+                workspace.release_pages()
+        adata.uns['log1p'] = {'base': None}
+        workspace.release_pages()
     if show_progress:
         with tqdm(total=2, desc="Normalization steps") as pbar:
             normalize_total(); pbar.update(1)
-            sc.pp.log1p(adata); pbar.update(1)
+            log_transform(); pbar.update(1)
     else:
         normalize_total()
-        sc.pp.log1p(adata)
+        log_transform()
 
 def save_marker_genes(adata, groupby, output_file):
     deg = pd.DataFrame(adata.uns['rank_genes_groups']['names'])
@@ -291,6 +311,7 @@ def combine_and_align_h5(
     ambient_memory_efficient=False,
     stream_10x_inputs=False,
     unaligned_h5ad=None,
+    bounded_h5ad=False,
 ):
     """``adata`` is an in-memory cells x genes AnnData, for example one read by
     ``sparse_stream.read_sparse_stream``. It takes the same path as ``h5ad_file``: gene
@@ -360,6 +381,9 @@ def combine_and_align_h5(
         adata._inplace_subset_obs(keep)
 
     def _apply_qc_filters(adata):
+        workspace = getattr(adata, '_matrix_workspace', None)
+        if workspace is not None:
+            return workspace.qc(adata, min_genes, min_cells, min_counts, mit_percent)
         matrix, source = _qc_matrix(adata)
         if source != "X":
             print(f"[qc] Using {source} for QC filters")
@@ -427,14 +451,26 @@ def combine_and_align_h5(
                 "ambient_subtract module is unavailable."
             ) from exc
 
-        library_col = "Library" if "Library" in adata_combined.obs.columns else (
-            "sample" if "sample" in adata_combined.obs.columns else None)
+        library_col = next((key for key in ("scalable_upload", "Library", "sample")
+                            if key in adata_combined.obs.columns), None)
         if library_col is None:
             adata_combined.obs["Library"] = "Library_1"
             library_col = "Library"
 
         ambient_rho = str(ambient_correct_cutoff).strip()
         print(f"[INFO] Running ambient RNA correction (rho={ambient_rho})...")
+        # Ambient subtraction is a count-space operation. A normalized H5AD
+        # may have valid RNA in X and raw counts in a layer; subtracting directly
+        # from that logged X destroys its depth normalization.
+        input_scale = assess_expression_scale(adata_combined)
+        normalized_input = input_scale['x_verdict'] == 'log'
+        if normalized_input:
+            if input_scale['counts_verdict'] != 'counts':
+                raise ValueError('Ambient RNA correction of log-normalized RNA requires '
+                                 "raw counts in layers['counts']. Supply the raw-count layer "
+                                 'or disable ambient correction; logged RNA is not subtracted.')
+            print("[ambient] Using layers['counts']; RNA will be regenerated with CP10k + log1p.")
+            adata_combined.X = adata_combined.layers['counts']
         corrected = ambient_subtract.process_anndata(
             adata_combined,
             rho=ambient_rho,
@@ -448,6 +484,14 @@ def combine_and_align_h5(
         )
         if corrected is None:
             raise RuntimeError("Ambient RNA correction did not return a corrected AnnData object.")
+        if normalized_input:
+            corrected.layers['counts'] = corrected.X
+            workspace = getattr(corrected, '_matrix_workspace', None)
+            corrected.X = (workspace.copy_matrix(corrected.X) if workspace else corrected.X.copy())
+            normalize_adata(corrected)
+            corrected.uns['soupx_correction'].update(
+                input_source='layers/counts', rna_normalization='CP10k + log1p')
+            print('[ambient] Regenerated normalized RNA; corrected counts and soupx_raw are retained.')
         corrected.var_names_make_unique()
         print(f"[INFO] Ambient RNA correction complete. Corrected adata shape: "
               f"{corrected.shape} (cells x genes)")
@@ -467,7 +511,12 @@ def combine_and_align_h5(
             adata_combined = _read_h5ad_reference_genes(h5ad_file, cellharmony_ref)
             source_label = os.path.basename(h5ad_file)
         else:
-            adata_combined = sc.read_h5ad(h5ad_file)
+            if bounded_h5ad:
+                from .mapped_h5ad import Workspace
+                adata_combined = Workspace(os.path.join(output_dir, '.h5ad_work')).load(h5ad_file)
+                print('[mem] H5AD matrices use disk-backed arrays; QC reads bounded row blocks.')
+            else:
+                adata_combined = sc.read_h5ad(h5ad_file)
             source_label = os.path.basename(h5ad_file)
         apply_gene_translation(adata_combined, translation_map, source_label)
         adata_combined.var_names_make_unique()
@@ -823,7 +872,9 @@ def combine_and_align_h5(
         # only store X as "counts" when X really holds counts; otherwise a log matrix would be
         # labelled counts and every count-based step downstream would silently read log values
         if "counts" not in adata_combined.layers:
-            adata_combined.layers["counts"] = adata_combined.X.copy()
+            workspace = getattr(adata_combined, '_matrix_workspace', None)
+            adata_combined.layers["counts"] = (workspace.copy_matrix(adata_combined.X)
+                                                if workspace else adata_combined.X.copy())
     else:
         print(f"[scale] not writing layers['counts'] from X: X looks like {_scale['x_verdict'].upper()}")
 
@@ -842,8 +893,12 @@ def combine_and_align_h5(
         return (None, adata_combined) if return_adata else None
 
     marker_genes = reference_df.index
+    alignment_workspace = getattr(adata_combined, '_matrix_workspace', None)
+    bounded_cosine = alignment_workspace is not None and alignment_mode == 'cosine' and not export_cptt
+    alignment_source = (ad.AnnData(X=sp.csr_matrix((0, adata_combined.n_vars)), var=adata_combined.var.copy())
+                        if bounded_cosine else adata_combined)
     adata_filtered, genes_present, missing_genes = subset_to_reference_genes(
-        adata_combined, marker_genes, copy_layers=alignment_mode != "cosine",
+        alignment_source, marker_genes, copy_layers=alignment_mode != "cosine",
     )
 
     if missing_genes:
@@ -862,10 +917,26 @@ def combine_and_align_h5(
     print('Aligning cells to reference...',alignment_mode)
     align_start_time = time.time()
     ref_matrix = reference_df.loc[genes_present].T
-    query_index = adata_filtered.obs_names
+    query_index = adata_combined.obs_names if bounded_cosine else adata_filtered.obs_names
 
     if alignment_mode == "cosine":
-        best_matches, alignment_scores = _cosine_best_matches(adata_filtered.X, ref_matrix.values)
+        if bounded_cosine:
+            symbols = (adata_combined.var['gene_symbols'].astype(str) if 'gene_symbols' in adata_combined.var
+                       else adata_combined.var_names.astype(str))
+            first = {}
+            for i, symbol in enumerate(symbols):
+                first.setdefault(symbol, i)
+            columns = [first[g] for g in genes_present]
+            best_matches = np.empty(adata_combined.n_obs, dtype=np.int64)
+            alignment_scores = np.empty(adata_combined.n_obs, dtype=float)
+            for start in range(0, adata_combined.n_obs, 4096):
+                block = adata_combined.X[start:start + 4096, :][:, columns]
+                best, scores = _cosine_best_matches(block, ref_matrix.values)
+                best_matches[start:start + len(best)] = best
+                alignment_scores[start:start + len(best)] = scores
+                alignment_workspace.release_pages()
+        else:
+            best_matches, alignment_scores = _cosine_best_matches(adata_filtered.X, ref_matrix.values)
         assignments = ref_matrix.index[best_matches]
         z_diff = None  # not computed
 
@@ -933,12 +1004,16 @@ def combine_and_align_h5(
             # clustered without a reference (scALABLE-discover). X holds the counts the alignment
             # used (ambient-corrected when correction ran); soupx_raw, when present, the raw ones.
             dropped = ~adata_combined.obs_names.astype(str).isin(match_df["CellBarcode"].astype(str))
-            excluded = adata_combined[dropped]
+            workspace = getattr(adata_combined, '_matrix_workspace', None)
+            excluded = (workspace.subset(adata_combined, np.flatnonzero(dropped))
+                        if workspace else adata_combined[dropped])
             holds_counts = "counts" in excluded.layers
-            out = ad.AnnData(X=(excluded.layers["counts"] if holds_counts else excluded.X).copy(),
+            out_matrix = excluded.layers["counts"] if holds_counts else excluded.X
+            out = ad.AnnData(X=out_matrix if workspace else out_matrix.copy(),
                              obs=excluded.obs.copy(), var=excluded.var.copy())
             if "soupx_raw" in excluded.layers:
-                out.layers["soupx_raw"] = excluded.layers["soupx_raw"].copy()
+                out.layers["soupx_raw"] = (excluded.layers["soupx_raw"] if workspace
+                                           else excluded.layers["soupx_raw"].copy())
             scores = all_matches.set_index("CellBarcode").loc[out.obs_names]
             out.obs[f"{ref_name}_best_match"] = scores[ref_name].astype(str).values
             out.obs["AlignmentScore"] = scores["AlignmentScore"].astype(float).values
@@ -1005,7 +1080,9 @@ def combine_and_align_h5(
             adata_combined.obs_names.astype(str).to_numpy(), _wanted):
         print("[mem] every aligned cell is already present in order; skipping the reorder copy")
     else:
-        adata_combined = adata_combined[match_df.CellBarcode].copy()
+        workspace = getattr(adata_combined, '_matrix_workspace', None)
+        adata_combined = (workspace.subset(adata_combined, adata_combined.obs_names.get_indexer(match_df.CellBarcode))
+                         if workspace else adata_combined[match_df.CellBarcode].copy())
     adata_combined.obs[ref_name] = match_df.set_index('CellBarcode').loc[adata_combined.obs_names][ref_name]
 
     if export_cptt and metacell_align:

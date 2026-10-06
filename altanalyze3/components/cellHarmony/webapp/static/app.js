@@ -2494,6 +2494,13 @@ async function handleJobSubmit(evt) {
     formData.append("files", fileInput.files[0]);
   }
 
+  const formats = new Set(Array.from(rows, row =>
+    row.querySelector('.sample-file').files[0].name.toLowerCase().split('.').pop()));
+  if (formats.has('h5ad') && formats.size > 1) {
+    alert('Upload H5AD files together, or 10x H5 files together; mixing the two formats is not supported.');
+    return;
+  }
+
   const submitBtn = document.getElementById("upload-submit-btn");
   try {
     submitBtn.disabled = true;
@@ -2545,6 +2552,10 @@ async function handleQcSubmit(evt) {
       return value && value !== "none" ? [value] : [];   // "all" expands on the backend
     })(),
   };
+  // App-specific QC controls, supplied only by interfaces that add them.
+  if (typeof window.scalableQcOptions === "function") {
+    Object.assign(payload, window.scalableQcOptions(evt.target));
+  }
   try {
     if (selectedReferenceDiffersFromLoadedJob()) {
       const configureResp = await fetch(apiPath(`/jobs/${jobId}/configure`), {
@@ -3067,6 +3078,21 @@ function renderQcLiveProgress(data) {
   const state = extractQcThresholdState(lines);
   const ambientRows = extractAmbientCorrectionState(lines);
   const total = Number.isFinite(state.total) ? state.total : null;
+  const qcSkipped = lines.some((line) => /\.\.\.skipping QC: input is already scaled and log-transformed/i.test(line));
+
+  if (qcSkipped && ![state.afterMinGenes, state.afterMinCounts, state.afterMito].some(Number.isFinite)) {
+    try {
+      Plotly.purge(plot);
+    } catch (_) {
+      // The skipped-QC notice also works before any plot has been created.
+    }
+    plot.innerHTML = '<div class="empty-state">QC filtering skipped: the input is already log-normalized. Count thresholds were not applied.</div>';
+    caption.textContent = Number.isFinite(total)
+      ? `Total detected cells: ${total.toLocaleString()}.`
+      : "Input retained without additional QC filtering.";
+    renderAmbientCorrectionProgress(ambientPlot, ambientCaption, ambientRows, data);
+    return;
+  }
 
   if (!Number.isFinite(total) || total <= 0) {
     try {
@@ -3278,6 +3304,9 @@ function buildQcCellSummary(data) {
   const status = String(data.status || "").trim().toLowerCase();
   const message = String(data.message || "").trim();
   const progress = parseProgressPercent(data.progress);
+  if (status === 'uploaded' && message) {
+    return message;
+  }
   // A rerun can still have stage logs from its previous analysis. Show the
   // current queue message before consulting those logs.
   if (status === "queued" && message) {
@@ -5645,6 +5674,24 @@ function panelModeLabel(mode) {
   return labels[mode] || "plot";
 }
 
+// Column transport removes repeated keys and labels without removing any cells.
+function expandPlotColumns(payload) {
+  for (const name of ["query", "reference", "umap", "scatter"]) {
+    const table = payload?.[name];
+    if (table?.encoding !== "columns-v1") continue;
+    const fields = Object.keys(table.columns);
+    payload[name] = Array.from({length: table.length}, (_, i) => {
+      const row = {};
+      for (const field of fields) {
+        const value = table.columns[field][i];
+        row[field] = table.dictionaries[field] ? table.dictionaries[field][value] : value;
+      }
+      return row;
+    });
+  }
+  return payload;
+}
+
 async function loadVisualizationPanel(panelKey) {
   const jobId = document.getElementById("results-job-id").value.trim();
   const mode = getPanelSelectValue(panelKey, "mode");
@@ -5718,13 +5765,14 @@ async function loadVisualizationPanel(panelKey) {
           params.set("coords", coordsKey);
         }
       }
+      params.set("compact", "true");
       const suffix = params.toString() ? `?${params.toString()}` : "";
       const resp = await fetch(apiPath(`/jobs/${jobId}/umap${suffix}`));
       const data = await parseApiResponse(resp);
       if (!resp.ok) {
         throw new Error(data.detail || "UMAP not ready.");
       }
-      panelPlotData[panelKey] = { source: "umap", payload: data };
+      panelPlotData[panelKey] = { source: "umap", payload: expandPlotColumns(data) };
       renderVisualizationPanel(panelKey);
       return;
     }
@@ -5813,6 +5861,8 @@ async function loadVisualizationPanel(panelKey) {
       }
       const params = getDisplayFilterParams(panelKey);
       params.set("gene", gene);
+      params.set("compact", "true");
+      params.set("view", mode === "violin" ? "violin" : "umap");
       params.set("modality", modality);
         // One window is twice as wide, so the violin plot draws more cell states
         // rather than leaving the extra space empty.
@@ -5835,7 +5885,7 @@ async function loadVisualizationPanel(panelKey) {
       if (data?.gene && data.gene !== gene && geneInput) {
         geneInput.value = data.gene;
       }
-      panelPlotData[panelKey] = { source: "expression", payload: data };
+      panelPlotData[panelKey] = { source: "expression", payload: expandPlotColumns(data) };
       renderVisualizationPanel(panelKey);
       return;
     }

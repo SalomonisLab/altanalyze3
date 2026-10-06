@@ -3,6 +3,8 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import signal
+import shutil
 import subprocess
 import sys
 import threading
@@ -155,10 +157,11 @@ class JobRunner:
                                 self._update_differential(job_id, message=message)
                             last_reason = reason
                         self._admission.wait(timeout=1)
-                    process = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env)
+                    process = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env,
+                                               start_new_session=True)
                     self._active_workers[process.pid] = process
                 try:
-                    returncode = process.wait()
+                    returncode = self._wait_for_worker(process)
                 finally:
                     with self._admission:
                         self._active_workers.pop(process.pid, None)
@@ -166,6 +169,11 @@ class JobRunner:
             meta = self.store.get_job(job_id)
             state = meta if task_name == "pipeline" else meta.get("differential", {})
             if returncode or state.get("status") not in {"completed", "failed"}:
+                if returncode == -9:
+                    raise RuntimeError('The analysis worker was killed by the operating system, usually '
+                                       'because available memory was exhausted. Your uploaded files remain '
+                                       'available. Try fewer modalities or contact the server administrator '
+                                       f'with this job ID; see {log_path.name}.')
                 raise RuntimeError(f"Analysis worker exited with code {returncode}; see {log_path.name}.")
         except Exception as exc:
             summary = self._log_failure(job_id, "Analysis worker failed", exc)
@@ -173,6 +181,53 @@ class JobRunner:
                 self.store.update_job(job_id, status="failed", progress=100, message=summary, worker_pid=None)
             else:
                 self._update_differential(job_id, status="failed", message=summary, worker_pid=None)
+        finally:
+            if task_name == 'pipeline':
+                shutil.rmtree(self.store.outputs_dir(job_id) / '.h5ad_work', ignore_errors=True)
+
+    def _wait_for_worker(self, process):
+        """Stop the largest worker at the safety ceiling, before a container OOM.
+
+        This is a polled safeguard, not a guarantee against instantaneous spikes.
+        The 15-GiB threshold still controls admission, not termination.
+        """
+        while True:
+            try:
+                return process.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                pass
+            try:
+                usage = container_memory()
+                processes = process_memory()
+            except (OSError, ValueError, subprocess.SubprocessError):
+                continue
+            if usage is None:
+                used, ceiling = tree_rss(processes, os.getpid()), self.total_memory_limit
+            else:
+                used, limit = usage
+                ceiling = min(self.total_memory_limit, int(limit * 0.9))
+            with self._admission:
+                largest = max(self._active_workers, key=lambda pid: tree_rss(processes, pid), default=None)
+            if used < ceiling or largest != process.pid:
+                continue
+            if process.poll() is not None:
+                return process.returncode
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                return process.wait()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+            raise MemoryError(f'Analysis stopped because server memory reached its safety limit '
+                              f'({used / 1024**3:.1f} of {ceiling / 1024**3:.1f} GiB). '
+                              'Uploaded data are retained. Reduce simultaneous analyses or selected '
+                              'modalities, or run this job on a server with more memory.')
 
     def recover_interrupted_pipeline(self, job_id: str) -> Dict:
         """Turn an orphaned pipeline into a terminal failure when status is polled."""
@@ -279,6 +334,8 @@ class JobRunner:
         except Exception as exc:  # pragma: no cover - defensive
             summary = self._log_failure(job_id, "Job failed", exc)
             self.store.update_job(job_id, status="failed", message=summary, progress=100, worker_pid=None)
+        finally:
+            shutil.rmtree(self.store.outputs_dir(job_id) / '.h5ad_work', ignore_errors=True)
 
     def _run_differential(self, job_id: str) -> None:
         try:

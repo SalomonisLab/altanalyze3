@@ -1,0 +1,700 @@
+{
+  "legacy": {
+    "method": "legacy",
+    "embedding_seconds": 204.4793959580129,
+    "parameters": {
+      "requested_fit_mode": "landmark",
+      "fit_mode": "landmark",
+      "fit_cells": 30000,
+      "total_cells": 62498,
+      "max_fit_cells": 30000,
+      "transform_batch_cells": 50000,
+      "min_landmarks_per_state": 50,
+      "random_state": 0,
+      "fit_seconds": 129.7797682499513,
+      "transform_seconds": 66.7881763339974
+    },
+    "cells": 62498,
+    "features": 1260,
+    "input_manifest_sha256": "6714b226ab799c6d82bb3eddff9993c7b1d545c3df621d0531641158052275d8",
+    "cell_sha256": "15e97865d8f1cd490f9aa131e592bd132f8f390863658aefe5e21fba891b6e35",
+    "feature_sha256": "68728dc24c5ee9ed7863794a7b705034fc72eb45aebe778e0bc643309981881b",
+    "cluster_sha256": "1aa6fdda357acec6400b41955dcea4020b4d2620e56df65d0cd97de09c0c20a0",
+    "finite_coordinates": true,
+    "peak_rss_gib": 2.3949127197265625,
+    "versions": {
+      "scanpy": "1.10.3",
+      "anndata": "0.10.9",
+      "umap-learn": "0.5.7",
+      "scikit-learn": "1.3.2",
+      "numpy": "1.26.4",
+      "scipy": "1.14.1"
+    },
+    "diagnostics": {
+      "embedding_neighbor_state_purity": 0.862544934771246,
+      "per_state": {
+        "C1": {
+          "cells": 29,
+          "neighbor_state_purity": 0.9655172413793104
+        },
+        "C10": {
+          "cells": 289,
+          "neighbor_state_purity": 0.8214532871972319
+        },
+        "C11": {
+          "cells": 59,
+          "neighbor_state_purity": 0.288135593220339
+        },
+        "C12": {
+          "cells": 1864,
+          "neighbor_state_purity": 0.9733190271816882
+        },
+        "C13": {
+          "cells": 192,
+          "neighbor_state_purity": 0.9802083333333332
+        },
+        "C14": {
+          "cells": 128,
+          "neighbor_state_purity": 0.9567708333333335
+        },
+        "C15": {
+          "cells": 1634,
+          "neighbor_state_purity": 0.8477764177886576
+        },
+        "C16": {
+          "cells": 4581,
+          "neighbor_state_purity": 0.8659099177763225
+        },
+        "C17": {
+          "cells": 6088,
+          "neighbor_state_purity": 0.9574025405168637
+        },
+        "C18": {
+          "cells": 24,
+          "neighbor_state_purity": 1.0
+        },
+        "C19": {
+          "cells": 71,
+          "neighbor_state_purity": 0.9248826291079812
+        },
+        "C2": {
+          "cells": 147,
+          "neighbor_state_purity": 0.3664399092970521
+        },
+        "C20": {
+          "cells": 23,
+          "neighbor_state_purity": 0.8260869565217392
+        },
+        "C21": {
+          "cells": 351,
+          "neighbor_state_purity": 0.8379867046533713
+        },
+        "C22": {
+          "cells": 269,
+          "neighbor_state_purity": 0.4540272614622057
+        },
+        "C23": {
+          "cells": 4115,
+          "neighbor_state_purity": 0.9527906034831917
+        },
+        "C24": {
+          "cells": 824,
+          "neighbor_state_purity": 0.8366504854368934
+        },
+        "C25": {
+          "cells": 35,
+          "neighbor_state_purity": 0.6438095238095237
+        },
+        "C26": {
+          "cells": 510,
+          "neighbor_state_purity": 0.8637908496732027
+        },
+        "C27": {
+          "cells": 208,
+          "neighbor_state_purity": 0.7865384615384616
+        },
+        "C28": {
+          "cells": 449,
+          "neighbor_state_purity": 0.9628804751299184
+        },
+        "C29": {
+          "cells": 4521,
+          "neighbor_state_purity": 0.9541546855415469
+        },
+        "C3": {
+          "cells": 182,
+          "neighbor_state_purity": 0.5717948717948719
+        },
+        "C30": {
+          "cells": 351,
+          "neighbor_state_purity": 0.7242165242165243
+        },
+        "C31": {
+          "cells": 6112,
+          "neighbor_state_purity": 0.8784467713787085
+        },
+        "C32": {
+          "cells": 1044,
+          "neighbor_state_purity": 0.8235632183908047
+        },
+        "C33": {
+          "cells": 1912,
+          "neighbor_state_purity": 0.7922594142259415
+        },
+        "C34": {
+          "cells": 3,
+          "neighbor_state_purity": 0.0
+        },
+        "C35": {
+          "cells": 21,
+          "neighbor_state_purity": 0.25079365079365085
+        },
+        "C36": {
+          "cells": 1555,
+          "neighbor_state_purity": 0.9697749196141481
+        },
+        "C37": {
+          "cells": 231,
+          "neighbor_state_purity": 0.9056277056277056
+        },
+        "C38": {
+          "cells": 163,
+          "neighbor_state_purity": 0.7329243353783231
+        },
+        "C39": {
+          "cells": 274,
+          "neighbor_state_purity": 0.7598540145985401
+        },
+        "C4": {
+          "cells": 4357,
+          "neighbor_state_purity": 0.8511208017749217
+        },
+        "C40": {
+          "cells": 675,
+          "neighbor_state_purity": 0.8548148148148148
+        },
+        "C41": {
+          "cells": 50,
+          "neighbor_state_purity": 0.8373333333333332
+        },
+        "C42": {
+          "cells": 169,
+          "neighbor_state_purity": 0.8840236686390532
+        },
+        "C43": {
+          "cells": 1353,
+          "neighbor_state_purity": 0.9426952451342695
+        },
+        "C44": {
+          "cells": 156,
+          "neighbor_state_purity": 0.46324786324786327
+        },
+        "C45": {
+          "cells": 1371,
+          "neighbor_state_purity": 0.9863360077802091
+        },
+        "C46": {
+          "cells": 812,
+          "neighbor_state_purity": 0.8919540229885057
+        },
+        "C47": {
+          "cells": 179,
+          "neighbor_state_purity": 0.6871508379888268
+        },
+        "C5": {
+          "cells": 5055,
+          "neighbor_state_purity": 0.9178239366963403
+        },
+        "C6": {
+          "cells": 4284,
+          "neighbor_state_purity": 0.8175692499221913
+        },
+        "C7": {
+          "cells": 3023,
+          "neighbor_state_purity": 0.32243907817841
+        },
+        "C8": {
+          "cells": 1880,
+          "neighbor_state_purity": 0.9015957446808511
+        },
+        "C9": {
+          "cells": 875,
+          "neighbor_state_purity": 0.8799238095238096
+        }
+      },
+      "all_states_represented_in_fit": true,
+      "scope": "15-neighbor consistency with existing ICGS3 clusters in 2D; not biological validation."
+    }
+  },
+  "scanpy": {
+    "method": "scanpy",
+    "embedding_seconds": 59.33840541704558,
+    "parameters": {
+      "fit_mode": "full",
+      "fit_cells": 62498,
+      "total_cells": 62498,
+      "neighbors_seconds": 22.270293541019782,
+      "fit_seconds": 31.79038262501126,
+      "transform_seconds": 0.0,
+      "source": "scanpy_pca_scanpy",
+      "pca_seconds": 2.3483647920074873,
+      "n_pcs": 50,
+      "pca_solver": "arpack",
+      "pca_zero_center": true,
+      "n_features": 1260,
+      "n_neighbors": 15,
+      "min_dist": 0.75,
+      "metric": "euclidean",
+      "random_state": 0
+    },
+    "cells": 62498,
+    "features": 1260,
+    "input_manifest_sha256": "6714b226ab799c6d82bb3eddff9993c7b1d545c3df621d0531641158052275d8",
+    "cell_sha256": "15e97865d8f1cd490f9aa131e592bd132f8f390863658aefe5e21fba891b6e35",
+    "feature_sha256": "68728dc24c5ee9ed7863794a7b705034fc72eb45aebe778e0bc643309981881b",
+    "cluster_sha256": "1aa6fdda357acec6400b41955dcea4020b4d2620e56df65d0cd97de09c0c20a0",
+    "finite_coordinates": true,
+    "peak_rss_gib": 2.056915283203125,
+    "versions": {
+      "scanpy": "1.10.3",
+      "anndata": "0.10.9",
+      "umap-learn": "0.5.7",
+      "scikit-learn": "1.3.2",
+      "numpy": "1.26.4",
+      "scipy": "1.14.1"
+    },
+    "diagnostics": {
+      "embedding_neighbor_state_purity": 0.8717964308191195,
+      "per_state": {
+        "C1": {
+          "cells": 29,
+          "neighbor_state_purity": 0.896551724137931
+        },
+        "C10": {
+          "cells": 289,
+          "neighbor_state_purity": 0.8364475201845445
+        },
+        "C11": {
+          "cells": 59,
+          "neighbor_state_purity": 0.1864406779661017
+        },
+        "C12": {
+          "cells": 1864,
+          "neighbor_state_purity": 0.9761087267525036
+        },
+        "C13": {
+          "cells": 192,
+          "neighbor_state_purity": 0.9670138888888888
+        },
+        "C14": {
+          "cells": 128,
+          "neighbor_state_purity": 0.9520833333333334
+        },
+        "C15": {
+          "cells": 1634,
+          "neighbor_state_purity": 0.8575275397796818
+        },
+        "C16": {
+          "cells": 4581,
+          "neighbor_state_purity": 0.8680782944044242
+        },
+        "C17": {
+          "cells": 6088,
+          "neighbor_state_purity": 0.9495072273324574
+        },
+        "C18": {
+          "cells": 24,
+          "neighbor_state_purity": 0.9277777777777777
+        },
+        "C19": {
+          "cells": 71,
+          "neighbor_state_purity": 0.9032863849765257
+        },
+        "C2": {
+          "cells": 147,
+          "neighbor_state_purity": 0.030839002267573697
+        },
+        "C20": {
+          "cells": 23,
+          "neighbor_state_purity": 0.7999999999999999
+        },
+        "C21": {
+          "cells": 351,
+          "neighbor_state_purity": 0.849192782526116
+        },
+        "C22": {
+          "cells": 269,
+          "neighbor_state_purity": 0.4158612143742255
+        },
+        "C23": {
+          "cells": 4115,
+          "neighbor_state_purity": 0.9542810854597004
+        },
+        "C24": {
+          "cells": 824,
+          "neighbor_state_purity": 0.8584951456310681
+        },
+        "C25": {
+          "cells": 35,
+          "neighbor_state_purity": 0.6495238095238095
+        },
+        "C26": {
+          "cells": 510,
+          "neighbor_state_purity": 0.8041830065359478
+        },
+        "C27": {
+          "cells": 208,
+          "neighbor_state_purity": 0.7900641025641024
+        },
+        "C28": {
+          "cells": 449,
+          "neighbor_state_purity": 0.9643652561247216
+        },
+        "C29": {
+          "cells": 4521,
+          "neighbor_state_purity": 0.9564992995649931
+        },
+        "C3": {
+          "cells": 182,
+          "neighbor_state_purity": 0.4684981684981685
+        },
+        "C30": {
+          "cells": 351,
+          "neighbor_state_purity": 0.7331433998100664
+        },
+        "C31": {
+          "cells": 6112,
+          "neighbor_state_purity": 0.9255671902268763
+        },
+        "C32": {
+          "cells": 1044,
+          "neighbor_state_purity": 0.8033205619412517
+        },
+        "C33": {
+          "cells": 1912,
+          "neighbor_state_purity": 0.8428521617852163
+        },
+        "C34": {
+          "cells": 3,
+          "neighbor_state_purity": 0.044444444444444446
+        },
+        "C35": {
+          "cells": 21,
+          "neighbor_state_purity": 0.21587301587301586
+        },
+        "C36": {
+          "cells": 1555,
+          "neighbor_state_purity": 0.9713612004287245
+        },
+        "C37": {
+          "cells": 231,
+          "neighbor_state_purity": 0.9102453102453102
+        },
+        "C38": {
+          "cells": 163,
+          "neighbor_state_purity": 0.5717791411042946
+        },
+        "C39": {
+          "cells": 274,
+          "neighbor_state_purity": 0.5982968369829684
+        },
+        "C4": {
+          "cells": 4357,
+          "neighbor_state_purity": 0.8820901231734374
+        },
+        "C40": {
+          "cells": 675,
+          "neighbor_state_purity": 0.8340740740740741
+        },
+        "C41": {
+          "cells": 50,
+          "neighbor_state_purity": 0.7866666666666666
+        },
+        "C42": {
+          "cells": 169,
+          "neighbor_state_purity": 0.9120315581854043
+        },
+        "C43": {
+          "cells": 1353,
+          "neighbor_state_purity": 0.9449618132544961
+        },
+        "C44": {
+          "cells": 156,
+          "neighbor_state_purity": 0.46282051282051284
+        },
+        "C45": {
+          "cells": 1371,
+          "neighbor_state_purity": 0.986870897155361
+        },
+        "C46": {
+          "cells": 812,
+          "neighbor_state_purity": 0.8798850574712644
+        },
+        "C47": {
+          "cells": 179,
+          "neighbor_state_purity": 0.5810055865921788
+        },
+        "C5": {
+          "cells": 5055,
+          "neighbor_state_purity": 0.9305374216946918
+        },
+        "C6": {
+          "cells": 4284,
+          "neighbor_state_purity": 0.8408807967631496
+        },
+        "C7": {
+          "cells": 3023,
+          "neighbor_state_purity": 0.3599073767780351
+        },
+        "C8": {
+          "cells": 1880,
+          "neighbor_state_purity": 0.8871985815602837
+        },
+        "C9": {
+          "cells": 875,
+          "neighbor_state_purity": 0.9106285714285713
+        }
+      },
+      "all_states_represented_in_fit": true,
+      "scope": "15-neighbor consistency with existing ICGS3 clusters in 2D; not biological validation."
+    }
+  },
+  "landmark": {
+    "method": "landmark",
+    "embedding_seconds": 45.24051591701573,
+    "parameters": {
+      "requested_fit_mode": "landmark",
+      "fit_mode": "landmark",
+      "fit_cells": 30000,
+      "total_cells": 62498,
+      "max_fit_cells": 30000,
+      "transform_batch_cells": 50000,
+      "min_landmarks_per_state": 50,
+      "random_state": 0,
+      "fit_seconds": 24.703695167030673,
+      "transform_seconds": 10.89501699997345,
+      "source": "scanpy_pca_landmark",
+      "pca_seconds": 2.1832230840227567,
+      "n_pcs": 50,
+      "pca_solver": "arpack",
+      "pca_zero_center": true,
+      "n_features": 1260,
+      "n_neighbors": 15,
+      "min_dist": 0.75,
+      "metric": "euclidean"
+    },
+    "cells": 62498,
+    "features": 1260,
+    "input_manifest_sha256": "6714b226ab799c6d82bb3eddff9993c7b1d545c3df621d0531641158052275d8",
+    "cell_sha256": "15e97865d8f1cd490f9aa131e592bd132f8f390863658aefe5e21fba891b6e35",
+    "feature_sha256": "68728dc24c5ee9ed7863794a7b705034fc72eb45aebe778e0bc643309981881b",
+    "cluster_sha256": "1aa6fdda357acec6400b41955dcea4020b4d2620e56df65d0cd97de09c0c20a0",
+    "finite_coordinates": true,
+    "peak_rss_gib": 1.987762451171875,
+    "versions": {
+      "scanpy": "1.10.3",
+      "anndata": "0.10.9",
+      "umap-learn": "0.5.7",
+      "scikit-learn": "1.3.2",
+      "numpy": "1.26.4",
+      "scipy": "1.14.1"
+    },
+    "diagnostics": {
+      "embedding_neighbor_state_purity": 0.8678784387767076,
+      "per_state": {
+        "C1": {
+          "cells": 29,
+          "neighbor_state_purity": 0.8804597701149426
+        },
+        "C10": {
+          "cells": 289,
+          "neighbor_state_purity": 0.8200692041522492
+        },
+        "C11": {
+          "cells": 59,
+          "neighbor_state_purity": 0.2305084745762712
+        },
+        "C12": {
+          "cells": 1864,
+          "neighbor_state_purity": 0.9778969957081545
+        },
+        "C13": {
+          "cells": 192,
+          "neighbor_state_purity": 0.9361111111111112
+        },
+        "C14": {
+          "cells": 128,
+          "neighbor_state_purity": 0.9442708333333334
+        },
+        "C15": {
+          "cells": 1634,
+          "neighbor_state_purity": 0.8565075479396165
+        },
+        "C16": {
+          "cells": 4581,
+          "neighbor_state_purity": 0.8552863275849524
+        },
+        "C17": {
+          "cells": 6088,
+          "neighbor_state_purity": 0.9498357424441525
+        },
+        "C18": {
+          "cells": 24,
+          "neighbor_state_purity": 0.8305555555555554
+        },
+        "C19": {
+          "cells": 71,
+          "neighbor_state_purity": 0.91924882629108
+        },
+        "C2": {
+          "cells": 147,
+          "neighbor_state_purity": 0.034013605442176874
+        },
+        "C20": {
+          "cells": 23,
+          "neighbor_state_purity": 0.744927536231884
+        },
+        "C21": {
+          "cells": 351,
+          "neighbor_state_purity": 0.8379867046533713
+        },
+        "C22": {
+          "cells": 269,
+          "neighbor_state_purity": 0.44931846344485754
+        },
+        "C23": {
+          "cells": 4115,
+          "neighbor_state_purity": 0.9564844066423653
+        },
+        "C24": {
+          "cells": 824,
+          "neighbor_state_purity": 0.864401294498382
+        },
+        "C25": {
+          "cells": 35,
+          "neighbor_state_purity": 0.6285714285714286
+        },
+        "C26": {
+          "cells": 510,
+          "neighbor_state_purity": 0.7726797385620915
+        },
+        "C27": {
+          "cells": 208,
+          "neighbor_state_purity": 0.7016025641025642
+        },
+        "C28": {
+          "cells": 449,
+          "neighbor_state_purity": 0.9443207126948775
+        },
+        "C29": {
+          "cells": 4521,
+          "neighbor_state_purity": 0.9564992995649931
+        },
+        "C3": {
+          "cells": 182,
+          "neighbor_state_purity": 0.586813186813187
+        },
+        "C30": {
+          "cells": 351,
+          "neighbor_state_purity": 0.7426400759734092
+        },
+        "C31": {
+          "cells": 6112,
+          "neighbor_state_purity": 0.9192735602094242
+        },
+        "C32": {
+          "cells": 1044,
+          "neighbor_state_purity": 0.8146871008939975
+        },
+        "C33": {
+          "cells": 1912,
+          "neighbor_state_purity": 0.8046373779637378
+        },
+        "C34": {
+          "cells": 3,
+          "neighbor_state_purity": 0.0
+        },
+        "C35": {
+          "cells": 21,
+          "neighbor_state_purity": 0.27619047619047615
+        },
+        "C36": {
+          "cells": 1555,
+          "neighbor_state_purity": 0.9714040728831725
+        },
+        "C37": {
+          "cells": 231,
+          "neighbor_state_purity": 0.8738816738816739
+        },
+        "C38": {
+          "cells": 163,
+          "neighbor_state_purity": 0.523517382413088
+        },
+        "C39": {
+          "cells": 274,
+          "neighbor_state_purity": 0.5800486618004866
+        },
+        "C4": {
+          "cells": 4357,
+          "neighbor_state_purity": 0.8845076887766813
+        },
+        "C40": {
+          "cells": 675,
+          "neighbor_state_purity": 0.8273580246913581
+        },
+        "C41": {
+          "cells": 50,
+          "neighbor_state_purity": 0.5786666666666667
+        },
+        "C42": {
+          "cells": 169,
+          "neighbor_state_purity": 0.9128205128205127
+        },
+        "C43": {
+          "cells": 1353,
+          "neighbor_state_purity": 0.9373244641537325
+        },
+        "C44": {
+          "cells": 156,
+          "neighbor_state_purity": 0.45384615384615384
+        },
+        "C45": {
+          "cells": 1371,
+          "neighbor_state_purity": 0.9780209093119379
+        },
+        "C46": {
+          "cells": 812,
+          "neighbor_state_purity": 0.8777504105090312
+        },
+        "C47": {
+          "cells": 179,
+          "neighbor_state_purity": 0.623463687150838
+        },
+        "C5": {
+          "cells": 5055,
+          "neighbor_state_purity": 0.9252884932410156
+        },
+        "C6": {
+          "cells": 4284,
+          "neighbor_state_purity": 0.8481325863678804
+        },
+        "C7": {
+          "cells": 3023,
+          "neighbor_state_purity": 0.3404785533134856
+        },
+        "C8": {
+          "cells": 1880,
+          "neighbor_state_purity": 0.9073049645390072
+        },
+        "C9": {
+          "cells": 875,
+          "neighbor_state_purity": 0.8881523809523809
+        }
+      },
+      "all_states_represented_in_fit": true,
+      "scope": "15-neighbor consistency with existing ICGS3 clusters in 2D; not biological validation."
+    }
+  },
+  "selected_method": "landmark",
+  "selection_reason": "Fastest measured embedding, finite coordinates for all cells, all existing states represented. Clustering and MarkerFinder inputs unchanged."
+}

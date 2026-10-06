@@ -356,7 +356,7 @@ def _build_imputed_adt_adata(
 # AML imputation modalities (metabolite, lipid, GRN) — pseudobulk-trained, so
 # imputed per (sample x cell-state) pseudobulk and broadcast to cells.
 # --------------------------------------------------------------------------- #
-_PB_SAMPLE_COLS = ("sample", "Sample", "library", "Library", "orig.ident", "dataset", "Dataset")
+_PB_SAMPLE_COLS = ("scalable_upload", "sample", "Sample", "library", "Library", "orig.ident", "dataset", "Dataset")
 
 
 def _pseudobulk_group_key(obs: pd.DataFrame, cluster_obs_col: Optional[str]) -> pd.Series:
@@ -806,24 +806,22 @@ def _differential_runtime_params(modality: str, comparison_type: str) -> Dict[st
     }
 
 
-def _split_uploads(files: List[Dict[str, str]], uploads_dir: Path) -> Tuple[List[Tuple[str, str]], Optional[str]]:
+def _split_uploads(files: List[Dict[str, str]], uploads_dir: Path) -> Tuple[List[Tuple[str, str]], Optional[str | List[Tuple[str, str]]]]:
     h5_files: List[Tuple[str, str]] = []
-    h5ad_entries: List[str] = []
+    h5ad_entries = []
     for record in files:
         path = uploads_dir / record["filename"]
         sample_name = str(record.get("sample_name", "")).strip() or path.stem
         suffix = path.suffix.lower()
         if suffix == ".h5ad":
-            h5ad_entries.append(str(path))
+            h5ad_entries.append((str(path), sample_name))
         else:
             h5_files.append((str(path), sample_name))
     h5ad_file = None
     if h5ad_entries:
-        if len(h5ad_entries) > 1:
-            raise ValueError("Multiple .h5ad uploads detected; please upload a single combined .h5ad or 10x files.")
         if h5_files:
             raise ValueError("Mixing .h5ad with other file types is not supported.")
-        h5ad_file = h5ad_entries[0]
+        h5ad_file = h5ad_entries[0][0] if len(h5ad_entries) == 1 else h5ad_entries
     if not h5_files and not h5ad_file:
         raise ValueError("No compatible input files detected.")
     return h5_files, h5ad_file
@@ -928,7 +926,7 @@ def _resolve_samples_for_adata(
     meta: Dict,
     selected_samples: List[str],
 ) -> Tuple[str, Dict[str, str]]:
-    candidate_columns = [column for column in ("Library", "group", "sample") if column in adata.obs.columns]
+    candidate_columns = [column for column in ("scalable_upload", "Library", "group", "sample") if column in adata.obs.columns]
     if not candidate_columns:
         raise ValueError("Aligned AnnData is missing the sample metadata required for group comparison.")
 
@@ -1088,6 +1086,7 @@ def _upload_profile(meta: Dict) -> Dict[str, object]:
     single_h5 = total_files == 1 and h5_count == 1
     single_h5ad = total_files == 1 and h5ad_count == 1
     multiple_h5 = total_files >= 2 and h5_count == total_files
+    multiple_h5ad = total_files >= 2 and h5ad_count == total_files
 
     return {
         "total_files": total_files,
@@ -1095,8 +1094,9 @@ def _upload_profile(meta: Dict) -> Dict[str, object]:
         "single_h5": single_h5,
         "single_h5ad": single_h5ad,
         "multiple_h5": multiple_h5,
-        "differential_eligible": bool(single_h5ad or multiple_h5),
-        "allow_alternate_population_fields": bool(single_h5ad),
+        "multiple_h5ad": multiple_h5ad,
+        "differential_eligible": bool(single_h5ad or multiple_h5 or multiple_h5ad),
+        "allow_alternate_population_fields": bool(single_h5ad or multiple_h5ad),
         "show_secondary_display_filter": not single_h5,
     }
 
@@ -1707,6 +1707,16 @@ def run_cellharmony_pipeline(
     outputs_dir.mkdir(parents=True, exist_ok=True)
 
     h5_files, h5ad_file = _split_uploads(meta["files"], uploads_dir)
+    bounded_h5ad = False
+    multiple_h5ad = isinstance(h5ad_file, list)
+    if h5ad_file:
+        from ..mapped_h5ad import inspect_h5ad, merge_h5ads, needs_disk_backed_import
+        if isinstance(h5ad_file, list):
+            store.append_log(job_id, 'Merging H5AD uploads on disk, retaining the union of features and upload identities.')
+            h5ad_file = str(merge_h5ads(h5ad_file, outputs_dir / '.h5ad_work'))
+            bounded_h5ad = True
+        header = inspect_h5ad(h5ad_file)
+        bounded_h5ad = bounded_h5ad or needs_disk_backed_import([header])
     qc = meta.get("qc", {})
     selected_impute_modalities = _selected_impute_modalities(meta, reference_entry)
     selected_impute_modality = selected_impute_modalities[0] if selected_impute_modalities else None
@@ -1716,7 +1726,7 @@ def run_cellharmony_pipeline(
         job_id,
         (
             "[params] alignment "
-            f"input_mode={'single_h5ad' if h5ad_file else 'multi_h5'} "
+            f"input_mode={'multi_h5ad' if multiple_h5ad else 'single_h5ad' if h5ad_file else 'multi_h5'} "
             f"n_h5={len(h5_files)} "
             f"h5ad={'yes' if h5ad_file else 'no'} "
             f"reference={reference_entry['states_tsv']} "
@@ -1761,6 +1771,7 @@ def run_cellharmony_pipeline(
         stream_10x_inputs=True,
         return_adata=True,
         unaligned_h5ad=str(unaligned_h5ad_path),
+        bounded_h5ad=bounded_h5ad,
     )
 
     assignments_path = outputs_dir / "cellHarmony_lite_assignments.txt"
@@ -2076,7 +2087,14 @@ def run_cellharmony_pipeline(
         store.append_log(job_id, "rna2grn imputation complete.")
 
     approx_mod.ensure_h5ad_compat_for_write(approx_result.query_adata)
+    store.update_job(job_id, progress=89, message="Saving aligned RNA and retained count matrices.")
     approx_result.query_adata.write(combined_h5ad_path, compression=resolved_h5ad_compression)
+    analysis_workspace = getattr(approx_result.query_adata, '_matrix_workspace', None)
+    if analysis_workspace is not None:
+        # HDF5 export reads every retained layer. Release those clean pages
+        # before communication buffers overlap them; all matrices remain usable.
+        analysis_workspace.release_pages()
+    store.append_log(job_id, "Aligned RNA and count matrices saved; work-array pages released.")
 
     prefix = outputs_dir / "approximate"
     prefix.mkdir(parents=True, exist_ok=True)
@@ -2173,7 +2191,7 @@ def run_cellharmony_pipeline(
             )
         )
         fastcomm_sample_key = next(
-            (candidate for candidate in ("Library", "group", "sample", "Donor") if candidate in approx_result.query_adata.obs.columns),
+            (candidate for candidate in ("scalable_upload", "Library", "group", "sample", "Donor") if candidate in approx_result.query_adata.obs.columns),
             None,
         )
         fastcomm_split_summary: Dict[str, object] = {}
@@ -2244,7 +2262,7 @@ def run_cellharmony_pipeline(
             fastcnv_dir = outputs_dir / "fastCNV"
             fastcnv_dir.mkdir(parents=True, exist_ok=True)
             sample_key = next(
-                (candidate for candidate in ("sample", "Library", "group") if candidate in approx_result.query_adata.obs.columns),
+                (candidate for candidate in ("scalable_upload", "sample", "Library", "group") if candidate in approx_result.query_adata.obs.columns),
                 None,
             )
             fastcnv_outputs = run_fastcnv(
@@ -2287,10 +2305,10 @@ def run_cellharmony_pipeline(
 
     sample_fields, sample_values = _candidate_group_fields(
         combined_h5ad_path,
-        preferred=["Library", "group", "sample"],
-        max_categories=None if upload_profile.get("single_h5ad") else 120,
+        preferred=["scalable_upload", "Library", "group", "sample"],
+        max_categories=None if upload_profile.get("allow_alternate_population_fields") else 120,
     )
-    if not upload_profile.get("single_h5ad"):
+    if not upload_profile.get("allow_alternate_population_fields"):
         population_field_values = {
             str(candidate.get("value", "")).strip()
             for candidate in all_population_columns
@@ -2332,7 +2350,7 @@ def run_cellharmony_pipeline(
             sample_fields[0]["value"] if sample_fields else None,
         )
     max_group_values = max((len(values) for values in sample_values.values()), default=0)
-    pseudobulk_allowed = bool(upload_profile.get("single_h5ad") or upload_profile.get("total_files", 0) >= 4 or max_group_values > 5)
+    pseudobulk_allowed = bool(upload_profile.get("single_h5ad") or upload_profile.get("multiple_h5ad") or upload_profile.get("total_files", 0) >= 4 or max_group_values > 5)
     differential_enabled = bool(upload_profile["differential_eligible"])
     differential_modalities = list(modalities_payload["available"])
     if fastcomm_analysis.get("enabled"):
@@ -2378,6 +2396,9 @@ def run_cellharmony_pipeline(
     )
     # Everything needed below is on disk. Do not overlap the bundle builder's
     # buffers with RNA layers and all of the per-cell imputation outputs.
+    if analysis_workspace is not None:
+        analysis_workspace.release_pages()
+    analysis_workspace = None
     combined_adata = approx_result = reference_adata = None
     lipid_adata = adt_adata = met_adata = met_diff_adata = None
     lip_adata = lip_diff_adata = None

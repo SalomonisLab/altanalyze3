@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import sys
@@ -83,6 +84,10 @@ class ICGS3Config:
     n_neighbors: int = 30
     umap_min_dist: float = 0.75
     umap_n_neighbors: int = 0
+    # Opt-in; scALABLE-discover selects PCA landmarks in its own interface.
+    umap_fit_mode: str = "full"
+    umap_fit_cells: int = 30000
+    umap_transform_batch_cells: int = 50000
     leiden_resolution: float = 0.8
     batch_correction: str = "none"
     batch_key: Optional[str] = None
@@ -186,6 +191,10 @@ class ICGS3Config:
         # here as well means a caller who builds the config directly can never reach
         # `pearson_r >= None`, which pandas turns into an all-false mask.
         _resolve_marker_gate(self)
+        if self.umap_fit_mode not in {"full", "landmark", "pca_landmark"}:
+            raise ValueError("umap_fit_mode must be full, landmark or pca_landmark")
+        if self.umap_fit_cells < 3 or self.umap_transform_batch_cells < 1:
+            raise ValueError("UMAP requires at least 3 fit cells and a positive transform batch size")
 
 
 def _resolve_marker_gate(config: "ICGS3Config") -> None:
@@ -278,6 +287,9 @@ def cli_equivalent(config: ICGS3Config) -> str:
         ("--n-neighbors", config.n_neighbors),
         ("--umap-min-dist", config.umap_min_dist),
         ("--umap-n-neighbors", config.umap_n_neighbors),
+        ("--umap-fit-mode", config.umap_fit_mode),
+        ("--umap-fit-cells", config.umap_fit_cells),
+        ("--umap-transform-batch-cells", config.umap_transform_batch_cells),
         ("--leiden-resolution", config.leiden_resolution),
         ("--batch-correction", config.batch_correction),
         ("--batch-key", config.batch_key),
@@ -4265,16 +4277,34 @@ def compute_umap_outputs(
     outdir: str,
     *,
     marker_features: Optional[Sequence[str]] = None,
+    matrix_source: Optional[ad.AnnData] = None,
 ) -> None:
     umap_dir = os.path.join(outdir, "UMAPs")
     os.makedirs(umap_dir, exist_ok=True)
+    def fit_final(model, load_rows):
+        from altanalyze3.components.clustering.umap_fit import fit_umap
+        coords, fit_info, selected = fit_umap(
+            model, load_rows, adata.n_obs,
+            mode="landmark" if config.umap_fit_mode == "pca_landmark" else config.umap_fit_mode,
+            labels=adata.obs[config.cluster_key].astype(str).values if config.cluster_key in adata.obs else None,
+            max_fit_cells=config.umap_fit_cells, batch_cells=config.umap_transform_batch_cells,
+            seed=config.random_state, log=_log,
+        )
+        if fit_info["fit_mode"] == "landmark":
+            landmark_path = os.path.join(umap_dir, "icgs3_umap_landmarks.tsv")
+            pd.DataFrame({"barcode": adata.obs_names[selected].astype(str)}).to_csv(
+                landmark_path, sep="\t", index=False)
+            fit_info["landmark_file"] = landmark_path
+        return coords, fit_info
+
     if config.generate_umap:
+        source = adata if matrix_source is None else matrix_source
         feature_mode = str(config.umap_feature_mode or "markerfinder").lower()
         if feature_mode == "variable":
-            if "icgs3_feature" in adata.var:
-                source_features = adata.var_names[adata.var["icgs3_feature"].values]
+            if "icgs3_feature" in source.var:
+                source_features = source.var_names[source.var["icgs3_feature"].values]
             else:
-                source_features = adata.var_names
+                source_features = source.var_names
             source_label = "variable_features"
         elif feature_mode == "pca":
             source_features = []
@@ -4283,7 +4313,9 @@ def compute_umap_outputs(
             source_features = marker_features or []
             source_label = "final_markerfinder_features"
         features = pd.Index([str(g) for g in source_features]).drop_duplicates()
-        features = features[features.isin(adata.var_names.astype(str))]
+        missing_features = features.difference(source.var_names.astype(str))
+        if len(missing_features):
+            raise ValueError(f"UMAP feature identities must all be present; resolve {list(missing_features[:10])}")
         if _batch_correction_applies(config, "umap") and str(config.batch_correction or "none").lower() == "harmony":
             graph_source = adata[:, features].copy() if len(features) > 0 else adata.copy()
             _log(
@@ -4304,8 +4336,9 @@ def compute_umap_outputs(
                     metric="correlation",
                     random_state=config.random_state,
                 )
-                adata.obsm["X_umap"] = model.fit_transform(coords)
+                adata.obsm["X_umap"], fit_info = fit_final(model, lambda rows: coords[rows])
                 adata.uns["icgs3_umap"] = {
+                    **fit_info,
                     "source": f"harmony_corrected_{source_label}_pcs",
                     "n_features": int(graph_source.n_vars),
                     "n_pcs": int(coords.shape[1]),
@@ -4324,23 +4357,48 @@ def compute_umap_outputs(
                 with open(os.path.join(umap_dir, "icgs3_umap_error.txt"), "w", encoding="utf-8") as handle:
                     handle.write(str(exc) + "\n")
                 _log(f"UMAP skipped: {exc}")
+        elif config.umap_fit_mode == "pca_landmark" and len(features) > 0:
+            from altanalyze3.components.clustering.accelerated_umap import pca_umap
+            from altanalyze3.components.clustering.umap_input import sparse_umap_input
+            feature_path = os.path.join(umap_dir, "icgs3_umap_features.tsv")
+            pd.DataFrame({"feature": features}).to_csv(feature_path, sep="\t", index=False)
+            _log(f"running final UMAP on {len(features)} {source_label} via centered PCA")
+            matrix = sparse_umap_input(source, features, cells=adata.obs_names)
+            coords, fit_info, selected = pca_umap(
+                matrix, method="landmark",
+                labels=adata.obs[config.cluster_key].astype(str).values if config.cluster_key in adata.obs else None,
+                n_neighbors=int(config.umap_n_neighbors) or 15,
+                min_dist=float(config.umap_min_dist), seed=config.random_state,
+                fit_cells=config.umap_fit_cells, batch_cells=config.umap_transform_batch_cells, log=_log)
+            adata.obsm["X_umap"] = coords
+            if fit_info["fit_mode"] == "landmark":
+                landmark_path = os.path.join(umap_dir, "icgs3_umap_landmarks.tsv")
+                pd.DataFrame({"barcode": adata.obs_names[selected].astype(str)}).to_csv(
+                    landmark_path, sep="\t", index=False)
+                fit_info["landmark_file"] = landmark_path
+            adata.uns["icgs3_umap"] = {**fit_info, "requested_fit_mode": config.umap_fit_mode,
+                                       "feature_file": feature_path, "feature_source": source_label}
         elif len(features) == 0:
             _log(f"UMAP using graph/PCA fallback (requested mode={feature_mode})")
+            if config.umap_fit_mode in {"landmark", "pca_landmark"}:
+                _log("Landmark fitting is unavailable for the Scanpy graph/PCA fallback; using full fitting")
             graph = compute_sparse_graph(adata, config)
             _copy_graph_slots(graph, adata)
             try:
                 sc.tl.umap(graph, random_state=config.random_state)
                 adata.obsm["X_umap"] = graph.obsm["X_umap"].copy()
+                adata.uns["icgs3_umap"] = {"source": "scanpy_graph_pca_fallback",
+                    "requested_fit_mode": config.umap_fit_mode, "fit_mode": "full",
+                    "fit_cells": int(adata.n_obs), "total_cells": int(adata.n_obs)}
             except Exception as exc:
                 _log(f"Scanpy UMAP skipped: {exc}")
         else:
+            # This small ordered feature list is provenance, even under minimal
+            # exports. Omitting it makes an exact saved-job UMAP benchmark
+            # impossible without regenerating an upstream MarkerFinder pass.
             feature_path = os.path.join(umap_dir, "icgs3_umap_features.tsv")
-            if _keep_intermediates(config):
-                pd.DataFrame({"feature": features}).to_csv(feature_path, sep="\t", index=False)
-            else:
-                feature_path = None
-            X = adata[:, features].X
-            X = X.toarray() if sp.issparse(X) else np.asarray(X)
+            pd.DataFrame({"feature": features}).to_csv(feature_path, sep="\t", index=False)
+            from altanalyze3.components.clustering.umap_input import dense_umap_input
             # --umap-n-neighbors overrides; 0 keeps the historical cap of 50.
             _nn = int(config.umap_n_neighbors) or 50
             n_neighbors = min(_nn, max(2, adata.n_obs - 1))
@@ -4353,8 +4411,10 @@ def compute_umap_outputs(
                     metric="correlation",
                     random_state=config.random_state,
                 )
-                adata.obsm["X_umap"] = model.fit_transform(X)
+                adata.obsm["X_umap"], fit_info = fit_final(
+                    model, lambda rows: dense_umap_input(source, features, cells=adata.obs_names[rows]))
                 adata.uns["icgs3_umap"] = {
+                    **fit_info,
                     "source": source_label,
                     "n_features": int(len(features)),
                     "feature_file": feature_path,
@@ -4839,7 +4899,7 @@ def _cluster_suffix(cluster) -> str:
     "Fibroblast_cC18" (Nathan, 2026-10-05). Ids of any other form pass through unchanged.
     """
     text = str(cluster)
-    return text[1:] if len(text) > 1 and text[0] == "C" and text[1:].isdigit() else text
+    return text[1:] if len(text) > 1 and text[0].lower() == "c" and text[1:].isdigit() else text
 
 
 def clean_biomarker_prediction_labels(labels: pd.DataFrame) -> pd.DataFrame:
@@ -4875,10 +4935,17 @@ def clean_biomarker_prediction_labels(labels: pd.DataFrame) -> pd.DataFrame:
             label = label.replace(tissue_preference, "")
         label = label.strip(" -_")
         if not label:
-            label = original.strip() or "UNK"
-        cleaned.append(f"{label}_c{_cluster_suffix(cluster)}")
+            label = original.strip()
+        cleaned.append(f"c{_cluster_suffix(cluster)}" if not label or label.upper() == "UNK"
+                       else f"{label}_c{_cluster_suffix(cluster)}")
     labels["cell_type_prediction"] = cleaned
     return labels
+
+
+def _biomarker_identifier(value) -> str:
+    """Normalize lookup IDs, keeping versioned native IDs in the evidence."""
+    value = str(value).upper()
+    return re.sub(r"^(ENS[A-Z]*G\d+)\.\d+$", r"\1", value)
 
 
 def biomarker_enrichment(markers: pd.DataFrame, background: Sequence[str], config: ICGS3Config, outdir: str) -> pd.DataFrame:
@@ -4888,17 +4955,45 @@ def biomarker_enrichment(markers: pd.DataFrame, background: Sequence[str], confi
     if not path or not os.path.exists(path) or markers.empty:
         _log(f"GO-Elite BioMarkers enrichment skipped: "
              f"{'no markers' if markers.empty else f'no BioMarkers file for species {config.species} ({path})'}; "
-             "cell-state predictions fall back to UNK-c<cluster>")
+             "cell-state predictions fall back to c<cluster>")
         return pd.DataFrame()
     _log(f"GO-Elite BioMarkers gene sets: {path}")
     bm = pd.read_csv(path, sep="\t")
-    gene_col = "Gene" if "Gene" in bm.columns else ("System" if "System" in bm.columns else bm.columns[1])
     term_col = "Term" if "Term" in bm.columns else ("GeneSet" if "GeneSet" in bm.columns else bm.columns[-1])
-    bm = bm[[gene_col, term_col]].dropna()
-    bm.columns = ["gene", "term"]
-    bm["gene"] = bm["gene"].astype(str).str.upper()
+    # The packaged catalog contains Ensembl AND Gene columns. Querying only Gene
+    # silently returned no enrichment for Ensembl-indexed inputs. Resolve exact
+    # aliases from this same catalog, retaining the complete native background.
+    gene_cols = [col for col in ("Ensembl", "Gene", "Symbol", "gene_id") if col in bm.columns]
+    if not gene_cols:
+        gene_cols = ["System" if "System" in bm.columns else bm.columns[1]]
+    bm = pd.concat([
+        bm[[col, term_col]].dropna().rename(columns={col: "gene", term_col: "term"})
+        for col in gene_cols
+    ], ignore_index=True)
+    bm["gene"] = bm["gene"].map(_biomarker_identifier)
     bg = {str(g).upper() for g in background}
-    term_sets = {t: set(g["gene"]) & bg for t, g in bm.groupby("term")}
+    query_ids = {str(g).upper() for g in markers["marker"]}
+    missing = query_ids - bg
+    if missing:
+        raise ValueError(f"BioMarkers query contains {len(missing)} features absent from its background; "
+                         f"resolve their identities before enrichment: {sorted(missing)[:10]}")
+    native_ids = {}
+    for gene in bg:
+        native_ids.setdefault(_biomarker_identifier(gene), set()).add(gene)
+    matched = set().union(*(native_ids.get(gene, set()) for gene in set(bm["gene"])))
+    n_ensembl = sum(bool(re.fullmatch(r"ENS[A-Z]*G\d+(?:\.\d+)?", gene)) for gene in bg)
+    _log(f"GO-Elite primary identifiers: {n_ensembl:,} Ensembl gene IDs; "
+         f"{len(bg) - n_ensembl:,} symbols or other IDs")
+    _log(f"GO-Elite BioMarkers matched {len(matched):,}/{len(bg):,} background identifiers "
+         f"using {', '.join(gene_cols)}; the full background is retained")
+    pd.DataFrame({"feature": list(background)}).to_csv(
+        os.path.join(goelite_dir, "icgs3_biomarker_background.tsv"), sep="\t", index=False)
+    if not matched:
+        raise ValueError("No input identifiers match the BioMarkers catalog's "
+                         f"{', '.join(gene_cols)} columns. Resolve the gene identifier mapping; "
+                         "cell-state annotations cannot be computed.")
+    term_sets = {t: set().union(*(native_ids.get(gene, set()) for gene in g["gene"]))
+                 for t, g in bm.groupby("term")}
     term_sets = {t: s for t, s in term_sets.items() if len(s) >= 3}
     if not term_sets or not bg:
         return pd.DataFrame()
@@ -5190,16 +5285,27 @@ def _run_icgs3_logged(config: ICGS3Config, outdir: str, log_path: str, start_tim
         label_col = "cell_type_prediction" if "cell_type_prediction" in biomarker_predictions.columns else "term_name"
         label_map = biomarker_predictions.set_index("cluster")[label_col].astype(str).to_dict()
         adata.obs["ICGS3_cell_state_prediction"] = [
-            label_map.get(str(cluster), f"UNK-c{_cluster_suffix(cluster)}")
+            label_map.get(str(cluster), f"c{_cluster_suffix(cluster)}")
             for cluster in adata.obs[config.cluster_key].astype(str)
         ]
     else:
         adata.obs["ICGS3_cell_state_prediction"] = [
-            f"UNK-c{_cluster_suffix(cluster)}" for cluster in adata.obs[config.cluster_key].astype(str)
+            f"c{_cluster_suffix(cluster)}" for cluster in adata.obs[config.cluster_key].astype(str)
         ]
     t = step_time("GO-Elite BioMarkers enrichment", t)
 
-    if analysis_adata is not adata:
+    direct_umap = (str(config.umap_feature_mode or "markerfinder").lower() != "pca"
+                   and not (_batch_correction_applies(config, "umap")
+                            and str(config.batch_correction or "none").lower() == "harmony"))
+    if analysis_adata is not adata and direct_umap:
+        # Read the same cells/features from the analysis matrix in bounded blocks;
+        # avoid copying all genes and layers solely to attach UMAP coordinates.
+        compute_umap_outputs(adata, config, outdir, marker_features=markers["marker"].tolist(),
+                             matrix_source=analysis_adata)
+        for key in ("icgs3_batch_correction", "icgs3_expression_batch_adjustment"):
+            if key in analysis_adata.uns:
+                adata.uns[key] = dict(analysis_adata.uns[key])
+    elif analysis_adata is not adata:
         umap_adata = analysis_adata[adata.obs_names].copy()
         umap_adata.obs = adata.obs.copy()
         compute_umap_outputs(umap_adata, config, outdir, marker_features=markers["marker"].tolist())
@@ -5388,6 +5494,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--leiden-resolution", type=float, default=0.8)
+    parser.add_argument("--umap-fit-mode", choices=["full", "landmark", "pca_landmark"], default="full",
+                        help="Full feature UMAP (default), feature landmarks, or pca_landmark: centered 50-PC/15-neighbor UMAP with landmarks. Clustering is unchanged. Scanpy graph fallback stays full.")
+    parser.add_argument("--umap-fit-cells", type=int, default=30000,
+                        help="Landmark fit budget; expands if needed to cover at least 50 cells per state.")
+    parser.add_argument("--umap-transform-batch-cells", type=int, default=50000,
+                        help="Maximum cells per landmark UMAP transform block.")
     parser.add_argument(
         "--batch-correction",
         choices=["none", "harmony"],
@@ -5705,6 +5817,9 @@ def main(argv: Optional[Sequence[str]] = None) -> ICGS3Result:
         n_neighbors=args.n_neighbors,
         umap_min_dist=args.umap_min_dist,
         umap_n_neighbors=args.umap_n_neighbors,
+        umap_fit_mode=args.umap_fit_mode,
+        umap_fit_cells=args.umap_fit_cells,
+        umap_transform_batch_cells=args.umap_transform_batch_cells,
         leiden_resolution=args.leiden_resolution,
         batch_correction=args.batch_correction,
         batch_key=args.batch_key,
@@ -6340,5 +6455,3 @@ _EmbeddedFFS = _EmbeddedFFSNamespace
 
 if __name__ == "__main__":
     main()
-
-

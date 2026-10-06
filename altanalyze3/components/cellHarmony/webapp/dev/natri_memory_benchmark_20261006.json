@@ -1,0 +1,669 @@
+{
+  "date": "2026-10-06",
+  "source": "Natri-2024_HLCA_with_umap_and_markers.h5ad",
+  "input_cells": 635456,
+  "input_genes": 33723,
+  "libraries": 127,
+  "uncompressed_expression_gib": 24.326016418635845,
+  "native_job_id": "c3c778b10aa14a5fa5bff7b62cc67ac9",
+  "native_peak_tree_rss_gib": 18.404129028320312,
+  "native_status": "failed",
+  "native_phases": {
+    "awaiting_run": {
+      "seconds": 9.91051575000165,
+      "cpu_seconds": 3.589587623999998,
+      "peak_tree_rss_bytes": 637026304,
+      "peak_worker_rss_bytes": 441499648,
+      "peak_active_cpu_cores": 2.22734759531824,
+      "peak_threads": 14,
+      "samples": 20,
+      "average_active_cpu_cores": 0.36219988086890437
+    },
+    "import": {
+      "seconds": 118.83038762497017,
+      "cpu_seconds": 111.06247308800005,
+      "peak_tree_rss_bytes": 19653066752,
+      "peak_worker_rss_bytes": 19465125888,
+      "peak_active_cpu_cores": 1.0170803460482267,
+      "peak_threads": 14,
+      "samples": 225,
+      "average_active_cpu_cores": 0.9346302348058837
+    },
+    "ambient_correction": {
+      "seconds": 178.08874583401484,
+      "cpu_seconds": 148.19528499199998,
+      "peak_tree_rss_bytes": 19761283072,
+      "peak_worker_rss_bytes": 19573063680,
+      "peak_active_cpu_cores": 1.0188778819160011,
+      "peak_threads": 13,
+      "samples": 336,
+      "average_active_cpu_cores": 0.8321428976209612
+    },
+    "qc_normalization": {
+      "seconds": 81.25360499997623,
+      "cpu_seconds": 65.19045119999996,
+      "peak_tree_rss_bytes": 17322754048,
+      "peak_worker_rss_bytes": 17176330240,
+      "peak_active_cpu_cores": 1.031850335592164,
+      "peak_threads": 13,
+      "samples": 150,
+      "average_active_cpu_cores": 0.8023084169621646
+    },
+    "centroid_alignment": {
+      "seconds": 366.63016587501625,
+      "cpu_seconds": 266.705271808,
+      "peak_tree_rss_bytes": 13052280832,
+      "peak_worker_rss_bytes": 12920209408,
+      "peak_active_cpu_cores": 1.017509622322564,
+      "peak_threads": 11,
+      "samples": 696,
+      "average_active_cpu_cores": 0.7274504299761289
+    },
+    "rna_markerfinder": {
+      "seconds": 12.151719790999778,
+      "cpu_seconds": 3.4025236479998995,
+      "peak_tree_rss_bytes": 13306216448,
+      "peak_worker_rss_bytes": 13174046720,
+      "peak_active_cpu_cores": 0.9502682018149358,
+      "peak_threads": 10,
+      "samples": 23,
+      "average_active_cpu_cores": 0.28000346506673013
+    }
+  },
+  "source_scaling_validation": {
+    "status": "ok",
+    "transform": "depth-normalized natural log",
+    "sampled_cells": 20000,
+    "inverse_log_cell_total_cv": 2.0141293913497844e-16
+  },
+  "failure": "For this normalized H5AD, the original cellHarmony wrapper passes logged X to ambient subtraction instead of the available raw counts layer; subsequent MarkerFinder depth-normalization check fails. This is an input-routing issue, not a demonstrated defect in the ambient subtraction algorithm.",
+  "model": "unchanged production lipid-wise ElasticNetCV, 1303 input slots and 202 outputs",
+  "safe_optimizations": [
+    "RNA2lipid reads existing AnnData batches without copying whole object",
+    "one sparse column extraction per batch",
+    "evaluate stored linear coefficients jointly, with original estimator fallback",
+    "sparse selection counts use original row pointers",
+    "selection releases only touched mapping ranges",
+    "sparse MarkerFinder batch bounds use stored entries; original statistical formula"
+  ],
+  "regression_checks": {
+    "native": 125,
+    "linux": 125,
+    "known_existing_signed_marker_tests_not_included": 3
+  },
+  "docker_configuration": {
+    "hard_memory_limit_gib": 30,
+    "swap_limit_gib": 0,
+    "cpus": 4,
+    "large_job_id": "8d28d79c444e44ba9dd663297ec185bb",
+    "large_job_started": true,
+    "context": "colima-scalable-bench",
+    "container": "scalable-natri-30g",
+    "hard_memory_limit_bytes": 32212254720,
+    "memory_plus_swap_limit_bytes": 32212254720
+  },
+  "pending_decision": {
+    "status": "approved",
+    "proposed_fix": "Route existing raw counts to standard ambient correction and regenerate RNA with existing normalize_total(target_sum=10000)+log1p; preserve deployed model and its full input/output panels",
+    "authorization": "User: Yes fix",
+    "authorized_date": "2026-10-06"
+  },
+  "full_large_lipid_benchmark_complete": true,
+  "lipid_extraction_comparison": {
+    "synthetic": true,
+    "rows": 2048,
+    "source_genes": 33723,
+    "stored_values": 3453235,
+    "model_genes": 1303,
+    "baseline_seconds": 4.03281462501036,
+    "optimized_seconds": 0.023224082950036973,
+    "speedup": 173.6479599080979,
+    "parity": "bit-identical float64 model input; same gene positions and ordering",
+    "scope": "one batch input extraction, not whole prediction/workflow"
+  },
+  "lipid_linear_fusion_comparison": {
+    "synthetic": true,
+    "rows": 2048,
+    "model_genes": 1303,
+    "outputs": 202,
+    "baseline_seconds": 0.43989179097115993,
+    "fused_seconds": 0.0183224169886671,
+    "speedup": 24.00839317450556,
+    "max_absolute_difference": 1.4210854715202004e-14,
+    "scope": "Exact existing linear coefficients, scalers, intercepts and selected genes; no retraining; enabled with validated original-estimator fallback"
+  },
+  "row_selection_disk_comparison": {
+    "cells": 100000,
+    "features": 33723,
+    "stored_entries": 100000000,
+    "selected_cells": 80000,
+    "baseline_seconds": 5.194402874971274,
+    "optimized_seconds": 1.9595302500529215,
+    "speedup": 2.650840871086827,
+    "exact_sparse_structure_and_values": true,
+    "measurement": "both implementations read/write disk-backed arrays; baseline retained during optimized pass"
+  },
+  "row_selection_range_comparison": {
+    "cells": 100000,
+    "features": 33723,
+    "stored_entries": 100000000,
+    "selected_cells": 80000,
+    "optimized_seconds": 1.0611766669899225,
+    "prior_full_flush_baseline_seconds": 5.194402874971274,
+    "speedup_vs_prior_timing": 4.894946370904895,
+    "exact_sparse_structure_and_values": true,
+    "measurement": "new invocation with identical seed/dimensions/selection; not a paired timing"
+  },
+  "marker_row_batches_comparison": {
+    "cells": 10000,
+    "features": 33723,
+    "groups": 60,
+    "stored_entries": 4963490,
+    "old_seconds": 0.5956263750558719,
+    "optimized_seconds": 0.48402262502349913,
+    "speedup": 1.2305754819352803,
+    "max_abs_r_difference": 4.163336342344337e-17,
+    "all_top_50_markers_identical": true,
+    "method": "same Welford/Pearson statistics, sparse batches limited to four million stored entries"
+  },
+  "original_wrapper_reproduction": {
+    "commit": "1f524caa467df2a8478a484a0353a09e9524224b",
+    "source_rows": 2048,
+    "source_genes": 33723,
+    "source_libraries": 2,
+    "ambient_rho": "auto",
+    "before_scaling_status": "ok",
+    "after_scaling_status": "unknown",
+    "soupx_raw_matches_logged_X": true,
+    "soupx_raw_matches_counts": false,
+    "counts_layer_unchanged": true,
+    "before_inverse_natural_log_cell_total_cv": 1.9391694656259618e-16,
+    "after_inverse_natural_log_cell_total_cv": 0.20809468029721534,
+    "scope": "Both wrapper and ambient implementation executed from original committed HEAD code; no modified analysis code in this reproduction."
+  },
+  "candidate_storage_changes": {
+    "scratch_cache": "Flush and release scratch pages and Linux clean-file cache after bounded row ranges and stage transitions.",
+    "lipid_model": "Unchanged deployed 1303-input/202-output lipid-wise ElasticNetCV bundle; fused prediction retains per-target preprocessing and estimator fallback.",
+    "communication": "Read only selected H5AD X/layer and obs/var; batch pandas aggregation by 128 gene symbols, preserving cell order, duplicate-symbol means, NaN handling, floating arithmetic and original scores.",
+    "ambient_scope": "Normalized H5AD routing to its verified counts layer; standard ambient algorithm, per-library auto rho, CP10k/log1p. Raw-count H5 path unchanged."
+  },
+  "fastcomm_real_probe_parity": {
+    "cells": 4096,
+    "genes": 1349,
+    "edges": 9372,
+    "edge_identity_and_order_equal": true,
+    "max_numeric_difference": 0.0,
+    "tolerance": 1e-06
+  },
+  "regression_tests": {
+    "native_targeted": 125,
+    "linux_new_fastcomm": 20,
+    "linux_prior_matrix_ambient_marker_lipid": 80,
+    "native_log": "jobs/natri_memory_benchmark_20261006/native_final_tests.log",
+    "linux_targeted": 125,
+    "native_serving_and_readiness": 25,
+    "linux_serving_and_readiness": 25
+  },
+  "docker_current_job_id": "8d28d79c444e44ba9dd663297ec185bb",
+  "docker_current_attempt": 4,
+  "docker_attempts": [
+    {
+      "attempt": 1,
+      "job_id": "ca9be3a0bc144e3bb8863de33adaff72",
+      "status": "failed",
+      "peak_working_set_gib": 27.103336334228516,
+      "failure_stage": "aligned matrix selection: active scratch-file cache"
+    },
+    {
+      "attempt": 2,
+      "job_id": "8d28d79c444e44ba9dd663297ec185bb",
+      "status": "failed",
+      "peak_working_set_gib": 26.98101806640625,
+      "failure_stage": "communication handoff: scratch-file cache"
+    },
+    {
+      "attempt": 3,
+      "job_id": "8d28d79c444e44ba9dd663297ec185bb",
+      "status": "failed",
+      "peak_working_set_gib": 27.029796600341797,
+      "failure_stage": "per-library communication: eager counts layers and dense table"
+    },
+    {
+      "attempt": 4,
+      "job_id": "8d28d79c444e44ba9dd663297ec185bb",
+      "status": "completed",
+      "peak_working_set_gib": 22.42652130126953,
+      "analysis_duration_seconds": 1052.9326585199997,
+      "oom_kills": 0
+    }
+  ],
+  "successful_full_workflow": {
+    "job_id": "8d28d79c444e44ba9dd663297ec185bb",
+    "url": "http://127.0.0.1:8011/?job_id=8d28d79c444e44ba9dd663297ec185bb",
+    "started_at": "2026-10-06T17:53:19.967639+00:00",
+    "completed_at": "2026-10-06T18:10:52.799999+00:00",
+    "analysis_duration_seconds": 1052.9326585199997,
+    "import_ambient_alignment_seconds": 379.69,
+    "lipid_inference_save_and_markers_seconds": 43.247553,
+    "canonical_rna_counts_export_seconds": 299.759916,
+    "communication_seconds": 134.712685,
+    "bundle_seconds": 75.5,
+    "peak_cgroup_working_set_gib": 22.42652130126953,
+    "memory_measurement": "Sampled cgroup working set = memory.current minus inactive_file. Reclaimable file cache also accrued up to the hard 30 GiB cap; working set is not total charged memory. Kernel lifetime memory.peak includes earlier attempts.",
+    "oom_events": 0,
+    "oom_kills": 0,
+    "unexpected_analysis_restarts": 0,
+    "guard_limit_gib": 27,
+    "guard_triggered": false,
+    "phase_resources": {
+      "awaiting_run": {
+        "seconds": 2.0368707280003946,
+        "cpu_seconds": 1.9200000000000048,
+        "peak_tree_rss_bytes": 643289088,
+        "peak_worker_rss_bytes": 290025472,
+        "peak_active_cpu_cores": 1.510644614160712,
+        "peak_threads": 20,
+        "samples": 5,
+        "average_active_cpu_cores": 0.9426224127070045
+      },
+      "import": {
+        "seconds": 94.07742603799943,
+        "cpu_seconds": 79.57,
+        "peak_tree_rss_bytes": 1118429184,
+        "peak_worker_rss_bytes": 765157376,
+        "peak_active_cpu_cores": 1.0284359852711145,
+        "peak_threads": 20,
+        "samples": 185,
+        "average_active_cpu_cores": 0.845792698110813
+      },
+      "ambient_correction": {
+        "seconds": 166.58753879100004,
+        "cpu_seconds": 125.55,
+        "peak_tree_rss_bytes": 9594990592,
+        "peak_worker_rss_bytes": 9241661440,
+        "peak_active_cpu_cores": 1.0334192235865882,
+        "peak_threads": 20,
+        "samples": 327,
+        "average_active_cpu_cores": 0.7536578120498824
+      },
+      "qc_normalization": {
+        "seconds": 15.71841365399996,
+        "cpu_seconds": 4.050000000000011,
+        "peak_tree_rss_bytes": 1563054080,
+        "peak_worker_rss_bytes": 1209724928,
+        "peak_active_cpu_cores": 1.025610613353603,
+        "peak_threads": 20,
+        "samples": 31,
+        "average_active_cpu_cores": 0.25765958888411
+      },
+      "centroid_alignment": {
+        "seconds": 103.77606662900052,
+        "cpu_seconds": 68.45999999999998,
+        "peak_tree_rss_bytes": 1985204224,
+        "peak_worker_rss_bytes": 1631875072,
+        "peak_active_cpu_cores": 1.0394051231129657,
+        "peak_threads": 20,
+        "samples": 203,
+        "average_active_cpu_cores": 0.6596896782062911
+      },
+      "rna_markerfinder": {
+        "seconds": 64.65712467599951,
+        "cpu_seconds": 51.82000000000005,
+        "peak_tree_rss_bytes": 10153136128,
+        "peak_worker_rss_bytes": 9799806976,
+        "peak_active_cpu_cores": 1.8887782771757704,
+        "peak_threads": 25,
+        "samples": 128,
+        "average_active_cpu_cores": 0.8014584666372497
+      },
+      "approximate_umap": {
+        "seconds": 4.047893425999973,
+        "cpu_seconds": 4.0600000000000165,
+        "peak_tree_rss_bytes": 1520754688,
+        "peak_worker_rss_bytes": 1167425536,
+        "peak_active_cpu_cores": 1.0276696658311513,
+        "peak_threads": 21,
+        "samples": 8,
+        "average_active_cpu_cores": 1.0029908331880186
+      },
+      "lipid_imputation": {
+        "seconds": 43.38594109400037,
+        "cpu_seconds": 106.05999999999999,
+        "peak_tree_rss_bytes": 11136778240,
+        "peak_worker_rss_bytes": 10783449088,
+        "peak_active_cpu_cores": 3.986249349981735,
+        "peak_threads": 21,
+        "samples": 82,
+        "average_active_cpu_cores": 2.444570691003554
+      },
+      "post_imputation": {
+        "seconds": 346.03322994799964,
+        "cpu_seconds": 293.53999999999905,
+        "peak_tree_rss_bytes": 23935111168,
+        "peak_worker_rss_bytes": 23581773824,
+        "peak_active_cpu_cores": 1.5817901908914986,
+        "peak_threads": 21,
+        "samples": 682,
+        "average_active_cpu_cores": 0.8483000318903215
+      },
+      "communication": {
+        "seconds": 138.86805067600017,
+        "cpu_seconds": 133.77000000000012,
+        "peak_tree_rss_bytes": 10673106944,
+        "peak_worker_rss_bytes": 10319769600,
+        "peak_active_cpu_cores": 1.979493860917255,
+        "peak_threads": 21,
+        "samples": 274,
+        "average_active_cpu_cores": 0.9632885271220912
+      },
+      "serving_bundle": {
+        "seconds": 80.9081506399998,
+        "cpu_seconds": 186.34999999999994,
+        "peak_tree_rss_bytes": 16953593856,
+        "peak_worker_rss_bytes": 3929694208,
+        "peak_active_cpu_cores": 3.9485515307512404,
+        "peak_threads": 52,
+        "samples": 151,
+        "average_active_cpu_cores": 2.303229013714117
+      }
+    },
+    "phase_cgroup_memory": {
+      "awaiting_run": {
+        "peak_working_set_gib": 0.653045654296875,
+        "peak_anonymous_gib": 0.4538383483886719,
+        "peak_charged_memory_gib": 6.2216033935546875
+      },
+      "import": {
+        "peak_working_set_gib": 1.0211830139160156,
+        "peak_anonymous_gib": 0.6219749450683594,
+        "peak_charged_memory_gib": 6.541728973388672
+      },
+      "ambient_correction": {
+        "peak_working_set_gib": 8.972679138183594,
+        "peak_anonymous_gib": 1.7313346862792969,
+        "peak_charged_memory_gib": 14.710559844970703
+      },
+      "qc_normalization": {
+        "peak_working_set_gib": 1.6462631225585938,
+        "peak_anonymous_gib": 1.1698837280273438,
+        "peak_charged_memory_gib": 7.3847503662109375
+      },
+      "centroid_alignment": {
+        "peak_working_set_gib": 2.0535507202148438,
+        "peak_anonymous_gib": 0.7188949584960938,
+        "peak_charged_memory_gib": 8.259456634521484
+      },
+      "rna_markerfinder": {
+        "peak_working_set_gib": 10.818923950195312,
+        "peak_anonymous_gib": 1.3943557739257812,
+        "peak_charged_memory_gib": 17.26468276977539
+      },
+      "approximate_umap": {
+        "peak_working_set_gib": 1.4041633605957031,
+        "peak_anonymous_gib": 1.1030921936035156,
+        "peak_charged_memory_gib": 7.9300384521484375
+      },
+      "lipid_imputation": {
+        "peak_working_set_gib": 10.383293151855469,
+        "peak_anonymous_gib": 3.8450355529785156,
+        "peak_charged_memory_gib": 16.910903930664062
+      },
+      "post_imputation": {
+        "peak_working_set_gib": 22.42652130126953,
+        "peak_anonymous_gib": 2.381378173828125,
+        "peak_charged_memory_gib": 30.0
+      },
+      "communication": {
+        "peak_working_set_gib": 10.024242401123047,
+        "peak_anonymous_gib": 3.4126663208007812,
+        "peak_charged_memory_gib": 18.156681060791016
+      },
+      "serving_bundle": {
+        "peak_working_set_gib": 15.66171646118164,
+        "peak_anonymous_gib": 15.409400939941406,
+        "peak_charged_memory_gib": 27.81383514404297
+      }
+    },
+    "reference": "hs_lung_cellref2_reference",
+    "qc_settings": {
+      "align_cutoff": 0.4,
+      "ambient_correction": "yes",
+      "impute_modalities": [
+        "lipids"
+      ],
+      "impute_modality": "none",
+      "marker_cells_per_cluster": 100,
+      "marker_heatmap_dpi": null,
+      "marker_render_heatmap": false,
+      "marker_write_svg": true,
+      "min_cells": 0,
+      "min_counts": 1000,
+      "min_genes": 500,
+      "mit_percent": 15
+    },
+    "normalized_input_qc_policy": "Existing count-QC skip policy retained for depth-normalized/logged input. Ambient correction uses verified raw counts, followed by existing CP10k/log1p.",
+    "model_sha256": "ed807e7a438e161bdfe7953ac212594e9b6f95872a9d48ae3834884dfa91cae0",
+    "production_inputs": 1303,
+    "production_lipid_outputs": 202,
+    "output_verification": {
+      "job_id": "8d28d79c444e44ba9dd663297ec185bb",
+      "status": "verified",
+      "input_cells": 635456,
+      "aligned_cells": 552880,
+      "below_cutoff_cells": 82576,
+      "full_gene_panel": 33723,
+      "source_libraries": 127,
+      "lipid_outputs": 202,
+      "all_lipid_values_finite_nonnegative": true,
+      "source_cell_roster_preserved": true,
+      "gene_order_preserved": true,
+      "model_identity_unchanged": true,
+      "raw_counts_probe_exact": true,
+      "normalized_rna_probe_matches_corrected_counts": true,
+      "lipid_probe_matches_original_estimators": true,
+      "probe_cells": 128,
+      "communication_and_serving_bundle_completed": true,
+      "max_lipid_prediction_difference": 1.0658141036401503e-14,
+      "normalization": {
+        "n_cells_sampled": 128,
+        "n_cells_empty_skipped": 0,
+        "min": 0.0,
+        "max": 8.410069465637207,
+        "frac_negative": 0.0,
+        "frac_integer": 0.9559703318210123,
+        "cv_cell_total[identity]": 0.23046085480709622,
+        "cv_cell_total[natural-log]": 8.320938190493628e-08,
+        "cv_cell_total[log2]": 0.11576524652384629,
+        "best_transform": "natural-log",
+        "cv_cell_total": 8.320938190493628e-08,
+        "status": "ok",
+        "transform": "depth-normalized, natural-log"
+      }
+    },
+    "artifacts_relative_to_webapp": "jobs/natri_memory_benchmark_20261006/docker_jobs",
+    "scratch_workspace_removed": true
+  },
+  "serving_verification": {
+    "requests_passed": 16,
+    "http_status": 200,
+    "views": [
+      "UMAP",
+      "expression UMAP",
+      "violin",
+      "DotPlot",
+      "CombPlot",
+      "library-filtered expression",
+      "plot variables",
+      "filter menus"
+    ],
+    "modalities": [
+      "RNA",
+      "Lipids"
+    ],
+    "all_cell_ids_and_filtered_cell_membership_verified": true,
+    "requests": [
+      {
+        "modality": "rna",
+        "endpoint": "plot-variables",
+        "view": null,
+        "filtered": false,
+        "seconds": 3.635405643000013,
+        "bytes": 4954,
+        "server_rss_gib": 1.0643692016601562
+      },
+      {
+        "modality": "rna",
+        "endpoint": "display-filters",
+        "view": null,
+        "filtered": false,
+        "seconds": 0.002915596000093501,
+        "bytes": 3723,
+        "server_rss_gib": 1.0643692016601562
+      },
+      {
+        "modality": "rna",
+        "endpoint": "umap",
+        "view": null,
+        "filtered": false,
+        "seconds": 6.8571979719999945,
+        "bytes": 38208697,
+        "server_rss_gib": 1.204498291015625
+      },
+      {
+        "modality": "rna",
+        "endpoint": "expression",
+        "view": "umap",
+        "filtered": false,
+        "seconds": 3.41179480899973,
+        "bytes": 32320998,
+        "server_rss_gib": 1.2321891784667969
+      },
+      {
+        "modality": "rna",
+        "endpoint": "expression",
+        "view": "violin",
+        "filtered": false,
+        "seconds": 0.5120239599991692,
+        "bytes": 1137199,
+        "server_rss_gib": 1.2274055480957031
+      },
+      {
+        "modality": "rna",
+        "endpoint": "dotplot",
+        "view": null,
+        "filtered": false,
+        "seconds": 0.5931352179995883,
+        "bytes": 5514,
+        "server_rss_gib": 1.2539596557617188
+      },
+      {
+        "modality": "rna",
+        "endpoint": "combplot",
+        "view": null,
+        "filtered": false,
+        "seconds": 1.7776314029997593,
+        "bytes": 5009802,
+        "server_rss_gib": 1.2887382507324219
+      },
+      {
+        "modality": "rna",
+        "endpoint": "expression",
+        "view": "umap",
+        "filtered": true,
+        "seconds": 0.08593400100016879,
+        "bytes": 70071,
+        "server_rss_gib": 1.2887382507324219
+      },
+      {
+        "modality": "lipids",
+        "endpoint": "plot-variables",
+        "view": null,
+        "filtered": false,
+        "seconds": 3.085695849000331,
+        "bytes": 4916,
+        "server_rss_gib": 1.6316299438476562
+      },
+      {
+        "modality": "lipids",
+        "endpoint": "display-filters",
+        "view": null,
+        "filtered": false,
+        "seconds": 0.0026806169998963014,
+        "bytes": 3723,
+        "server_rss_gib": 1.5946273803710938
+      },
+      {
+        "modality": "lipids",
+        "endpoint": "umap",
+        "view": null,
+        "filtered": false,
+        "seconds": 1.9132777920003718,
+        "bytes": 38208697,
+        "server_rss_gib": 1.4240837097167969
+      },
+      {
+        "modality": "lipids",
+        "endpoint": "expression",
+        "view": "umap",
+        "filtered": false,
+        "seconds": 3.5495034129999112,
+        "bytes": 39918543,
+        "server_rss_gib": 1.4629936218261719
+      },
+      {
+        "modality": "lipids",
+        "endpoint": "expression",
+        "view": "violin",
+        "filtered": false,
+        "seconds": 0.6042190239995762,
+        "bytes": 945043,
+        "server_rss_gib": 1.4591445922851562
+      },
+      {
+        "modality": "lipids",
+        "endpoint": "dotplot",
+        "view": null,
+        "filtered": false,
+        "seconds": 0.6546169729999747,
+        "bytes": 4850,
+        "server_rss_gib": 1.4591941833496094
+      },
+      {
+        "modality": "lipids",
+        "endpoint": "combplot",
+        "view": null,
+        "filtered": false,
+        "seconds": 2.226117283000349,
+        "bytes": 5206361,
+        "server_rss_gib": 1.4605255126953125
+      },
+      {
+        "modality": "lipids",
+        "endpoint": "expression",
+        "view": "umap",
+        "filtered": true,
+        "seconds": 0.08165110099980666,
+        "bytes": 88090,
+        "server_rss_gib": 1.4605255126953125
+      }
+    ],
+    "server_peak_rss_gib": 1.7411346435546875,
+    "browser_verified": [
+      "CellRef2 cell-state UMAP",
+      "RNA KRT15 UMAP",
+      "Lipid PE(O-16:0/22:4) UMAP",
+      "Lipid violin filtered to Library THD0006"
+    ],
+    "readiness_fix": "Do not read analytical H5AD while web job is queued/processing/running. Return not-ready before matrix/cache-lock access; completed bundle identity invalidates older H5AD fallback entry.",
+    "planned_server_restart_after_analysis": "Dedicated test server deliberately restarted after completed analysis to load readiness fix and release a previously blocked H5AD serving read. Analytical outputs were retained."
+  },
+  "validation_scope": {
+    "tested": "Full original 635456-cell H5AD, standard CellRef2 alignment, automatic ambient correction, production lipids, RNA/lipid MarkerFinder, approximate UMAP, global/per-library FastComm, serving bundle and specified Explore views.",
+    "not_yet_validated": [
+      "million-cell end-to-end run",
+      "two concurrent full heavy workflows",
+      "all other modalities and all analysis views on this source"
+    ],
+    "remaining_bottleneck": "Canonical RNA/count H5AD export takes approximately five minutes."
+  }
+}

@@ -382,7 +382,7 @@ def enforce_input_scaling(matrix, *, scale_data=False, scale_factor=None, verbos
     return scaled, report
 
 
-def _marker_finder_rows(matrix, groups, gene_names):
+def _marker_finder_rows(matrix, groups, gene_names, *, row_block_size=None):
     """One sequential pass with stable variance and group sufficient statistics."""
     n_cells, n_genes = matrix.shape
     if len(groups) != n_cells:
@@ -395,8 +395,24 @@ def _marker_finder_rows(matrix, groups, gene_names):
     rows = max(1, min(8192, 8_000_000 // max(1, n_genes)))
     if rows >= 256:
         rows = rows // 256 * 256
-    for start in range(0, n_cells, rows):
-        block = matrix[start:start + rows]
+    sparse_rows = row_block_size is None and sparse.issparse(matrix) and matrix.format == 'csr'
+    if sparse_rows:
+        # A wide sparse RNA panel does not allocate cells x all genes. Size
+        # batches by stored entries, avoiding thousands of repeated allocations
+        # of the gene x group sufficient-statistic matrix. Every cell and gene
+        # still contributes to the same Pearson/Welford calculation.
+        rows = 8192
+    elif row_block_size is not None:
+        if row_block_size <= 0:
+            raise ValueError('row_block_size must be positive')
+        rows = row_block_size
+    start = 0
+    while start < n_cells:
+        stop = min(n_cells, start + rows)
+        if sparse_rows:
+            stop = min(stop, max(start + 1, int(np.searchsorted(
+                matrix.indptr, int(matrix.indptr[start]) + 4_000_000, side='right') - 1)))
+        block = matrix[start:stop]
         block = block.astype(np.float64)
         size = block.shape[0]
         if sparse.issparse(block):
@@ -412,6 +428,7 @@ def _marker_finder_rows(matrix, groups, gene_names):
         mean += delta * size / total
         sum_xy += group_sum
         seen = total
+        start = stop
     sum_y = np.asarray(indicator.sum(axis=0)).ravel()
     numerator = sum_xy - np.outer(mean * n_cells, sum_y) / n_cells
     ssy = np.maximum(sum_y - sum_y**2 / n_cells, 0)
@@ -446,6 +463,13 @@ def marker_finder(
     confound the statistic.
     """
     import h5py
+    if sparse.issparse(expression_matrix) and expression_matrix.indices.dtype != expression_matrix.indptr.dtype:
+        # H5AD can retain int32 indices with int64 pointers. SciPy's compiled
+        # row slicer then casts the *entire* index array for every row block.
+        # Reconcile index widths once; values and their ordering are unchanged.
+        expression_matrix = expression_matrix.__class__(
+            (expression_matrix.data, expression_matrix.indices, expression_matrix.indptr),
+            shape=expression_matrix.shape, copy=False)
     disk = isinstance(expression_matrix, h5py.Dataset)
     n_cells, n_features = expression_matrix.shape
     if (disk or n_cells >= 50_000) and feature_block_size is None:

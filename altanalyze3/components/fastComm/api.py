@@ -109,17 +109,16 @@ def _peek_input_genes(params: FastCommParams) -> list[str]:
         return adata.var_names.astype(str).tolist()
     if params.h5ad is not None:
         try:
-            import anndata as ad
+            import h5py
+            from anndata.io import read_elem
         except ImportError:
             return []
-        adata = ad.read_h5ad(params.h5ad, backed="r")
-        try:
-            if params.gene_symbol_col and params.gene_symbol_col in adata.var.columns:
-                genes = adata.var[params.gene_symbol_col].astype(str).tolist()
+        with h5py.File(params.h5ad, "r") as handle:
+            var = read_elem(handle["var"])
+            if params.gene_symbol_col and params.gene_symbol_col in var.columns:
+                genes = var[params.gene_symbol_col].astype(str).tolist()
             else:
-                genes = adata.var_names.astype(str).tolist()
-        finally:
-            adata.file.close()
+                genes = var.index.astype(str).tolist()
         return genes
     if params.expression is not None:
         header = pd.read_csv(params.expression, sep=None, engine="python", nrows=0, index_col=0)
@@ -249,40 +248,54 @@ def _matrix_inputs_from_h5ad(
     if params.h5ad is None:
         raise ValueError("h5ad path is required")
     try:
-        import anndata as ad
+        import h5py
+        from anndata.io import read_elem, sparse_dataset
+        from scipy import sparse
     except ImportError as exc:  # pragma: no cover - exercised only in minimal envs
         raise ImportError("AnnData input requires the 'anndata' package") from exc
 
-    adata = ad.read_h5ad(params.h5ad, backed="r")
-    try:
+    # AnnData's backed reader still loads layers/raw eagerly. Read only the
+    # requested matrix and annotations, never unrelated count matrices.
+    with h5py.File(params.h5ad, "r") as handle:
+        var = read_elem(handle["var"])
         if params.gene_symbol_col:
-            if params.gene_symbol_col not in adata.var.columns:
+            if params.gene_symbol_col not in var.columns:
                 raise KeyError(f"Column {params.gene_symbol_col!r} was not found in adata.var")
-            genes = adata.var[params.gene_symbol_col].astype(str).tolist()
+            genes = var[params.gene_symbol_col].astype(str).tolist()
         else:
-            genes = adata.var_names.astype(str).tolist()
+            genes = var.index.astype(str).tolist()
 
         gene_positions, selected_genes, diagnostics = _select_gene_positions(genes, required_genes)
         if required_genes and not gene_positions:
             raise ValueError("None of the requested ligand/receptor/response genes were found in the h5ad")
 
-        index = adata.obs_names.astype(str).tolist()
-        metadata = adata.obs.copy()
-        try:
-            matrix = _slice_matrix_from_adata(adata, params, gene_positions)
-        except AttributeError as exc:
-            if "_validate_indices" not in str(exc):
-                raise
-            matrix_source = adata.layers[params.layer] if params.layer else adata.X
-            if hasattr(matrix_source, "to_memory"):
-                matrix = matrix_source.to_memory()[:, gene_positions]
+        metadata = read_elem(handle["obs"])
+        index = metadata.index.astype(str).tolist()
+        node = handle["layers"][params.layer] if params.layer else handle["X"]
+        matrix_source = node if isinstance(node, h5py.Dataset) else sparse_dataset(node)
+        parts = []
+        step = max(1, min(4096, 4_000_000 // max(1, matrix_source.shape[1])))
+        ptr = node["indptr"][:] if not isinstance(node, h5py.Dataset) and node.attrs.get("encoding-type") == "csr_matrix" else None
+        start = 0
+        while start < len(index):
+            if ptr is not None:
+                stop = min(len(index), start + 4096,
+                           max(start + 1, int(np.searchsorted(ptr, int(ptr[start]) + 4_000_000, side="right") - 1)))
+                lo, hi = int(ptr[start]), int(ptr[stop])
+                block = sparse.csr_matrix((node["data"][lo:hi], node["indices"][lo:hi],
+                                           ptr[start:stop + 1] - lo),
+                                          shape=(stop - start, matrix_source.shape[1]))[:, gene_positions]
             else:
-                adata.file.close()
-                adata = ad.read_h5ad(params.h5ad)
-                matrix = _slice_matrix_from_adata(adata, params, gene_positions)
-    finally:
-        if getattr(adata, "isbacked", False):
-            adata.file.close()
+                stop = min(len(index), start + step)
+                block = matrix_source[start:stop, :][:, gene_positions]
+            # Slice rows first: h5py fancy columns require sorted/unique indices,
+            # while supplied symbol aliases can legitimately repeat/reorder.
+            parts.append(np.asarray(block) if isinstance(node, h5py.Dataset) else sparse.csr_matrix(block))
+            start = stop
+        if isinstance(node, h5py.Dataset):
+            matrix = np.vstack(parts) if parts else np.empty((0, len(selected_genes)), dtype=node.dtype)
+        else:
+            matrix = sparse.vstack(parts, format="csr") if parts else sparse.csr_matrix((0, len(selected_genes)))
     diagnostics["n_loaded_columns"] = int(len(selected_genes))
     return matrix, index, selected_genes, metadata, diagnostics
 

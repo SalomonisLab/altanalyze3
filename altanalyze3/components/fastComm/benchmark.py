@@ -7,12 +7,14 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
+import numpy as np
 
 from .api import (
     DEFAULT_LR_TABLE,
     DEFAULT_RESPONSE_MATRIX,
     FastCommParams,
-    _expression_from_h5ad,
+    _matrix_inputs_from_h5ad,
+    _deduplicate_columns,
     _filter_lr_sources,
     _required_genes,
     _resolve_default_resource_paths,
@@ -24,6 +26,9 @@ from .scoring import (
     limit_lr_candidates_per_state_pair,
     make_receiver_delta,
     make_state_pseudobulk,
+    PseudobulkState,
+    clean_labels,
+    to_dense_frame,
     score_ligand_receptor_expression,
 )
 
@@ -64,20 +69,25 @@ def _edge_key_frame(scores: pd.DataFrame) -> pd.Series:
 
 
 def _score_subset(
-    expression: pd.DataFrame,
+    expression,
     metadata: pd.DataFrame,
     *,
     lr_table: pd.DataFrame,
     response_matrix: Optional[pd.DataFrame],
     params: FastCommBenchmarkParams,
+    matrix_index=None,
+    matrix_columns=None,
 ) -> Tuple[pd.DataFrame, Dict[str, object]]:
     started = time.perf_counter()
-    state = make_state_pseudobulk(
-        expression,
-        metadata,
-        state_key=params.state_key,
-        min_cells=params.min_cells,
-    )
+    if matrix_index is None:
+        state = make_state_pseudobulk(expression, metadata,
+                                      state_key=params.state_key, min_cells=params.min_cells)
+        n_cells, n_genes = expression.shape
+    else:
+        state = _batched_state(expression, matrix_index, matrix_columns, metadata,
+                               state_key=params.state_key, min_cells=params.min_cells)
+        n_cells = len(pd.Index(matrix_index).intersection(metadata.index.astype(str)))
+        n_genes = len(set(clean_labels(matrix_columns)))
     edges = score_ligand_receptor_expression(
         state,
         lr_table,
@@ -94,8 +104,8 @@ def _score_subset(
     scores = finalize_scores(edges)
     elapsed = time.perf_counter() - started
     summary = {
-        "n_cells": int(expression.shape[0]),
-        "n_loaded_genes": int(expression.shape[1]),
+        "n_cells": int(n_cells),
+        "n_loaded_genes": int(n_genes),
         "n_states": int(state.expression.shape[0]),
         "n_edges": int(scores.shape[0]),
         "elapsed_seconds": round(elapsed, 4),
@@ -109,6 +119,51 @@ def _score_subset(
             }
         )
     return scores, summary
+
+
+def _batched_state(matrix, index, columns, metadata, *, state_key, min_cells, block_genes=128):
+    """Original pandas means/detection, processing bounded feature panels.
+
+    Every retained cell enters each calculation in its original order. Unlike
+    adding partial row sums, this preserves pandas' floating-point accumulation
+    and near-tied interaction ranks. Duplicate symbols are averaged per cell
+    before detection, exactly as in the original dense benchmark.
+    """
+    if state_key not in metadata:
+        raise KeyError(f"State column {state_key!r} was not found in metadata")
+    obs_index = pd.Index(clean_labels(index))
+    metadata = metadata.copy()
+    metadata.index = clean_labels(metadata.index)
+    common = obs_index.intersection(metadata.index)
+    if common.empty:
+        raise ValueError("No shared cells between expression index and metadata index")
+    states = metadata.loc[common, state_key].astype(str).str.strip()
+    valid = states.ne("") & states.notna()
+    common, states = common[valid], states.loc[valid]
+    sizes = states.value_counts().sort_index()
+    keep = sizes.index[sizes >= min_cells]
+    if keep.empty:
+        raise ValueError(f"No states passed min_cells={min_cells}")
+    valid = states.isin(keep)
+    common, states = common[valid], states.loc[valid]
+    positions = obs_index.get_indexer(common)
+    column_labels = pd.Index(clean_labels(columns))
+    names = column_labels.drop_duplicates()
+    # Sparse rows stay sparse. No all-feature dense single-cell table exists.
+    subset = matrix[positions]
+    means, detections = [], []
+    if not len(names):
+        empty = pd.DataFrame(index=keep, columns=names, dtype=float)
+        return PseudobulkState(empty, empty.copy(), sizes.loc[keep])
+    for start in range(0, len(names), block_genes):
+        selected = names[start:start + block_genes]
+        gene_positions = np.flatnonzero(column_labels.isin(selected))
+        block = _deduplicate_columns(to_dense_frame(subset[:, gene_positions],
+                                                     index=common, columns=column_labels[gene_positions]))
+        means.append(block.groupby(states, sort=True).mean().astype(float))
+        detections.append(block.gt(0).groupby(states, sort=True).mean().astype(float))
+    return PseudobulkState(pd.concat(means, axis=1).reindex(columns=names),
+                           pd.concat(detections, axis=1).reindex(columns=names), sizes.loc[keep])
 
 
 def _compare_to_full(full_scores: pd.DataFrame, split_scores: pd.DataFrame, *, top_n: int) -> Dict[str, object]:
@@ -160,7 +215,7 @@ def run_benchmark(params: FastCommBenchmarkParams) -> Dict[str, object]:
     lr_table = _filter_lr_sources(pd.read_csv(resolved_lr_table, sep="\t"), params.lr_sources)
     response_matrix = load_response_matrix(str(resolved_response_path)) if resolved_response_path else None
     required_genes = _required_genes(lr_table, response_matrix)
-    expression, metadata, gene_diagnostics = _expression_from_h5ad(
+    expression, matrix_index, matrix_columns, metadata, gene_diagnostics = _matrix_inputs_from_h5ad(
         FastCommParams(
             h5ad=params.h5ad,
             lr_table=resolved_lr_table,
@@ -180,6 +235,8 @@ def run_benchmark(params: FastCommBenchmarkParams) -> Dict[str, object]:
         lr_table=lr_table,
         response_matrix=response_matrix,
         params=params,
+        matrix_index=matrix_index,
+        matrix_columns=matrix_columns,
     )
     full_scores.to_csv(params.output_dir / "full_scores.tsv", sep="\t", index=False)
 
@@ -189,17 +246,17 @@ def run_benchmark(params: FastCommBenchmarkParams) -> Dict[str, object]:
         raise KeyError(f"Split column {params.split_key!r} was not found in h5ad obs")
 
     for split_name, split_metadata in metadata.groupby(metadata[params.split_key].astype(str), sort=True):
-        split_cells = split_metadata.index.astype(str)
-        split_expression = expression.loc[split_cells]
-        if split_expression.shape[0] < params.min_cells:
+        if len(split_metadata) < params.min_cells:
             continue
         try:
             split_scores, split_summary = _score_subset(
-                split_expression,
+                expression,
                 split_metadata,
                 lr_table=lr_table,
                 response_matrix=response_matrix,
                 params=params,
+                matrix_index=matrix_index,
+                matrix_columns=matrix_columns,
             )
         except ValueError as exc:
             split_rows.append(
@@ -207,7 +264,7 @@ def run_benchmark(params: FastCommBenchmarkParams) -> Dict[str, object]:
                     "split": split_name,
                     "status": "skipped",
                     "reason": str(exc),
-                    "n_cells": int(split_expression.shape[0]),
+                    "n_cells": int(len(split_metadata)),
                 }
             )
             continue
@@ -241,7 +298,7 @@ def run_benchmark(params: FastCommBenchmarkParams) -> Dict[str, object]:
         "top_n_stability": int(params.top_n_stability),
         "full": full_summary,
         "n_splits": int(split_summary_df.shape[0]),
-        "loaded_genes": int(expression.shape[1]),
+        "loaded_genes": int(len(set(clean_labels(matrix_columns)))),
         **gene_diagnostics,
     }
     (params.output_dir / "benchmark_summary.json").write_text(

@@ -617,7 +617,10 @@ def process_anndata(
     outdir.mkdir(parents=True, exist_ok=True)
 
     working = adata if inplace else adata.copy()
-    x_csr = _to_csr(working.X).astype(np.float32, copy=False)
+    workspace = getattr(working, '_matrix_workspace', None)
+    x_csr = _to_csr(working.X)
+    x_csr = (workspace.copy_matrix(x_csr, dtype=np.float32) if workspace and x_csr.dtype != np.float32
+             else x_csr.astype(np.float32, copy=False))
 
     if store_raw_layer:
         # Correction operates on library slices, so this source stays untouched.
@@ -638,7 +641,7 @@ def process_anndata(
 
     # Preserve the sparsity structure until every library is processed. This
     # avoids retaining library outputs, stacking them, then reordering a copy.
-    corrected_all = x_csr.copy()
+    corrected_all = workspace.copy_matrix(x_csr, copy_structure=True) if workspace else x_csr.copy()
     summary_rows = []
 
     all_library_values = working.obs[library_col].astype(str).to_numpy()
@@ -724,6 +727,15 @@ def process_anndata(
                 corrected_all.data[corrected_all.indptr[global_row]:corrected_all.indptr[global_row + 1]] = (
                     corrected_subset_csr.data[corrected_subset_csr.indptr[local_row]:corrected_subset_csr.indptr[local_row + 1]]
                 )
+
+        if workspace is not None:
+            # Finished libraries must not accumulate resident source/output
+            # pages. This changes storage accounting, never subtraction or rho.
+            first, last = int(row_idx.min()), int(row_idx.max())
+            lo, hi = int(x_csr.indptr[first]), int(x_csr.indptr[last + 1])
+            workspace.release_range(corrected_all.data, lo, hi, write=True)
+            workspace.release_range(x_csr.data, lo, hi)
+            workspace.release_range(x_csr.indices, lo, hi)
 
         summary_row = {
             "library": lib_label,

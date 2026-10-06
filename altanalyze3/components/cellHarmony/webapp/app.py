@@ -25,6 +25,8 @@ from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFi
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
+from .plot_payload import compact_plot_payload
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
@@ -300,6 +302,11 @@ def _resolve_gene_name(candidates, requested_gene: str) -> Optional[str]:
         candidate_str = str(candidate)
         normalized_map.setdefault(_normalize_gene_token(candidate_str), candidate_str)
     return normalized_map.get(requested_norm)
+
+
+def _resolve_expression_gene(cache, requested_gene):
+    from .feature_lookup import expression_lookup
+    return expression_lookup(cache).resolve(requested_gene)
 
 
 def _configure_matplotlib_pdf_style() -> None:
@@ -861,7 +868,7 @@ def _differential_options(meta: Dict) -> Dict:
     sample_fields = list(stored.get("sample_fields", []))
     max_group_values = max((len(values) for values in sample_values.values() if isinstance(values, list)), default=0)
     upload_profile = dict(stored.get("upload_profile") or pipeline_mod._upload_profile(meta))
-    if upload_profile.get("single_h5ad"):
+    if upload_profile.get("single_h5ad") or upload_profile.get("multiple_h5ad"):
         combined_h5ad_raw = str(meta.get("artifacts", {}).get("combined_h5ad", "")).strip()
         if combined_h5ad_raw:
             combined_h5ad_path = Path(combined_h5ad_raw)
@@ -896,7 +903,7 @@ def _differential_options(meta: Dict) -> Dict:
     )
     comparison_types = stored.get("comparison_types")
     if not isinstance(comparison_types, list) or not comparison_types:
-        pseudobulk_allowed = bool(upload_profile.get("single_h5ad") or upload_profile.get("total_files", 0) >= 4)
+        pseudobulk_allowed = bool(upload_profile.get("single_h5ad") or upload_profile.get("multiple_h5ad") or upload_profile.get("total_files", 0) >= 4)
         comparison_types = ["cells", "pseudobulk"] if pseudobulk_allowed else ["cells"]
     if max_group_values > 5 and "pseudobulk" not in comparison_types:
         comparison_types = [*comparison_types, "pseudobulk"]
@@ -1557,6 +1564,13 @@ def _get_expression_cache(app: FastAPI, meta: Dict, modality: str = "rna") -> Di
     bundle_cache = getattr(app.state.job_store, "get_expression_cache", None)
     if callable(bundle_cache):
         return bundle_cache(app, meta, normalized_modality)
+    # The pipeline publishes analytical files before its serving bundle is
+    # complete. A preload at that point must not read a large H5AD into the web
+    # process or hold the cache lock while subsequent bundle requests wait.
+    if str(meta.get("status") or "").lower() in {"queued", "processing", "running"}:
+        raise FileNotFoundError("Expression results are being finalized; retry when the analysis completes.")
+    bundle_record = meta.get("bundle") or {}
+    bundle_signature = tuple(bundle_record.get(key) for key in ("status", "dir", "prefix", "built_utc"))
     artifacts = meta.get("artifacts", {})
     h5ad_path = _modality_h5ad_path(meta, normalized_modality)
 
@@ -1579,6 +1593,7 @@ def _get_expression_cache(app: FastAPI, meta: Dict, modality: str = "rna") -> Di
         and cache_entry.get("cluster_key") == str(cluster_key)
         and cache_entry.get("modality") == normalized_modality
         and (is_bundle or cache_entry.get("source_stamp") == source_stamp)
+        and cache_entry.get("bundle_signature") == bundle_signature
     ):
         return cache_entry
 
@@ -1592,6 +1607,7 @@ def _get_expression_cache(app: FastAPI, meta: Dict, modality: str = "rna") -> Di
             and cache_entry.get("cluster_key") == str(cluster_key)
             and cache_entry.get("modality") == normalized_modality
             and (is_bundle or cache_entry.get("source_stamp") == source_stamp)
+            and cache_entry.get("bundle_signature") == bundle_signature
         ):
             return cache_entry
 
@@ -1713,6 +1729,7 @@ def _get_expression_cache(app: FastAPI, meta: Dict, modality: str = "rna") -> Di
             "h5ad_path": str(h5ad_path),
             "expression_source": expression_source,
             "source_stamp": source_stamp,
+            "bundle_signature": bundle_signature,
             "umap_path": str(umap_path or ""),
             "cluster_key": str(cluster_key),
             "adata": adata,
@@ -3400,7 +3417,7 @@ def _build_cell_communication_feature_expression(
 ) -> Optional[Dict]:
     expression_cache = _get_expression_cache(app, meta, modality="rna")
     adata = expression_cache["adata"]
-    resolved_gene = _resolve_gene_name(expression_cache["var_names"], feature_symbol)
+    resolved_gene = _resolve_expression_gene(expression_cache, feature_symbol)
     if not resolved_gene:
         raise KeyError(f"Gene '{feature_symbol}' not found in the aligned AnnData output.")
     if population_col not in adata.obs.columns:
@@ -3607,7 +3624,8 @@ def _build_differential_gene_detail_payload(
         expression_cache = _get_expression_cache(app, meta, modality=modality)
         adata = expression_cache["adata"]
         var_names = expression_cache["var_names"]
-    resolved_gene = _resolve_gene_name(var_names, gene)
+    resolved_gene = (_resolve_gene_name(var_names, gene) if modality == "grn" and _has_edge_level_h5ad(meta)
+                     else _resolve_expression_gene(expression_cache, gene))
     ragged_only = False
     if not resolved_gene and modality == "grn":
         # The per-cell-state GRN sidecar and the per-metacell ragged store hold DIFFERENT
@@ -3766,7 +3784,7 @@ def _validate_differential_request(meta: Dict, payload: DifferentialSettings) ->
     if comparison_type not in {"cells", "pseudobulk"}:
         raise HTTPException(status_code=400, detail="Comparison Type must be either 'cells' or 'pseudobulk'.")
     upload_profile = dict((meta.get("differential_options") or {}).get("upload_profile") or pipeline_mod._upload_profile(meta))
-    pseudobulk_allowed = bool(upload_profile.get("single_h5ad") or upload_profile.get("total_files", 0) >= 4
+    pseudobulk_allowed = bool(upload_profile.get("single_h5ad") or upload_profile.get("multiple_h5ad") or upload_profile.get("total_files", 0) >= 4
                              or len(set(group1_samples + group2_samples)) > 5)
     if comparison_type == "pseudobulk" and not pseudobulk_allowed:
         comparison_type = "cells"
@@ -4224,7 +4242,8 @@ def _chat_genes_in_question(question: str, cache: Dict[str, Any]) -> List[str]:
     dataset holds a gene of that name.
     """
     index = {}
-    for name in cache.get("var_names", []):
+    from .feature_lookup import expression_lookup
+    for name in expression_lookup(cache).suggestions:
         index.setdefault(str(name).lower(), str(name))
     out: List[str] = []
     for token in re.findall(r"[A-Za-z0-9_.\-]{3,}", str(question or "")):
@@ -4244,12 +4263,13 @@ def _chat_read_question(question: str, cache: Dict[str, Any], meta: Dict) -> Dic
     data, so it cannot invent a number: it chooses the reading, and the executors
     below compute the answer from the job's own files.
     """
-    reading = gnet.read_regulatory_question(question, [s for s, _ in _chat_states_by_size(cache)],
-                                            cache.get("var_names", []))
+    from .feature_lookup import expression_lookup
+    gene_names = expression_lookup(cache).suggestions
+    reading = gnet.read_regulatory_question(question, [s for s, _ in _chat_states_by_size(cache)], gene_names)
     if reading is not None:
         return reading
     from .chat_service import read_question
-    local=read_question(question,[s for s,_ in _chat_states_by_size(cache)],cache.get('var_names',[]),cache['adata'].obs.columns)
+    local=read_question(question,[s for s,_ in _chat_states_by_size(cache)],gene_names,cache['adata'].obs.columns)
     if local is not None:return local
     contrast = _chat_contrast(meta)
     payload = json.dumps({
@@ -4511,12 +4531,12 @@ def _names_have_pipe(cache: Dict[str, Any]) -> bool:
 
 def _gene_rows(cache: Dict[str, Any], wanted: List[str]) -> tuple:
     """Row index of each requested gene, and the ones this dataset lacks."""
-    var_names = cache["var_names"]
-    index = {str(name): i for i, name in enumerate(var_names)}
-    upper = {str(name).upper(): i for i, name in enumerate(var_names)}
+    from .feature_lookup import expression_lookup
+    lookup = expression_lookup(cache)
     rows, labels, missing = [], [], []
     for gene in wanted:
-        row = index.get(gene, upper.get(gene.upper()))
+        resolved = lookup.resolve(gene)
+        row = lookup.rows.get(resolved)
         if row is None:
             missing.append(gene)
         else:
@@ -4915,6 +4935,7 @@ def _build_expression_payload(
     violin_limit: int = 10,
     x_field: str = "",
     y_field: str = "",
+    view: str = "all",
 ) -> Dict:
     """`violin_limit` is how many cell states the violin plot draws.
 
@@ -4945,7 +4966,7 @@ def _build_expression_payload(
     if _ax is not None and _ay is not None:
         umap_x, umap_y = _ax, _ay
     display_mask = _apply_display_filter_mask(cache_entry, display_filters)
-    resolved_gene = _resolve_gene_name(cache_entry["var_names"], gene)
+    resolved_gene = _resolve_expression_gene(cache_entry, gene)
     if not resolved_gene and not str(gene or "").strip() and len(cache_entry["var_names"]):
         resolved_gene = str(cache_entry["var_names"][0])
     if not resolved_gene:
@@ -4958,13 +4979,13 @@ def _build_expression_payload(
 
     values = _flatten_expr(adata[:, resolved_gene].X)
     global_min, global_max = _expression_global_range(values)
-    scatter_data = [
+    scatter_data = [] if view != "all" else [
         {"population": pop, "value": float(val)}
         for pop, val, keep in zip(populations, values, display_mask)
         if keep and _is_finite_number(val)
     ]
 
-    umap_points = [
+    umap_points = [] if view == "violin" else [
         {
             "barcode": barcode,
             "population": pop,
@@ -4978,7 +4999,7 @@ def _build_expression_payload(
     umap_points.sort(key=lambda point: (point["value"], point["population"], point["barcode"]))
 
     violin_data = []
-    for pop in sorted(pd.unique(populations)):
+    for pop in (sorted(pd.unique(populations)) if view != "umap" else []):
         mask = (populations == pop) & display_mask
         pop_values = values[mask].astype(float)
         finite_values = pop_values[np.isfinite(pop_values)]
@@ -4993,8 +5014,11 @@ def _build_expression_payload(
         )
     violin_data = sorted(violin_data, key=lambda x: x["mean"], reverse=True)[:violin_limit]
 
+    lookup = cache_entry["feature_lookup"]
+    shown_gene = (str(gene).strip() if str(gene).strip() in lookup.suggestions
+                  and str(gene).strip() not in lookup.rows else resolved_gene)
     return {
-        "gene": resolved_gene,
+        "gene": shown_gene,
         "requested_gene": gene,
         "resolved_gene": resolved_gene,
         "source": "query",
@@ -5010,10 +5034,12 @@ def _build_expression_payload(
 
 def _build_gene_suggestions_payload(app: FastAPI, meta: Dict, modality: str = "rna") -> Dict:
     cache_entry = _get_expression_cache(app, meta, modality=modality)
-    genes = [str(gene) for gene in cache_entry["var_names"].tolist()]
+    from .feature_lookup import expression_lookup
+    lookup = expression_lookup(cache_entry)
     modality_info = _modality_definition(meta, modality)
     return {
-        "genes": genes,
+        "genes": lookup.display_names,
+        "keys": lookup.suggestions,
         "modality": _normalize_modality_id(modality),
         "feature_label": str(modality_info.get("feature_label") or "gene"),
     }
@@ -5953,13 +5979,31 @@ def create_app(test_config: dict | None = None) -> FastAPI:
 
         # Inspect the HDF5 layout before creating a job or copying upload bytes.
         from altanalyze3.components.cellHarmony.input_validation import validate_10x_h5
+        from altanalyze3.components.cellHarmony.mapped_h5ad import inspect_h5ad, validate_batch, needs_disk_backed_import
+        suffixes = {Path(str(upload.filename or '')).suffix.lower() for upload in files}
+        if '.h5ad' in suffixes and len(suffixes) > 1:
+            raise HTTPException(status_code=400, detail='Upload H5AD files together, or 10x H5 files together; mixing the two formats is not supported.')
+        input_headers = []
         for upload in files:
+            if not upload.filename or not _allowed_file(app, upload.filename):
+                raise HTTPException(status_code=400, detail=f'Unsupported file: {upload.filename}.')
+            if str(upload.filename).lower().endswith('.h5ad'):
+                try:
+                    input_headers.append(inspect_h5ad(upload.file))
+                except (ValueError, OSError, KeyError) as exc:
+                    raise HTTPException(status_code=400, detail=f'{upload.filename}: {exc}') from exc
+                finally:
+                    await upload.seek(0)
             if str(upload.filename or "").lower().endswith(".h5"):
                 try:
                     validate_10x_h5(upload.file, upload.filename)
                 except ValueError as exc:
                     raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+        try:
+            validate_batch(input_headers)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         effective_ambient_option = ambient_option if ambient_option is not None else soupx_option
         metadata = store.create_job(species, reference, effective_ambient_option, files=[])
         job_id = metadata["job_id"]
@@ -5984,12 +6028,34 @@ def create_app(test_config: dict | None = None) -> FastAPI:
                 raise HTTPException(status_code=400, detail=f"Duplicate sample name '{sample}' detected.")
             used_names.add(dest_name)
             dest_path = _require_within(uploads_dir / dest_name, uploads_dir, "Upload destination")
-            content = await upload.read()
-            dest_path.write_bytes(content)
+            with dest_path.open('wb') as destination:
+                while content := await upload.read(8 * 1024 * 1024):
+                    destination.write(content)
             records.append({"sample_name": sample, "filename": dest_name, "size": dest_path.stat().st_size})
 
-        store.update_job(job_id, files=records, message="Upload complete. Configure QC to proceed.")
-        return JSONResponse({"job_id": job_id, "status": "uploaded"})
+        memory_profile = {}
+        message = 'Upload complete. Configure QC to proceed.'
+        if input_headers:
+            cells = sum(h['cells'] for h in input_headers)
+            matrix_size = sum(h['matrix_bytes'] for h in input_headers)
+            bounded = needs_disk_backed_import(input_headers)
+            # Planning estimate only: X plus QC/normalization copies, before imputation.
+            estimated_peak = matrix_size + 2 * sum(h['x_bytes'] for h in input_headers)
+            memory_profile = {'cells': cells, 'matrix_bytes': matrix_size,
+                              'bounded_h5ad': bounded, 'files': input_headers,
+                              'estimated_in_memory_peak_bytes': estimated_peak,
+                              'estimate_scope': 'rough unbounded import/QC estimate; not a peak guarantee'}
+            if bounded:
+                message = (f'Upload complete: {cells:,} cells; expression arrays occupy approximately '
+                           f'{matrix_size / 1024**3:.1f} GiB uncompressed. This analysis will use '
+                           'disk-backed processing. Peak memory also depends on QC, ambient correction '
+                           'and selected modalities; the server will stop the analysis if memory becomes unsafe.')
+                if estimated_peak >= cfg.get('TOTAL_MEMORY_LIMIT_GIB', 27) * 1024**3:
+                    message += (' The estimated in-memory import/QC requirement exceeds the server analysis '
+                                'budget; disk-backed processing is required and completion is not guaranteed.')
+        store.update_job(job_id, files=records, input_memory=memory_profile, message=message)
+        return JSONResponse({"job_id": job_id, "status": "uploaded", 'message': message,
+                             'input_memory': memory_profile})
 
     @app.post("/api/jobs/{job_id}/qc")
     async def update_qc(job_id: str, qc: QCSettings):
@@ -6174,6 +6240,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         coords: str = Query(""),
         x_field: str = Query(""),
         y_field: str = Query(""),
+        compact: bool = Query(False),
     ):
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
@@ -6181,10 +6248,11 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         meta = store.get_job(job_id)
         display_filters = _display_filter_specs(filter1_field, filter1_values, filter2_field, filter2_values)
         try:
-            return JSONResponse(_build_umap_payload(
+            payload = _build_umap_payload(
                 app, meta, modality=modality, display_filters=display_filters,
                 color_by=color_by, coords_key=coords,
-                x_field=x_field, y_field=y_field))
+                x_field=x_field, y_field=y_field)
+            return JSONResponse(compact_plot_payload(payload) if compact is True else payload)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
         except ValueError as exc:
@@ -6202,6 +6270,8 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         violin_limit: int = Query(10),
         x_field: str = Query(""),
         y_field: str = Query(""),
+        compact: bool = Query(False),
+        view: str = Query("all", pattern="^(all|umap|violin)$"),
     ):
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
@@ -6209,13 +6279,19 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         meta = store.get_job(job_id)
         display_filters = _display_filter_specs(filter1_field, filter1_values, filter2_field, filter2_values)
         try:
-            return JSONResponse(_build_expression_payload(
-                app, meta, gene, modality=modality, display_filters=display_filters,
-                x_field=str(x_field or ""), y_field=str(y_field or ""),
-                # Coerced defensively: this route is also called directly by
-                # the scALABLE viewer's wrapper, where an unpassed argument
-                # arrives as a FastAPI Query object rather than an int.
-                violin_limit=_as_int(violin_limit, 10, 1, 80)))
+            # Matrix access/cache locks and JSON serialization must not block
+            # the event loop while other visitors poll or interact.
+            def build_response():
+                payload = _build_expression_payload(
+                    app, meta, gene, modality=modality, display_filters=display_filters,
+                    x_field=str(x_field or ""), y_field=str(y_field or ""),
+                    # Coerced defensively: this route is also called directly by
+                    # the scALABLE viewer's wrapper, where an unpassed argument
+                    # arrives as a FastAPI Query object rather than an int.
+                    violin_limit=_as_int(violin_limit, 10, 1, 80),
+                    view=view if isinstance(view, str) else "all")
+                return JSONResponse(compact_plot_payload(payload) if compact is True else payload)
+            return await run_in_threadpool(build_response)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
         except KeyError as exc:

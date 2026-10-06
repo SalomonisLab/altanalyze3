@@ -28,6 +28,11 @@ The compose file joins the `lungmap_default` network, as scALABLE-web's does. Th
 Put `./jobs` on real disk. Uploads and results land there. The build ignores that
 directory, so a rebuild never copies old jobs into the image.
 
+Rebuild the Discover image for the disk-import handoff and QC/UMAP status fixes. No new
+environment variable is required. Multiple H5AD uploads require AnnData 0.12 or newer,
+already specified in `requirements.docker.txt`. The 1 GiB import trigger refers to
+uncompressed arrays, separately from the 10,000-cell Explore-bundle threshold.
+
 If port 8007 is taken on the host, change `127.0.0.1:8007:8000` in the compose file and use
 the new port below.
 
@@ -85,6 +90,33 @@ A first job on the server is the first run of this image. Report the job's
 
 Each new upload already deletes finished jobs older than 8 hours. The purge command is for
 a schedule, for example a daily cron entry; add `--dry-run` to list what it would remove.
+
+### Normalized inputs and accelerated UMAP update
+
+Rebuild the Discover image to include the normalized-input handoff fix, the UMAP fitting
+control and `clustering/{umap_fit,umap_input,accelerated_umap}.py`. No additional dependency
+or environment variable is required. Discover defaults to a 15-neighbor correlation
+fit on the complete final MarkerFinder panel, targeting 30,000 landmarks and at least
+200 cells per cluster (all cells from smaller clusters). Additional places are allocated
+proportionally and sampled within clusters; the budget expands if needed for minimum
+coverage. The Run tab also offers the original full feature
+fitting. ICGS3's API and CLI defaults remain full fitting. Existing completed jobs retain
+their saved coordinates; rerunning a job uses its saved choice, or accelerated fitting if
+it predates this option. The failed normalized-input jobs can be rerun from their uploads.
+The saved UI/API `landmark` choice now uses feature landmarks directly. Rebuild the image
+and restart Discover to apply the profile and sampling update. No new dependency,
+environment setting or result migration is needed; existing coordinates remain saved.
+
+Include the BioMarkers identifier fix in `clustering/ICGS.py` and the packaged
+`clustering/biomarkers/{Hs,Mm}/Ensembl-BioMarkers.txt.gz` catalogs. Ensembl-indexed uploads
+now use the catalog's Ensembl column, with version suffixes normalized for lookup;
+symbol-indexed uploads continue to use symbols. Unknown prediction labels use lowercase
+`c18`. Existing jobs retain their coordinates and raw categories, with abbreviated UMAP
+and filter-menu text; rerun to recompute biological predictions and gene-symbol aliases.
+Include `cellHarmony/webapp/feature_lookup.py` and its shared app integration. Explore,
+gene-set views and Chat accept the uploaded symbol aliases and Ensembl IDs without
+renaming expression features. The browser offers one readable suggestion per feature;
+all primary IDs remain accepted. Ambiguous symbols require an exact feature ID.
 
 ## 7. Settings
 

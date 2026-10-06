@@ -70,6 +70,8 @@ LAYER_LABELS = {CLUSTER_KEY: "Clusters", PREDICTION_KEY: "Predicted cell states"
 LOUVAIN_CUTOFF = 10000
 PRE_PAGERANK_CELLS = 10000
 PAGERANK_CELLS = 5000
+# Saved UI/API value. Accelerated retains the complete marker feature panel.
+DEFAULT_UMAP_FIT_MODE = "landmark"
 # What a run exports (Nathan, 2026-10-05). "minimal", the default: the final combined h5ad and
 # scALABLE's MarkerFinder output set, with ICGS3 --minimal-outputs and no ICGS3 h5ad; the ICGS3
 # input and ambient raw matrices are staged in a temporary folder removed after use. "full":
@@ -211,7 +213,8 @@ def _run_fastcomm_layer(combined: ad.AnnData, combined_h5ad_path: Path, state_ke
     result = run_fastcomm(FastCommParams(
         adata=combined, output=scores_path, response_matrix=None, lr_sources=("CellChatDB",),
         state_pair_output=pairs_path, state_expression_output=state_expression_path,
-        state_key=state_key, species=species, min_cells=5, min_lr_expression_score=0.2,
+        state_key=state_key, species=species, gene_symbol_col="gene_symbols",
+        min_cells=5, min_lr_expression_score=0.2,
         max_lr_candidates_per_state_pair=5, include_self_edges=False,
     ))
     significant_path = fastcomm_dir / "significant_interactions.tsv"
@@ -227,6 +230,7 @@ def _run_fastcomm_layer(combined: ad.AnnData, combined_h5ad_path: Path, state_ke
         split_summary = run_fastcomm_benchmark(FastCommBenchmarkParams(
             h5ad=combined_h5ad_path, output_dir=fastcomm_dir / "per_sample", state_key=state_key,
             split_key=sample_key, response_matrix=None, lr_sources=["CellChatDB"], species=species,
+            gene_symbol_col="gene_symbols",
             min_cells=5, min_lr_expression_score=0.2, max_lr_candidates_per_state_pair=5,
             include_self_edges=False,
         ))
@@ -245,6 +249,33 @@ def _run_fastcomm_layer(combined: ad.AnnData, combined_h5ad_path: Path, state_ke
     return analysis, paths
 
 
+def attach_serving_gene_symbols(adata: ad.AnnData) -> Dict[str, object]:
+    """Use supplied aliases for serving/communication after clustering is finished.
+
+    Native feature IDs, their order and expression are preserved. A gene_symbols
+    field that just repeats Ensembl IDs must not hide a supplied feature_name.
+    """
+    native = adata.var_names.astype(str)
+    symbols = pd.Series(native, index=adata.var_names, dtype=object)
+    sources = pd.Series("var_names", index=adata.var_names, dtype=object)
+    unresolved = pd.Series(True, index=adata.var_names)
+    for column in ("gene_symbols", "gene_symbol", "feature_name", "Gene", "Symbol"):
+        if column not in adata.var:
+            continue
+        values = adata.var[column].astype(object)
+        valid = values.notna() & values.astype(str).str.strip().ne("")
+        valid &= ~values.astype(str).str.upper().str.fullmatch(r"ENS[A-Z]*G\d+(?:\.\d+)?")
+        use = unresolved & valid
+        symbols.loc[use] = values.loc[use].astype(str)
+        sources.loc[use] = column
+        unresolved.loc[use] = False
+    adata.var["gene_symbols"] = symbols.values
+    return {"primary_ensembl_ids": int(pd.Series(native).str.upper().str.fullmatch(
+                r"ENS[A-Z]*G\d+(?:\.\d+)?").sum()),
+            "symbol_sources": {str(k): int(v) for k, v in sources.value_counts().items()},
+            "native_feature_ids_preserved": True}
+
+
 def run_discover_pipeline(job_id: str, store: JobStore, *, h5ad_compression: Optional[str] = "lzf") -> Dict[str, Path]:
     meta = store.get_job(job_id)
     species = str(meta.get("species") or "").strip().lower()
@@ -258,6 +289,16 @@ def run_discover_pipeline(job_id: str, store: JobStore, *, h5ad_compression: Opt
     outputs_dir = store.outputs_dir(job_id)
     outputs_dir.mkdir(parents=True, exist_ok=True)
     h5_files, h5ad_file = web_pipeline._split_uploads(meta["files"], uploads_dir)
+    bounded_h5ad = False
+    if h5ad_file:
+        from altanalyze3.components.cellHarmony.mapped_h5ad import (
+            inspect_h5ad, merge_h5ads, needs_disk_backed_import,
+        )
+        sources = [path for path, _ in h5ad_file] if isinstance(h5ad_file, list) else [h5ad_file]
+        bounded_h5ad = needs_disk_backed_import([inspect_h5ad(path) for path in sources])
+        if isinstance(h5ad_file, list):
+            store.append_log(job_id, "Merging H5AD uploads on disk, retaining the union of features and upload identities.")
+            h5ad_file = str(merge_h5ads(h5ad_file, outputs_dir / ".h5ad_work"))
     qc = meta.get("qc", {})
     min_genes = int(qc.get("min_genes", 500))
     min_cells = int(qc.get("min_cells", 0))
@@ -298,12 +339,14 @@ def run_discover_pipeline(job_id: str, store: JobStore, *, h5ad_compression: Opt
         concat_batch_size=1,
         stream_10x_inputs=True,
         return_adata=True,
+        bounded_h5ad=bounded_h5ad,
     )
     n_qc_cells, n_qc_genes = int(qc_adata.n_obs), int(qc_adata.n_vars)
     if n_qc_cells < 2:
         raise ValueError(f"QC retained {n_qc_cells} cells; ICGS3 needs more. Lower the QC thresholds.")
 
-    # ICGS3 reads counts only. The ambient raw matrix is stored apart and re-attached to the
+    # ICGS3 reads counts when available, otherwise normalized X with input_normalized=True.
+    # The ambient raw matrix is stored apart and re-attached to the
     # combined h5ad, as scALABLE-web keeps it, without ICGS3 ever loading it.
     exports = export_mode()
     minimal = exports == "minimal"
@@ -331,6 +374,15 @@ def run_discover_pipeline(job_id: str, store: JobStore, *, h5ad_compression: Opt
         output_dir=str(icgs3_dir),
         modality="rna",
         normalization="auto" if holds_counts else "none",
+        input_normalized=not holds_counts,
+        # The interface's Max K is the existing target NMF rank override.
+        # Unset retains ICGS3's automatic rank selection.
+        rank=qc.get("max_k"),
+        # The paired 69-state comparison favors feature/correlation landmarks
+        # over PCA for separation and original-expression neighbor preservation.
+        # These controls apply only to the final embedding, not clustering.
+        umap_fit_mode=qc.get("umap_fit_mode", DEFAULT_UMAP_FIT_MODE),
+        umap_n_neighbors=15 if qc.get("umap_fit_mode", DEFAULT_UMAP_FIT_MODE) == "landmark" else 0,
         # QC ran once, above, with the user's thresholds. Zero/None disables each filter in
         # ICGS.apply_qc, so ICGS3 removes no further cell or gene.
         min_genes=0,
@@ -351,6 +403,10 @@ def run_discover_pipeline(job_id: str, store: JobStore, *, h5ad_compression: Opt
     store.append_log(job_id, "Running ICGS3 unsupervised clustering.")
     store.append_log(job_id, f"[params] icgs3 module=altanalyze3.components.clustering.ICGS.run_icgs3 "
                              f"species={config.species} normalization={config.normalization} "
+                             f"nmf_k={config.rank if config.rank is not None else 'auto'} "
+                             f"input_normalized={config.input_normalized} umap_fit_mode={config.umap_fit_mode} "
+                             f"umap_fit_cells={config.umap_fit_cells} "
+                             f"umap_transform_batch_cells={config.umap_transform_batch_cells} "
                              "qc=disabled(applied upstream) export_marker_networks=True "
                              f"louvain_downsample_cutoff={LOUVAIN_CUTOFF} pre_pagerank_cells={PRE_PAGERANK_CELLS} "
                              f"pagerank_cells={PAGERANK_CELLS} "
@@ -368,6 +424,7 @@ def run_discover_pipeline(job_id: str, store: JobStore, *, h5ad_compression: Opt
                         index=result.adata.obs_names.astype(str), columns=["umap_0", "umap_1"])
     cluster_order = [str(v) for v in (result.adata.uns.get("lineage_order") or [])]
     heatmap = dict(result.adata.uns.get("icgs3_heatmap_outputs") or {})
+    umap_details = dict(result.adata.uns.get("icgs3_umap") or {})
     # The gene universe ICGS3's BioMarkers enrichment tested against (ICGS.biomarker_enrichment).
     biomarker_background = len({str(g).upper() for g in result.adata.var_names})
     icgs3_logs = sorted((icgs3_dir / "logs").glob("icgs3_*.log"))
@@ -393,6 +450,8 @@ def run_discover_pipeline(job_id: str, store: JobStore, *, h5ad_compression: Opt
         raise RuntimeError(f"{len(missing_cells)} ICGS3 barcodes are absent from the QC matrix, "
                            f"e.g. {list(missing_cells[:3])}")
     combined = combined[clusters.index].copy()
+    gene_identifier_info = attach_serving_gene_symbols(combined)
+    store.append_log(job_id, f"[gene identifiers] {json.dumps(gene_identifier_info, sort_keys=True)}")
     if holds_counts:
         combined.layers["counts"] = combined.X.copy()
         cellHarmony_lite.normalize_adata(combined)
@@ -411,11 +470,13 @@ def run_discover_pipeline(job_id: str, store: JobStore, *, h5ad_compression: Opt
     combined.obs[PREDICTION_KEY] = pd.Categorical(clusters["ICGS3_cluster"].astype(str).map(names).values,
                                                   categories=name_order, ordered=True)
     combined.obsm["X_umap"] = umap.loc[combined.obs_names, ["umap_0", "umap_1"]].to_numpy()
+    combined.uns["icgs3_umap"] = umap_details
     combined.uns["lineage_order"] = name_order       # the default layer's state order
     combined.uns["scalable_discover"] = {"default_layer": DEFAULT_LAYER, "cluster_key": CLUSTER_KEY,
                                          "prediction_key": PREDICTION_KEY,
                                          "icgs3_output_dir": str(icgs3_dir),
-                                         "qc_cells": n_qc_cells, "clustered_cells": n_clustered}
+                                         "qc_cells": n_qc_cells, "clustered_cells": n_clustered,
+                                         "gene_identifiers": gene_identifier_info}
     combined_h5ad_path = outputs_dir / "combined_with_umap_and_markers.h5ad"
     web_pipeline.approx_mod.ensure_h5ad_compat_for_write(combined)
     combined.write_h5ad(combined_h5ad_path, compression=compression)
@@ -525,13 +586,18 @@ def run_discover_pipeline(job_id: str, store: JobStore, *, h5ad_compression: Opt
                                          "Under minimal exports the input path was a temporary file.",
                   "non_default_parameters": {"min_genes": 0, "min_cells": 0, "min_counts": 0,
                                              "mito_percent": None, "normalization": config.normalization,
+                                             "input_normalized": config.input_normalized,
+                                             "rank": config.rank,
+                                             "umap_fit_mode": config.umap_fit_mode,
+                                             "umap_fit_cells": config.umap_fit_cells,
+                                             "umap_transform_batch_cells": config.umap_transform_batch_cells,
                                              "louvain_downsample_cutoff": LOUVAIN_CUTOFF,
                                              "pre_pagerank_cells": PRE_PAGERANK_CELLS,
                                              "pagerank_cells": PAGERANK_CELLS,
                                              "species": config.species, "export_marker_networks": True,
                                              "marker_network_top_n": 1000, "marker_network_jobs": network_jobs,
                                              "minimal_outputs": minimal, "write_h5ad": not minimal},
-                  "cells_clustered": n_clustered, "clusters": cluster_order},
+                  "cells_clustered": n_clustered, "clusters": cluster_order, "umap": umap_details},
         "cell_state_layers": {CLUSTER_KEY: cluster_order, PREDICTION_KEY: name_order,
                               "predicted_layer_marker_tables": "copies of ICGS3's MarkerFinder tables with "
                                                                "cluster ids replaced by predicted names"},
@@ -562,6 +628,7 @@ def run_discover_pipeline(job_id: str, store: JobStore, *, h5ad_compression: Opt
         "unassigned_cells": n_qc_cells - n_clustered,
         "log": str(icgs3_logs[-1]) if icgs3_logs else None, "cli_equivalent": cli_line,
         "parameters_json": str(parameters_path), "goelite": goelite,
+        "umap": umap_details,
     }
     # The default layer's values sit at the top level of the job, where scALABLE's readers
     # look. The alternative layer's values sit in cell_state_layers; the app swaps them in

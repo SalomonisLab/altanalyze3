@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -47,6 +48,12 @@ class IntegrityTests(unittest.TestCase):
         gate.validate_contract(self.contract)
         gate.validate_tables(self.x, self.y, self.contract)
         gate.validate_provenance(self.provenance, self.contract)
+
+    def test_full_metacell_roster_check_finishes_without_quadratic_work(self):
+        ids = [f'metacell_{i}' for i in range(230057)]
+        started = time.monotonic()
+        gate.exact_ids(ids, list(ids), 'Full metacell roster')
+        self.assertLess(time.monotonic() - started, 5.0)
 
     def test_reduced_lipid_panel_rejected(self):
         with self.assertRaisesRegex(gate.IntegrityError, 'L3'):
@@ -156,6 +163,36 @@ class IntegrityTests(unittest.TestCase):
         with self.assertRaisesRegex(gate.IntegrityError, 'lacks its user answer'):
             gate.require_review(state, 'fixture')
 
+    def test_approved_D071_scope_retains_all_features_and_other_samples(self):
+        c = gate.read_json(gate.CONTRACT)
+        s = gate.read_json(gate.STATE)
+        result = gate.candidate_contract(c, {'approved_scope_change': s['approved_scope_change']}, s)
+        self.assertEqual(len(result['samples']), 45)
+        self.assertEqual(result['lipids'], c['lipids'])
+        self.assertEqual(result['genes'], c['genes'])
+        self.assertEqual(result['samples'], [k for k in c['samples'] if not k.startswith('D071_')])
+        self.assertEqual(len(c['samples']), 50)
+
+    def test_scope_cannot_add_another_exclusion_or_change_panel(self):
+        c = gate.read_json(gate.CONTRACT)
+        s = gate.read_json(gate.STATE)
+        for key, value in [('excluded_profiles', s['approved_scope_change']['excluded_profiles'] + ['D018_MIC']),
+                           ('required_lipid_outputs', 47), ('required_RNA_inputs', 1302)]:
+            altered = copy.deepcopy(s['approved_scope_change']); altered[key] = value
+            with self.subTest(key=key), self.assertRaises(gate.IntegrityError):
+                gate.candidate_contract(c, {'approved_scope_change': altered}, s)
+
+    def test_phase_approval_cannot_authorize_pending_abundance_calibration(self):
+        s = self.synthetic_review()
+        s['approval']['analysis_phase'] = 'native_fold_validation'
+        s['questions'] = [{'status': 'pending', 'question': 'Missing MS1 identification',
+                           'required_for': ['MS1_abundance']}]
+        gate.require_review(s, 'fixture', 'native_fold_validation')
+        with self.assertRaisesRegex(gate.IntegrityError, 'Missing MS1 identification'):
+            gate.require_review(s, 'fixture', 'MS1_abundance')
+        with self.assertRaisesRegex(gate.IntegrityError, 'does not cover'):
+            gate.require_review(s, 'fixture', 'unapproved_other_analysis')
+
     def test_missing_state_fails_closed(self):
         with patch.object(gate, 'STATE', self.root/'missing-state.json'):
             with self.assertRaisesRegex(gate.IntegrityError, 'Missing or unreadable'):
@@ -206,7 +243,7 @@ class RealWorkflowGuards(unittest.TestCase):
         c = gate.read_json(gate.CONTRACT)
         gate.validate_contract(c)
         self.assertEqual((len(c['samples']),len(c['lipids']),len(c['genes'])), (50,202,1303))
-        with self.assertRaisesRegex(gate.IntegrityError, 'D071'):
+        with self.assertRaisesRegex(gate.IntegrityError, 'ANALYSIS BLOCKED'):
             gate.require_review(gate.read_json(gate.STATE), '')
 
     def test_actual_reduced_candidate_is_rejected(self):

@@ -71,7 +71,8 @@ def test_network_missing_folds_stay_missing(tmp_path, monkeypatch):
         {'population':'A','gene':'UP','log2fc':2.,'fdr':.01,'pval':.001},
         {'population':'A','gene':'DOWN','log2fc':-2.,'fdr':.01,'pval':.001}]))
     monkeypatch.setattr(W, '_get_differential_cache_entry',lambda *a:{'network_tables':{}})
-    p = W._build_differential_network_payload(None,{'job_id':'demo'},'A')
+    app = SimpleNamespace(state=SimpleNamespace(differential_cache={}))
+    p = W._build_differential_network_payload(app,{'job_id':'demo'},'A')
     values = {e['data']['id']:e['data']['log2fc'] for e in p['elements'] if 'source' not in e['data']}
     assert values == {'UP':2.,'UNKNOWN':None,'DOWN':-2.}
     assert W._render_network_pdf(p,'network').read(4) == b'%PDF'

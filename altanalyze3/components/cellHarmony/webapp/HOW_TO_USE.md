@@ -17,16 +17,24 @@ differential analysis: https://vimeo.com/1179728118/c5e0c39d24
 | --- | --- |
 | File types | `.h5` (Cell Ranger) or `.h5ad` (AnnData) |
 | Files per job | up to 7, one per sample |
-| Size per upload request | up to 1 GiB |
+| Size per upload request | set by the deployment’s reverse proxy |
 | Species and reference | one per job |
 
 The pipeline keeps compatible `obs` columns of an uploaded `.h5ad`. Explore filters,
 Differential cell-state selection and Differential group selection reuse them.
+Multiple H5AD files are merged on disk, retaining the union of features. Each upload
+has a separate `scalable_upload` value; original sample/donor annotations remain
+available under **Group values from**. Supply consistent expression layers, raw
+slots and preprocessing across the files. Do not mix H5AD and 10x H5 in one job.
+Large uploads display their uncompressed matrix size and use disk-backed processing.
+If memory reaches the server safety limit, the job stops with an explanation;
+its uploaded files are retained under the normal job-retention policy.
 
 | Upload | Group differential available |
 | --- | --- |
 | two or more `.h5` files | yes, samples form the groups |
 | one `.h5ad` with two or more group values in `obs` | yes, an `obs` column forms the groups |
+| multiple `.h5ad` files | yes, upload names (`scalable_upload`) or an annotated `obs` column form the groups |
 | one `.h5` file | no |
 
 ## Run tab
@@ -197,7 +205,7 @@ button saves the pipeline's own heatmap PDF. A `Cell communication` network save
 
 ## Differential tab
 
-The tab works when the job has two or more `.h5` samples, or one `.h5ad` with a group column.
+The tab works when the job has two or more `.h5` or `.h5ad` samples, or one `.h5ad` with a group column.
 Otherwise it shows a message instead of the controls.
 
 ### Setup
@@ -211,7 +219,7 @@ Otherwise it shows a message instead of the controls.
 | `Group 1 (numerator)` | the case values |
 | `Group 2 (denominator)` | the control values |
 
-`pseudobulk` appears only for one `.h5ad` or four or more files. It needs at least 2 samples
+`pseudobulk` is available for H5AD inputs or four or more 10x files. It needs at least 2 samples
 per group within a cell state; a state with fewer is not tested and does not appear in the
 views. The test and the fold and p thresholds depend on the modality; the README section
 "The differential engine" lists them. The GRN modality tests TF-to-target edges, not TFs.

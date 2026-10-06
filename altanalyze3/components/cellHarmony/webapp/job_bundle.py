@@ -390,9 +390,11 @@ class JobBundleAnnData:
             shape = (tuple(int(v) for v in x.attrs["shape"]) if self._sparse
                      else tuple(int(v) for v in x.shape))
             x_dtype = np.dtype((x["data"] if self._sparse else x).dtype)
-        # THE STORE HOLDS FLOAT32. A float64 h5ad (the COVID atlas stores X as float64)
-        # would be served rounded, so it is refused and read as before.
-        if x_dtype != np.float32:
+        # RNA bundles deliberately use reduced precision for display, including
+        # float64-normalized ICGS3 outputs. Rejecting those sources reloads every
+        # expression value for each view when the matrix exceeds the cache budget.
+        # Analytical inputs and downloaded H5ADs retain their original precision.
+        if x_dtype != np.float32 and not (self.store_id == "rna" and x_dtype.kind == "f"):
             raise ValueError(f"{self.path} stores X as {x_dtype}; the bundle holds float32")
         self.var = var
         self.var_names = var.index

@@ -1,5 +1,9 @@
-/* scALABLE-discover page ground: the LungMAP site header colour, --lm-paper #fbf9f6
-   (LungMAP-net-refactor theme/css/tokens.css), in place of scALABLE-web's light blue
-   --bg #f4f7fb and its blue and green corner tints. */
-:root { --bg: #fbf9f6; }
+/* Preserve the original LungMAP tan (#fbf9f6) for an easy revert:
+   set --bg to var(--discover-bg-tan) to restore it. */
+:root {
+  --discover-bg-tan: #fbf9f6;
+  --discover-bg-green: #f3f8f2;
+  --discover-bg-red: #fcf3f3;
+  --bg: var(--discover-bg-tan);
+}
 body { background: var(--bg); }

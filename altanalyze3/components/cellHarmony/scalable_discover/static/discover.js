@@ -8,6 +8,58 @@ const GOELITE_MODE = "goelite_biomarkers";
 let discoverStatus = null;
 let discoverGoeliteStates = { key: "", states: [] };
 
+window.scalableQcOptions = function discoverQcOptions(form) {
+  const maxK = form.elements.max_k.value.trim();
+  return {
+    umap_fit_mode: form.elements.umap_fit_mode.value,
+    max_k: maxK === "" ? null : Number(maxK),
+  };
+};
+
+// Saved jobs retain their original category IDs for requests and filtering. Only
+// the label shown on their UMAP is abbreviated; new jobs write c18 directly.
+function discoverCellStateLabel(value) {
+  return String(value ?? "").replace(/^UNK[-_]+c?(\d+)$/i, "c$1");
+}
+
+(function cleanSavedUmapLabels() {
+  const original = renderPanelUmap;
+  renderPanelUmap = function discoverRenderPanelUmap(panelKey, data, mode, dotScale) {
+    const needsCleanup = ["query", "reference"].some((key) =>
+      (data[key] || []).some((point) => discoverCellStateLabel(point.population) !== point.population));
+    if (!needsCleanup) return original.apply(this, arguments);
+    const shown = { ...data };
+    for (const key of ["query", "reference"]) {
+      shown[key] = (data[key] || []).map((point) => {
+        const population = discoverCellStateLabel(point.population);
+        return population === point.population ? point : { ...point, population };
+      });
+    }
+    for (const key of ["population_order", "populations", "lineage_order"]) {
+      if (Array.isArray(data[key])) shown[key] = data[key].map(discoverCellStateLabel);
+    }
+    return original.call(this, panelKey, shown, mode, dotScale);
+  };
+})();
+
+// Keep each option's original value so filtering saved jobs still addresses the
+// original category. Abbreviate only the text that visitors see.
+(function cleanSavedMenuLabels() {
+  const original = populateSelectOptions;
+  populateSelectOptions = function discoverPopulateSelectOptions(selectEl) {
+    const result = original.apply(this, arguments);
+    for (const option of selectEl.options) option.textContent = discoverCellStateLabel(option.textContent);
+    return result;
+  };
+  const originalFilter = syncDisplayFilterValueOptions;
+  syncDisplayFilterValueOptions = function discoverSyncDisplayFilterValueOptions(panelKey, index) {
+    const result = originalFilter.apply(this, arguments);
+    const select = document.getElementById(panelElementId(panelKey, `filter${index}-values`));
+    for (const option of select.options) option.textContent = discoverCellStateLabel(option.textContent);
+    return result;
+  };
+})();
+
 // No reference atlas: the "UMAP broad" view draws the query over reference cells.
 (function adjustPlotTypes() {
   const broad = BASE_VISUALIZATION_MODES.findIndex((mode) => mode.value === "relative");

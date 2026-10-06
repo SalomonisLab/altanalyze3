@@ -345,29 +345,31 @@ class Rna2LipidBundle:
         obs_names = _clean_labels(adata.obs_names)
         if len(set(obs_names)) != len(obs_names):
             obs_names = _make_unique(obs_names)
-        adata_local = adata.copy()
-        adata_local.obs_names = pd.Index(obs_names)
+        prediction_index = pd.Index(obs_names)
 
-        if groupby is not None and groupby not in adata_local.obs.columns:
+        if groupby is not None and groupby not in adata.obs.columns:
             raise KeyError(f"Column {groupby!r} was not found in adata.obs")
 
-        gene_labels = self._extract_gene_labels(adata_local, gene_symbol_col=gene_symbol_col)
+        gene_labels = self._extract_gene_labels(adata, gene_symbol_col=gene_symbol_col)
         matched_positions = self._matched_model_positions(gene_labels)
         if not matched_positions:
             raise ValueError("No model genes were found in the provided AnnData")
 
         predictions: List[pd.DataFrame] = []
-        for start in range(0, adata_local.n_obs, chunk_size):
-            stop = min(start + chunk_size, adata_local.n_obs)
-            matrix = self._read_matrix_chunk(adata_local, start=start, stop=stop, layer=layer)
+        # Only row labels need cleaning. Copying AnnData also duplicates all RNA,
+        # counts, raw and other modalities before otherwise bounded prediction.
+        # Read the caller's matrices without modifying its annotations or values.
+        for start in range(0, adata.n_obs, chunk_size):
+            stop = min(start + chunk_size, adata.n_obs)
+            matrix = self._read_matrix_chunk(adata, start=start, stop=stop, layer=layer)
             aligned = self._align_matrix_chunk(matrix, matched_positions)
             predicted = self._predict_aligned_matrix(aligned)
-            predicted.index = adata_local.obs_names[start:stop]
+            predicted.index = prediction_index[start:stop]
             predictions.append(predicted)
 
         prediction_df = pd.concat(predictions, axis=0)
         summary = self._build_summary(
-            input_rows=int(adata_local.n_obs),
+            input_rows=int(adata.n_obs),
             matched_genes=len(matched_positions),
             input_kind="adata",
         )
@@ -375,7 +377,8 @@ class Rna2LipidBundle:
         summary["gene_symbol_source"] = gene_symbol_col or "var_names"
 
         if groupby is not None:
-            groups = adata_local.obs[groupby].astype(str).str.strip()
+            groups = adata.obs[groupby].astype(str).str.strip().copy()
+            groups.index = prediction_index
             prediction_df = prediction_df.groupby(groups, dropna=False).mean()
             prediction_df.index.name = groupby
             summary["groupby"] = groupby
@@ -441,17 +444,18 @@ class Rna2LipidBundle:
         n_rows = matrix.shape[0]
         aligned = np.zeros((n_rows, len(self.input_genes)), dtype=float)
 
+        # Slice the batch once. Repeated CSR column slicing scanned every stored
+        # entry once per model gene (over 1,300 scans for the lung model).
+        # Preserve source order and the original float64 duplicate-gene mean.
+        columns = [pos for _, positions in matched_positions for pos in positions]
+        selected = matrix[:, columns]
+        selected = selected.toarray() if sparse.issparse(selected) else np.asarray(selected)
+        offset = 0
         for model_idx, source_positions in matched_positions:
-            chunk = matrix[:, source_positions]
-            if sparse.issparse(chunk):
-                chunk = chunk.toarray()
-            else:
-                chunk = np.asarray(chunk)
-
-            if chunk.ndim == 1:
-                aligned[:, model_idx] = chunk.astype(float, copy=False)
-            else:
-                aligned[:, model_idx] = np.asarray(chunk, dtype=float).mean(axis=1)
+            width = len(source_positions)
+            chunk = selected[:, offset:offset + width]
+            aligned[:, model_idx] = np.asarray(chunk, dtype=float).mean(axis=1)
+            offset += width
 
         return aligned
 
@@ -483,9 +487,16 @@ class Rna2LipidBundle:
             columns=self.input_genes,
         )
 
-        # NEW LIPID-WISE ARCHITECTURE
+        # Evaluate the deployed linear regressors together, using their stored
+        # coefficients, intercepts and selected-gene order. No model is fitted
+        # or replaced. Unsupported estimators retain their predict() path.
+        linear_parameters = (self._lipidwise_linear_parameters()
+                             if self.architecture == "lipidwise" and np.isfinite(transformed).all() else None)
+        if linear_parameters is not None:
+            weights, intercepts = linear_parameters
+            predicted = np.asarray(transformed, dtype=float) @ weights + intercepts
 
-        if self.architecture == "lipidwise":
+        elif self.architecture == "lipidwise":
 
             if not self.models:
                 raise ValueError(
@@ -694,6 +705,49 @@ class Rna2LipidBundle:
             index=aligned_matrix.index,
             columns=self.output_lipids,
         )
+
+
+    def _lipidwise_linear_parameters(self):
+        """Pack supported stored predictors; malformed/other models use the original path.
+
+        Rebuild per batch so a caller updating a stored estimator cannot receive
+        stale coefficients. Both RNA and target scalers remain in the caller.
+        """
+        from sklearn.linear_model import ElasticNet, ElasticNetCV
+
+        if (len(set(self.input_genes)) != len(self.input_genes)
+                or len(set(self.output_lipids)) != len(self.output_lipids)):
+            return None
+        weights = np.zeros((len(self.input_genes), len(self.output_lipids)), dtype=float)
+        intercepts = np.empty(len(self.output_lipids), dtype=float)
+        for column, lipid in enumerate(self.output_lipids):
+            entry = self.models.get(lipid)
+            if not isinstance(entry, dict):
+                return None
+            estimator = entry.get("model")
+            # Exact classes: custom subclasses may implement different predict().
+            if type(estimator) not in (ElasticNet, ElasticNetCV):
+                return None
+            genes = entry.get("genes")
+            if not genes:
+                return None
+            genes = [str(gene).strip() for gene in genes]
+            if any(gene not in self._input_gene_to_index for gene in genes):
+                return None
+            if getattr(estimator, "n_features_in_", None) != len(genes):
+                return None
+            if hasattr(estimator, "feature_names_in_") and not np.array_equal(estimator.feature_names_in_, genes):
+                return None
+            coefficient = np.asarray(getattr(estimator, "coef_", None), dtype=float)
+            intercept = np.asarray(getattr(estimator, "intercept_", None), dtype=float)
+            if coefficient.shape != (len(genes),) or intercept.ndim != 0:
+                return None
+            if not np.isfinite(coefficient).all() or not np.isfinite(intercept):
+                return None
+            positions = [self._input_gene_to_index[gene] for gene in genes]
+            np.add.at(weights[:, column], positions, coefficient)
+            intercepts[column] = float(intercept)
+        return weights, intercepts
 
 
     def _build_summary(self, *, input_rows: int, matched_genes: int, input_kind: str) -> Dict[str, object]:

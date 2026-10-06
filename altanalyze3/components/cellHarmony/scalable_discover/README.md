@@ -11,7 +11,7 @@ Controls are described in [HOW_TO_USE.md](HOW_TO_USE.md).
 | Step | Module | Parameters |
 | --- | --- | --- |
 | Load, ambient RNA, QC, normalize | `cellHarmony.cellHarmony_lite.combine_and_align_h5` with `cellharmony_ref=None` | the user's QC values; scALABLE-web's other arguments |
-| Clustering | `clustering.ICGS.run_icgs3` | `ICGS3Config` defaults, except the five below |
+| Clustering | `clustering.ICGS.run_icgs3` | `ICGS3Config` defaults, except those below |
 | Marker networks | ICGS3's MarkerFinder heatmap call, `export_networks=True` | top 1000 markers per cluster |
 | Cell communication | `fastComm.api.run_fastcomm` | scALABLE-web's values: CellChatDB, `min_cells` 5, score 0.2, 5 pairs |
 | Serving bundle | `scalable_viewer.precompute`, at 10,000 cells or more | scALABLE-web's |
@@ -27,17 +27,57 @@ ICGS3 parameters that differ from `ICGS3Config`:
 | `pre_pagerank_cells` | 10,000 | step 1 keeps 10,000 cells |
 | `pagerank_cells` | 5,000 | step 2, PageRank, keeps 5,000 cells; these train NMF |
 | `export_marker_networks` | True | the MarkerNetwork view reads these networks |
-| `normalization` | `auto` (`none` when the upload holds no counts) | ICGS3 reads counts |
+| `normalization`, `input_normalized` | `auto`, False for counts; `none`, True for normalized X | preserve the input scale; avoid a second log transform |
+| `umap_fit_mode` | `landmark`, selectable `full` in the Run tab | feature-based accelerated embedding for Discover; ICGS3's default remains `full` |
 | `minimal_outputs`, `write_h5ad` | True, False under the default `minimal` exports | see Outputs |
 
 ICGS3's own downsampling defaults are 30,000 (cutoff), 120,000 (step 1) and 30,000 (step 2).
 The SVM still assigns every QC-retained cell, and UMAP and the heatmap cache hold every
 clustered cell.
 
+### Accelerated UMAP
+
+Discover defaults to correlation-distance UMAP on the complete ordered final MarkerFinder
+panel, with 15 neighbors, `min_dist=0.75` and seed 0. It does not reduce the panel to PCs.
+These settings apply only to the final embedding. The clustering graph, NMF,
+MarkerFinder, SVM and expression matrices retain their original methods and inputs.
+UMAP fits 30,000 representative cells.
+Landmarks include at least 200 cells from every final ICGS3 cluster with that many cells,
+and every cell from smaller clusters. Remaining places are allocated proportionally to
+the remaining cluster populations, with random sampling within each cluster. The budget
+expands above 30,000 if needed to preserve this minimum coverage for every cluster.
+All other clustered cells are transformed in blocks of at most 50,000 cells. Blocks are
+balanced to avoid a small tail triggering additional UMAP transform iterations. Smaller jobs
+fit every cell. This changes the embedding, while clustering, MarkerFinder and the complete
+cell and feature rosters stay unchanged. Choose `All cells` for the original full
+MarkerFinder-feature fit with correlation distance and 50 neighbors.
+
+The config, job metadata and `scalable_discover_parameters.json` record the requested and
+actual fitting modes, landmark count and fit/transform timings. The ordered feature panel
+and selected landmark barcodes are retained in `ICGS3/UMAPs/`, including minimal exports.
+ICGS3 API/CLI callers continue to use full fitting unless they explicitly request
+`umap_fit_mode="landmark"` (the original feature landmark method) or `pca_landmark`.
+The Scanpy graph/PCA fallback, used when no direct feature panel is available, keeps a full
+embedding and records that fallback in the log and metadata.
+
+The eight-setting, identical-input comparison on 60,164 cells and 69 clusters is recorded
+in `clustering/benchmarking/UMAP_SEPARATION_BENCHMARK.md`. The chosen feature fit gives
+better normalized centroid separation than the PCA alternatives while preserving more
+original-expression neighbors. These diagnostics do not establish biological accuracy.
+
 The QC-only call stops `combine_and_align_h5` before alignment. ICGS3 reads the
 QC-retained counts. The combined h5ad holds every QC-retained gene, normalized by
 `cellHarmony_lite.normalize_adata` as scALABLE-web does, for the cells ICGS3 placed in a
 cluster. ICGS3's own `icgs3_result.h5ad` holds only its protein-coding gene set.
+
+Discover and scALABLE-web share the H5AD disk-import decision: more than 100,000 cells,
+at least 1 GiB of uncompressed matrix data (`X`, layers, `raw`, `obsm`, `obsp`), or multiple
+H5AD uploads. Discover passes that decision to the same bounded import/QC implementation
+and merges multiple H5AD files on disk with the feature union and upload identities intact.
+Disk-backed import does not make all ICGS3 computations disk-backed. Explore bundles use
+their separate `CELLHARMONY_BUNDLE_MIN_CELLS` threshold (10,000 cells by default).
+Log-normalized inputs retain the existing skipped-QC behavior; the Run panel reports that
+count thresholds were not applied instead of waiting for nonexistent filter metrics.
 
 ### Cell annotations and layers
 
@@ -45,6 +85,19 @@ The combined h5ad carries ICGS3's columns without the `ICGS3_` prefix: `cell_sta
 `cluster`, `original_NMF_cluster`, `SVM_score`, `SVM_margin`. `cell_state_predicted` is ICGS3's
 GO-Elite BioMarkers label of each cluster, `<label>_c<n>`, one label per cluster; the pipeline
 refuses a run where two clusters share a label or one cluster has two.
+Unannotated predictions use lowercase `c18`; saved `UNK-c18`/`UNK_c18` labels are also
+abbreviated in UMAP and filter menus, retaining their original filter values.
+
+BioMarkers enrichment detects Ensembl primary IDs and looks up both the Ensembl and
+symbol columns in the packaged catalog. Ensembl version suffixes are normalized for
+lookup; native IDs and the entire enrichment background remain in the evidence files.
+Hypergeometric testing, BH correction and label selection remain unchanged. A catalog
+with no matching identifiers fails explicitly instead of silently labelling every cluster
+unknown. After clustering, supplied `feature_name`/symbol aliases populate `gene_symbols`
+for Explore and fastComm; native feature IDs and expression are preserved.
+The shared expression lookup accepts those supplied aliases, case variations and
+unversioned Ensembl IDs in Explore, gene-set views and Chat. Ambiguous aliases produce
+an explicit request for a primary ID instead of selecting or dropping a feature.
 
 Two cell-state layers drive every view. A viewer picks one under `Cell-state layer`; the
 choice rides in the `discover_layer` cookie and the server reads the job through it.

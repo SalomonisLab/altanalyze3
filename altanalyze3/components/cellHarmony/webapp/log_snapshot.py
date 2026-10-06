@@ -34,7 +34,7 @@ def read_pipeline_log(path):
                 key = None
                 for marker in ('adata shape:', 'Cells remaining after min_genes',
                                'Cells remaining after min_counts', 'Cells remaining after mito-percent',
-                               'Applied min_alignment_score='):
+                               'Applied min_alignment_score=', '...skipping QC:'):
                     if marker in line:
                         key = marker
                         break

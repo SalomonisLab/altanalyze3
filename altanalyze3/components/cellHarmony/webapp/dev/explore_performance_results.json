@@ -1,0 +1,132 @@
+{
+  "job_id": "d5fee6ea361e4ee2bdfce51b9c6ee312",
+  "original_analysis_seconds": 1377.606,
+  "analysis_phase_seconds": {
+    "umap": 700.3,
+    "nmf_markerfinder_svm": 286.4,
+    "initial_graph_sampling": 174.2,
+    "bundle": 11.9
+  },
+  "scope": "Read-only serving tests of the saved 149745-cell result. Fresh processes; two repetitions. Baseline emulates float64 bundle refusal and legacy all-view response. Optimized uses the same saved bundle and compact view-specific responses. Browser timing includes reload and waiting for Explore to become clickable. No new end-to-end analysis timing claimed.",
+  "baseline": {
+    "mode": "baseline",
+    "job_id": "d5fee6ea361e4ee2bdfce51b9c6ee312",
+    "cells": 149745,
+    "requests": [
+      {
+        "iteration": 0,
+        "endpoint": "umap",
+        "seconds": 10.115709708014037,
+        "bytes": 24638101,
+        "all_cell_ids_verified": true
+      },
+      {
+        "iteration": 0,
+        "endpoint": "expression",
+        "seconds": 10.489246874989476,
+        "bytes": 30550234,
+        "all_cell_ids_verified": true
+      },
+      {
+        "iteration": 1,
+        "endpoint": "umap",
+        "seconds": 9.91941366699757,
+        "bytes": 24638101,
+        "all_cell_ids_verified": true
+      },
+      {
+        "iteration": 1,
+        "endpoint": "expression",
+        "seconds": 10.854101916018408,
+        "bytes": 30550234,
+        "all_cell_ids_verified": true
+      }
+    ],
+    "peak_rss_gib": 9.451873779296875
+  },
+  "optimized": {
+    "mode": "optimized",
+    "job_id": "d5fee6ea361e4ee2bdfce51b9c6ee312",
+    "cells": 149745,
+    "requests": [
+      {
+        "iteration": 0,
+        "endpoint": "umap",
+        "seconds": 1.502993208996486,
+        "bytes": 12379415,
+        "all_cell_ids_verified": true
+      },
+      {
+        "iteration": 0,
+        "endpoint": "expression",
+        "seconds": 0.6703227090183645,
+        "bytes": 12747789,
+        "all_cell_ids_verified": true
+      },
+      {
+        "iteration": 1,
+        "endpoint": "umap",
+        "seconds": 0.39493937499355525,
+        "bytes": 12379415,
+        "all_cell_ids_verified": true
+      },
+      {
+        "iteration": 1,
+        "endpoint": "expression",
+        "seconds": 0.6109987500240095,
+        "bytes": 12747789,
+        "all_cell_ids_verified": true
+      }
+    ],
+    "peak_rss_gib": 0.8701324462890625
+  },
+  "local_http": [
+    {
+      "endpoint": "umap?compact=true",
+      "seconds": 2.0046253339969553,
+      "bytes": 12379403,
+      "points": 149745
+    },
+    {
+      "endpoint": "expression?gene=SFTPC&view=umap&compact=true",
+      "seconds": 1.9713521670200862,
+      "bytes": 12747789,
+      "points": 149745
+    },
+    {
+      "endpoint": "expression?gene=SFTPC&view=violin&compact=true",
+      "seconds": 0.12986716598970816,
+      "bytes": 238977,
+      "points": 0
+    },
+    {
+      "endpoint": "umap?compact=true&filter1_field=Library&filter1_values=donor3_proximal_rep1",
+      "seconds": 0.08012166700791568,
+      "bytes": 703638,
+      "points": 8290
+    }
+  ],
+  "browser": {
+    "reload_to_usable_explore_seconds": 3.208,
+    "checked": [
+      "cell-state UMAP",
+      "gene UMAP",
+      "Library filter",
+      "Library coloring",
+      "gene change",
+      "cell frequency",
+      "violin"
+    ],
+    "console_errors": 0
+  },
+  "environment": "macOS arm64, Python 3.11, existing Discover server runtime; no Docker limit. Peak RSS includes imports, metadata and request serialization. Shared workstation, single paired run.",
+  "validation": {
+    "regression_tests_passed": 120,
+    "warnings": 44,
+    "seconds": 32.08,
+    "javascript_syntax": "passed",
+    "python_compile": "passed",
+    "git_diff_whitespace": "passed",
+    "scope": "Shared web/viewer response tests, real Discover browser checks; UMAP input byte parity, not a complete rerun of the original analysis."
+  }
+}

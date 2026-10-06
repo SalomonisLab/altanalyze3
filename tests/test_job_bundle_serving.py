@@ -140,15 +140,23 @@ def test_misaligned_bundle_is_refused(tmp_path, monkeypatch):
     assert any("features differ" in why for why in JB.refusals().values())
 
 
-def test_float64_h5ad_is_refused(tmp_path, monkeypatch):
+def test_float64_rna_uses_display_bundle_without_changing_source(tmp_path, monkeypatch):
+    import hashlib
     store, job_id, rna_path, mod_path, artifacts, payload = _job(tmp_path)
-    monkeypatch.setenv("CELLHARMONY_BUNDLE_MIN_CELLS", "0")
-    rec = P._build_job_bundle(store, job_id, rna_path, "state", artifacts, payload)
     ref = ad.read_h5ad(rna_path)
     ref.X = ref.X.astype(np.float64)
-    ref.write_h5ad(rna_path)                          # same cells and genes, now float64
-    assert JB.view({"bundle": rec}, rna_path) is None
-    assert any("float64" in why for why in JB.refusals().values())
+    ref.X.data += 1e-9
+    ref.uns["log1p"] = {"base": None}
+    ref.write_h5ad(rna_path)
+    before = hashlib.sha256(rna_path.read_bytes()).hexdigest()
+    monkeypatch.setenv("CELLHARMONY_BUNDLE_MIN_CELLS", "0")
+    rec = P._build_job_bundle(store, job_id, rna_path, "state", artifacts, payload)
+    got = JB.view({"bundle": rec}, rna_path)
+    assert got is not None, JB.refusals()
+    assert got.obs_names.equals(ref.obs_names)
+    assert got.var_names.equals(ref.var_names)
+    np.testing.assert_allclose(_flat(got[:, "G0"].X), _flat(ref[:, "G0"].X), rtol=5e-4, atol=1e-7)
+    assert hashlib.sha256(rna_path.read_bytes()).hexdigest() == before
 
 
 def test_unbundled_job_reads_h5ad(tmp_path):
@@ -220,3 +228,34 @@ def test_bundle_build_decodes_gene_symbols(tmp_path, monkeypatch, encoding):
     got = JB.view({"bundle": rec}, rna_path)
     assert got is not None, JB.refusals()
     np.testing.assert_array_equal(got.X[:, [0, 3, 9]].toarray(), ref.X[:, [0, 3, 9]].toarray())
+
+
+@pytest.mark.parametrize('bundled', [False, True])
+def test_expression_symbol_and_native_id_return_identical_values(tmp_path, monkeypatch, bundled):
+    from importlib import import_module
+    W = import_module('altanalyze3.components.cellHarmony.webapp.app')
+    store, job_id, path, _mod, artifacts, payload = _job(tmp_path)
+    original = ad.read_h5ad(path)
+    original.var['gene_symbols'] = pd.Categorical(['SFTPC'] + list(original.var_names[1:]))
+    original.write_h5ad(path)
+    if bundled:
+        monkeypatch.setenv('CELLHARMONY_BUNDLE_MIN_CELLS', '0')
+        record = P._build_job_bundle(store, job_id, path, 'state', artifacts, payload)
+        assert record['status'] == 'completed'
+        a = JB.view({'bundle': record}, path)
+    else:
+        a = ad.read_h5ad(path)
+    cache = {'adata': a, 'modality': 'rna', 'var_names': a.var_names.astype(str).to_numpy(),
+             'populations': a.obs['state'].astype(str).to_numpy(), 'obs_names': a.obs_names.to_numpy(),
+             'umap_x': a.obsm['X_umap'][:, 0], 'umap_y': a.obsm['X_umap'][:, 1]}
+    monkeypatch.setattr(W, '_get_expression_cache', lambda *args, **kwargs: cache)
+    left = W._build_expression_payload(None, {}, 'SFTPC', view='violin')
+    right = W._build_expression_payload(None, {}, 'G0', view='violin')
+    assert left['resolved_gene'] == right['resolved_gene'] == 'G0'
+    assert left['gene'] == 'SFTPC' and left['violin'] == right['violin']
+    assert W._gene_rows(cache, ['SFTPC', 'G0', 'unknown']) == ([0, 0], ['SFTPC', 'G0'], ['unknown'])
+    suggestions = W._build_gene_suggestions_payload(None, {})
+    assert len(suggestions['genes']) == len(original.var_names)
+    assert set(original.var_names).issubset(suggestions['keys']) and 'SFTPC' in suggestions['genes']
+    assert W._chat_genes_in_question('Where is SFTPC expressed?', cache) == ['SFTPC']
+    np.testing.assert_array_equal(a.X[:, 0].toarray(), original.X[:, 0].toarray())

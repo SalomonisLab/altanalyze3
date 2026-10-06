@@ -520,7 +520,8 @@ def _prepare_marker_stats_aggregates(adata, cluster_key, genes, use_raw, layer):
 
     selected_genes = pd.Index(ordered_genes)[valid_gene_mask].astype(str).tolist()
     import h5py
-    disk_matrix = isinstance(matrix, h5py.Dataset)
+    workspace = getattr(adata, '_matrix_workspace', None)
+    disk_matrix = isinstance(matrix, h5py.Dataset) or workspace is not None
     selected_columns = gene_indexer[valid_gene_mask]
     if not disk_matrix:
         matrix = matrix[:, selected_columns]
@@ -553,11 +554,24 @@ def _prepare_marker_stats_aggregates(adata, cluster_key, genes, use_raw, layer):
         total = np.zeros(len(selected_columns), dtype=matrix.dtype)
         for start in range(0, matrix.shape[0], 512):
             block = matrix[start:start + 512, unique][:, inverse]
+            if sparse.issparse(block):
+                block = block.tocsr()
+                row_groups = cluster_codes[start:start + block.shape[0]]
+                keep = valid_cells[start:start + block.shape[0]]
+                values = block[keep]
+                np.add.at(total, values.indices, values.data)
+                groups = np.repeat(row_groups[keep].astype(np.intp), np.diff(values.indptr))
+                np.add.at(sums_values.ravel(), groups * sums_values.shape[1] + values.indices, values.data)
+                if workspace is not None and start % (512 * 32) == 0:
+                    workspace.release_pages()
+                continue
             keep = valid_cells[start:start + len(block)]
             values = block[keep]
             np.add.at(sums_values, cluster_codes[start:start + len(block)][keep], values)
             if len(values):
                 total = np.cumsum(np.vstack([total, values]), axis=0, dtype=matrix.dtype)[-1]
+            if workspace is not None and start % (512 * 32) == 0:
+                workspace.release_pages()
         total_sum_values = total.astype(float)
     else:
         sums_matrix = indicator.T.dot(matrix)
