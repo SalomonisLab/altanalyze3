@@ -126,30 +126,7 @@ check, and the same job runner with isolated workers.
 | API paths in `openapi.json` | see scALABLE-web's deploy guide | 41 |
 | reference files | the registry, baked into the image | none; BioMarkers gene sets in `clustering/biomarkers/` |
 
-On the host:
-
-```bash
-git clone --depth 1 https://github.com/SalomonisLab/altanalyze3.git
-cd altanalyze3/altanalyze3/components/cellHarmony/scalable_discover
-docker network create lungmap_default 2>/dev/null || true   # the compose file joins it, as scALABLE-web's does
-docker compose -f docker-compose.discover.yml up -d --build
-curl -s http://127.0.0.1:8007/openapi.json | jq '.paths | length'   # 41
-```
-
-Then route the proxy, as `/scalable/` is routed, passing the prefix through:
-
-```apache
-ProxyPass        /scalable-discover/ http://127.0.0.1:8007/scalable-discover/
-ProxyPassReverse /scalable-discover/ http://127.0.0.1:8007/scalable-discover/
-```
-
-and check `curl -s https://<site origin>/scalable-discover/openapi.json | jq '.paths | length'`.
-
-Bind `./jobs` to real disk; uploads and results land there. `altanalyze3/components/.dockerignore`
-excludes that directory, so jobs never enter a rebuilt image. Job retention is scALABLE-web's:
-each new upload deletes finished jobs older than 8 hours, and `cellHarmony/webapp/cleanup_jobs.py
---job-root <jobs dir>` purges on a schedule. Chat needs `CELLHARMONY_ASSISTANT_URL` to reach the
-LungMAP.net assistant, which the compose file sets for the `lungmap_default` network.
+Step-by-step host instructions: [DEPLOY.md](DEPLOY.md).
 
 | Variable | Default | Effect |
 | --- | --- | --- |
