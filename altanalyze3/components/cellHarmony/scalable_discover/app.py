@@ -27,9 +27,12 @@ Online: docker-compose.discover.yml in this directory.
 """
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import json
+import logging
 import os
+from contextlib import asynccontextmanager, suppress
 from importlib import import_module
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -54,6 +57,8 @@ W = import_module("altanalyze3.components.cellHarmony.webapp.app")
 HERE = Path(__file__).resolve().parent
 APP_NAME = "scALABLE-discover"
 DEFAULT_JOB_STORAGE = HERE / "jobs"
+JOB_CLEANUP_INTERVAL_SECONDS = 60 * 60
+logger = logging.getLogger(__name__)
 LAYER_COOKIE = "discover_layer"
 _LAYER = contextvars.ContextVar("scalable_discover_layer", default="")
 _GITHUB_BLOB = "https://github.com/SalomonisLab/altanalyze3/blob/master/altanalyze3/components/cellHarmony"
@@ -346,6 +351,40 @@ def _validate_species(species: str, reference: str) -> str:
     return value
 
 
+def _install_job_cleanup(app: FastAPI) -> None:
+    """Use web's eight-hour terminal-job policy even when no uploads arrive."""
+    previous_lifespan = app.router.lifespan_context
+
+    async def purge():
+        try:
+            deleted = await asyncio.to_thread(app.state.job_store.purge_old_jobs)
+            if deleted:
+                logger.info("scALABLE-discover removed %d expired jobs", deleted)
+        except Exception:
+            # A transient filesystem error must not stop serving or later sweeps.
+            logger.exception("scALABLE-discover job cleanup failed; retrying next hour")
+
+    async def periodic_cleanup():
+        while True:
+            await asyncio.sleep(JOB_CLEANUP_INTERVAL_SECONDS)
+            await purge()
+
+    @asynccontextmanager
+    async def lifespan(application):
+        async with previous_lifespan(application) as state:
+            await purge()
+            task = asyncio.create_task(periodic_cleanup(), name="discover-job-cleanup")
+            application.state.job_cleanup_task = task
+            try:
+                yield state
+            finally:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+
+    app.router.lifespan_context = lifespan
+
+
 def create_discover_app(overrides: Optional[Dict] = None) -> FastAPI:
     config = {
         "APP_TITLE": APP_NAME,
@@ -368,6 +407,7 @@ def create_discover_app(overrides: Optional[Dict] = None) -> FastAPI:
         total_memory_limit_gib=cfg.get("TOTAL_MEMORY_LIMIT_GIB", 27),
     )
     previous.executor.shutdown(wait=False)
+    _install_job_cleanup(app)
     app.state.discover = True
     _install_shared_wrappers()
 

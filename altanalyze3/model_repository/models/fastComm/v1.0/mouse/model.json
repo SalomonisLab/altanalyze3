@@ -1,0 +1,57 @@
+{
+  "analysis_model_version_id": "fastComm:sha256:8ef504b3e507fb67e611fda72fbbc347756da2c1f290ea943a20c1e7ad5a7da2",
+  "artifact_paths": {
+    "ligand_receptor": "components/fastComm/training_data/processed/upstream/cellchat_nichenet_mouse/ligand_receptor.tsv",
+    "response_matrix": "components/fastComm/training_data/processed/upstream/cellchat_nichenet_mouse/response_signatures.tsv"
+  },
+  "artifacts": {
+    "ligand_receptor": {
+      "filename": "ligand_receptor.tsv",
+      "release_asset_name": "mouse-ligand_receptor.tsv",
+      "sha256": "d4c29f6a4cc2fd81b87552b987fcb8b6975d15f2ed1a82a32b5863ce4b88e38a",
+      "url": "https://github.com/SalomonisLab/scalable-models/releases/download/fastComm-v1.0/mouse-ligand_receptor.tsv"
+    },
+    "response_matrix": {
+      "filename": "response_signatures.tsv",
+      "release_asset_name": "mouse-response_signatures.tsv",
+      "sha256": "1d7abf95f44a3b99b23e5429611dfc738c21042d0e17f1735a484b53c0a98a66",
+      "url": "https://github.com/SalomonisLab/scalable-models/releases/download/fastComm-v1.0/mouse-response_signatures.tsv"
+    }
+  },
+  "component": "fastComm",
+  "inference_code_sha256": {
+    "components:fastComm:api.py": "ab0d44c65f45659129640092639827bc1f8794d8aee7703b11116dd902494a62",
+    "components:fastComm:scoring.py": "6898fc6c5197010eaeeed886b02384d6071b2a15c631e3dbcf5ff00f35895244",
+    "components:fastComm:upstream_resources.py": "c228d5269de8e526b3778bfb2d76a343cfc1ecc5c17f77f6dcee3e8026c45f5d"
+  },
+  "inference_version_id": "sha256:e77f4609e9754a7b82b8775992adcbd30993b3065c24b7374f2344cc0d0469c1",
+  "inference_versions": [
+    {
+      "analysis_model_version_id": "fastComm:sha256:8ef504b3e507fb67e611fda72fbbc347756da2c1f290ea943a20c1e7ad5a7da2",
+      "inference_code_sha256": {
+        "components:fastComm:api.py": "ab0d44c65f45659129640092639827bc1f8794d8aee7703b11116dd902494a62",
+        "components:fastComm:scoring.py": "6898fc6c5197010eaeeed886b02384d6071b2a15c631e3dbcf5ff00f35895244",
+        "components:fastComm:upstream_resources.py": "c228d5269de8e526b3778bfb2d76a343cfc1ecc5c17f77f6dcee3e8026c45f5d"
+      },
+      "inference_version_id": "sha256:e77f4609e9754a7b82b8775992adcbd30993b3065c24b7374f2344cc0d0469c1"
+    }
+  ],
+  "model_display_id": "fastComm/mouse/v1.0",
+  "model_modality": "fastComm",
+  "model_variant": "mouse",
+  "model_version": "v1.0",
+  "model_version_id": "fastComm:sha256:4a68e71bf0168885ce0cc1025fef5e4b22d37f81758c3d9b0b5de4268c595436",
+  "name": "ligand_receptor.tsv, response_signatures.tsv",
+  "registry_path": "models/fastComm/v1.0/mouse/model.json",
+  "runtime_versions": {
+    "altanalyze3": "0.1.3",
+    "anndata": "0.10.9",
+    "numpy": "2.4.6",
+    "pandas": "2.2.3",
+    "scikit-learn": "1.5.2",
+    "scipy": "1.17.1"
+  },
+  "status": "observed-default",
+  "trained_at": null,
+  "training_provenance_status": "not-certified-by-registry"
+}

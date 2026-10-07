@@ -1,11 +1,20 @@
 # How to use scALABLE-discover
 
-scALABLE-discover clusters single-cell RNA data without a reference atlas. ICGS3 finds the
-clusters; the Explore and Chat tabs are the ones scALABLE-web uses. The interface has three
-tabs: `Run`, `Explore` and `Chat`. This version runs no differential expression and no
-modality imputation.
+scALABLE-discover identifies transcriptionally distinct cell states and their marker genes
+in human and mouse single-cell RNA-sequencing data. Upload samples in `Run`, examine
+cell states and gene expression in `Explore`, and query the results in `Chat`.
 
-The method behind each number is in [README.md](README.md).
+The analysis uses ICGS3, a Python 3 implementation optimized for ultrafast cell-state
+discovery and accessible through a web interface. It builds on the
+[ICGS approach (Venkatasubramanian et al., 2020)](https://academic.oup.com/bioinformatics/article/36/12/3773/5811229),
+which combined HOPACH, sparse non-negative matrix factorization, cluster fitness and SVM
+classification to resolve rare and common cell states while limiting donor and batch
+influences. The published atlas analyses showed that PageRank sampling preserved rare
+and closely related cell types and enabled discovery of additional distinct populations.
+ICGS3 replaces the legacy HOPACH workflow with sparse processing and UDON-derived feature
+selection and NMF, retaining PageRank, MarkerFinder cluster fitness and SVM assignment.
+
+[README.md](README.md) describes the methods, parameters, outputs and validation results.
 
 ## Run tab
 
@@ -40,7 +49,7 @@ bundle at 10,000 cells or more by default.
 | `UMAP fitting` | Accelerated | fit representative cells using the complete MarkerFinder panel, then map every remaining cell; target 30,000 fitting cells with a minimum of 200 per cluster; select All cells for the original full feature fit |
 | `Max K` | — (automatic) | optional integer of at least 2; sets ICGS3's target NMF K (`--nmf-k`); leave blank for automatic rank estimation |
 
-QC uses scALABLE-web's shared filtering code; UMAP fitting and Max K configure ICGS3. Click
+QC applies the selected thresholds; UMAP fitting and Max K configure ICGS3. Click
 `Save QC and run`.
 
 Max K sets the target NMF rank. ICGS3's later marker and SVM steps can yield fewer
@@ -58,12 +67,13 @@ panel explicitly reports that the thresholds were not applied.
 ### What runs
 
 1. QC filters the cells and normalizes the counts.
-2. ICGS3 clusters the QC-retained cells. Louvain sampling keeps 10,000 cells, PageRank keeps
-   5,000. UDON NMF and the first MarkerFinder pass use those 5,000. The SVM then assigns
-   every QC-retained cell, and the final MarkerFinder markers, UMAP and GO-Elite BioMarkers
-   labels use every clustered cell.
+2. ICGS3 clusters the QC-retained cells. For larger datasets, Louvain sampling selects up
+   to 10,000 representative cells, followed by PageRank sampling of up to 5,000 cells.
+   UDON-derived NMF and the first MarkerFinder pass use the sampled cells. The SVM then
+   scores every QC-retained cell for cluster assignment. The final MarkerFinder markers,
+   UMAP and GO-Elite BioMarkers labels use every clustered cell.
 3. GO-Elite BioMarkers names each cluster, for example `AT2 Cells_c2` for cluster C2.
-4. NetPerspective draws a marker network per cell state.
+4. NetPerspective generates a marker network per cell state.
 5. fastComm scores receptor-ligand communication between cell states.
 
 While the job runs, the percentage and the line under the progress bar show the current
@@ -71,11 +81,6 @@ stage: QC, then ICGS3 steps 1 to 10, then writing the results. Step 10 reports U
 fitting and mapping remaining cells separately. When it finishes, the line
 gives how many QC-retained cells ICGS3 placed in a cell state. ICGS3 leaves a cell
 unassigned when its best SVM score is 0 or lower. An unassigned cell appears in no view.
-
-Upload tip: scALABLE-web offers "Download unaligned QC-passed cells (h5ad)" for the cells
-that passed QC but fell below its alignment cutoff. Upload that file here to cluster them.
-Its counts are already ambient-corrected when the scALABLE-web job corrected them, so set
-`Ambient RNA correction` to `No` for it.
 
 ## Explore tab
 
@@ -86,7 +91,7 @@ Its counts are already ambient-corrected when the scALABLE-web job corrected the
 | Predicted cell states (default) | the GO-Elite BioMarkers label of each cluster, column `cell_state_predicted` |
 | Clusters | C1, C2, ..., column `cluster` |
 
-Changing the layer reloads the page. Two panels follow, each with its own plot type,
+Changing the layer reloads the page. Each of the two plotting panels has its own plot type,
 filters and `Download PDF`.
 
 | Plot type | What it shows |
@@ -101,7 +106,7 @@ filters and `Download PDF`.
 | `MarkerNetwork` | known interactions among one cell state's markers |
 | `GO-Elite BioMarkers` | one cell state's enriched BioMarkers terms: z-score against FDR; hover for the overlapping genes |
 | `Cell communication` | fastComm receptor-ligand signalling between cell states |
-| `Pathway` | pathways holding a cell state's markers |
+| `Pathway` | pathways containing a cell state's markers |
 
 `Color by` on `UMAP cell states` offers the other layer, `original_NMF_cluster`, and every
 other categorical cell annotation.
@@ -120,6 +125,6 @@ parameters.
 
 ## Chat tab
 
-Chat works as in scALABLE-web. It answers marker, comparison-between-clusters and
-where-expressed questions from this job's data. A question about a comparison between
-groups answers that no comparison has run.
+Chat answers questions about cell-state markers and where genes are expressed using the
+job's results. Differential expression between sample groups is not computed in this
+workflow; Chat reports that limitation when asked for a group comparison.

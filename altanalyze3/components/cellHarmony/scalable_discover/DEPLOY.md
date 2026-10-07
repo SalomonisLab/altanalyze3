@@ -88,8 +88,16 @@ A first job on the server is the first run of this image. Report the job's
 | One job's log | `jobs/<job id>/logs/pipeline.log` |
 | Purge old jobs | `docker exec scalable-discover python /app/altanalyze3/components/cellHarmony/webapp/cleanup_jobs.py --job-root /srv/scalable-discover/jobs --retain-days 7 --keep-latest 5` |
 
-Each new upload already deletes finished jobs older than 8 hours. The purge command is for
-a schedule, for example a daily cron entry; add `--dry-run` to list what it would remove.
+Discover uses scALABLE-web's retention policy: completed, failed and cancelled jobs
+last updated more than 8 hours ago are deleted, including uploads, outputs and logs.
+Unfinished jobs and jobs with a queued/processing differential are retained. Cleanup
+runs on each new upload, at server startup and every hour while the server runs.
+The hourly sweep runs outside the request event loop; cleanup errors are logged and
+retried at the next sweep. No cron job or additional dependency is required.
+Rebuild/restart the Discover service to activate the startup/hourly sweeps.
+
+The manual purge command uses its explicit seven-day policy; add `--dry-run` to
+list what it would remove. It does not override the automatic eight-hour policy.
 
 ### Normalized inputs and accelerated UMAP update
 

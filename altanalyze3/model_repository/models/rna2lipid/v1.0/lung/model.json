@@ -1,0 +1,38 @@
+{
+  "analysis_model_version_id": "rna2lipid:sha256:61212aa844bd4f179f3d64c8ba2e197593ada156be7944834672d085c3402c2c",
+  "artifact_paths": {
+    "bundle": "components/rna2lipid/rna2lipid_hs_lung_lipidwise_bundle.pkl"
+  },
+  "artifacts": {
+    "bundle": {
+      "filename": "rna2lipid_hs_lung_lipidwise_bundle.pkl",
+      "release_asset_name": "rna2lipid_hs_lung_lipidwise_bundle.pkl",
+      "sha256": "ed807e7a438e161bdfe7953ac212594e9b6f95872a9d48ae3834884dfa91cae0",
+      "url": "https://github.com/SalomonisLab/scalable-models/releases/download/rna2lipid-v1.0/rna2lipid_hs_lung_lipidwise_bundle.pkl"
+    }
+  },
+  "component": "rna2lipid",
+  "inference_code_sha256": {
+    "components:rna2lipid:api.py": "837b1bfb6fddf664c036145fa299ef57867233d401bdd5132a84f26b3e2723d4",
+    "components:rna2lipid:release.py": "def8cfdb791640aac9aca881dec10e5ce95f289b2018f001f8a92d5cc3289afc"
+  },
+  "inference_version_id": "sha256:e2dcff78d70e211f8c475aaa884ce915917f60f532f135cbad99ce50c5570918",
+  "model_display_id": "rna2lipid/lung/v1.0",
+  "model_modality": "rna2lipid",
+  "model_variant": "lung",
+  "model_version": "v1.0",
+  "model_version_id": "rna2lipid:sha256:9f50b9acacfa964261ce4e662d6b31cdbe4b90b1785570e50433193aa6dd8742",
+  "name": "rna2lipid_hs_lung_lipidwise_bundle.pkl",
+  "registry_path": "models/rna2lipid/v1.0/lung/model.json",
+  "runtime_versions": {
+    "altanalyze3": "0.1.3",
+    "anndata": "0.10.9",
+    "numpy": "2.4.6",
+    "pandas": "2.2.3",
+    "scikit-learn": "1.5.2",
+    "scipy": "1.17.1"
+  },
+  "status": "historical-default",
+  "trained_at": null,
+  "training_provenance_status": "not-certified-by-registry"
+}

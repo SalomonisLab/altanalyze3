@@ -1,0 +1,44 @@
+{
+  "modality": "rna2metabolite",
+  "models": [
+    {
+      "analysis_model_version_id": "rna2metabolite:sha256:870c72068f54d3c4fd641019dbe6846dc45796afc29441ff54a9cc2c04582ad6",
+      "artifact_paths": {
+        "bundle": "components/rna2metabolite/artifacts/rna2metabolite_aml_bundle.pkl.gz"
+      },
+      "artifacts": {
+        "bundle": {
+          "filename": "rna2metabolite_aml_bundle.pkl.gz",
+          "release_asset_name": "rna2metabolite_aml_bundle.pkl.gz",
+          "sha256": "232e9b56d72e3efacad1830aae2fd432f21d90b2e9dda5e723f09b2692db15c2",
+          "url": "https://github.com/SalomonisLab/scalable-models/releases/download/rna2metabolite-v1.0/rna2metabolite_aml_bundle.pkl.gz"
+        }
+      },
+      "component": "rna2metabolite",
+      "inference_code_sha256": {
+        "components:rna2metabolite:_impute.py": "3a440006e6d7eaa9ee6340e67414a88ec2a0cdcaef184718eabaa77fcba749de",
+        "components:rna2metabolite:api.py": "9a85d8fbc727af203af874592c99fe8998baaf7c3526fdd20e56bb72f6161da3"
+      },
+      "inference_version_id": "sha256:3df9b3a34822c40022e0329bc4ef1ef9abc2b0776d6eb58f905fb0ed1409bc8a",
+      "model_display_id": "rna2metabolite/aml/v1.0",
+      "model_modality": "rna2metabolite",
+      "model_variant": "aml",
+      "model_version": "v1.0",
+      "model_version_id": "rna2metabolite:sha256:18b6a8e32d8e3934610ec7906efb1a4ed6537c6afe45806427506a4c7fda1a5c",
+      "name": "rna2metabolite_aml_bundle.pkl.gz",
+      "registry_path": "models/rna2metabolite/v1.0/aml/model.json",
+      "runtime_versions": {
+        "altanalyze3": "0.1.3",
+        "anndata": "0.10.9",
+        "numpy": "2.4.6",
+        "pandas": "2.2.3",
+        "scikit-learn": "1.5.2",
+        "scipy": "1.17.1"
+      },
+      "status": "historical-default",
+      "trained_at": null,
+      "training_provenance_status": "not-certified-by-registry"
+    }
+  ],
+  "version": "v1.0"
+}

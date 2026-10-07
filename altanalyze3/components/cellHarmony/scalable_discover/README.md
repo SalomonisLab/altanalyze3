@@ -1,16 +1,47 @@
 # scALABLE-discover
 
-scALABLE-discover is scALABLE-web with ICGS3 unsupervised clustering in place of reference
-alignment. It keeps scALABLE-web's upload, QC, ambient RNA correction, Explore views and
-Chat. It runs no differential expression and no modality imputation. Species: human or mouse.
+scALABLE-discover is a web application for discovering transcriptionally distinct cell
+states in human and mouse single-cell RNA-sequencing data. ICGS3 identifies cell populations
+and their marker genes; GO-Elite BioMarkers enrichment provides predicted cell-type labels.
+The interface supports sample upload, quality control, ambient RNA correction, and
+interactive analysis of gene expression, marker networks, pathways and cell communication.
+The `Run`, `Explore` and `Chat` tabs support analysis from uploaded counts through
+interpretation of the resulting cell states.
 
 Controls are described in [HOW_TO_USE.md](HOW_TO_USE.md).
 
 ## Method
 
+### ICGS approach and ICGS3 implementation
+
+Iterative Clustering and Guide-gene Selection (ICGS) identifies coherent gene-expression
+programs to resolve cellular heterogeneity. The published ICGS2 approach combines HOPACH
+hybrid clustering, sparse non-negative matrix factorization, MarkerFinder assessment of
+cluster fitness, and support vector machine classification. These complementary methods
+identify both rare and common cell states while limiting clustering driven by donor or
+batch differences. In the published cell-atlas benchmarks, PageRank sampling retained
+rare populations and closely related but distinct cell types, and supported discovery of
+previously unresolved transcriptional populations
+([Venkatasubramanian et al., 2020](https://academic.oup.com/bioinformatics/article/36/12/3773/5811229)).
+
+ICGS3 is optimized for ultrafast analysis in Python 3, with browser access through
+scALABLE-discover. It replaces the original dense, HOPACH-based feature-selection workflow
+with sparse processing and UDON-derived feature selection and NMF. It retains
+Louvain/PageRank sampling, MarkerFinder cluster fitness and linear SVM assignment.
+Sparse matrices, blockwise SVM scoring and accelerated UMAP reduce memory use and
+computation time for large datasets. The original atlas benchmarks describe ICGS2;
+measurements for this implementation are reported under Validation and Where the time goes.
+
+Citation: Venkatasubramanian M, Chetal K, Schnell DJ, Atluri G, Salomonis N.
+[Resolving single-cell heterogeneity from hundreds of thousands of cells through sequential
+hybrid clustering and NMF](https://academic.oup.com/bioinformatics/article/36/12/3773/5811229).
+*Bioinformatics*. 2020;36(12):3773–3780. doi:10.1093/bioinformatics/btaa201.
+
+### Processing steps
+
 | Step | Module | Parameters |
 | --- | --- | --- |
-| Load, ambient RNA, QC, normalize | `cellHarmony.cellHarmony_lite.combine_and_align_h5` with `cellharmony_ref=None` | the user's QC values; scALABLE-web's other arguments |
+| Load, ambient RNA, QC, normalize | `cellHarmony.cellHarmony_lite` preprocessing | user-selected QC thresholds and ambient RNA correction |
 | Clustering | `clustering.ICGS.run_icgs3` | `ICGS3Config` defaults, except those below |
 | Marker networks | ICGS3's MarkerFinder heatmap call, `export_networks=True` | top 1000 markers per cluster |
 | Cell communication | `fastComm.api.run_fastcomm` | scALABLE-web's values: CellChatDB, `min_cells` 5, score 0.2, 5 pairs |
@@ -65,10 +96,9 @@ in `clustering/benchmarking/UMAP_SEPARATION_BENCHMARK.md`. The chosen feature fi
 better normalized centroid separation than the PCA alternatives while preserving more
 original-expression neighbors. These diagnostics do not establish biological accuracy.
 
-The QC-only call stops `combine_and_align_h5` before alignment. ICGS3 reads the
-QC-retained counts. The combined h5ad holds every QC-retained gene, normalized by
-`cellHarmony_lite.normalize_adata` as scALABLE-web does, for the cells ICGS3 placed in a
-cluster. ICGS3's own `icgs3_result.h5ad` holds only its protein-coding gene set.
+ICGS3 reads the counts retained after quality control. The combined h5ad contains every
+QC-retained gene, normalized by `cellHarmony_lite.normalize_adata`, for the cells assigned
+to an ICGS3 cluster. ICGS3's own `icgs3_result.h5ad` holds only its protein-coding gene set.
 
 Discover and scALABLE-web share the H5AD disk-import decision: more than 100,000 cells,
 at least 1 GiB of uncompressed matrix data (`X`, layers, `raw`, `obsm`, `obsp`), or multiple
@@ -81,7 +111,7 @@ count thresholds were not applied instead of waiting for nonexistent filter metr
 
 ### Cell annotations and layers
 
-The combined h5ad carries ICGS3's columns without the `ICGS3_` prefix: `cell_state_predicted`,
+The combined h5ad contains ICGS3's columns without the `ICGS3_` prefix: `cell_state_predicted`,
 `cluster`, `original_NMF_cluster`, `SVM_score`, `SVM_margin`. `cell_state_predicted` is ICGS3's
 GO-Elite BioMarkers label of each cluster, `<label>_c<n>`, one label per cluster; the pipeline
 refuses a run where two clusters share a label or one cluster has two.
@@ -92,15 +122,16 @@ BioMarkers enrichment detects Ensembl primary IDs and looks up both the Ensembl 
 symbol columns in the packaged catalog. Ensembl version suffixes are normalized for
 lookup; native IDs and the entire enrichment background remain in the evidence files.
 Hypergeometric testing, BH correction and label selection remain unchanged. A catalog
-with no matching identifiers fails explicitly instead of silently labelling every cluster
-unknown. After clustering, supplied `feature_name`/symbol aliases populate `gene_symbols`
-for Explore and fastComm; native feature IDs and expression are preserved.
+with no matching identifiers produces an explicit error. After clustering, supplied
+`feature_name`/symbol aliases populate `gene_symbols` for Explore and fastComm; native
+feature IDs and expression are preserved.
 The shared expression lookup accepts those supplied aliases, case variations and
 unversioned Ensembl IDs in Explore, gene-set views and Chat. Ambiguous aliases produce
 an explicit request for a primary ID instead of selecting or dropping a feature.
 
-Two cell-state layers drive every view. A viewer picks one under `Cell-state layer`; the
-choice rides in the `discover_layer` cookie and the server reads the job through it.
+Two cell-state layers are available in every view. Select a layer under `Cell-state layer`.
+The server stores this selection in the `discover_layer` cookie and uses the corresponding
+labels, marker tables and communication results.
 
 | Layer | Default | Cell states | MarkerHeatmap, MarkerNetwork, Chat markers | Cell communication |
 | --- | --- | --- | --- | --- |
@@ -108,12 +139,12 @@ choice rides in the `discover_layer` cookie and the server reads the job through
 | Clusters | no | `cluster` (C1..Cn) | ICGS3's own `ICGS3/MarkerFinder/` tables | fastComm run on `cluster`, `outputs/layers/cluster/fastComm/` |
 
 The relabelled copies change only the cluster field and the centroid header; every marker,
-fold, cell and order is ICGS3's. A viewer who switches layer rebuilds the serving caches.
+fold, cell and order is ICGS3's. Switching layers rebuilds the serving caches.
 
 ### GO-Elite BioMarkers plot
 
-`GO-Elite BioMarkers` draws, for one cell state, every BioMarkers term that overlaps its
-markers, in the form of scALABLE's GO Terms view: GO-Elite z-score against FDR.
+`GO-Elite BioMarkers` plots the enrichment z-score against FDR for every BioMarkers term
+that overlaps the selected cell state's markers.
 
 | Value | Source |
 | --- | --- |
@@ -122,7 +153,7 @@ markers, in the form of scALABLE's GO Terms view: GO-Elite z-score against FDR.
 | Highlight | FDR <= 0.05 and z > 2, the rule scALABLE's GO Terms view uses; BioMarkers sets have no ontology, so GO-Elite's pruning does not apply |
 | Labelled terms | the term behind the cell-state label (blue) and the top highlighted terms |
 
-`Download PDF` draws the same plot with scALABLE's GO Terms PDF renderer.
+`Download PDF` exports the same plot with scALABLE's GO Terms PDF renderer.
 
 ### Progress
 
@@ -136,12 +167,10 @@ line each step writes to the ICGS3 log.
 
 | File | Change | Default behaviour |
 | --- | --- | --- |
-| `cellHarmony/cellHarmony_lite.py` | `cellharmony_ref=None` runs QC only and returns before alignment | unchanged: validation V1 |
+| `cellHarmony/cellHarmony_lite.py` | preprocessing-only mode loads samples, applies QC and normalizes expression | validation V1 |
 | `clustering/ICGS.py` | `export_marker_networks`, `marker_network_top_n`, `marker_network_jobs`; CLI `--export-marker-networks` | off: validation V2 |
 | `clustering/ICGS.py` | `minimal_outputs`; CLI `--minimal-outputs`: write only the final h5ad, the MarkerFinder marker set, the GO-Elite BioMarkers tables, `icgs3_config.json` and the log | off; not validated |
 | `clustering/ICGS.py` | cell-state labels read `<label>_c18` for cluster C18, not `_cC18` | changes the label text of every ICGS3 run; not validated |
-| `cellHarmony/cellHarmony_lite.py` | `unaligned_h5ad=<path>` writes the QC-passed cells below `min_alignment_score` | off unless a path is given; not validated |
-| `cellHarmony/flask/pipeline.py`, `webapp/static/app.js` | scALABLE-web passes that path and offers "Download unaligned QC-passed cells (h5ad)" when any cell falls below the cutoff | new; not validated |
 | `clustering/ICGS.py` | BioMarkers gene sets come from `clustering/biomarkers/`, or from `$ICGS3_BIOMARKER_DIR` | identical tables: validation V2 |
 | `clustering/biomarkers/{Hs,Mm}/Ensembl-BioMarkers.txt.gz` | AltDatabase EnsMart72 BioMarkers files, gzipped unchanged | new |
 | `cellHarmony/flask/tasks.py` | `JobRunner.WORKER_MODULE` names the isolated worker module | same module as before |
@@ -177,7 +206,6 @@ check, and the same job runner with isolated workers.
 | path prefix | `/scalable` (`CELLHARMONY_ROOT_PATH`) | `/scalable-discover` (`SCALABLE_DISCOVER_ROOT_PATH`) |
 | job volume | `cellHarmony/webapp/jobs` -> `/srv/cellharmony/jobs` | `cellHarmony/scalable_discover/jobs` -> `/srv/scalable-discover/jobs` |
 | API paths in `openapi.json` | see scALABLE-web's deploy guide | 41 |
-| reference files | the registry, baked into the image | none; BioMarkers gene sets in `clustering/biomarkers/` |
 
 Step-by-step host instructions: [DEPLOY.md](DEPLOY.md).
 
@@ -222,8 +250,7 @@ and records inputs by file name and SHA-256.
 
 | Check | Input | Result |
 | --- | --- | --- |
-| V1: `cellHarmony_lite` reference path unchanged | 2 human lung 10x files, 10,107 cells, ambient on | assignments file and every matrix hash identical, 7,445 aligned cells |
-| V1: QC-only mode equals scALABLE QC | same | 8,485 cells x 32,738 genes; X, `counts`, `soupx_raw` identical on all 7,445 aligned cells |
+| V1: preprocessing agrees with shared scALABLE QC | 2 human lung 10x files, 10,107 cells, ambient on | 8,485 cells x 32,738 genes retained; X, `counts`, `soupx_raw` identical in the 7,445-cell comparison subset |
 | V2: ICGS3 defaults unchanged | 8,485 QC cells | 9 of 9 output files byte-identical, GO-Elite tables included |
 | V2: network option changes no result | same | 9 of 9 files identical; 24 network tables for 25 clusters |
 | V3: human, HTTP end to end | lung, ambient on | 50 of 50 checks; 8,099 of 8,485 cells (95.5%) in 25 clusters; 140 s from run request to completion |
@@ -241,7 +268,7 @@ Existing tests: 66 of 66 cellHarmony and runner tests pass. `clustering/test_ICG
 
 V1 to V4 ran before the 10,000/5,000 downsampling values, the `minimal` export mode, the
 cell-state layers, the GO-Elite BioMarkers plot, the stage progress, the `_c18` label fix and
-the unaligned-cell export. None of these has been run; all are not verified.
+related export changes. These validation runs do not verify the later changes.
 
 Also not verified: a Docker build and run (the local container VM did not start).
 

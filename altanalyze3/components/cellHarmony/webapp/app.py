@@ -11,6 +11,7 @@ import threading
 import time
 import urllib.request
 import weakref
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -37,6 +38,7 @@ from altanalyze3.components.visualization import approximate_umap as approx_mod
 from altanalyze3.components.rna2metabolite import annotations as metabolite_annotations
 
 from .memory_cache import BoundedCache, CacheBudget
+from .plot_build import PlotBuildQueue
 from .config import BASE_DIR, load_config
 from . import job_bundle as _job_bundle
 from .grn_data import UploadedGrnData, completed_differentials, comparison_entry
@@ -4308,6 +4310,7 @@ def _build_umap_payload(
     coords_key: str = "",
     x_field: str = "",
     y_field: str = "",
+    compact: bool = False,
 ) -> Dict[str, List[Dict]]:
     cache_entry = _get_expression_cache(app, meta, modality=modality)
     obs_names = cache_entry["obs_names"]
@@ -4328,24 +4331,38 @@ def _build_umap_payload(
     axes_source = "obs" if resolved_x else ("obsm" if resolved_coords else "cellharmony")
     display_mask = _apply_display_filter_mask(cache_entry, display_filters)
 
-    query_points = [
-        {
-            "barcode": barcode,
-            "population": population,
-            "sample": str(sample) if sample_labels is not None else "",
-            "x": float(x),
-            "y": float(y),
-        }
-        for barcode, population, sample, x, y, keep in zip(
-            obs_names,
-            populations,
-            sample_labels if sample_labels is not None else np.repeat("", len(obs_names)),
-            umap_x,
-            umap_y,
-            display_mask,
-        )
-        if keep and _is_finite_number(x) and _is_finite_number(y)
-    ]
+    if compact:
+        from .plot_payload import plot_columns
+        selected = np.flatnonzero(display_mask & np.isfinite(umap_x) & np.isfinite(umap_y))
+        query_points = plot_columns({
+            "barcode": np.asarray(obs_names)[selected],
+            "population": np.asarray(populations)[selected],
+            "sample": (np.asarray(sample_labels).astype(str)[selected] if sample_labels is not None
+                       else np.repeat("", len(selected))),
+            "x": np.asarray(umap_x, dtype=float)[selected],
+            "y": np.asarray(umap_y, dtype=float)[selected],
+        })
+        n_drawn = len(selected)
+    else:
+        query_points = [
+            {
+                "barcode": barcode,
+                "population": population,
+                "sample": str(sample) if sample_labels is not None else "",
+                "x": float(x),
+                "y": float(y),
+            }
+            for barcode, population, sample, x, y, keep in zip(
+                obs_names,
+                populations,
+                sample_labels if sample_labels is not None else np.repeat("", len(obs_names)),
+                umap_x,
+                umap_y,
+                display_mask,
+            )
+            if keep and _is_finite_number(x) and _is_finite_number(y)
+        ]
+        n_drawn = len(query_points)
 
     # The reference atlas is drawn behind the query only while both choices are
     # the default. Another obs column has no counterpart in the reference, and a
@@ -4387,8 +4404,8 @@ def _build_umap_payload(
             "x_label": resolved_x or "UMAP 1",
             "y_label": resolved_y or "UMAP 2",
             "n_cells_selected": n_kept,
-            "n_points_drawn": len(query_points),
-            "n_dropped_no_coordinate": max(0, n_kept - len(query_points)),
+            "n_points_drawn": n_drawn,
+            "n_dropped_no_coordinate": max(0, n_kept - n_drawn),
             "reference_hidden": bool(resolved_color_by or resolved_coords or resolved_x)}
 
 
@@ -4555,6 +4572,22 @@ def _dense_column(adata, row: int) -> np.ndarray:
 
 def _default_marker_genes(cache: Dict[str, Any], group_by: str = "",
                           limit: int = 12) -> List[str]:
+    # The containing expression entry is replaced when its source or state layer
+    # changes. Cache only tiny selections; never retain another expression matrix.
+    choices = cache.setdefault("default_marker_choices", BoundedCache(CacheBudget(
+        max_bytes=65536, max_entries=8, ttl_seconds=600)))
+    lock = cache.setdefault("default_marker_lock", threading.Lock())
+    key = (group_by or cache.get("cluster_key", ""), limit)
+    with lock:
+        selected = choices.get(key)
+        if selected is None:
+            selected = tuple(_compute_default_marker_genes(cache, group_by, limit))
+            choices[key] = selected
+        return list(selected)
+
+
+def _compute_default_marker_genes(cache: Dict[str, Any], group_by: str = "",
+                                  limit: int = 12) -> List[str]:
     """One marker gene per group, used when the user gives no gene set.
 
     Picked as the gene with the largest gap between its mean inside a group and
@@ -4587,12 +4620,17 @@ def _default_marker_genes(cache: Dict[str, Any], group_by: str = "",
     indicator = sp.csr_matrix(
         (np.ones(rows.size, dtype=np.float64), (codes[rows], rows)),
         shape=(len(groups), n_cells))
-    sums = indicator @ X
+    reduce_groups = getattr(X, "group_sums_and_total", None)
+    if callable(reduce_groups):
+        sums, total = reduce_groups(indicator)
+    else:
+        sums = indicator @ X
+        total = X.sum(axis=0)
     sums = np.asarray(sums.todense() if sp.issparse(sums) else sums, dtype=np.float64)
     counts = np.bincount(codes[rows], minlength=len(groups)).astype(np.float64)
     # The contrast is against every other cell in the dataset, which is what the
     # previous `values[~inside]` measured, so the statistic is unchanged.
-    total = np.asarray(X.sum(axis=0), dtype=np.float64).ravel()
+    total = np.asarray(total, dtype=np.float64).ravel()
     inside_mean = sums / np.maximum(counts[:, None], 1.0)
     outside_mean = (total[None, :] - sums) / np.maximum(float(n_cells) - counts[:, None], 1.0)
     gap = inside_mean - outside_mean
@@ -4778,7 +4816,15 @@ def _gene_cell_values(cache: Dict[str, Any], wanted: List[str], group_by: str = 
                 "donor": str(donors[i]) if donors is not None else "", "n_cells": 1}
                for i in indices]
     rows, labels, missing = _gene_rows(cache, wanted)
-    series = [np.round(_dense_column(adata, row)[indices].astype(float), 5).tolist() for row in rows]
+    series = []
+    if sp.issparse(adata.X):
+        # CSR column slicing scans the matrix. Extract bounded batches once,
+        # instead of rescanning all stored values for every displayed gene.
+        for start in range(0, len(rows), 64):
+            block = adata.X[:, rows[start:start + 64]][indices].toarray()
+            series.extend(np.round(block.astype(float), 5).T.tolist())
+    else:
+        series = [np.round(_dense_column(adata, row)[indices].astype(float), 5).tolist() for row in rows]
     return {"genes": labels, "values": series, "columns": columns,
             "colors": _state_colors(cache, [c["group"] for c in columns]),
             "unit": "cells", "observation_unit": "cells", "sampling": sampling, "groups": groups, "states": groups,
@@ -4936,6 +4982,7 @@ def _build_expression_payload(
     x_field: str = "",
     y_field: str = "",
     view: str = "all",
+    compact: bool = False,
 ) -> Dict:
     """`violin_limit` is how many cell states the violin plot draws.
 
@@ -4985,18 +5032,32 @@ def _build_expression_payload(
         if keep and _is_finite_number(val)
     ]
 
-    umap_points = [] if view == "violin" else [
-        {
-            "barcode": barcode,
-            "population": pop,
-            "value": float(val),
-            "x": float(x),
-            "y": float(y),
-        }
-        for barcode, pop, val, x, y, keep in zip(obs_names, populations, values.astype(float), umap_x, umap_y, display_mask)
-        if keep and _is_finite_number(val) and _is_finite_number(x) and _is_finite_number(y)
-    ]
-    umap_points.sort(key=lambda point: (point["value"], point["population"], point["barcode"]))
+    if compact and view != "violin":
+        from .plot_payload import plot_columns
+        selected = np.flatnonzero(display_mask & np.isfinite(values) & np.isfinite(umap_x) & np.isfinite(umap_y))
+        # Keep the original value/population/barcode draw order, including ties.
+        order = np.lexsort((np.asarray(obs_names)[selected], np.asarray(populations)[selected], values[selected]))
+        selected = selected[order]
+        umap_points = plot_columns({
+            "barcode": np.asarray(obs_names)[selected],
+            "population": np.asarray(populations)[selected],
+            "value": np.asarray(values, dtype=float)[selected],
+            "x": np.asarray(umap_x, dtype=float)[selected],
+            "y": np.asarray(umap_y, dtype=float)[selected],
+        })
+    else:
+        umap_points = [] if view == "violin" else [
+            {
+                "barcode": barcode,
+                "population": pop,
+                "value": float(val),
+                "x": float(x),
+                "y": float(y),
+            }
+            for barcode, pop, val, x, y, keep in zip(obs_names, populations, values.astype(float), umap_x, umap_y, display_mask)
+            if keep and _is_finite_number(val) and _is_finite_number(x) and _is_finite_number(y)
+        ]
+        umap_points.sort(key=lambda point: (point["value"], point["population"], point["barcode"]))
 
     violin_data = []
     for pop in (sorted(pd.unique(populations)) if view != "umap" else []):
@@ -5899,6 +5960,18 @@ def create_app(test_config: dict | None = None) -> FastAPI:
     app.state.expression_cache_locks = weakref.WeakValueDictionary()
     app.state.reference_adata_cache_locks = weakref.WeakValueDictionary()
     app.state.cache_registry_lock = threading.Lock()
+    app.state.plot_build_queue = PlotBuildQueue()
+    previous_lifespan = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def plot_lifespan(application):
+        async with previous_lifespan(application) as state:
+            try:
+                yield state
+            finally:
+                await run_in_threadpool(application.state.plot_build_queue.close)
+
+    app.router.lifespan_context = plot_lifespan
     app.state.job_runner = JobRunner(
         app.state.job_store,
         Path(cfg["REFERENCE_REGISTRY"]),
@@ -6253,7 +6326,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             payload = _build_umap_payload(
                 app, meta, modality=modality, display_filters=display_filters,
                 color_by=color_by, coords_key=coords,
-                x_field=x_field, y_field=y_field)
+                x_field=x_field, y_field=y_field, compact=compact is True)
             return JSONResponse(compact_plot_payload(payload) if compact is True else payload)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
@@ -6291,7 +6364,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
                     # the scALABLE viewer's wrapper, where an unpassed argument
                     # arrives as a FastAPI Query object rather than an int.
                     violin_limit=_as_int(violin_limit, 10, 1, 80),
-                    view=view if isinstance(view, str) else "all")
+                    view=view if isinstance(view, str) else "all", compact=compact is True)
                 return JSONResponse(compact_plot_payload(payload) if compact is True else payload)
             return await run_in_threadpool(build_response)
         except FileNotFoundError as exc:
@@ -6483,33 +6556,56 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         return JSONResponse(payload)
 
     @app.get("/api/jobs/{job_id}/combplot")
-    def combplot(job_id: str, genes: str = Query(""), modality: str = Query("rna"),
+    def combplot(request: Request, job_id: str, genes: str = Query(""), modality: str = Query("rna"),
                        min_cells: int = Query(5), cells_per_sample: int = Query(10), unit: str = Query("cells", pattern="^(cells|donor)$"),
                        group_by: str = Query(""), groups: List[str] = Query([]),
                       subset_by: str = Query(""), subset_values: List[str] = Query([]),
-                      subset2_by: str = Query(""), subset2_values: List[str] = Query([])):
+                      subset2_by: str = Query(""), subset2_values: List[str] = Query([]),
+                      deferred: Optional[bool] = Query(None)):
         """Individual cells by default, with opt-in per-donor means."""
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
-        cache = _get_expression_cache(app, store.get_job(job_id), modality=modality)
-        # Blank means the marker gene of every group, the same default the
-        # DotPlot uses, so switching between the two keeps the same gene set.
-        wanted = (_split_expression_features(genes, cache)
-                  or _default_marker_genes(cache, group_by))
-        if not wanted:
-            raise HTTPException(status_code=400, detail="Give at least one gene.")
-        if unit == "cells":
-            payload = _gene_cell_values(cache, wanted, group_by, list(groups),
-                                        subset_by, list(subset_values), subset2_by, list(subset2_values), cells_per_sample)
-        else:
-            payload = _gene_donor_state_means(cache, wanted, max(1, int(min_cells)),
-                                            group_by, list(groups), subset_by, list(subset_values),
-                                            subset2_by, list(subset2_values))
-        if payload.get("error"):
-            raise HTTPException(status_code=404, detail=payload["error"])
-        payload["modality"] = _normalize_modality_id(modality)
-        return JSONResponse(payload)
+        meta = store.get_job(job_id)
+
+        def build():
+            cache = _get_expression_cache(app, meta, modality=modality)
+            # Preserve the same default selection in DotPlot and CombPlot.
+            wanted = (_split_expression_features(genes, cache)
+                      or _default_marker_genes(cache, group_by))
+            if not wanted:
+                raise HTTPException(status_code=400, detail="Give at least one gene.")
+            if unit == "cells":
+                payload = _gene_cell_values(cache, wanted, group_by, list(groups),
+                                            subset_by, list(subset_values), subset2_by, list(subset2_values), cells_per_sample)
+            else:
+                payload = _gene_donor_state_means(cache, wanted, max(1, int(min_cells)),
+                                                group_by, list(groups), subset_by, list(subset_values),
+                                                subset2_by, list(subset2_values))
+            if payload.get("error"):
+                raise HTTPException(status_code=404, detail=payload["error"])
+            payload["modality"] = _normalize_modality_id(modality)
+            return JSONResponse(payload)
+
+        # Source identity prevents a result from surviving a rerun or state-layer
+        # switch. Every filter, modality, gene and sampling control is in the URL.
+        source = _modality_h5ad_path(meta, _normalize_modality_id(modality))
+        stamp = None
+        if source and Path(source).is_file():
+            stat = Path(source).stat()
+            stamp = (stat.st_mtime_ns, stat.st_size)
+            if deferred is None:
+                import h5py
+                with h5py.File(source, "r") as handle:
+                    matrix = handle["X"]
+                    shape = matrix.shape if isinstance(matrix, h5py.Dataset) else matrix.attrs["shape"]
+                    deferred = int(shape[0]) >= 10000
+        if not deferred:
+            return build()
+        identity = json.dumps([str(request.url), stamp, meta.get("cluster_key"),
+                               meta.get("active_cell_state_layer"), meta.get("bundle"),
+                               meta.get("artifacts"), meta.get("analysis_completed_at")], sort_keys=True)
+        return app.state.plot_build_queue.request(identity, build)
 
 
     @app.get("/api/jobs/{job_id}/plot-variables")

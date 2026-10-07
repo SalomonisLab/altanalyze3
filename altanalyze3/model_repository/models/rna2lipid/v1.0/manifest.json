@@ -1,0 +1,92 @@
+{
+  "modality": "rna2lipid",
+  "models": [
+    {
+      "analysis_model_version_id": "rna2lipid_aml:sha256:c6c353771b3bac3213dde7990419cfad8c4a7760dc7a2bfb12c258c3f6fd9fe2",
+      "artifact_paths": {
+        "bundle": "components/rna2lipid/aml/artifacts/rna2lipid_aml_bundle.pkl.gz"
+      },
+      "artifacts": {
+        "bundle": {
+          "filename": "rna2lipid_aml_bundle.pkl.gz",
+          "release_asset_name": "rna2lipid_aml_bundle.pkl.gz",
+          "sha256": "e4739c82f00b8a60d4a44d71711e7a6d68b0f5e6fa87a730bdbce64f321f8f46",
+          "url": "https://github.com/SalomonisLab/scalable-models/releases/download/rna2lipid-v1.0/rna2lipid_aml_bundle.pkl.gz"
+        }
+      },
+      "component": "rna2lipid_aml",
+      "inference_code_sha256": {
+        "components:rna2lipid:aml:_impute.py": "cec261380e496705c1e0582c47f5952afbdfa8830fa97c929e5a387f0e4777fa",
+        "components:rna2lipid:aml:api.py": "a9e05a3522ce343756d8635e5b33f4e085aa1e780f972ba47e9046de41e20117"
+      },
+      "inference_version_id": "sha256:ad9d6f600169f2ed8715190cf78ef6364fcd35876146bfe8172cbb1f5157ff65",
+      "inference_versions": [
+        {
+          "analysis_model_version_id": "rna2lipid_aml:sha256:c6c353771b3bac3213dde7990419cfad8c4a7760dc7a2bfb12c258c3f6fd9fe2",
+          "inference_code_sha256": {
+            "components:rna2lipid:aml:_impute.py": "cec261380e496705c1e0582c47f5952afbdfa8830fa97c929e5a387f0e4777fa",
+            "components:rna2lipid:aml:api.py": "a9e05a3522ce343756d8635e5b33f4e085aa1e780f972ba47e9046de41e20117"
+          },
+          "inference_version_id": "sha256:ad9d6f600169f2ed8715190cf78ef6364fcd35876146bfe8172cbb1f5157ff65"
+        }
+      ],
+      "model_display_id": "rna2lipid/aml/v1.0",
+      "model_modality": "rna2lipid",
+      "model_variant": "aml",
+      "model_version": "v1.0",
+      "model_version_id": "rna2lipid_aml:sha256:4399979dde8c603b4bd37795c3c8b426e563d8dce1be5a8f013c20b4672dceca",
+      "name": "rna2lipid_aml_bundle.pkl.gz",
+      "registry_path": "models/rna2lipid/v1.0/aml/model.json",
+      "runtime_versions": {
+        "altanalyze3": "0.1.3",
+        "anndata": "0.10.9",
+        "numpy": "2.4.6",
+        "pandas": "2.2.3",
+        "scikit-learn": "1.5.2",
+        "scipy": "1.17.1"
+      },
+      "status": "observed-default",
+      "trained_at": null,
+      "training_provenance_status": "not-certified-by-registry"
+    },
+    {
+      "analysis_model_version_id": "rna2lipid:sha256:61212aa844bd4f179f3d64c8ba2e197593ada156be7944834672d085c3402c2c",
+      "artifact_paths": {
+        "bundle": "components/rna2lipid/rna2lipid_hs_lung_lipidwise_bundle.pkl"
+      },
+      "artifacts": {
+        "bundle": {
+          "filename": "rna2lipid_hs_lung_lipidwise_bundle.pkl",
+          "release_asset_name": "rna2lipid_hs_lung_lipidwise_bundle.pkl",
+          "sha256": "ed807e7a438e161bdfe7953ac212594e9b6f95872a9d48ae3834884dfa91cae0",
+          "url": "https://github.com/SalomonisLab/scalable-models/releases/download/rna2lipid-v1.0/rna2lipid_hs_lung_lipidwise_bundle.pkl"
+        }
+      },
+      "component": "rna2lipid",
+      "inference_code_sha256": {
+        "components:rna2lipid:api.py": "837b1bfb6fddf664c036145fa299ef57867233d401bdd5132a84f26b3e2723d4",
+        "components:rna2lipid:release.py": "def8cfdb791640aac9aca881dec10e5ce95f289b2018f001f8a92d5cc3289afc"
+      },
+      "inference_version_id": "sha256:e2dcff78d70e211f8c475aaa884ce915917f60f532f135cbad99ce50c5570918",
+      "model_display_id": "rna2lipid/lung/v1.0",
+      "model_modality": "rna2lipid",
+      "model_variant": "lung",
+      "model_version": "v1.0",
+      "model_version_id": "rna2lipid:sha256:9f50b9acacfa964261ce4e662d6b31cdbe4b90b1785570e50433193aa6dd8742",
+      "name": "rna2lipid_hs_lung_lipidwise_bundle.pkl",
+      "registry_path": "models/rna2lipid/v1.0/lung/model.json",
+      "runtime_versions": {
+        "altanalyze3": "0.1.3",
+        "anndata": "0.10.9",
+        "numpy": "2.4.6",
+        "pandas": "2.2.3",
+        "scikit-learn": "1.5.2",
+        "scipy": "1.17.1"
+      },
+      "status": "historical-default",
+      "trained_at": null,
+      "training_provenance_status": "not-certified-by-registry"
+    }
+  ],
+  "version": "v1.0"
+}

@@ -89,7 +89,70 @@ def _parse_list_arg(values: Optional[Sequence[str]]) -> List[str]:
     return resolved
 
 
-def _plot_gene_groups(ax: matplotlib.axes.Axes, group_payload: List[dict], *, title: str) -> None:
+def _pairwise_group_tests(group_payload: List[dict], *, test: str, correction: str) -> List[dict]:
+    """Two-sided tests between every pair of groups; p-values adjusted across the pairs of one panel."""
+    from itertools import combinations
+
+    from scipy.stats import mannwhitneyu
+    from statsmodels.stats.multitest import multipletests
+
+    if test != "mannwhitney":
+        raise ValueError(f"Unsupported pairwise test '{test}'.")
+    rows = []
+    for (i, a), (j, b) in combinations(enumerate(group_payload), 2):
+        stat, p = mannwhitneyu(np.asarray(a["values"], float), np.asarray(b["values"], float),
+                               alternative="two-sided")
+        rows.append({"i": i, "j": j, "group_1": a["label"], "group_2": b["label"], "n_1": len(a["values"]),
+                     "n_2": len(b["values"]), "test": "Mann-Whitney U, two-sided", "U": float(stat), "p": float(p)})
+    if rows and correction != "none":
+        method = {"holm": "holm", "bh": "fdr_bh"}[correction]
+        adjusted = multipletests([r["p"] for r in rows], method=method)[1]
+        for r, q in zip(rows, adjusted):
+            r["p_adjusted"] = float(q)
+    else:
+        for r in rows:
+            r["p_adjusted"] = r["p"]
+    for r in rows:
+        r["correction"] = correction
+    return rows
+
+
+def _significance_stars(p: float) -> str:
+    return "***" if p <= 0.001 else "**" if p <= 0.01 else "*" if p <= 0.05 else "ns"
+
+
+def _draw_pairwise_brackets(ax: matplotlib.axes.Axes, rows: List[dict], positions, values, *, alpha: float) -> None:
+    significant = sorted((r for r in rows if r["p_adjusted"] <= alpha), key=lambda r: (r["j"] - r["i"], r["i"]))
+    if not significant:
+        return
+    finite = np.concatenate([np.asarray(v, float) for v in values])
+    lo, hi = float(np.nanmin(finite)), float(np.nanmax(finite))
+    step = 0.09 * (hi - lo if hi > lo else 1.0)
+    for level, r in enumerate(significant, start=1):
+        y = hi + level * step
+        x1, x2 = positions[r["i"]], positions[r["j"]]
+        tick = 0.25 * step
+        ax.plot([x1, x2], [y, y], color="#000000", linewidth=0.8)
+        ax.plot([x1, x1], [y - tick, y], color="#000000", linewidth=0.8)
+        ax.plot([x2, x2], [y - tick, y], color="#000000", linewidth=0.8)
+        p = r["p_adjusted"]
+        label = f"{_significance_stars(p)} p={p:.2g}"
+        ax.text((x1 + x2) / 2, y + 0.05 * step, label, ha="center", va="bottom", fontsize=7)
+    ax.set_ylim(lo - step, hi + (len(significant) + 1) * step)
+
+
+def _plot_gene_groups(
+    ax: matplotlib.axes.Axes,
+    group_payload: List[dict],
+    *,
+    title: str,
+    point_color: Optional[str] = None,
+    point_size: float = 2.0,
+    point_alpha: float = 0.25,
+    pairwise_test: str = "none",
+    pairwise_correction: str = "holm",
+    pairwise_alpha: float = 0.05,
+) -> List[dict]:
     positions = np.arange(1, len(group_payload) + 1)
     labels = [entry["label"] for entry in group_payload]
     palette = _build_preview_palette(labels)
@@ -118,9 +181,9 @@ def _plot_gene_groups(ax: matplotlib.axes.Axes, group_payload: List[dict], *, ti
         ax.scatter(
             np.full(len(vals), idx) + jitter,
             vals,
-            s=2,
-            c=color,
-            alpha=0.25,
+            s=point_size,
+            c=point_color or color,
+            alpha=point_alpha,
             linewidths=0,
             rasterized=False,
         )
@@ -130,6 +193,11 @@ def _plot_gene_groups(ax: matplotlib.axes.Axes, group_payload: List[dict], *, ti
     ax.set_ylabel("Expression")
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
+    if pairwise_test == "none":
+        return []
+    rows = _pairwise_group_tests(group_payload, test=pairwise_test, correction=pairwise_correction)
+    _draw_pairwise_brackets(ax, rows, positions, [entry["values"] for entry in group_payload], alpha=pairwise_alpha)
+    return rows
 
 
 def _build_across_lineages_groups(
@@ -225,6 +293,13 @@ def write_lineage_violin_pdf(
     restrict_obs_field: Optional[str] = None,
     restrict_obs_value: Optional[Sequence[str] | str] = None,
     restrict_obs_mode: str = "include",
+    point_color: Optional[str] = None,
+    point_size: float = 2.0,
+    point_alpha: float = 0.25,
+    pairwise_test: str = "none",
+    pairwise_correction: str = "holm",
+    pairwise_alpha: float = 0.05,
+    also_png: bool = False,
 ) -> str:
     step_started_at = time.perf_counter()
     adata = _load_adata(h5ad)
@@ -291,14 +366,30 @@ def write_lineage_violin_pdf(
     height = max(4.5, 3.6 * len(plot_payloads))
     step_started_at = time.perf_counter()
     fig, axes = plt.subplots(len(plot_payloads), 1, figsize=(width, height), squeeze=False)
+    stats_rows: List[dict] = []
     try:
         for ax, payload in zip(axes.ravel(), plot_payloads):
-            _plot_gene_groups(ax, payload["groups"], title=payload["title"])
+            rows = _plot_gene_groups(
+                ax,
+                payload["groups"],
+                title=payload["title"],
+                point_color=point_color,
+                point_size=point_size,
+                point_alpha=point_alpha,
+                pairwise_test=pairwise_test,
+                pairwise_correction=pairwise_correction,
+                pairwise_alpha=pairwise_alpha,
+            )
+            stats_rows += [{"gene": payload["gene"], **{k: v for k, v in r.items() if k not in ("i", "j")}} for r in rows]
         fig.tight_layout()
         output_pdf.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(output_pdf, format="pdf", bbox_inches="tight")
+        if also_png:
+            fig.savefig(output_pdf.with_suffix(".png"), format="png", dpi=300, bbox_inches="tight")
     finally:
         plt.close(fig)
+    if pairwise_test != "none":
+        pd.DataFrame(stats_rows).to_csv(output_pdf.with_suffix(".pairwise_stats.tsv"), sep="\t", index=False)
     _log_timing("lineage_violin.render_pdf", step_started_at)
     return str(output_pdf)
 
@@ -343,6 +434,23 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--output-pdf",
         help="Output PDF filename or path. Defaults to <mode>-<cluster-key>.pdf in --outdir.",
     )
+    parser.add_argument("--point-color", help="Colour for the per-observation points (e.g. '#000000'). Default: group colour.")
+    parser.add_argument("--point-size", type=float, default=2.0, help="Point marker area in pt^2 (default 2).")
+    parser.add_argument("--point-alpha", type=float, default=0.25, help="Point opacity (default 0.25).")
+    parser.add_argument(
+        "--pairwise-test",
+        choices=("none", "mannwhitney"),
+        default="none",
+        help="Test every pair of groups per panel and draw brackets for significant pairs (default none).",
+    )
+    parser.add_argument(
+        "--pairwise-correction",
+        choices=("holm", "bh", "none"),
+        default="holm",
+        help="Multiple-testing correction across the pairs of one panel (default holm).",
+    )
+    parser.add_argument("--pairwise-alpha", type=float, default=0.05, help="Adjusted p threshold for a bracket (default 0.05).")
+    parser.add_argument("--png", action="store_true", help="Also write a 300 dpi PNG beside the PDF.")
     parser.add_argument("--verbose", action="store_true", help="Enable INFO logging.")
     return parser.parse_args(argv)
 
@@ -373,6 +481,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         restrict_obs_field=args.restrict_obs_field,
         restrict_obs_value=args.restrict_obs_value,
         restrict_obs_mode=args.restrict_obs_mode,
+        point_color=args.point_color,
+        point_size=args.point_size,
+        point_alpha=args.point_alpha,
+        pairwise_test=args.pairwise_test,
+        pairwise_correction=args.pairwise_correction,
+        pairwise_alpha=args.pairwise_alpha,
+        also_png=args.png,
     )
     _log_timing("lineage_violin.total", main_started_at)
     print(f"[info] Wrote violin PDF to {output_pdf}")

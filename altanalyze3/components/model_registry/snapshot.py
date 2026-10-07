@@ -1,8 +1,11 @@
 """Explicitly refresh the model catalog from current files, without unpickling."""
 import json
+from datetime import datetime, timezone
+import argparse
 from pathlib import Path
-from .registry import PACKAGE_ROOT, REGISTRY_PATH, describe_model
+from .registry import PACKAGE_ROOT, REGISTRY_PATH, describe_model, describe_application, _identity
 from .static_defaults import api_selection
+from .layout import LABEL_FIELDS, write_layout
 
 API_MODULES = {
     "rna2lipid": "rna2lipid", "rna2adt": "rna2adt", "rna2grn": "rna2grn",
@@ -13,7 +16,7 @@ MODALITIES = {"lipids": "rna2lipid", "adt": "rna2adt", "grn": "rna2grn",
               "metabolite": "rna2metabolite", "lipid": "rna2lipid_aml"}
 
 
-def main():
+def build_catalog(observed_on):
     config_path = PACKAGE_ROOT / "components/cellHarmony/flask/reference_config.json"
     config = json.loads(config_path.read_text())
     selections = []
@@ -50,15 +53,83 @@ def main():
                        "status": "observed-default", "trained_at": None,
                        "training_provenance_status": "not-certified-by-registry",
                        "artifact_paths": {r: p.relative_to(PACKAGE_ROOT).as_posix() for r, p in paths.items()}}
-        defaults.append({"application": application, "context": context,
-                         "model_version_id": mid, "observed_on": "2026-10-06",
+        defaults.append({"application": application, "context": context, "component": component,
+                         "model_version_id": mid, "observed_on": observed_on,
                          "source": "working-tree configuration", "effective_from": None,
                          "effective_until": None})
-    catalog = {"schema_version": "1.0", "models": list(models.values()), "defaults": defaults}
-    REGISTRY_PATH.write_text(json.dumps(catalog, indent=2, sort_keys=True) + "\n")
-    destination = PACKAGE_ROOT / "model_repository/catalog.json"
-    destination.write_text(REGISTRY_PATH.read_text())
-    print(f"Recorded {len(models)} model versions and {len(defaults)} default selections")
+    catalog = {"schema_version": "1.0", "models": list(models.values()), "defaults": defaults,
+               "application_methods": {name: describe_application(name) for name in
+                                       ("scALABLE", "scALABLE-discover", "scALABLE-viewer")}}
+    return catalog
+
+
+def merge_catalog(previous, current):
+    """Keep every historical artifact and inference identity when defaults move."""
+    records = {record["model_version_id"]: dict(record) for record in previous.get("models", [])}
+    active = {record["model_version_id"] for record in current["models"]}
+    for record in records.values():
+        if record["model_version_id"] not in active:
+            record["status"] = "historical-default"
+    version_keys = ("inference_version_id", "analysis_model_version_id", "inference_code_sha256")
+    for record in current["models"]:
+        old = records.get(record["model_version_id"], {})
+        versions = list(old.get("inference_versions", []))
+        if old and not versions:
+            versions.append({key: old[key] for key in version_keys})
+        new_version = {key: record[key] for key in version_keys}
+        if new_version not in versions:
+            versions.append(new_version)
+        merged = {**old, **record, "inference_versions": versions}
+        if "artifacts" in record:
+            merged["artifacts"] = {}
+            for role, artifact in record["artifacts"].items():
+                prior = old.get("artifacts", {}).get(role, {})
+                if prior.get("sha256") == artifact["sha256"]:
+                    merged["artifacts"][role] = {**prior, **artifact}
+                else:
+                    merged["artifacts"][role] = dict(artifact)
+        records[record["model_version_id"]] = merged
+    result = {**current, "models": list(records.values())}
+    by_id = {record["model_version_id"]: record for record in result["models"]}
+    for default in result.get("defaults", []):
+        for key in LABEL_FIELDS:
+            if key in by_id[default["model_version_id"]]:
+                default[key] = by_id[default["model_version_id"]][key]
+    if previous.get("registry_release"):
+        result["registry_release"] = previous["registry_release"]
+    return result
+
+
+def archive_catalog(catalog, destination):
+    """Archive a complete catalog by its canonical JSON digest without overwriting."""
+    path = destination / "snapshots" / ("catalog-" + _identity(catalog) + ".json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if json.loads(path.read_text()) != catalog:
+            raise ValueError("Archived catalog content differs from its identity")
+    else:
+        path.write_text(json.dumps(catalog, indent=2, sort_keys=True) + "\n")
+    return path.name
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--observed-on", default=datetime.now(timezone.utc).date().isoformat())
+    args = parser.parse_args()
+    repository = PACKAGE_ROOT / "model_repository"
+    previous = json.loads(REGISTRY_PATH.read_text()) if REGISTRY_PATH.exists() else {"models": [], "defaults": []}
+    old_snapshot = archive_catalog(previous, repository)
+    current = build_catalog(args.observed_on)
+    catalog = merge_catalog(previous, current)
+    new_snapshot = archive_catalog(catalog, repository)
+    catalog["latest_snapshot"] = new_snapshot
+    text = json.dumps(catalog, indent=2, sort_keys=True) + "\n"
+    REGISTRY_PATH.write_text(text)
+    (repository / "catalog.json").write_text(text)
+    if all(record.get("registry_path") for record in catalog["models"]):
+        write_layout(catalog, repository)
+    print(f"Recorded {len(current['models'])} current and {len(catalog['models'])} total model versions; "
+          f"{len(current['defaults'])} defaults. Prior snapshot: {old_snapshot}")
 
 
 if __name__ == "__main__":

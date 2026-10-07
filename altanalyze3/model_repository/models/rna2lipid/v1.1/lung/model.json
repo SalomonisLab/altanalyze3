@@ -1,0 +1,146 @@
+{
+  "analysis_model_version_id": "rna2lipid:sha256:97796cb6eac9ce645ac7ab0a8cdf990be43e0f97b458ed5549f1fa8196f6acb3",
+  "artifact_paths": {
+    "bundle": "components/rna2lipid/rna2lipid_hs_lung_native_log2_20261005_bundle.pkl"
+  },
+  "artifacts": {
+    "bundle": {
+      "filename": "rna2lipid_hs_lung_native_log2_20261005_bundle.pkl",
+      "release_asset_name": "rna2lipid_hs_lung_native_log2_20261005_bundle.pkl",
+      "sha256": "e67f2ac72abfc79ba4fb1e006c08ad664bd8297a585c156f62b412defb887689",
+      "url": "https://github.com/SalomonisLab/scalable-models/releases/download/rna2lipid-v1.1/rna2lipid_hs_lung_native_log2_20261005_bundle.pkl"
+    }
+  },
+  "component": "rna2lipid",
+  "declared_method": {
+    "MS1_absolute_calibration_complete": false,
+    "RNA_inputs": 1303,
+    "authorization": {
+      "conversation_reference": "Current thread, 2026-10-06 explicit model promotion/deployment request",
+      "granted_by": "user",
+      "scope": "Promote the evaluated complete-panel native-relative-log2 ElasticNetCV bundle; preserve the original bundle for rollback.",
+      "user_message": "Deploy the new Lipidomics prediction method for rna2lipid and as the default for scALABLE"
+    },
+    "lipid_outputs": 202,
+    "method": {
+      "RNA_preprocessing": "production supplied numeric scale; mean duplicate gene symbols; feature median missing-value policy; exact pinned 1303 gene list",
+      "architecture": "one_estimator_per_lipid",
+      "differential_policy": "same reviewed cellHarmony parameters and full-panel testing family; any scale-handling changes must be discussed separately",
+      "estimator": "sklearn.linear_model.ElasticNetCV",
+      "estimator_defaults": {
+        "fit_intercept": true,
+        "selection": "cyclic",
+        "tol": 0.0001
+      },
+      "external_holdout": false,
+      "feature_selection": "absolute Pearson ranking; choose top-N using training R2 minus sparsity_penalty * nonzero coefficients",
+      "fit_settings": {
+        "alpha_grid": [
+          0.001,
+          0.0013738237958832622,
+          0.0018873918221350978,
+          0.002592943797404667,
+          0.003562247890262444,
+          0.004893900918477494,
+          0.006723357536499335,
+          0.009236708571873864,
+          0.01268961003167922,
+          0.017433288221999882,
+          0.02395026619987486,
+          0.03290344562312667,
+          0.04520353656360243,
+          0.06210169418915616,
+          0.08531678524172805,
+          0.11721022975334805,
+          0.16102620275609392,
+          0.2212216291070448,
+          0.3039195382313198,
+          0.41753189365604004,
+          0.5736152510448681,
+          0.7880462815669912,
+          1.082636733874054,
+          1.4873521072935119,
+          2.0433597178569416,
+          2.8072162039411754,
+          3.8566204211634725,
+          5.298316906283707,
+          7.278953843983146,
+          10.0
+        ],
+        "cv_folds": 3,
+        "l1_ratio_grid": [
+          0.7,
+          0.9,
+          0.95,
+          1.0
+        ],
+        "max_iter": 50000,
+        "n_jobs": -1,
+        "random_seed": 1,
+        "sparsity_penalty": 0.002,
+        "top_gene_options": [
+          25,
+          50,
+          100,
+          200
+        ]
+      },
+      "inference": "deployed RNA inputs unchanged; production API zero-fill of absent input genes; no added study alignment",
+      "scaler_x": "StandardScaler fitted on the complete training roster",
+      "scaler_y": "StandardScaler fitted on each complete corrected target column",
+      "sklearn_version": "1.6.1",
+      "target_representation": "reviewed log2 targets; documented exact inverse; no new pseudocount",
+      "training_scope": "same 50 sorted profiles; no bulk training profiles"
+    },
+    "source": "recorded release manifest",
+    "target_scale": "native_relative_log2",
+    "training_profiles": 45
+  },
+  "inference_code_sha256": {
+    "components:rna2lipid:api.py": "837b1bfb6fddf664c036145fa299ef57867233d401bdd5132a84f26b3e2723d4",
+    "components:rna2lipid:release.py": "b94aa21973a74feeb98218e5275aa2762178d83057f3e36f5ccc0a14150beef7"
+  },
+  "inference_version_id": "sha256:53614deba5fada6e0db8556938972e53e90706e4af213f0fcfad5be046bcda71",
+  "inference_versions": [
+    {
+      "analysis_model_version_id": "rna2lipid:sha256:a90d85414969c3546057d1a731f00372a9e236ae91f2b35712b24844d0b3f12b",
+      "inference_code_sha256": {
+        "components:rna2lipid:api.py": "837b1bfb6fddf664c036145fa299ef57867233d401bdd5132a84f26b3e2723d4",
+        "components:rna2lipid:release.py": "def8cfdb791640aac9aca881dec10e5ce95f289b2018f001f8a92d5cc3289afc"
+      },
+      "inference_version_id": "sha256:e2dcff78d70e211f8c475aaa884ce915917f60f532f135cbad99ce50c5570918"
+    },
+    {
+      "analysis_model_version_id": "rna2lipid:sha256:97796cb6eac9ce645ac7ab0a8cdf990be43e0f97b458ed5549f1fa8196f6acb3",
+      "inference_code_sha256": {
+        "components:rna2lipid:api.py": "837b1bfb6fddf664c036145fa299ef57867233d401bdd5132a84f26b3e2723d4",
+        "components:rna2lipid:release.py": "b94aa21973a74feeb98218e5275aa2762178d83057f3e36f5ccc0a14150beef7"
+      },
+      "inference_version_id": "sha256:53614deba5fada6e0db8556938972e53e90706e4af213f0fcfad5be046bcda71"
+    }
+  ],
+  "model_display_id": "rna2lipid/lung/v1.1",
+  "model_modality": "rna2lipid",
+  "model_variant": "lung",
+  "model_version": "v1.1",
+  "model_version_id": "rna2lipid:sha256:83ca5d1e86d8ec9ee82d37c71aeb4b6654c65384b72a424f4d46b34cefade90a",
+  "name": "rna2lipid_hs_lung_native_log2_20261005_bundle.pkl",
+  "registry_path": "models/rna2lipid/v1.1/lung/model.json",
+  "release_evidence": {
+    "manifest": "releases/registry-2026.10.06.1/native_log2_release.json",
+    "manifest_sha256": "4d8adc116d7de0e2abbfc10aa2d3ca1d6dac8b8f5efe544bf6af2506b6468dd7",
+    "scope": "Recorded release metadata; no scientific rerun or service activation",
+    "source_commit": "b550c6b2f7de6fc0a687d79e0a0f6c4da842bdd2"
+  },
+  "runtime_versions": {
+    "altanalyze3": "0.1.3",
+    "anndata": "0.10.9",
+    "numpy": "2.4.6",
+    "pandas": "2.2.3",
+    "scikit-learn": "1.5.2",
+    "scipy": "1.17.1"
+  },
+  "status": "observed-default",
+  "trained_at": null,
+  "training_provenance_status": "not-certified-by-registry"
+}

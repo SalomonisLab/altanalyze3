@@ -12,10 +12,34 @@ INFERENCE_FILES = {
     "rna2lipid": ["rna2lipid/api.py"],
     "rna2adt": ["rna2adt/api.py", "rna2adt/training.py", "rna2adt/rna2lipid_arch.py", "rna2adt/lung/model.py", "rna2adt/mouse/train_mouse.py", "rna2adt/generalizable.py", "rna2adt/centroid.py", "rna2adt/targeted.py"],
     "rna2grn": ["rna2grn/api.py", "rna2grn/model.py"],
-    "rna2metabolite": ["rna2metabolite/api.py", "rna2metabolite/_impute.py"],
+    "rna2metabolite": ["rna2metabolite/api.py", "rna2metabolite/_impute.py", "rna2metabolite/missingness_release.py"],
     "rna2lipid_aml": ["rna2lipid/aml/api.py", "rna2lipid/aml/_impute.py"],
     "fastComm": ["fastComm/api.py", "fastComm/scoring.py", "fastComm/upstream_resources.py"],
 }
+
+
+APPLICATION_FILES = {
+    "scALABLE": ["cellHarmony/flask/pipeline.py", "cellHarmony/flask/disk_predictions.py",
+        "cellHarmony/imputed_scale.py", "cellHarmony/imputed_pseudobulk.py",
+        "cellHarmony/lipid_scale.py", "cellHarmony/cellHarmony_differential.py",
+        "cellHarmony/disk_differential.py"],
+    "scALABLE-discover": ["cellHarmony/scalable_discover/pipeline.py"],
+    "scALABLE-viewer": ["visualization/scalable_viewer/precompute.py",
+        "visualization/scalable_viewer/bundle_meta.py"],
+}
+
+
+def describe_application(application, *, code_paths=None):
+    key = "scALABLE" if application == "scALABLE-differential" else application
+    paths = code_paths if code_paths is not None else [
+        PACKAGE_ROOT / "components" / rel for rel in APPLICATION_FILES.get(key, [])]
+    hashes = {(Path(path).relative_to(PACKAGE_ROOT).as_posix().replace("/", ":")
+               if Path(path).is_relative_to(PACKAGE_ROOT) else Path(path).name): sha256_file(path)
+              for path in paths}
+    if not hashes:
+        return {}
+    return {"application": application, "application_method_version_id": f"{key}:sha256:{_identity(hashes)}",
+            "code_sha256": hashes}
 
 
 def sha256_file(path):
@@ -84,6 +108,9 @@ def describe_model(component, artifacts, *, code_paths=None, catalog_path=REGIST
             if record["model_version_id"] == artifact_id:
                 result["registry_status"] = record["status"]
                 result["registry_name"] = record["name"]
+                for key in ("model_modality", "model_version", "model_variant", "model_display_id", "registry_path"):
+                    if key in record:
+                        result[key] = record[key]
                 break
     return result
 
@@ -100,7 +127,8 @@ def write_provenance(output_path, provenance):
 def write_run_provenance(output_dir, models, *, application):
     path = Path(output_dir) / "model_provenance.json"
     path.write_text(json.dumps({"schema_version": "1.0", "application": application,
-        "recorded_at": datetime.now(timezone.utc).isoformat(), "models": models},
+        "recorded_at": datetime.now(timezone.utc).isoformat(), "models": models,
+        "application_method": describe_application(application)},
         indent=2, sort_keys=True, default=_json_default) + "\n")
     return path
 

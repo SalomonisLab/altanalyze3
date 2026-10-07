@@ -1,0 +1,120 @@
+{
+  "analysis_rerun": false,
+  "application_methods": {
+    "scALABLE": {
+      "application": "scALABLE",
+      "application_method_version_id": "scALABLE:sha256:3214f741a5cff46f50fe3fb553b58c6d001dcf9de5037ab77cee540a8f1aa91d",
+      "code_sha256": {
+        "components:cellHarmony:cellHarmony_differential.py": "ace7ca05889df6a871f4960657f41bf63b8722874114d28d97846f5af31d3d57",
+        "components:cellHarmony:disk_differential.py": "7a8aed8dee6a621e11d00dfcaa679fc819196458877a78b81f8af93d604f8826",
+        "components:cellHarmony:flask:disk_predictions.py": "53491cc1acfdae8bef81e01a194cea482dadf2f92d4c174d2c386cd4c0266048",
+        "components:cellHarmony:flask:pipeline.py": "00bee4eacf1988e8d3da45a44bcced8c2eed3d5b7b9771f274b7c956778bef87",
+        "components:cellHarmony:imputed_pseudobulk.py": "82b88b326ed1358f2abbbec85e6389f1d762181744b43dd3cd275dd87af022ee",
+        "components:cellHarmony:imputed_scale.py": "1abec4dc6223c0371f9b8b5635246f6f25c2d0391feb8341b1570b3b9083634c",
+        "components:cellHarmony:lipid_scale.py": "7d9c21c58ea2172e52b7508d526012bd3443bcf42d91b01d73885e1cead00f43"
+      }
+    },
+    "scALABLE-discover": {
+      "application": "scALABLE-discover",
+      "application_method_version_id": "scALABLE-discover:sha256:ccd526f67a534bdcf75689599aa5a4629cc5ac4addcea3704ee22bbff3cac2af",
+      "code_sha256": {
+        "components:cellHarmony:scalable_discover:pipeline.py": "59ac545e0be964abd0ee5a51caf0424c8d61186e4926c4ee341f3ef0f903abbf"
+      }
+    },
+    "scALABLE-viewer": {
+      "application": "scALABLE-viewer",
+      "application_method_version_id": "scALABLE-viewer:sha256:538e1c1bad742bfd80f7ef5c3f4253583774780b3348e3f25f513e9d62da97c9",
+      "code_sha256": {
+        "components:visualization:scalable_viewer:bundle_meta.py": "d4b6debde3316e6879ea87cff20547238a9bc31ac5a5e894d65b465bf784d8ca",
+        "components:visualization:scalable_viewer:precompute.py": "e21fc753ab917c420a575ea265cb0f0b45040154f4b81d96c2d88e5cfd9c4c80"
+      }
+    }
+  },
+  "artifacts": [
+    {
+      "bytes": 1905509,
+      "component": "rna2lipid",
+      "filename": "rna2lipid_hs_lung_native_log2_20261005_bundle.pkl",
+      "manifest": "releases/registry-2026.10.06.1/native_log2_release.json",
+      "model_version_id": "rna2lipid:sha256:83ca5d1e86d8ec9ee82d37c71aeb4b6654c65384b72a424f4d46b34cefade90a",
+      "sha256": "e67f2ac72abfc79ba4fb1e006c08ad664bd8297a585c156f62b412defb887689",
+      "source_path": "components/rna2lipid/rna2lipid_hs_lung_native_log2_20261005_bundle.pkl"
+    },
+    {
+      "bytes": 12137602,
+      "component": "rna2metabolite",
+      "filename": "rna2metabolite_aml_NA30_20261006_bundle.pkl.gz",
+      "manifest": "releases/registry-2026.10.06.1/missingness_release.json",
+      "model_version_id": "rna2metabolite:sha256:9c1fdad35ef3bee7077b47270acaf614008d0b84249043a167e16932cad8c3d3",
+      "sha256": "0e492cda787c5c1385437332296c5e7b751e7b5d92e6fc2fcf5409ade7105a6d",
+      "source_path": "components/rna2metabolite/artifacts/rna2metabolite_aml_NA30_20261006_bundle.pkl.gz"
+    }
+  ],
+  "current_snapshot": "catalog-a60e7554f285ae0b85c729b39ceef25bdde832861d245c8d3d8477ad89970946.json",
+  "default_selection_changes": [
+    {
+      "application": "altanalyze3",
+      "component": "rna2metabolite",
+      "context": "api-default",
+      "model_version_id": "rna2metabolite:sha256:9c1fdad35ef3bee7077b47270acaf614008d0b84249043a167e16932cad8c3d3",
+      "previous_model_version_id": "rna2metabolite:sha256:18b6a8e32d8e3934610ec7906efb1a4ed6537c6afe45806427506a4c7fda1a5c"
+    },
+    {
+      "application": "scALABLE",
+      "component": "rna2lipid",
+      "context": "hs_lung_cellref2_reference",
+      "model_version_id": "rna2lipid:sha256:83ca5d1e86d8ec9ee82d37c71aeb4b6654c65384b72a424f4d46b34cefade90a",
+      "previous_model_version_id": "rna2lipid:sha256:9f50b9acacfa964261ce4e662d6b31cdbe4b90b1785570e50433193aa6dd8742"
+    },
+    {
+      "application": "scALABLE",
+      "component": "rna2lipid",
+      "context": "hs_lung_cellref_reference",
+      "model_version_id": "rna2lipid:sha256:83ca5d1e86d8ec9ee82d37c71aeb4b6654c65384b72a424f4d46b34cefade90a",
+      "previous_model_version_id": "rna2lipid:sha256:9f50b9acacfa964261ce4e662d6b31cdbe4b90b1785570e50433193aa6dd8742"
+    },
+    {
+      "application": "scALABLE",
+      "component": "rna2metabolite",
+      "context": "hs_bm_reference",
+      "model_version_id": "rna2metabolite:sha256:9c1fdad35ef3bee7077b47270acaf614008d0b84249043a167e16932cad8c3d3",
+      "previous_model_version_id": "rna2metabolite:sha256:18b6a8e32d8e3934610ec7906efb1a4ed6537c6afe45806427506a4c7fda1a5c"
+    },
+    {
+      "application": "scALABLE",
+      "component": "rna2lipid",
+      "context": "hs_lung_hlca_reference",
+      "model_version_id": "rna2lipid:sha256:83ca5d1e86d8ec9ee82d37c71aeb4b6654c65384b72a424f4d46b34cefade90a",
+      "previous_model_version_id": "rna2lipid:sha256:9f50b9acacfa964261ce4e662d6b31cdbe4b90b1785570e50433193aa6dd8742"
+    },
+    {
+      "application": "scALABLE",
+      "component": "rna2lipid",
+      "context": "hs_lung_natri_reference",
+      "model_version_id": "rna2lipid:sha256:83ca5d1e86d8ec9ee82d37c71aeb4b6654c65384b72a424f4d46b34cefade90a",
+      "previous_model_version_id": "rna2lipid:sha256:9f50b9acacfa964261ce4e662d6b31cdbe4b90b1785570e50433193aa6dd8742"
+    },
+    {
+      "application": "scALABLE",
+      "component": "rna2lipid",
+      "context": "hs_lung_bpd_sun_reference",
+      "model_version_id": "rna2lipid:sha256:83ca5d1e86d8ec9ee82d37c71aeb4b6654c65384b72a424f4d46b34cefade90a",
+      "previous_model_version_id": "rna2lipid:sha256:9f50b9acacfa964261ce4e662d6b31cdbe4b90b1785570e50433193aa6dd8742"
+    }
+  ],
+  "inference_code_changes": [
+    {
+      "component": "rna2lipid",
+      "inference_version_id": "sha256:53614deba5fada6e0db8556938972e53e90706e4af213f0fcfad5be046bcda71",
+      "model_version_id": "rna2lipid:sha256:83ca5d1e86d8ec9ee82d37c71aeb4b6654c65384b72a424f4d46b34cefade90a",
+      "name": "rna2lipid_hs_lung_native_log2_20261005_bundle.pkl",
+      "previous_inference_version_id": "sha256:e2dcff78d70e211f8c475aaa884ce915917f60f532f135cbad99ce50c5570918"
+    }
+  ],
+  "observed_at": "2026-10-06T20:52:47.273874+00:00",
+  "previous_snapshot": "catalog-345f9ac8b6ff2199841372cf66cc0bbaf4f444703197b263e8e3817d8bf3cd86.json",
+  "registry_release": "registry-2026.10.06.1",
+  "scope": "Registry/default observations and model distribution; not a live-service deployment event",
+  "service_activated": false,
+  "source_commit": "b550c6b2f7de6fc0a687d79e0a0f6c4da842bdd2"
+}

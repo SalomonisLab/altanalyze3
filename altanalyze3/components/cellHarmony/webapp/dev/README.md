@@ -1,5 +1,75 @@
 # Explore and Chat repairs, 2026-08-25
 
+## Explore serving updates, 2026-10-06
+
+Cold CombPlot requests no longer need to occupy an Apache proxy connection while
+the plot is calculated. The web/discover route returns `202` with `Retry-After: 1`
+for background preparation and `200` with the original payload when ready. Inputs
+with at least 10,000 cells use this automatically; the updated Explore and Chat
+interfaces explicitly request `deferred=true`. Small legacy requests remain
+synchronous. API clients must poll the same URL on `202`; `deferred=false` retains
+the synchronous API for existing integrations that explicitly need it.
+
+The background queue has one builder per web process, at most eight distinct
+pending/completed entries, and five-minute completed-result retention. Completed
+JSON lives in temporary files rather than another expression dictionary. Its
+temporary directory is removed at application shutdown; expired files are removed
+on subsequent requests. Errors retain their HTTP status and detail. Use the
+existing single ASGI web worker: additional web processes have separate queues
+and caches and can duplicate builds. Analysis workers retain their existing
+configuration and admission policy.
+
+Additional changes preserve the analysis and figure contents:
+
+- The serving bundle computes the existing float64 group contrast and sequential
+  float32 totals in one feature pass, with temporary batches bounded by one million
+  stored entries. Gene choices are cached per expression entry/grouping (64 KiB,
+  eight selections, ten-minute TTL). The formulas and all input features are retained.
+- CSR CombPlot requests extract up to 64 requested features in one sparse slice
+  instead of rescanning the matrix for each feature. Sampling, five-decimal values,
+  gene order, missing-gene reporting, filters and cell identities are unchanged.
+- Compact UMAP/expression payloads are constructed directly from columns, avoiding
+  hundreds of thousands of temporary Python row dictionaries. Legacy row payloads
+  remain available. Compact and legacy builders have exact parity checks.
+- The shared browser caches recent encoded responses for five minutes, at most
+  eight entries and 384 MiB estimated parsed storage (four times JSON text length).
+  This is an estimate for cached responses, not a bound on the browser's total heap
+  or Plotly buffers. Full query URLs and the result identity govern reuse; resets,
+  job changes and state-layer changes invalidate it. Pending requests are deduplicated,
+  and older responses cannot overwrite a newly selected view.
+- Large CombPlots retain nonzero positive/negative SVG bars and every zero-valued
+  observation's hover point on transparent SVG lines. This removes zero-height
+  rectangle nodes without dropping observations, changing values or rasterizing
+  PDF exports. Dense modalities may still require many SVG bars.
+
+Validation is recorded in `plot_performance_20261006.json`. A synthetic 600,000-cell,
+1,024-feature, 24,576,000-entry serving benchmark ran in the 30 GiB/4 CPU container.
+Across the second fresh-process pair, compact UMAP construction fell from 1.019 s
+to 0.139 s; JSON serialization still took about 0.61 s. Peak process RSS fell from
+1.525 to 1.096 GiB. Entire UMAP and sampled CombPlot payload hashes matched exactly.
+The original full analytical workflow was not rerun for this serving change.
+
+On the isolated local web server, cold CombPlot returned `202` in 0.0075 s;
+a subsequent cached 7.6 MB result returned `200` in 0.041 s. The browser rendered
+50,800 sampled cells and 12 genes using 24,562 bar nodes rather than 609,600 gene
+bars. A zero-valued cell's barcode, gene, state, sample and zero value were verified
+in its tooltip. The downloaded PDF contained all 12 genes and no raster images.
+These are synthetic serving checks, not timings for the reported online visitor
+job. Complete browser draw time was not measured. Dense imputed-modality CombPlots,
+all-point violin rendering and validation against the visitor's saved job remain.
+
+Deployment: rebuild/restart with `app.py`, `job_bundle.py`, `plot_payload.py`, the
+new `plot_build.py`, and the shared `static/app.js` together. Refresh browser pages
+so older JavaScript is not interpreting a `202` as a completed plot. No new Python
+dependency or Apache-wide `ProxyTimeout` increase is required. Shared browser
+transport/caching and SVG improvements apply to web, discover and viewer; the
+standalone viewer keeps its specialized immediate CombPlot endpoint.
+
+Reproduce in a scratch directory with `benchmark_plot_builds.py prepare ROOT`,
+then `baseline ROOT` and `optimized ROOT` in separate fresh Python processes.
+`serve ROOT --port 8012` starts the isolated synthetic UI. These inputs are
+computational test data, not biological replicates or inference outputs.
+
 I repaired three faults in the scALABLE webapp and I added two controls. This
 folder holds the scripts that prove each change.
 

@@ -1,0 +1,84 @@
+{
+  "models": [
+    {
+      "model_display_id": "rna2lipid/lung/v1.1",
+      "model_modality": "rna2lipid",
+      "model_variant": "lung",
+      "model_version": "v1.1",
+      "model_version_id": "rna2lipid:sha256:83ca5d1e86d8ec9ee82d37c71aeb4b6654c65384b72a424f4d46b34cefade90a",
+      "registry_path": "models/rna2lipid/v1.1/lung/model.json"
+    },
+    {
+      "model_display_id": "rna2adt/human-bone-marrow/v1.0",
+      "model_modality": "rna2adt",
+      "model_variant": "human-bone-marrow",
+      "model_version": "v1.0",
+      "model_version_id": "rna2adt:sha256:8b454dcc4a3e7eacc66c9be2ec672ec669888ec56f76e4ee267738e6a32f989b",
+      "registry_path": "models/rna2adt/v1.0/human-bone-marrow/model.json"
+    },
+    {
+      "model_display_id": "rna2grn/leukemia/v1.0",
+      "model_modality": "rna2grn",
+      "model_variant": "leukemia",
+      "model_version": "v1.0",
+      "model_version_id": "rna2grn:sha256:a52a648e1f5ddcad96ff680093b4eb71f3ede272ac093567afa552d5eacbdf94",
+      "registry_path": "models/rna2grn/v1.0/leukemia/model.json"
+    },
+    {
+      "model_display_id": "rna2lipid/aml/v1.0",
+      "model_modality": "rna2lipid",
+      "model_variant": "aml",
+      "model_version": "v1.0",
+      "model_version_id": "rna2lipid_aml:sha256:4399979dde8c603b4bd37795c3c8b426e563d8dce1be5a8f013c20b4672dceca",
+      "registry_path": "models/rna2lipid/v1.0/aml/model.json"
+    },
+    {
+      "model_display_id": "rna2grn/lung/v1.0",
+      "model_modality": "rna2grn",
+      "model_variant": "lung",
+      "model_version": "v1.0",
+      "model_version_id": "rna2grn:sha256:0ab247a852b7681689ca78c060aeaf4fc2f6df11df60125973db47901d1b79a2",
+      "registry_path": "models/rna2grn/v1.0/lung/model.json"
+    },
+    {
+      "model_display_id": "rna2adt/human-lung/v1.0",
+      "model_modality": "rna2adt",
+      "model_variant": "human-lung",
+      "model_version": "v1.0",
+      "model_version_id": "rna2adt:sha256:bfaed001c73e979185ddcb14da708452ac20c5e412eff887dbeba191dcdc95ec",
+      "registry_path": "models/rna2adt/v1.0/human-lung/model.json"
+    },
+    {
+      "model_display_id": "rna2adt/mouse/v1.0",
+      "model_modality": "rna2adt",
+      "model_variant": "mouse",
+      "model_version": "v1.0",
+      "model_version_id": "rna2adt:sha256:1e404e28f37bebc4ae82421ab05d5ecb90a7fde5c5e8ceadf490e5589253cd20",
+      "registry_path": "models/rna2adt/v1.0/mouse/model.json"
+    },
+    {
+      "model_display_id": "fastComm/human/v1.0",
+      "model_modality": "fastComm",
+      "model_variant": "human",
+      "model_version": "v1.0",
+      "model_version_id": "fastComm:sha256:63230ba3ca790f9a9eee590baccb3999f3b388c842b9a672ade9308a86ccaf22",
+      "registry_path": "models/fastComm/v1.0/human/model.json"
+    },
+    {
+      "model_display_id": "fastComm/mouse/v1.0",
+      "model_modality": "fastComm",
+      "model_variant": "mouse",
+      "model_version": "v1.0",
+      "model_version_id": "fastComm:sha256:4a68e71bf0168885ce0cc1025fef5e4b22d37f81758c3d9b0b5de4268c595436",
+      "registry_path": "models/fastComm/v1.0/mouse/model.json"
+    },
+    {
+      "model_display_id": "rna2metabolite/aml/v1.1",
+      "model_modality": "rna2metabolite",
+      "model_variant": "aml",
+      "model_version": "v1.1",
+      "model_version_id": "rna2metabolite:sha256:9c1fdad35ef3bee7077b47270acaf614008d0b84249043a167e16932cad8c3d3",
+      "registry_path": "models/rna2metabolite/v1.1/aml/model.json"
+    }
+  ]
+}

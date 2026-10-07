@@ -56,5 +56,8 @@
       "describe all differences"
     ],
     "evaluation_report_url": "https://example.org/comparison"
-  }
+  },
+  "modality": "rna2adt",
+  "version": "v1.0",
+  "variant": "example-tissue"
 }

@@ -12,7 +12,7 @@ def _identity(value):
 
 
 def validate_proposal(record):
-    required = ("name", "component", "submitter", "license", "species", "tissue",
+    required = ("name", "component", "modality", "version", "variant", "submitter", "license", "species", "tissue",
                 "trained_at", "method", "training_sources", "input_roster", "output_roster",
                 "sample_roster", "evaluation", "artifacts", "baseline_comparison")
     for key in required:
@@ -27,6 +27,11 @@ def validate_proposal(record):
         date.fromisoformat(record["trained_at"])
     except (TypeError, ValueError) as exc:
         raise ValueError("trained_at must be an ISO date") from exc
+    if not re.fullmatch(r"v[1-9]\d*\.(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?", record["version"]):
+        raise ValueError("version must be a readable release such as v1.0 or v1.1")
+    for key in ("modality", "variant"):
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", record[key]):
+            raise ValueError(f"Invalid {key}")
     if record.get("status") != "proposed":
         raise ValueError("Community submissions must have status=proposed")
     if record.get("default_history") or record.get("approval"):

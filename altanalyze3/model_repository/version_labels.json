@@ -1,0 +1,62 @@
+{
+  "fastComm:sha256:4a68e71bf0168885ce0cc1025fef5e4b22d37f81758c3d9b0b5de4268c595436": {
+    "modality": "fastComm",
+    "variant": "mouse",
+    "version": "v1.0"
+  },
+  "fastComm:sha256:63230ba3ca790f9a9eee590baccb3999f3b388c842b9a672ade9308a86ccaf22": {
+    "modality": "fastComm",
+    "variant": "human",
+    "version": "v1.0"
+  },
+  "rna2adt:sha256:1e404e28f37bebc4ae82421ab05d5ecb90a7fde5c5e8ceadf490e5589253cd20": {
+    "modality": "rna2adt",
+    "variant": "mouse",
+    "version": "v1.0"
+  },
+  "rna2adt:sha256:8b454dcc4a3e7eacc66c9be2ec672ec669888ec56f76e4ee267738e6a32f989b": {
+    "modality": "rna2adt",
+    "variant": "human-bone-marrow",
+    "version": "v1.0"
+  },
+  "rna2adt:sha256:bfaed001c73e979185ddcb14da708452ac20c5e412eff887dbeba191dcdc95ec": {
+    "modality": "rna2adt",
+    "variant": "human-lung",
+    "version": "v1.0"
+  },
+  "rna2grn:sha256:0ab247a852b7681689ca78c060aeaf4fc2f6df11df60125973db47901d1b79a2": {
+    "modality": "rna2grn",
+    "variant": "lung",
+    "version": "v1.0"
+  },
+  "rna2grn:sha256:a52a648e1f5ddcad96ff680093b4eb71f3ede272ac093567afa552d5eacbdf94": {
+    "modality": "rna2grn",
+    "variant": "leukemia",
+    "version": "v1.0"
+  },
+  "rna2lipid:sha256:83ca5d1e86d8ec9ee82d37c71aeb4b6654c65384b72a424f4d46b34cefade90a": {
+    "modality": "rna2lipid",
+    "variant": "lung",
+    "version": "v1.1"
+  },
+  "rna2lipid:sha256:9f50b9acacfa964261ce4e662d6b31cdbe4b90b1785570e50433193aa6dd8742": {
+    "modality": "rna2lipid",
+    "variant": "lung",
+    "version": "v1.0"
+  },
+  "rna2lipid_aml:sha256:4399979dde8c603b4bd37795c3c8b426e563d8dce1be5a8f013c20b4672dceca": {
+    "modality": "rna2lipid",
+    "variant": "aml",
+    "version": "v1.0"
+  },
+  "rna2metabolite:sha256:18b6a8e32d8e3934610ec7906efb1a4ed6537c6afe45806427506a4c7fda1a5c": {
+    "modality": "rna2metabolite",
+    "variant": "aml",
+    "version": "v1.0"
+  },
+  "rna2metabolite:sha256:9c1fdad35ef3bee7077b47270acaf614008d0b84249043a167e16932cad8c3d3": {
+    "modality": "rna2metabolite",
+    "variant": "aml",
+    "version": "v1.1"
+  }
+}

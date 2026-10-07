@@ -1,0 +1,84 @@
+{
+  "modality": "rna2metabolite",
+  "models": [
+    {
+      "analysis_model_version_id": "rna2metabolite:sha256:f806493e77bd51e27cfc2777622310d8b7378edf84c9681965666338542e9554",
+      "artifact_paths": {
+        "bundle": "components/rna2metabolite/artifacts/rna2metabolite_aml_NA30_20261006_bundle.pkl.gz"
+      },
+      "artifacts": {
+        "bundle": {
+          "filename": "rna2metabolite_aml_NA30_20261006_bundle.pkl.gz",
+          "release_asset_name": "rna2metabolite_aml_NA30_20261006_bundle.pkl.gz",
+          "sha256": "0e492cda787c5c1385437332296c5e7b751e7b5d92e6fc2fcf5409ade7105a6d",
+          "url": "https://github.com/SalomonisLab/scalable-models/releases/download/rna2metabolite-v1.1/rna2metabolite_aml_NA30_20261006_bundle.pkl.gz"
+        }
+      },
+      "component": "rna2metabolite",
+      "declared_method": {
+        "RNA_inputs": 12416,
+        "authorization": {
+          "comparison": "missing_count * 10 > training_case_count * 3",
+          "denominator": "all 84 original matched training cases",
+          "granted_by": "user",
+          "preserve_RNA_inputs": true,
+          "preserve_retained_models": true,
+          "preserve_training_cases": true,
+          "scope": "AML metabolite targets; evaluate original normalized-log2 training table before filling",
+          "threshold": "strictly greater than 30% missing",
+          "user_message": "If >30% values are NA, remove that feature"
+        },
+        "authorized_removed_targets": 510,
+        "estimator": "per-target Ridge (ElasticNet l1_ratio=0, alpha=100.0); 1000 genes/target",
+        "new_fitting_executed": false,
+        "original_targets": 2533,
+        "retained_targets": 2023,
+        "retained_weights_identical": true,
+        "source": "recorded release manifest",
+        "training_cases": 84
+      },
+      "inference_code_sha256": {
+        "components:rna2metabolite:_impute.py": "21974b2569f42566664534584ec3b508d0ee925cec94cbe4b5ce737f1f4f4578",
+        "components:rna2metabolite:api.py": "0476eb82b2f3fbce869084c768315d34cca77c326ed17234cacc24820d99c362",
+        "components:rna2metabolite:missingness_release.py": "a3624e7b66422f6744d2bf34dcf9daeb315fd99d5c923e2097459a6c18422c0a"
+      },
+      "inference_version_id": "sha256:9a83b6cab28d4cd3a78f3a486b7520a1cab6928c755a234036bfa6bae8e25760",
+      "inference_versions": [
+        {
+          "analysis_model_version_id": "rna2metabolite:sha256:f806493e77bd51e27cfc2777622310d8b7378edf84c9681965666338542e9554",
+          "inference_code_sha256": {
+            "components:rna2metabolite:_impute.py": "21974b2569f42566664534584ec3b508d0ee925cec94cbe4b5ce737f1f4f4578",
+            "components:rna2metabolite:api.py": "0476eb82b2f3fbce869084c768315d34cca77c326ed17234cacc24820d99c362",
+            "components:rna2metabolite:missingness_release.py": "a3624e7b66422f6744d2bf34dcf9daeb315fd99d5c923e2097459a6c18422c0a"
+          },
+          "inference_version_id": "sha256:9a83b6cab28d4cd3a78f3a486b7520a1cab6928c755a234036bfa6bae8e25760"
+        }
+      ],
+      "model_display_id": "rna2metabolite/aml/v1.1",
+      "model_modality": "rna2metabolite",
+      "model_variant": "aml",
+      "model_version": "v1.1",
+      "model_version_id": "rna2metabolite:sha256:9c1fdad35ef3bee7077b47270acaf614008d0b84249043a167e16932cad8c3d3",
+      "name": "rna2metabolite_aml_NA30_20261006_bundle.pkl.gz",
+      "registry_path": "models/rna2metabolite/v1.1/aml/model.json",
+      "release_evidence": {
+        "manifest": "releases/registry-2026.10.06.1/missingness_release.json",
+        "manifest_sha256": "edffc4f88107d6fbcaba19196b0bf6ce6173dce21cb53ed129aac7dd3ee6f32b",
+        "scope": "Recorded release metadata; no scientific rerun or service activation",
+        "source_commit": "b550c6b2f7de6fc0a687d79e0a0f6c4da842bdd2"
+      },
+      "runtime_versions": {
+        "altanalyze3": "0.1.3",
+        "anndata": "0.10.9",
+        "numpy": "2.4.6",
+        "pandas": "2.2.3",
+        "scikit-learn": "1.5.2",
+        "scipy": "1.17.1"
+      },
+      "status": "observed-default",
+      "trained_at": null,
+      "training_provenance_status": "not-certified-by-registry"
+    }
+  ],
+  "version": "v1.1"
+}

@@ -1,0 +1,1181 @@
+{
+  "application_methods": {
+    "scALABLE": {
+      "application": "scALABLE",
+      "application_method_version_id": "scALABLE:sha256:3214f741a5cff46f50fe3fb553b58c6d001dcf9de5037ab77cee540a8f1aa91d",
+      "code_sha256": {
+        "components:cellHarmony:cellHarmony_differential.py": "ace7ca05889df6a871f4960657f41bf63b8722874114d28d97846f5af31d3d57",
+        "components:cellHarmony:disk_differential.py": "7a8aed8dee6a621e11d00dfcaa679fc819196458877a78b81f8af93d604f8826",
+        "components:cellHarmony:flask:disk_predictions.py": "53491cc1acfdae8bef81e01a194cea482dadf2f92d4c174d2c386cd4c0266048",
+        "components:cellHarmony:flask:pipeline.py": "00bee4eacf1988e8d3da45a44bcced8c2eed3d5b7b9771f274b7c956778bef87",
+        "components:cellHarmony:imputed_pseudobulk.py": "82b88b326ed1358f2abbbec85e6389f1d762181744b43dd3cd275dd87af022ee",
+        "components:cellHarmony:imputed_scale.py": "1abec4dc6223c0371f9b8b5635246f6f25c2d0391feb8341b1570b3b9083634c",
+        "components:cellHarmony:lipid_scale.py": "7d9c21c58ea2172e52b7508d526012bd3443bcf42d91b01d73885e1cead00f43"
+      }
+    },
+    "scALABLE-discover": {
+      "application": "scALABLE-discover",
+      "application_method_version_id": "scALABLE-discover:sha256:ccd526f67a534bdcf75689599aa5a4629cc5ac4addcea3704ee22bbff3cac2af",
+      "code_sha256": {
+        "components:cellHarmony:scalable_discover:pipeline.py": "59ac545e0be964abd0ee5a51caf0424c8d61186e4926c4ee341f3ef0f903abbf"
+      }
+    },
+    "scALABLE-viewer": {
+      "application": "scALABLE-viewer",
+      "application_method_version_id": "scALABLE-viewer:sha256:538e1c1bad742bfd80f7ef5c3f4253583774780b3348e3f25f513e9d62da97c9",
+      "code_sha256": {
+        "components:visualization:scalable_viewer:bundle_meta.py": "d4b6debde3316e6879ea87cff20547238a9bc31ac5a5e894d65b465bf784d8ca",
+        "components:visualization:scalable_viewer:precompute.py": "e21fc753ab917c420a575ea265cb0f0b45040154f4b81d96c2d88e5cfd9c4c80"
+      }
+    }
+  },
+  "defaults": [
+    {
+      "application": "altanalyze3",
+      "component": "rna2lipid",
+      "context": "api-default",
+      "effective_from": null,
+      "effective_until": null,
+      "model_display_id": "rna2lipid/lung/v1.1",
+      "model_modality": "rna2lipid",
+      "model_variant": "lung",
+      "model_version": "v1.1",
+      "model_version_id": "rna2lipid:sha256:83ca5d1e86d8ec9ee82d37c71aeb4b6654c65384b72a424f4d46b34cefade90a",
+      "observed_on": "2026-10-06",
+      "registry_path": "models/rna2lipid/v1.1/lung/model.json",
+      "source": "working-tree configuration"
+    },
+    {
+      "application": "altanalyze3",
+      "component": "rna2adt",
+      "context": "api-default",
+      "effective_from": null,
+      "effective_until": null,
+      "model_display_id": "rna2adt/human-bone-marrow/v1.0",
+      "model_modality": "rna2adt",
+      "model_variant": "human-bone-marrow",
+      "model_version": "v1.0",
+      "model_version_id": "rna2adt:sha256:8b454dcc4a3e7eacc66c9be2ec672ec669888ec56f76e4ee267738e6a32f989b",
+      "observed_on": "2026-10-06",
+      "registry_path": "models/rna2adt/v1.0/human-bone-marrow/model.json",
+      "source": "working-tree configuration"
+    },
+    {
+      "application": "altanalyze3",
+      "component": "rna2grn",
+      "context": "api-default",
+      "effective_from": null,
+      "effective_until": null,
+      "model_display_id": "rna2grn/leukemia/v1.0",
+      "model_modality": "rna2grn",
+      "model_variant": "leukemia",
+      "model_version": "v1.0",
+      "model_version_id": "rna2grn:sha256:a52a648e1f5ddcad96ff680093b4eb71f3ede272ac093567afa552d5eacbdf94",
+      "observed_on": "2026-10-06",
+      "registry_path": "models/rna2grn/v1.0/leukemia/model.json",
+      "source": "working-tree configuration"
+    },
+    {
+      "application": "altanalyze3",
+      "component": "rna2metabolite",
+      "context": "api-default",
+      "effective_from": null,
+      "effective_until": null,
+      "model_display_id": "rna2metabolite/aml/v1.1",
+      "model_modality": "rna2metabolite",
+      "model_variant": "aml",
+      "model_version": "v1.1",
+      "model_version_id": "rna2metabolite:sha256:9c1fdad35ef3bee7077b47270acaf614008d0b84249043a167e16932cad8c3d3",
+      "observed_on": "2026-10-06",
+      "registry_path": "models/rna2metabolite/v1.1/aml/model.json",
+      "source": "working-tree configuration"
+    },
+    {
+      "application": "altanalyze3",
+      "component": "rna2lipid_aml",
+      "context": "api-default",
+      "effective_from": null,
+      "effective_until": null,
+      "model_display_id": "rna2lipid/aml/v1.0",
+      "model_modality": "rna2lipid",
+      "model_variant": "aml",
+      "model_version": "v1.0",
+      "model_version_id": "rna2lipid_aml:sha256:4399979dde8c603b4bd37795c3c8b426e563d8dce1be5a8f013c20b4672dceca",
+      "observed_on": "2026-10-06",
+      "registry_path": "models/rna2lipid/v1.0/aml/model.json",
+      "source": "working-tree configuration"
+    },
+    {
+      "application": "scALABLE",
+      "component": "rna2grn",
+      "context": "hs_lung_cellref2_reference",
+      "effective_from": null,
+      "effective_until": null,
+      "model_display_id": "rna2grn/lung/v1.0",
+      "model_modality": "rna2grn",
+      "model_variant": "lung",
+      "model_version": "v1.0",
+      "model_version_id": "rna2grn:sha256:0ab247a852b7681689ca78c060aeaf4fc2f6df11df60125973db47901d1b79a2",
+      "observed_on": "2026-10-06",
+      "registry_path": "models/rna2grn/v1.0/lung/model.json",
+      "source": "working-tree configuration"
+    },
+    {
+      "application": "scALABLE",
+      "component": "rna2adt",
+      "context": "hs_lung_cellref2_reference",
+      "effective_from": null,
+      "effective_until": null,
+      "model_display_id": "rna2adt/human-lung/v1.0",
+      "model_modality": "rna2adt",
+      "model_variant": "human-lung",
+      "model_version": "v1.0",
+      "model_version_id": "rna2adt:sha256:bfaed001c73e979185ddcb14da708452ac20c5e412eff887dbeba191dcdc95ec",
+      "observed_on": "2026-10-06",
+      "registry_path": "models/rna2adt/v1.0/human-lung/model.json",
+      "source": "working-tree configuration"
+    },
+    {
+      "application": "scALABLE",
+      "component": "rna2lipid",
+      "context": "hs_lung_cellref2_reference",
+      "effective_from": null,
+      "effective_until": null,
+      "model_display_id": "rna2lipid/lung/v1.1",
+      "model_modality": "rna2lipid",
+      "model_variant": "lung",
+      "model_version": "v1.1",
+      "model_version_id": "rna2lipid:sha256:83ca5d1e86d8ec9ee82d37c71aeb4b6654c65384b72a424f4d46b34cefade90a",
+      "observed_on": "2026-10-06",
+      "registry_path": "models/rna2lipid/v1.1/lung/model.json",
+      "source": "working-tree configuration"
+    },
+    {
+      "application": "scALABLE",
+      "component": "rna2grn",
+      "context": "hs_lung_cellref_reference",
+      "effective_from": null,
+      "effective_until": null,
+      "model_display_id": "rna2grn/lung/v1.0",
+      "model_modality": "rna2grn",
+      "model_variant": "lung",
+      "model_version": "v1.0",
+      "model_version_id": "rna2grn:sha256:0ab247a852b7681689ca78c060aeaf4fc2f6df11df60125973db47901d1b79a2",
+      "observed_on": "2026-10-06",
+      "registry_path": "models/rna2grn/v1.0/lung/model.json",
+      "source": "working-tree configuration"
+    },
+    {
+      "application": "scALABLE",
+      "component": "rna2adt",
+      "context": "hs_lung_cellref_reference",
+      "effective_from": null,
+      "effective_until": null,
+      "model_display_id": "rna2adt/human-lung/v1.0",
+      "model_modality": "rna2adt",
+      "model_variant": "human-lung",
+      "model_version": "v1.0",
+      "model_version_id": "rna2adt:sha256:bfaed001c73e979185ddcb14da708452ac20c5e412eff887dbeba191dcdc95ec",
+      "observed_on": "2026-10-06",
+      "registry_path": "models/rna2adt/v1.0/human-lung/model.json",
+      "source": "working-tree configuration"
+    },
+    {
+      "application": "scALABLE",
+      "component": "rna2lipid",
+      "context": "hs_lung_cellref_reference",
+      "effective_from": null,
+      "effective_until": null,
+      "model_display_id": "rna2lipid/lung/v1.1",
+      "model_modality": "rna2lipid",
+      "model_variant": "lung",
+      "model_version": "v1.1",
+      "model_version_id": "rna2lipid:sha256:83ca5d1e86d8ec9ee82d37c71aeb4b6654c65384b72a424f4d46b34cefade90a",
+      "observed_on": "2026-10-06",
+      "registry_path": "models/rna2lipid/v1.1/lung/model.json",
+      "source": "working-tree configuration"
+    },
+    {
+      "application": "scALABLE",
+      "component": "rna2adt",
+      "context": "hs_bm_reference",
+      "effective_from": null,
+      "effective_until": null,
+      "model_display_id": "rna2adt/human-bone-marrow/v1.0",
+      "model_modality": "rna2adt",
+      "model_variant": "human-bone-marrow",
+      "model_version": "v1.0",
+      "model_version_id": "rna2adt:sha256:8b454dcc4a3e7eacc66c9be2ec672ec669888ec56f76e4ee267738e6a32f989b",
+      "observed_on": "2026-10-06",
+      "registry_path": "models/rna2adt/v1.0/human-bone-marrow/model.json",
+      "source": "working-tree configuration"
+    },
+    {
+      "application": "scALABLE",
+      "component": "rna2metabolite",
+      "context": "hs_bm_reference",
+      "effective_from": null,
+      "effective_until": null,
+      "model_display_id": "rna2metabolite/aml/v1.1",
+      "model_modality": "rna2metabolite",
+      "model_variant": "aml",
+      "model_version": "v1.1",
+      "model_version_id": "rna2metabolite:sha256:9c1fdad35ef3bee7077b47270acaf614008d0b84249043a167e16932cad8c3d3",
+      "observed_on": "2026-10-06",
+      "registry_path": "models/rna2metabolite/v1.1/aml/model.json",
+      "source": "working-tree configuration"
+    },
+    {
+      "application": "scALABLE",
+      "component": "rna2lipid_aml",
+      "context": "hs_bm_reference",
+      "effective_from": null,
+      "effective_until": null,
+      "model_display_id": "rna2lipid/aml/v1.0",
+      "model_modality": "rna2lipid",
+      "model_variant": "aml",
+      "model_version": "v1.0",
+      "model_version_id": "rna2lipid_aml:sha256:4399979dde8c603b4bd37795c3c8b426e563d8dce1be5a8f013c20b4672dceca",
+      "observed_on": "2026-10-06",
+      "registry_path": "models/rna2lipid/v1.0/aml/model.json",
+      "source": "working-tree configuration"
+    },
+    {
+      "application": "scALABLE",
+      "component": "rna2grn",
+      "context": "hs_bm_reference",
+      "effective_from": null,
+      "effective_until": null,
+      "model_display_id": "rna2grn/leukemia/v1.0",
+      "model_modality": "rna2grn",
+      "model_variant": "leukemia",
+      "model_version": "v1.0",
+      "model_version_id": "rna2grn:sha256:a52a648e1f5ddcad96ff680093b4eb71f3ede272ac093567afa552d5eacbdf94",
+      "observed_on": "2026-10-06",
+      "registry_path": "models/rna2grn/v1.0/leukemia/model.json",
+      "source": "working-tree configuration"
+    },
+    {
+      "application": "scALABLE",
+      "component": "rna2grn",
+      "context": "hs_lung_hlca_reference",
+      "effective_from": null,
+      "effective_until": null,
+      "model_display_id": "rna2grn/lung/v1.0",
+      "model_modality": "rna2grn",
+      "model_variant": "lung",
+      "model_version": "v1.0",
+      "model_version_id": "rna2grn:sha256:0ab247a852b7681689ca78c060aeaf4fc2f6df11df60125973db47901d1b79a2",
+      "observed_on": "2026-10-06",
+      "registry_path": "models/rna2grn/v1.0/lung/model.json",
+      "source": "working-tree configuration"
+    },
+    {
+      "application": "scALABLE",
+      "component": "rna2adt",
+      "context": "hs_lung_hlca_reference",
+      "effective_from": null,
+      "effective_until": null,
+      "model_display_id": "rna2adt/human-lung/v1.0",
+      "model_modality": "rna2adt",
+      "model_variant": "human-lung",
+      "model_version": "v1.0",
+      "model_version_id": "rna2adt:sha256:bfaed001c73e979185ddcb14da708452ac20c5e412eff887dbeba191dcdc95ec",
+      "observed_on": "2026-10-06",
+      "registry_path": "models/rna2adt/v1.0/human-lung/model.json",
+      "source": "working-tree configuration"
+    },
+    {
+      "application": "scALABLE",
+      "component": "rna2lipid",
+      "context": "hs_lung_hlca_reference",
+      "effective_from": null,
+      "effective_until": null,
+      "model_display_id": "rna2lipid/lung/v1.1",
+      "model_modality": "rna2lipid",
+      "model_variant": "lung",
+      "model_version": "v1.1",
+      "model_version_id": "rna2lipid:sha256:83ca5d1e86d8ec9ee82d37c71aeb4b6654c65384b72a424f4d46b34cefade90a",
+      "observed_on": "2026-10-06",
+      "registry_path": "models/rna2lipid/v1.1/lung/model.json",
+      "source": "working-tree configuration"
+    },
+    {
+      "application": "scALABLE",
+      "component": "rna2grn",
+      "context": "hs_lung_natri_reference",
+      "effective_from": null,
+      "effective_until": null,
+      "model_display_id": "rna2grn/lung/v1.0",
+      "model_modality": "rna2grn",
+      "model_variant": "lung",
+      "model_version": "v1.0",
+      "model_version_id": "rna2grn:sha256:0ab247a852b7681689ca78c060aeaf4fc2f6df11df60125973db47901d1b79a2",
+      "observed_on": "2026-10-06",
+      "registry_path": "models/rna2grn/v1.0/lung/model.json",
+      "source": "working-tree configuration"
+    },
+    {
+      "application": "scALABLE",
+      "component": "rna2adt",
+      "context": "hs_lung_natri_reference",
+      "effective_from": null,
+      "effective_until": null,
+      "model_display_id": "rna2adt/human-lung/v1.0",
+      "model_modality": "rna2adt",
+      "model_variant": "human-lung",
+      "model_version": "v1.0",
+      "model_version_id": "rna2adt:sha256:bfaed001c73e979185ddcb14da708452ac20c5e412eff887dbeba191dcdc95ec",
+      "observed_on": "2026-10-06",
+      "registry_path": "models/rna2adt/v1.0/human-lung/model.json",
+      "source": "working-tree configuration"
+    },
+    {
+      "application": "scALABLE",
+      "component": "rna2lipid",
+      "context": "hs_lung_natri_reference",
+      "effective_from": null,
+      "effective_until": null,
+      "model_display_id": "rna2lipid/lung/v1.1",
+      "model_modality": "rna2lipid",
+      "model_variant": "lung",
+      "model_version": "v1.1",
+      "model_version_id": "rna2lipid:sha256:83ca5d1e86d8ec9ee82d37c71aeb4b6654c65384b72a424f4d46b34cefade90a",
+      "observed_on": "2026-10-06",
+      "registry_path": "models/rna2lipid/v1.1/lung/model.json",
+      "source": "working-tree configuration"
+    },
+    {
+      "application": "scALABLE",
+      "component": "rna2grn",
+      "context": "hs_lung_bpd_sun_reference",
+      "effective_from": null,
+      "effective_until": null,
+      "model_display_id": "rna2grn/lung/v1.0",
+      "model_modality": "rna2grn",
+      "model_variant": "lung",
+      "model_version": "v1.0",
+      "model_version_id": "rna2grn:sha256:0ab247a852b7681689ca78c060aeaf4fc2f6df11df60125973db47901d1b79a2",
+      "observed_on": "2026-10-06",
+      "registry_path": "models/rna2grn/v1.0/lung/model.json",
+      "source": "working-tree configuration"
+    },
+    {
+      "application": "scALABLE",
+      "component": "rna2adt",
+      "context": "hs_lung_bpd_sun_reference",
+      "effective_from": null,
+      "effective_until": null,
+      "model_display_id": "rna2adt/human-lung/v1.0",
+      "model_modality": "rna2adt",
+      "model_variant": "human-lung",
+      "model_version": "v1.0",
+      "model_version_id": "rna2adt:sha256:bfaed001c73e979185ddcb14da708452ac20c5e412eff887dbeba191dcdc95ec",
+      "observed_on": "2026-10-06",
+      "registry_path": "models/rna2adt/v1.0/human-lung/model.json",
+      "source": "working-tree configuration"
+    },
+    {
+      "application": "scALABLE",
+      "component": "rna2lipid",
+      "context": "hs_lung_bpd_sun_reference",
+      "effective_from": null,
+      "effective_until": null,
+      "model_display_id": "rna2lipid/lung/v1.1",
+      "model_modality": "rna2lipid",
+      "model_variant": "lung",
+      "model_version": "v1.1",
+      "model_version_id": "rna2lipid:sha256:83ca5d1e86d8ec9ee82d37c71aeb4b6654c65384b72a424f4d46b34cefade90a",
+      "observed_on": "2026-10-06",
+      "registry_path": "models/rna2lipid/v1.1/lung/model.json",
+      "source": "working-tree configuration"
+    },
+    {
+      "application": "scALABLE",
+      "component": "rna2adt",
+      "context": "mm_bm_reference",
+      "effective_from": null,
+      "effective_until": null,
+      "model_display_id": "rna2adt/mouse/v1.0",
+      "model_modality": "rna2adt",
+      "model_variant": "mouse",
+      "model_version": "v1.0",
+      "model_version_id": "rna2adt:sha256:1e404e28f37bebc4ae82421ab05d5ecb90a7fde5c5e8ceadf490e5589253cd20",
+      "observed_on": "2026-10-06",
+      "registry_path": "models/rna2adt/v1.0/mouse/model.json",
+      "source": "working-tree configuration"
+    },
+    {
+      "application": "altanalyze3/scALABLE",
+      "component": "fastComm",
+      "context": "human",
+      "effective_from": null,
+      "effective_until": null,
+      "model_display_id": "fastComm/human/v1.0",
+      "model_modality": "fastComm",
+      "model_variant": "human",
+      "model_version": "v1.0",
+      "model_version_id": "fastComm:sha256:63230ba3ca790f9a9eee590baccb3999f3b388c842b9a672ade9308a86ccaf22",
+      "observed_on": "2026-10-06",
+      "registry_path": "models/fastComm/v1.0/human/model.json",
+      "source": "working-tree configuration"
+    },
+    {
+      "application": "altanalyze3/scALABLE",
+      "component": "fastComm",
+      "context": "mouse",
+      "effective_from": null,
+      "effective_until": null,
+      "model_display_id": "fastComm/mouse/v1.0",
+      "model_modality": "fastComm",
+      "model_variant": "mouse",
+      "model_version": "v1.0",
+      "model_version_id": "fastComm:sha256:4a68e71bf0168885ce0cc1025fef5e4b22d37f81758c3d9b0b5de4268c595436",
+      "observed_on": "2026-10-06",
+      "registry_path": "models/fastComm/v1.0/mouse/model.json",
+      "source": "working-tree configuration"
+    }
+  ],
+  "models": [
+    {
+      "analysis_model_version_id": "rna2lipid:sha256:97796cb6eac9ce645ac7ab0a8cdf990be43e0f97b458ed5549f1fa8196f6acb3",
+      "artifact_paths": {
+        "bundle": "components/rna2lipid/rna2lipid_hs_lung_native_log2_20261005_bundle.pkl"
+      },
+      "artifacts": {
+        "bundle": {
+          "filename": "rna2lipid_hs_lung_native_log2_20261005_bundle.pkl",
+          "release_asset_name": "rna2lipid_hs_lung_native_log2_20261005_bundle.pkl",
+          "sha256": "e67f2ac72abfc79ba4fb1e006c08ad664bd8297a585c156f62b412defb887689",
+          "url": "https://github.com/SalomonisLab/scalable-models/releases/download/rna2lipid-v1.1/rna2lipid_hs_lung_native_log2_20261005_bundle.pkl"
+        }
+      },
+      "component": "rna2lipid",
+      "declared_method": {
+        "MS1_absolute_calibration_complete": false,
+        "RNA_inputs": 1303,
+        "authorization": {
+          "conversation_reference": "Current thread, 2026-10-06 explicit model promotion/deployment request",
+          "granted_by": "user",
+          "scope": "Promote the evaluated complete-panel native-relative-log2 ElasticNetCV bundle; preserve the original bundle for rollback.",
+          "user_message": "Deploy the new Lipidomics prediction method for rna2lipid and as the default for scALABLE"
+        },
+        "lipid_outputs": 202,
+        "method": {
+          "RNA_preprocessing": "production supplied numeric scale; mean duplicate gene symbols; feature median missing-value policy; exact pinned 1303 gene list",
+          "architecture": "one_estimator_per_lipid",
+          "differential_policy": "same reviewed cellHarmony parameters and full-panel testing family; any scale-handling changes must be discussed separately",
+          "estimator": "sklearn.linear_model.ElasticNetCV",
+          "estimator_defaults": {
+            "fit_intercept": true,
+            "selection": "cyclic",
+            "tol": 0.0001
+          },
+          "external_holdout": false,
+          "feature_selection": "absolute Pearson ranking; choose top-N using training R2 minus sparsity_penalty * nonzero coefficients",
+          "fit_settings": {
+            "alpha_grid": [
+              0.001,
+              0.0013738237958832622,
+              0.0018873918221350978,
+              0.002592943797404667,
+              0.003562247890262444,
+              0.004893900918477494,
+              0.006723357536499335,
+              0.009236708571873864,
+              0.01268961003167922,
+              0.017433288221999882,
+              0.02395026619987486,
+              0.03290344562312667,
+              0.04520353656360243,
+              0.06210169418915616,
+              0.08531678524172805,
+              0.11721022975334805,
+              0.16102620275609392,
+              0.2212216291070448,
+              0.3039195382313198,
+              0.41753189365604004,
+              0.5736152510448681,
+              0.7880462815669912,
+              1.082636733874054,
+              1.4873521072935119,
+              2.0433597178569416,
+              2.8072162039411754,
+              3.8566204211634725,
+              5.298316906283707,
+              7.278953843983146,
+              10.0
+            ],
+            "cv_folds": 3,
+            "l1_ratio_grid": [
+              0.7,
+              0.9,
+              0.95,
+              1.0
+            ],
+            "max_iter": 50000,
+            "n_jobs": -1,
+            "random_seed": 1,
+            "sparsity_penalty": 0.002,
+            "top_gene_options": [
+              25,
+              50,
+              100,
+              200
+            ]
+          },
+          "inference": "deployed RNA inputs unchanged; production API zero-fill of absent input genes; no added study alignment",
+          "scaler_x": "StandardScaler fitted on the complete training roster",
+          "scaler_y": "StandardScaler fitted on each complete corrected target column",
+          "sklearn_version": "1.6.1",
+          "target_representation": "reviewed log2 targets; documented exact inverse; no new pseudocount",
+          "training_scope": "same 50 sorted profiles; no bulk training profiles"
+        },
+        "source": "recorded release manifest",
+        "target_scale": "native_relative_log2",
+        "training_profiles": 45
+      },
+      "inference_code_sha256": {
+        "components:rna2lipid:api.py": "837b1bfb6fddf664c036145fa299ef57867233d401bdd5132a84f26b3e2723d4",
+        "components:rna2lipid:release.py": "b94aa21973a74feeb98218e5275aa2762178d83057f3e36f5ccc0a14150beef7"
+      },
+      "inference_version_id": "sha256:53614deba5fada6e0db8556938972e53e90706e4af213f0fcfad5be046bcda71",
+      "inference_versions": [
+        {
+          "analysis_model_version_id": "rna2lipid:sha256:a90d85414969c3546057d1a731f00372a9e236ae91f2b35712b24844d0b3f12b",
+          "inference_code_sha256": {
+            "components:rna2lipid:api.py": "837b1bfb6fddf664c036145fa299ef57867233d401bdd5132a84f26b3e2723d4",
+            "components:rna2lipid:release.py": "def8cfdb791640aac9aca881dec10e5ce95f289b2018f001f8a92d5cc3289afc"
+          },
+          "inference_version_id": "sha256:e2dcff78d70e211f8c475aaa884ce915917f60f532f135cbad99ce50c5570918"
+        },
+        {
+          "analysis_model_version_id": "rna2lipid:sha256:97796cb6eac9ce645ac7ab0a8cdf990be43e0f97b458ed5549f1fa8196f6acb3",
+          "inference_code_sha256": {
+            "components:rna2lipid:api.py": "837b1bfb6fddf664c036145fa299ef57867233d401bdd5132a84f26b3e2723d4",
+            "components:rna2lipid:release.py": "b94aa21973a74feeb98218e5275aa2762178d83057f3e36f5ccc0a14150beef7"
+          },
+          "inference_version_id": "sha256:53614deba5fada6e0db8556938972e53e90706e4af213f0fcfad5be046bcda71"
+        }
+      ],
+      "model_display_id": "rna2lipid/lung/v1.1",
+      "model_modality": "rna2lipid",
+      "model_variant": "lung",
+      "model_version": "v1.1",
+      "model_version_id": "rna2lipid:sha256:83ca5d1e86d8ec9ee82d37c71aeb4b6654c65384b72a424f4d46b34cefade90a",
+      "name": "rna2lipid_hs_lung_native_log2_20261005_bundle.pkl",
+      "registry_path": "models/rna2lipid/v1.1/lung/model.json",
+      "release_evidence": {
+        "manifest": "releases/registry-2026.10.06.1/native_log2_release.json",
+        "manifest_sha256": "4d8adc116d7de0e2abbfc10aa2d3ca1d6dac8b8f5efe544bf6af2506b6468dd7",
+        "scope": "Recorded release metadata; no scientific rerun or service activation",
+        "source_commit": "b550c6b2f7de6fc0a687d79e0a0f6c4da842bdd2"
+      },
+      "runtime_versions": {
+        "altanalyze3": "0.1.3",
+        "anndata": "0.10.9",
+        "numpy": "2.4.6",
+        "pandas": "2.2.3",
+        "scikit-learn": "1.5.2",
+        "scipy": "1.17.1"
+      },
+      "status": "observed-default",
+      "trained_at": null,
+      "training_provenance_status": "not-certified-by-registry"
+    },
+    {
+      "analysis_model_version_id": "rna2adt:sha256:3d4adb9d1135bf4b90c032d4418ece7bbec2e7c6bbc742bb61a4fc637c139696",
+      "artifact_paths": {
+        "bundle": "components/rna2adt/rna2adt_bm_bundle.pkl"
+      },
+      "artifacts": {
+        "bundle": {
+          "filename": "rna2adt_bm_bundle.pkl",
+          "release_asset_name": "rna2adt_bm_bundle.pkl",
+          "sha256": "4bfc16def91144406ae1bc697fbfff2c3a42adffc92f512c36a14b96f6b4d4cd",
+          "url": "https://github.com/SalomonisLab/scalable-models/releases/download/rna2adt-v1.0/rna2adt_bm_bundle.pkl"
+        }
+      },
+      "component": "rna2adt",
+      "inference_code_sha256": {
+        "components:rna2adt:api.py": "7144e4b00a334f4f391665c02f4c0f131d2928cb275f3f19b80d89a5d84df991",
+        "components:rna2adt:centroid.py": "c521ad60214a77bab32c15c00496401330ce753ebb352798863c7b2d1c93574d",
+        "components:rna2adt:generalizable.py": "a10271856e3971b994ec17b90ae5197b1b7f6a384e0ed6c7c0b9479308bfa134",
+        "components:rna2adt:lung:model.py": "b3e1392b515d582657b929a27afd7f10a27ab52cdf74356bd41a061b5236b966",
+        "components:rna2adt:mouse:train_mouse.py": "542cef7782d4614b43d5496922c9977aa820191d8b52261654f5050f00e3087b",
+        "components:rna2adt:rna2lipid_arch.py": "4348bc3e5f8bb3cd5d06507e11b5a21759c86f21c6af4b156f345c55f37af254",
+        "components:rna2adt:targeted.py": "8b906e3bc29baba2f73ef9ff9420c75e065901ab99b6383fd7a1ad8302922335",
+        "components:rna2adt:training.py": "fbe81f18b9fba9a9a79b4e66b0866e7b459c56172fc0930db8bb6a9bbcd1ce10"
+      },
+      "inference_version_id": "sha256:43ca220957787ef801f1e6d27630863493bee2750a5181235dfd6a91d79955c1",
+      "inference_versions": [
+        {
+          "analysis_model_version_id": "rna2adt:sha256:3d4adb9d1135bf4b90c032d4418ece7bbec2e7c6bbc742bb61a4fc637c139696",
+          "inference_code_sha256": {
+            "components:rna2adt:api.py": "7144e4b00a334f4f391665c02f4c0f131d2928cb275f3f19b80d89a5d84df991",
+            "components:rna2adt:centroid.py": "c521ad60214a77bab32c15c00496401330ce753ebb352798863c7b2d1c93574d",
+            "components:rna2adt:generalizable.py": "a10271856e3971b994ec17b90ae5197b1b7f6a384e0ed6c7c0b9479308bfa134",
+            "components:rna2adt:lung:model.py": "b3e1392b515d582657b929a27afd7f10a27ab52cdf74356bd41a061b5236b966",
+            "components:rna2adt:mouse:train_mouse.py": "542cef7782d4614b43d5496922c9977aa820191d8b52261654f5050f00e3087b",
+            "components:rna2adt:rna2lipid_arch.py": "4348bc3e5f8bb3cd5d06507e11b5a21759c86f21c6af4b156f345c55f37af254",
+            "components:rna2adt:targeted.py": "8b906e3bc29baba2f73ef9ff9420c75e065901ab99b6383fd7a1ad8302922335",
+            "components:rna2adt:training.py": "fbe81f18b9fba9a9a79b4e66b0866e7b459c56172fc0930db8bb6a9bbcd1ce10"
+          },
+          "inference_version_id": "sha256:43ca220957787ef801f1e6d27630863493bee2750a5181235dfd6a91d79955c1"
+        }
+      ],
+      "model_display_id": "rna2adt/human-bone-marrow/v1.0",
+      "model_modality": "rna2adt",
+      "model_variant": "human-bone-marrow",
+      "model_version": "v1.0",
+      "model_version_id": "rna2adt:sha256:8b454dcc4a3e7eacc66c9be2ec672ec669888ec56f76e4ee267738e6a32f989b",
+      "name": "rna2adt_bm_bundle.pkl",
+      "registry_path": "models/rna2adt/v1.0/human-bone-marrow/model.json",
+      "runtime_versions": {
+        "altanalyze3": "0.1.3",
+        "anndata": "0.10.9",
+        "numpy": "2.4.6",
+        "pandas": "2.2.3",
+        "scikit-learn": "1.5.2",
+        "scipy": "1.17.1"
+      },
+      "status": "observed-default",
+      "trained_at": null,
+      "training_provenance_status": "not-certified-by-registry"
+    },
+    {
+      "analysis_model_version_id": "rna2grn:sha256:00f8d4cc44bade7cf99c79d2b9563e219f3ad157208dc5d1f334c30257c1e528",
+      "artifact_paths": {
+        "bundle": "components/rna2grn/rna2grn_bundle.pkl.gz"
+      },
+      "artifacts": {
+        "bundle": {
+          "filename": "rna2grn_bundle.pkl.gz",
+          "release_asset_name": "rna2grn_bundle.pkl.gz",
+          "sha256": "b629b4c9e1008615efc7c0b123345755cb2106ff3168d9b13d94eb123ad7b5ae",
+          "url": "https://github.com/SalomonisLab/scalable-models/releases/download/rna2grn-v1.0/rna2grn_bundle.pkl.gz"
+        }
+      },
+      "component": "rna2grn",
+      "inference_code_sha256": {
+        "components:rna2grn:api.py": "95c9f333f8c9edc176ad0c5028a46233ce67df09cc41ba2e40a849c126722024",
+        "components:rna2grn:model.py": "2389ccc8067f6b3c24a85022e99112831c69a012dd3d1d70610adf831417feee"
+      },
+      "inference_version_id": "sha256:10b487430c1ba1ca2fa222f785bd6c9201338ec72bc6b64c7290787bc8251edb",
+      "inference_versions": [
+        {
+          "analysis_model_version_id": "rna2grn:sha256:00f8d4cc44bade7cf99c79d2b9563e219f3ad157208dc5d1f334c30257c1e528",
+          "inference_code_sha256": {
+            "components:rna2grn:api.py": "95c9f333f8c9edc176ad0c5028a46233ce67df09cc41ba2e40a849c126722024",
+            "components:rna2grn:model.py": "2389ccc8067f6b3c24a85022e99112831c69a012dd3d1d70610adf831417feee"
+          },
+          "inference_version_id": "sha256:10b487430c1ba1ca2fa222f785bd6c9201338ec72bc6b64c7290787bc8251edb"
+        }
+      ],
+      "model_display_id": "rna2grn/leukemia/v1.0",
+      "model_modality": "rna2grn",
+      "model_variant": "leukemia",
+      "model_version": "v1.0",
+      "model_version_id": "rna2grn:sha256:a52a648e1f5ddcad96ff680093b4eb71f3ede272ac093567afa552d5eacbdf94",
+      "name": "rna2grn_bundle.pkl.gz",
+      "registry_path": "models/rna2grn/v1.0/leukemia/model.json",
+      "runtime_versions": {
+        "altanalyze3": "0.1.3",
+        "anndata": "0.10.9",
+        "numpy": "2.4.6",
+        "pandas": "2.2.3",
+        "scikit-learn": "1.5.2",
+        "scipy": "1.17.1"
+      },
+      "status": "observed-default",
+      "trained_at": null,
+      "training_provenance_status": "not-certified-by-registry"
+    },
+    {
+      "analysis_model_version_id": "rna2metabolite:sha256:870c72068f54d3c4fd641019dbe6846dc45796afc29441ff54a9cc2c04582ad6",
+      "artifact_paths": {
+        "bundle": "components/rna2metabolite/artifacts/rna2metabolite_aml_bundle.pkl.gz"
+      },
+      "artifacts": {
+        "bundle": {
+          "filename": "rna2metabolite_aml_bundle.pkl.gz",
+          "release_asset_name": "rna2metabolite_aml_bundle.pkl.gz",
+          "sha256": "232e9b56d72e3efacad1830aae2fd432f21d90b2e9dda5e723f09b2692db15c2",
+          "url": "https://github.com/SalomonisLab/scalable-models/releases/download/rna2metabolite-v1.0/rna2metabolite_aml_bundle.pkl.gz"
+        }
+      },
+      "component": "rna2metabolite",
+      "inference_code_sha256": {
+        "components:rna2metabolite:_impute.py": "3a440006e6d7eaa9ee6340e67414a88ec2a0cdcaef184718eabaa77fcba749de",
+        "components:rna2metabolite:api.py": "9a85d8fbc727af203af874592c99fe8998baaf7c3526fdd20e56bb72f6161da3"
+      },
+      "inference_version_id": "sha256:3df9b3a34822c40022e0329bc4ef1ef9abc2b0776d6eb58f905fb0ed1409bc8a",
+      "model_display_id": "rna2metabolite/aml/v1.0",
+      "model_modality": "rna2metabolite",
+      "model_variant": "aml",
+      "model_version": "v1.0",
+      "model_version_id": "rna2metabolite:sha256:18b6a8e32d8e3934610ec7906efb1a4ed6537c6afe45806427506a4c7fda1a5c",
+      "name": "rna2metabolite_aml_bundle.pkl.gz",
+      "registry_path": "models/rna2metabolite/v1.0/aml/model.json",
+      "runtime_versions": {
+        "altanalyze3": "0.1.3",
+        "anndata": "0.10.9",
+        "numpy": "2.4.6",
+        "pandas": "2.2.3",
+        "scikit-learn": "1.5.2",
+        "scipy": "1.17.1"
+      },
+      "status": "historical-default",
+      "trained_at": null,
+      "training_provenance_status": "not-certified-by-registry"
+    },
+    {
+      "analysis_model_version_id": "rna2lipid_aml:sha256:c6c353771b3bac3213dde7990419cfad8c4a7760dc7a2bfb12c258c3f6fd9fe2",
+      "artifact_paths": {
+        "bundle": "components/rna2lipid/aml/artifacts/rna2lipid_aml_bundle.pkl.gz"
+      },
+      "artifacts": {
+        "bundle": {
+          "filename": "rna2lipid_aml_bundle.pkl.gz",
+          "release_asset_name": "rna2lipid_aml_bundle.pkl.gz",
+          "sha256": "e4739c82f00b8a60d4a44d71711e7a6d68b0f5e6fa87a730bdbce64f321f8f46",
+          "url": "https://github.com/SalomonisLab/scalable-models/releases/download/rna2lipid-v1.0/rna2lipid_aml_bundle.pkl.gz"
+        }
+      },
+      "component": "rna2lipid_aml",
+      "inference_code_sha256": {
+        "components:rna2lipid:aml:_impute.py": "cec261380e496705c1e0582c47f5952afbdfa8830fa97c929e5a387f0e4777fa",
+        "components:rna2lipid:aml:api.py": "a9e05a3522ce343756d8635e5b33f4e085aa1e780f972ba47e9046de41e20117"
+      },
+      "inference_version_id": "sha256:ad9d6f600169f2ed8715190cf78ef6364fcd35876146bfe8172cbb1f5157ff65",
+      "inference_versions": [
+        {
+          "analysis_model_version_id": "rna2lipid_aml:sha256:c6c353771b3bac3213dde7990419cfad8c4a7760dc7a2bfb12c258c3f6fd9fe2",
+          "inference_code_sha256": {
+            "components:rna2lipid:aml:_impute.py": "cec261380e496705c1e0582c47f5952afbdfa8830fa97c929e5a387f0e4777fa",
+            "components:rna2lipid:aml:api.py": "a9e05a3522ce343756d8635e5b33f4e085aa1e780f972ba47e9046de41e20117"
+          },
+          "inference_version_id": "sha256:ad9d6f600169f2ed8715190cf78ef6364fcd35876146bfe8172cbb1f5157ff65"
+        }
+      ],
+      "model_display_id": "rna2lipid/aml/v1.0",
+      "model_modality": "rna2lipid",
+      "model_variant": "aml",
+      "model_version": "v1.0",
+      "model_version_id": "rna2lipid_aml:sha256:4399979dde8c603b4bd37795c3c8b426e563d8dce1be5a8f013c20b4672dceca",
+      "name": "rna2lipid_aml_bundle.pkl.gz",
+      "registry_path": "models/rna2lipid/v1.0/aml/model.json",
+      "runtime_versions": {
+        "altanalyze3": "0.1.3",
+        "anndata": "0.10.9",
+        "numpy": "2.4.6",
+        "pandas": "2.2.3",
+        "scikit-learn": "1.5.2",
+        "scipy": "1.17.1"
+      },
+      "status": "observed-default",
+      "trained_at": null,
+      "training_provenance_status": "not-certified-by-registry"
+    },
+    {
+      "analysis_model_version_id": "rna2grn:sha256:a7af3fa55d972c908c02060e82007a23b6f45bf3d8a8ff61dfe96e5ed76ee81d",
+      "artifact_paths": {
+        "bundle": "components/rna2grn/rna2grn_lung_hybrid_bundle.pkl.gz"
+      },
+      "artifacts": {
+        "bundle": {
+          "filename": "rna2grn_lung_hybrid_bundle.pkl.gz",
+          "release_asset_name": "rna2grn_lung_hybrid_bundle.pkl.gz",
+          "sha256": "4ca2a6457f39fe2d42c881f9a3d3df6f91f0bd7b3902d563d8070c9d76005d62",
+          "url": "https://github.com/SalomonisLab/scalable-models/releases/download/rna2grn-v1.0/rna2grn_lung_hybrid_bundle.pkl.gz"
+        }
+      },
+      "component": "rna2grn",
+      "inference_code_sha256": {
+        "components:rna2grn:api.py": "95c9f333f8c9edc176ad0c5028a46233ce67df09cc41ba2e40a849c126722024",
+        "components:rna2grn:model.py": "2389ccc8067f6b3c24a85022e99112831c69a012dd3d1d70610adf831417feee"
+      },
+      "inference_version_id": "sha256:10b487430c1ba1ca2fa222f785bd6c9201338ec72bc6b64c7290787bc8251edb",
+      "inference_versions": [
+        {
+          "analysis_model_version_id": "rna2grn:sha256:a7af3fa55d972c908c02060e82007a23b6f45bf3d8a8ff61dfe96e5ed76ee81d",
+          "inference_code_sha256": {
+            "components:rna2grn:api.py": "95c9f333f8c9edc176ad0c5028a46233ce67df09cc41ba2e40a849c126722024",
+            "components:rna2grn:model.py": "2389ccc8067f6b3c24a85022e99112831c69a012dd3d1d70610adf831417feee"
+          },
+          "inference_version_id": "sha256:10b487430c1ba1ca2fa222f785bd6c9201338ec72bc6b64c7290787bc8251edb"
+        }
+      ],
+      "model_display_id": "rna2grn/lung/v1.0",
+      "model_modality": "rna2grn",
+      "model_variant": "lung",
+      "model_version": "v1.0",
+      "model_version_id": "rna2grn:sha256:0ab247a852b7681689ca78c060aeaf4fc2f6df11df60125973db47901d1b79a2",
+      "name": "rna2grn_lung_hybrid_bundle.pkl.gz",
+      "registry_path": "models/rna2grn/v1.0/lung/model.json",
+      "runtime_versions": {
+        "altanalyze3": "0.1.3",
+        "anndata": "0.10.9",
+        "numpy": "2.4.6",
+        "pandas": "2.2.3",
+        "scikit-learn": "1.5.2",
+        "scipy": "1.17.1"
+      },
+      "status": "observed-default",
+      "trained_at": null,
+      "training_provenance_status": "not-certified-by-registry"
+    },
+    {
+      "analysis_model_version_id": "rna2adt:sha256:27bd96145ed9948aaa6282059516b026c711c9dc7bc23c290e9b3c9216252958",
+      "artifact_paths": {
+        "bundle": "components/rna2adt/lung/rna2adt_hs_lung_bundle.pkl"
+      },
+      "artifacts": {
+        "bundle": {
+          "filename": "rna2adt_hs_lung_bundle.pkl",
+          "release_asset_name": "rna2adt_hs_lung_bundle.pkl",
+          "sha256": "48a520a240d25986aab576ec47fb0a9a4c9ddae6f016cb6ac7c7c7d3a4401dcb",
+          "url": "https://github.com/SalomonisLab/scalable-models/releases/download/rna2adt-v1.0/rna2adt_hs_lung_bundle.pkl"
+        }
+      },
+      "component": "rna2adt",
+      "inference_code_sha256": {
+        "components:rna2adt:api.py": "7144e4b00a334f4f391665c02f4c0f131d2928cb275f3f19b80d89a5d84df991",
+        "components:rna2adt:centroid.py": "c521ad60214a77bab32c15c00496401330ce753ebb352798863c7b2d1c93574d",
+        "components:rna2adt:generalizable.py": "a10271856e3971b994ec17b90ae5197b1b7f6a384e0ed6c7c0b9479308bfa134",
+        "components:rna2adt:lung:model.py": "b3e1392b515d582657b929a27afd7f10a27ab52cdf74356bd41a061b5236b966",
+        "components:rna2adt:mouse:train_mouse.py": "542cef7782d4614b43d5496922c9977aa820191d8b52261654f5050f00e3087b",
+        "components:rna2adt:rna2lipid_arch.py": "4348bc3e5f8bb3cd5d06507e11b5a21759c86f21c6af4b156f345c55f37af254",
+        "components:rna2adt:targeted.py": "8b906e3bc29baba2f73ef9ff9420c75e065901ab99b6383fd7a1ad8302922335",
+        "components:rna2adt:training.py": "fbe81f18b9fba9a9a79b4e66b0866e7b459c56172fc0930db8bb6a9bbcd1ce10"
+      },
+      "inference_version_id": "sha256:43ca220957787ef801f1e6d27630863493bee2750a5181235dfd6a91d79955c1",
+      "inference_versions": [
+        {
+          "analysis_model_version_id": "rna2adt:sha256:27bd96145ed9948aaa6282059516b026c711c9dc7bc23c290e9b3c9216252958",
+          "inference_code_sha256": {
+            "components:rna2adt:api.py": "7144e4b00a334f4f391665c02f4c0f131d2928cb275f3f19b80d89a5d84df991",
+            "components:rna2adt:centroid.py": "c521ad60214a77bab32c15c00496401330ce753ebb352798863c7b2d1c93574d",
+            "components:rna2adt:generalizable.py": "a10271856e3971b994ec17b90ae5197b1b7f6a384e0ed6c7c0b9479308bfa134",
+            "components:rna2adt:lung:model.py": "b3e1392b515d582657b929a27afd7f10a27ab52cdf74356bd41a061b5236b966",
+            "components:rna2adt:mouse:train_mouse.py": "542cef7782d4614b43d5496922c9977aa820191d8b52261654f5050f00e3087b",
+            "components:rna2adt:rna2lipid_arch.py": "4348bc3e5f8bb3cd5d06507e11b5a21759c86f21c6af4b156f345c55f37af254",
+            "components:rna2adt:targeted.py": "8b906e3bc29baba2f73ef9ff9420c75e065901ab99b6383fd7a1ad8302922335",
+            "components:rna2adt:training.py": "fbe81f18b9fba9a9a79b4e66b0866e7b459c56172fc0930db8bb6a9bbcd1ce10"
+          },
+          "inference_version_id": "sha256:43ca220957787ef801f1e6d27630863493bee2750a5181235dfd6a91d79955c1"
+        }
+      ],
+      "model_display_id": "rna2adt/human-lung/v1.0",
+      "model_modality": "rna2adt",
+      "model_variant": "human-lung",
+      "model_version": "v1.0",
+      "model_version_id": "rna2adt:sha256:bfaed001c73e979185ddcb14da708452ac20c5e412eff887dbeba191dcdc95ec",
+      "name": "rna2adt_hs_lung_bundle.pkl",
+      "registry_path": "models/rna2adt/v1.0/human-lung/model.json",
+      "runtime_versions": {
+        "altanalyze3": "0.1.3",
+        "anndata": "0.10.9",
+        "numpy": "2.4.6",
+        "pandas": "2.2.3",
+        "scikit-learn": "1.5.2",
+        "scipy": "1.17.1"
+      },
+      "status": "observed-default",
+      "trained_at": null,
+      "training_provenance_status": "not-certified-by-registry"
+    },
+    {
+      "analysis_model_version_id": "rna2lipid:sha256:61212aa844bd4f179f3d64c8ba2e197593ada156be7944834672d085c3402c2c",
+      "artifact_paths": {
+        "bundle": "components/rna2lipid/rna2lipid_hs_lung_lipidwise_bundle.pkl"
+      },
+      "artifacts": {
+        "bundle": {
+          "filename": "rna2lipid_hs_lung_lipidwise_bundle.pkl",
+          "release_asset_name": "rna2lipid_hs_lung_lipidwise_bundle.pkl",
+          "sha256": "ed807e7a438e161bdfe7953ac212594e9b6f95872a9d48ae3834884dfa91cae0",
+          "url": "https://github.com/SalomonisLab/scalable-models/releases/download/rna2lipid-v1.0/rna2lipid_hs_lung_lipidwise_bundle.pkl"
+        }
+      },
+      "component": "rna2lipid",
+      "inference_code_sha256": {
+        "components:rna2lipid:api.py": "837b1bfb6fddf664c036145fa299ef57867233d401bdd5132a84f26b3e2723d4",
+        "components:rna2lipid:release.py": "def8cfdb791640aac9aca881dec10e5ce95f289b2018f001f8a92d5cc3289afc"
+      },
+      "inference_version_id": "sha256:e2dcff78d70e211f8c475aaa884ce915917f60f532f135cbad99ce50c5570918",
+      "model_display_id": "rna2lipid/lung/v1.0",
+      "model_modality": "rna2lipid",
+      "model_variant": "lung",
+      "model_version": "v1.0",
+      "model_version_id": "rna2lipid:sha256:9f50b9acacfa964261ce4e662d6b31cdbe4b90b1785570e50433193aa6dd8742",
+      "name": "rna2lipid_hs_lung_lipidwise_bundle.pkl",
+      "registry_path": "models/rna2lipid/v1.0/lung/model.json",
+      "runtime_versions": {
+        "altanalyze3": "0.1.3",
+        "anndata": "0.10.9",
+        "numpy": "2.4.6",
+        "pandas": "2.2.3",
+        "scikit-learn": "1.5.2",
+        "scipy": "1.17.1"
+      },
+      "status": "historical-default",
+      "trained_at": null,
+      "training_provenance_status": "not-certified-by-registry"
+    },
+    {
+      "analysis_model_version_id": "rna2adt:sha256:fd28ecab4d2bd56215227749ce178c41d1dc2d7398467cdcf572e5de2b7d92e3",
+      "artifact_paths": {
+        "bundle": "components/rna2adt/mouse/rna2adt_mm_bundle.pkl"
+      },
+      "artifacts": {
+        "bundle": {
+          "filename": "rna2adt_mm_bundle.pkl",
+          "release_asset_name": "rna2adt_mm_bundle.pkl",
+          "sha256": "2b601717c0afa77e5a50bc3358075767f2a4937dd95b1146b7a94334cbf3f7aa",
+          "url": "https://github.com/SalomonisLab/scalable-models/releases/download/rna2adt-v1.0/rna2adt_mm_bundle.pkl"
+        }
+      },
+      "component": "rna2adt",
+      "inference_code_sha256": {
+        "components:rna2adt:api.py": "7144e4b00a334f4f391665c02f4c0f131d2928cb275f3f19b80d89a5d84df991",
+        "components:rna2adt:centroid.py": "c521ad60214a77bab32c15c00496401330ce753ebb352798863c7b2d1c93574d",
+        "components:rna2adt:generalizable.py": "a10271856e3971b994ec17b90ae5197b1b7f6a384e0ed6c7c0b9479308bfa134",
+        "components:rna2adt:lung:model.py": "b3e1392b515d582657b929a27afd7f10a27ab52cdf74356bd41a061b5236b966",
+        "components:rna2adt:mouse:train_mouse.py": "542cef7782d4614b43d5496922c9977aa820191d8b52261654f5050f00e3087b",
+        "components:rna2adt:rna2lipid_arch.py": "4348bc3e5f8bb3cd5d06507e11b5a21759c86f21c6af4b156f345c55f37af254",
+        "components:rna2adt:targeted.py": "8b906e3bc29baba2f73ef9ff9420c75e065901ab99b6383fd7a1ad8302922335",
+        "components:rna2adt:training.py": "fbe81f18b9fba9a9a79b4e66b0866e7b459c56172fc0930db8bb6a9bbcd1ce10"
+      },
+      "inference_version_id": "sha256:43ca220957787ef801f1e6d27630863493bee2750a5181235dfd6a91d79955c1",
+      "inference_versions": [
+        {
+          "analysis_model_version_id": "rna2adt:sha256:fd28ecab4d2bd56215227749ce178c41d1dc2d7398467cdcf572e5de2b7d92e3",
+          "inference_code_sha256": {
+            "components:rna2adt:api.py": "7144e4b00a334f4f391665c02f4c0f131d2928cb275f3f19b80d89a5d84df991",
+            "components:rna2adt:centroid.py": "c521ad60214a77bab32c15c00496401330ce753ebb352798863c7b2d1c93574d",
+            "components:rna2adt:generalizable.py": "a10271856e3971b994ec17b90ae5197b1b7f6a384e0ed6c7c0b9479308bfa134",
+            "components:rna2adt:lung:model.py": "b3e1392b515d582657b929a27afd7f10a27ab52cdf74356bd41a061b5236b966",
+            "components:rna2adt:mouse:train_mouse.py": "542cef7782d4614b43d5496922c9977aa820191d8b52261654f5050f00e3087b",
+            "components:rna2adt:rna2lipid_arch.py": "4348bc3e5f8bb3cd5d06507e11b5a21759c86f21c6af4b156f345c55f37af254",
+            "components:rna2adt:targeted.py": "8b906e3bc29baba2f73ef9ff9420c75e065901ab99b6383fd7a1ad8302922335",
+            "components:rna2adt:training.py": "fbe81f18b9fba9a9a79b4e66b0866e7b459c56172fc0930db8bb6a9bbcd1ce10"
+          },
+          "inference_version_id": "sha256:43ca220957787ef801f1e6d27630863493bee2750a5181235dfd6a91d79955c1"
+        }
+      ],
+      "model_display_id": "rna2adt/mouse/v1.0",
+      "model_modality": "rna2adt",
+      "model_variant": "mouse",
+      "model_version": "v1.0",
+      "model_version_id": "rna2adt:sha256:1e404e28f37bebc4ae82421ab05d5ecb90a7fde5c5e8ceadf490e5589253cd20",
+      "name": "rna2adt_mm_bundle.pkl",
+      "registry_path": "models/rna2adt/v1.0/mouse/model.json",
+      "runtime_versions": {
+        "altanalyze3": "0.1.3",
+        "anndata": "0.10.9",
+        "numpy": "2.4.6",
+        "pandas": "2.2.3",
+        "scikit-learn": "1.5.2",
+        "scipy": "1.17.1"
+      },
+      "status": "observed-default",
+      "trained_at": null,
+      "training_provenance_status": "not-certified-by-registry"
+    },
+    {
+      "analysis_model_version_id": "fastComm:sha256:34e814a9cfcb551e442a637a678d14dbedf3ba5898b24fb73f0b3016a5c353f4",
+      "artifact_paths": {
+        "ligand_receptor": "components/fastComm/training_data/processed/upstream/cellchat_nichenet_human/ligand_receptor.tsv",
+        "response_matrix": "components/fastComm/training_data/processed/upstream/cellchat_nichenet_human/response_signatures.tsv"
+      },
+      "artifacts": {
+        "ligand_receptor": {
+          "filename": "ligand_receptor.tsv",
+          "release_asset_name": "human-ligand_receptor.tsv",
+          "sha256": "d2c80410de36a9e2d1778294244890e48bb45342e5c7ee26ed0528f41a048fc3",
+          "url": "https://github.com/SalomonisLab/scalable-models/releases/download/fastComm-v1.0/human-ligand_receptor.tsv"
+        },
+        "response_matrix": {
+          "filename": "response_signatures.tsv",
+          "release_asset_name": "human-response_signatures.tsv",
+          "sha256": "3d69db75348fc6a302bda8627e793be962852a4d76128b6e562c4e2c86474412",
+          "url": "https://github.com/SalomonisLab/scalable-models/releases/download/fastComm-v1.0/human-response_signatures.tsv"
+        }
+      },
+      "component": "fastComm",
+      "inference_code_sha256": {
+        "components:fastComm:api.py": "ab0d44c65f45659129640092639827bc1f8794d8aee7703b11116dd902494a62",
+        "components:fastComm:scoring.py": "6898fc6c5197010eaeeed886b02384d6071b2a15c631e3dbcf5ff00f35895244",
+        "components:fastComm:upstream_resources.py": "c228d5269de8e526b3778bfb2d76a343cfc1ecc5c17f77f6dcee3e8026c45f5d"
+      },
+      "inference_version_id": "sha256:e77f4609e9754a7b82b8775992adcbd30993b3065c24b7374f2344cc0d0469c1",
+      "inference_versions": [
+        {
+          "analysis_model_version_id": "fastComm:sha256:34e814a9cfcb551e442a637a678d14dbedf3ba5898b24fb73f0b3016a5c353f4",
+          "inference_code_sha256": {
+            "components:fastComm:api.py": "ab0d44c65f45659129640092639827bc1f8794d8aee7703b11116dd902494a62",
+            "components:fastComm:scoring.py": "6898fc6c5197010eaeeed886b02384d6071b2a15c631e3dbcf5ff00f35895244",
+            "components:fastComm:upstream_resources.py": "c228d5269de8e526b3778bfb2d76a343cfc1ecc5c17f77f6dcee3e8026c45f5d"
+          },
+          "inference_version_id": "sha256:e77f4609e9754a7b82b8775992adcbd30993b3065c24b7374f2344cc0d0469c1"
+        }
+      ],
+      "model_display_id": "fastComm/human/v1.0",
+      "model_modality": "fastComm",
+      "model_variant": "human",
+      "model_version": "v1.0",
+      "model_version_id": "fastComm:sha256:63230ba3ca790f9a9eee590baccb3999f3b388c842b9a672ade9308a86ccaf22",
+      "name": "ligand_receptor.tsv, response_signatures.tsv",
+      "registry_path": "models/fastComm/v1.0/human/model.json",
+      "runtime_versions": {
+        "altanalyze3": "0.1.3",
+        "anndata": "0.10.9",
+        "numpy": "2.4.6",
+        "pandas": "2.2.3",
+        "scikit-learn": "1.5.2",
+        "scipy": "1.17.1"
+      },
+      "status": "observed-default",
+      "trained_at": null,
+      "training_provenance_status": "not-certified-by-registry"
+    },
+    {
+      "analysis_model_version_id": "fastComm:sha256:8ef504b3e507fb67e611fda72fbbc347756da2c1f290ea943a20c1e7ad5a7da2",
+      "artifact_paths": {
+        "ligand_receptor": "components/fastComm/training_data/processed/upstream/cellchat_nichenet_mouse/ligand_receptor.tsv",
+        "response_matrix": "components/fastComm/training_data/processed/upstream/cellchat_nichenet_mouse/response_signatures.tsv"
+      },
+      "artifacts": {
+        "ligand_receptor": {
+          "filename": "ligand_receptor.tsv",
+          "release_asset_name": "mouse-ligand_receptor.tsv",
+          "sha256": "d4c29f6a4cc2fd81b87552b987fcb8b6975d15f2ed1a82a32b5863ce4b88e38a",
+          "url": "https://github.com/SalomonisLab/scalable-models/releases/download/fastComm-v1.0/mouse-ligand_receptor.tsv"
+        },
+        "response_matrix": {
+          "filename": "response_signatures.tsv",
+          "release_asset_name": "mouse-response_signatures.tsv",
+          "sha256": "1d7abf95f44a3b99b23e5429611dfc738c21042d0e17f1735a484b53c0a98a66",
+          "url": "https://github.com/SalomonisLab/scalable-models/releases/download/fastComm-v1.0/mouse-response_signatures.tsv"
+        }
+      },
+      "component": "fastComm",
+      "inference_code_sha256": {
+        "components:fastComm:api.py": "ab0d44c65f45659129640092639827bc1f8794d8aee7703b11116dd902494a62",
+        "components:fastComm:scoring.py": "6898fc6c5197010eaeeed886b02384d6071b2a15c631e3dbcf5ff00f35895244",
+        "components:fastComm:upstream_resources.py": "c228d5269de8e526b3778bfb2d76a343cfc1ecc5c17f77f6dcee3e8026c45f5d"
+      },
+      "inference_version_id": "sha256:e77f4609e9754a7b82b8775992adcbd30993b3065c24b7374f2344cc0d0469c1",
+      "inference_versions": [
+        {
+          "analysis_model_version_id": "fastComm:sha256:8ef504b3e507fb67e611fda72fbbc347756da2c1f290ea943a20c1e7ad5a7da2",
+          "inference_code_sha256": {
+            "components:fastComm:api.py": "ab0d44c65f45659129640092639827bc1f8794d8aee7703b11116dd902494a62",
+            "components:fastComm:scoring.py": "6898fc6c5197010eaeeed886b02384d6071b2a15c631e3dbcf5ff00f35895244",
+            "components:fastComm:upstream_resources.py": "c228d5269de8e526b3778bfb2d76a343cfc1ecc5c17f77f6dcee3e8026c45f5d"
+          },
+          "inference_version_id": "sha256:e77f4609e9754a7b82b8775992adcbd30993b3065c24b7374f2344cc0d0469c1"
+        }
+      ],
+      "model_display_id": "fastComm/mouse/v1.0",
+      "model_modality": "fastComm",
+      "model_variant": "mouse",
+      "model_version": "v1.0",
+      "model_version_id": "fastComm:sha256:4a68e71bf0168885ce0cc1025fef5e4b22d37f81758c3d9b0b5de4268c595436",
+      "name": "ligand_receptor.tsv, response_signatures.tsv",
+      "registry_path": "models/fastComm/v1.0/mouse/model.json",
+      "runtime_versions": {
+        "altanalyze3": "0.1.3",
+        "anndata": "0.10.9",
+        "numpy": "2.4.6",
+        "pandas": "2.2.3",
+        "scikit-learn": "1.5.2",
+        "scipy": "1.17.1"
+      },
+      "status": "observed-default",
+      "trained_at": null,
+      "training_provenance_status": "not-certified-by-registry"
+    },
+    {
+      "analysis_model_version_id": "rna2metabolite:sha256:f806493e77bd51e27cfc2777622310d8b7378edf84c9681965666338542e9554",
+      "artifact_paths": {
+        "bundle": "components/rna2metabolite/artifacts/rna2metabolite_aml_NA30_20261006_bundle.pkl.gz"
+      },
+      "artifacts": {
+        "bundle": {
+          "filename": "rna2metabolite_aml_NA30_20261006_bundle.pkl.gz",
+          "release_asset_name": "rna2metabolite_aml_NA30_20261006_bundle.pkl.gz",
+          "sha256": "0e492cda787c5c1385437332296c5e7b751e7b5d92e6fc2fcf5409ade7105a6d",
+          "url": "https://github.com/SalomonisLab/scalable-models/releases/download/rna2metabolite-v1.1/rna2metabolite_aml_NA30_20261006_bundle.pkl.gz"
+        }
+      },
+      "component": "rna2metabolite",
+      "declared_method": {
+        "RNA_inputs": 12416,
+        "authorization": {
+          "comparison": "missing_count * 10 > training_case_count * 3",
+          "denominator": "all 84 original matched training cases",
+          "granted_by": "user",
+          "preserve_RNA_inputs": true,
+          "preserve_retained_models": true,
+          "preserve_training_cases": true,
+          "scope": "AML metabolite targets; evaluate original normalized-log2 training table before filling",
+          "threshold": "strictly greater than 30% missing",
+          "user_message": "If >30% values are NA, remove that feature"
+        },
+        "authorized_removed_targets": 510,
+        "estimator": "per-target Ridge (ElasticNet l1_ratio=0, alpha=100.0); 1000 genes/target",
+        "new_fitting_executed": false,
+        "original_targets": 2533,
+        "retained_targets": 2023,
+        "retained_weights_identical": true,
+        "source": "recorded release manifest",
+        "training_cases": 84
+      },
+      "inference_code_sha256": {
+        "components:rna2metabolite:_impute.py": "21974b2569f42566664534584ec3b508d0ee925cec94cbe4b5ce737f1f4f4578",
+        "components:rna2metabolite:api.py": "0476eb82b2f3fbce869084c768315d34cca77c326ed17234cacc24820d99c362",
+        "components:rna2metabolite:missingness_release.py": "a3624e7b66422f6744d2bf34dcf9daeb315fd99d5c923e2097459a6c18422c0a"
+      },
+      "inference_version_id": "sha256:9a83b6cab28d4cd3a78f3a486b7520a1cab6928c755a234036bfa6bae8e25760",
+      "inference_versions": [
+        {
+          "analysis_model_version_id": "rna2metabolite:sha256:f806493e77bd51e27cfc2777622310d8b7378edf84c9681965666338542e9554",
+          "inference_code_sha256": {
+            "components:rna2metabolite:_impute.py": "21974b2569f42566664534584ec3b508d0ee925cec94cbe4b5ce737f1f4f4578",
+            "components:rna2metabolite:api.py": "0476eb82b2f3fbce869084c768315d34cca77c326ed17234cacc24820d99c362",
+            "components:rna2metabolite:missingness_release.py": "a3624e7b66422f6744d2bf34dcf9daeb315fd99d5c923e2097459a6c18422c0a"
+          },
+          "inference_version_id": "sha256:9a83b6cab28d4cd3a78f3a486b7520a1cab6928c755a234036bfa6bae8e25760"
+        }
+      ],
+      "model_display_id": "rna2metabolite/aml/v1.1",
+      "model_modality": "rna2metabolite",
+      "model_variant": "aml",
+      "model_version": "v1.1",
+      "model_version_id": "rna2metabolite:sha256:9c1fdad35ef3bee7077b47270acaf614008d0b84249043a167e16932cad8c3d3",
+      "name": "rna2metabolite_aml_NA30_20261006_bundle.pkl.gz",
+      "registry_path": "models/rna2metabolite/v1.1/aml/model.json",
+      "release_evidence": {
+        "manifest": "releases/registry-2026.10.06.1/missingness_release.json",
+        "manifest_sha256": "edffc4f88107d6fbcaba19196b0bf6ce6173dce21cb53ed129aac7dd3ee6f32b",
+        "scope": "Recorded release metadata; no scientific rerun or service activation",
+        "source_commit": "b550c6b2f7de6fc0a687d79e0a0f6c4da842bdd2"
+      },
+      "runtime_versions": {
+        "altanalyze3": "0.1.3",
+        "anndata": "0.10.9",
+        "numpy": "2.4.6",
+        "pandas": "2.2.3",
+        "scikit-learn": "1.5.2",
+        "scipy": "1.17.1"
+      },
+      "status": "observed-default",
+      "trained_at": null,
+      "training_provenance_status": "not-certified-by-registry"
+    }
+  ],
+  "registry_release": "registry-2026.10.06.1",
+  "schema_version": "1.0"
+}

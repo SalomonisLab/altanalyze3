@@ -1,0 +1,60 @@
+{
+  "analysis_model_version_id": "rna2adt:sha256:fd28ecab4d2bd56215227749ce178c41d1dc2d7398467cdcf572e5de2b7d92e3",
+  "artifact_paths": {
+    "bundle": "components/rna2adt/mouse/rna2adt_mm_bundle.pkl"
+  },
+  "artifacts": {
+    "bundle": {
+      "filename": "rna2adt_mm_bundle.pkl",
+      "release_asset_name": "rna2adt_mm_bundle.pkl",
+      "sha256": "2b601717c0afa77e5a50bc3358075767f2a4937dd95b1146b7a94334cbf3f7aa",
+      "url": "https://github.com/SalomonisLab/scalable-models/releases/download/rna2adt-v1.0/rna2adt_mm_bundle.pkl"
+    }
+  },
+  "component": "rna2adt",
+  "inference_code_sha256": {
+    "components:rna2adt:api.py": "7144e4b00a334f4f391665c02f4c0f131d2928cb275f3f19b80d89a5d84df991",
+    "components:rna2adt:centroid.py": "c521ad60214a77bab32c15c00496401330ce753ebb352798863c7b2d1c93574d",
+    "components:rna2adt:generalizable.py": "a10271856e3971b994ec17b90ae5197b1b7f6a384e0ed6c7c0b9479308bfa134",
+    "components:rna2adt:lung:model.py": "b3e1392b515d582657b929a27afd7f10a27ab52cdf74356bd41a061b5236b966",
+    "components:rna2adt:mouse:train_mouse.py": "542cef7782d4614b43d5496922c9977aa820191d8b52261654f5050f00e3087b",
+    "components:rna2adt:rna2lipid_arch.py": "4348bc3e5f8bb3cd5d06507e11b5a21759c86f21c6af4b156f345c55f37af254",
+    "components:rna2adt:targeted.py": "8b906e3bc29baba2f73ef9ff9420c75e065901ab99b6383fd7a1ad8302922335",
+    "components:rna2adt:training.py": "fbe81f18b9fba9a9a79b4e66b0866e7b459c56172fc0930db8bb6a9bbcd1ce10"
+  },
+  "inference_version_id": "sha256:43ca220957787ef801f1e6d27630863493bee2750a5181235dfd6a91d79955c1",
+  "inference_versions": [
+    {
+      "analysis_model_version_id": "rna2adt:sha256:fd28ecab4d2bd56215227749ce178c41d1dc2d7398467cdcf572e5de2b7d92e3",
+      "inference_code_sha256": {
+        "components:rna2adt:api.py": "7144e4b00a334f4f391665c02f4c0f131d2928cb275f3f19b80d89a5d84df991",
+        "components:rna2adt:centroid.py": "c521ad60214a77bab32c15c00496401330ce753ebb352798863c7b2d1c93574d",
+        "components:rna2adt:generalizable.py": "a10271856e3971b994ec17b90ae5197b1b7f6a384e0ed6c7c0b9479308bfa134",
+        "components:rna2adt:lung:model.py": "b3e1392b515d582657b929a27afd7f10a27ab52cdf74356bd41a061b5236b966",
+        "components:rna2adt:mouse:train_mouse.py": "542cef7782d4614b43d5496922c9977aa820191d8b52261654f5050f00e3087b",
+        "components:rna2adt:rna2lipid_arch.py": "4348bc3e5f8bb3cd5d06507e11b5a21759c86f21c6af4b156f345c55f37af254",
+        "components:rna2adt:targeted.py": "8b906e3bc29baba2f73ef9ff9420c75e065901ab99b6383fd7a1ad8302922335",
+        "components:rna2adt:training.py": "fbe81f18b9fba9a9a79b4e66b0866e7b459c56172fc0930db8bb6a9bbcd1ce10"
+      },
+      "inference_version_id": "sha256:43ca220957787ef801f1e6d27630863493bee2750a5181235dfd6a91d79955c1"
+    }
+  ],
+  "model_display_id": "rna2adt/mouse/v1.0",
+  "model_modality": "rna2adt",
+  "model_variant": "mouse",
+  "model_version": "v1.0",
+  "model_version_id": "rna2adt:sha256:1e404e28f37bebc4ae82421ab05d5ecb90a7fde5c5e8ceadf490e5589253cd20",
+  "name": "rna2adt_mm_bundle.pkl",
+  "registry_path": "models/rna2adt/v1.0/mouse/model.json",
+  "runtime_versions": {
+    "altanalyze3": "0.1.3",
+    "anndata": "0.10.9",
+    "numpy": "2.4.6",
+    "pandas": "2.2.3",
+    "scikit-learn": "1.5.2",
+    "scipy": "1.17.1"
+  },
+  "status": "observed-default",
+  "trained_at": null,
+  "training_provenance_status": "not-certified-by-registry"
+}

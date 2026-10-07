@@ -282,6 +282,43 @@ class _StoreMatrix:
             out[:, s:e] = part.reshape(k, e - s)
         return out
 
+    def group_sums_and_total(self, left):
+        """The existing group contrast, with one bounded read of each feature.
+
+        Preserve float64 weighted group accumulation and sequential float32
+        totals exactly as __rmatmul__ and sum(axis=0) do separately.
+        """
+        left = sp.csr_matrix(left)
+        if left.shape[1] != self.shape[0]:
+            raise ValueError(f"shape mismatch: {left.shape} @ {self.shape}")
+        coo = left.tocoo()
+        if np.bincount(coo.col, minlength=self.shape[0]).max(initial=0) > 1:
+            raise NotImplementedError("a left operand with two entries in one column")
+        group = np.full(self.shape[0], -1, dtype=np.int64)
+        weight = np.zeros(self.shape[0], dtype=np.float64)
+        group[coo.col], weight[coo.col] = coo.row, coo.data
+        k, n = left.shape[0], self.shape[1]
+        out = np.zeros((k, n), dtype=np.float64)
+        total = np.zeros(n, dtype=np.float32)
+        s = 0
+        while s < n:
+            # At most one million stored entries, or one exceptionally dense
+            # feature. Bound temporary arrays by nnz, not by dataset cell count.
+            target = int(self._o._indptr[s]) + 1_000_000
+            e = min(n, s + 2048, max(s + 1, int(np.searchsorted(self._o._indptr, target, side="right")) - 1))
+            cells, values, feature = self._columns(s, e)
+            g = group[cells]
+            keep = g >= 0
+            key = g[keep] * (e - s) + (feature[keep] - s)
+            out[:, s:e] = np.bincount(key, weights=weight[cells[keep]] * values[keep].astype(np.float64),
+                                     minlength=k * (e - s)).reshape(k, e - s)
+            offsets = np.asarray(self._o._indptr[s:e + 1], dtype=np.int64)
+            offsets = offsets - offsets[0]
+            for j in np.flatnonzero(np.diff(offsets)):
+                total[s + j] = np.cumsum(values[offsets[j]:offsets[j + 1]], dtype=np.float32)[-1]
+            s = e
+        return out, total
+
     # ---- indexing: X[rows], X[:, j], X[:, cols], X[rows, cols] ------------------------
     #
     # The result is the object the h5ad path returns, built from the same float32 values:

@@ -1,0 +1,101 @@
+{
+  "baseline": {
+    "mode": "baseline",
+    "scope": "Synthetic serving components only",
+    "cells": 600000,
+    "genes": 1024,
+    "nnz": 24576000,
+    "default_genes_cold_seconds": 1.6647891600005096,
+    "default_genes_repeat_seconds": 0.770849136999459,
+    "selected_genes": [
+      "G560",
+      "G601",
+      "G1010",
+      "G291",
+      "G772",
+      "G373",
+      "G774",
+      "G495",
+      "G496",
+      "G337",
+      "G18",
+      "G619"
+    ],
+    "combplot_cells_seconds": 1.8429370949997974,
+    "combplot_cell_count": 50800,
+    "combplot_sha256": "e4408b4a6cf5f6b54c31c47cc09e972a9043568deebf97639355d75b395397ed",
+    "compact_umap_build_seconds": 1.0185623750003288,
+    "umap_json_seconds": 0.6134362179982418,
+    "umap_bytes": 42603810,
+    "umap_sha256": "4146c08bc71881021dbd58a10a2b4280f43b8c837b5228708e70f79938fd5405",
+    "peak_rss_gib": 1.52545166015625
+  },
+  "optimized": {
+    "mode": "optimized",
+    "scope": "Synthetic serving components only",
+    "cells": 600000,
+    "genes": 1024,
+    "nnz": 24576000,
+    "default_genes_cold_seconds": 0.8039484539986006,
+    "default_genes_repeat_seconds": 2.1665997337549925e-05,
+    "selected_genes": [
+      "G560",
+      "G601",
+      "G1010",
+      "G291",
+      "G772",
+      "G373",
+      "G774",
+      "G495",
+      "G496",
+      "G337",
+      "G18",
+      "G619"
+    ],
+    "combplot_cells_seconds": 1.8001450240008126,
+    "combplot_cell_count": 50800,
+    "combplot_sha256": "e4408b4a6cf5f6b54c31c47cc09e972a9043568deebf97639355d75b395397ed",
+    "compact_umap_build_seconds": 0.13888202899761382,
+    "umap_json_seconds": 0.6149572120011726,
+    "umap_bytes": 42603810,
+    "umap_sha256": "4146c08bc71881021dbd58a10a2b4280f43b8c837b5228708e70f79938fd5405",
+    "peak_rss_gib": 1.0959701538085938
+  },
+  "equal_payloads": true,
+  "http_protocol_checks": {
+    "cells": 600000,
+    "cold_status": 202,
+    "cold_seconds": 0.007486,
+    "repeat_status": 200,
+    "repeat_seconds": 0.041434,
+    "repeat_first_byte_seconds": 0.013266,
+    "response_bytes": 7596164,
+    "combplot_cells": 50800,
+    "genes": 12
+  },
+  "browser_checks": {
+    "synthetic": true,
+    "svg_bar_nodes": 24562,
+    "svg_scatter_traces": 13,
+    "previous_gene_bar_nodes": 609600,
+    "zero_hover_verified": true,
+    "zero_hover_cell": "performance-cell-0296421",
+    "zero_hover_gene": "G560",
+    "zero_hover_state": "c21",
+    "visible_cells_and_gene_values_retained": true,
+    "render_wall_time_not_measured": true,
+    "pdf_export_verified": {
+      "all_12_genes_present": true,
+      "image_objects": 0,
+      "bytes": 456256,
+      "pages": 1
+    }
+  },
+  "verification": {
+    "python_tests_first_suite": 58,
+    "python_tests_additional_suite": 32,
+    "overlapping_tests_between_suites": true,
+    "node_cache_and_trace_checks": true,
+    "scope": "Serving component and browser checks only; not the online visitor job, whose source is unavailable."
+  }
+}

@@ -1608,6 +1608,279 @@
         }
       ],
       "repository_from": "2026-10-06T15:27:02-04:00",
+      "repository_until": "2026-10-06T16:49:08-04:00"
+    },
+    {
+      "commit": "b550c6b2f7de6fc0a687d79e0a0f6c4da842bdd2",
+      "defaults": [
+        {
+          "artifact_git_blob": "ebb316e8a46dd80207159225c92ac233a468bc78",
+          "artifact_path": "altanalyze3/components/rna2grn/rna2grn_lung_hybrid_bundle.pkl.gz",
+          "config": {
+            "bundle_path": "../../rna2grn/rna2grn_lung_hybrid_bundle.pkl.gz",
+            "expression_scale": "linear",
+            "pseudobulk_statistic": "mean_over_cells_of_log1p_cp10k"
+          },
+          "modality": "grn",
+          "reference": "hs_lung_cellref2_reference"
+        },
+        {
+          "artifact_git_blob": "c572eae7f157ee61b5a5c4603b1dc3a25a263044",
+          "artifact_path": "altanalyze3/components/rna2adt/lung/rna2adt_hs_lung_bundle.pkl",
+          "config": {
+            "bundle_path": "../../rna2adt/lung/rna2adt_hs_lung_bundle.pkl",
+            "expression_scale": "log1p",
+            "log_base": "e"
+          },
+          "modality": "adt",
+          "reference": "hs_lung_cellref2_reference"
+        },
+        {
+          "artifact_git_blob": "9a9187eb7a072b6b2e1d95d0c83d7670a2f4a4cf",
+          "artifact_path": "altanalyze3/components/rna2lipid/rna2lipid_hs_lung_native_log2_20261005_bundle.pkl",
+          "config": {
+            "bundle_path": "../../rna2lipid/rna2lipid_hs_lung_native_log2_20261005_bundle.pkl",
+            "expression_scale": "native_relative_log2",
+            "log_base": "2",
+            "log_pseudocount": 0
+          },
+          "modality": "lipids",
+          "reference": "hs_lung_cellref2_reference"
+        },
+        {
+          "artifact_git_blob": "ebb316e8a46dd80207159225c92ac233a468bc78",
+          "artifact_path": "altanalyze3/components/rna2grn/rna2grn_lung_hybrid_bundle.pkl.gz",
+          "config": {
+            "bundle_path": "../../rna2grn/rna2grn_lung_hybrid_bundle.pkl.gz",
+            "expression_scale": "linear",
+            "pseudobulk_statistic": "mean_over_cells_of_log1p_cp10k"
+          },
+          "modality": "grn",
+          "reference": "hs_lung_cellref_reference"
+        },
+        {
+          "artifact_git_blob": "c572eae7f157ee61b5a5c4603b1dc3a25a263044",
+          "artifact_path": "altanalyze3/components/rna2adt/lung/rna2adt_hs_lung_bundle.pkl",
+          "config": {
+            "bundle_path": "../../rna2adt/lung/rna2adt_hs_lung_bundle.pkl",
+            "expression_scale": "log1p",
+            "log_base": "e"
+          },
+          "modality": "adt",
+          "reference": "hs_lung_cellref_reference"
+        },
+        {
+          "artifact_git_blob": "9a9187eb7a072b6b2e1d95d0c83d7670a2f4a4cf",
+          "artifact_path": "altanalyze3/components/rna2lipid/rna2lipid_hs_lung_native_log2_20261005_bundle.pkl",
+          "config": {
+            "bundle_path": "../../rna2lipid/rna2lipid_hs_lung_native_log2_20261005_bundle.pkl",
+            "expression_scale": "native_relative_log2",
+            "log_base": "2",
+            "log_pseudocount": 0
+          },
+          "modality": "lipids",
+          "reference": "hs_lung_cellref_reference"
+        },
+        {
+          "artifact_git_blob": "2701bbe0a2849971da0314c3ae12fdd344d3f832",
+          "artifact_path": "altanalyze3/components/rna2adt/rna2adt_bm_bundle.pkl",
+          "config": {
+            "bundle_path": "../../rna2adt/rna2adt_bm_bundle.pkl",
+            "expression_scale": "log1p",
+            "log_base": "e"
+          },
+          "modality": "adt",
+          "reference": "hs_bm_reference"
+        },
+        {
+          "artifact_git_blob": "afc2aafed2c0cb7016f7323997618c4795e9b9c7",
+          "artifact_path": "altanalyze3/components/rna2metabolite/artifacts/rna2metabolite_aml_NA30_20261006_bundle.pkl.gz",
+          "config": {
+            "bundle_path": "../../rna2metabolite/artifacts/rna2metabolite_aml_NA30_20261006_bundle.pkl.gz",
+            "expression_scale": "log2",
+            "log_base": "2",
+            "log_pseudocount": 0.0
+          },
+          "modality": "metabolite",
+          "reference": "hs_bm_reference"
+        },
+        {
+          "artifact_git_blob": "33f310ec01a5fce616671bd34ec57eab8f4b7664",
+          "artifact_path": "altanalyze3/components/rna2lipid/aml/artifacts/rna2lipid_aml_bundle.pkl.gz",
+          "config": {
+            "bundle_path": "../../rna2lipid/aml/artifacts/rna2lipid_aml_bundle.pkl.gz",
+            "expression_scale": "log2",
+            "log_base": "2",
+            "log_pseudocount": 0.0
+          },
+          "modality": "lipid",
+          "reference": "hs_bm_reference"
+        },
+        {
+          "artifact_git_blob": "2bb2150e01e98ecd11cc36a3d99323d279f040d2",
+          "artifact_path": "altanalyze3/components/rna2grn/rna2grn_bundle.pkl.gz",
+          "config": {
+            "bundle_path": "../../rna2grn/rna2grn_bundle.pkl.gz",
+            "expression_scale": "linear"
+          },
+          "modality": "grn",
+          "reference": "hs_bm_reference"
+        },
+        {
+          "artifact_git_blob": "ebb316e8a46dd80207159225c92ac233a468bc78",
+          "artifact_path": "altanalyze3/components/rna2grn/rna2grn_lung_hybrid_bundle.pkl.gz",
+          "config": {
+            "bundle_path": "../../rna2grn/rna2grn_lung_hybrid_bundle.pkl.gz",
+            "expression_scale": "linear",
+            "pseudobulk_statistic": "mean_over_cells_of_log1p_cp10k"
+          },
+          "modality": "grn",
+          "reference": "hs_lung_hlca_reference"
+        },
+        {
+          "artifact_git_blob": "c572eae7f157ee61b5a5c4603b1dc3a25a263044",
+          "artifact_path": "altanalyze3/components/rna2adt/lung/rna2adt_hs_lung_bundle.pkl",
+          "config": {
+            "bundle_path": "../../rna2adt/lung/rna2adt_hs_lung_bundle.pkl",
+            "expression_scale": "log1p",
+            "log_base": "e"
+          },
+          "modality": "adt",
+          "reference": "hs_lung_hlca_reference"
+        },
+        {
+          "artifact_git_blob": "9a9187eb7a072b6b2e1d95d0c83d7670a2f4a4cf",
+          "artifact_path": "altanalyze3/components/rna2lipid/rna2lipid_hs_lung_native_log2_20261005_bundle.pkl",
+          "config": {
+            "bundle_path": "../../rna2lipid/rna2lipid_hs_lung_native_log2_20261005_bundle.pkl",
+            "expression_scale": "native_relative_log2",
+            "log_base": "2",
+            "log_pseudocount": 0
+          },
+          "modality": "lipids",
+          "reference": "hs_lung_hlca_reference"
+        },
+        {
+          "artifact_git_blob": "ebb316e8a46dd80207159225c92ac233a468bc78",
+          "artifact_path": "altanalyze3/components/rna2grn/rna2grn_lung_hybrid_bundle.pkl.gz",
+          "config": {
+            "bundle_path": "../../rna2grn/rna2grn_lung_hybrid_bundle.pkl.gz",
+            "expression_scale": "linear",
+            "pseudobulk_statistic": "mean_over_cells_of_log1p_cp10k"
+          },
+          "modality": "grn",
+          "reference": "hs_lung_natri_reference"
+        },
+        {
+          "artifact_git_blob": "c572eae7f157ee61b5a5c4603b1dc3a25a263044",
+          "artifact_path": "altanalyze3/components/rna2adt/lung/rna2adt_hs_lung_bundle.pkl",
+          "config": {
+            "bundle_path": "../../rna2adt/lung/rna2adt_hs_lung_bundle.pkl",
+            "expression_scale": "log1p",
+            "log_base": "e"
+          },
+          "modality": "adt",
+          "reference": "hs_lung_natri_reference"
+        },
+        {
+          "artifact_git_blob": "9a9187eb7a072b6b2e1d95d0c83d7670a2f4a4cf",
+          "artifact_path": "altanalyze3/components/rna2lipid/rna2lipid_hs_lung_native_log2_20261005_bundle.pkl",
+          "config": {
+            "bundle_path": "../../rna2lipid/rna2lipid_hs_lung_native_log2_20261005_bundle.pkl",
+            "expression_scale": "native_relative_log2",
+            "log_base": "2",
+            "log_pseudocount": 0
+          },
+          "modality": "lipids",
+          "reference": "hs_lung_natri_reference"
+        },
+        {
+          "artifact_git_blob": "ebb316e8a46dd80207159225c92ac233a468bc78",
+          "artifact_path": "altanalyze3/components/rna2grn/rna2grn_lung_hybrid_bundle.pkl.gz",
+          "config": {
+            "bundle_path": "../../rna2grn/rna2grn_lung_hybrid_bundle.pkl.gz",
+            "expression_scale": "linear",
+            "pseudobulk_statistic": "mean_over_cells_of_log1p_cp10k"
+          },
+          "modality": "grn",
+          "reference": "hs_lung_bpd_sun_reference"
+        },
+        {
+          "artifact_git_blob": "c572eae7f157ee61b5a5c4603b1dc3a25a263044",
+          "artifact_path": "altanalyze3/components/rna2adt/lung/rna2adt_hs_lung_bundle.pkl",
+          "config": {
+            "bundle_path": "../../rna2adt/lung/rna2adt_hs_lung_bundle.pkl",
+            "expression_scale": "log1p",
+            "log_base": "e"
+          },
+          "modality": "adt",
+          "reference": "hs_lung_bpd_sun_reference"
+        },
+        {
+          "artifact_git_blob": "9a9187eb7a072b6b2e1d95d0c83d7670a2f4a4cf",
+          "artifact_path": "altanalyze3/components/rna2lipid/rna2lipid_hs_lung_native_log2_20261005_bundle.pkl",
+          "config": {
+            "bundle_path": "../../rna2lipid/rna2lipid_hs_lung_native_log2_20261005_bundle.pkl",
+            "expression_scale": "native_relative_log2",
+            "log_base": "2",
+            "log_pseudocount": 0
+          },
+          "modality": "lipids",
+          "reference": "hs_lung_bpd_sun_reference"
+        },
+        {
+          "artifact_git_blob": "4121f30592e7f59a09f340609672723836920bba",
+          "artifact_path": "altanalyze3/components/rna2adt/mouse/rna2adt_mm_bundle.pkl",
+          "config": {
+            "bundle_path": "../../rna2adt/mouse/rna2adt_mm_bundle.pkl",
+            "expression_scale": "log1p",
+            "log_base": "e"
+          },
+          "modality": "adt",
+          "reference": "mm_bm_reference"
+        },
+        {
+          "api_git_blob": "ec82e2f6e762bce95040dbf843d44426420068be",
+          "application": "altanalyze3",
+          "artifact_git_blob": "9a9187eb7a072b6b2e1d95d0c83d7670a2f4a4cf",
+          "artifact_path": "altanalyze3/components/rna2lipid/rna2lipid_hs_lung_native_log2_20261005_bundle.pkl",
+          "component": "rna2lipid",
+          "context": "api-default"
+        },
+        {
+          "api_git_blob": "8a621b4b31e69cc6bbb35a2fe155f08afc4a1afa",
+          "application": "altanalyze3",
+          "artifact_git_blob": "2701bbe0a2849971da0314c3ae12fdd344d3f832",
+          "artifact_path": "altanalyze3/components/rna2adt/rna2adt_bm_bundle.pkl",
+          "component": "rna2adt",
+          "context": "api-default"
+        },
+        {
+          "api_git_blob": "bcf38f3c912fa7347bd651bf8ce3e88e4bf8623b",
+          "application": "altanalyze3",
+          "artifact_git_blob": "2bb2150e01e98ecd11cc36a3d99323d279f040d2",
+          "artifact_path": "altanalyze3/components/rna2grn/rna2grn_bundle.pkl.gz",
+          "component": "rna2grn",
+          "context": "api-default"
+        },
+        {
+          "api_git_blob": "d42815165a25f050f798af92e70b1c1076a79e56",
+          "application": "altanalyze3",
+          "artifact_git_blob": "afc2aafed2c0cb7016f7323997618c4795e9b9c7",
+          "artifact_path": "altanalyze3/components/rna2metabolite/artifacts/rna2metabolite_aml_NA30_20261006_bundle.pkl.gz",
+          "component": "rna2metabolite",
+          "context": "api-default"
+        },
+        {
+          "api_git_blob": "a816f755b831f4ef0bc15d88313dcdc807735161",
+          "application": "altanalyze3",
+          "artifact_git_blob": "33f310ec01a5fce616671bd34ec57eab8f4b7664",
+          "artifact_path": "altanalyze3/components/rna2lipid/aml/artifacts/rna2lipid_aml_bundle.pkl.gz",
+          "component": "rna2lipid/aml",
+          "context": "api-default"
+        }
+      ],
+      "repository_from": "2026-10-06T16:49:08-04:00",
       "repository_until": null
     }
   ],

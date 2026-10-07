@@ -1005,6 +1005,8 @@ def combine_and_align_h5(
             # used (ambient-corrected when correction ran); soupx_raw, when present, the raw ones.
             dropped = ~adata_combined.obs_names.astype(str).isin(match_df["CellBarcode"].astype(str))
             workspace = getattr(adata_combined, '_matrix_workspace', None)
+            _log_step(f"selecting {before - after} below-cutoff cells; "
+                      f"backend={'disk-backed' if workspace else 'in-memory'}")
             excluded = (workspace.subset(adata_combined, np.flatnonzero(dropped))
                         if workspace else adata_combined[dropped])
             holds_counts = "counts" in excluded.layers
@@ -1081,6 +1083,8 @@ def combine_and_align_h5(
         print("[mem] every aligned cell is already present in order; skipping the reorder copy")
     else:
         workspace = getattr(adata_combined, '_matrix_workspace', None)
+        _log_step(f"selecting {len(_wanted)} aligned cells; "
+                  f"backend={'disk-backed' if workspace else 'in-memory'}")
         adata_combined = (workspace.subset(adata_combined, adata_combined.obs_names.get_indexer(match_df.CellBarcode))
                          if workspace else adata_combined[match_df.CellBarcode].copy())
     adata_combined.obs[ref_name] = match_df.set_index('CellBarcode').loc[adata_combined.obs_names][ref_name]

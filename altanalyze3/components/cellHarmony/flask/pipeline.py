@@ -1748,6 +1748,9 @@ def run_cellharmony_pipeline(
             bounded_h5ad = True
         header = inspect_h5ad(h5ad_file)
         bounded_h5ad = bounded_h5ad or needs_disk_backed_import([header])
+        store.append_log(job_id, f"[mem] H5AD import backend={'disk-backed' if bounded_h5ad else 'in-memory'} "
+                         f"cells={header['cells']} genes={header.get('genes', 'unknown')} "
+                         f"uncompressed_matrix_bytes={header['matrix_bytes']}")
     qc = meta.get("qc", {})
     selected_impute_modalities = _selected_impute_modalities(meta, reference_entry)
     selected_impute_modality = selected_impute_modalities[0] if selected_impute_modalities else None

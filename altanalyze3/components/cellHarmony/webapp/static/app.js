@@ -14,6 +14,73 @@ let panelPlotData = {
   viz1: null,
   viz2: null,
 };
+// Retain recent completed plot responses, with a conservative estimate of parsed
+// JS memory. Keys include the complete request URL and the active result identity.
+class ExplorePayloadCache {
+  constructor(maxBytes = 384 * 1024 * 1024, maxEntries = 8, ttlMs = 300000, clock = () => performance.now()) {
+    Object.assign(this, {maxBytes, maxEntries, ttlMs, clock});
+    this.entries = new Map();
+    this.pending = new Map();
+    this.bytes = 0;
+    this.generation = 0;
+    this.identity = "";
+  }
+  clear() {
+    this.entries.clear(); this.pending.clear(); this.bytes = 0; this.generation += 1;
+  }
+  setIdentity(identity) {
+    if (identity !== this.identity) {this.clear(); this.identity = identity;}
+  }
+  drop(key) {
+    const entry = this.entries.get(key);
+    if (entry) {this.bytes -= entry.bytes; this.entries.delete(key);}
+  }
+  get(key) {
+    const now = this.clock();
+    for (const [name, entry] of this.entries) if (now - entry.created >= this.ttlMs) this.drop(name);
+    const entry = this.entries.get(key);
+    if (!entry) return null;
+    this.entries.delete(key); this.entries.set(key, entry);
+    return entry.payload;
+  }
+  put(key, payload, bytes) {
+    this.drop(key);
+    if (bytes > this.maxBytes || this.maxEntries <= 0 || this.ttlMs <= 0) return;
+    while (this.entries.size && (this.bytes + bytes > this.maxBytes || this.entries.size >= this.maxEntries)) {
+      this.drop(this.entries.keys().next().value);
+    }
+    this.entries.set(key, {payload, bytes, created: this.clock()}); this.bytes += bytes;
+  }
+  async fetch(url, onPending = () => {}) {
+    const cached = this.get(url);
+    if (cached) return cached;
+    if (this.pending.has(url)) return this.pending.get(url);
+    const generation = this.generation;
+    const request = (async () => {
+      for (;;) {
+        if (generation !== this.generation) throw new Error("Visualization changed.");
+        const response = await fetch(url);
+        const text = await response.text();
+        let payload;
+        try {payload = text ? JSON.parse(text) : {};}
+        catch (_) {throw new Error(text.trim() || `HTTP ${response.status}`);}
+        if (!response.ok) throw new Error(payload.detail || "Visualization unavailable.");
+        if (response.status === 202) {
+          onPending(payload.detail || "Preparing visualization…");
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          continue;
+        }
+        if (generation === this.generation) this.put(url, payload, text.length * 4);
+        return payload;
+      }
+    })();
+    this.pending.set(url, request);
+    try {return await request;}
+    finally {if (this.pending.get(url) === request) this.pending.delete(url);}
+  }
+}
+const explorePayloadCache = new ExplorePayloadCache();
+const panelVisualizationRequest = {viz1: 0, viz2: 0};
 let loadedResultsJobId = null;
 let loadedGeneSuggestionsSignature = "";
 let loadedDisplayFiltersJobId = null;
@@ -2295,6 +2362,8 @@ function updateResetDataButton() {
 }
 
 function resetWorkspaceData() {
+  explorePayloadCache.clear();
+  VISUALIZATION_PANELS.forEach(panel => {panelVisualizationRequest[panel] += 1;});
   setSessionUrl(null);
   if (pollTimer) {
     clearInterval(pollTimer);
@@ -2708,6 +2777,9 @@ function setSessionUrl(jobId) {
 }
 
 function applyJobStatus(jobId, data) {
+  explorePayloadCache.setIdentity(JSON.stringify([jobId, data.status, data.analysis_completed_at,
+    data.cluster_key, data.active_cell_state_layer, data.reference, data.bundle?.built_utc,
+    data.artifacts?.combined_h5ad, data.modality_artifacts]));
   setSessionUrl(jobId);
   previousJobStatus = currentJobStatus;
   currentJobStatus = String(data.status || "").trim().toLowerCase();
@@ -3440,7 +3512,8 @@ async function populateDownloadLinks(jobId, statusData = null) {
     details.appendChild(title);
     versions.forEach(([modality, record]) => {
       const row = document.createElement("div");
-      row.textContent = `${modality}: ${record.model_version_id}`;
+      row.textContent = `${modality}: ${record.model_display_id || record.model_version_id}`;
+      row.title = record.model_version_id;
       row.style.overflowWrap = "anywhere";
       details.appendChild(row);
     });
@@ -5691,6 +5764,7 @@ function panelModeLabel(mode) {
 
 // Column transport removes repeated keys and labels without removing any cells.
 function expandPlotColumns(payload) {
+  payload = {...payload}; // Cached encoded columns remain untouched by expansion.
   for (const name of ["query", "reference", "umap", "scatter"]) {
     const table = payload?.[name];
     if (table?.encoding !== "columns-v1") continue;
@@ -5711,6 +5785,12 @@ async function loadVisualizationPanel(panelKey) {
   const jobId = document.getElementById("results-job-id").value.trim();
   const mode = getPanelSelectValue(panelKey, "mode");
   const modality = panelModality(panelKey);
+  const requestId = ++panelVisualizationRequest[panelKey];
+  const generation = explorePayloadCache.generation;
+  const isCurrent = () => requestId === panelVisualizationRequest[panelKey]
+    && generation === explorePayloadCache.generation
+    && jobId === document.getElementById("results-job-id").value.trim()
+    && mode === getPanelSelectValue(panelKey, "mode");
   if (!jobId || !mode) {
     return;
   }
@@ -5736,6 +5816,7 @@ async function loadVisualizationPanel(panelKey) {
       params.set("genes", genes.join(","));
     }
     if (mode === "combplot") {
+      params.set("deferred", "true");
       params.set("unit", panelCombUnit(panelKey));
       params.set("cells_per_sample", String(panelCellsPerSample(panelKey)));
       if (panelCombUnit(panelKey) === "donor") params.set("min_cells", String(panelCombMinCells(panelKey)));
@@ -5748,12 +5829,14 @@ async function loadVisualizationPanel(panelKey) {
     // however the control was set.
     appendGeneSetGroupParams(params, panelKey);
     const query = params.toString() ? `?${params.toString()}` : "";
+    if (mode === "combplot") setPanelSummary(panelKey, "Preparing CombPlot…");
     try {
-      const response = await fetch(apiPath(`/api/jobs/${jobId}/${mode}${query}`));
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.detail || `${mode} failed`);
+      const payload = await explorePayloadCache.fetch(apiPath(`/api/jobs/${jobId}/${mode}${query}`),
+        message => {if (isCurrent()) setPanelSummary(panelKey, message);});
+      if (!isCurrent()) return;
       panelPlotData[panelKey] = { source: mode, payload };
     } catch (err) {
+      if (!isCurrent()) return;
       panelPlotData[panelKey] = { source: "error", payload: { message: err.message } };
     }
     renderVisualizationPanel(panelKey);
@@ -5782,11 +5865,8 @@ async function loadVisualizationPanel(panelKey) {
       }
       params.set("compact", "true");
       const suffix = params.toString() ? `?${params.toString()}` : "";
-      const resp = await fetch(apiPath(`/jobs/${jobId}/umap${suffix}`));
-      const data = await parseApiResponse(resp);
-      if (!resp.ok) {
-        throw new Error(data.detail || "UMAP not ready.");
-      }
+      const data = await explorePayloadCache.fetch(apiPath(`/jobs/${jobId}/umap${suffix}`));
+      if (!isCurrent()) return;
       panelPlotData[panelKey] = { source: "umap", payload: expandPlotColumns(data) };
       renderVisualizationPanel(panelKey);
       return;
@@ -5808,11 +5888,8 @@ async function loadVisualizationPanel(panelKey) {
         renderVisualizationPanel(panelKey);
         return;
       }
-      const resp = await fetch(apiPath(`/jobs/${jobId}/marker/network?population=${encodeURIComponent(population)}&modality=${encodeURIComponent(modality)}`));
-      const data = await parseApiResponse(resp);
-      if (!resp.ok) {
-        throw new Error(data.detail || "Marker network unavailable.");
-      }
+      const data = await explorePayloadCache.fetch(apiPath(`/jobs/${jobId}/marker/network?population=${encodeURIComponent(population)}&modality=${encodeURIComponent(modality)}`));
+      if (!isCurrent()) return;
       panelPlotData[panelKey] = { source: "marker_network", payload: data };
       renderVisualizationPanel(panelKey);
       return;
@@ -5833,11 +5910,8 @@ async function loadVisualizationPanel(panelKey) {
       params.set("population", population);
       params.set("plot_type", plotType);
       params.set("limit", "60");
-      const resp = await fetch(apiPath(`/jobs/${jobId}/fastcomm/plot?${params.toString()}`));
-      const data = await parseApiResponse(resp);
-      if (!resp.ok) {
-        throw new Error(data.detail || "fastComm network unavailable.");
-      }
+      const data = await explorePayloadCache.fetch(apiPath(`/jobs/${jobId}/fastcomm/plot?${params.toString()}`));
+      if (!isCurrent()) return;
       panelPlotData[panelKey] = { source: "fastcomm_network", payload: data };
       renderVisualizationPanel(panelKey);
       return;
@@ -5852,11 +5926,8 @@ async function loadVisualizationPanel(panelKey) {
       params.set("cell_state", getPanelSelectValue(panelKey, "grn-cellstate"));
       params.set("threshold", String(document.getElementById(panelElementId(panelKey, "grn-threshold"))?.value || "0"));
       params.set("max_edges", getPanelSelectValue(panelKey, "grn-limit") || "25");
-      const resp = await fetch(apiPath(`/jobs/${jobId}/grn/network?${params.toString()}`));
-      const data = await parseApiResponse(resp);
-      if (!resp.ok) {
-        throw new Error(data.detail || "GRN network unavailable.");
-      }
+      const data = await explorePayloadCache.fetch(apiPath(`/jobs/${jobId}/grn/network?${params.toString()}`));
+      if (!isCurrent()) return;
       populateGrnDropdowns(panelKey, data);
       panelPlotData[panelKey] = { source: "grn_network", payload: data };
       renderVisualizationPanel(panelKey);
@@ -5892,11 +5963,8 @@ async function loadVisualizationPanel(panelKey) {
             params.set("y_field", yField);
           }
         }
-      const resp = await fetch(apiPath(`/jobs/${jobId}/expression?${params.toString()}`));
-      const data = await parseApiResponse(resp);
-      if (!resp.ok) {
-        throw new Error(data.detail || "Expression unavailable.");
-      }
+      const data = await explorePayloadCache.fetch(apiPath(`/jobs/${jobId}/expression?${params.toString()}`));
+      if (!isCurrent()) return;
       if (data?.gene && data.gene !== gene && geneInput) {
         geneInput.value = data.gene;
       }
@@ -5905,6 +5973,7 @@ async function loadVisualizationPanel(panelKey) {
       return;
     }
   } catch (err) {
+    if (!isCurrent()) return;
     panelPlotData[panelKey] = {
       source: "error",
       payload: { message: err.message || "Plot unavailable." },
@@ -7192,6 +7261,24 @@ function renderDotPlotFigure(hostId, payload) {
 /* CombPlot shows individual observations by default; donor means are optional.
  * State names label the top colour strip. Column details belong only in hover.
  * Explicit subplot domains keep each gene and annotation band on its own row. */
+function combGeneTraces(gene, values, colors, hover, axis, modality) {
+  const common = {xaxis: "x", yaxis: axis, showlegend: false,
+    hovertemplate: `${featureHover(gene, modality)}<br>%{text}<br>%{y}<extra></extra>`};
+  // A zero has no visible bar area. Retain its individual hover point on one
+  // transparent SVG line, rather than allocating a zero-height SVG rectangle
+  // per observation. Positive and negative bars retain their original positions,
+  // widths, values and colors. Both traces remain vector objects in PDF export.
+  const bars = [], zeros = [];
+  values.forEach((value, i) => (value === 0 ? zeros : bars).push(i));
+  const traces = [{...common, type: "bar", x: bars, y: bars.map(i => values[i]), width: 1,
+    marker: {color: bars.map(i => colors[i]), line: {width: 0}},
+    text: bars.map(i => hover[i]), textposition: "none"}];
+  if (zeros.length) traces.push({...common, type: "scatter", mode: "lines",
+    x: zeros, y: zeros.map(() => 0), text: zeros.map(i => hover[i]),
+    line: {color: "rgba(0,0,0,0)", width: 0, simplify: true}});
+  return traces;
+}
+
 function renderCombPlotFigure(hostId, payload) {
   const genes = payload.genes || [];
   const columns = payload.columns || [];
@@ -7342,12 +7429,16 @@ function renderCombPlotFigure(hostId, payload) {
   genes.forEach((gene, gi) => {
     top -= frac(GAP_PX);
     const axis = `y${gi + 2}`;
-    traces.push({
-      type: "bar", x, y: values[gi], width: 1,
-      marker: { color: colors, line: { width: 0 } },
-      hovertext: hover.map(value => `${featureHover(gene, payload.modality)}<br>${value}`), textposition: "none", hoverinfo: "text+y",
-      xaxis: "x", yaxis: axis,
-    });
+    if (nCols > 2000) {
+      traces.push(...combGeneTraces(gene, values[gi], colors, hover, axis, payload.modality));
+    } else {
+      traces.push({
+        type: "bar", x, y: values[gi], width: 1,
+        marker: { color: colors, line: { width: 0 } },
+        hovertext: hover.map(value => `${featureHover(gene, payload.modality)}<br>${value}`), textposition: "none", hoverinfo: "text+y",
+        xaxis: "x", yaxis: axis,
+      });
+    }
     layout[`yaxis${gi + 2}`] = {
       domain: [Math.max(0, top - frac(GENE_PX)), top],
       title: { text: gene, font: { size: 11 } },
@@ -7761,14 +7852,19 @@ async function drawChatPlot() {
   // all return one. Without this the panel said "no figure" for three of the
   // protocols that do the most work.
   if (spec.kind === "combplot" && (spec.genes || []).length) {
+    const generation = explorePayloadCache.generation;
+    const isCurrent = () => result === chatLastResult && generation === explorePayloadCache.generation
+      && jobId === document.getElementById("results-job-id").value.trim();
     try {
       const bits = [`genes=${encodeURIComponent(spec.genes.join(","))}`, "min_cells=5", "unit=donor"];
       if (spec.group_by) bits.push(`group_by=${encodeURIComponent(spec.group_by)}`);
-      const response = await fetch(apiPath(`/api/jobs/${jobId}/combplot?${bits.join("&")}`));
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || "combplot failed");
+      bits.push("deferred=true");
+      const data = await explorePayloadCache.fetch(apiPath(`/api/jobs/${jobId}/combplot?${bits.join("&")}`),
+        message => {if (isCurrent()) host.textContent = message;});
+      if (!isCurrent()) return;
       renderCombPlotFigure("chat-plot", data);
     } catch (err) {
+      if (!isCurrent()) return;
       host.innerHTML = `<span class="warn">${err.message}</span>`;
     }
     return;

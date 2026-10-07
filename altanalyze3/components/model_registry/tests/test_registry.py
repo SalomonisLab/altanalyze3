@@ -166,3 +166,96 @@ def test_static_default_can_follow_a_release_module():
     source = 'from .release import RELEASE_BUNDLE_PATH\nDEFAULT_BUNDLE_PATH = RELEASE_BUNDLE_PATH'
     release = 'HERE = Path(__file__).resolve().parent\nRELEASE_BUNDLE_PATH = HERE / "release.pkl"'
     assert api_selection(source, "components/rna2lipid/api.py", lambda path: release) == "components/rna2lipid/release.pkl"
+
+
+def test_catalog_refresh_retains_prior_artifacts_and_code():
+    from altanalyze3.components.model_registry.snapshot import merge_catalog
+    def record(mid, iid):
+        return {"model_version_id": mid, "inference_version_id": iid,
+                "analysis_model_version_id": mid + iid, "inference_code_sha256": {"api": iid},
+                "status": "observed-default"}
+    original = record("original", "v1")
+    unchanged_artifact = record("retained", "v1")
+    current = {"models": [record("new", "v1"), record("retained", "v2")], "defaults": []}
+    result = merge_catalog({"models": [original, unchanged_artifact]}, current)
+    by_id = {r["model_version_id"]: r for r in result["models"]}
+    assert set(by_id) == {"original", "retained", "new"}
+    assert by_id["original"]["status"] == "historical-default"
+    assert [v["inference_version_id"] for v in by_id["retained"]["inference_versions"]] == ["v1", "v2"]
+    assert original["status"] == "observed-default"  # Do not mutate the archived record.
+    assert merge_catalog(result, current) == result
+
+
+def test_archived_catalog_is_stable(tmp_path):
+    from altanalyze3.components.model_registry.snapshot import archive_catalog
+    record = {"models": [], "defaults": []}
+    name = archive_catalog(record, tmp_path)
+    assert archive_catalog(record, tmp_path) == name
+    assert json.loads((tmp_path / "snapshots" / name).read_text()) == record
+
+
+def test_downstream_method_has_its_own_version(tmp_path):
+    from altanalyze3.components.model_registry.registry import describe_application
+    code = tmp_path / "scale.py"
+    code.write_text("version1")
+    before = describe_application("scALABLE", code_paths=[code])
+    code.write_text("version2")
+    after = describe_application("scALABLE", code_paths=[code])
+    assert before["application_method_version_id"] != after["application_method_version_id"]
+
+
+def test_refresh_preserves_download_and_release_evidence():
+    from altanalyze3.components.model_registry.snapshot import merge_catalog
+    model = {"model_version_id": "test", "inference_version_id": "v1",
+             "analysis_model_version_id": "av1", "inference_code_sha256": {},
+             "artifacts": {"bundle": {"sha256": "hash", "url": "https://example.org/model"}},
+             "release_evidence": {"manifest": "release.json"}}
+    current = copy.deepcopy(model)
+    current.pop("release_evidence")
+    current["artifacts"]["bundle"].pop("url")
+    result = merge_catalog({"registry_release": "release1", "models": [model]},
+                           {"models": [current], "defaults": []})
+    assert result["registry_release"] == "release1"
+    assert result["models"][0]["artifacts"]["bundle"]["url"] == "https://example.org/model"
+    assert result["models"][0]["release_evidence"] == model["release_evidence"]
+
+
+def test_readable_versions_keep_artifact_ids_and_default_links(tmp_path):
+    from altanalyze3.components.model_registry.layout import apply_labels, write_layout
+    mid = "rna2lipid:sha256:original"
+    catalog = {"models": [{"model_version_id": mid, "artifacts": {}, "status": "observed-default"}],
+               "defaults": [{"model_version_id": mid}]}
+    apply_labels(catalog, {mid: {"modality": "rna2lipid", "version": "v1.1", "variant": "lung"}})
+    assert catalog["models"][0]["model_version_id"] == mid
+    assert catalog["defaults"][0]["model_display_id"] == "rna2lipid/lung/v1.1"
+    write_layout(catalog, tmp_path)
+    assert (tmp_path / "models/rna2lipid/v1.1/lung/model.json").exists()
+    assert (tmp_path / "models/rna2lipid/v1.1/README.md").exists()
+
+
+def test_two_artifacts_cannot_reuse_a_readable_version():
+    from altanalyze3.components.model_registry.layout import apply_labels
+    catalog = {"models": [{"model_version_id": "a"}, {"model_version_id": "b"}], "defaults": []}
+    label = {"modality": "rna2lipid", "version": "v1.0", "variant": "lung"}
+    with pytest.raises(ValueError, match="multiple artifacts"):
+        apply_labels(catalog, {"a": label, "b": label})
+
+
+def test_result_summary_exposes_human_version(tmp_path):
+    artifact = tmp_path / "model"
+    artifact.write_bytes(b"model")
+    identity = describe_model("test", {"bundle": artifact}, code_paths=[])
+    catalog = tmp_path / "catalog.json"
+    catalog.write_text(json.dumps({"models": [{"model_version_id": identity["model_version_id"],
+        "status": "observed-default", "name": "test", "model_modality": "rna2lipid",
+        "model_version": "v1.1", "model_variant": "lung", "model_display_id": "rna2lipid/lung/v1.1"}]}))
+    result = describe_model("test", {"bundle": artifact}, code_paths=[], catalog_path=catalog)
+    assert result["model_version"] == "v1.1"
+    assert result["model_display_id"] == "rna2lipid/lung/v1.1"
+
+
+def test_assigned_model_version_cannot_be_renumbered():
+    from altanalyze3.components.model_registry.layout import apply_labels
+    catalog = {"models": [{"model_version_id": "known", "model_version": "v1.0"}], "defaults": []}
+    with pytest.raises(ValueError, match="Cannot relabel"):
+        apply_labels(catalog, {"known": {"modality": "rna2lipid", "version": "v1.1", "variant": "lung"}})
