@@ -57,6 +57,10 @@ vm.runInContext(source.slice(a,b),ctx);
   badHtml.iframe.listeners.error();
   assert.equal(ctx.markerHeatmapViews.get('viz1'),recovered,'late events from disposed frames must not remove replacements');
   assert.ok(!recovered.failed,'late errors must not mark the recovered viewer as failed');
+  message({origin:'http://local',source:recovered.iframe.contentWindow,data:{type:'marker-heatmap-empty',message:'No cells match these filters.'}});
+  assert.equal(recovered.bytes,0);
+  assert.equal(recovered.summary,'No cells match these filters.');
+  assert.ok(!recovered.failed,'empty filters are a valid view state, not a failed analysis');
   // A pending HTML response must not recreate an already-disposed frame.
   ctx.disposeMarkerHeatmapViews();
   let lateReply;

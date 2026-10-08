@@ -1,0 +1,17 @@
+{
+  "cellchat_url": "https://raw.githubusercontent.com/jinworks/CellChat/main/data/CellChatDB.mouse.rda",
+  "deployment_scope": "Unmodified complete ligand-receptor table; response matrix is not bundled here. scALABLE fastComm uses response_matrix=None.",
+  "lr_table": "ligand_receptor.tsv",
+  "min_target_weight": 0.001,
+  "n_cellchat_interactions": 3361,
+  "n_ligand_signatures": 1286,
+  "n_merged_interactions": 8091,
+  "n_response_genes": 11312,
+  "n_total_signatures": 1528,
+  "nichenet_ligand_target_url": "https://zenodo.org/records/7074291/files/ligand_target_matrix_nsga2r_final_mouse.rds?download=1",
+  "nichenet_lr_url": "https://zenodo.org/records/7074291/files/lr_network_mouse_21122021.rds?download=1",
+  "sha256": "d4c29f6a4cc2fd81b87552b987fcb8b6975d15f2ed1a82a32b5863ce4b88e38a",
+  "species": "mouse",
+  "top_targets_per_signature": 200,
+  "used_nichenet_lr_network": true
+}

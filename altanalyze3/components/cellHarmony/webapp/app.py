@@ -391,8 +391,8 @@ def _build_marker_heatmap_viewer_html(job_id: str, root_path: str) -> str:
           console.debug("Viewer log failed", err);
         }}
       }}
-      function showFallback(message) {{
-        window.parent.postMessage({{type: "marker-heatmap-error", message}}, viewerUrl.origin);
+      function showFallback(message, empty = false) {{
+        window.parent.postMessage({{type: empty ? "marker-heatmap-empty" : "marker-heatmap-error", message}}, viewerUrl.origin);
         const target = document.getElementById("morpheus-target");
         const fallback = document.getElementById("fallback-message");
         if (target) {{
@@ -533,7 +533,13 @@ def _build_marker_heatmap_viewer_html(job_id: str, root_path: str) -> str:
             `dataset GET status=${{getResp.status}} ok=${{getResp.ok}} content_type=${{getResp.headers.get("content-type") || "-"}} content_length=${{getResp.headers.get("content-length") || "-"}}`
           );
           if (!getResp.ok) {{
-            throw new Error(`Dataset GET returned ${{getResp.status}}.`);
+            let detail = "";
+            try {{ detail = (await getResp.json()).detail || ""; }} catch (_) {{}}
+            throw new Error(detail || `Dataset GET returned ${{getResp.status}}.`);
+          }}
+          if (getResp.headers.get("X-Marker-Columns") === "0") {{
+            showFallback("No cells in this heatmap match the selected filters. Clear or change the filters to display the heatmap.", true);
+            return null;
           }}
           window.parent.postMessage({{
             type: "marker-heatmap-dataset",
@@ -555,6 +561,7 @@ def _build_marker_heatmap_viewer_html(job_id: str, root_path: str) -> str:
           `Initializing local Morpheus viewer. dataset_url=${{datasetUrl}} protocol=${{window.location.protocol}} ready_state=${{document.readyState}} ua=${{navigator.userAgent}}`
         );
         const datasetText = await fetchDatasetText(datasetUrl);
+        if (datasetText === null) return;
         if (!window.morpheus || !window.morpheus.HeatMap) {{
           await logClient(
             `Morpheus scripts did not load. morpheus_present=${{Boolean(window.morpheus)}} heatmap_present=${{Boolean(window.morpheus && window.morpheus.HeatMap)}}`
@@ -942,7 +949,8 @@ def _differential_options(meta: Dict) -> Dict:
     if isinstance(fastcomm_analysis, dict) and fastcomm_analysis.get("enabled"):
         precomputed = (meta.get("scalable_viewer") or {}).get("deg_comparisons")
         if precomputed is None:
-            has_contrast = True                     # an interactive job computes on demand
+            # Interactive contrasts read saved split scores, not global scores.
+            has_contrast = bool(fastcomm_analysis.get("sample_key") and _fastcomm_split_scores_path(meta))
         else:
             has_contrast = any(
                 _normalize_modality_id(str(c.get("modality") or ""), default="")
@@ -2825,6 +2833,8 @@ def _fastcomm_scores_table(app: FastAPI, meta: Dict) -> pd.DataFrame:
 def _fastcomm_split_scores_path(meta: Dict) -> Optional[Path]:
     analysis = _fastcomm_analysis(meta)
     per_sample = analysis.get("per_sample") or {}
+    if isinstance(per_sample, dict) and per_sample.get("status") == "failed":
+        return None  # A partially written table from a failed run is not valid.
     raw_path = str(per_sample.get("split_scores_long_tsv") or "").strip() if isinstance(per_sample, dict) else ""
     if not raw_path and isinstance(per_sample, dict):
         output_dir = str(per_sample.get("output_dir") or "").strip()
@@ -5308,7 +5318,8 @@ def _sampled_marker_heatmap(app, meta, modality, display_filters, cells_per_samp
     indices = indices[np.argsort([order.get(states[i], len(order)) for i in indices], kind="stable")]
     indices, sampling = _sample_plot_cells(expression, indices, cells_per_sample)
     if not len(indices):
-        raise HTTPException(404, "No cells match the current display filters for the marker heatmap.")
+        return {"matrix": np.empty((len(row_ids), 0), dtype=np.float32), "row_ids": row_ids,
+                "col_ids": np.asarray([], dtype=str), "col_barcodes": np.asarray([], dtype=str), "sampling": sampling}
     adata = expression["adata"]
     names = np.asarray(expression["var_names"], dtype=str)
     lookup = {gene: i for i, gene in enumerate(names)}
@@ -5361,13 +5372,8 @@ def _filter_marker_heatmap_matrix(
         [str(barcode) for barcode, keep in zip(cache_entry["obs_names"], display_mask) if bool(keep)],
         dtype=str,
     )
-    if allowed_barcodes.size == 0:
-        raise HTTPException(status_code=404, detail="No cells match the current display filters for the marker heatmap.")
-
     keep_mask = np.isin(marker_matrix["col_barcodes"], allowed_barcodes)
     keep_count = int(np.count_nonzero(keep_mask))
-    if keep_count == 0:
-        raise HTTPException(status_code=404, detail="No heatmap columns match the current display filters.")
 
     return (
         _marker_heatmap_subset_to_tsv(
@@ -7392,28 +7398,18 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         path = store.logs_dir(job_id) / "pipeline.log"
         if not path.exists():
             raise HTTPException(status_code=404, detail="Log file unavailable.")
-        meta = store.get_job(job_id)
-        provenance_path = (meta.get("artifacts") or {}).get("model_provenance")
-        def log_with_provenance():
-            with path.open("rb") as handle:
-                while block := handle.read(64 * 1024):
+        # Export the whole job, independently of Explore's request-local layer.
+        meta = JobStore.get_job(store, job_id) if isinstance(store, JobStore) else store.get_job(job_id)
+        from ..analysis_record import build_archive
+        spool = await run_in_threadpool(build_archive, meta, store.logs_dir(job_id).parent)
+        def archive_chunks():
+            try:
+                while block := spool.read(64 * 1024):
                     yield block
-            yield b"\n\n=== Model versions and provenance ===\n"
-            if provenance_path and Path(provenance_path).is_file():
-                with Path(provenance_path).open("rb") as handle:
-                    while block := handle.read(64 * 1024):
-                        yield block
-            else:
-                yield json.dumps(meta.get("model_versions") or {}, indent=2).encode("utf-8")
-            layers = (meta.get("cell_state_layers") or {}).get("layers") or []
-            if layers:
-                summaries = {layer["key"]: (layer.get("fastcomm_analysis") or {}).get("summary")
-                             for layer in layers if (layer.get("fastcomm_analysis") or {}).get("summary")}
-                yield b"\n\n=== Analysis-layer communication provenance ===\n"
-                yield json.dumps(summaries, indent=2).encode("utf-8")
-            yield b"\n"
-        return StreamingResponse(log_with_provenance(), media_type="text/plain",
-                                 headers={"Content-Disposition": f'attachment; filename="{path.name}"'})
+            finally:
+                spool.close()
+        return StreamingResponse(archive_chunks(), media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{job_id}_logs_methods.zip"'})
 
     @app.get("/api/jobs/{job_id}/differential/archive")
     async def download_differential_archive(job_id: str):

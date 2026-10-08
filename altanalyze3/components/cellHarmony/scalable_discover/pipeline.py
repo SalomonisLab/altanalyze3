@@ -279,6 +279,9 @@ def attach_serving_gene_symbols(adata: ad.AnnData) -> Dict[str, object]:
 
 
 def run_discover_pipeline(job_id: str, store: JobStore, *, h5ad_compression: Optional[str] = "lzf", build_bundle: bool = True) -> Dict[str, Path]:
+    from ..analysis_record import capture_execution
+    capture_execution(store, job_id, application="scALABLE-discover", effective={
+        "h5ad_compression": h5ad_compression, "build_bundle": build_bundle})
     meta = store.get_job(job_id)
     species = str(meta.get("species") or "").strip().lower()
     if species not in SPECIES_TO_ICGS:
@@ -402,6 +405,10 @@ def run_discover_pipeline(job_id: str, store: JobStore, *, h5ad_compression: Opt
         minimal_outputs=minimal,
         write_h5ad=not minimal,     # the combined h5ad below is the final h5ad
     )
+    from dataclasses import asdict
+    capture_execution(store, job_id, application="scALABLE-discover", key="icgs3",
+                      effective={"passed_native_config": asdict(config),
+                                 "ICGS3_constructor_defaults": asdict(ICGS.ICGS3Config(input_paths=[], output_dir=""))})
     store.update_job(job_id, progress=35, message="ICGS3: starting.")
     store.append_log(job_id, "Running ICGS3 unsupervised clustering.")
     store.append_log(job_id, f"[params] icgs3 module=altanalyze3.components.clustering.ICGS.run_icgs3 "
@@ -417,6 +424,10 @@ def run_discover_pipeline(job_id: str, store: JobStore, *, h5ad_compression: Opt
                              f"exports={exports} minimal_outputs={minimal} write_h5ad={not minimal} "
                              "all other parameters=ICGS3Config defaults")
     result = ICGS.run_icgs3(config)
+    resolved_config_path = icgs3_dir / "icgs3_config.json"
+    if resolved_config_path.is_file():
+        from ..analysis_record import record_effective
+        record_effective(store, job_id, "icgs3", resolved_native_config=json.loads(resolved_config_path.read_text()))
     clusters = result.clusters.copy()
     clusters.index = clusters.index.astype(str)
     if "X_umap" not in result.adata.obsm:

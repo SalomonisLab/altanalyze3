@@ -10,6 +10,7 @@ import gc
 import contextlib
 import json
 import shutil
+import tempfile
 from pathlib import Path
 
 import anndata as ad
@@ -304,6 +305,51 @@ def _combine(job_id, store, prepared, cells, genes, supervised, unsupervised, co
     return result, path
 
 
+def add_imputed_layer_marker_heatmaps(job_id, store, result):
+    """Reuse the standard modality MarkerFinder hook for the ICGS3 grouping.
+
+    Prediction arrays and their original barcode/feature coverage stay intact.
+    Predicted cell-state names are a one-to-one relabeling of the same clusters,
+    so that layer reuses the native relabeling helper rather than rescoring.
+    """
+    layers = {entry["key"]: entry for entry in result["cell_state_layers"]["layers"]}
+    if UNSUPERVISED not in layers or "unsupervised_state" not in layers:
+        return
+    from ..scalable_discover.pipeline import relabel_marker_outputs
+    obs, _, _ = _read_annotations(result["artifacts"]["combined_h5ad"])
+    root = store.outputs_dir(job_id) / "layer_markers"
+    names = result["cell_state_layers"].get("names") or {}
+    raw = layers[UNSUPERVISED].setdefault("marker_analysis_by_modality", {"rna": layers[UNSUPERVISED]["marker_analysis"]})
+    named = layers["unsupervised_state"].setdefault("marker_analysis_by_modality", {"rna": layers["unsupervised_state"]["marker_analysis"]})
+    for info in result["modalities"]["available"]:
+        modality = info["id"]
+        if modality == "rna" or not info.get("supports_explore", True) or not info.get("supports_marker_heatmap", True):
+            continue
+        if all(Path(records.get(modality, {}).get("heatmap_cache") or "").is_file() for records in (raw, named)):
+            continue
+        source = P._modality_h5ad_path(result, modality)
+        root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="mapped_", dir=root) as work:
+            workspace = Workspace(Path(work))
+            matrix = workspace.load(source)
+            if not matrix.obs_names.is_unique or not matrix.var_names.is_unique or not matrix.obs_names.isin(obs.index).all():
+                raise ValueError(f"{modality} prediction identities do not match the combined cell roster.")
+            # Reindex labels only. Do not intersect, downsample or replace X.
+            matrix.obs[UNSUPERVISED] = pd.Categorical(obs[UNSUPERVISED].astype(str).reindex(matrix.obs_names))
+            present = list(dict.fromkeys(matrix.obs[UNSUPERVISED].astype(str)))
+            native_order = result.get("icgs3_analysis", {}).get("clusters") or []
+            matrix.uns["lineage_order"] = [c for c in native_order if c in present] + [c for c in present if c not in native_order]
+            store.append_log(job_id, f"Preparing {modality} MarkerHeatmap for unsupervised clusters using the standard modality MarkerFinder hook ({matrix.n_obs} cells, {matrix.n_vars} features).")
+            analysis = P._emit_modality_marker_heatmap(modality, matrix, root / UNSUPERVISED, UNSUPERVISED, result)
+            raw[modality] = analysis
+            named[modality] = dict(relabel_marker_outputs(analysis, names, root / "unsupervised_state" / modality),
+                                   cluster_key="unsupervised_state")
+            workspace.release_pages()
+            matrix = workspace = None
+            gc.collect()
+    result["marker_analysis_by_modality"] = layers[result["cluster_key"]].get("marker_analysis_by_modality") or {"rna": result["marker_analysis"]}
+
+
 def run_analysis_workflow(job_id, store, registry_path, *, export_approx_pdfs=False, h5ad_compression="lzf"):
     original = store.get_job(job_id)
     mode = (original.get("qc") or {}).get("analysis_mode", "supervised")
@@ -313,6 +359,11 @@ def run_analysis_workflow(job_id, store, registry_path, *, export_approx_pdfs=Fa
         return P.run_cellharmony_pipeline(job_id, store, registry_path, export_approx_pdfs=export_approx_pdfs,
                                           h5ad_compression=h5ad_compression)
     from ..scalable_discover.pipeline import run_discover_pipeline
+    from ..analysis_record import capture_execution
+    reference = P._lookup_reference(original["species"], original["reference"], registry_path) if mode == "both" else None
+    capture_execution(store, job_id, reference=reference, effective={
+        "shared_qc_applied_once": True, "export_approx_pdfs": export_approx_pdfs,
+        "h5ad_compression": h5ad_compression})
     compression = P._normalize_h5ad_compression(h5ad_compression)
     prepared, cells, genes = _shared_qc(job_id, store, compression)
     supervised = None
@@ -333,6 +384,7 @@ def run_analysis_workflow(job_id, store, registry_path, *, export_approx_pdfs=Fa
     shutil.rmtree(unsupervised.outputs_dir(job_id) / ".h5ad_work", ignore_errors=True)
     if mode == "both":
         result, path = _combine(job_id, store, prepared, cells, genes, supervised, unsupervised, compression)
+        add_imputed_layer_marker_heatmaps(job_id, store, result)
         keys = [UNSUPERVISED, "unsupervised_state", SUPERVISED]
     else:
         result = unsupervised.get_job(job_id)
@@ -342,7 +394,7 @@ def run_analysis_workflow(job_id, store, registry_path, *, export_approx_pdfs=Fa
     enable_differential(result, original, path, keys)
     # Restore upload configuration: branch plumbing must never become user metadata.
     protected = {"job_id", "species", "reference", "files", "qc", "created_at", "updated_at", "status", "progress",
-                 "analysis_started_at", "analysis_completed_at", "analysis_duration_seconds", "worker_pid", "message"}
+                 "analysis_started_at", "analysis_completed_at", "analysis_duration_seconds", "worker_pid", "message", "analysis_records"}
     store.update_job(job_id, **{k: v for k, v in result.items() if k not in protected},
                      message="Analysis complete; preparing Explore results.")
     bundle = P._build_job_bundle(store, job_id, path, result["cluster_key"], result["modality_artifacts"], result["modalities"])

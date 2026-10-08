@@ -1,0 +1,205 @@
+{
+  "date": "2026-10-08",
+  "scope": "Local candidate fix; deployed job unknown and deployment not performed.",
+  "confirmed_code_failure_paths": [
+    "Optional per-sample exception previously set the complete global fastComm result to disabled/failed.",
+    "Failed fastComm metadata was nulled in the client, silently removing the feature.",
+    "Supervised global and split scoring did not select an existing gene_symbols annotation."
+  ],
+  "changes": [
+    "Keep standard completed global scores when optional split scoring raises; record and log the split error.",
+    "Retain failed communication as a discoverable menu item displaying its actual diagnostic, with no plot API request for failed scores.",
+    "Use existing gene_symbols when present for both standard supervised scoring calls, else preserve primary-symbol behavior.",
+    "Reject failed split files in both readers, and offer interactive communication differentials only when valid saved split scores and a sample key exist."
+  ],
+  "baseline": "Existing FastCommParams/FastCommBenchmarkParams; CellChatDB only, response_matrix=None, min_cells=5, min_lr_expression_score=0.2, max_lr_candidates_per_state_pair=5, include_self_edges=False. No new scoring algorithm; fixtures verify original X, obs and var unchanged.",
+  "api_checks": [
+    {
+      "layer": "supervised_state",
+      "view": "focused_incoming",
+      "status": 200,
+      "seconds": 0.025,
+      "populated": true
+    },
+    {
+      "layer": "supervised_state",
+      "view": "focused_outgoing",
+      "status": 200,
+      "seconds": 0.017,
+      "populated": true
+    },
+    {
+      "layer": "supervised_state",
+      "view": "cell_state_network",
+      "status": 200,
+      "seconds": 0.329,
+      "populated": true
+    },
+    {
+      "layer": "supervised_state",
+      "view": "lr_dotplot",
+      "status": 200,
+      "seconds": 0.01,
+      "populated": true
+    },
+    {
+      "layer": "supervised_state",
+      "view": "state_heatmap",
+      "status": 200,
+      "seconds": 0.017,
+      "populated": true
+    },
+    {
+      "layer": "supervised_state",
+      "view": "top_table",
+      "status": 200,
+      "seconds": 0.009,
+      "populated": true
+    },
+    {
+      "layer": "supervised_state",
+      "view": "per_sample",
+      "status": 200,
+      "seconds": 0.026,
+      "populated": true
+    },
+    {
+      "layer": "unsupervised_cluster",
+      "view": "focused_incoming",
+      "status": 200,
+      "seconds": 0.016,
+      "populated": true
+    },
+    {
+      "layer": "unsupervised_cluster",
+      "view": "focused_outgoing",
+      "status": 200,
+      "seconds": 0.01,
+      "populated": true
+    },
+    {
+      "layer": "unsupervised_cluster",
+      "view": "cell_state_network",
+      "status": 200,
+      "seconds": 0.145,
+      "populated": true
+    },
+    {
+      "layer": "unsupervised_cluster",
+      "view": "lr_dotplot",
+      "status": 200,
+      "seconds": 0.007,
+      "populated": true
+    },
+    {
+      "layer": "unsupervised_cluster",
+      "view": "state_heatmap",
+      "status": 200,
+      "seconds": 0.011,
+      "populated": true
+    },
+    {
+      "layer": "unsupervised_cluster",
+      "view": "top_table",
+      "status": 200,
+      "seconds": 0.007,
+      "populated": true
+    },
+    {
+      "layer": "unsupervised_cluster",
+      "view": "per_sample",
+      "status": 200,
+      "seconds": 0.02,
+      "populated": true
+    },
+    {
+      "layer": "unsupervised_state",
+      "view": "focused_incoming",
+      "status": 200,
+      "seconds": 0.018,
+      "populated": true
+    },
+    {
+      "layer": "unsupervised_state",
+      "view": "focused_outgoing",
+      "status": 200,
+      "seconds": 0.011,
+      "populated": true
+    },
+    {
+      "layer": "unsupervised_state",
+      "view": "cell_state_network",
+      "status": 200,
+      "seconds": 0.144,
+      "populated": true
+    },
+    {
+      "layer": "unsupervised_state",
+      "view": "lr_dotplot",
+      "status": 200,
+      "seconds": 0.008,
+      "populated": true
+    },
+    {
+      "layer": "unsupervised_state",
+      "view": "state_heatmap",
+      "status": 200,
+      "seconds": 0.011,
+      "populated": true
+    },
+    {
+      "layer": "unsupervised_state",
+      "view": "top_table",
+      "status": 200,
+      "seconds": 0.008,
+      "populated": true
+    },
+    {
+      "layer": "unsupervised_state",
+      "view": "per_sample",
+      "status": 200,
+      "seconds": 0.019,
+      "populated": true
+    },
+    {
+      "case": "global_failure",
+      "status": 200,
+      "differential_not_offered": true,
+      "per_sample_available": null
+    },
+    {
+      "case": "split_failure",
+      "status": 200,
+      "differential_not_offered": true,
+      "per_sample_available": false
+    }
+  ],
+  "browser_checks": {
+    "normal_job_options": [
+      "Focused incoming",
+      "Focused outgoing",
+      "Cell-state network",
+      "Ligand-receptor dot plot",
+      "Cell-state heatmap",
+      "Top interactions table",
+      "Per-sample comparison"
+    ],
+    "global_failure": "Feature remains in menu; Plotly annotation contains Validation fixture: explicit global failure; screenshot inspected.",
+    "split_failure": "Global cell-state network renders on 3 canvas elements; per-sample option absent; screenshot inspected."
+  },
+  "tests": {
+    "python": "61 passed, 4 dependency deprecation warnings",
+    "javascript": [
+      "communication_availability passed",
+      "explore_metadata_views passed",
+      "analysis_progress passed"
+    ],
+    "git_diff_check": "passed"
+  },
+  "deployed_asset": {
+    "url": "https://devapp.lungmap.net/scalable/static/app.js?v=1791320186107685350",
+    "sha256": "ec62b31893069745af71b871055a7f8d0737d310d3a722e88bd17eb59a517fa3",
+    "observation": "Still discards disabled fastcomm_analysis and hides communication unless enabled and status completed."
+  },
+  "deployment": "Michal must rebuild/recreate scalable-web from committed changes; no RAM or proxy configuration change. Failed existing analyses are not relabeled as successful."
+}

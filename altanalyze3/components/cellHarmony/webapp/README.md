@@ -1063,13 +1063,42 @@ DejaVu Sans.
 | `GET /api/jobs/{id}/fastcomm/network` | incoming or outgoing pairs; no browser caller |
 | `GET /api/jobs/{id}/marker/heatmap.tsv`, `.pdf`, `/jobs/{id}/marker/heatmap/viewer` | MarkerFinder matrix, its PDF, the Morpheus page |
 | `GET /api/jobs/{id}/umap/pdf`, `/expression/pdf` | server-rendered PDFs; the Explore buttons use the browser path instead |
-| `GET /api/jobs/{id}/download/{artifact}`, `/log` | artifacts and the pipeline log |
+| `GET /api/jobs/{id}/download/{artifact}`, `/log` | artifacts; `/log` returns the logs, methods, notebook and provenance ZIP |
 | `POST /api/jobs/{id}/differential`, `GET .../differential/status` | run and poll a contrast |
 | `GET /api/jobs/{id}/differential/interactive/{summary,heatmap,volcano,go,network,table,gene}` | the Differential views |
 | `GET /api/jobs/{id}/differential/interactive/pdf?mode=`, `.../gene/pdf` | server PDFs of the views |
 | `GET /api/jobs/{id}/differential/archive`, `/artifact/{key}`, `/heatmap?format=`, `/network/{id}?format=` | downloads |
 | `GET /api/jobs/{id}/chat-examples`, `POST /api/jobs/{id}/chat` | Chat |
 | `POST /api/jobs/{id}/client-log` | append a browser message to the job log |
+
+### Logs, methods and deployment resources
+
+The existing log button is **Download log & methods ZIP**. `GET /api/jobs/{id}/log`
+returns `application/zip` with `methods.md`, `analysis.ipynb`, `run_manifest.json`,
+`model_provenance.json`, `references.json` and the available pipeline, worker and
+branch logs. Methods are generated deterministically by
+`cellHarmony/analysis_record.py`, without an LLM or expression/model loading.
+Workers record package versions, native method/code identities, reference hashes,
+QC defaults and selected settings at execution. ICGS3 records both the passed
+configuration and the resolved native configuration. Differential snapshots retain
+their own grouping layer, modality, samples and actual test dispatch; pseudobulk
+uses the native moderated t-test, not the configured cell-level ranking method.
+Historical jobs retain their saved versions/logs and explicitly mark missing
+execution snapshots/default provenance. Notebook cells are unexecuted, with
+replay gated on verification of the original code and complete resources.
+
+Clean source/Docker deployments must include these four tracked resources:
+`fastComm/resources/cellchat_nichenet_{human,mouse}/{ligand_receptor.tsv,manifest.json}`.
+They are byte-identical copies of the complete existing native LR tables (7,340
+human and 8,091 mouse rows); the manifests record their SHA-256 identities and
+upstream source URLs. Locally generated resources retain priority; inference
+falls back to the tracked copies when the generated training directory is absent.
+scALABLE explicitly runs fastComm with `response_matrix=None`, so its deployment
+does not require the large response-signature matrices. Both Dockerfiles validate
+the tracked tables at build time using `fastComm/verify_packaged_resources.py`.
+Include the loader, packaging and Dockerfile changes along with the four resources,
+then rebuild the image. Existing jobs with failed communication retain that failure
+record; rebuilding alone does not create their missing scores.
 | `POST /api/tools/approximate-umap` | run approximate UMAP on files already on disk |
 
 The Morpheus heatmap page loads its scripts from `software.broadinstitute.org`, so the

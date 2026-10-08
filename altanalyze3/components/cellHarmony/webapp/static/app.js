@@ -1105,6 +1105,11 @@ function fastCommAvailable() {
   return Boolean(currentFastCommAnalysis && currentFastCommAnalysis.enabled && currentFastCommAnalysis.status === "completed");
 }
 
+function fastCommOffered() {
+  // Retain the feature when its analysis failed, so the reason remains visible.
+  return fastCommAvailable() || currentFastCommAnalysis?.status === "failed";
+}
+
 function fastCommPopulations() {
   const summary = currentFastCommAnalysis?.summary || {};
   const fromSummary = currentFastCommAnalysis?.populations || summary.populations || [];
@@ -1153,7 +1158,7 @@ function availableVisualizationModes(panelKey) {
   if ((currentMarkerAnalysisByModality.rna || currentMarkerAnalysis)?.networks?.length) {
     modes.push({ value: "marker_network", label: "MarkerNetwork" });
   }
-  if (fastCommAvailable()) {
+  if (fastCommOffered()) {
     modes.push({ value: "fastcomm_network", label: "Cell communication" });
   }
   if (availableModalities().some(m => m.id === "grn")) {
@@ -1416,9 +1421,15 @@ function showMarkerHeatmapView(panelKey, view) {
   setPanelSummary(panelKey, view.summary);
 }
 window.addEventListener("message", event => {
-  if (event.origin !== window.location.origin || !["marker-heatmap-dataset", "marker-heatmap-error"].includes(event.data?.type)) return;
+  if (event.origin !== window.location.origin || !["marker-heatmap-dataset", "marker-heatmap-error", "marker-heatmap-empty"].includes(event.data?.type)) return;
   for (const [panelKey, view] of markerHeatmapViews) {
     if (event.source !== view.iframe.contentWindow) continue;
+    if (event.data.type === "marker-heatmap-empty") {
+      view.bytes = 0;
+      view.summary = String(event.data.message || "No cells match the selected filters.");
+      if (!view.host.classList.contains("hidden")) setPanelSummary(panelKey, view.summary);
+      continue;
+    }
     if (event.data.type === "marker-heatmap-error") {
       view.failed = true;
       view.summary = String(event.data.message || "Unable to load marker heatmap.");
@@ -3033,7 +3044,7 @@ function applyJobStatus(jobId, data) {
   renderAnalysisLayers(jobId);
   currentMarkerAnalysis = data.marker_analysis && data.marker_analysis.enabled ? data.marker_analysis : null;
   currentMarkerAnalysisByModality = data.marker_analysis_by_modality || { rna: currentMarkerAnalysis };
-  currentFastCommAnalysis = data.fastcomm_analysis && data.fastcomm_analysis.enabled ? data.fastcomm_analysis : null;
+  currentFastCommAnalysis = data.fastcomm_analysis || null;
   currentModalitiesState = data.modalities || { default: "rna", available: [{ id: "rna", label: "RNA", feature_label: "gene", example_feature: "MPO" }] };
   updateExpressionModeOptions();
   updateWorkflowPanels(referenceRerunPending ? "uploaded" : (data.status || null));
@@ -3807,7 +3818,7 @@ async function populateDownloadLinks(jobId, statusData = null) {
     const logBtn = document.createElement("a");
     logBtn.className = "download-btn";
     logBtn.href = apiPath(`/jobs/${jobId}/log`);
-    logBtn.textContent = "Download log";
+    logBtn.textContent = "Download log & methods ZIP";
     container.appendChild(logBtn);
   }
 }
@@ -6223,6 +6234,14 @@ async function loadVisualizationPanel(panelKey) {
     }
 
     if (mode === "fastcomm_network") {
+      if (!fastCommAvailable()) {
+        panelPlotData[panelKey] = {
+          source: "fastcomm_network",
+          payload: { elements: [], message: currentFastCommAnalysis?.message || "Cell communication analysis is not ready." },
+        };
+        renderVisualizationPanel(panelKey);
+        return;
+      }
       const plotType = panelCommunicationPlotType(panelKey);
       const population = fastCommPlotNeedsPopulation(plotType) ? getPanelSelectValue(panelKey, "marker-population") : "";
       if (fastCommPlotNeedsPopulation(plotType) && !population) {

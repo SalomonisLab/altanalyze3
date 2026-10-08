@@ -385,7 +385,7 @@ def test_both_imputed_sidecars_keep_barcode_coordinates_and_differential_layers(
 
 
 def test_log_download_contains_full_provenance_without_mutating_pipeline_log(tmp_path):
-    import json
+    import json, io, zipfile
     app=create_app({'JOB_STORAGE':str(tmp_path),'ISOLATE_JOBS':False})
     store=app.state.job_store;job=store.create_job('human','fixture',None,[])['job_id']
     store.append_log(job,'Job completed.')
@@ -397,9 +397,12 @@ def test_log_download_contains_full_provenance_without_mutating_pipeline_log(tmp
     with TestClient(app) as client:
         response=client.get(f'/api/jobs/{job}/log')
         assert response.status_code==200
-        assert response.content.startswith(before)
-        assert 'Model versions and provenance' in response.text
-        assert json.loads(response.text.split('=== Model versions and provenance ===\n')[1])==provenance
+        assert response.headers['content-type']=='application/zip'
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+            assert archive.read('logs/pipeline.log')==before
+            saved=json.loads(archive.read('model_provenance.json'))
+            assert saved['software_provenance']['model_provenance']['main']==provenance
+            assert 'methods.md' in archive.namelist() and 'analysis.ipynb' in archive.namelist()
         assert 'attachment;' in response.headers['content-disposition']
     assert logpath.read_bytes()==before
     app.state.job_runner.executor.shutdown(wait=True)

@@ -193,14 +193,65 @@
     },
     {
       "id": "lung_RNA_training_matrix_preprocessing_20261007",
-      "status": "pending",
-      "question": "Which previously sent file/protocol documents Clair cell RNA normalization units, log base and pseudocount? Please give the filename/path.",
+      "status": "resolved",
+      "question": "Is newrna_cell_clair_filtered_symbol.csv a renamed copy of unmerged_clair_newRNA.csv produced by this script?",
       "evidence": "Delivered train_sparse_lipidwise_delivered_2026-08-19.py loads the supplied numeric RNA matrix directly, without documenting the transformation that generated it. The original rna_lipid-main archive also loads it directly. Deployed CP10k inference does not establish the training matrix normalization.",
       "scope": "Adjudicate CPM versus CP10k versus another RNA representation and any subsequent scale-dependent changes; no further reconstruction or inference pending this answer.",
       "not_blocked_by_this_question": "Read-only explanation of already verified donor replication, existing statistical tests, approved median filling, fold definitions and concordance denominators.",
       "source_identity_clarification": "User relayed Abby: renamed copy of Clair cell data with previously supplied normalization.",
       "external_file_role_clarification": "Not reopened by external validation; training source determines saved RNA scaler and coefficient input representation.",
-      "clarification_record": "components/rna2lipid/artifacts/Abby_external_validation_audit_20261007/ABBY_CLARIFICATION_20261007.md"
+      "clarification_record": "components/rna2lipid/artifacts/Abby_external_validation_audit_20261007/ABBY_CLARIFICATION_20261007.md",
+      "provided_preprocessing_script": {
+        "path": "components/rna2lipid/artifacts/Abby_external_validation_audit_20261007/source/Repetitive_genes.py",
+        "sha256": "66d93453ead664f33a20b94d02eb5fc2a3a6ce1f2c759c5ef3055c848d7eece6"
+      },
+      "verified_script_normalization": "log2(1 + df / column_sum(df) * 1000000)",
+      "remaining_dependency": null,
+      "new_inference_allowed": true,
+      "user_message": "unmerged_clair_newRNA.csv = newrna_cell_clair_filtered_symbol.csv",
+      "resolved_by": "user",
+      "resolved_date": "2026-10-08"
+    },
+    {
+      "id": "bulk_IPF_separate_fold_threshold_role_20261008",
+      "status": "resolved",
+      "required_for": [
+        "bulk_IPF_separate_measured_and_predicted_folds_20261008"
+      ],
+      "question": "Does the 1.5\u20132-fold cutoff grid apply to measured bulk lipidomics or RNA-imputed bulk lipid predictions?",
+      "user_answer": "Measured bulk lipidomics: 1.5 and 2; imputed lipids: separate cutoffs",
+      "resolution_evidence": "Explicit response through interactive question tool. Apply independent source and predicted fold cutoff grids."
+    },
+    {
+      "id": "bulk_IPF_experimental_log_effect_base_20261008",
+      "status": "diagnostic_complete_log_base_unconfirmed",
+      "required_for": [
+        "bulk_IPF_separate_measured_and_predicted_folds_20261008"
+      ],
+      "question": "What is the base of log(IPF/Ctrl) in 10_results_with_statistics.csv? If unknown, does the user authorize tracing the calculation using supplied group means and romics source code?",
+      "user_answer": null,
+      "evidence": "File includes log(IPF/Ctrl), Ctrl_mean and IPF_mean but no verified log-base declaration. No experimental fold cutoff or conversion has been applied.",
+      "diagnostic_authorized": true,
+      "diagnostic_user_answer": "We don't know if these lipid data are log2 or log10 or not-log... what does the data tell is likely the answer? I don't have a definitive answer yet but will try to get one from the author. This impacts whether you subtract or divide. I may not be able to get a clean answer",
+      "diagnostic_evidence": "components/rna2lipid/artifacts/experimental_lipid_scale_diagnostic_20261008/scale_diagnostic.json",
+      "best_supported_hypothesis": "sample-median-centered log2 intensities",
+      "reported_effect_formula_verified": "difference of logged/centered group means within export precision",
+      "verified_log_base": null,
+      "provisional_log_base_assumption_authorized": true,
+      "provisional_policy_authorization": {
+        "granted_by": "user",
+        "user_answer": "Run provisional log2 plus a separately labeled log10 sensitivity analysis",
+        "approved_assumed_log_bases": [2.0, 10.0],
+        "response_evidence": "Actual interactive response in this session to call_08b3fb2f23f74f95b17ac73e8f1dbdf2. The source log base remains unconfirmed; these are authorized assumptions, not verified provenance."
+      },
+      "workbook_diagnostic_evidence": "components/rna2lipid/artifacts/Geremy_original_lipid_statistics_20261008/workbook_audit.json",
+      "reported_effect_formula_workbook_verified": "IPF_mean minus Ctrl_mean; maximum residual 1.0436096431476471e-14",
+      "pending_provisional_policy_question": "The workbooks confirm disease-minus-control differences but do not identify the log base. For the 1.5- and 2-fold measured-lipid cutoffs, which analysis should I run? Log2 remains the best-supported estimate.",
+      "pending_provisional_policy_options": [
+        "Run provisional log2 plus a separately labeled log10 sensitivity analysis",
+        "Run provisional log2 only",
+        "Wait for the author to confirm the base"
+      ]
     }
   ],
   "approval": {
@@ -492,5 +543,86 @@
     "RNA_preprocessing_units_confirmed": false,
     "new_inference_or_training_executed": false,
     "author_reply_is_not_model_change_authorization": true
+  },
+  "bulk_IPF_harmonized_plan_20261008": {
+    "granted_by": "user",
+    "user_message": "proceed with this plan",
+    "scope": "Verify original training RNA representation; correct and freeze lipid matching; compare unchanged full-panel candidate and prior at donor level with reference-only and significant-in-both metrics and approved fold/p-value scans.",
+    "status": "completed_fixed_model_CPM_comparison",
+    "required_lipid_outputs": 202,
+    "required_RNA_inputs": 1303,
+    "required_RNA_IPF_donors": 20,
+    "required_RNA_control_donors": 14,
+    "training_authorized": false,
+    "RNA_scale_assumption_authorized": false,
+    "new_inference_executed": true,
+    "training_RNA_scale": "log2(CPM + 1)",
+    "source_identity_user_confirmation": "unmerged_clair_newRNA.csv = newrna_cell_clair_filtered_symbol.csv",
+    "models_changed": false,
+    "report": "components/rna2lipid/artifacts/bulk_IPF_CPM_harmonized_20261008/BULK_IPF_CANDIDATE_VS_PRIOR_REPORT.md",
+    "independent_verification_passed": true
+  },
+  "Abby_latest_bundle_comparison_20261008": {
+    "user_request": "Abby said I was wrong about the model that is supposed to be the most recent of her models which instead is. Compare",
+    "scope": "Read-only comparison of supplied model, trainer and API to current and preserved prior; no replacement, refitting or inference.",
+    "status": "completed_artifact_and_algorithm_comparison",
+    "audit": "components/rna2lipid/artifacts/Abby_latest_bundle_comparison_20261008/comparison_audit.json",
+    "supplied_model_byte_identical_to_prior": true,
+    "new_inference_executed": false,
+    "model_default_changed": false
+  },
+  "bulk_IPF_three_version_rerun_20261008": {
+    "granted_by": "user",
+    "user_message": "Perform the IPF bulk analyses again and compare to the prior set of Abby provided, your last version and this new version (bulk only lipid and RNA with different thresholds).",
+    "scope": "Rerun unchanged prior/Abby supplied model and current full202 model under approved donor-level methods; compare prior CPM, current CP10k, current CPM; separate original author-reported results with missing saved tables. No fitting, deployment or feature/sample exclusions.",
+    "status": "completed_common_method_three_version_rerun",
+    "required_RNA_inputs": 1303,
+    "required_lipid_outputs": 202,
+    "RNA_IPF_donors": 20,
+    "RNA_control_donors": 14,
+    "new_inference_executed": true,
+    "independent_verification_passed": true,
+    "report": "components/rna2lipid/artifacts/bulk_IPF_three_version_comparison_20261008/BULK_IPF_THREE_VERSION_REPORT.md",
+    "Abby_original_saved_result_reproduction": "pending saved outputs; not claimed complete"
+  },
+  "bulk_IPF_separate_measured_and_predicted_folds_20261008": {
+    "granted_by": "user",
+    "user_message": "You can apply different fold threhsolds in the lipid and bulk. The bulk minimum should be 1.5 with a max of 2 fold.",
+    "status": "completed_authorized_provisional_log2_and_log10_sensitivity_scan",
+    "independent_fold_thresholds_authorized": true,
+    "bulk_minimum_threshold": 1.5,
+    "bulk_maximum_threshold": 2,
+    "maximum_is_a_cutoff_grid_limit_not_authorization_to_clip_effects": true,
+    "source_data_or_models_changed": true,
+    "experimental_source_updated_to_full_precision_workbook": true,
+    "models_changed": false,
+    "source_statistics_refitted": false,
+    "prediction_statistics_changed": false,
+    "dependent_threshold_analysis_executed": true,
+    "measured_bulk_fold_cutoffs": [
+      1.5,
+      2.0
+    ],
+    "imputed_fold_cutoffs": [
+      1.0,
+      1.1,
+      1.2,
+      1.5,
+      2.0
+    ],
+    "cutoff_role_user_answer": "Measured bulk lipidomics: 1.5 and 2; imputed lipids: separate cutoffs",
+    "prepared_threshold_code": "components/rna2lipid/scan_independent_bulk_lipid_thresholds.py",
+    "synthetic_safeguard_tests_passed": 7,
+    "full_precision_workbook_audit_completed": true,
+    "original_means_and_prediction_tables": "components/rna2lipid/artifacts/Geremy_original_lipid_statistics_20261008/BULK_IPF_ORIGINAL_MEANS_AND_PREDICTIONS.md",
+    "source_scale_policy_answer_pending": false,
+    "provisional_scale_user_answer": "Run provisional log2 plus a separately labeled log10 sensitivity analysis",
+    "threshold_rows_completed": 180,
+    "identical_lipid_comparison_rows_completed": 180,
+    "all_202_outputs_retained_per_version": true,
+    "independent_verification_passed": true,
+    "report": "components/rna2lipid/artifacts/bulk_IPF_three_version_comparison_20261008/independent_measured_and_imputed_fold_thresholds/BULK_IPF_INDEPENDENT_THRESHOLDS.md",
+    "verification": "components/rna2lipid/artifacts/bulk_IPF_three_version_comparison_20261008/independent_measured_and_imputed_fold_thresholds/independent_verification.json",
+    "measured_log_base_remains_unconfirmed": true
   }
 }

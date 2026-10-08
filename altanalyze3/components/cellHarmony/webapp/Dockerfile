@@ -34,6 +34,9 @@ COPY . /app/altanalyze3/components
 RUN mkdir -p /app/altanalyze3 /srv/cellharmony/jobs /tmp/matplotlib \
     && touch /app/altanalyze3/__init__.py
 
+# Catch omitted deployment resources at build time, before visitors submit jobs.
+RUN python /app/altanalyze3/components/fastComm/verify_packaged_resources.py
+
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \

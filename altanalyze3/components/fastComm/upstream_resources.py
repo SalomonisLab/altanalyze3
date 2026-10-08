@@ -16,6 +16,7 @@ from .training import prune_response_matrix
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 GENERATED_BUNDLE_ROOT = PACKAGE_DIR / "training_data" / "processed" / "upstream"
+PACKAGED_BUNDLE_ROOT = PACKAGE_DIR / "resources"
 
 CELLCHAT_URLS = {
     "human": "https://raw.githubusercontent.com/jinworks/CellChat/main/data/CellChatDB.human.rda",
@@ -53,6 +54,18 @@ def bundle_paths_for_species(species: str, root: Optional[Path] = None) -> Dict[
         "response_matrix": bundle_root / "response_signatures.tsv",
         "manifest": bundle_root / "manifest.json",
     }
+
+
+def inference_bundle_paths_for_species(species: str) -> Dict[str, Path]:
+    """Prefer locally built resources; source deployments also ship the same LR table.
+
+    Explicit build destinations remain unchanged. The fallback contains the complete
+    original LR table; it is not a regenerated or reduced scientific resource.
+    """
+    generated = bundle_paths_for_species(species)
+    if generated["lr_table"].is_file():
+        return generated
+    return bundle_paths_for_species(species, root=PACKAGED_BUNDLE_ROOT)
 
 
 def _import_rdata():

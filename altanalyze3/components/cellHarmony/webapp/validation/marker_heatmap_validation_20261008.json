@@ -1,0 +1,212 @@
+{
+  "date": "2026-10-08",
+  "job_id": "9f9964d515bb4f6f844f35e9117e0f1f",
+  "fix": "Both-mode imputed MarkerHeatmaps registered for raw and annotated unsupervised layers using the standard modality MarkerFinder hook; no matching filter columns return a readable empty-state notice rather than a dataset error.",
+  "standard_route": "flask.pipeline._emit_modality_marker_heatmap -> visualization.marker_heatmap_h5ad.generate_marker_heatmap_from_adata",
+  "repair_seconds": 1.0095300000393763,
+  "model_imputation_rerun": false,
+  "source_sha256_unchanged": {
+    "adt": "f5c1846d15035d3e4493fbc36a000b4529d5f4161f71eacb3f4162169b300ca5",
+    "grn_tf": "b1c229c0d7beb614ae1f8ee5840ce75aba1a09e82cbe43ff7febcad5022a2f0b",
+    "lipids": "1c098c0a6283024d3a974e1799dadd5013686ca81413143993ca57ab778180fe"
+  },
+  "prediction_source_coverage": {
+    "adt": {
+      "cells": 4355,
+      "features": 56
+    },
+    "grn_tf": {
+      "cells": 4355,
+      "features": 284
+    },
+    "lipids": {
+      "cells": 4355,
+      "features": 202
+    }
+  },
+  "api_checks": [
+    {
+      "layer": "supervised_state",
+      "modality": "rna",
+      "rows": 2070,
+      "columns": 327,
+      "status": 200,
+      "viewer_status": 200,
+      "seconds": 1.069
+    },
+    {
+      "layer": "supervised_state",
+      "modality": "adt",
+      "rows": 32,
+      "columns": 317,
+      "status": 200,
+      "viewer_status": 200,
+      "seconds": 0.118
+    },
+    {
+      "layer": "supervised_state",
+      "modality": "lipids",
+      "rows": 52,
+      "columns": 317,
+      "status": 200,
+      "viewer_status": 200,
+      "seconds": 0.104
+    },
+    {
+      "layer": "supervised_state",
+      "modality": "grn_tf",
+      "rows": 99,
+      "columns": 317,
+      "status": 200,
+      "viewer_status": 200,
+      "seconds": 0.238
+    },
+    {
+      "layer": "unsupervised_cluster",
+      "modality": "rna",
+      "rows": 1380,
+      "columns": 240,
+      "status": 200,
+      "viewer_status": 200,
+      "seconds": 0.865
+    },
+    {
+      "layer": "unsupervised_cluster",
+      "modality": "adt",
+      "rows": 35,
+      "columns": 240,
+      "status": 200,
+      "viewer_status": 200,
+      "seconds": 0.011
+    },
+    {
+      "layer": "unsupervised_cluster",
+      "modality": "lipids",
+      "rows": 70,
+      "columns": 240,
+      "status": 200,
+      "viewer_status": 200,
+      "seconds": 0.084
+    },
+    {
+      "layer": "unsupervised_cluster",
+      "modality": "grn_tf",
+      "rows": 90,
+      "columns": 240,
+      "status": 200,
+      "viewer_status": 200,
+      "seconds": 0.092
+    },
+    {
+      "layer": "unsupervised_state",
+      "modality": "rna",
+      "rows": 1380,
+      "columns": 240,
+      "status": 200,
+      "viewer_status": 200,
+      "seconds": 0.726
+    },
+    {
+      "layer": "unsupervised_state",
+      "modality": "adt",
+      "rows": 35,
+      "columns": 240,
+      "status": 200,
+      "viewer_status": 200,
+      "seconds": 0.071
+    },
+    {
+      "layer": "unsupervised_state",
+      "modality": "lipids",
+      "rows": 70,
+      "columns": 240,
+      "status": 200,
+      "viewer_status": 200,
+      "seconds": 0.085
+    },
+    {
+      "layer": "unsupervised_state",
+      "modality": "grn_tf",
+      "rows": 90,
+      "columns": 240,
+      "status": 200,
+      "viewer_status": 200,
+      "seconds": 0.092
+    },
+    {
+      "filter": "Unaligned TF cells without predictions",
+      "status": 200,
+      "columns": 0
+    }
+  ],
+  "browser_dom_checks": [
+    {
+      "layer": "unsupervised_state",
+      "modality": "lipids",
+      "render": [
+        "          - heading \"70 rows by 240 columns\" [level=6]"
+      ]
+    },
+    {
+      "layer": "unsupervised_state",
+      "modality": "adt",
+      "render": [
+        "          - heading \"35 rows by 240 columns\" [level=6]"
+      ]
+    },
+    {
+      "layer": "unsupervised_state",
+      "modality": "grn_tf",
+      "render": [
+        "          - heading \"90 rows by 240 columns\" [level=6]"
+      ]
+    },
+    {
+      "layer": "unsupervised_state",
+      "modality": "rna",
+      "render": [
+        "          - heading \"1,380 rows by 240 columns\" [level=6]"
+      ]
+    },
+    {
+      "layer": "supervised_state",
+      "modality": "grn_tf",
+      "filter": "Unaligned",
+      "message": [
+        "      - generic: No cells in this heatmap match the selected filters. Clear or change the filters to display the heatmap.",
+        "    - generic: No cells in this heatmap match the selected filters. Clear or change the filters to display the heatmap."
+      ]
+    },
+    {
+      "layer": "supervised_state",
+      "modality": "grn_tf",
+      "after_clearing_filter": [
+        "          - heading \"99 rows by 317 columns\" [level=6]"
+      ]
+    }
+  ],
+  "additional_browser_checks": {
+    "unsupervised_cluster": {
+      "rna": "1380 rows x 240 cells",
+      "adt": "35 rows x 240 cells",
+      "lipids": "70 rows x 240 cells",
+      "grn_tf": "90 rows x 240 cells"
+    },
+    "supervised_state": {
+      "rna": "2070 rows x 327 cells",
+      "adt": "32 rows x 317 cells",
+      "lipids": "52 rows x 317 cells",
+      "grn_tf": "99 rows x 317 cells"
+    }
+  },
+  "tests": {
+    "python": "31 passed; 4 dependency deprecation warnings",
+    "browser_lifecycle": "passed",
+    "git_diff_check": "passed"
+  },
+  "limits": [
+    "Unaligned cells without existing imputation values are not assigned fabricated prediction values. Filtering a modality to these cells shows guidance; clearing the filter restores the real heatmap.",
+    "Backfill applied to this job; future Both pipelines generate layer caches automatically. Other old completed jobs were not modified.",
+    "Benchmarks use this saved job, not a new million-cell pipeline run."
+  ]
+}

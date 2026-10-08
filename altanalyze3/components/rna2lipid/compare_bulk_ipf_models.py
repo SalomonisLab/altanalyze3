@@ -21,7 +21,7 @@ HERE = Path(__file__).resolve().parent
 SOURCE = Path('/Users/saljh8/Downloads/Lipidomics/IPF')
 PREVIOUS = HERE / 'artifacts/IPF_candidate_validation_20261001'
 REFERENCE = HERE / 'artifacts/LungMAP_full202_native_log2_20261005'
-OUT = HERE / 'artifacts/bulk_IPF_full202_comparison_20261007'
+OUT = HERE / 'artifacts/bulk_IPF_CPM_harmonized_20261008'
 ANNOTATION = HERE.parent / 'fastCNV/resources/Hs_Ensembl_GRCh38_genes.tsv'
 GENES_TO_FILL = ['ADORA3', 'CHGA', 'FABP7', 'FFAR1', 'GGT1', 'HBG1', 'ST6GALNAC6', 'STAR']
 
@@ -36,7 +36,7 @@ def signed_fold(log2fc):
 
 
 def model_inputs(raw, published, annotation, genes, medians):
-    """Keep all source rows in the CP10k denominator and all declared model genes."""
+    """Keep all source rows in the CPM/CP10k denominators and all declared model genes."""
     if raw.index.has_duplicates or raw.columns.has_duplicates or published.index.has_duplicates:
         raise ValueError('Duplicate source gene/sample identities')
     if list(raw.index) != list(published.index) or list(raw.columns) != list(published.columns):
@@ -52,13 +52,14 @@ def model_inputs(raw, published, annotation, genes, medians):
         raise ValueError('Zero source library; no sample exclusion permitted')
     symbol = annotation.set_index('gene_id').gene.reindex(raw.index)
     matrices = {name: pd.DataFrame(index=raw.columns, columns=genes, dtype=float)
-                for name in ('log2_CP10k', 'publisher_logRPKM')}
+                for name in ('log2_CPM', 'log2_CP10k', 'publisher_logRPKM')}
     audit = []
     missing_genes = []
     for gene in genes:
         ids = raw.index[symbol.eq(gene)]
         if len(ids):
             counts = raw.loc[ids].sum(axis=0)
+            matrices['log2_CPM'][gene] = np.log2(1 + counts / totals * 1e6)
             matrices['log2_CP10k'][gene] = np.log2(1 + counts / totals * 1e4)
             matrices['publisher_logRPKM'][gene] = np.log2(np.exp2(published.loc[ids]).sum(axis=0))
         else:
@@ -105,11 +106,77 @@ def thresholds(comparison, model, representation, region):
     return rows
 
 
-def main():
+
+def verified_RNA_source(state):
+    """Reject inference until the actual source answer and pinned code are verified."""
+    q = next(q for q in state['questions'] if q['id'] == 'lung_RNA_training_matrix_preprocessing_20261007')
+    expected = 'unmerged_clair_newRNA.csv = newrna_cell_clair_filtered_symbol.csv'
+    if q['status'] != 'resolved' or q.get('resolved_by') != 'user' or q.get('user_message') != expected or not q.get('new_inference_allowed'):
+        raise ValueError('Training RNA source identity unresolved; stop inference')
+    source = q['provided_preprocessing_script']
+    if sha(HERE.parents[1] / source['path']) != source['sha256']:
+        raise ValueError('Verified RNA preprocessing source changed')
+    if q['verified_script_normalization'] != 'log2(1 + df / column_sum(df) * 1000000)':
+        raise ValueError('Verified training RNA transformation changed')
+    return q
+
+
+def corrected_matching(base, lipid_raw):
+    """Correct the approved CE parser omission; preserve every previous identity."""
+    fixed = base.copy()
+    changes = []
+    for gene in fixed.index[fixed.index.str.startswith('CE(')]:
+        fixed.loc[gene, 'canonical'] = gene
+        ion = fixed.loc[gene, 'ion_mode']
+        suffix = {'P': '_POS', 'N': '_NEG'}.get(ion)
+        candidates = lipid_raw.index[lipid_raw.Lipid.eq(gene) & lipid_raw.index.str.endswith(suffix)] if suffix else []
+        if len(candidates) > 1:
+            raise ValueError(f'Ambiguous CE mapping requires discussion: {gene}')
+        if len(candidates) == 1:
+            fixed.loc[gene, 'measured_feature'] = candidates[0]
+            fixed.loc[gene, 'status'] = 'matched'
+            changes.append({'model_lipid': gene, 'measured_feature': candidates[0], 'reason': 'CE omitted from original class parser'})
+    pd.testing.assert_frame_equal(fixed.loc[base.status.eq('matched')], base.loc[base.status.eq('matched')])
+    if {r['model_lipid'] for r in changes} != {'CE(18:2)', 'CE(20:3)'}:
+        raise ValueError('CE correction differs from reviewed source; discuss before inference')
+    if fixed.index.has_duplicates or fixed.loc[fixed.status.eq('matched'), 'measured_feature'].duplicated().any():
+        raise ValueError('Nonunique frozen lipid mapping')
+    return fixed, changes
+
+
+def reference_only(comparison, model, representation, region):
+    """Selection uses measured BH/effect only, never model p-values or outcome."""
+    eligible = comparison[comparison.status.eq('matched') & comparison.supplied_adjusted_p.lt(.05) & comparison.supplied_log_effect.ne(0)]
+    top = pd.concat([eligible[eligible.supplied_log_effect.gt(0)].sort_values(
+        ['supplied_adjusted_p', 'supplied_log_effect'], ascending=[True, False]).head(15),
+        eligible[eligible.supplied_log_effect.lt(0)].sort_values(
+        ['supplied_adjusted_p', 'supplied_log_effect'], ascending=[True, True]).head(15)])
+    summaries, details = [], []
+    for selection, frame in [('top15_up_top15_down', top), ('all_measured_BH005', eligible)]:
+        for estimand, field in [('mean_log_prediction', 'predicted_geometric_log2FC'), ('arithmetic_abundance', 'predicted_log2FC')]:
+            agree = frame.supplied_log_effect * frame[field] > 0
+            summaries.append({'model': model, 'RNA_representation': representation, 'region': region,
+                'selection': selection, 'effect_estimand': estimand, 'measured_lipids': len(frame),
+                'measured_up': int(frame.supplied_log_effect.gt(0).sum()), 'measured_down': int(frame.supplied_log_effect.lt(0).sum()),
+                'concordant_up': int((agree & frame.supplied_log_effect.gt(0)).sum()),
+                'concordant_down': int((agree & frame.supplied_log_effect.lt(0)).sum()),
+                'concordant_total': int(agree.sum()), 'discordant_total': int((frame.supplied_log_effect * frame[field] < 0).sum()),
+                'zero_predicted_effect': int(frame[field].eq(0).sum()),
+                'concordance_percent': 100 * agree.mean() if len(frame) else np.nan})
+        selected = frame.copy()
+        selected['selection'] = selection
+        selected['mean_log_concordant'] = selected.supplied_log_effect * selected.predicted_geometric_log2FC > 0
+        selected['arithmetic_abundance_concordant'] = selected.supplied_log_effect * selected.predicted_log2FC > 0
+        details.append(selected)
+    return summaries, details
+
+def main(output=OUT):
+    OUT = Path(output)
     state_path = HERE / 'integrity/decision_state.json'
     state = json.loads(state_path.read_text())
-    authorization = state['bulk_IPF_head_to_head_authorization_20261007']
-    if authorization.get('granted_by') != 'user' or authorization.get('user_message') != 'Yes, I am asking you to do this':
+    authorization = state['bulk_IPF_harmonized_plan_20261008']
+    RNA_source_confirmation = verified_RNA_source(state)
+    if authorization.get('granted_by') != 'user' or authorization.get('user_message') != 'proceed with this plan':
         raise ValueError('Bulk inference requires actual user authorization')
     decision = next(q for q in state['questions'] if q['id'] == 'bulk_IPF_eight_RNA_gene_mappings_20261007')
     if decision['status'] != 'resolved' or not decision.get('NA_filling_authorized'):
@@ -161,27 +228,52 @@ def main():
     if list(base_match.index) != manifest['Y_columns']:
         raise ValueError('Approved matching audit lacks required 202 identities')
     pd.testing.assert_frame_equal(base_match.drop(columns='model'), prior_match.drop(columns='model'))
+    base_match, matching_changes = corrected_matching(base_match, lipid_raw)
     diagnoses = md.groupby('donorid').diseasegroup
     if (diagnoses.nunique() != 1).any():
         raise ValueError('Conflicting donor diagnoses')
     donor_groups = diagnoses.first()
+    # Verify BOTH fixed algorithms before creating outputs or running either model.
+    preflight_settings = None
+    for label, filename, expected_hash in [('candidate', manifest['bundle_filename'], manifest['bundle_sha256']),
+                                          ('prior', manifest['previous_bundle_filename'], manifest['previous_bundle_sha256'])]:
+        path = HERE / filename
+        if sha(path) != expected_hash:
+            raise ValueError(f'{label} differs from the pinned fixed model')
+        with path.open('rb') as handle:
+            bundle = pickle.load(handle)
+        if label == 'candidate':
+            verify_release_bundle(path, bundle)
+        if bundle['X_columns'] != manifest['X_columns'] or bundle['Y_columns'] != manifest['Y_columns']:
+            raise ValueError(f'{label} full ordered panel mismatch')
+        if list(bundle['models']) != manifest['Y_columns'] or {type(v['model']).__name__ for v in bundle['models'].values()} != {'ElasticNetCV'}:
+            raise ValueError(f'{label} baseline estimators differ')
+        settings = {key: bundle[key] for key in ['top_gene_options', 'l1_ratio_grid', 'alpha_grid', 'cv_folds', 'max_iter', 'sparsity_penalty', 'random_seed']}
+        if preflight_settings is None:
+            preflight_settings = settings
+        else:
+            for key in settings:
+                np.testing.assert_array_equal(settings[key], preflight_settings[key])
     OUT.mkdir(parents=True, exist_ok=True)
     RNA_audit.to_csv(OUT / 'RNA_mapping_and_median_filling.csv', index=False)
     md.to_csv(OUT / 'all_139_RNA_sample_metadata.csv')
     base_match.to_csv(OUT / 'all_202_lipid_matching.csv')
     all_thresholds, all_comparisons, numerical = [], [], []
-    audit = {'authorization': authorization, 'source_sha256': source_hashes,
+    reference_summaries, reference_details = [], []
+    audit = {'authorization': authorization, 'RNA_source_confirmation': RNA_source_confirmation,
+        'RNA_representations': list(matrices), 'matching_changes': matching_changes, 'source_sha256': source_hashes,
         'source_profiles': len(md), 'RNA_inputs': len(manifest['X_columns']), 'lipid_outputs': len(manifest['Y_columns']),
         'training_median_profiles': list(training.index), 'filled_RNA_genes': RNA_audit.loc[RNA_audit.filled, 'gene'].tolist(),
         'matched_experimental_features': int(base_match.measured_feature.notna().sum()),
         'experimental_log_base': 'unconfirmed; no experimental fold magnitude invented',
-        'primary_RNA_representation': 'log2(1 + source_gene_counts / sum_all_15065_source_gene_counts * 10000)',
-        'sensitivity_RNA_representation': 'Publisher logRPKM, unchanged except original duplicate-gene linear summation and authorized missing-gene medians',
+        'primary_RNA_representation': 'log2(1 + source_gene_counts / sum_all_15065_source_gene_counts * 1000000)',
+        'sensitivity_RNA_representation': 'Previous CP10k and publisher logRPKM, unchanged except original duplicate-gene linear summation and authorized missing-gene medians',
         'study_offsets_added': False, 'training_executed': False, 'models_changed': False,
         'statistical_test': 'Established donor-level Welch test on averaged log predictions; BH over all 202 targets',
         'donor_aggregation': 'Established left/right mean within region, then equal apex/base weighting within donor; 101 known-region IPF/NDC profiles, all 34 IPF/NDC donors retained. All 139 profiles imputed and saved, including two unknown-region profiles and ILD/CLAD.',
         'reported_fold': 'Ratio of arithmetic means of positive 2**predictions, donor and region balanced; signed positive increase / negative decrease',
         'model_checks': {}}
+    baseline_method = None
     for label, path, expected_hash in [('candidate', HERE / manifest['bundle_filename'], manifest['bundle_sha256']),
                                       ('prior', HERE / manifest['previous_bundle_filename'], manifest['previous_bundle_sha256'])]:
         if sha(path) != expected_hash:
@@ -193,6 +285,14 @@ def main():
         for key in ('X_columns', 'Y_columns'):
             if original[key] != manifest[key]:
                 raise ValueError(f'{label} incomplete {key} roster')
+        settings = {k: original[k] for k in ['top_gene_options', 'l1_ratio_grid', 'alpha_grid', 'cv_folds', 'max_iter', 'sparsity_penalty', 'random_seed']}
+        if baseline_method is None:
+            baseline_method = settings
+        else:
+            for k in settings:
+                np.testing.assert_array_equal(settings[k], baseline_method[k])
+        if {type(v['model']).__name__ for v in original['models'].values()} != {'ElasticNetCV'}:
+            raise ValueError('Baseline estimator changed')
         model = load_bundle(path)
         audit['model_checks'][label] = {'path': str(path), 'sha256': expected_hash,
             'input_genes': len(model.input_genes), 'outputs': len(model.output_lipids),
@@ -233,6 +333,9 @@ def main():
                 for column in ('supplied_log_effect', 'supplied_raw_p', 'supplied_adjusted_p'):
                     comparison[column] = comparison.measured_feature.map(measured[column])
                 all_thresholds.extend(thresholds(comparison, label, representation, region_name))
+                refs, ref_detail = reference_only(comparison, label, representation, region_name)
+                reference_summaries.extend(refs)
+                reference_details.extend(ref_detail)
                 all_comparisons.append(comparison)
                 matched = comparison[comparison.status.eq('matched')]
                 concordant = matched.supplied_log_effect * matched.predicted_log2FC > 0
@@ -249,6 +352,8 @@ def main():
     comparison_table = pd.concat(all_comparisons, ignore_index=True)
     threshold_table.to_csv(OUT / 'all_threshold_results.csv', index=False)
     comparison_table.to_csv(OUT / 'every_lipid_all_comparisons.csv', index=False)
+    pd.DataFrame(reference_summaries).to_csv(OUT / 'reference_only_concordance.csv', index=False)
+    pd.concat(reference_details, ignore_index=True).to_csv(OUT / 'reference_only_every_lipid.csv', index=False)
     pd.DataFrame(numerical).to_csv(OUT / 'overall_direction_and_effect_summary.csv', index=False)
     for label, values in audit['model_checks'].items():
         if sha(values['path']) != values['sha256']:
@@ -256,7 +361,7 @@ def main():
     audit['inference_completed'] = True
     audit['script_sha256'] = sha(__file__)
     (OUT / 'comparison_audit.json').write_text(json.dumps(audit, indent=2) + '\n')
-    print(threshold_table[(threshold_table.RNA_representation == 'log2_CP10k') &
+    print(threshold_table[(threshold_table.RNA_representation == 'log2_CPM') &
           (threshold_table.region == 'donor_balanced') & (threshold_table.minimum_predicted_fold == 1)]
           .drop(columns=['concordant_lipids', 'discordant_lipids']).to_string(index=False), flush=True)
 

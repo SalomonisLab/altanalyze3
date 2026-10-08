@@ -1,0 +1,25 @@
+{
+  "date": "2026-10-08",
+  "module": "components/cellHarmony/analysis_record.py",
+  "python_checks_passed": 82,
+  "javascript_regressions_passed": 4,
+  "notebook_validation": "Both saved-job and production-record exports passed nbformat.validate; all code cells remain unexecuted.",
+  "browser_validation": "Explore exposes exactly one existing log download button, labelled Download log & methods ZIP; other downloads remain available.",
+  "saved_both_job": {
+    "job_id": "9f9964d515bb4f6f844f35e9117e0f1f",
+    "archive_build_seconds": 0.026,
+    "archive_bytes": 81247,
+    "archive_entries": 11
+  },
+  "production_record_export": {
+    "job_id": "cc990a308d684979bf480553a34de6d1",
+    "archive_build_seconds": 0.005,
+    "archive_bytes": 21822,
+    "archive_entries": 6,
+    "historical_provenance": "Unavailable execution versions/defaults are explicitly reported as unrecorded; download-time versions are not substituted.",
+    "communication_failure": "Original missing ligand-receptor bundle diagnostic is preserved."
+  },
+  "resource_validation": "Complete human and mouse ligand-receptor tables matched original hashes and row counts; all four deployment resource files are explicitly Git-whitelisted and addable.",
+  "deployment": "Changes are uncommitted and have not been deployed to production. Production requires commit and image rebuild/redeployment.",
+  "scope": "Reporting and resource packaging only; no scientific model training or analysis reruns."
+}

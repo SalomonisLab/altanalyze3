@@ -19,7 +19,7 @@ from statsmodels.stats.multitest import multipletests
 from threadpoolctl import threadpool_limits
 
 HERE = Path(__file__).resolve().parent
-OUT = HERE / 'artifacts/bulk_IPF_full202_comparison_20261007'
+OUT = HERE / 'artifacts/bulk_IPF_CPM_harmonized_20261008'
 
 
 def aggregate(frame, md, region):
@@ -46,7 +46,8 @@ def table(frame):
         ['| ' + ' | '.join(number(v) for v in row) + ' |' for row in frame.itertuples(index=False, name=None)])
 
 
-def main():
+def main(output=OUT):
+    OUT = Path(output)
     audit = json.loads((OUT / 'comparison_audit.json').read_text())
     md = pd.read_csv(OUT / 'all_139_RNA_sample_metadata.csv', index_col=0)
     fills = pd.read_csv(OUT / 'RNA_mapping_and_median_filling.csv')
@@ -72,7 +73,7 @@ def main():
             for key in settings_keys:
                 np.testing.assert_array_equal(current_settings[key], baseline_settings[key])
         verification['identical_ElasticNetCV_training_settings'] = settings_keys
-        for representation in ['log2_CP10k', 'publisher_logRPKM']:
+        for representation in audit['RNA_representations']:
             X = pd.read_csv(OUT / f'{representation}_identical_RNA_inputs.csv', index_col=0)
             saved = pd.read_csv(OUT / f'{label}_{representation}_all_139_predictions_log2.csv', index_col=0)
             assert X.shape == (139, 1303) and saved.shape == (139, 202)
@@ -119,7 +120,7 @@ def main():
 
     detail = pd.read_csv(OUT / 'every_lipid_all_comparisons.csv')
     thresholds = pd.read_csv(OUT / 'all_threshold_results.csv')
-    assert len(detail) == 12 * 202 and len(thresholds) == 180
+    assert len(detail) == len(audit['RNA_representations']) * 6 * 202 and len(thresholds) == len(audit['RNA_representations']) * 90
     # Independent identities/significance counts, not a call to the analysis helper.
     for row in thresholds.itertuples():
         frame = detail[(detail.model == row.model) & (detail.RNA_representation == row.RNA_representation) & (detail.region == row.region)]
@@ -133,7 +134,7 @@ def main():
         assert row.discordant_total == int((both & ~direction).sum())
 
     paired = []
-    for representation in ['log2_CP10k', 'publisher_logRPKM']:
+    for representation in audit['RNA_representations']:
         frames = {m: detail[(detail.model == m) & (detail.RNA_representation == representation) &
                            (detail.region == 'donor_balanced')].set_index('model_lipid') for m in ['candidate', 'prior']}
         c, p = frames['candidate'], frames['prior']
@@ -153,16 +154,40 @@ def main():
                 'wrong_in_both': int((common & ~c_agree & ~p_agree).sum())})
     paired = pd.DataFrame(paired)
     paired.to_csv(OUT / 'same_lipid_paired_model_comparison.csv', index=False)
-    verification['all_checks_passed'] = True
-    (OUT / 'independent_verification.json').write_text(json.dumps(verification, indent=2) + '\n')
 
-    primary = thresholds[(thresholds.RNA_representation == 'log2_CP10k') & (thresholds.region == 'donor_balanced')]
+    refs = pd.read_csv(OUT / 'reference_only_concordance.csv')
+    ref_detail = pd.read_csv(OUT / 'reference_only_every_lipid.csv')
+    for row in refs.itertuples():
+        frame = detail[(detail.model == row.model) & (detail.RNA_representation == row.RNA_representation) & (detail.region == row.region)]
+        selected = frame[frame.status.eq('matched') & frame.supplied_adjusted_p.lt(.05) & frame.supplied_log_effect.ne(0)]
+        if row.selection == 'top15_up_top15_down':
+            selected = pd.concat([selected[selected.supplied_log_effect.gt(0)].sort_values(['supplied_adjusted_p', 'supplied_log_effect'], ascending=[True, False]).head(15),
+                                  selected[selected.supplied_log_effect.lt(0)].sort_values(['supplied_adjusted_p', 'supplied_log_effect'], ascending=[True, True]).head(15)])
+        field = 'predicted_geometric_log2FC' if row.effect_estimand == 'mean_log_prediction' else 'predicted_log2FC'
+        direction = selected.supplied_log_effect * selected[field]
+        assert row.measured_lipids == len(selected)
+        assert row.concordant_total == int(direction.gt(0).sum())
+        assert row.discordant_total == int(direction.lt(0).sum())
+        expected = ref_detail[(ref_detail.model == row.model) & (ref_detail.RNA_representation == row.RNA_representation) & (ref_detail.region == row.region) & (ref_detail.selection == row.selection)]
+        assert list(expected.model_lipid) == list(selected.model_lipid)
+    for (rep, region, selection), frame in ref_detail.groupby(['RNA_representation', 'region', 'selection']):
+        candidate = frame[frame.model.eq('candidate')]
+        prior = frame[frame.model.eq('prior')]
+        assert list(candidate.measured_feature) == list(prior.measured_feature)
+    verification['all_checks_passed'] = True
+    verification['reference_only_selection_and_counts_verified'] = True
+    (OUT / 'independent_verification.json').write_text(json.dumps(verification, indent=2) + '\n')
+    primary = thresholds[(thresholds.RNA_representation == 'log2_CPM') & (thresholds.region == 'donor_balanced')]
     display_columns = ['model', 'statistic', 'p_cutoff', 'minimum_predicted_fold', 'significant_in_both',
                        'concordant_up', 'concordant_down', 'concordant_total', 'discordant_total', 'concordance_percent']
     lines = ['# Bulk unmatched IPF: complete 202-lipid candidate versus prior model', '',
-        'Evaluation date: 2026-10-07. The candidate is the current promoted native-relative-log2 lipid-wise ElasticNetCV bundle; the prior is the preserved original lipid-wise ElasticNetCV bundle. Both fixed models were evaluated without refitting.', '',
+        'Evaluation date: 2026-10-08. The candidate is the current promoted native-relative-log2 lipid-wise ElasticNetCV bundle; the prior is the preserved original lipid-wise ElasticNetCV bundle. Both fixed models were evaluated without refitting.', '',
         '## Results', '',
-        'The candidate has higher directional agreement with the supplied lung-tissue IPF lipid differentials. In the primary donor-balanced analysis at BH FDR <0.1, the candidate agrees for **39/62 (62.9%)** lipids significant in both assays versus **22/63 (34.9%)** for the prior. These are model-specific significant overlap sets; the identical-lipid comparison below checks the result on a common set. This bulk comparison does not attain 75% agreement at the no-fold-cutoff setting.', '',
+        'Both models receive **log2(CPM + 1)** RNA inputs, matching the training preprocessing confirmed by the user on 2026-10-08. The prior bundle is byte-identical to Abby’s supplied latest bundle. Model weights remain unchanged. The tables report separately the reference-only direction metric Abby described and the significant-in-both metric used in the earlier CODEX report.', '',
+        '## Abby-style reference-only direction metric', '',
+        'Select measured BH <0.05 lipids, sort by measured BH and measured effect as in Abby’s code, then take up to 15 increases and 15 decreases. Both models use exactly the same selected lipids; predicted significance is not required. Mean-log prediction uses the effect definition closest to Abby’s code, with the authorized donor aggregation. Arithmetic-abundance uses the fold estimand of the downstream abundance comparison. The original ~50% profile-level result is not a saved numeric result reproduced here.', '',
+        table(refs[(refs.RNA_representation == 'log2_CPM') & (refs.region == 'donor_balanced')].drop(columns=['RNA_representation','region'])), '',
+        '## Significant in both assays', '',
         'Counts below require significance in both measured lipidomics and the indicated model. Up and down counts refer to concordant changes. Fold cutoffs apply to the prediction only because the supplied experimental effect log base is unconfirmed.', '',
         table(primary[primary.minimum_predicted_fold.eq(1)][display_columns]), '',
         '## Comparison on the same significant lipids', '',
@@ -172,9 +197,9 @@ def main():
         '- RNA: GSE213001, supplied raw counts and publisher logRPKM, 15,065 source genes and 139 profiles. Diagnosis metadata come from the supplied GEO series matrix. IPF and non-diseased control are separate donors, not patient-paired contrasts. All 139 profiles were imputed and retained in the exported prediction matrices.',
         '- Primary IPF/control comparison: 101 profiles with known apex/base anatomy, 20 IPF and 14 control donors, using the original comparison roster. Average left/right profiles within donor/region, then weight available apex/base regions equally within donor. ALF018E and ALF026E lack region labels and remain in the full prediction exports but do not enter this established regional aggregation. ILD and CLAD profiles are likewise retained in the exports but do not belong to the IPF/control contrast.',
         '- Lipidomics: corrected lung-tissue `10_results_with_statistics.csv`, 544 feature rows and 40 tissue-sample columns. Use its supplied `log(IPF/Ctrl)`, `IPF_vs_Ctrl_Ttest_p`, and `IPF_vs_Ctrl_Ttest_padj`. This is the Dr. Clair romics export described in the user-supplied email. A publication citation and experimental log base have not been established; no source-fold magnitude or absolute concentration is asserted.',
-        '- Lipid identity matching: retain the previously reviewed ion-mode/acyl-composition matching audit unchanged. Exactly 132 unambiguous experimental lipids match either model; both use the same 132 identities. The other 70 model lipids remain predicted, tested, BH-corrected, and listed below, with their matching status explicit. They have no established corresponding experimental result for this comparison.',
-        '- Primary RNA inputs: `log2(1 + counts / sum(all 15065 supplied gene counts) * 10000)`. All source genes, including genes outside the model panel or annotation, contribute to the library denominator. No IPF/control-dependent alignment is applied.',
-        '- Sensitivity inputs: supplied publisher logRPKM, with duplicate gene mappings combined in linear space as in the previous bulk workflow. This alternate representation checks robustness; it does not replace the primary deployed RNA transformation.',
+        '- Lipid identity matching: preserve all 132 previously reviewed matches and correct the documented CE parser omission, adding CE(18:2)_POS and CE(20:3)_POS. Exactly 134 measured identities match both models. The remaining 68 model outputs stay predicted, tested, BH-corrected and listed; their absence/ambiguity status is not a feature exclusion. No ambiguous peak is selected by its FDR.',
+        '- Primary RNA inputs: `log2(1 + counts / sum(all 15065 supplied gene counts) * 1000000)`. All source genes, including genes outside the model panel or annotation, contribute to the library denominator. No IPF/control-dependent alignment is applied.',
+        '- Sensitivity inputs: the previous log2(CP10k + 1) representation and supplied publisher logRPKM, with duplicate gene mappings combined in linear space as in the previous bulk workflow. This alternate representation checks robustness; these representations do not replace the verified CPM training transformation. The deployed CP10k path is a separately documented scale discrepancy; this comparison does not change deployed code.',
         '- Authorized NA policy: per-gene median of the verified 45-profile RNA training reference, on its stored model-input scale. Fill only ADORA3, CHGA, FABP7, FFAR1, GGT1, HBG1, ST6GALNAC6 and STAR, which could not be reconciled to rows in the supplied RNA source. Every one of the 1,303 required RNA features is retained. Both models receive the identical filled matrix. The >30%-NA AML-target removal authorization is not applied to these fixed lung RNA inputs.',
         '- Estimators: independent ElasticNetCV for every one of the 202 lipids in both models. Stored coefficients, scalers, and lipid-specific selected genes are used unchanged. Candidate training contained the authorized 45 non-D071 profiles; prior training contained the original 50. Consequently this compares the two delivered methods and does not isolate the target-scale correction from the authorized D071 removal.',
         '- Prediction scale: inverse the returned lipid log2 coordinate with `2**prediction`. Aggregate existing positive linear predictions; do not normalize their lipid-panel sum. Predicted signed folds are ratios of arithmetic donor means: +2 means twice control, -2 means half control; 0 denotes no change.',
@@ -188,13 +213,13 @@ def main():
         'The following table has no additional fold cutoff. Regional analyses retain their original donor rosters. It is not a cell-state analysis.', '',
         table(thresholds[thresholds.minimum_predicted_fold.eq(1)][['model','RNA_representation','region','statistic','p_cutoff',
             'significant_in_both','concordant_up','concordant_down','concordant_total','discordant_total','concordance_percent']]), '',
-        'All 180 threshold combinations and their explicit concordant/discordant lipid lists are in [all_threshold_results.csv](all_threshold_results.csv). All 2,424 model-lipid/representation/region rows are retained in [every_lipid_all_comparisons.csv](every_lipid_all_comparisons.csv).', '',
+        'All 270 threshold combinations and their explicit concordant/discordant lipid lists are in [all_threshold_results.csv](all_threshold_results.csv). All 3,636 model-lipid/representation/region rows are retained in [every_lipid_all_comparisons.csv](every_lipid_all_comparisons.csv).', '',
         '## Primary discordant lipids significant in both', '']
     for row in primary[primary.minimum_predicted_fold.eq(1)].itertuples():
         lines += [f'**{row.model}, {row.statistic} <{row.p_cutoff:g}: {row.discordant_total} discordant lipids.**', '',
                   row.discordant_lipids if isinstance(row.discordant_lipids, str) else 'None.', '']
-    c = detail[(detail.model == 'candidate') & (detail.RNA_representation == 'log2_CP10k') & (detail.region == 'donor_balanced')].set_index('model_lipid')
-    p = detail[(detail.model == 'prior') & (detail.RNA_representation == 'log2_CP10k') & (detail.region == 'donor_balanced')].set_index('model_lipid')
+    c = detail[(detail.model == 'candidate') & (detail.RNA_representation == 'log2_CPM') & (detail.region == 'donor_balanced')].set_index('model_lipid')
+    p = detail[(detail.model == 'prior') & (detail.RNA_representation == 'log2_CPM') & (detail.region == 'donor_balanced')].set_index('model_lipid')
     full = c[['measured_feature','status','supplied_log_effect','supplied_raw_p','supplied_adjusted_p']].copy()
     full = full.rename(columns={'supplied_log_effect':'source effect (log base unconfirmed)', 'supplied_raw_p':'source raw p','supplied_adjusted_p':'source BH'})
     for label, frame in [('candidate',c),('prior',p)]:
@@ -204,12 +229,14 @@ def main():
     lines += ['## Every one of the 202 model lipids: primary analysis', '',
               'Model folds are signed abundance ratios. The source effect is reported in its original unconfirmed log units; it is not mislabeled as a fold. A dash means no established matched experimental result, not a discarded model output.', '',
               table(full.reset_index()), '', '## Verification and reproducibility', '',
-              'All saved predictions independently matched individual stored estimator.predict calls after their original scalers. Both bundles have identical top-gene options, l1-ratio and alpha grids, CV folds, iteration limit, sparsity penalty, and random seed. Welch raw p-values, complete-panel BH, arithmetic folds, every threshold count, ordered RNA/prediction identities, training-median fills, and both unchanged bundle hashes passed verification. No models were fitted or modified. The missing-input and prediction-equivalence test suites passed (13 tests).', '',
+              'All saved predictions independently matched individual stored estimator.predict calls after their original scalers. Both bundles have identical top-gene options, l1-ratio and alpha grids, CV folds, iteration limit, sparsity penalty, and random seed. Welch raw p-values, complete-panel BH, arithmetic folds, every threshold count, ordered RNA/prediction identities, training-median fills, and both unchanged bundle hashes passed verification. No models were fitted or modified. The missing-input, scale, reference-only selection and prediction-equivalence tests were run separately; their receipt is saved alongside this report.', '',
               f"Maximum prediction discrepancy: {max(row['prediction_max_abs_error'] for row in verification['checks']):.3g}; maximum raw-p discrepancy: {max(row['raw_p_max_abs_error'] for row in verification['checks']):.3g}.", '',
               'Source and model hashes: [comparison_audit.json](comparison_audit.json). Independent numerical checks: [independent_verification.json](independent_verification.json). Same-lipid paired comparisons: [same_lipid_paired_model_comparison.csv](same_lipid_paired_model_comparison.csv).', '',
               'Runner: [compare_bulk_ipf_models.py](../../compare_bulk_ipf_models.py). Verification/report generator: [verify_bulk_ipf_comparison.py](../../verify_bulk_ipf_comparison.py).', '',
               'Inference used scikit-learn '+sklearn.__version__+'; the candidate was saved with scikit-learn 1.6.1. No fitting occurred in the inference environment, and every delivered prediction was checked against the stored estimator/scaler calculation.', '',
               'This is independent, unmatched-cohort directional support for the delivered candidate. It does not validate individual-patient predictions, absolute lipid concentrations, or experimental fold magnitudes whose source log base is unknown.', '']
+    selected_refs = ref_detail[(ref_detail.RNA_representation == 'log2_CPM') & (ref_detail.region == 'donor_balanced')]
+    lines += ['## Every selected reference-only lipid', '', table(selected_refs[['model','selection','model_lipid','measured_feature','supplied_log_effect','supplied_adjusted_p','predicted_signed_fold','predicted_geometric_log2FC','predicted_raw_p','predicted_BH','mean_log_concordant','arithmetic_abundance_concordant']]), '']
     (OUT / 'BULK_IPF_CANDIDATE_VS_PRIOR_REPORT.md').write_text('\n'.join(lines))
     print(json.dumps({'all_checks_passed': True, 'checks': len(verification['checks']),
         'max_prediction_error': max(row['prediction_max_abs_error'] for row in verification['checks'])}))

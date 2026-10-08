@@ -37,6 +37,8 @@ RUN python -m pip install --upgrade pip setuptools wheel \
 
 COPY . /app/altanalyze3/components
 
+RUN python /app/altanalyze3/components/fastComm/verify_packaged_resources.py
+
 RUN mkdir -p /app/altanalyze3 /srv/scalable-discover/jobs /tmp/matplotlib \
     && touch /app/altanalyze3/__init__.py
 

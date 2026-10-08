@@ -688,6 +688,125 @@ def _marker_output_options(meta):
     }
 
 
+def _run_fastcomm_analysis(job_id, store, query_adata, combined_h5ad_path, outputs_dir, query_cluster_key, meta):
+    """Run the standard scores; an optional split failure must not hide global results."""
+    artifacts = {}
+    fastcomm_analysis: Dict[str, object] = {"enabled": False}
+    try:
+        store.update_job(job_id, progress=90, message="cellHarmony step 9 of 10: cell communication inference.")
+        store.append_log(job_id, "Running fastComm receptor-ligand communication analysis.")
+        fastcomm_dir = outputs_dir / "fastComm"
+        fastcomm_dir.mkdir(parents=True, exist_ok=True)
+        fastcomm_scores_path = fastcomm_dir / "fastcomm_scores.tsv"
+        fastcomm_pairs_path = fastcomm_dir / "state_pair_summary.tsv"
+        fastcomm_state_expression_path = fastcomm_dir / "state_expression.tsv"
+        fastcomm_species = str(meta.get("species", "")).strip().lower() or None
+        store.append_log(job_id, f"[params] fastcomm state_key={query_cluster_key} species={fastcomm_species} "
+                         "lr_sources=CellChatDB response_matrix=None min_cells=5 "
+                         "min_lr_expression_score=0.2 max_lr_candidates_per_state_pair=5 "
+                         "include_self_edges=False exemplar_min_score=0.25 exemplar_top_n=100000")
+        fastcomm_result = run_fastcomm(
+            FastCommParams(
+                adata=query_adata,
+                gene_symbol_col="gene_symbols" if "gene_symbols" in query_adata.var.columns else None,
+                output=fastcomm_scores_path,
+                response_matrix=None,
+                lr_sources=("CellChatDB",),
+                state_pair_output=fastcomm_pairs_path,
+                state_expression_output=fastcomm_state_expression_path,
+                state_key=query_cluster_key,
+                species=fastcomm_species if fastcomm_species in {"human", "mouse"} else None,
+                min_cells=5,
+                min_lr_expression_score=0.2,
+                max_lr_candidates_per_state_pair=5,
+                include_self_edges=False,
+            )
+        )
+        fastcomm_significant_path = fastcomm_dir / "significant_interactions.tsv"
+        fastcomm_significant_md_path = fastcomm_dir / "significant_interactions.md"
+        write_exemplar_report(
+            ExemplarReportParams(
+                scores=fastcomm_scores_path,
+                output_tsv=fastcomm_significant_path,
+                output_md=fastcomm_significant_md_path,
+                top_n=100000,
+                min_score=0.25,
+                one_per_state_pair=False,
+                title="Cell communication significant interactions",
+            )
+        )
+        fastcomm_sample_key = next(
+            (candidate for candidate in ("scalable_upload", "Library", "group", "sample", "Donor") if candidate in query_adata.obs.columns),
+            None,
+        )
+        fastcomm_split_summary: Dict[str, object] = {}
+        if fastcomm_sample_key:
+            fastcomm_split_dir = fastcomm_dir / "per_sample"
+            try:
+                fastcomm_split_summary = run_fastcomm_benchmark(
+                    FastCommBenchmarkParams(
+                        h5ad=combined_h5ad_path,
+                        gene_symbol_col="gene_symbols" if "gene_symbols" in query_adata.var.columns else None,
+                        output_dir=fastcomm_split_dir,
+                        state_key=query_cluster_key,
+                        split_key=fastcomm_sample_key,
+                        response_matrix=None,
+                        lr_sources=["CellChatDB"],
+                        species=fastcomm_species if fastcomm_species in {"human", "mouse"} else None,
+                        min_cells=5,
+                        min_lr_expression_score=0.2,
+                        max_lr_candidates_per_state_pair=5,
+                        include_self_edges=False,
+                    )
+                )
+            except Exception as exc:
+                fastcomm_split_summary = {"status": "failed", "message": f"{type(exc).__name__}: {exc}"}
+                store.append_log(job_id, "fastComm per-sample scoring failed; global communication scores remain available: " + fastcomm_split_summary["message"])
+        fastcomm_archive_path = outputs_dir / "cell_communication_fastcomm.zip"
+        _write_selected_zip(fastcomm_dir, fastcomm_archive_path, suffixes=(".tsv", ".json", ".md"))
+        artifacts["fastcomm_scores"] = fastcomm_scores_path
+        artifacts["fastcomm_state_pairs"] = fastcomm_pairs_path
+        artifacts["fastcomm_state_expression"] = fastcomm_state_expression_path
+        artifacts["fastcomm_significant_interactions"] = fastcomm_significant_path
+        artifacts["fastcomm_significant_report"] = fastcomm_significant_md_path
+        artifacts["fastcomm_archive"] = fastcomm_archive_path
+        fastcomm_analysis = {
+            "enabled": True,
+            "status": "completed",
+            "state_key": query_cluster_key,
+            "sample_key": fastcomm_sample_key,
+            "populations": [str(value) for value in fastcomm_result.state_sizes.index.tolist()],
+            "scores_tsv": str(fastcomm_scores_path),
+            "state_pair_tsv": str(fastcomm_pairs_path),
+            "state_expression_tsv": str(fastcomm_state_expression_path),
+            "significant_tsv": str(fastcomm_significant_path),
+            "significant_md": str(fastcomm_significant_md_path),
+            "significance_threshold": 0.25,
+            "archive": str(fastcomm_archive_path),
+            "per_sample": fastcomm_split_summary,
+            "summary": fastcomm_result.summary,
+        }
+        store.append_log(
+            job_id,
+            (
+                "fastComm analysis complete: "
+                f"states={fastcomm_result.summary.get('n_states')} "
+                f"edges={fastcomm_result.summary.get('n_scored_edges')} "
+                f"genes={fastcomm_result.summary.get('n_loaded_genes')}"
+            ),
+        )
+    except Exception as exc:
+        fastcomm_analysis = {
+            "enabled": False,
+            "status": "failed",
+            "message": f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__,
+            "state_key": query_cluster_key,
+        }
+        store.append_log(job_id, f"fastComm analysis skipped: {fastcomm_analysis['message']}")
+
+    return fastcomm_analysis, artifacts
+
+
 def _emit_modality_marker_heatmap(modality_id, modality_adata, outputs_dir, query_cluster_key, meta):
     """Per-state markers on the original prediction scale; empty results are optional."""
     file_label = "lipid" if modality_id == "lipids" else modality_id
@@ -1201,6 +1320,8 @@ def _bh_fdr(pvalues: List[float]) -> List[float]:
 def _fastcomm_split_scores_long_path(meta: Dict) -> Path:
     analysis = meta.get("fastcomm_analysis") or {}
     per_sample = analysis.get("per_sample") or {}
+    if per_sample.get("status") == "failed":
+        raise ValueError("Per-sample fastComm scoring failed: " + str(per_sample.get("message") or "see pipeline log"))
     raw_path = str(per_sample.get("split_scores_long_tsv") or "").strip()
     if not raw_path:
         output_dir = str(per_sample.get("output_dir") or "").strip()
@@ -1732,6 +1853,10 @@ def run_cellharmony_pipeline(
     meta = store.get_job(job_id)
     reference_entry = _lookup_reference(meta["species"], meta["reference"], registry_path)
     _ensure_reference_fields(reference_entry)
+    from ..analysis_record import capture_execution
+    capture_execution(store, job_id, reference=reference_entry, effective={
+        "export_approx_pdfs": export_approx_pdfs, "h5ad_compression": h5ad_compression,
+        "build_bundle": build_bundle, "allow_empty_alignment": allow_empty_alignment})
     store.append_log(job_id, "Reference metadata loaded.")
     default_gene = _first_reference_gene(reference_entry["states_tsv"])
 
@@ -2204,108 +2329,9 @@ def run_cellharmony_pipeline(
             _bundle_modality_zip(_mod_id)
 
     fastcnv_analysis: Dict[str, object] = {"enabled": False}
-    fastcomm_analysis: Dict[str, object] = {"enabled": False}
-    try:
-        store.update_job(job_id, progress=90, message="cellHarmony step 9 of 10: cell communication inference.")
-        store.append_log(job_id, "Running fastComm receptor-ligand communication analysis.")
-        fastcomm_dir = outputs_dir / "fastComm"
-        fastcomm_dir.mkdir(parents=True, exist_ok=True)
-        fastcomm_scores_path = fastcomm_dir / "fastcomm_scores.tsv"
-        fastcomm_pairs_path = fastcomm_dir / "state_pair_summary.tsv"
-        fastcomm_state_expression_path = fastcomm_dir / "state_expression.tsv"
-        fastcomm_species = str(meta.get("species", "")).strip().lower() or None
-        fastcomm_result = run_fastcomm(
-            FastCommParams(
-                adata=approx_result.query_adata,
-                output=fastcomm_scores_path,
-                response_matrix=None,
-                lr_sources=("CellChatDB",),
-                state_pair_output=fastcomm_pairs_path,
-                state_expression_output=fastcomm_state_expression_path,
-                state_key=query_cluster_key,
-                species=fastcomm_species if fastcomm_species in {"human", "mouse"} else None,
-                min_cells=5,
-                min_lr_expression_score=0.2,
-                max_lr_candidates_per_state_pair=5,
-                include_self_edges=False,
-            )
-        )
-        fastcomm_significant_path = fastcomm_dir / "significant_interactions.tsv"
-        fastcomm_significant_md_path = fastcomm_dir / "significant_interactions.md"
-        write_exemplar_report(
-            ExemplarReportParams(
-                scores=fastcomm_scores_path,
-                output_tsv=fastcomm_significant_path,
-                output_md=fastcomm_significant_md_path,
-                top_n=100000,
-                min_score=0.25,
-                one_per_state_pair=False,
-                title="Cell communication significant interactions",
-            )
-        )
-        fastcomm_sample_key = next(
-            (candidate for candidate in ("scalable_upload", "Library", "group", "sample", "Donor") if candidate in approx_result.query_adata.obs.columns),
-            None,
-        )
-        fastcomm_split_summary: Dict[str, object] = {}
-        if fastcomm_sample_key:
-            fastcomm_split_dir = fastcomm_dir / "per_sample"
-            fastcomm_split_summary = run_fastcomm_benchmark(
-                FastCommBenchmarkParams(
-                    h5ad=combined_h5ad_path,
-                    output_dir=fastcomm_split_dir,
-                    state_key=query_cluster_key,
-                    split_key=fastcomm_sample_key,
-                    response_matrix=None,
-                    lr_sources=["CellChatDB"],
-                    species=fastcomm_species if fastcomm_species in {"human", "mouse"} else None,
-                    min_cells=5,
-                    min_lr_expression_score=0.2,
-                    max_lr_candidates_per_state_pair=5,
-                    include_self_edges=False,
-                )
-            )
-        fastcomm_archive_path = outputs_dir / "cell_communication_fastcomm.zip"
-        _write_selected_zip(fastcomm_dir, fastcomm_archive_path, suffixes=(".tsv", ".json", ".md"))
-        artifacts["fastcomm_scores"] = fastcomm_scores_path
-        artifacts["fastcomm_state_pairs"] = fastcomm_pairs_path
-        artifacts["fastcomm_state_expression"] = fastcomm_state_expression_path
-        artifacts["fastcomm_significant_interactions"] = fastcomm_significant_path
-        artifacts["fastcomm_significant_report"] = fastcomm_significant_md_path
-        artifacts["fastcomm_archive"] = fastcomm_archive_path
-        fastcomm_analysis = {
-            "enabled": True,
-            "status": "completed",
-            "state_key": query_cluster_key,
-            "sample_key": fastcomm_sample_key,
-            "populations": [str(value) for value in fastcomm_result.state_sizes.index.tolist()],
-            "scores_tsv": str(fastcomm_scores_path),
-            "state_pair_tsv": str(fastcomm_pairs_path),
-            "state_expression_tsv": str(fastcomm_state_expression_path),
-            "significant_tsv": str(fastcomm_significant_path),
-            "significant_md": str(fastcomm_significant_md_path),
-            "significance_threshold": 0.25,
-            "archive": str(fastcomm_archive_path),
-            "per_sample": fastcomm_split_summary,
-            "summary": fastcomm_result.summary,
-        }
-        store.append_log(
-            job_id,
-            (
-                "fastComm analysis complete: "
-                f"states={fastcomm_result.summary.get('n_states')} "
-                f"edges={fastcomm_result.summary.get('n_scored_edges')} "
-                f"genes={fastcomm_result.summary.get('n_loaded_genes')}"
-            ),
-        )
-    except Exception as exc:
-        fastcomm_analysis = {
-            "enabled": False,
-            "status": "failed",
-            "message": f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__,
-            "state_key": query_cluster_key,
-        }
-        store.append_log(job_id, f"fastComm analysis skipped: {fastcomm_analysis['message']}")
+    fastcomm_analysis, fastcomm_artifacts = _run_fastcomm_analysis(
+        job_id, store, approx_result.query_adata, combined_h5ad_path, outputs_dir, query_cluster_key, meta)
+    artifacts.update(fastcomm_artifacts)
 
     if _env_truthy("CELLHARMONY_ENABLE_FASTCNV", False):
         species_id = str(meta.get("species", "")).strip().lower()
@@ -2599,6 +2625,12 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
     case_label = _group_display_label(group1_samples)
     control_label = _group_display_label(group2_samples)
 
+    from ..analysis_record import capture_execution
+    capture_execution(store, job_id, key=f"differential:{run_id}", effective={
+        "config": config, "comparison_type": comparison_type,
+        "statistical_parameters": _differential_runtime_params(modality, comparison_type)
+        if modality != "cell_communication" else {"method": "native fastComm differential"}})
+
     _update_differential_state(
         store,
         job_id,
@@ -2785,6 +2817,12 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
             f"use_rawp={de_params['use_rawp']}"
         ),
     )
+    actual_test = ("limma_like_moderated_t" if "pseudobulk" in str(adata.uns.get("pseudobulk_method", ""))
+                   else str(de_params["method"]))
+    from ..analysis_record import record_effective
+    record_effective(store, job_id, f"differential:{run_id}", actual_population_test=actual_test)
+    store.append_log(job_id, f"[params] differential_dispatch actual_population_test={actual_test} "
+                     f"pseudobulk_method={adata.uns.get('pseudobulk_method', 'none')}")
     de_store = cellHarmony_differential.run_de_for_comparisons(
         adata=adata,
         population_col=population_col,

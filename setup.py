@@ -21,6 +21,7 @@ setup(
         "altanalyze3.components.rna2metabolite": ["resources/*.json", "missingness_release.json", "artifacts/rna2metabolite_aml_bundle.pkl.gz", "artifacts/rna2metabolite_aml_NA30_20261006_bundle.pkl.gz"],
         "altanalyze3.components.snaf": ["docs/*.md", "surface/data/*.json"],
         "altanalyze3.components.fastCNV": ["resources/*.tsv"],
+        "altanalyze3.components.fastComm": ["resources/*.tsv", "resources/*/*.tsv", "resources/*/*.json", "configs/*.json"],
         "altanalyze3.components.long_read": ["resources/*.gz"],
     },
     packages=find_packages(exclude=["docs", "tests", "cwls", "tmp"]),

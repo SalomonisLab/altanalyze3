@@ -25,7 +25,7 @@ from .scoring import (
     split_complex,
     to_dense_frame,
 )
-from .upstream_resources import bundle_paths_for_species
+from .upstream_resources import inference_bundle_paths_for_species as bundle_paths_for_species
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
