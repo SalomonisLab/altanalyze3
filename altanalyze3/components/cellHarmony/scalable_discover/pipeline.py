@@ -278,7 +278,7 @@ def attach_serving_gene_symbols(adata: ad.AnnData) -> Dict[str, object]:
             "native_feature_ids_preserved": True}
 
 
-def run_discover_pipeline(job_id: str, store: JobStore, *, h5ad_compression: Optional[str] = "lzf") -> Dict[str, Path]:
+def run_discover_pipeline(job_id: str, store: JobStore, *, h5ad_compression: Optional[str] = "lzf", build_bundle: bool = True) -> Dict[str, Path]:
     meta = store.get_job(job_id)
     species = str(meta.get("species") or "").strip().lower()
     if species not in SPECIES_TO_ICGS:
@@ -680,8 +680,9 @@ def run_discover_pipeline(job_id: str, store: JobStore, *, h5ad_compression: Opt
         differential=web_pipeline._default_differential_state(False, DEFAULT_LAYER, sample_key),
         message="ICGS3 clustering completed.",
     )
-    bundle_record = web_pipeline._build_job_bundle(store, job_id, combined_h5ad_path, DEFAULT_LAYER,
+    bundle_record = (web_pipeline._build_job_bundle(store, job_id, combined_h5ad_path, DEFAULT_LAYER,
                                                    {"rna": {"h5ad": str(combined_h5ad_path)}}, modalities_payload)
+                     if build_bundle else {})
     store.update_job(job_id, bundle=bundle_record, message="ICGS3 clustering completed.")
     store.append_log(job_id, "scALABLE-discover pipeline finished.")
     return artifacts

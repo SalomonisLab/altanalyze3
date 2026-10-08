@@ -82,6 +82,9 @@ class JobStore:
         return updated_at < cutoff
 
     def _purge_old_jobs_unlocked(self, *, max_age_hours: float) -> int:
+        # A configured storage directory may have been moved/deleted while the
+        # service stayed up. Recreate its empty root before accepting new jobs.
+        self.root.mkdir(parents=True, exist_ok=True)
         cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
         deleted = 0
         for job_dir in sorted(self.root.iterdir()):
@@ -92,11 +95,15 @@ class JobStore:
                 continue
             try:
                 metadata = json.loads(meta_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, FileNotFoundError):
                 continue
             if not self._is_purge_eligible(metadata, cutoff):
                 continue
-            shutil.rmtree(job_dir, ignore_errors=False)
+            try:
+                shutil.rmtree(job_dir, ignore_errors=False)
+            except FileNotFoundError:
+                # Another service/cleanup process already removed this job.
+                continue
             deleted += 1
         return deleted
 

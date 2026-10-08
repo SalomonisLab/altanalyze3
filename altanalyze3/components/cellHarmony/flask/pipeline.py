@@ -1679,7 +1679,7 @@ def _build_job_bundle(store: JobStore, job_id: str, combined_h5ad_path: Path,
     repo_root = Path(__file__).resolve().parents[4]      # the checkout holding altanalyze3/
     env = dict(os.environ)
     env["PYTHONPATH"] = str(repo_root) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
-    store.update_job(job_id, progress=97, message="Building the scalable bundle.")
+    store.update_job(job_id, progress=97, message="cellHarmony step 10 of 10: building the serving bundle.")
     store.append_log(job_id, f"[bundle] building for {n_cells:,} cells (threshold {threshold:,}): "
                              f"{', '.join(sources)}; log {log_path}")
     started = _time.time()
@@ -1717,6 +1717,8 @@ def run_cellharmony_pipeline(
     *,
     export_approx_pdfs: bool = True,
     h5ad_compression: Optional[str] = "lzf",
+    build_bundle: bool = True,
+    allow_empty_alignment: bool = False,
 ) -> Dict[str, Path]:
     """
     Execute the production cellHarmony-lite + approximate UMAP workflow for a job.
@@ -1816,6 +1818,23 @@ def run_cellharmony_pipeline(
     query_cluster_key = Path(reference_entry["states_tsv"]).stem
     reference_cluster_key = reference_entry.get("cluster_key", query_cluster_key)
 
+    if allow_empty_alignment and combined_adata.n_obs == 0:
+        # Both still has an independent ICGS3 branch. An empty alignment is a
+        # valid assignment result, not a reason to discard unaligned cells.
+        combined_adata.obsm["X_umap"] = np.empty((0, 2), dtype=np.float32)
+        approx_mod.ensure_h5ad_compat_for_write(combined_adata)
+        combined_adata.write_h5ad(combined_h5ad_path, compression=_normalize_h5ad_compression(h5ad_compression))
+        artifacts = {"combined_h5ad": combined_h5ad_path, "assignments": assignments_path}
+        for key, path in artifacts.items():
+            store.add_artifact(job_id, key, path)
+        store.update_job(job_id, cluster_key=query_cluster_key, reference_cluster_key=reference_cluster_key,
+                         reference_coords_tsv=reference_entry["reference_coords_tsv"],
+                         reference_clusters_tsv=reference_entry["reference_clusters_tsv"],
+                         marker_analysis={}, marker_analysis_by_modality={}, fastcomm_analysis={"enabled": False},
+                         modalities=_modalities_payload([]), modality_artifacts={"rna": {"h5ad": str(combined_h5ad_path)}},
+                         message="No cells passed the reference alignment threshold; continuing ICGS3.")
+        return artifacts
+
     marker_archive_path: Optional[Path] = None
     marker_analysis: Dict[str, object] = {}
     marker_analysis_by_modality: Dict[str, Dict[str, object]] = {}
@@ -1823,7 +1842,7 @@ def run_cellharmony_pipeline(
     store.update_job(
         job_id,
         progress=72,
-        message="Identifying the top 50 unique markers per cell state using all aligned cells.",
+        message="cellHarmony step 6 of 10: MarkerFinder markers and regulatory networks.",
     )
     store.append_log(job_id, "Identifying cell-state marker genes.")
     store.append_log(
@@ -1890,7 +1909,7 @@ def run_cellharmony_pipeline(
     marker_analysis_by_modality["rna"] = dict(marker_analysis)
     store.append_log(job_id, "Cell-state marker gene export complete.")
 
-    store.update_job(job_id, progress=82, message="Running approximate UMAP placement.")
+    store.update_job(job_id, progress=82, message="cellHarmony step 7 of 10: approximate UMAP placement.")
     store.append_log(job_id, "Running approximate UMAP placement.")
     resolved_h5ad_compression = _normalize_h5ad_compression(h5ad_compression)
     store.append_log(
@@ -1928,7 +1947,7 @@ def run_cellharmony_pipeline(
     disk_imputation = approx_result.query_adata.n_obs >= int(os.getenv('CELLHARMONY_DISK_ANALYSIS_MIN_CELLS', '20000'))
 
     if "lipids" in selected_impute_modalities:
-        store.update_job(job_id, progress=88, message="Imputing lipid profiles from aligned RNA.")
+        store.update_job(job_id, progress=88, message="cellHarmony step 8 of 10: lipid imputation.")
         store.append_log(job_id, "Running rna2lipid lipid imputation.")
         lipid_impute_config = _reference_impute_config(reference_entry, "lipids")
         store.append_log(
@@ -1969,7 +1988,7 @@ def run_cellharmony_pipeline(
         store.append_log(job_id, "rna2lipid lipid imputation complete.")
 
     if "adt" in selected_impute_modalities:
-        store.update_job(job_id, progress=88, message="Imputing ADT (CITE-seq) values from aligned RNA.")
+        store.update_job(job_id, progress=88, message="cellHarmony step 8 of 10: ADT imputation.")
         store.append_log(job_id, "Running rna2adt ADT imputation.")
         adt_impute_config = _reference_impute_config(reference_entry, "adt")
         adt_bundle_desc = adt_impute_config.get("bundle_path") or "default"
@@ -2009,7 +2028,7 @@ def run_cellharmony_pipeline(
         store.append_log(job_id, "rna2adt ADT imputation complete.")
 
     if "metabolite" in selected_impute_modalities:
-        store.update_job(job_id, progress=88, message="Imputing metabolite abundance from aligned RNA (pseudobulk).")
+        store.update_job(job_id, progress=88, message="cellHarmony step 8 of 10: metabolite imputation.")
         store.append_log(job_id, "Running rna2metabolite imputation.")
         met_h5ad_path = outputs_dir / "combined_with_umap_and_markers_metabolite.h5ad"
         met_diff_path = outputs_dir / "combined_with_umap_and_markers_metabolite_pseudobulk.h5ad"
@@ -2040,7 +2059,7 @@ def run_cellharmony_pipeline(
         store.append_log(job_id, "rna2metabolite imputation complete.")
 
     if "lipid" in selected_impute_modalities:
-        store.update_job(job_id, progress=88, message="Imputing lipid abundance from aligned RNA (pseudobulk).")
+        store.update_job(job_id, progress=88, message="cellHarmony step 8 of 10: AML lipid imputation.")
         store.append_log(job_id, "Running rna2lipid (AML) imputation.")
         lip_h5ad_path = outputs_dir / "combined_with_umap_and_markers_lipid.h5ad"
         lip_diff_path = outputs_dir / "combined_with_umap_and_markers_lipid_pseudobulk.h5ad"
@@ -2071,7 +2090,7 @@ def run_cellharmony_pipeline(
         store.append_log(job_id, "rna2lipid (AML) imputation complete.")
 
     if "grn" in selected_impute_modalities:
-        store.update_job(job_id, progress=88, message="Imputing GRN / TF activity from aligned RNA (pseudobulk).")
+        store.update_job(job_id, progress=88, message="cellHarmony step 8 of 10: GRN and TF activity imputation.")
         store.append_log(job_id, "Running rna2grn imputation.")
         grn_edges_path = outputs_dir / "combined_with_umap_and_markers_grn_edges.h5ad"
         (grn_tf_adata, grn_edges_adata, grn_edges_pseudobulk, grn_tf_pseudobulk,
@@ -2121,7 +2140,7 @@ def run_cellharmony_pipeline(
         store.append_log(job_id, "rna2grn imputation complete.")
 
     approx_mod.ensure_h5ad_compat_for_write(approx_result.query_adata)
-    store.update_job(job_id, progress=89, message="Saving aligned RNA and retained count matrices.")
+    store.update_job(job_id, progress=89, message="cellHarmony step 8 of 10: saving RNA, counts and predicted modalities.")
     approx_result.query_adata.write(combined_h5ad_path, compression=resolved_h5ad_compression)
     analysis_workspace = getattr(approx_result.query_adata, '_matrix_workspace', None)
     if analysis_workspace is not None:
@@ -2187,7 +2206,7 @@ def run_cellharmony_pipeline(
     fastcnv_analysis: Dict[str, object] = {"enabled": False}
     fastcomm_analysis: Dict[str, object] = {"enabled": False}
     try:
-        store.update_job(job_id, progress=90, message="Running fastComm receptor-ligand communication analysis.")
+        store.update_job(job_id, progress=90, message="cellHarmony step 9 of 10: cell communication inference.")
         store.append_log(job_id, "Running fastComm receptor-ligand communication analysis.")
         fastcomm_dir = outputs_dir / "fastComm"
         fastcomm_dir.mkdir(parents=True, exist_ok=True)
@@ -2291,7 +2310,7 @@ def run_cellharmony_pipeline(
     if _env_truthy("CELLHARMONY_ENABLE_FASTCNV", False):
         species_id = str(meta.get("species", "")).strip().lower()
         if species_id in {"human", "mouse"}:
-            store.update_job(job_id, progress=92, message="Running fastCNV clone analysis.")
+            store.update_job(job_id, progress=92, message="cellHarmony step 9 of 10: fastCNV clone analysis.")
             store.append_log(job_id, "Running fastCNV clone analysis.")
             fastcnv_dir = outputs_dir / "fastCNV"
             fastcnv_dir.mkdir(parents=True, exist_ok=True)
@@ -2441,7 +2460,7 @@ def run_cellharmony_pipeline(
             default_sample_field,
             default_modality=modalities_payload["default"],
         ),
-        message="Approximate UMAP completed.",
+        message="cellHarmony step 10 of 10: results ready.",
     )
     # Everything needed below is on disk. Do not overlap the bundle builder's
     # buffers with RNA layers and all of the per-cell imputation outputs.
@@ -2455,9 +2474,9 @@ def run_cellharmony_pipeline(
     import gc
     gc.collect()
     # LARGE_DATASET_DESIGN.md step A: large jobs also write a bundle the app serves from.
-    bundle_record = _build_job_bundle(store, job_id, combined_h5ad_path, query_cluster_key,
-                                      modality_artifacts, modalities_payload)
-    store.update_job(job_id, bundle=bundle_record, message="Approximate UMAP completed.")
+    bundle_record = (_build_job_bundle(store, job_id, combined_h5ad_path, query_cluster_key,
+                                      modality_artifacts, modalities_payload) if build_bundle else {})
+    store.update_job(job_id, bundle=bundle_record, message="cellHarmony step 10 of 10: results ready.")
     store.append_log(job_id, "cellHarmony-lite pipeline finished.")
     return artifacts
 
@@ -2604,6 +2623,11 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
     )
 
     if modality == "cell_communication":
+        # Worker processes do not inherit the browser's request-local layer.
+        # Use the explicitly posted population field to choose branch scores.
+        if meta.get("cell_state_layers"):
+            from ..webapp.state_layers import apply_layer
+            meta = apply_layer(meta, population_col)
         return _run_cell_communication_differential(
             job_id=job_id,
             store=store,

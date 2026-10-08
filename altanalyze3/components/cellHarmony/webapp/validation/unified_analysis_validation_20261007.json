@@ -1,0 +1,1280 @@
+{
+  "scope": "Native Unsupervised run; Both read-only saved-job UI/API diagnostics and synthetic multi-modality software fixtures. A new full Supervised/Both inference validation remains paused for the pending coverage question.",
+  "job": "195b62cc841d4494b13337cd3bc02a6b",
+  "cells": 586,
+  "checks": [
+    {
+      "name": "status",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.006,
+      "bytes": 88401,
+      "detail": ""
+    },
+    {
+      "name": "cell_state_predicted: variables",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.003,
+      "bytes": 5144,
+      "detail": ""
+    },
+    {
+      "name": "cell_state_predicted: filters",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.002,
+      "bytes": 2262,
+      "detail": ""
+    },
+    {
+      "name": "cell_state_predicted: genes",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.008,
+      "bytes": 649492,
+      "detail": ""
+    },
+    {
+      "name": "cell_state_predicted: UMAP",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.004,
+      "bytes": 93850,
+      "detail": ""
+    },
+    {
+      "name": "cell_state_predicted: UMAP expression",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.007,
+      "bytes": 85643,
+      "detail": ""
+    },
+    {
+      "name": "cell_state_predicted: violin",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.004,
+      "bytes": 1747,
+      "detail": ""
+    },
+    {
+      "name": "cell_state_predicted: DotPlot",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.006,
+      "bytes": 2313,
+      "detail": ""
+    },
+    {
+      "name": "cell_state_predicted: CombPlot",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.011,
+      "bytes": 42855,
+      "detail": ""
+    },
+    {
+      "name": "cell_state_predicted: Morpheus matrix",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.531,
+      "bytes": 3258231,
+      "detail": ""
+    },
+    {
+      "name": "cell_state_predicted: UMAP PDF",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.353,
+      "bytes": 38088,
+      "detail": ""
+    },
+    {
+      "name": "cell_state_predicted: expression PDF",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.242,
+      "bytes": 25177,
+      "detail": ""
+    },
+    {
+      "name": "cell_state_predicted: violin PDF",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.262,
+      "bytes": 22301,
+      "detail": ""
+    },
+    {
+      "name": "cell_state_predicted: Morpheus frame",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.004,
+      "bytes": 10441,
+      "detail": ""
+    },
+    {
+      "name": "cell_state_predicted: fastComm focused_incoming",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.02,
+      "bytes": 47702,
+      "detail": ""
+    },
+    {
+      "name": "cell_state_predicted: fastComm focused_outgoing",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.011,
+      "bytes": 43412,
+      "detail": ""
+    },
+    {
+      "name": "cell_state_predicted: fastComm cell_state_network",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.197,
+      "bytes": 140549,
+      "detail": ""
+    },
+    {
+      "name": "cell_state_predicted: fastComm state_heatmap",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.014,
+      "bytes": 97190,
+      "detail": ""
+    },
+    {
+      "name": "cell_state_predicted: fastComm lr_dotplot",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.007,
+      "bytes": 15594,
+      "detail": ""
+    },
+    {
+      "name": "cell_state_predicted: fastComm top_table",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.006,
+      "bytes": 16666,
+      "detail": ""
+    },
+    {
+      "name": "cell_state_predicted: fastComm per_sample",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.017,
+      "bytes": 2135,
+      "detail": ""
+    },
+    {
+      "name": "cell_state_predicted: chat examples",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.012,
+      "bytes": 828,
+      "detail": ""
+    },
+    {
+      "name": "cell_state_predicted: chat",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "name": "cell_state_predicted: MarkerNetwork availability",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.003,
+      "bytes": 88815,
+      "detail": ""
+    },
+    {
+      "name": "cluster: variables",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.105,
+      "bytes": 5131,
+      "detail": ""
+    },
+    {
+      "name": "cluster: filters",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.002,
+      "bytes": 2249,
+      "detail": ""
+    },
+    {
+      "name": "cluster: genes",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.008,
+      "bytes": 649492,
+      "detail": ""
+    },
+    {
+      "name": "cluster: UMAP",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.004,
+      "bytes": 81447,
+      "detail": ""
+    },
+    {
+      "name": "cluster: UMAP expression",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.202,
+      "bytes": 73253,
+      "detail": ""
+    },
+    {
+      "name": "cluster: violin",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.006,
+      "bytes": 1811,
+      "detail": ""
+    },
+    {
+      "name": "cluster: DotPlot",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.006,
+      "bytes": 1133,
+      "detail": ""
+    },
+    {
+      "name": "cluster: CombPlot",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.008,
+      "bytes": 31575,
+      "detail": ""
+    },
+    {
+      "name": "cluster: Morpheus matrix",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.542,
+      "bytes": 3218806,
+      "detail": ""
+    },
+    {
+      "name": "cluster: UMAP PDF",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.23,
+      "bytes": 32434,
+      "detail": ""
+    },
+    {
+      "name": "cluster: expression PDF",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.245,
+      "bytes": 25149,
+      "detail": ""
+    },
+    {
+      "name": "cluster: violin PDF",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.156,
+      "bytes": 20026,
+      "detail": ""
+    },
+    {
+      "name": "cluster: Morpheus frame",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.003,
+      "bytes": 10441,
+      "detail": ""
+    },
+    {
+      "name": "cluster: fastComm focused_incoming",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.019,
+      "bytes": 40629,
+      "detail": ""
+    },
+    {
+      "name": "cluster: fastComm focused_outgoing",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.01,
+      "bytes": 43112,
+      "detail": ""
+    },
+    {
+      "name": "cluster: fastComm cell_state_network",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.19,
+      "bytes": 122784,
+      "detail": ""
+    },
+    {
+      "name": "cluster: fastComm state_heatmap",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.011,
+      "bytes": 64870,
+      "detail": ""
+    },
+    {
+      "name": "cluster: fastComm lr_dotplot",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.007,
+      "bytes": 12211,
+      "detail": ""
+    },
+    {
+      "name": "cluster: fastComm top_table",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.007,
+      "bytes": 14681,
+      "detail": ""
+    },
+    {
+      "name": "cluster: fastComm per_sample",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.017,
+      "bytes": 1327,
+      "detail": ""
+    },
+    {
+      "name": "cluster: chat examples",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.011,
+      "bytes": 542,
+      "detail": ""
+    },
+    {
+      "name": "cluster: chat",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "name": "cluster: MarkerNetwork availability",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.004,
+      "bytes": 88790,
+      "detail": ""
+    },
+    {
+      "name": "RNA differential submit",
+      "status": 200,
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "RNA differential completes",
+      "status": "completed",
+      "ok": true,
+      "detail": "Differential analysis finished."
+    },
+    {
+      "name": "Differential summary",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.006,
+      "bytes": 260,
+      "detail": ""
+    },
+    {
+      "name": "Differential table",
+      "status": 404,
+      "ok": false,
+      "seconds": 0.003,
+      "bytes": 85,
+      "detail": "{\"detail\":\"Differential interaction table is only available for Cell communication.\"}"
+    },
+    {
+      "name": "Differential volcano",
+      "status": 404,
+      "ok": false,
+      "seconds": 0.003,
+      "bytes": 55,
+      "detail": "{\"detail\":\"No differential genes were found for 'C1'.\"}"
+    },
+    {
+      "name": "Differential go",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.002,
+      "bytes": 50,
+      "detail": ""
+    },
+    {
+      "name": "Differential heatmap",
+      "status": 404,
+      "ok": false,
+      "seconds": 0.003,
+      "bytes": 49,
+      "detail": "{\"detail\":\"No heatmap rows were found for 'C1'.\"}"
+    },
+    {
+      "name": "download combined_h5ad",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.074,
+      "bytes": 19688881,
+      "detail": ""
+    },
+    {
+      "name": "download fastcomm_scores",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.006,
+      "bytes": 944362,
+      "detail": ""
+    },
+    {
+      "name": "download fastcomm_significant_interactions",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.003,
+      "bytes": 153300,
+      "detail": ""
+    },
+    {
+      "name": "download fastcomm_significant_report",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.002,
+      "bytes": 59771,
+      "detail": ""
+    },
+    {
+      "name": "download fastcomm_state_expression",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.003,
+      "bytes": 273542,
+      "detail": ""
+    },
+    {
+      "name": "download fastcomm_state_pairs",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.002,
+      "bytes": 72966,
+      "detail": ""
+    },
+    {
+      "name": "download marker_genes_zip",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.003,
+      "bytes": 287587,
+      "detail": ""
+    },
+    {
+      "name": "download model_provenance",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.002,
+      "bytes": 7527,
+      "detail": ""
+    },
+    {
+      "name": "download umap_coordinates",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.002,
+      "bytes": 42152,
+      "detail": ""
+    }
+  ],
+  "expected_unavailable_views": [
+    {
+      "name": "Differential table",
+      "status": 404,
+      "ok": false,
+      "seconds": 0.003,
+      "bytes": 85,
+      "detail": "{\"detail\":\"Differential interaction table is only available for Cell communication.\"}"
+    },
+    {
+      "name": "Differential volcano",
+      "status": 404,
+      "ok": false,
+      "seconds": 0.003,
+      "bytes": 55,
+      "detail": "{\"detail\":\"No differential genes were found for 'C1'.\"}"
+    },
+    {
+      "name": "Differential heatmap",
+      "status": 404,
+      "ok": false,
+      "seconds": 0.003,
+      "bytes": 49,
+      "detail": "{\"detail\":\"No heatmap rows were found for 'C1'.\"}"
+    }
+  ],
+  "explanation": "The RNA comparison completed with zero tested shared cell states/DEGs. Table is communication-only; RNA volcano/heatmap had no results. Their 404 responses are retained here as unavailable checks, not successful populated plots.",
+  "additional_checks": [
+    {
+      "name": "cell_state_predicted: GO-Elite states",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "name": "cell_state_predicted: GO-Elite figure",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "name": "cluster: GO-Elite states",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "name": "cluster: GO-Elite figure",
+      "status": 200,
+      "ok": true
+    }
+  ],
+  "ui_checks": [
+    "saved-job reload",
+    "three-mode configuration controls (no new analysis launched)",
+    "cell-state layer switch",
+    "UMAP cell states and expression",
+    "annotation filter",
+    "violin paths rendered",
+    "DotPlot SVG and screenshot",
+    "CombPlot SVG",
+    "Cell frequency bars",
+    "GO-Elite enrichment SVG",
+    "Morpheus iframe with 1,585 rows by 255 columns",
+    "one/two windows",
+    "data-grounded marker Chat table",
+    "Differential empty-results message"
+  ],
+  "not_validated": [
+    "Supervised/Both full real-data Explore UI",
+    "lipid serving and differential",
+    "positive differential heatmap/volcano/network",
+    "MarkerNetwork export/render (local Cairo backend unavailable)",
+    "large dataset/concurrency/30-GiB peak"
+  ],
+  "integrity_pause": {
+    "status": "waiting_for_user",
+    "question": "Authorize the existing production missing-input behavior solely for UI smoke tests, or supply a fully matched source/mapping?",
+    "reported_coverage": {
+      "lipid_input_genes": 1303,
+      "matched_lipid_input_genes": 1301,
+      "unmatched_CellRef_markers": 8
+    },
+    "dependent_tests_paused": [
+      "supervised",
+      "both",
+      "lipid serving and differential"
+    ],
+    "no_model_or_feature_panel_changes": true
+  },
+  "regressions": {
+    "python": {
+      "passed": 113,
+      "log": "/tmp/scalable-unified-20261007/python-regression-final.log"
+    },
+    "javascript": {
+      "checks": [
+        {
+          "test": "test_differential_cache_selection.cjs",
+          "passed": true,
+          "output": "Differential cache/selection checks passed: full edges, retry, bounded caches, deduplication, invalidation and ordered latest selection."
+        },
+        {
+          "test": "test_differential_result_races.cjs",
+          "passed": true,
+          "output": "Differential request races passed: annotation delay, mode change, result reset and integrated teardown preserve current view."
+        },
+        {
+          "test": "test_discover_result_races.cjs",
+          "passed": true,
+          "output": "Discover result races passed: deduplicated states, rerun ownership and latest plot/state wins."
+        },
+        {
+          "test": "test_explore_annotation_races.cjs",
+          "passed": true,
+          "output": "Annotation rerun race passed: current request independent and stale response discarded."
+        },
+        {
+          "test": "test_explore_chat_races.cjs",
+          "passed": true,
+          "output": "Chat race regression passed: newest question wins, requests cancel and dataset changes release output."
+        },
+        {
+          "test": "test_explore_export_retry.cjs",
+          "passed": true,
+          "output": "Export retry regression passed: failed scripts and promises released for all three exporters."
+        },
+        {
+          "test": "test_explore_figure_reuse.cjs",
+          "passed": true,
+          "output": "Rendered SVG reuse passed: exact node identity, restoration, budget, expiration and disposal.\nIntegrated mount regression passed: replacement host used and cached SVG preserved.\nResult invalidation regression passed: retained and active resources, payloads and readiness released."
+        },
+        {
+          "test": "test_explore_group_controls.cjs",
+          "passed": true,
+          "output": "Group control regression passed: first request waits and subsequent selections are retained."
+        },
+        {
+          "test": "test_explore_metadata_views.cjs",
+          "passed": true,
+          "output": "Explore metadata and live heatmap lifecycle tests passed (complete 32,000-feature catalogs)."
+        },
+        {
+          "test": "test_explore_payload_cache.cjs",
+          "passed": true,
+          "output": "Explore cache checks passed: deduplication, LRU, byte budget, TTL, context changes, errors, 202 polling and immutable expansion."
+        },
+        {
+          "test": "test_explore_session_races.cjs",
+          "passed": true,
+          "output": "Session readiness regression passed: obsolete completion/error cannot mutate a newer result."
+        },
+        {
+          "test": "test_explore_status_races.cjs",
+          "passed": true,
+          "output": "Status race regression passed: latest response wins and job/reset boundaries are respected."
+        },
+        {
+          "test": "test_viewer_dataset_races.cjs",
+          "passed": true,
+          "output": "Viewer races passed: dataset metadata ownership, readiness timeout and ordered latest comparison."
+        }
+      ],
+      "failed": []
+    },
+    "union_tests": {
+      "passed": 13,
+      "included_in_python_total": true,
+      "log": "/tmp/scalable-unified-20261007/union-regression-final.log"
+    }
+  },
+  "input_provenance": {
+    "source": "/Users/saljh8/Dropbox/Transfer/BOS_PAM_SMG_with_umap_and_markers.h5ad",
+    "source_cells": 59469,
+    "seed": 0,
+    "selected_cells": 600,
+    "libraries": [
+      "10X_D071",
+      "10X_PAM1_PAMCD45_neg"
+    ],
+    "features": 31782,
+    "feature_sha256": "c3ed32590ba932b5cd0ca93a6798e3602d4037139de8f375d16138a8dda5f55e",
+    "barcode_sha256": "3a3db0eba805643501826b4bfa9e85a5f8ba70ccceb2dc1785ecd299ebacad66"
+  },
+  "final_readonly_rechecks": [
+    {
+      "name": "cell_state_predicted: final status",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "name": "cell_state_predicted: final umap",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "name": "cell_state_predicted: final chat-examples",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "name": "cell_state_predicted: final biomarkers/goelite/states",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "name": "cluster: final status",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "name": "cluster: final umap",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "name": "cluster: final chat-examples",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "name": "cluster: final biomarkers/goelite/states",
+      "status": 200,
+      "ok": true
+    }
+  ],
+  "upload_ui_update": {
+    "analysis_location": "1. Upload, after Species and before Reference",
+    "mode_persisted_at_upload": true,
+    "missing_job_storage_root_recreated": true,
+    "concurrent_expired_job_removal_tolerated": true,
+    "focused_python_checks": 35,
+    "browser_regression_scripts": 13,
+    "live_browser_checks": [
+      "one Analysis selector inside job-form and Upload section",
+      "all three options available before upload",
+      "Unsupervised hides reference and preview and removes reference requirement",
+      "Both restores reference requirement",
+      "Supervised screenshot inspected"
+    ],
+    "local_server": "http://127.0.0.1:8000/",
+    "local_storage": "canonical webapp/jobs; replaced stale deleted benchmark-specific setting",
+    "scientific_pause_unchanged": true
+  },
+  "progress_ui_update": {
+    "root_cause": "Status renderer called layers.find on undefined while cell_state_layers was an empty object, preventing progress and log painting.",
+    "fixes": [
+      "Handle missing layer metadata during queued/processing states",
+      "Block simultaneous QC submissions; show Starting, Queued and Running",
+      "Recover an active-job 409 by polling rather than showing a repeat-click error",
+      "Route ICGS3 stdout and flushed lines through branch stage reporting; show current ICGS3 stage"
+    ],
+    "regression_evidence": {
+      "prior_code_expected_find_failure_reproduced": true,
+      "python_tests_passed": 32,
+      "javascript_regression_scripts_passed": 14,
+      "syntax_and_diff_checks_passed": true
+    },
+    "live_browser_software_fixture": {
+      "queued": "5%, Queued button disabled",
+      "clustering": "44%, Running button disabled, log updated",
+      "umap": "68%, current UMAP message and new log line without refresh",
+      "terminal_failure": "100%, Run re-enabled"
+    },
+    "actual_user_job_readonly": {
+      "job_id": "01cae7bf11b54c759d6d6b03e20acae6",
+      "status": "completed",
+      "browser_progress": "100%",
+      "browser_message": "Analysis completed and results saved in 43 seconds."
+    },
+    "scientific_scope": "Software state-transition fixtures and read-only inspection of user-run results; supervised/Both scientific validation remains paused for the prior unresolved mapping question.",
+    "local_deployment": "Port 8000 restarted only after no active jobs or child workers remained; preserved existing process environment and storage configuration."
+  },
+  "icgs3_status_api_update": {
+    "root_cause": "Native ICGS3 stage messages were stored correctly but the status API replaced them with prior normalization log text. Previous stage-parser and UI tests missed the API transform.",
+    "fix": "Preserve native ICGS3 stage messages in the shared API builder; remove the redundant process-wide discover status override.",
+    "tests": {
+      "python": 40,
+      "javascript_scripts": 15,
+      "api": "Every native ICGS3 stage checked through GET /status for both unsupervised and Both job modes with stale normalization logs present.",
+      "browser": "Live HTTP polling displayed step 1 at 36%, step 2 at 38%, and step 10 at 69% without navigation; screenshot inspected.",
+      "supervised": "Live supervised log-derived updates, queued messages and terminal errors preserved."
+    },
+    "deployment": "Restarted idle port 8000 preserving its process environment only after the active job completed.",
+    "scope": "Software progress reporting only; scientific analysis methods unchanged. Prior unresolved scientific mapping question remains pending."
+  },
+  "both_results_controls_update": {
+    "saved_job_readonly": "84a80bf6b90445299b9186f712a200a1",
+    "retention": {
+      "qc_and_union_cells": 3126,
+      "supervised_assigned_cells": 3090,
+      "unaligned_retained_cells": 36,
+      "unsupervised_cells": 2999,
+      "coordinates": "Native branch coordinates; no fabrication or cross-embedding splice."
+    },
+    "changes": [
+      "Supervised left and unsupervised right UMAP defaults; preserve later selections",
+      "Visible count and alternate saved-coordinate display for retained unaligned cells",
+      "Both RNA/sidecar embeddings resolved by barcode",
+      "Human branch labels for axes, grouping and saved differential comparisons",
+      "Exclude generated assignment/acceptance columns from biological sample-group fields",
+      "Clear obsolete result links when differential settings change; retain saved comparisons",
+      "Full model provenance appended to Download log; hide separate provenance controls and redundant Both unaligned download",
+      "Report cellHarmony native stages; keep Both QC form/status separate and shrink log to fit"
+    ],
+    "python": {
+      "passed": 72,
+      "log": "/tmp/scalable-unified-20261007/both-final-v3-python.log"
+    },
+    "javascript": {
+      "passed": 17,
+      "failed": [],
+      "log": "/tmp/scalable-unified-20261007/both-js-v2-regression.json"
+    },
+    "live_api": {
+      "passed": 58,
+      "total": 58,
+      "checks": [
+        {
+          "layer": "supervised_state",
+          "view": "status",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.011,
+          "detail": ""
+        },
+        {
+          "layer": "supervised_state",
+          "view": "variables",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.306,
+          "detail": ""
+        },
+        {
+          "layer": "supervised_state",
+          "view": "filters",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.003,
+          "detail": ""
+        },
+        {
+          "layer": "supervised_state",
+          "view": "genes",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.01,
+          "detail": ""
+        },
+        {
+          "layer": "supervised_state",
+          "view": "UMAP",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.565,
+          "detail": ""
+        },
+        {
+          "layer": "supervised_state",
+          "view": "KRT15",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.254,
+          "detail": ""
+        },
+        {
+          "layer": "supervised_state",
+          "view": "violin",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.012,
+          "detail": ""
+        },
+        {
+          "layer": "supervised_state",
+          "view": "DotPlot",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.012,
+          "detail": ""
+        },
+        {
+          "layer": "supervised_state",
+          "view": "CombPlot",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.02,
+          "detail": ""
+        },
+        {
+          "layer": "supervised_state",
+          "view": "associations",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.019,
+          "detail": ""
+        },
+        {
+          "layer": "supervised_state",
+          "view": "Morpheus matrix",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.595,
+          "detail": ""
+        },
+        {
+          "layer": "supervised_state",
+          "view": "Morpheus frame",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.005,
+          "detail": ""
+        },
+        {
+          "layer": "supervised_state",
+          "view": "communication focused_incoming",
+          "status": 200,
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "layer": "supervised_state",
+          "view": "communication focused_outgoing",
+          "status": 200,
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "layer": "supervised_state",
+          "view": "communication cell_state_network",
+          "status": 200,
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "layer": "supervised_state",
+          "view": "communication state_heatmap",
+          "status": 200,
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "layer": "supervised_state",
+          "view": "communication lr_dotplot",
+          "status": 200,
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "layer": "supervised_state",
+          "view": "communication top_table",
+          "status": 200,
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "layer": "supervised_state",
+          "view": "communication per_sample",
+          "status": 200,
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_cluster",
+          "view": "status",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.004,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_cluster",
+          "view": "variables",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.268,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_cluster",
+          "view": "filters",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.002,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_cluster",
+          "view": "genes",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.009,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_cluster",
+          "view": "UMAP",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.015,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_cluster",
+          "view": "KRT15",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.246,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_cluster",
+          "view": "violin",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.011,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_cluster",
+          "view": "DotPlot",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.011,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_cluster",
+          "view": "CombPlot",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.019,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_cluster",
+          "view": "associations",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.017,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_cluster",
+          "view": "Morpheus matrix",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.359,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_cluster",
+          "view": "Morpheus frame",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.003,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_cluster",
+          "view": "communication focused_incoming",
+          "status": 200,
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_cluster",
+          "view": "communication focused_outgoing",
+          "status": 200,
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_cluster",
+          "view": "communication cell_state_network",
+          "status": 200,
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_cluster",
+          "view": "communication state_heatmap",
+          "status": 200,
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_cluster",
+          "view": "communication lr_dotplot",
+          "status": 200,
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_cluster",
+          "view": "communication top_table",
+          "status": 200,
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_cluster",
+          "view": "communication per_sample",
+          "status": 200,
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_state",
+          "view": "status",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.004,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_state",
+          "view": "variables",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.261,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_state",
+          "view": "filters",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.004,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_state",
+          "view": "genes",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.009,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_state",
+          "view": "UMAP",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.016,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_state",
+          "view": "KRT15",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.255,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_state",
+          "view": "violin",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.011,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_state",
+          "view": "DotPlot",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.011,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_state",
+          "view": "CombPlot",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.018,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_state",
+          "view": "associations",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.014,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_state",
+          "view": "Morpheus matrix",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.358,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_state",
+          "view": "Morpheus frame",
+          "status": 200,
+          "ok": true,
+          "seconds": 0.003,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_state",
+          "view": "communication focused_incoming",
+          "status": 200,
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_state",
+          "view": "communication focused_outgoing",
+          "status": 200,
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_state",
+          "view": "communication cell_state_network",
+          "status": 200,
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_state",
+          "view": "communication state_heatmap",
+          "status": 200,
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_state",
+          "view": "communication lr_dotplot",
+          "status": 200,
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_state",
+          "view": "communication top_table",
+          "status": 200,
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "layer": "unsupervised_state",
+          "view": "communication per_sample",
+          "status": 200,
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "view": "log provenance",
+          "status": 200,
+          "ok": true
+        }
+      ],
+      "log": "/tmp/scalable-unified-20261007/both-live-api-readonly.json"
+    },
+    "live_browser": [
+      "Both supervised and unsupervised state/cluster UMAPs and KRT15 rendered",
+      "Fresh Both defaults verified: supervised coordinates/colors left; unsupervised coordinates/clusters right",
+      "Unaligned alternate-coordinate button displayed Unaligned label without changing assignments",
+      "Native RNA violin, DotPlot and CombPlot rendered",
+      "Morpheus frame loaded 840 rows by 150 displayed cells",
+      "No separate provenance controls or Both unaligned download in results list",
+      "Both QC Run bottom624/status top680/log top755,bottom831, panelbottom850: no overlap",
+      "Synthetic differential form: all nine combinations of three population fields and RNA/lipids/ADT retained Library and a/b groups"
+    ],
+    "software_modality_fixtures": [
+      "lipids",
+      "adt",
+      "metabolite",
+      "lipid",
+      "grn",
+      "grn_tf"
+    ],
+    "scientific_scope": "No model inference or model changes performed in these checks. Prior unresolved scientific mapping/coverage question remains pending; fixture checks and read-only saved-job inspection do not substitute for a new full scientific workflow validation.",
+    "local_deployment": "Idle port 8000 restarted with process environment and canonical storage retained; final HTTP200 verified. Changes left uncommitted."
+  }
+}

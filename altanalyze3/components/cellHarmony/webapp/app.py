@@ -65,6 +65,9 @@ _GO_ELITE_HIGHLIGHT_KEYWORDS = (
 
 
 class QCSettings(BaseModel):
+    analysis_mode: str = Field(default="supervised", pattern="^(supervised|unsupervised|both)$")
+    umap_fit_mode: str = Field(default="landmark", pattern="^(full|landmark)$")
+    max_k: int | None = Field(default=None, ge=2)
     min_genes: int = 500
     min_counts: int = 1000
     min_cells: int = 0
@@ -820,6 +823,11 @@ def _derive_live_pipeline_message(status: object, log_lines: List[str], fallback
     normalized_status = str(status or "").strip().lower()
     if normalized_status != "processing":
       return str(fallback or "")
+    # Discover's stage reporter has already interpreted the current ICGS3
+    # logs. Earlier shared-QC lines must not replace that live stage.
+    live_message = str(fallback or "")
+    if "ICGS3" in live_message or "cellHarmony step" in live_message:
+        return live_message
     stage_markers = (
         "Running fastComm receptor-ligand communication analysis.",
         "fastComm analysis complete:",
@@ -888,7 +896,15 @@ def _differential_options(meta: Dict) -> Dict:
                 sample_fields = rebuilt_fields
                 sample_values = rebuilt_values
     default_population_col = stored.get("default_population_col") or meta.get("cluster_key")
-    if not upload_profile.get("allow_alternate_population_fields"):
+    layer_entries = (meta.get("cell_state_layers") or {}).get("layers") or []
+    if layer_entries:
+        layer_labels = {layer["key"]: layer.get("label", layer["key"]) for layer in layer_entries}
+        population_columns = [dict(entry, label=layer_labels.get(entry["value"], entry.get("label", entry["value"])))
+                              for entry in population_columns]
+        generated = set(layer_labels) | {"supervised_accepted", "unsupervised_accepted", "original_NMF_cluster"}
+        sample_fields = [entry for entry in sample_fields if entry["value"] not in generated]
+        sample_values = {key: value for key, value in sample_values.items() if key not in generated}
+    if not upload_profile.get("allow_alternate_population_fields") and not meta.get("cell_state_layers"):
         population_columns = [entry for entry in population_columns if entry.get("value") == default_population_col]
         if not population_columns and default_population_col:
             population_columns = [{"value": default_population_col, "label": default_population_col, "n_categories": 0}]
@@ -904,6 +920,8 @@ def _differential_options(meta: Dict) -> Dict:
             bool(upload_profile.get("differential_eligible")),
         )
     )
+    if layer_entries:
+        enabled = enabled and any(len(values) >= 2 for values in sample_values.values())
     comparison_types = stored.get("comparison_types")
     if not isinstance(comparison_types, list) or not comparison_types:
         pseudobulk_allowed = bool(upload_profile.get("single_h5ad") or upload_profile.get("multiple_h5ad") or upload_profile.get("total_files", 0) >= 4)
@@ -1628,6 +1646,22 @@ def _get_expression_cache(app: FastAPI, meta: Dict, modality: str = "rna") -> Di
         populations = adata.obs[cluster_key].astype(str).to_numpy()
         umap_x = np.full(adata.n_obs, np.nan, dtype=float)
         umap_y = np.full(adata.n_obs, np.nan, dtype=float)
+        default_coords_key = ""
+        default_coords_label = "cellHarmony UMAP"
+        branch_embeddings = {}
+        if meta.get("analysis_mode") == "both":
+            # Imputed sidecars contain only the cells with predictions. Look up
+            # the native RNA embeddings by barcode, never by sidecar row order.
+            source = adata if normalized_modality == "rna" else _get_expression_cache(app, meta, "rna")["adata"]
+            rows = source.obs_names.get_indexer(adata.obs_names)
+            if (rows < 0).any():
+                raise ValueError("Modality barcodes do not match the combined RNA roster; no cells were discarded.")
+            for branch in ("supervised", "unsupervised"):
+                key = f"X_umap_{branch}"
+                if key in source.obsm:
+                    branch_embeddings[key] = np.asarray(source.obsm[key])[rows, :2]
+                elif all(f"umap_{branch}_{axis}" in source.obs for axis in ("x", "y")):
+                    branch_embeddings[key] = source.obs[[f"umap_{branch}_x", f"umap_{branch}_y"]].to_numpy()[rows]
 
         if umap_path and Path(umap_path).exists():
             coords_df = pd.read_csv(umap_path, sep="\t")
@@ -1640,6 +1674,20 @@ def _get_expression_cache(app: FastAPI, meta: Dict, modality: str = "rna") -> Di
             reindexed = coords_indexed.reindex(obs_names)
             umap_x = reindexed["UMAP1"].to_numpy(dtype=float)
             umap_y = reindexed["UMAP2"].to_numpy(dtype=float)
+
+        # Unified jobs store separate native embeddings instead of one TSV.
+        # Select the active branch without changing or averaging coordinates.
+        if not (umap_path and Path(umap_path).exists()):
+            branch = "supervised" if cluster_key == "supervised_state" else "unsupervised"
+            preferred = f"X_umap_{branch}" if meta.get("analysis_mode") == "both" else "X_umap"
+            key = preferred if preferred in adata.obsm or preferred in branch_embeddings else "X_umap"
+            if key in adata.obsm or key in branch_embeddings:
+                coordinates = branch_embeddings[key] if key in branch_embeddings else np.asarray(adata.obsm[key])
+                if coordinates.ndim == 2 and coordinates.shape[1] >= 2:
+                    umap_x, umap_y = coordinates[:, 0], coordinates[:, 1]
+                    default_coords_key = key
+                    default_coords_label = (f"{branch.capitalize()} UMAP" if meta.get("analysis_mode") == "both"
+                                            else "ICGS3 UMAP" if meta.get("analysis_mode") == "unsupervised" else "cellHarmony UMAP")
 
         obs_filter_values: Dict[str, np.ndarray] = {}
         filter_fields: List[Dict[str, str]] = []
@@ -1694,7 +1742,7 @@ def _get_expression_cache(app: FastAPI, meta: Dict, modality: str = "rna") -> Di
         filter_fields = deduped_fields
 
         default_secondary_field = str(cluster_key) if str(cluster_key) in obs_filter_values else ""
-        if upload_profile.get("single_h5"):
+        if upload_profile.get("single_h5") and not meta.get("cell_state_layers"):
             preferred_primary_field = str(cluster_key) if str(cluster_key) in obs_filter_values else (filter_fields[0]["value"] if filter_fields else "")
             filter_fields = [entry for entry in filter_fields if entry["value"] == preferred_primary_field] if preferred_primary_field else filter_fields[:1]
             filter_values = {
@@ -1743,7 +1791,10 @@ def _get_expression_cache(app: FastAPI, meta: Dict, modality: str = "rna") -> Di
             "sample_labels": sample_labels,
             "umap_x": umap_x,
             "umap_y": umap_y,
-            "obsm_keys": _obsm_embedding_keys(adata),
+            "default_coords_key": default_coords_key,
+            "default_coords_label": default_coords_label,
+            "branch_embeddings": branch_embeddings,
+            "obsm_keys": list(dict.fromkeys([*_obsm_embedding_keys(adata), *branch_embeddings])),
             "obs_filter_values": obs_filter_values,
             "display_filters_meta": {
                 "fields": filter_fields,
@@ -3858,7 +3909,8 @@ def _numeric_obs_columns(cache: Dict[str, Any]) -> List[Dict[str, Any]]:
         # `<name>__n_obs` tallies. Plotting one against a measurement draws a
         # meaningless panel, so it is not offered as an axis. The test is on the
         # VALUES, so no field name is hardcoded and a new count is caught too.
-        if np.all(values[finite] == np.round(values[finite])):
+        stored_umap = str(name) in {"umap_supervised_x", "umap_supervised_y", "umap_unsupervised_x", "umap_unsupervised_y"}
+        if not stored_umap and np.all(values[finite] == np.round(values[finite])):
             continue
         out.append({
             "field": str(name),
@@ -3905,8 +3957,9 @@ def _axis_field_options(cache: Dict[str, Any]) -> List[Dict[str, Any]]:
     x = np.asarray(cache["umap_x"], dtype=float)
     y = np.asarray(cache["umap_y"], dtype=float)
     out = []
-    for field, label, values in ((UMAP_AXIS_FIELDS[0], "cellHarmony UMAP 1", x),
-                                 (UMAP_AXIS_FIELDS[1], "cellHarmony UMAP 2", y)):
+    default_label = cache.get("default_coords_label", "cellHarmony UMAP")
+    for field, label, values in ((UMAP_AXIS_FIELDS[0], f"{default_label} 1", x),
+                                 (UMAP_AXIS_FIELDS[1], f"{default_label} 2", y)):
         finite = np.isfinite(values)
         out.append({"field": field, "label": label,
                     "n_finite": int(finite.sum()),
@@ -3938,6 +3991,10 @@ def _axis_field_options(cache: Dict[str, Any]) -> List[Dict[str, Any]]:
 _AXIS_LABELS = {
     "umap_approx_x": "approximate-projection UMAP 1",
     "umap_approx_y": "approximate-projection UMAP 2",
+    "umap_supervised_x": "Supervised UMAP 1",
+    "umap_supervised_y": "Supervised UMAP 2",
+    "umap_unsupervised_x": "Unsupervised UMAP 1",
+    "umap_unsupervised_y": "Unsupervised UMAP 2",
 }
 
 
@@ -3952,7 +4009,7 @@ def _umap_coordinate_options(cache: Dict[str, Any]) -> List[Dict[str, str]]:
     always drawn: the coordinates the alignment wrote, read from the job's
     `umap_coordinates` artifact.
     """
-    options = [{"key": "", "label": "cellHarmony UMAP"}]
+    options = [{"key": "", "label": cache.get("default_coords_label", "cellHarmony UMAP")}]
     for key in cache.get("obsm_keys", []) or []:
         options.append({"key": str(key), "label": str(key)})
     # A coordinate set is a PAIR, so a stored `<stem>_x` / `<stem>_y` pair is one
@@ -3981,7 +4038,7 @@ def _coordinates_for_key(cache: Dict[str, Any], coords_key: str = "") -> tuple:
     """(x, y, resolved key). An unknown key falls back to the cellHarmony one."""
     key = str(coords_key or "").strip()
     if not key:
-        return cache["umap_x"], cache["umap_y"], ""
+        return cache["umap_x"], cache["umap_y"], cache.get("default_coords_key", "")
     if key.startswith(OBS_PAIR_PREFIX):
         stem = key[len(OBS_PAIR_PREFIX):]
         x = _axis_values(cache, stem + "_x")
@@ -3989,6 +4046,9 @@ def _coordinates_for_key(cache: Dict[str, Any], coords_key: str = "") -> tuple:
         if x is not None and y is not None:
             return x, y, key
         return cache["umap_x"], cache["umap_y"], ""
+    if key in cache.get("branch_embeddings", {}):
+        matrix = cache["branch_embeddings"][key]
+        return matrix[:, 0], matrix[:, 1], key
     adata = cache["adata"]
     obsm = getattr(adata, "obsm", {}) or {}
     if key not in obsm:
@@ -4150,6 +4210,8 @@ def _chat_examples(app: FastAPI, meta: Dict) -> Dict[str, Any]:
         reference_label = str(_reference_entry_for_meta(meta).get("label") or reference_id)
     except Exception:  # noqa: BLE001 - the registry may not hold this reference any more
         reference_label = reference_id
+    if meta.get("analysis_mode") == "unsupervised":
+        reference_label = "ICGS3"
 
     try:
         cache = _get_expression_cache(app, meta)
@@ -4370,7 +4432,10 @@ def _build_umap_payload(
     # second embedding is a different coordinate space, so an overlay there would
     # put the reference cells in positions that mean nothing.
     reference_points = []
-    ref_adata = (None if (resolved_color_by or resolved_coords or resolved_x)
+    analysis_mode = meta.get("analysis_mode", "supervised")
+    reference_coordinates = (resolved_coords == "X_umap_supervised" if analysis_mode == "both"
+                             else analysis_mode == "supervised" and not resolved_coords)
+    ref_adata = (None if (resolved_color_by or not reference_coordinates or resolved_x)
                  else _load_reference_adata(app, meta))
     if ref_adata is not None:
         ref_cluster_key = meta.get("reference_cluster_key") or meta.get("cluster_key")
@@ -4391,7 +4456,14 @@ def _build_umap_payload(
     # recorded for part of the dataset only, and a silently shorter plot would
     # read as a real absence of cells.
     n_kept = int(np.count_nonzero(np.asarray(display_mask, dtype=bool)))
+    missing_coordinates = display_mask & ~(np.isfinite(umap_x) & np.isfinite(umap_y))
+    unplaced_counts = pd.Series(np.asarray(populations)[missing_coordinates]).value_counts().to_dict()
+    frequency_counts = (pd.DataFrame({"sample": np.asarray(sample_labels)[display_mask],
+                                     "population": np.asarray(populations)[display_mask]})
+                        .value_counts().rename("cells").reset_index().to_dict("records")
+                        if meta.get("analysis_mode") == "both" and sample_labels is not None else None)
     return {"reference": reference_points, "query": query_points,
+            "frequency_counts": frequency_counts,
             "sample_field": sample_field,
             "color_by": resolved_color_by,
             "color_label": resolved_color_by or str(cache_entry["cluster_key"]),
@@ -4402,12 +4474,15 @@ def _build_umap_payload(
             "axes_source": axes_source,
             "x_field": resolved_x,
             "y_field": resolved_y,
-            "x_label": resolved_x or "UMAP 1",
-            "y_label": resolved_y or "UMAP 2",
+            "x_label": (f"{cache_entry.get('default_coords_label', 'UMAP')} 1" if resolved_x == UMAP_AXIS_FIELDS[0]
+                        else _axis_label(resolved_x) if resolved_x else "UMAP 1"),
+            "y_label": (f"{cache_entry.get('default_coords_label', 'UMAP')} 2" if resolved_y == UMAP_AXIS_FIELDS[1]
+                        else _axis_label(resolved_y) if resolved_y else "UMAP 2"),
             "n_cells_selected": n_kept,
             "n_points_drawn": n_drawn,
             "n_dropped_no_coordinate": max(0, n_kept - n_drawn),
-            "reference_hidden": bool(resolved_color_by or resolved_coords or resolved_x)}
+            "unplaced_population_counts": {str(key): int(count) for key, count in unplaced_counts.items()},
+            "reference_hidden": bool(resolved_color_by or not reference_coordinates or resolved_x)}
 
 
 def _reference_entry_for_meta(meta: Dict) -> Dict:
@@ -5032,7 +5107,7 @@ def _build_expression_payload(
     if not resolved_gene and not str(gene or "").strip() and len(cache_entry["var_names"]):
         resolved_gene = str(cache_entry["var_names"][0])
     if not resolved_gene:
-        if normalized_modality == "rna":
+        if normalized_modality == "rna" and meta.get("analysis_mode") != "unsupervised":
             try:
                 return _build_reference_expression_payload(app, meta, gene)
             except (FileNotFoundError, KeyError, ValueError):
@@ -5105,7 +5180,9 @@ def _build_expression_payload(
         "resolved_gene": resolved_gene,
         "source": "query",
         "modality": normalized_modality,
-        "message": None if int(np.asarray(display_mask).sum()) else "No cells match the current Display only filters.",
+        "message": ("No cells match the current Display only filters." if not int(np.asarray(display_mask).sum())
+                    else "The feature is present, but no selected cells have finite values on both coordinate axes. Choose another coordinate pair."
+                    if view == "umap" and not len(umap_points) else None),
         "scatter": scatter_data,
         "violin": violin_data,
         "umap": umap_points,
@@ -5335,19 +5412,19 @@ def _render_umap_pdf(payload: Dict[str, List[Dict]], mode: str) -> io.BytesIO:
     if mode == "frequency":
         query_points = payload.get("query", []) or []
         sample_field = str(payload.get("sample_field") or "sample").strip() or "sample"
-        frame = pd.DataFrame(query_points)
+        # Union frequencies include assigned cells that have no coordinates in
+        # the selected branch. Plot placement must not change the denominator.
+        aggregated = payload.get("frequency_counts")
+        frame = pd.DataFrame(aggregated if aggregated is not None else query_points)
         if frame.empty or "sample" not in frame.columns or not frame["sample"].astype(str).str.strip().any():
             ax.text(0.5, 0.5, "Sample labels were not available for this job.", ha="center", va="center", transform=ax.transAxes, color="#64748b")
             ax.axis("off")
         else:
             frame["population"] = frame["population"].astype(str)
             frame["sample"] = frame["sample"].astype(str)
-            counts = (
-                frame.groupby(["sample", "population"], observed=False)
-                .size()
-                .rename("count")
-                .reset_index()
-            )
+            counts = (frame.rename(columns={"cells": "count"}) if aggregated is not None else
+                      frame.groupby(["sample", "population"], observed=False)
+                      .size().rename("count").reset_index())
             sample_totals = counts.groupby("sample", observed=False)["count"].sum().rename("sample_total")
             counts = counts.merge(sample_totals, on="sample", how="left")
             counts["fraction"] = counts["count"] / counts["sample_total"].replace(0, np.nan)
@@ -6000,7 +6077,21 @@ def create_app(test_config: dict | None = None) -> FastAPI:
     app = FastAPI(title=cfg["APP_TITLE"], root_path=cfg["ROOT_PATH"])
     app.state.config = cfg
     app.state.root_path = cfg["ROOT_PATH"]
-    app.state.job_store = JobStore(Path(cfg["JOB_STORAGE"]))
+    from .state_layers import ACTIVE_LAYER, AnalysisJobStore
+    app.state.job_store = AnalysisJobStore(Path(cfg["JOB_STORAGE"]))
+
+    @app.middleware("http")
+    async def analysis_layer(request: Request, call_next):
+        # Job-scoped cookies let two open jobs choose different layers.
+        match = re.search(r"/(?:api/)?jobs/([a-f0-9]+)(?:/|$)", request.url.path)
+        key = request.query_params.get("state_layer", "")
+        if not key and match:
+            key = request.cookies.get(f"scalable_layer_{match.group(1)}", "")
+        token = ACTIVE_LAYER.set(key)
+        try:
+            return await call_next(request)
+        finally:
+            ACTIVE_LAYER.reset(token)
     app.state.result_cache_budget = CacheBudget(
         max_bytes=int(float(cfg["CACHE_MAX_GIB"]) * 1024**3),
         ttl_seconds=cfg["CACHE_TTL_SECONDS"], max_entries=cfg["CACHE_MAX_ENTRIES"],
@@ -6067,6 +6158,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
                 "app_root_path": cfg["ROOT_PATH"],
                 "styles_version": css_version,
                 "app_js_version": js_version,
+                "unified_analysis_controls": cfg.get("UNIFIED_ANALYSIS_CONTROLS", True),
             },
         )
 
@@ -6081,13 +6173,17 @@ def create_app(test_config: dict | None = None) -> FastAPI:
     @app.post("/api/jobs")
     async def create_job(
         species: str = Form(...),
-        reference: str = Form(...),
+        reference: str = Form(""),
+        analysis_mode: str = Form("supervised", pattern="^(supervised|unsupervised|both)$"),
         ambient_option: str | None = Form(None),
         soupx_option: str | None = Form(None),
         sample_names: List[str] = Form(...),
         files: List[UploadFile] = File(...),
     ):
         store, _ = _job_resources(app)
+        if analysis_mode != "unsupervised" and not reference.strip():
+            raise HTTPException(status_code=400, detail="Select a reference for Supervised or Both analysis.")
+        reference = reference.strip() or "icgs3"
         if len(files) > cfg["MAX_FILES_PER_JOB"]:
             raise HTTPException(status_code=400, detail=f"Maximum {cfg['MAX_FILES_PER_JOB']} files are allowed per job.")
         if len(sample_names) != len(files):
@@ -6178,9 +6274,10 @@ def create_app(test_config: dict | None = None) -> FastAPI:
                 if estimated_peak >= cfg.get('TOTAL_MEMORY_LIMIT_GIB', 27) * 1024**3:
                     message += (' The estimated in-memory import/QC requirement exceeds the server analysis '
                                 'budget; disk-backed processing is required and completion is not guaranteed.')
-        store.update_job(job_id, files=records, input_memory=memory_profile, message=message)
+        store.update_job(job_id, files=records, input_memory=memory_profile, message=message,
+                         analysis_mode=analysis_mode, qc={"analysis_mode": analysis_mode})
         return JSONResponse({"job_id": job_id, "status": "uploaded", 'message': message,
-                             'input_memory': memory_profile})
+                             'input_memory': memory_profile, 'analysis_mode': analysis_mode})
 
     @app.post("/api/jobs/{job_id}/qc")
     async def update_qc(job_id: str, qc: QCSettings):
@@ -6188,8 +6285,13 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         meta = store.get_job(job_id)
+        if meta.get("status") in {"queued", "processing"}:
+            raise HTTPException(status_code=409, detail="Wait for the running analysis before changing its QC settings.")
         registry_path = Path(app.state.config["REFERENCE_REGISTRY"])
-        reference_entry = pipeline_mod._lookup_reference(meta["species"], meta["reference"], registry_path)
+        reference_entry = ({} if qc.analysis_mode == "unsupervised" else
+                           pipeline_mod._lookup_reference(meta["species"], meta["reference"], registry_path))
+        if qc.analysis_mode != "supervised" and meta.get("species") not in {"human", "mouse"}:
+            raise HTTPException(status_code=400, detail="ICGS3 currently supports Human and Mouse.")
         supported_modalities = {
             _normalize_modality_id(value, default="")
             for value in (reference_entry.get("impute_modalities") or [])
@@ -6206,7 +6308,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         if unsupported:
             raise HTTPException(status_code=400,
                                 detail=f"Impute modalities not supported for this reference: {', '.join(unsupported)}")
-        meta = store.update_job(job_id, qc=qc.model_dump(), message="QC parameters saved.")
+        meta = store.update_job(job_id, qc=qc.model_dump(), analysis_mode=qc.analysis_mode, message="QC parameters saved.")
         return JSONResponse({"job_id": job_id, "qc": meta["qc"]})
 
     @app.post("/api/jobs/{job_id}/configure")
@@ -6265,12 +6367,15 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         store, runner = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
+        if store.get_job(job_id).get("status") in {"queued", "processing"}:
+            raise HTTPException(status_code=409, detail="This analysis is already running.")
         _invalidate_expression_cache(app, job_id)
         _invalidate_differential_cache(app, job_id)
         _invalidate_marker_heatmap_cache(app, job_id)
         _invalidate_fastcomm_cache(app, job_id)
         store.update_job(
             job_id,
+            artifacts={}, bundle={}, cell_state_layers={}, icgs3_analysis={}, analysis_summary={},
             marker_analysis={},
             marker_analysis_by_modality={},
             fastcomm_analysis={},
@@ -6606,6 +6711,38 @@ def create_app(test_config: dict | None = None) -> FastAPI:
                 detail=f"none of the {len(wanted)} requested genes are in this dataset")
         payload["modality"] = _normalize_modality_id(modality)
         return JSONResponse(payload)
+
+    @app.get("/api/jobs/{job_id}/cluster-associations")
+    def cluster_associations(job_id: str, subset_by: str = Query(""), subset_values: List[str] = Query([]),
+                             subset2_by: str = Query(""), subset2_values: List[str] = Query([])):
+        from .analysis_workflow import association_payload
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        meta = store.get_job(job_id)
+        if meta.get("analysis_mode") != "both" or meta.get("status") != "completed":
+            raise HTTPException(status_code=404, detail="Cluster associations require a completed Both analysis.")
+        filters = [(field, values) for field, values in ((subset_by, subset_values), (subset2_by, subset2_values)) if field and values]
+        try:
+            return JSONResponse(association_payload(pipeline_mod._read_h5ad_obs(Path(meta["artifacts"]["combined_h5ad"])), filters))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/jobs/{job_id}/biomarkers/goelite/states")
+    def biomarkers_states(job_id: str):
+        from ..scalable_discover.biomarkers import goelite_states
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        return JSONResponse({"states": goelite_states(store.get_job(job_id))})
+
+    @app.get("/api/jobs/{job_id}/biomarkers/goelite")
+    def biomarkers_plot(job_id: str, state: str = Query(...)):
+        from ..scalable_discover.biomarkers import build_goelite_payload
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        return JSONResponse(build_goelite_payload(store.get_job(job_id), state))
 
     @app.get("/api/jobs/{job_id}/combplot")
     def combplot(request: Request, job_id: str, genes: str = Query(""), modality: str = Query("rna"),
@@ -7255,7 +7392,28 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         path = store.logs_dir(job_id) / "pipeline.log"
         if not path.exists():
             raise HTTPException(status_code=404, detail="Log file unavailable.")
-        return FileResponse(path, filename=path.name, media_type="text/plain")
+        meta = store.get_job(job_id)
+        provenance_path = (meta.get("artifacts") or {}).get("model_provenance")
+        def log_with_provenance():
+            with path.open("rb") as handle:
+                while block := handle.read(64 * 1024):
+                    yield block
+            yield b"\n\n=== Model versions and provenance ===\n"
+            if provenance_path and Path(provenance_path).is_file():
+                with Path(provenance_path).open("rb") as handle:
+                    while block := handle.read(64 * 1024):
+                        yield block
+            else:
+                yield json.dumps(meta.get("model_versions") or {}, indent=2).encode("utf-8")
+            layers = (meta.get("cell_state_layers") or {}).get("layers") or []
+            if layers:
+                summaries = {layer["key"]: (layer.get("fastcomm_analysis") or {}).get("summary")
+                             for layer in layers if (layer.get("fastcomm_analysis") or {}).get("summary")}
+                yield b"\n\n=== Analysis-layer communication provenance ===\n"
+                yield json.dumps(summaries, indent=2).encode("utf-8")
+            yield b"\n"
+        return StreamingResponse(log_with_provenance(), media_type="text/plain",
+                                 headers={"Content-Disposition": f'attachment; filename="{path.name}"'})
 
     @app.get("/api/jobs/{job_id}/differential/archive")
     async def download_differential_archive(job_id: str):

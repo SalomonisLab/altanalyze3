@@ -85,8 +85,8 @@ INDEX_REWRITES: Tuple[Tuple[str, str, int], ...] = (
     ('          <button class="workspace-tab-btn" type="button" data-tab="differential">Differential</button>\n', "", 1),
     (f"{_GITHUB_BLOB}/webapp/HOW_TO_USE.md", f"{_GITHUB_BLOB}/scalable_discover/HOW_TO_USE.md", 1),
     (f"{_GITHUB_BLOB}/webapp/README.md", f"{_GITHUB_BLOB}/scalable_discover/README.md", 1),
-    ('<label class="field">\n                  <span>Reference</span>',
-     '<label class="field hidden">\n                  <span>Reference</span>', 1),
+    ('<div class="field">\n                  <label class="field-group-label" for="reference-select">Reference</label>',
+     '<div class="field hidden">\n                  <label class="field-group-label" for="reference-select">Reference</label>', 1),
     ("<h2>2. QC and alignment</h2>", "<h2>2. QC and ICGS3 clustering</h2>", 1),
     ('''                  <label class="field">
                     <span>Ambient RNA correction</span>
@@ -182,85 +182,7 @@ class LayeredJobStore(JobStore):
 
 # ------------------------------------------------------------- GO-Elite BioMarkers plot
 
-def _cluster_for_state(meta: Dict, state: str) -> str:
-    """A cell state of either layer -> its ICGS3 cluster id."""
-    names = (meta.get("cell_state_layers") or {}).get("names") or {}
-    reverse = {str(v): str(k) for k, v in names.items()}
-    return reverse.get(str(state), str(state))
-
-
-def _state_label(meta: Dict, cluster: str) -> str:
-    """An ICGS3 cluster id as the active layer names it."""
-    layers = meta.get("cell_state_layers") or {}
-    if meta.get("active_cell_state_layer") == "cluster":
-        return cluster
-    return str((layers.get("names") or {}).get(cluster, cluster))
-
-
-def goelite_states(meta: Dict) -> List[str]:
-    """The active layer's cell states that hold at least one BioMarkers term."""
-    goelite = (meta.get("icgs3_analysis") or {}).get("goelite") or {}
-    path = Path(str(goelite.get("enrichment_tsv") or ""))
-    if not path.is_file():
-        return []
-    clusters = set(pd.read_csv(path, sep="\t", usecols=["cluster"])["cluster"].astype(str))
-    order = (meta.get("icgs3_analysis") or {}).get("clusters") or sorted(clusters)
-    return [_state_label(meta, c) for c in order if c in clusters]
-
-
-def build_goelite_payload(meta: Dict, state: str) -> Dict:
-    """One cell state's BioMarkers terms, in the shape scALABLE's GO Terms view draws.
-
-    p, FDR and overlap are ICGS3's own (ICGS.biomarker_enrichment: hypergeometric p, BH FDR
-    over every cluster and term). ICGS3 stores no z-score, so z is GO-Elite's own
-    `compute_z_score` (goelite/structures.py) on ICGS3's overlap, query size, term size and
-    the gene universe ICGS3 tested against.
-    """
-    goelite = (meta.get("icgs3_analysis") or {}).get("goelite") or {}
-    path = Path(str(goelite.get("enrichment_tsv") or ""))
-    background = int(goelite.get("background_size") or 0)
-    cluster = _cluster_for_state(meta, state)
-    label = _state_label(meta, cluster)
-    payload = {"population": label, "cluster": cluster, "terms": [], "labels": [],
-               "statistics": {"p_value": "ICGS3 hypergeometric p", "fdr": "ICGS3 BH FDR, all clusters x terms",
-                              "z_score": "GO-Elite compute_z_score on ICGS3 overlap counts",
-                              "background_size": background,
-                              "highlight": f"FDR <= {GOELITE_MAX_FDR} and z > {GOELITE_MIN_Z}"}}
-    if not path.is_file() or background <= 0:
-        payload["message"] = "This job has no GO-Elite BioMarkers table."
-        return payload
-    frame = pd.read_csv(path, sep="\t")
-    frame = frame.loc[frame["cluster"].astype(str) == cluster]
-    if frame.empty:
-        payload["message"] = f"No BioMarkers term overlaps the markers of {label}."
-        return payload
-    # ICGS3 labels each cluster with its first row after sorting by FDR, p and name.
-    frame = frame.sort_values(["fdr", "p_value", "term_name"]).reset_index(drop=True)
-    terms = []
-    for index, row in frame.iterrows():
-        z_score = float(compute_z_score(int(row["overlap"]), int(row["query_size"]),
-                                        int(row["term_size"]), background))
-        fdr = float(row["fdr"])
-        genes = [g for g in str(row.get("overlap_genes") or "").split(",") if g]
-        significant = fdr <= GOELITE_MAX_FDR and z_score > GOELITE_MIN_Z
-        terms.append({
-            "term_id": "", "term_name": str(row["term_name"]), "direction": "up",
-            "fdr": fdr, "p_value": float(row["p_value"]), "z_score": z_score,
-            "fdr_plot": float(min(max(fdr, 1e-300), 1.0)), "score": float(-np.log10(min(max(fdr, 1e-300), 1.0))),
-            "overlap": int(row["overlap"]), "query_size": int(row["query_size"]), "term_size": int(row["term_size"]),
-            "selected": significant, "is_positive_sig": significant, "is_selected_positive_sig": significant,
-            "is_prediction": index == 0, "overlap_genes": genes, "selected_gene": genes[0] if genes else None,
-        })
-    payload["terms"] = terms
-    labelled = [t for t in terms if t["is_selected_positive_sig"]][:4]
-    if terms[0] not in labelled:
-        labelled = [terms[0]] + labelled[:3]
-    payload["labels"] = [{"term_name": t["term_name"], "z_score": t["z_score"], "fdr_plot": t["fdr_plot"],
-                          "selected_gene": t["selected_gene"], "overlap_genes": t["overlap_genes"],
-                          "label_color": "#1f19c7" if t["is_prediction"] else "#111827",
-                          "label_rank": i, "label_role": "prediction" if t["is_prediction"] else "top"}
-                         for i, t in enumerate(labelled)]
-    return payload
+from .biomarkers import _cluster_for_state, _state_label, goelite_states, build_goelite_payload
 
 
 # ------------------------------------------------------------------- wrapped builders
@@ -281,8 +203,8 @@ def _relabel_embedding(value):
 def _install_shared_wrappers() -> None:
     """Wrap webapp builders the routes call by module name; once per process.
 
-    As scalable_app.py wraps the same module. Only labels and the live stage message change;
-    no value is touched.
+    As scalable_app.py wraps the same module. Only labels change; no value is touched.
+    Native ICGS3 stage messages are preserved by the shared status builder.
     """
     if getattr(W, "_scalable_discover_wrappers_installed", False):
         return
@@ -309,16 +231,6 @@ def _install_shared_wrappers() -> None:
 
     W._chat_examples = chat_examples
 
-    original_live = W._derive_live_pipeline_message
-
-    def live_message(status, log_lines, fallback):
-        # The runner keeps the job message on the current ICGS3 stage; scALABLE-web's own
-        # log scan would report its last alignment-era marker instead.
-        if str(status or "").strip().lower() == "processing" and fallback:
-            return str(fallback)
-        return original_live(status, log_lines, fallback)
-
-    W._derive_live_pipeline_message = live_message
     W._scalable_discover_wrappers_installed = True
 
 
@@ -387,6 +299,7 @@ def _install_job_cleanup(app: FastAPI) -> None:
 
 def create_discover_app(overrides: Optional[Dict] = None) -> FastAPI:
     config = {
+        "UNIFIED_ANALYSIS_CONTROLS": False,
         "APP_TITLE": APP_NAME,
         "JOB_STORAGE": os.getenv("SCALABLE_DISCOVER_JOB_STORAGE", str(DEFAULT_JOB_STORAGE)),
         "ROOT_PATH": os.getenv("SCALABLE_DISCOVER_ROOT_PATH", ""),
@@ -466,7 +379,7 @@ def create_discover_app(overrides: Optional[Dict] = None) -> FastAPI:
         files: List[UploadFile] = File(...),
     ):
         species = _validate_species(species, reference)
-        return await original_create_job(species=species, reference=DISCOVER_REFERENCE_ID,
+        return await original_create_job(species=species, reference=DISCOVER_REFERENCE_ID, analysis_mode="unsupervised",
                                          ambient_option=ambient_option, soupx_option=soupx_option,
                                          sample_names=sample_names, files=files)
 

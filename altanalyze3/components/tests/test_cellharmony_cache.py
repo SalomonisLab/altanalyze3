@@ -152,7 +152,7 @@ def test_child_worker_kill_is_terminal_failure(tmp_path, monkeypatch, task):
     runner = JobRunner(store, tmp_path / 'registry.json', isolate_jobs=True)
     monkeypatch.setattr(runner, '_memory_wait_reason', lambda: None)
     monkeypatch.setattr('altanalyze3.components.cellHarmony.flask.tasks.subprocess.Popen',
-                        lambda *a, **k: SimpleNamespace(pid=123456, wait=lambda: -9))
+                        lambda *a, **k: SimpleNamespace(pid=123456, wait=lambda timeout=None: -9))
     try:
         if task == 'pipeline':
             runner.submit_pipeline(job)
@@ -162,7 +162,8 @@ def test_child_worker_kill_is_terminal_failure(tmp_path, monkeypatch, task):
         meta = store.get_job(job)
         state = meta if task == 'pipeline' else meta['differential']
         assert state['status'] == 'failed' and state['worker_pid'] is None
-        assert 'code -9' in state['message']
+        assert 'killed by the operating system' in state['message']
+        assert 'uploaded files remain available' in state['message']
     finally:
         runner.executor.shutdown(wait=True)
 

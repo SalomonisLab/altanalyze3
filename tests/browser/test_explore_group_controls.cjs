@@ -13,7 +13,7 @@ const groupBy = select(), groups = select();
 const elements = {'results-job-id': {value: 'job'}, 'viz1-groupby': groupBy, 'viz1-groups': groups};
 let resolveMetadata, requests = [];
 const metadata = new Promise(resolve => {resolveMetadata = resolve;});
-const ctx = vm.createContext({console, URLSearchParams,
+const ctx = vm.createContext({console, URLSearchParams, currentAnalysisMode:'supervised', currentAnalysisLayers:null,
   document: {getElementById: id => elements[id], createElement: () => ({})},
   panelElementId: (panel, suffix) => `${panel}-${suffix}`,
   loadPlotVariables: () => metadata, getResultsJobId: () => elements['results-job-id'].value, getPanelSelectValue: () => 'dotplot',
@@ -26,6 +26,7 @@ for (const [start, end] of [
   ['async function refreshGroupControls(', '/* The Color by'],
   ['function appendGeneSetGroupParams(', 'function panelGroupParams('],
   ['async function loadVisualizationPanel(', 'function renderVisualizationMessage('],
+  ['function initializeBothPanelModes(', 'function renderAnalysisLayers('],
 ]) {
   const offset = source.indexOf(start);
   vm.runInContext(source.slice(offset, source.indexOf(end, offset)), ctx);

@@ -34,15 +34,27 @@ def score_coding_potential(sequence):
     norm_usage_dict = {k:(v-min_freq)/(max_freq-min_freq) for k,v in usage_dict.items()}      
     length_seq = len(sequence)
     num_triplet = length_seq / 3
-    i = 0   
+    i = 0
     score = 0
+    skipped = 0
     while i + 2 < length_seq:
         triplet = sequence[i:i+3:1]
-        score_tri = norm_usage_dict[triplet]
-        score += score_tri
+        # A codon holding an ambiguous base is not in the 64-codon usage table, and indexing it
+        # raised `KeyError: 'GNC'` after 59.6 h of SNAF-B on POSEIDON Small_Intestine
+        # (job 1375812, 2026-10-08). hg38 and the Alt91 gene FASTA both carry N runs, so an
+        # ambiguous codon is ordinary input, not corruption. It carries no usage information, so
+        # it is dropped from BOTH the sum and the denominator. With no ambiguous codon present,
+        # skipped is 0 and this returns score/num_triplet, byte-identical to the original.
+        if triplet in norm_usage_dict:
+            score += norm_usage_dict[triplet]
+        else:
+            skipped += 1
         i += 3
-    score_potential = score/num_triplet # scale by the number of triplet in the sequence
-    return score_potential
+    denom = num_triplet - skipped
+    if denom <= 0:
+        # every codon was ambiguous: no coding-potential evidence either way
+        return 0.0
+    return score / denom
 
 def orf2pep(orf):
     assert len(orf) % 3 == 0

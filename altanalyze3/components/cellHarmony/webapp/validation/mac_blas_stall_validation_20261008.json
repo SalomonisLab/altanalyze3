@@ -1,0 +1,480 @@
+{
+  "date": "2026-10-08",
+  "job": "9f9964d515bb4f6f844f35e9117e0f1f",
+  "scope": "Recovery of the user-run Both job: unchanged native unsupervised workflow, reuse of already completed supervised and imputed results. No model fitting or imputation rerun.",
+  "root_cause": {
+    "platform": "macOS",
+    "stalled_worker_pid": 17883,
+    "main_thread": "SciPy LU -> scipy_sgetrf_ -> OpenBLAS blas_thread_init -> pthread mutex wait",
+    "stack_evidence": "/tmp/scalable-9f9964-worker-sample.txt",
+    "last_original_progress": "2026-10-08T12:41:08.614700Z",
+    "worker_stopped_at": "2026-10-08T14:45:47Z",
+    "cpu_observation": "Essentially idle; 94 seconds cumulative CPU over more than two hours"
+  },
+  "change": {
+    "file": "components/cellHarmony/flask/worker_runtime.py",
+    "policy": "Darwin isolated worker BLAS thread budgets set to 1 before interpreter package imports. OpenMP/Numba budgets retained; Linux/Windows budgets unchanged. Shared by web and discover runners.",
+    "algorithm_changes": false
+  },
+  "recovery": {
+    "status": "completed",
+    "recovery_started_at": "2026-10-08T14:46:02.583768+00:00",
+    "recovery_seconds": 76.76173499994911,
+    "unsupervised_seconds": 73.75190375000238,
+    "max_rss_bytes": 5174706176,
+    "summary": {
+      "qc_cells": 5359,
+      "union_cells": 5323,
+      "supervised_cells": 4355,
+      "unsupervised_cells": 5182,
+      "unaligned_clustered_cells": 968
+    },
+    "shared_genes": 32738,
+    "method_gate": true,
+    "blas_threads": "1"
+  },
+  "native_nmf": {
+    "rank": 52,
+    "sampled_cells": 5000,
+    "guide_features": 1294,
+    "clusters": 23,
+    "approximate_nmf_seconds": 2.0
+  },
+  "method_gate": {
+    "passed": true,
+    "settings_checked": 92,
+    "temporary_input_path_only_difference": true
+  },
+  "integrity": {
+    "X": {
+      "equal": true,
+      "shape": [
+        5323,
+        32738
+      ]
+    },
+    "layers/counts": {
+      "equal": true,
+      "shape": [
+        5323,
+        32738
+      ]
+    },
+    "layers/soupx_raw": {
+      "equal": true,
+      "shape": [
+        5323,
+        32738
+      ]
+    },
+    "adt": {
+      "equal": true,
+      "shape": [
+        4355,
+        56
+      ]
+    },
+    "grn_tf": {
+      "equal": true,
+      "shape": [
+        4355,
+        284
+      ]
+    },
+    "feature_roster": {
+      "equal": true,
+      "genes": 32738
+    }
+  },
+  "tests": {
+    "python_regressions_passed": 56,
+    "API_checks_passed": 47,
+    "API_failures": [],
+    "max_verified_request_seconds": 1.431,
+    "browser": "Verified live progress, rendered supervised/unsupervised UMAPs, 968 retained unaligned cells indicated; no visualization unavailable messages."
+  },
+  "serving_checks": [
+    {
+      "name": "completed status",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.011,
+      "bytes": 123069,
+      "detail": ""
+    },
+    {
+      "name": "supervised_state: variables",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.42,
+      "bytes": 4824,
+      "detail": ""
+    },
+    {
+      "name": "supervised_state: filters",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.003,
+      "bytes": 1999,
+      "detail": ""
+    },
+    {
+      "name": "supervised_state: genes",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.011,
+      "bytes": 717680,
+      "detail": ""
+    },
+    {
+      "name": "supervised_state: UMAP",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.514,
+      "bytes": 10855859,
+      "detail": ""
+    },
+    {
+      "name": "supervised_state: expression",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.369,
+      "bytes": 514315,
+      "detail": ""
+    },
+    {
+      "name": "supervised_state: violin",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.013,
+      "bytes": 17826,
+      "detail": ""
+    },
+    {
+      "name": "supervised_state: dotplot",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.013,
+      "bytes": 2232,
+      "detail": ""
+    },
+    {
+      "name": "supervised_state: combplot",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.026,
+      "bytes": 38832,
+      "detail": ""
+    },
+    {
+      "name": "supervised_state: Morpheus data",
+      "status": 200,
+      "ok": true,
+      "seconds": 1.431,
+      "bytes": 5706499,
+      "detail": ""
+    },
+    {
+      "name": "supervised_state: associations",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.05,
+      "bytes": 12832,
+      "detail": ""
+    },
+    {
+      "name": "unsupervised_cluster: variables",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.507,
+      "bytes": 4826,
+      "detail": ""
+    },
+    {
+      "name": "unsupervised_cluster: filters",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.004,
+      "bytes": 2003,
+      "detail": ""
+    },
+    {
+      "name": "unsupervised_cluster: genes",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.009,
+      "bytes": 717680,
+      "detail": ""
+    },
+    {
+      "name": "unsupervised_cluster: UMAP",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.042,
+      "bytes": 645292,
+      "detail": ""
+    },
+    {
+      "name": "unsupervised_cluster: expression",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.356,
+      "bytes": 608065,
+      "detail": ""
+    },
+    {
+      "name": "unsupervised_cluster: violin",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.014,
+      "bytes": 14600,
+      "detail": ""
+    },
+    {
+      "name": "unsupervised_cluster: dotplot",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.02,
+      "bytes": 1340,
+      "detail": ""
+    },
+    {
+      "name": "unsupervised_cluster: combplot",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.056,
+      "bytes": 27239,
+      "detail": ""
+    },
+    {
+      "name": "unsupervised_cluster: Morpheus data",
+      "status": 200,
+      "ok": true,
+      "seconds": 1.042,
+      "bytes": 2646846,
+      "detail": ""
+    },
+    {
+      "name": "unsupervised_cluster: associations",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.151,
+      "bytes": 12832,
+      "detail": ""
+    },
+    {
+      "name": "unsupervised_state: variables",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.525,
+      "bytes": 4824,
+      "detail": ""
+    },
+    {
+      "name": "unsupervised_state: filters",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.003,
+      "bytes": 2001,
+      "detail": ""
+    },
+    {
+      "name": "unsupervised_state: genes",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.009,
+      "bytes": 717680,
+      "detail": ""
+    },
+    {
+      "name": "unsupervised_state: UMAP",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.064,
+      "bytes": 742395,
+      "detail": ""
+    },
+    {
+      "name": "unsupervised_state: expression",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.319,
+      "bytes": 704658,
+      "detail": ""
+    },
+    {
+      "name": "unsupervised_state: violin",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.015,
+      "bytes": 11690,
+      "detail": ""
+    },
+    {
+      "name": "unsupervised_state: dotplot",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.014,
+      "bytes": 2360,
+      "detail": ""
+    },
+    {
+      "name": "unsupervised_state: combplot",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.027,
+      "bytes": 38499,
+      "detail": ""
+    },
+    {
+      "name": "unsupervised_state: Morpheus data",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.593,
+      "bytes": 2682686,
+      "detail": ""
+    },
+    {
+      "name": "unsupervised_state: associations",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.019,
+      "bytes": 12832,
+      "detail": ""
+    },
+    {
+      "name": "supervised coordinates",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.331,
+      "bytes": 546870,
+      "detail": ""
+    },
+    {
+      "name": "unsupervised coordinates",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.026,
+      "bytes": 645333,
+      "detail": ""
+    },
+    {
+      "name": "rna features",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.01,
+      "bytes": 717680,
+      "detail": ""
+    },
+    {
+      "name": "rna: UMAP",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.022,
+      "bytes": 645292,
+      "detail": ""
+    },
+    {
+      "name": "rna: violin",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.236,
+      "bytes": 13206,
+      "detail": ""
+    },
+    {
+      "name": "adt features",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.002,
+      "bytes": 947,
+      "detail": ""
+    },
+    {
+      "name": "adt: UMAP",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.079,
+      "bytes": 526254,
+      "detail": ""
+    },
+    {
+      "name": "adt: violin",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.008,
+      "bytes": 56624,
+      "detail": ""
+    },
+    {
+      "name": "lipids features",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.006,
+      "bytes": 6812,
+      "detail": ""
+    },
+    {
+      "name": "lipids: UMAP",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.074,
+      "bytes": 526254,
+      "detail": ""
+    },
+    {
+      "name": "lipids: violin",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.006,
+      "bytes": 14885,
+      "detail": ""
+    },
+    {
+      "name": "grn features",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.259,
+      "bytes": 1785782,
+      "detail": ""
+    },
+    {
+      "name": "grn_tf features",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.007,
+      "bytes": 4427,
+      "detail": ""
+    },
+    {
+      "name": "grn_tf: UMAP",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.077,
+      "bytes": 526254,
+      "detail": ""
+    },
+    {
+      "name": "grn_tf: violin",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.006,
+      "bytes": 14501,
+      "detail": ""
+    },
+    {
+      "name": "download log provenance",
+      "status": 200,
+      "ok": true,
+      "seconds": 0.006,
+      "bytes": 105599,
+      "detail": ""
+    }
+  ],
+  "service": "Restarted idle port 8000 service PID 56060, HTTP200; user port 8011 tab untouched.",
+  "limitations": [
+    "The original job elapsed duration retains the diagnosed two-hour stall; recovery duration is recorded separately.",
+    "This validates the macOS numerical thread fix. It does not establish a Linux deadlock or a cloud performance improvement.",
+    "The earlier separate scientific fixture integrity pause remains unresolved and unchanged."
+  ]
+}

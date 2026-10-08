@@ -12,6 +12,13 @@ const VISUALIZATION_DEFAULT_MODE = {
   viz1: "cluster",
   viz2: "expression_umap",
 };
+let currentAnalysisMode = "supervised";
+let currentAnalysisLayers = null;
+let activeAnalysisLayer = "";
+let clusterAssociationsAvailable = false;
+let currentBiomarkerStates = [];
+let currentBiomarkersAvailable = false;
+
 let panelPlotData = {
   viz1: null,
   viz2: null,
@@ -128,6 +135,7 @@ let exploreResultsReadyPromise = null;
 let exploreAutoOpenPendingJobId = null;
 let currentDisplayFiltersMeta = null;
 let currentJobStatus = "";
+let qcSubmissionJobId = "";
 let previousJobStatus = "";
 let currentJobSpecies = "";
 let currentJobReference = "";
@@ -1131,7 +1139,13 @@ function panelCellsPerSample(panelKey) {
 function availableVisualizationModes(panelKey) {
   const modality = panelModality(panelKey);
   const modalityInfo = modalityDefinition(modality);
-  const modes = [...BASE_VISUALIZATION_MODES];
+  const modes = BASE_VISUALIZATION_MODES.filter(mode => mode.value !== "relative" || currentAnalysisMode !== "unsupervised");
+  if (currentAnalysisMode !== "supervised") {
+    const clusters = modes.find(mode=>mode.value==="cluster");
+    if (clusters) modes[modes.indexOf(clusters)] = {...clusters,label:"UMAP cell states"};
+  }
+  if (clusterAssociationsAvailable) modes.push({value:"cluster_associations", label:"Cluster associations"});
+  if (currentBiomarkersAvailable && !window.__SCALABLE_DISCOVER__) modes.push({value:"goelite_biomarkers",label:"GO-Elite BioMarkers"});
   if (markerHeatmapAvailable(panelKey)) {
     modes.push({ value: "marker_heatmap", label: "MarkerHeatmap" });
   }
@@ -1257,7 +1271,7 @@ function updateExpressionModeOptions() {
       ...(currentMarkerAnalysis?.networks || []).map(entry => entry.population),
       ...(currentDisplayFiltersMeta?.values?.[currentDisplayFiltersMeta?.default_secondary_field] || []),
     ].filter(Boolean))];
-    const dropdownPopulations = modeSelect.value.startsWith("integrated_") ? integratedPopulations : modeSelect.value === "fastcomm_network" ? fastcommPopulations : networkPopulations;
+    const dropdownPopulations = modeSelect.value === "goelite_biomarkers" ? currentBiomarkerStates : modeSelect.value.startsWith("integrated_") ? integratedPopulations : modeSelect.value === "fastcomm_network" ? fastcommPopulations : networkPopulations;
     dropdownPopulations.forEach((population) => {
       const option = document.createElement("option");
       option.value = population;
@@ -1273,7 +1287,8 @@ function updateExpressionModeOptions() {
 
     const showMarkerPopulation =
       ((mode === "marker_network" || mode.startsWith("integrated_")) && dropdownPopulations.length > 0)
-      || (mode === "fastcomm_network" && fastcommPopulations.length > 0 && fastCommPlotNeedsPopulation(fastcommPlotType));
+      || (mode === "fastcomm_network" && fastcommPopulations.length > 0 && fastCommPlotNeedsPopulation(fastcommPlotType))
+      || (mode === "goelite_biomarkers" && dropdownPopulations.length > 0);
     const showGene = mode === "expression_umap" || mode === "violin";
     updatePanelFeatureInput(panelKey);
     const populationLabel = markerPopulationField.querySelector("span");
@@ -1298,7 +1313,7 @@ function updateExpressionModeOptions() {
     // don't apply to the network, so hide them to avoid confusion.
     const filterStack = document.getElementById(panelElementId(panelKey, "filter-stack"));
     if (filterStack) {
-      filterStack.classList.toggle("hidden", showGrn || mode === "marker_network" || mode.startsWith("integrated_"));
+      filterStack.classList.toggle("hidden", showGrn || mode === "marker_network" || mode === "goelite_biomarkers" || mode.startsWith("integrated_"));
     }
     const densityRow = document.getElementById(panelElementId(panelKey, "marker-density-row"));
     if (densityRow) {
@@ -2070,6 +2085,7 @@ document.addEventListener("DOMContentLoaded", () => {
   initSpeciesSelect();
   initSampleRows();
   hookForms();
+  syncAnalysisControls();
   updateWorkflowPanels(null);
   updateDifferentialUi(null);
   updateResetDataButton();
@@ -2100,9 +2116,13 @@ async function restoreJobFromUrl() {
     document.getElementById("reference-select").value = data.reference;
     document.getElementById("reference-select").dispatchEvent(new Event("change"));
     for (const [name, value] of Object.entries(data.qc || {})) {
-      const field = document.querySelector(`#qc-form [name="${name}"]`);
+      const field = name === "analysis_mode" ? document.getElementById("analysis-mode")
+        : document.querySelector(`#qc-form [name="${name}"]`);
       if (field && !Array.isArray(value)) field.value = value == null ? "" : String(value);
     }
+    const analysis = document.getElementById("analysis-mode");
+    if (analysis) analysis.value = data.analysis_mode || data.qc?.analysis_mode || "supervised";
+    syncAnalysisControls();
     const imputed = data.qc?.impute_modalities || [];
     if (imputed.length) document.getElementById("qc-impute-modality-select").value = imputed.includes("all") ? "all" : imputed[0];
     applyJobStatus(jobId, data);
@@ -2288,6 +2308,10 @@ function addSampleRow() {
 function hookForms() {
   document.getElementById("job-form").addEventListener("submit", handleJobSubmit);
   document.getElementById("qc-form").addEventListener("submit", handleQcSubmit);
+  document.getElementById("analysis-mode")?.addEventListener("change", () => {
+    syncAnalysisControls();
+    loadReferencePreview();
+  });
   document.getElementById("differential-form").addEventListener("submit", handleDifferentialSubmit);
   document.getElementById("results-form").addEventListener("submit", handleResultsSubmit);
   document.getElementById("reset-data-btn").addEventListener("click", resetWorkspaceData);
@@ -2513,6 +2537,16 @@ function markDifferentialConfigDirty(state) {
   return {
     ...state,
     status: "idle",
+    progress: 0,
+    run_id: null,
+    archive_url: null,
+    heatmap_svg_url: null,
+    heatmap_pdf_url: null,
+    heatmap_png_url: null,
+    result_populations: [],
+    visualization_populations: {},
+    networks: [],
+    default_result_population: null,
     message: "Differential settings changed. Run cellHarmony-differential to analyze the updated configuration.",
   };
 }
@@ -2710,6 +2744,7 @@ async function handleJobSubmit(evt) {
   const formData = new FormData();
   formData.append("species", species);
   formData.append("reference", reference);
+  formData.append("analysis_mode", document.getElementById("analysis-mode")?.value || "supervised");
 
   const rows = document.querySelectorAll("#sample-container .sample-row");
   if (!rows.length) {
@@ -2774,7 +2809,15 @@ async function handleQcSubmit(evt) {
     alert("Enter a job id.");
     return;
   }
+  if (qcSubmissionJobId === jobId) return;
+  if (["queued", "processing"].includes(currentJobStatus)) {
+    startStatusPolling(jobId);
+    return;
+  }
   const payload = {
+    analysis_mode: document.getElementById("analysis-mode")?.value || "supervised",
+    umap_fit_mode: evt.target.umap_fit_mode?.value || "landmark",
+    max_k: evt.target.max_k?.value.trim() ? Number(evt.target.max_k.value) : null,
     min_genes: evt.target.min_genes.value,
     min_counts: evt.target.min_counts.value,
     min_cells: evt.target.min_cells.value,
@@ -2790,6 +2833,20 @@ async function handleQcSubmit(evt) {
   if (typeof window.scalableQcOptions === "function") {
     Object.assign(payload, window.scalableQcOptions(evt.target));
   }
+  qcSubmissionJobId = jobId;
+  updateAnalysisRunControl();
+  document.getElementById("qc-cell-status").textContent = "Starting analysis…";
+  const isCurrentJob = () => document.getElementById("qc-job-id").value.trim() === jobId;
+  const recoverActiveSubmission = async (resp) => {
+    if (resp.status !== 409 || !isCurrentJob()) return false;
+    const statusResp = await fetch(apiPath(`/jobs/${jobId}/status`), { cache: "no-store" });
+    const status = await statusResp.json();
+    if (!statusResp.ok || !["queued", "processing"].includes(status.status)) return false;
+    if (!isCurrentJob()) return true;
+    applyJobStatus(jobId, status);
+    startStatusPolling(jobId);
+    return true;
+  };
   try {
     if (selectedReferenceDiffersFromLoadedJob()) {
       const configureResp = await fetch(apiPath(`/jobs/${jobId}/configure`), {
@@ -2802,8 +2859,10 @@ async function handleQcSubmit(evt) {
       });
       const configureData = await parseApiResponse(configureResp);
       if (!configureResp.ok) {
+        if (await recoverActiveSubmission(configureResp)) return;
         throw new Error(configureData.detail || "Failed to update the job reference.");
       }
+      if (!isCurrentJob()) return;
       currentJobSpecies = configureData.species || currentJobSpecies;
       currentJobReference = configureData.reference || currentJobReference;
       referenceRerunPending = false;
@@ -2833,19 +2892,32 @@ async function handleQcSubmit(evt) {
     });
     let data = await resp.json();
     if (!resp.ok) {
+      if (await recoverActiveSubmission(resp)) return;
       throw new Error(data.detail || "Failed to save QC.");
     }
+    if (!isCurrentJob()) return;
     resp = await fetch(apiPath(`/jobs/${jobId}/run`), { method: "POST" });
     data = await resp.json();
     if (!resp.ok) {
+      if (await recoverActiveSubmission(resp)) return;
       throw new Error(data.detail || "Failed to queue job.");
     }
+    if (!isCurrentJob()) return;
     loadedResultsJobId = null;
     resetExploreResultsReadiness(jobId);
     setResultMode("baseline");
+    currentJobStatus = "queued";
+    updateWorkflowPanels("queued");
+    document.getElementById("qc-cell-status").textContent = "Analysis queued. Waiting for a worker…";
     startStatusPolling(jobId);
   } catch (err) {
-    alert(err.message);
+    if (isCurrentJob()) {
+      document.getElementById("qc-cell-status").textContent = err.message;
+      alert(err.message);
+    }
+  } finally {
+    if (qcSubmissionJobId === jobId) qcSubmissionJobId = "";
+    updateAnalysisRunControl();
   }
 }
 
@@ -2951,6 +3023,14 @@ function applyJobStatus(jobId, data) {
   currentJobStatus = String(data.status || "").trim().toLowerCase();
   currentJobSpecies = String(data.species || currentJobSpecies || "");
   currentJobReference = String(data.reference || currentJobReference || "");
+  currentAnalysisMode = data.analysis_mode || data.qc?.analysis_mode || "supervised";
+  initializeBothPanelModes(jobId);
+  currentAnalysisLayers = data.cell_state_layers || null;
+  activeAnalysisLayer = data.active_cell_state_layer || data.cluster_key || "";
+  clusterAssociationsAvailable = currentAnalysisMode === "both" && data.status === "completed";
+  currentBiomarkersAvailable = Boolean(data.icgs3_analysis?.goelite?.available) && activeAnalysisLayer !== "supervised_state";
+  currentBiomarkerStates = currentAnalysisLayers?.layers?.find(layer=>layer.key===activeAnalysisLayer)?.states || (data.icgs3_analysis?.clusters || []).map(cluster => activeAnalysisLayer === "unsupervised_state" ? (currentAnalysisLayers?.names?.[cluster] || cluster) : cluster);
+  renderAnalysisLayers(jobId);
   currentMarkerAnalysis = data.marker_analysis && data.marker_analysis.enabled ? data.marker_analysis : null;
   currentMarkerAnalysisByModality = data.marker_analysis_by_modality || { rna: currentMarkerAnalysis };
   currentFastCommAnalysis = data.fastcomm_analysis && data.fastcomm_analysis.enabled ? data.fastcomm_analysis : null;
@@ -3033,7 +3113,19 @@ function applyJobStatus(jobId, data) {
   }
 }
 
+function updateAnalysisRunControl() {
+  const button = document.querySelector('#qc-form button[type="submit"]');
+  if (!button) return;
+  const submitting = Boolean(qcSubmissionJobId && qcSubmissionJobId === document.getElementById("qc-job-id")?.value.trim());
+  const active = ["queued", "processing"].includes(currentJobStatus);
+  button.disabled = submitting || active;
+  button.textContent = active ? (currentJobStatus === "queued" ? "Queued…" : "Running…")
+    : submitting ? "Starting…" : "Save QC and run";
+  button.setAttribute("aria-busy", String(submitting || active));
+}
+
 function updateWorkflowPanels(status) {
+  updateAnalysisRunControl();
   const normalizedStatus = String(status || "").trim().toLowerCase();
   const hasUploadedJob = Boolean(normalizedStatus);
   const hasStartedQcRun = hasUploadedJob && normalizedStatus !== "uploaded";
@@ -3054,7 +3146,7 @@ function updateWorkflowPanels(status) {
   qcLivePanel.classList.toggle("hidden", !hasStartedQcRun);
   differentialPanel.classList.toggle("hidden", !hasCompletedAlignment);
   exploreControlsPanel.classList.toggle("hidden", !hasExploreReady);
-  previewPanel.classList.toggle("hidden", hasUploadedJob);
+  previewPanel.classList.toggle("hidden", hasUploadedJob || document.getElementById("analysis-mode")?.value === "unsupervised");
   if (runGrid) {
     runGrid.classList.toggle("preupload-mode", !hasUploadedJob);
     runGrid.classList.toggle("workflow-mode", hasUploadedJob);
@@ -3085,7 +3177,7 @@ function updateWorkflowPanels(status) {
 async function loadReferencePreview() {
   if (restoringSavedSession) return;
   const previewPanel = document.getElementById("reference-preview-panel");
-  if (currentJobStatus) {
+  if (currentJobStatus || document.getElementById("analysis-mode")?.value === "unsupervised") {
     previewPanel.classList.add("hidden");
     return;
   }
@@ -3550,6 +3642,9 @@ function buildQcCellSummary(data) {
   if (status === "queued" && message) {
     return message;
   }
+  if (status === "processing" && (message.includes("ICGS3") || message.includes("cellHarmony step"))) {
+    return message;
+  }
   let alignmentExcluded = null;
   for (const line of lines) {
     const match = line.match(/Applied min_alignment_score=.*?Excluded\s+(\d+)\s+cells,\s+kept\s+(\d+)/i);
@@ -3621,7 +3716,7 @@ function buildQcCellSummary(data) {
 
   if (status === "completed") {
     if (!referenceRerunPending && !areExploreResultsReady()) {
-      return "Alignment completed. Finalizing Explore results and loading the combined h5ad for interactive viewing...";
+      return `${currentAnalysisMode === "supervised" ? "Alignment" : "Analysis"} completed. Finalizing Explore results and loading the combined h5ad for interactive viewing...`;
     }
     const duration = data.analysis_duration_seconds;
     const exclusionSuffix =
@@ -3672,23 +3767,7 @@ async function populateDownloadLinks(jobId, statusData = null) {
   if (generation !== explorePayloadCache.generation || jobId !== getResultsJobId()) return;
   container.innerHTML = "";
   const artifacts = data.artifacts || {};
-  const versions = Object.entries(data.model_versions || {});
-  if (versions.length) {
-    const details = document.createElement("details");
-    const title = document.createElement("summary");
-    title.textContent = "Model versions used in this analysis";
-    details.appendChild(title);
-    versions.forEach(([modality, record]) => {
-      const row = document.createElement("div");
-      row.textContent = `${modality}: ${record.model_display_id || record.model_version_id}`;
-      row.title = record.model_version_id;
-      row.style.overflowWrap = "anywhere";
-      details.appendChild(row);
-    });
-    container.appendChild(details);
-  }
   const labelMap = {
-    model_provenance: "Download model versions and provenance",
     assignments: "Download assignments",
     combined_h5ad: "Download combined_h5ad",
     marker_genes_zip: "Download marker genes ZIP",
@@ -3702,10 +3781,14 @@ async function populateDownloadLinks(jobId, statusData = null) {
     imputed_grn_results_zip: "Download GRN edge results ZIP",
     imputed_grn_tf_results_zip: "Download TF activity results ZIP",
     fastcomm_archive: "Download cell communication ZIP",
+    cluster_associations: "Download cluster associations",
+    unsupervised_marker_genes_zip: "Download unsupervised marker genes ZIP",
   };
   Object.keys(artifacts).forEach((key) => {
     if (
       key === "umap_coordinates" ||
+      key === "model_provenance" ||
+      (key === "unaligned_cells_h5ad" && data.analysis_mode === "both") ||
       key === "umap_placeholder_expression" ||
       key === "umap_pdf" ||
       key === "umap_pdf_plain" ||
@@ -3778,8 +3861,7 @@ function updateDifferentialUi(state) {
   }
   const completed = (state && state.completed_comparisons) || [];
   completedField.classList.toggle("hidden", !completed.length || Boolean(window.__SCALABLE_VIEWER__));
-  populateSingleSelect(document.getElementById("differential-completed-run"),
-    completed.map(c => ({value: c.id, label: `${modalityDefinition(c.modality).label}: ${c.comparison}`})), state && state.run_id);
+  populateCompletedDifferentialChoices(document.getElementById("differential-completed-run"), state, populationOptions);
   document.getElementById("differential-completed-run").disabled = ["queued", "processing"].includes(state && state.status);
   const modalityOptions = (state && state.modalities) || [{ id: "rna", label: "RNA", feature_label: "gene" }];
   const sampleFieldOptions = (state && state.sample_fields) || [];
@@ -3916,7 +3998,7 @@ function updateDifferentialUi(state) {
     vizModeSelect.value = visualizationModes[0].value;
   }
 
-  if (state.archive_url) {
+  if (state.status === "completed" && state.archive_url) {
     archiveLink.href = state.archive_url;
     archiveLink.classList.remove("hidden");
   } else {
@@ -6011,6 +6093,34 @@ async function loadVisualizationPanel(panelKey) {
     return;
   }
 
+  if (mode === "goelite_biomarkers") {
+    const state = getPanelSelectValue(panelKey,"marker-population") || currentBiomarkerStates[0];
+    try {
+      const payload = await explorePayloadCache.fetch(apiPath(`/jobs/${jobId}/biomarkers/goelite?state=${encodeURIComponent(state)}`));
+      if (!isCurrent()) return;
+      panelPlotData[panelKey] = {source:mode,payload};
+    } catch (error) {
+      if (!isCurrent()) return;
+      panelPlotData[panelKey] = {source:"error",payload:{message:error.message}};
+    }
+    renderVisualizationPanel(panelKey); return;
+  }
+
+  if (mode === "cluster_associations") {
+    const params = new URLSearchParams();
+    appendGeneSetSubsetParams(params, panelKey);
+    try {
+      const payload = await explorePayloadCache.fetch(apiPath(`/jobs/${jobId}/cluster-associations?${params}`));
+      if (!isCurrent()) return;
+      panelPlotData[panelKey] = {source:mode, payload};
+    } catch (error) {
+      if (!isCurrent()) return;
+      panelPlotData[panelKey] = {source:"error", payload:{message:error.message}};
+    }
+    renderVisualizationPanel(panelKey);
+    return;
+  }
+
   // Gene-set plot types fetch their own payload and draw it here, so they do not
   // travel through the single-molecule expression path below.
   if (GENE_SET_MODES.has(mode)) {
@@ -6055,6 +6165,8 @@ async function loadVisualizationPanel(panelKey) {
   }
   try {
     if (isUmapMode(mode)) {
+      await refreshUmapOptions(panelKey);
+      if (!isCurrent()) return;
       const params = getDisplayFilterParams(panelKey);
       params.set("modality", modality);
       // Only the cell-type view offers these. "UMAP broad" draws reference
@@ -6073,6 +6185,10 @@ async function loadVisualizationPanel(panelKey) {
         } else if (coordsKey) {
           params.set("coords", coordsKey);
         }
+      }
+      if (mode === "relative" && currentAnalysisMode === "both") {
+        params.delete("x_field"); params.delete("y_field");
+        params.set("coords", "X_umap_supervised");
       }
       params.set("compact", "true");
       const suffix = params.toString() ? `?${params.toString()}` : "";
@@ -6239,7 +6355,25 @@ function setUmapPanelSummary(panelKey, umapData) {
   if (umapData && Number(umapData.n_dropped_no_coordinate) > 0) {
     parts.push(`${umapData.n_dropped_no_coordinate} of ${umapData.n_cells_selected} cells not drawn: no value on both axes`);
   }
-  if (parts.length) setPanelSummary(panelKey, parts.join(" | "));
+  setPanelSummary(panelKey, parts.join(" | "));
+  const unaligned = Number(umapData?.unplaced_population_counts?.Unaligned || 0);
+  if (currentAnalysisMode === "both" && unaligned > 0 && umapData.color_label === "supervised_state") {
+    const summary = document.getElementById(panelElementId(panelKey, "filter-summary"));
+    const axes = ["xfield", "yfield"].map(name => document.getElementById(panelElementId(panelKey, name)));
+    const options = axes.map((select, i) => Array.from(select?.options || []).find(option =>
+      option.textContent.startsWith(`Unsupervised UMAP ${i + 1} (`)));
+    if (summary && options.every(Boolean)) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "unaligned-view-btn";
+      button.textContent = `Show ${unaligned} unaligned cells on unsupervised UMAP`;
+      button.addEventListener("click", () => {
+        axes.forEach((select, i) => { select.value = options[i].value; });
+        loadVisualizationPanel(panelKey);
+      });
+      summary.appendChild(button);
+    }
+  }
 }
 
 function renderPanelUmap(panelKey, umapData, mode, dotScale) {
@@ -6256,7 +6390,7 @@ function renderPanelUmap(panelKey, umapData, mode, dotScale) {
   };
   if (mode === "frequency") {
     const sampleField = String(umapData.sample_field || "sample").trim() || "sample";
-    const queryPoints = (umapData.query || []).filter((point) => String(point.sample || "").trim());
+    const queryPoints = (umapData.frequency_counts || umapData.query || []).filter((point) => String(point.sample || "").trim());
     if (!queryPoints.length) {
       Plotly.newPlot(panelPlotId(panelKey), [], {
         ...layout,
@@ -6290,7 +6424,7 @@ function renderPanelUmap(panelKey, umapData, mode, dotScale) {
         sampleMap = new Map();
         countsBySample.set(sample, sampleMap);
       }
-      sampleMap.set(population, (sampleMap.get(population) || 0) + 1);
+      sampleMap.set(population, (sampleMap.get(population) || 0) + (point.cells || 1));
     });
 
     const populationStats = new Map();
@@ -6436,6 +6570,12 @@ function renderPanelUmap(panelKey, umapData, mode, dotScale) {
     bgcolor: "rgba(255,255,255,0)",
     opacity: 1,
   }));
+  const unaligned = Number(umapData.unplaced_population_counts?.Unaligned || 0);
+  if (currentAnalysisMode === "both" && unaligned > 0 && umapData.color_label === "supervised_state") {
+    layout.annotations.push({text: `Unaligned: ${unaligned} retained cells<br>No coordinates in this embedding`,
+      x: 0, y: 1, xref: "paper", yref: "paper", xanchor: "left", yanchor: "top",
+      showarrow: false, align: "left", font: {size: 11, color: "#64748b"}, bgcolor: "rgba(255,255,255,0.9)"});
+  }
   if (umapData.axes_source === "obs") {
     // A UMAP hides its tick labels because the numbers mean nothing. A metadata
     // axis is the opposite: the value is the point of the plot, so it is
@@ -6652,6 +6792,22 @@ function drawVisualizationPanel(panelKey) {
     resetVisualizationSurface(panelKey);
   }
   const data = panelPlotData[panelKey];
+
+  if (mode === "goelite_biomarkers") {
+    resetVisualizationSurface(panelKey);
+    if (!data || data.source === "error") renderVisualizationMessage(panelKey,data?.payload?.message || "BioMarkers unavailable.");
+    else {renderGoeliteBiomarkers(panelKey,data.payload); setPanelSummary(panelKey,data.payload.message || "ICGS3 BioMarkers enrichment; hypergeometric p and BH FDR across every cluster and term. This predicts annotation from marker overlap.");}
+    return;
+  }
+  if (mode === "cluster_associations") {
+    if (!data || data.source === "error") {
+      renderVisualizationMessage(panelKey, data?.payload?.message || "Cluster associations unavailable.");
+      return;
+    }
+    resetVisualizationSurface(panelKey);
+    renderClusterAssociations(panelKey, data.payload);
+    return;
+  }
 
   // Gene-set figures are drawn from their own payload, not the expression one.
   if (GENE_SET_MODES.has(mode)) {
@@ -7898,13 +8054,14 @@ async function refreshUmapOptions(panelKey) {
   colorBy.innerHTML = "";
   const clusterOption = document.createElement("option");
   clusterOption.value = "";
-  clusterOption.textContent = `${info.cluster_key} (cellHarmony)`;
+  const layerLabel = key => currentAnalysisLayers?.layers?.find(entry => entry.key === key)?.label || key;
+  clusterOption.textContent = layerLabel(info.cluster_key);
   colorBy.appendChild(clusterOption);
   (info.color_variables || info.variables || []).forEach((variable) => {
     if (String(variable.field) === String(info.cluster_key)) return;
     const option = document.createElement("option");
     option.value = variable.field;
-    option.textContent = `${variable.field} (${variable.n})`;
+    option.textContent = `${layerLabel(variable.field)} (${variable.n})`;
     colorBy.appendChild(option);
   });
   colorBy.value = Array.from(colorBy.options).some((o) => o.value === previousColor) ? previousColor : "";
@@ -7959,6 +8116,7 @@ async function refreshUmapOptions(panelKey) {
       select.addEventListener("change", () => loadVisualizationPanel(panelKey));
     }
   });
+  applyBothUmapDefaults(panelKey, jobId, info);
 
   if (colorBy.dataset.wired !== "1") {
     colorBy.dataset.wired = "1";
@@ -8768,4 +8926,163 @@ function drawChatFrequency(spec) {
       xanchor: "right", font: { size: 9, color: "#555555" },
     }],
   }, { responsive: true, displaylogo: false });
+}
+
+
+function syncAnalysisControls() {
+  const control = document.getElementById("analysis-mode");
+  if (!control) return; // standalone discover/viewer owns its controls
+  const mode = control.value;
+  const qcPanel = document.getElementById("qc-panel");
+  if (qcPanel) qcPanel.dataset.analysisMode = mode;
+  document.getElementById("analysis-clustering-options")?.classList.toggle("hidden", mode === "supervised");
+  const reference = document.getElementById("reference-select");
+  reference?.closest(".field")?.classList.toggle("hidden", mode === "unsupervised");
+  if (reference) reference.required = mode !== "unsupervised";
+  document.getElementById("reference-preview-panel")?.classList.toggle("hidden", Boolean(currentJobStatus) || mode === "unsupervised");
+  const cutoff = document.querySelector('#qc-form [name="align_cutoff"]');
+  cutoff?.closest(".field")?.classList.toggle("hidden", mode === "unsupervised");
+  const heading = document.querySelector("#qc-panel h2");
+  if (heading) heading.textContent = mode === "supervised" ? "2. QC and alignment" : mode === "unsupervised" ? "2. QC and ICGS3 clustering" : "2. QC, alignment and ICGS3 clustering";
+  updateImputeModalityField();
+  if (mode === "unsupervised") {
+    document.getElementById("qc-impute-modality-field")?.classList.add("hidden");
+    const impute = document.getElementById("qc-impute-modality-select");
+    if (impute) impute.value = "none";
+  }
+}
+
+function completedDifferentialLabel(entry, populationOptions) {
+  let column = "";
+  try { column = JSON.parse(entry.contrast || "{}").population_col || ""; } catch (_) {}
+  const label = populationOptions.find(option => option.value === column)?.label || column;
+  return `${modalityDefinition(entry.modality).label}: ${entry.comparison}${label ? ` (${label})` : ""}`;
+}
+
+function populateCompletedDifferentialChoices(select, state, populationOptions) {
+  const options = (state?.completed_comparisons || []).map(entry =>
+    ({value: entry.id, label: completedDifferentialLabel(entry, populationOptions)}));
+  if (state?.status !== "completed") options.unshift({value:"",label:"Select a saved comparison"});
+  populateSingleSelect(select, options, state?.run_id);
+  if (state?.status !== "completed") select.value = "";
+}
+
+function initializeBothPanelModes(jobId) {
+  if (currentAnalysisMode !== "both") return;
+  VISUALIZATION_PANELS.forEach(panel => {
+    const mode = document.getElementById(panelElementId(panel, "mode"));
+    if (mode && mode.dataset.bothDefaultsJobId !== jobId) {
+      mode.value = "cluster";
+      mode.dataset.bothDefaultsJobId = jobId;
+    }
+  });
+}
+
+function applyBothUmapDefaults(panelKey, jobId, info) {
+  if (currentAnalysisMode !== "both") return;
+  const color = document.getElementById(panelElementId(panelKey, "colorby"));
+  if (!color || color.dataset.bothDefaultsJobId === jobId) return;
+  const branch = panelKey === "viz1" ? "supervised" : "unsupervised";
+  const key = branch === "supervised" ? "supervised_state" : "unsupervised_cluster";
+  const colorValue = key === info.cluster_key ? "" : key;
+  const fields = ["x", "y"].map((axis, i) => (info.numeric_variables || []).find(entry =>
+    entry.field === `umap_${branch}_${axis}` || entry.label === `${branch === "supervised" ? "Supervised" : "Unsupervised"} UMAP ${i + 1}`));
+  if (!fields.every(Boolean) || !Array.from(color.options).some(option => option.value === colorValue)) return;
+  color.value = colorValue;
+  ["xfield", "yfield"].forEach((axis, i) => {
+    document.getElementById(panelElementId(panelKey, axis)).value = fields[i].field;
+  });
+  color.dataset.bothDefaultsJobId = jobId;
+}
+
+function renderAnalysisLayers(jobId) {
+  if (window.__SCALABLE_DISCOVER__) return;
+  const form = document.getElementById("results-form");
+  let field = document.getElementById("analysis-layer-field");
+  const layers = currentAnalysisLayers?.layers || [];
+  if (layers.length < 2) {field?.remove(); return;}
+  if (!field) {
+    field = document.createElement("label"); field.id = "analysis-layer-field"; field.className = "field";
+    const caption = document.createElement("span"); caption.textContent = "Cell-state layer";
+    const select = document.createElement("select"); select.id = "analysis-layer-select";
+    field.append(caption, select); form.prepend(field);
+    select.addEventListener("change", () => {
+      const id = getResultsJobId();
+      document.cookie = `scalable_layer_${id}=${encodeURIComponent(select.value)}; path=${APP_ROOT_PATH || "/"}; SameSite=Lax`;
+      window.location.reload();
+    });
+  }
+  const select = field.querySelector("select");
+  const identity = JSON.stringify(layers.map(entry => [entry.key, entry.label]));
+  if (select.dataset.identity !== identity) {
+    select.replaceChildren(...layers.map(entry => {
+      const option = document.createElement("option"); option.value = entry.key; option.textContent = entry.label || entry.key; return option;
+    }));
+    select.dataset.identity = identity;
+  }
+  select.value = activeAnalysisLayer || currentAnalysisLayers.default;
+}
+
+function renderClusterAssociations(panelKey, payload) {
+  const rows = payload.rows || [];
+  const largest = Math.max(1, ...rows.map(row => row.cells));
+  Plotly.newPlot(panelPlotId(panelKey), [{
+    type:"scatter", mode:"markers", x:rows.map(row=>row.cluster), y:rows.map(row=>row.state),
+    customdata:rows.map(row=>[row.cells, row.cluster_cells, row.percent]),
+    marker:{size:rows.map(row=>row.cells), sizemode:"area", sizeref:2*largest/(32*32), sizemin:3,
+      color:rows.map(row=>row.percent), colorscale:"Viridis", cmin:0, cmax:100,
+      colorbar:{title:{text:"% of cluster"}}, line:{width:0.5,color:"#334155"}},
+    hovertemplate:"%{x} → %{y}<br>%{customdata[0]:,} shared cell barcodes<br>%{customdata[2]:.1f}% of %{customdata[1]:,} cluster cells<extra></extra>"
+  }], {
+    title:{text:"Supervised assignments within unsupervised clusters",font:{size:15}},
+    margin:{l:200,r:90,t:48,b:110}, height:Math.max(450, 22*(payload.states?.length||0)+190),
+    xaxis:{title:{text:"Unsupervised cluster"},categoryorder:"array",categoryarray:payload.clusters,tickangle:-45,automargin:true},
+    yaxis:{title:{text:"Supervised cell state"},categoryorder:"array",categoryarray:payload.states,automargin:true},
+    annotations:[{text:`${payload.cells.toLocaleString()} cells; dot area = barcode count; color = % within cluster`,xref:"paper",yref:"paper",x:0,y:-0.27,showarrow:false,xanchor:"left",font:{size:10}}]
+  }, {responsive:true,displaylogo:false});
+  setPanelSummary(panelKey, payload.description);
+}
+
+
+function renderGoeliteBiomarkers(panelKey, payload) {
+  const plot = document.getElementById(panelPlotId(panelKey));
+  const terms = payload.terms || [];
+  const significant = terms.filter((term) => term.is_selected_positive_sig);
+  const other = terms.filter((term) => !term.is_selected_positive_sig);
+  const trace = (rows, name, color) => ({
+    x: rows.map((term) => term.z_score),
+    y: rows.map((term) => term.fdr_plot),
+    type: "scattergl",
+    mode: "markers",
+    name,
+    customdata: rows.map((term) => [term.term_name, term.p_value, term.fdr, term.overlap, term.query_size,
+      term.term_size, (term.overlap_genes || []).join(", ")]),
+    marker: { color, size: 11, opacity: 0.95 },
+    hovertemplate: "%{customdata[0]}<br>Z-score=%{x:.3f}<br>FDR=%{customdata[2]:.3e}<br>p=%{customdata[1]:.3e}"
+      + "<br>Overlap %{customdata[3]} of %{customdata[4]} markers; term size %{customdata[5]}"
+      + "<br>Genes: %{customdata[6]}<extra></extra>",
+  });
+  const zValues = terms.map((term) => term.z_score);
+  const annotations = (payload.labels || []).map((label) => ({
+    x: label.z_score, y: Math.log10(label.fdr_plot), text: label.term_name, showarrow: true, arrowhead: 0,
+    ax: 40, ay: -24, font: { size: 11, color: label.label_color || "#111827" }, xanchor: "left",
+  }));
+  plot.classList.remove("hidden");
+  Plotly.newPlot(plot, [trace(other, "Other BioMarkers terms", "#d1d5db"),
+    trace(significant, "FDR <= 0.05 and z > 2", "#1f19c7")], {
+    title: `GO-Elite BioMarkers: ${payload.population}`,
+    paper_bgcolor: "rgba(0,0,0,0)",
+    plot_bgcolor: "rgba(255,255,255,0.94)",
+    margin: { t: 56, l: 86, r: 72, b: 72 },
+    height: 620,
+    xaxis: { title: "Z-Score", zeroline: false,
+      range: [Math.min(-10, Math.floor(Math.min(...zValues) - 0.5)), Math.max(20, Math.ceil(Math.max(...zValues) + 2.5))] },
+    yaxis: { title: "FDR", type: "log", autorange: true },
+    annotations,
+    showlegend: false,
+  }, { responsive: true });
+  plot.on("plotly_click", (event) => {
+    const row = event?.points?.[0]?.customdata;
+    if (row) setPanelSummary(panelKey, `${row[0]}: ${row[3]} of ${row[4]} markers overlap. Genes: ${row[6]}`);
+  });
 }

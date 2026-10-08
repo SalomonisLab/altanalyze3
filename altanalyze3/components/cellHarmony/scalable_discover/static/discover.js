@@ -200,48 +200,6 @@ async function loadGoeliteStates(jobId, data) {
   };
 })();
 
-function renderGoeliteBiomarkers(panelKey, payload) {
-  const plot = document.getElementById(panelPlotId(panelKey));
-  const terms = payload.terms || [];
-  const significant = terms.filter((term) => term.is_selected_positive_sig);
-  const other = terms.filter((term) => !term.is_selected_positive_sig);
-  const trace = (rows, name, color) => ({
-    x: rows.map((term) => term.z_score),
-    y: rows.map((term) => term.fdr_plot),
-    type: "scattergl",
-    mode: "markers",
-    name,
-    customdata: rows.map((term) => [term.term_name, term.p_value, term.fdr, term.overlap, term.query_size,
-      term.term_size, (term.overlap_genes || []).join(", ")]),
-    marker: { color, size: 11, opacity: 0.95 },
-    hovertemplate: "%{customdata[0]}<br>Z-score=%{x:.3f}<br>FDR=%{customdata[2]:.3e}<br>p=%{customdata[1]:.3e}"
-      + "<br>Overlap %{customdata[3]} of %{customdata[4]} markers; term size %{customdata[5]}"
-      + "<br>Genes: %{customdata[6]}<extra></extra>",
-  });
-  const zValues = terms.map((term) => term.z_score);
-  const annotations = (payload.labels || []).map((label) => ({
-    x: label.z_score, y: Math.log10(label.fdr_plot), text: label.term_name, showarrow: true, arrowhead: 0,
-    ax: 40, ay: -24, font: { size: 11, color: label.label_color || "#111827" }, xanchor: "left",
-  }));
-  plot.classList.remove("hidden");
-  Plotly.newPlot(plot, [trace(other, "Other BioMarkers terms", "#d1d5db"),
-    trace(significant, "FDR <= 0.05 and z > 2", "#1f19c7")], {
-    title: `GO-Elite BioMarkers: ${payload.population}`,
-    paper_bgcolor: "rgba(0,0,0,0)",
-    plot_bgcolor: "rgba(255,255,255,0.94)",
-    margin: { t: 56, l: 86, r: 72, b: 72 },
-    height: 620,
-    xaxis: { title: "Z-Score", zeroline: false,
-      range: [Math.min(-10, Math.floor(Math.min(...zValues) - 0.5)), Math.max(20, Math.ceil(Math.max(...zValues) + 2.5))] },
-    yaxis: { title: "FDR", type: "log", autorange: true },
-    annotations,
-    showlegend: false,
-  }, { responsive: true });
-  plot.on("plotly_click", (event) => {
-    const row = event?.points?.[0]?.customdata;
-    if (row) setPanelSummary(panelKey, `${row[0]}: ${row[3]} of ${row[4]} markers overlap. Genes: ${row[6]}`);
-  });
-}
 
 (function goelitePanel() {
   const originalLoad = loadVisualizationPanel;

@@ -44,6 +44,16 @@
                   <span>Species</span>
                   <select id="species-select" required></select>
                 </label>
+                {% if unified_analysis_controls %}
+                <label class="field">
+                  <span>Analysis</span>
+                  <select name="analysis_mode" id="analysis-mode">
+                    <option value="supervised" selected>Supervised</option>
+                    <option value="unsupervised">Unsupervised</option>
+                    <option value="both">Both</option>
+                  </select>
+                </label>
+                {% endif %}
                 <div class="field">
                   <label class="field-group-label" for="reference-select">Reference</label>
                   <select id="reference-select" required></select>
@@ -73,6 +83,21 @@
               <h2>2. QC and alignment</h2>
               <form id="qc-form">
                 <input id="qc-job-id" name="job_id" type="hidden" required>
+                {% if unified_analysis_controls %}
+                <div class="two-col hidden" id="analysis-clustering-options">
+                  <label class="field">
+                    <span>UMAP fitting</span>
+                    <select name="umap_fit_mode">
+                      <option value="landmark" selected>Accelerated</option>
+                      <option value="full">All cells</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>Max K</span>
+                    <input name="max_k" type="number" min="2" step="1" placeholder="—">
+                  </label>
+                </div>
+                {% endif %}
                 <div class="two-col">
                   <label class="field">
                     <span>Min genes</span>

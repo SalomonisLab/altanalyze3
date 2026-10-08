@@ -1194,6 +1194,19 @@ select:disabled {
 
 #qc-panel > .progress-shell {
   margin-top: 0;
+  flex: 0 0 auto;
+}
+
+#qc-form {
+  flex: 0 0 auto;
+}
+
+#qc-panel {
+  overflow-y: auto;
+}
+
+#qc-panel > h2 {
+  flex: 0 0 auto;
 }
 
 #qc-cell-status {
@@ -1207,12 +1220,17 @@ select:disabled {
 }
 
 #job-log {
-  flex: 0 0 148px;
-  min-height: 148px;
+  flex: 1 1 148px;
+  min-height: 48px;
   max-height: 148px;
   overflow-y: auto;
   overflow-x: auto;
   white-space: pre;
+}
+
+#qc-panel[data-analysis-mode="both"] #job-log {
+  flex-basis: 96px;
+  max-height: 96px;
 }
 
 .download-btn {
@@ -1363,3 +1381,14 @@ select:disabled {
 
 .dsc-legend.cross-modality-legend { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:8px 16px; }
 .cross-modality-legend .modality-colorbar { display:block; width:100%; max-width:350px; height:auto; }
+.unaligned-view-btn {
+  display: block;
+  margin-top: 0.5rem;
+  padding: 0.35rem 0.6rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 0.5rem;
+  color: #0f766e;
+  background: #fff;
+  cursor: pointer;
+  font-size: inherit;
+}

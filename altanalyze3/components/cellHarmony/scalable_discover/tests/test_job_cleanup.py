@@ -1,12 +1,14 @@
 """Automatic retention uses the shared web policy and runs without new uploads."""
 import json
 import threading
+import shutil
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 
 from fastapi.testclient import TestClient
 
 from altanalyze3.components.cellHarmony.scalable_discover import app as discover
+from altanalyze3.components.cellHarmony.flask import job_manager
 
 
 def seed_job(root, job_id, *, status="completed", age_hours=9, differential="idle"):
@@ -92,3 +94,16 @@ def test_cleanup_failure_does_not_stop_server_or_retry(tmp_path, monkeypatch, ca
         assert not expired.exists()
         assert client.get("/api/meta/species").status_code == 200
     assert "job cleanup failed" in caplog.text
+
+
+def test_other_process_removing_expired_job_does_not_block_upload(tmp_path,monkeypatch):
+    expired=seed_job(tmp_path,'expired')
+    store=job_manager.JobStore(tmp_path)
+    remove=shutil.rmtree
+    def competing_cleanup(path,**kwargs):
+        remove(path)
+        raise FileNotFoundError(str(path))
+    monkeypatch.setattr(job_manager.shutil,'rmtree',competing_cleanup)
+    created=store.create_job('human','fixture',None,[])
+    assert not expired.exists()
+    assert store.job_exists(created['job_id'])

@@ -17,6 +17,7 @@ from typing import Dict
 
 from .job_manager import JobStore
 from .worker_memory import process_memory, tree_rss, container_memory, host_memory
+from .worker_runtime import worker_environment
 from .pipeline import run_cellharmony_differential, run_cellharmony_pipeline
 
 
@@ -25,6 +26,30 @@ class _JobLogStream(io.TextIOBase):
         self.store = store
         self.job_id = job_id
         self._buffer = ""
+
+    def _report_alignment_stage(self, line: str) -> None:
+        stages = (
+            ("adata shape:", 18, "1 of 10: loading input matrices"),
+            ("Running ambient RNA correction", 23, "2 of 10: ambient RNA correction"),
+            ("Cells remaining after", 30, "3 of 10: QC filtering"),
+            ("Normalization steps", 40, "4 of 10: normalizing expression"),
+            ("...skipping QC:", 40, "4 of 10: using normalized input; QC skipped"),
+            ("Aligning cells to reference", 50, "5 of 10: centroid reference alignment"),
+            ("Applied min_alignment_score=", 65, "5 of 10: applying the alignment threshold"),
+        )
+        stage = next((entry for entry in stages if entry[0] in line), None)
+        if stage is None or getattr(self.store, "branch", "") == "unsupervised":
+            return
+        meta = self.store.get_job(self.job_id)
+        mode = (meta.get("qc") or {}).get("analysis_mode", "supervised")
+        if mode != "supervised" and getattr(self.store, "branch", "") != "supervised":
+            return
+        _, progress, description = stage
+        if progress < meta.get("progress", 0):
+            return
+        message = f"cellHarmony step {description}"
+        if meta.get("message") != message:
+            self.store.update_job(self.job_id, progress=progress, message=message)
 
     def write(self, data: str) -> int:
         if not data:
@@ -35,11 +60,13 @@ class _JobLogStream(io.TextIOBase):
             line = line.rstrip()
             if line:
                 self.store.append_log(self.job_id, line)
+                self._report_alignment_stage(line)
         return len(data)
 
     def flush(self) -> None:
         if self._buffer.strip():
             self.store.append_log(self.job_id, self._buffer.strip())
+            self._report_alignment_stage(self._buffer.strip())
         self._buffer = ""
 
 
@@ -138,7 +165,7 @@ class JobRunner:
         """One fresh interpreter per analysis; only the supervisor stays in the web app."""
         log_path = self.store.logs_dir(job_id) / f"{task_name}_worker.log"
         try:
-            env = dict(os.environ)
+            env = worker_environment(os.environ)
             root = str(Path(__file__).resolve().parents[4])
             env["PYTHONPATH"] = root + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
             cmd = [sys.executable, "-m", self.WORKER_MODULE,
@@ -322,7 +349,13 @@ class JobRunner:
             time.sleep(0.1)
             log_stream = _JobLogStream(self.store, job_id)
             with contextlib.redirect_stdout(log_stream), contextlib.redirect_stderr(log_stream):
-                run_cellharmony_pipeline(
+                mode = (self.store.get_job(job_id).get("qc") or {}).get("analysis_mode", "supervised")
+                if mode == "supervised":
+                    workflow = run_cellharmony_pipeline
+                else:
+                    from ..webapp.analysis_workflow import run_analysis_workflow
+                    workflow = run_analysis_workflow
+                workflow(
                     job_id,
                     self.store,
                     self.registry_path,
