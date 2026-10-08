@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import time
 from datetime import datetime, timezone
 
@@ -48,12 +49,25 @@ class _StageLogStream(_JobLogStream):
     def __init__(self, store, job_id):
         super().__init__(store, job_id)
         self._progress = 0
+        self._stage_message = ""
 
     def _stage(self, line: str) -> None:
+        mapped = re.search(r"UMAP transformed [\d,]+ remaining cells \(([\d,]+)/([\d,]+) completed;", line)
+        if mapped:
+            completed, total = (int(value.replace(",", "")) for value in mapped.groups())
+            if 0 < completed <= total:
+                progress = 72 + int(3 * completed / total)
+                message = f"ICGS3 step 10 of 10: UMAP mapped {completed:,} of {total:,} remaining cells"
+                if progress >= self._progress and message != self._stage_message:
+                    self._progress = progress
+                    self._stage_message = message
+                    self.store.update_job(self.job_id, progress=progress, message=message)
+            return
         for fragment, progress, message in STAGES:
             if fragment in line:
-                if progress > self._progress:
+                if progress > self._progress or (progress == self._progress and message != self._stage_message):
                     self._progress = progress
+                    self._stage_message = message
                     self.store.update_job(self.job_id, progress=progress, message=message)
                 return
 

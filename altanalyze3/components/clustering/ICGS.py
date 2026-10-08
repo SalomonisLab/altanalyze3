@@ -84,8 +84,9 @@ class ICGS3Config:
     n_neighbors: int = 30
     umap_min_dist: float = 0.75
     umap_n_neighbors: int = 0
-    # Opt-in; scALABLE-discover selects PCA landmarks in its own interface.
+    # Opt-in; scALABLE-discover selects feature landmarks in its own interface.
     umap_fit_mode: str = "full"
+    umap_transform_backend: str = "umap"
     umap_fit_cells: int = 30000
     umap_transform_batch_cells: int = 50000
     leiden_resolution: float = 0.8
@@ -193,6 +194,8 @@ class ICGS3Config:
         _resolve_marker_gate(self)
         if self.umap_fit_mode not in {"full", "landmark", "pca_landmark"}:
             raise ValueError("umap_fit_mode must be full, landmark or pca_landmark")
+        if self.umap_transform_backend not in {"umap", "exact_correlation"}:
+            raise ValueError("umap_transform_backend must be umap or exact_correlation")
         if self.umap_fit_cells < 3 or self.umap_transform_batch_cells < 1:
             raise ValueError("UMAP requires at least 3 fit cells and a positive transform batch size")
 
@@ -288,6 +291,7 @@ def cli_equivalent(config: ICGS3Config) -> str:
         ("--umap-min-dist", config.umap_min_dist),
         ("--umap-n-neighbors", config.umap_n_neighbors),
         ("--umap-fit-mode", config.umap_fit_mode),
+        ("--umap-transform-backend", config.umap_transform_backend),
         ("--umap-fit-cells", config.umap_fit_cells),
         ("--umap-transform-batch-cells", config.umap_transform_batch_cells),
         ("--leiden-resolution", config.leiden_resolution),
@@ -4289,6 +4293,7 @@ def compute_umap_outputs(
             labels=adata.obs[config.cluster_key].astype(str).values if config.cluster_key in adata.obs else None,
             max_fit_cells=config.umap_fit_cells, batch_cells=config.umap_transform_batch_cells,
             seed=config.random_state, log=_log,
+            transform_backend=config.umap_transform_backend,
         )
         if fit_info["fit_mode"] == "landmark":
             landmark_path = os.path.join(umap_dir, "icgs3_umap_landmarks.tsv")
@@ -5497,7 +5502,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--umap-fit-mode", choices=["full", "landmark", "pca_landmark"], default="full",
                         help="Full feature UMAP (default), feature landmarks, or pca_landmark: centered 50-PC/15-neighbor UMAP with landmarks. Clustering is unchanged. Scanpy graph fallback stays full.")
     parser.add_argument("--umap-fit-cells", type=int, default=30000,
-                        help="Landmark fit budget; expands if needed to cover at least 50 cells per state.")
+                        help="Landmark fit budget; expands if needed to cover at least 200 cells per state.")
+    parser.add_argument("--umap-transform-backend", choices=["umap", "exact_correlation"], default="umap",
+                        help="Neighbor search during landmark projection only; core default retains UMAP search.")
     parser.add_argument("--umap-transform-batch-cells", type=int, default=50000,
                         help="Maximum cells per landmark UMAP transform block.")
     parser.add_argument(
@@ -5818,6 +5825,7 @@ def main(argv: Optional[Sequence[str]] = None) -> ICGS3Result:
         umap_min_dist=args.umap_min_dist,
         umap_n_neighbors=args.umap_n_neighbors,
         umap_fit_mode=args.umap_fit_mode,
+        umap_transform_backend=args.umap_transform_backend,
         umap_fit_cells=args.umap_fit_cells,
         umap_transform_batch_cells=args.umap_transform_batch_cells,
         leiden_resolution=args.leiden_resolution,

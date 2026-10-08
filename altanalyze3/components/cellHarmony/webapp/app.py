@@ -371,6 +371,8 @@ def _build_marker_heatmap_viewer_html(job_id: str, root_path: str) -> str:
     (function () {{
       const jobId = {job_id_json};
       const rootPath = {root_path_json};
+      // Embedded srcdoc and directly opened viewers use the same source URL.
+      const viewerUrl = new URL(document.baseURI);
       function apiPath(path) {{
         const normalizedPath = path.startsWith("/") ? path : `/${{path}}`;
         return rootPath ? `${{rootPath}}${{normalizedPath}}` : normalizedPath;
@@ -387,6 +389,7 @@ def _build_marker_heatmap_viewer_html(job_id: str, root_path: str) -> str:
         }}
       }}
       function showFallback(message) {{
+        window.parent.postMessage({{type: "marker-heatmap-error", message}}, viewerUrl.origin);
         const target = document.getElementById("morpheus-target");
         const fallback = document.getElementById("fallback-message");
         if (target) {{
@@ -495,7 +498,7 @@ def _build_marker_heatmap_viewer_html(job_id: str, root_path: str) -> str:
         await logClient(`marker heatmap PDF exported filename=${{filename || "marker_heatmap.pdf"}}`);
       }}
       window.addEventListener("message", (event) => {{
-        if (event.origin !== window.location.origin) {{
+        if (event.origin !== viewerUrl.origin) {{
           return;
         }}
         const payload = event.data || {{}};
@@ -522,14 +525,6 @@ def _build_marker_heatmap_viewer_html(job_id: str, root_path: str) -> str:
       }});
       async function fetchDatasetText(datasetUrl) {{
         try {{
-          const headResp = await fetch(datasetUrl, {{ method: "HEAD", cache: "no-store" }});
-          await logClient(
-            `dataset HEAD status=${{headResp.status}} ok=${{headResp.ok}} content_type=${{headResp.headers.get("content-type") || "-"}} content_length=${{headResp.headers.get("content-length") || "-"}}`
-          );
-        }} catch (err) {{
-          await logClient(`dataset HEAD failed: ${{err && err.message ? err.message : err}}`);
-        }}
-        try {{
           const getResp = await fetch(datasetUrl, {{ method: "GET", cache: "no-store" }});
           await logClient(
             `dataset GET status=${{getResp.status}} ok=${{getResp.ok}} content_type=${{getResp.headers.get("content-type") || "-"}} content_length=${{getResp.headers.get("content-length") || "-"}}`
@@ -537,6 +532,12 @@ def _build_marker_heatmap_viewer_html(job_id: str, root_path: str) -> str:
           if (!getResp.ok) {{
             throw new Error(`Dataset GET returned ${{getResp.status}}.`);
           }}
+          window.parent.postMessage({{
+            type: "marker-heatmap-dataset",
+            columns: Number(getResp.headers.get("X-Marker-Columns")),
+            rows: Number(getResp.headers.get("X-Marker-Rows")),
+            sampleField: getResp.headers.get("X-Sample-Field") || "",
+          }}, viewerUrl.origin);
           const text = await getResp.text();
           await logClient(`dataset text length=${{text.length}}`);
           return text;
@@ -546,7 +547,7 @@ def _build_marker_heatmap_viewer_html(job_id: str, root_path: str) -> str:
         }}
       }}
       async function render() {{
-        const datasetUrl = `${{window.location.origin}}${{apiPath(`/api/jobs/${{jobId}}/marker/heatmap.tsv`)}}${{window.location.search || ""}}`;
+        const datasetUrl = `${{viewerUrl.origin}}${{apiPath(`/api/jobs/${{jobId}}/marker/heatmap.tsv`)}}${{viewerUrl.search}}`;
         await logClient(
           `Initializing local Morpheus viewer. dataset_url=${{datasetUrl}} protocol=${{window.location.protocol}} ready_state=${{document.readyState}} ua=${{navigator.userAgent}}`
         );
@@ -582,7 +583,7 @@ def _build_marker_heatmap_viewer_html(job_id: str, root_path: str) -> str:
           showFallback(`Unable to initialize Morpheus viewer. ${{err && err.message ? err.message : err}}`);
         }}
       }}
-      render();
+      render().catch(err => showFallback(`Unable to load marker heatmap. ${{err && err.message ? err.message : err}}`));
     }}());
   </script>
 </body>
@@ -4752,17 +4753,31 @@ def _gene_state_stats(cache: Dict[str, Any], wanted: List[str],
         groups = chosen
     restrict = _gene_set_filter_mask(cache, subset_by, subset_values, subset2_by, subset2_values)
     rows, labels, missing = _gene_rows(cache, wanted)
-    masks = [(values_of == group) for group in groups]
-    if restrict is not None:
-        masks = [m & restrict for m in masks]
-    counts = [int(m.sum()) for m in masks]
+    codes, names = pd.factorize(values_of, sort=False)
+    selected = np.arange(len(values_of)) if restrict is None else np.flatnonzero(restrict)
+    selected = selected[np.argsort(codes[selected], kind="stable")]
+    boundaries = np.flatnonzero(np.diff(codes[selected])) + 1
+    partitions = {names[codes[indices[0]]]: indices for indices in np.split(selected, boundaries) if len(indices)}
+    # Integer partitions avoid rescanning one N-cell boolean mask per gene and
+    # group. Stable partitioning preserves the exact original reduction order.
+    indices_by_group = [partitions.get(group, np.empty(0, dtype=np.int64)) for group in groups]
+    counts = [len(indices) for indices in indices_by_group]
     mean, frac = [], []
-    for row in rows:
-        column_values = _dense_column(adata, row)
-        mean.append([float(column_values[m].mean()) if n else 0.0
-                     for m, n in zip(masks, counts)])
-        frac.append([float((column_values[m] > 0).mean()) if n else 0.0
-                     for m, n in zip(masks, counts)])
+    def columns():
+        if sp.issparse(adata.X):
+            # A CSR column read scans all nonzeros; extract small batches once.
+            # Eight bounds the temporary dense allocation to 32 MB per million
+            # cells for float32 input, while retaining every requested feature.
+            for start in range(0, len(rows), 8):
+                yield from adata.X[:, rows[start:start + 8]].toarray().T
+        else:
+            for row in rows:
+                yield _dense_column(adata, row)
+    for column_values in columns():
+        mean.append([float(column_values[indices].mean()) if n else 0.0
+                     for indices, n in zip(indices_by_group, counts)])
+        frac.append([float((column_values[indices] > 0).mean()) if n else 0.0
+                     for indices, n in zip(indices_by_group, counts)])
     return {"genes": labels, "states": groups, "groups": groups,
             "group_by": column, "group_label": column,
             "subset_by": subset_by or "", "subset_values": list(subset_values or []),
@@ -5060,20 +5075,26 @@ def _build_expression_payload(
         umap_points.sort(key=lambda point: (point["value"], point["population"], point["barcode"]))
 
     violin_data = []
-    for pop in (sorted(pd.unique(populations)) if view != "umap" else []):
-        mask = (populations == pop) & display_mask
-        pop_values = values[mask].astype(float)
-        finite_values = pop_values[np.isfinite(pop_values)]
-        if not len(finite_values):
-            continue
-        violin_data.append(
-            {
-                "population": pop,
-                "values": [float(v) for v in finite_values],
-                "mean": float(np.mean(finite_values)) if len(finite_values) else 0.0,
-            }
-        )
+    if view != "umap":
+        # Partition once rather than comparing every cell's string label for
+        # every state. Stable sorting retains the original within-state order
+        # and therefore the same floating-point means and tied state ranking.
+        codes, labels = pd.factorize(populations, sort=True)
+        selected = np.flatnonzero(display_mask & np.isfinite(values))
+        selected = selected[np.argsort(codes[selected], kind="stable")]
+        boundaries = np.flatnonzero(np.diff(codes[selected])) + 1
+        for indices in np.split(selected, boundaries):
+            if not len(indices):
+                continue
+            finite_values = values[indices].astype(float)
+            violin_data.append({"population": labels[codes[indices[0]]],
+                                "values": finite_values,
+                                "mean": float(np.mean(finite_values))})
     violin_data = sorted(violin_data, key=lambda x: x["mean"], reverse=True)[:violin_limit]
+    # Only serialize values for displayed states; selection still uses all
+    # states and all their finite observations, exactly as before.
+    for entry in violin_data:
+        entry["values"] = entry["values"].tolist()
 
     lookup = cache_entry["feature_lookup"]
     shown_gene = (str(gene).strip() if str(gene).strip() in lookup.suggestions
@@ -5094,8 +5115,38 @@ def _build_expression_payload(
 
 
 def _build_gene_suggestions_payload(app: FastAPI, meta: Dict, modality: str = "rna") -> Dict:
+    from .feature_lookup import FeatureLookup, expression_lookup
+    normalized = _normalize_modality_id(modality)
+    viewer = callable(getattr(app.state.job_store, "get_expression_cache", None))
+    source = None if viewer else _modality_h5ad_path(meta, normalized)
+    # Catalogs need var alone. Opening the complete expression cache here used
+    # to load cell metadata, embeddings and sometimes the entire matrix before
+    # offering even the first gene. Published viewers provide their own store.
+    if source is not None and source.is_file():
+        if str(meta.get("status") or "").lower() in {"queued", "processing", "running"}:
+            raise FileNotFoundError("Expression results are being finalized; retry when the analysis completes.")
+        stamp = source.stat()
+        key = (str(source), stamp.st_mtime_ns, stamp.st_size, normalized)
+        catalogs = app.state.feature_catalog_cache
+        payload = catalogs.get(key)
+        if payload is not None:
+            return payload
+        lock = _get_cache_lock(app, "expression_cache_locks", f"catalog:{key}")
+        with lock:
+            payload = catalogs.get(key)
+            if payload is not None:
+                return payload
+            from .job_bundle import _read_elem
+            import h5py
+            with h5py.File(source, "r") as handle:
+                var = _read_elem(handle["var"])
+            lookup = FeatureLookup(var.index, var if normalized == "rna" else None)
+            info = _modality_definition(meta, modality)
+            payload = {"genes": lookup.display_names, "keys": lookup.suggestions,
+                       "modality": normalized, "feature_label": str(info.get("feature_label") or "gene")}
+            catalogs[key] = payload
+            return payload
     cache_entry = _get_expression_cache(app, meta, modality=modality)
-    from .feature_lookup import expression_lookup
     lookup = expression_lookup(cache_entry)
     modality_info = _modality_definition(meta, modality)
     return {
@@ -5958,6 +6009,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
                  "fastcomm_cache", "reference_adata_cache"):
         setattr(app.state, name, BoundedCache(app.state.result_cache_budget))
     app.state.expression_cache_locks = weakref.WeakValueDictionary()
+    app.state.feature_catalog_cache = BoundedCache(CacheBudget(max_bytes=16 * 1024**2, max_entries=16, ttl_seconds=600))
     app.state.reference_adata_cache_locks = weakref.WeakValueDictionary()
     app.state.cache_registry_lock = threading.Lock()
     app.state.plot_build_queue = PlotBuildQueue()
@@ -7022,7 +7074,8 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             matrix = _sampled_marker_heatmap(app, meta, modality, display_filters, cells_per_sample)
             headers = {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
                        "Access-Control-Allow-Headers": "*", "X-Marker-Columns": str(len(matrix["col_ids"])),
-                       "X-Cells-Per-Sample": str(cells_per_sample), "X-Sample-Field": matrix["sampling"]["sample_field"]}
+                       "X-Cells-Per-Sample": str(cells_per_sample), "X-Sample-Field": matrix["sampling"]["sample_field"],
+                       "X-Marker-Rows": str(len(matrix["row_ids"]))}
             content = "" if request.method in {"HEAD", "OPTIONS"} else _marker_heatmap_subset_to_tsv(matrix["matrix"], matrix["row_ids"], matrix["col_ids"])
             return Response(content=metabolite_annotations.label_tsv(content, annotations), media_type="text/tab-separated-values", headers=headers)
         try:

@@ -3,8 +3,33 @@ from __future__ import annotations
 
 import math
 import time
+from contextlib import contextmanager
 
 import numpy as np
+
+
+@contextmanager
+def projection_search(model, backend):
+    """Temporarily replace only transform's search; always restore the fit index."""
+    if backend == "umap":
+        yield "umap"
+        return
+    if backend != "exact_correlation":
+        raise ValueError(f"Unknown UMAP transform search: {backend}")
+    original = getattr(model, "_knn_search_index", None)
+    # Small-data UMAP uses its own exact pairwise path. Other metrics retain
+    # their established search and are identified as such in output metadata.
+    if (original is None or getattr(model, "_small_data", False)
+            or getattr(model, "_sparse_data", False)
+            or getattr(model, "metric", None) != "correlation"):
+        yield "umap"
+        return
+    from .umap_neighbors import ExactCorrelationIndex
+    model._knn_search_index = ExactCorrelationIndex(model._raw_data)
+    try:
+        yield "exact_correlation"
+    finally:
+        model._knn_search_index = original
 
 
 def select_landmarks(labels, budget, seed, min_per_state=200):
@@ -34,7 +59,8 @@ def select_landmarks(labels, budget, seed, min_per_state=200):
 
 
 def fit_umap(model, load_rows, n_cells, *, mode="full", labels=None,
-             max_fit_cells=30000, batch_cells=50000, min_per_state=200, seed=0, log=None):
+             max_fit_cells=30000, batch_cells=50000, min_per_state=200, seed=0, log=None,
+             transform_backend="umap"):
     """Keep the full-fit call unchanged; landmark mode only changes the embedding.
 
     load_rows receives ordered integer row positions and returns the baseline's
@@ -42,6 +68,8 @@ def fit_umap(model, load_rows, n_cells, *, mode="full", labels=None,
     """
     if mode not in {"full", "landmark"}:
         raise ValueError(f"Unknown UMAP fit mode: {mode}")
+    if transform_backend not in {"umap", "exact_correlation"}:
+        raise ValueError(f"Unknown UMAP transform search: {transform_backend}")
     if max_fit_cells < 3 or batch_cells < 1 or min_per_state < 1:
         raise ValueError("UMAP landmark and batch limits must be positive (at least 3 landmarks).")
     rows = np.arange(n_cells)
@@ -64,6 +92,7 @@ def fit_umap(model, load_rows, n_cells, *, mode="full", labels=None,
     if log:
         log(f"UMAP fitting finished in {fit_seconds:.1f} s")
     transform_seconds = 0.0
+    effective_backend = "umap"
     if effective_mode == "full":
         coordinates = fitted
     else:
@@ -73,13 +102,28 @@ def fit_umap(model, load_rows, n_cells, *, mode="full", labels=None,
         remaining[selected] = False
         to_transform = rows[remaining]
         started = time.perf_counter()
+        completed = 0
         # Balance blocks so a tiny last batch does not get extra UMAP epochs.
-        for block in np.array_split(to_transform, math.ceil(len(to_transform) / batch_cells)):
+        with projection_search(model, transform_backend) as effective_backend:
             if log:
-                log(f"UMAP mapping {len(block):,} remaining cells")
-            coordinates[block] = model.transform(load_rows(block))
-            if log:
-                log(f"UMAP transformed {len(block):,} remaining cells")
+                log(f"UMAP projection neighbor search={effective_backend}; requested={transform_backend}")
+            for block in np.array_split(to_transform, math.ceil(len(to_transform) / batch_cells)):
+                if log:
+                    log(f"UMAP mapping {len(block):,} remaining cells")
+                read_started = time.perf_counter()
+                values = load_rows(block)
+                read_seconds = time.perf_counter() - read_started
+                if log:
+                    log(f"UMAP projection input loaded: {len(block):,} cells in {read_seconds:.1f} s")
+                projection_started = time.perf_counter()
+                coordinates[block] = model.transform(values)
+                projection_seconds = time.perf_counter() - projection_started
+                del values
+                completed += len(block)
+                if log:
+                    log(f"UMAP transformed {len(block):,} remaining cells "
+                        f"({completed:,}/{len(to_transform):,} completed; "
+                        f"input {read_seconds:.1f} s; projection {projection_seconds:.1f} s)")
         transform_seconds = time.perf_counter() - started
     if coordinates.shape != (n_cells, 2) or not np.isfinite(coordinates).all():
         raise ValueError("UMAP must return finite coordinates for the complete input cell roster.")
@@ -89,6 +133,7 @@ def fit_umap(model, load_rows, n_cells, *, mode="full", labels=None,
             "min_landmarks_per_state": min_per_state, "random_state": seed,
             "landmark_strategy": "cluster_stratified_proportional" if effective_mode == "landmark" else "all_cells",
             "fit_seconds": fit_seconds, "transform_seconds": transform_seconds}
+    info["transform_search_backend"] = effective_backend
     if log:
         log(f"UMAP fit completed in {fit_seconds:.1f} s; transform in {transform_seconds:.1f} s")
     return coordinates, info, selected

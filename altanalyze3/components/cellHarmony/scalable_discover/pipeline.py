@@ -384,6 +384,7 @@ def run_discover_pipeline(job_id: str, store: JobStore, *, h5ad_compression: Opt
         # over PCA for separation and original-expression neighbor preservation.
         # These controls apply only to the final embedding, not clustering.
         umap_fit_mode=qc.get("umap_fit_mode", DEFAULT_UMAP_FIT_MODE),
+        umap_transform_backend="exact_correlation" if qc.get("umap_fit_mode", DEFAULT_UMAP_FIT_MODE) == "landmark" else "umap",
         umap_n_neighbors=15 if qc.get("umap_fit_mode", DEFAULT_UMAP_FIT_MODE) == "landmark" else 0,
         # QC ran once, above, with the user's thresholds. Zero/None disables each filter in
         # ICGS.apply_qc, so ICGS3 removes no further cell or gene.

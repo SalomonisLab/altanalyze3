@@ -3,6 +3,26 @@ from pathlib import Path
 import subprocess
 
 
+def host_memory():
+    """Linux allocation-domain available/total bytes, independent of cgroup cap.
+
+    MemAvailable includes reclaimable memory; MemFree alone does not. Outside
+    Linux return None instead of treating absent telemetry as zero free memory.
+    """
+    try:
+        lines = Path('/proc/meminfo').read_text().splitlines()
+    except FileNotFoundError:
+        return None
+    entries = {key.rstrip(':'): int(value) * 1024
+               for key, value, *_ in (line.split() for line in lines)}
+    if 'MemAvailable' not in entries or 'MemTotal' not in entries:
+        return None
+    available, total = entries['MemAvailable'], entries['MemTotal']
+    if not 0 <= available <= total or total <= 0:
+        raise ValueError('Host memory accounting is invalid.')
+    return available, total
+
+
 def process_memory():
     """Return pid -> (parent pid, RSS bytes), including worker descendants."""
     if Path('/proc/self/statm').exists():

@@ -96,8 +96,24 @@ def main():
         # come from the complete generated store, including explicit zero entries.
         source = store.outputs_dir(meta["job_id"]) / "performance.h5ad"
         ad.AnnData(sp.csr_matrix((n, genes), dtype=np.float32), obs=obs, var=a.var).write_h5ad(source)
+        # Serving fixture, not a MarkerFinder analytical result. Exercise the
+        # existing heatmap reader with twelve generated source features; the
+        # sampled heatmap endpoint reads individual values from the full store.
+        heatmap = store.outputs_dir(meta["job_id"]) / "synthetic-heatmap.tsv"
+        pd.DataFrame([owner._dense(j)[:40] for j in range(min(12, genes))],
+                     index=[f"c{j}:G{j}" for j in range(min(12, genes))],
+                     columns=[f"c{i % 40}:{a.obs_names[i]}" for i in range(40)]).to_csv(heatmap, sep="\t")
+        # Explicitly fabricated UI fixtures for network teardown/restoration;
+        # these are neither regulatory predictions nor MarkerFinder results.
+        network = store.outputs_dir(meta["job_id"]) / "synthetic-network.tsv"
+        pd.DataFrame({"Symbol1": ["G0"], "Symbol2": ["G1"],
+                      "InteractionType": ["transcription"], "Direction": ["neutral"]}).to_csv(network, sep="\t", index=False)
+        markers = store.outputs_dir(meta["job_id"]) / "synthetic-markers.tsv"
+        pd.DataFrame({"cluster": ["c0", "c0"], "Gene": ["G0", "G1"], "Fold": [1., 1.]}).to_csv(markers, sep="\t", index=False)
         store.update_job(meta["job_id"], status="completed", cluster_key="state", progress=100,
                          message="Synthetic serving performance test; no biological analysis.",
+                         marker_analysis={"enabled": True, "heatmap_tsv": str(heatmap), "markers_tsv": str(markers),
+                                          "networks": [{"population": "c0", "tsv": str(network)}]},
                          artifacts={"combined_h5ad": str(source), "umap_coordinates": str(coords)},
                          modality_artifacts={"rna": {"h5ad": str(source)}},
                          modalities={"default":"rna", "available":[{"id":"rna","label":"RNA"}]})

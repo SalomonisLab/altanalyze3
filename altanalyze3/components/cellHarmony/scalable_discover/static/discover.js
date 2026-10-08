@@ -7,6 +7,18 @@ const DISCOVER_LAYER_COOKIE = "discover_layer";
 const GOELITE_MODE = "goelite_biomarkers";
 let discoverStatus = null;
 let discoverGoeliteStates = { key: "", states: [] };
+let discoverGoeliteRequest = null;
+
+(function clearDiscoverResults() {
+  const original = explorePayloadCache.onClear;
+  explorePayloadCache.onClear = () => {
+    discoverStatus = null;
+    discoverGoeliteStates = { key: "", states: [] };
+    discoverGoeliteRequest = null;
+    document.getElementById("discover-layer-field")?.remove();
+    original();
+  };
+})();
 
 window.scalableQcOptions = function discoverQcOptions(form) {
   const maxK = form.elements.max_k.value.trim();
@@ -123,9 +135,10 @@ function renderLayerControl(data) {
 (function captureStatus() {
   const original = applyJobStatus;
   applyJobStatus = function discoverApplyJobStatus(jobId, data) {
+    const result = original.apply(this, arguments);
     discoverStatus = data;
     renderLayerControl(data);
-    const result = original.apply(this, arguments);
+    updateExpressionModeOptions();
     void loadGoeliteStates(jobId, data);
     return result;
   };
@@ -135,17 +148,27 @@ function renderLayerControl(data) {
 
 async function loadGoeliteStates(jobId, data) {
   if (!jobId || !data?.icgs3_analysis?.goelite?.available || data.status !== "completed") return;
-  const key = `${jobId}:${data.active_cell_state_layer || ""}`;
+  const generation = explorePayloadCache.generation;
+  const key = `${generation}:${jobId}:${data.active_cell_state_layer || ""}`;
   if (discoverGoeliteStates.key === key) return;
-  try {
-    const response = await fetch(apiPath(`/jobs/${encodeURIComponent(jobId)}/biomarkers/goelite/states`));
-    const payload = await parseApiResponse(response);
-    if (!response.ok) throw new Error(payload.detail || "BioMarkers states unavailable.");
-    discoverGoeliteStates = { key, states: payload.states || [] };
-    updateExpressionModeOptions();
-  } catch (error) {
-    console.warn("GO-Elite BioMarkers states unavailable:", error);
-  }
+  if (discoverGoeliteRequest?.key === key) return discoverGoeliteRequest.promise;
+  const isCurrent = () => generation === explorePayloadCache.generation && jobId === getResultsJobId();
+  discoverGoeliteStates = { key: "", states: [] };
+  const request = { key, promise: null };
+  request.promise = (async () => {
+    try {
+      const payload = await exploreMetadataCache.fetch(apiPath(`/jobs/${encodeURIComponent(jobId)}/biomarkers/goelite/states`));
+      if (!isCurrent()) return;
+      discoverGoeliteStates = { key, states: payload.states || [] };
+      updateExpressionModeOptions();
+    } catch (error) {
+      if (isCurrent()) console.warn("GO-Elite BioMarkers states unavailable:", error);
+    } finally {
+      if (discoverGoeliteRequest === request) discoverGoeliteRequest = null;
+    }
+  })();
+  discoverGoeliteRequest = request;
+  return request.promise;
 }
 
 (function goeliteMenus() {
@@ -226,15 +249,21 @@ function renderGoeliteBiomarkers(panelKey, payload) {
     if (getPanelSelectValue(panelKey, "mode") !== GOELITE_MODE) return originalLoad.apply(this, arguments);
     const jobId = getResultsJobId();
     const state = getPanelSelectValue(panelKey, "marker-population");
+    const requestId = ++panelVisualizationRequest[panelKey];
+    const generation = explorePayloadCache.generation;
+    const isCurrent = () => requestId === panelVisualizationRequest[panelKey]
+      && generation === explorePayloadCache.generation && jobId === getResultsJobId()
+      && getPanelSelectValue(panelKey, "mode") === GOELITE_MODE
+      && state === getPanelSelectValue(panelKey, "marker-population");
     resetVisualizationSurface(panelKey);
     if (!jobId || !state) {
       renderVisualizationMessage(panelKey, "Choose a cell state.", "GO-Elite BioMarkers");
       return;
     }
     try {
-      const response = await fetch(apiPath(`/jobs/${encodeURIComponent(jobId)}/biomarkers/goelite?population=${encodeURIComponent(state)}`));
-      const payload = await parseApiResponse(response);
-      if (!response.ok || !(payload.terms || []).length) {
+      const payload = await explorePayloadCache.fetch(apiPath(`/jobs/${encodeURIComponent(jobId)}/biomarkers/goelite?population=${encodeURIComponent(state)}`));
+      if (!isCurrent()) return;
+      if (!(payload.terms || []).length) {
         renderVisualizationMessage(panelKey, payload.message || payload.detail || "No BioMarkers terms.", "GO-Elite BioMarkers");
         return;
       }
@@ -244,7 +273,7 @@ function renderGoeliteBiomarkers(panelKey, payload) {
       setPanelSummary(panelKey, `${payload.terms.length} BioMarkers terms overlap the markers of ${payload.population}; `
         + `${passing} pass FDR <= 0.05 and z > 2. The cell-state label comes from "${payload.terms[0].term_name}".`);
     } catch (error) {
-      renderVisualizationMessage(panelKey, error.message || "GO-Elite BioMarkers plot unavailable.", "GO-Elite BioMarkers");
+      if (isCurrent()) renderVisualizationMessage(panelKey, error.message || "GO-Elite BioMarkers plot unavailable.", "GO-Elite BioMarkers");
     }
   };
   const originalDownload = downloadVisualizationImage;

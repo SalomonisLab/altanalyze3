@@ -148,3 +148,29 @@ else:
         with runner._admission:
             runner._admission.notify_all()
         runner.executor.shutdown(wait=True)
+
+
+def test_linux_host_available_memory_is_independent_of_container_limit(monkeypatch):
+    class VirtualPath:
+        def __init__(self, value):
+            assert value == '/proc/meminfo'
+        def read_text(self):
+            return 'MemTotal: 33554432 kB\nMemFree: 100 kB\nMemAvailable: 20971520 kB\nHugePages_Total: 0\n'
+    monkeypatch.setattr(worker_memory, 'Path', VirtualPath)
+    assert worker_memory.host_memory() == (20 * 1024**3, 32 * 1024**3)
+
+
+@pytest.mark.parametrize('available_gib,blocked', [(20, False), (2, True), (1, True)])
+def test_host_headroom_can_queue_despite_room_in_cgroup(tmp_path, monkeypatch, available_gib, blocked):
+    runner = tasks.JobRunner(JobStore(tmp_path), tmp_path / 'registry.json')
+    gib = 1024**3
+    monkeypatch.setattr(tasks, 'process_memory', lambda: {os.getpid(): (0, gib)})
+    monkeypatch.setattr(tasks, 'container_memory', lambda: (11 * gib, 30 * gib))
+    monkeypatch.setattr(tasks, 'host_memory', lambda: (available_gib * gib, 32 * gib))
+    try:
+        reason = runner._memory_wait_reason()
+        assert bool(reason) is blocked
+        if blocked:
+            assert 'host' in reason
+    finally:
+        runner.executor.shutdown()

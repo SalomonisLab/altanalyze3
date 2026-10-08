@@ -41,6 +41,8 @@
     {
      "id": "hs_lung_cellref_reference",
      "label": "LungMAP CellRef v1.1 (Guo 2023)",
+     "study_citation": "Guo 2023 et al. Nat Commun. 2023",
+     "study_url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC10387117/",
      "states_tsv": "references/Human/Lung/CellRef/Hs-CellRef.txt",
      "reference_clusters_tsv": "references/Human/Lung/CellRef/Hs-CellRef_clusters.tsv",
      "reference_coords_tsv": "references/Human/Lung/CellRef/Hs-CellRef_umap.tsv",
@@ -75,6 +77,8 @@
     {
      "id": "hs_bm_reference",
      "label": "Bone marrow CITE-Seq (Zhang 2024)",
+     "study_citation": "Zhang et al. Nat Immunol. 2024",
+     "study_url": "https://www.nature.com/articles/s41590-024-01782-4",
      "states_tsv": "references/Human/BoneMarrow/Zhang-2024/Hs-MarrowAtlas-L3M.txt",
      "reference_clusters_tsv": "references/Human/BoneMarrow/Zhang-2024/Hs-MarrowAtlas-L3M_reference_clusters.tsv",
      "reference_coords_tsv": "references/Human/BoneMarrow/Zhang-2024/Hs-MarrowAtlas-L3M_reference_umap.tsv",
@@ -116,6 +120,8 @@
     {
      "id": "hs_lung_hlca_reference",
      "label": "Lung HLCA (Sikkema 2023)",
+     "study_citation": "Sikkema et al. Nat Med. 2023",
+     "study_url": "https://www.nature.com/articles/s41591-023-02327-2",
      "states_tsv": "references/Human/Lung/HLCA/Hs-Lung-HLCA.txt",
      "reference_clusters_tsv": "references/Human/Lung/HLCA/Hs-Lung-HLCA_clusters.tsv",
      "reference_coords_tsv": "references/Human/Lung/HLCA/Hs-Lung-HLCA_umap.tsv",
@@ -150,6 +156,8 @@
     {
      "id": "hs_lung_natri_reference",
      "label": "Lung ILD Atlas (Natri 2024)",
+     "study_citation": "Natri et al. Nat Genet. 2024",
+     "study_url": "https://www.nature.com/articles/s41588-024-01702-0",
      "states_tsv": "references/Human/Lung/Natri-2024/Hs-Lung-IPF-Natri.txt",
      "reference_clusters_tsv": "references/Human/Lung/Natri-2024/Hs-Lung-IPF-Natri_clusters.tsv",
      "reference_coords_tsv": "references/Human/Lung/Natri-2024/Hs-Lung-IPF-Natri_umap.tsv",
@@ -184,6 +192,8 @@
     {
      "id": "hs_lung_bpd_sun_reference",
      "label": "BPD Atlas (Sun)",
+     "study_citation": "Sun et al. LungMAP BPD study",
+     "study_url": "https://www.lungmap.net/dataset/?dataset_id=LMEX0000004400",
      "states_tsv": "references/Human/Lung/BPD-Sun/Hs-BPD_Sun.tsv",
      "reference_clusters_tsv": "references/Human/Lung/BPD-Sun/Hs-BPD_Sun_clusters.tsv",
      "reference_coords_tsv": "references/Human/Lung/BPD-Sun/Hs-BPD_Sun_umap.tsv",
@@ -224,6 +234,8 @@
     {
      "id": "mm_lung_cellref_reference",
      "label": "LungMAP CellRef v1.0",
+     "study_citation": "Guo 2023 et al. Nat Commun. 2023",
+     "study_url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC10387117/",
      "states_tsv": "references/Mouse/Lung/CellRef/Mm-CellRef.txt",
      "reference_clusters_tsv": "references/Mouse/Lung/CellRef/Mm-CellRef_clusters.tsv",
      "reference_coords_tsv": "references/Mouse/Lung/CellRef/Mm-CellRef_umap.tsv",
@@ -235,6 +247,8 @@
     {
      "id": "mm_bm_reference",
      "label": "Bone marrow CITE-Seq (Ferchen 2025)",
+     "study_citation": "Ferchen et al. Nat Immunol. 2025",
+     "study_url": "https://www.nature.com/articles/s41590-025-02307-3",
      "states_tsv": "references/Mouse/BoneMarrow/Ferchen-2025/Mm-MarrowAtlas-L4.txt",
      "reference_clusters_tsv": "references/Mouse/BoneMarrow/Ferchen-2025/Mm-MarrowAtlas-L4_reference_clusters.tsv",
      "reference_coords_tsv": "references/Mouse/BoneMarrow/Ferchen-2025/Mm-MarrowAtlas-L4_reference_umap.tsv",
@@ -267,6 +281,8 @@
     {
      "id": "mm_lung_flu_reference",
      "label": "Lung Regeneration-Infection (Niethamer 2025)",
+     "study_citation": "Niethamer et al. Cell Stem Cell. 2025",
+     "study_url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC11805657/",
      "states_tsv": "references/Mouse/Lung/Flu/Lung-Influenza.txt",
      "reference_clusters_tsv": "references/Mouse/Lung/Flu/Lung-Influenza_clusters.tsv",
      "reference_coords_tsv": "references/Mouse/Lung/Flu/Lung-Influenza_umap.tsv",

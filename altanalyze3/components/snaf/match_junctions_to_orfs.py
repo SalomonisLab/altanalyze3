@@ -119,6 +119,7 @@ def load_protein_summary(file_path):
     with open(file_path, 'r') as f:
         for line in f:
             gene_id, isoform, length, nmd_status, _, longest_length = line.strip().split('\t')
+            full_isoform = isoform
             if '_' in isoform:
                 isoform = isoform.split('_')[1]  # Remove dataset prefix
             if ';' in gene_id:
@@ -127,6 +128,13 @@ def load_protein_summary(file_path):
             except:
                 continue
             protein_dict[gene_id,isoform] = f"{length}/{longest_length}({nmd_status})"
+            # DEFECT 5, second site: the prefix split above turns an ENCODE id such as
+            # m54284U_210130_010030/145884127/ccs or <uuid>_1 (Nanopore tier B) into "210130"
+            # or "1", so Step 5 found no protein_info for them and step 7 read their NMD
+            # status as blank. The full id is stored as well. An id without an underscore
+            # (every KINNEX-5 id) is stored exactly as before.
+            if full_isoform != isoform:
+                protein_dict[gene_id,full_isoform] = f"{length}/{longest_length}({nmd_status})"
     return protein_dict
 
 def generate_forward_frames(mrna_sequence,protein_sequence):
@@ -267,6 +275,13 @@ with _io.smart_open(transcript_associations_file) as f:
                 transcript_associations[gene_id] = []
             transcript_associations[gene_id].append((transcript_structure, transcript_id, strand))
 
+# The association id each ORF must equal, per gene, with the same digit-first suffix rule
+# Step 5 applies (assoc_base). Step 5 uses it to key an ORF by its FULL header id when that
+# id is an association id; see DEFECT 5.
+association_ids = {
+    g: {(t.split('.')[0] if t[:1].isdigit() else t) for _s, t, _st in rows}
+    for g, rows in transcript_associations.items()}
+
 protein_dict = load_protein_summary(protein_summary_file)
 
 # Step 4: Import transmembrane domain genomic positions
@@ -284,6 +299,16 @@ with open(orf_sequences_file, "r") as orf_handle, open(output_file, "w") as out_
         gene_id = None
         if "gene_id:" in header:
             gene_id = header.split("gene_id:")[1].split()[0]
+        # DEFECT 5 -- the split("_")[-1] above keeps only the text after the LAST underscore.
+        # ENCODE names 1,675,241 of its 7,066,791 ORFs (23.7%) by a PacBio read id,
+        # ">m54284U_200410_211646/120128892/ccs ;CDS;gene_id:...", which became
+        # "211646/120128892/ccs", never equalled its association id, and was silently
+        # dropped. The full id is used when it IS an association id of this gene; otherwise
+        # the old key stands. KINNEX-5 ORF ids carry no underscore (0 of 1,760,990), so for
+        # them both keys are the same string and the output is unchanged.
+        full_id = header.split(";")[0].split(" ")[0]
+        if full_id != transcript_id and full_id in association_ids.get(gene_id, ()):
+            transcript_id = full_id
         sequence = str(record.seq).upper()
         if gene_id in junctions:
             for junction_name, source_name, chrom, start, end in junctions[gene_id]:

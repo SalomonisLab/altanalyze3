@@ -1,0 +1,71 @@
+{
+  "scope": "600,000-cell synthetic expression serving; all input observations retained",
+  "cells": 600000,
+  "features": 1024,
+  "baseline_violin_seconds": [
+    0.3884009579778649,
+    0.3783968329662457,
+    0.3754122920217924
+  ],
+  "optimized_violin_seconds": [
+    0.15295645798323676,
+    0.15263304201653227,
+    0.15570025000488386
+  ],
+  "plotted_states": 10,
+  "plotted_observations": 150000,
+  "baseline_dotplot_seconds": [
+    0.5525629579788074,
+    0.5879812920466065,
+    0.5518073340062983
+  ],
+  "optimized_dotplot_seconds": [
+    0.18767999997362494,
+    0.1834309590049088,
+    0.18387633399106562
+  ],
+  "baseline_ref": "30ade6113212382c49f43034e8073ad63b107ab0",
+  "browser_switches_before": {
+    "dotplot_ms": 888,
+    "violin_ms": 3836
+  },
+  "browser_switches_after": [
+    {
+      "mode": "violin",
+      "milliseconds": 884
+    },
+    {
+      "mode": "dotplot",
+      "milliseconds": 972
+    },
+    {
+      "mode": "violin",
+      "milliseconds": 717
+    },
+    {
+      "mode": "dotplot",
+      "milliseconds": 236
+    }
+  ],
+  "browser_timing_scope": "Wall clock from browser selector action through observed full SVG point count; local synthetic fixture, not original visitor job.",
+  "morpheus": {
+    "rows": 12,
+    "columns": 50800,
+    "cold_dataset_gets": 1,
+    "warm_dataset_gets": 0,
+    "preflight_requests": 0
+  },
+  "catalog_validation": {
+    "features": 32000,
+    "panels": 2,
+    "requests": 1,
+    "all_primary_ids_and_unambiguous_aliases_preserved": true
+  },
+  "vector_pdf": {
+    "file": "2bc092239a8444c896b57d1ddf01d83d_viz1_plot_g0.pdf",
+    "bytes": 11946,
+    "genes": 12,
+    "states": 40,
+    "raster_images": 0
+  }
+}

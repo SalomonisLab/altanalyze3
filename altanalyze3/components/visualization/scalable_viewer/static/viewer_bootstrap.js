@@ -16,6 +16,9 @@
 
 (function () {
   const SV = { datasets: [], current: null, contrasts: [], contrast: null };
+  let datasetLoadRequest = 0;
+  let contrastRequest = 0;
+  let contrastWritePromise = Promise.resolve();
   window.__SCALABLE_VIEWER__ = SV;
 
   // ---------------------------------------------------------------- utilities
@@ -415,25 +418,39 @@
     el("sv-contrast").addEventListener("change", async (event) => {
       const jobId = el("results-job-id").value.trim();
       if (!jobId) return;
-      await fetch(api(`/api/jobs/${jobId}/differential/select?contrast=${encodeURIComponent(event.target.value)}`),
-        { method: "POST" });
       SV.contrast = event.target.value;
-        // app.js:5106 setResultMode() hides BOTH result views and returns early
-        // while areExploreResultsReady() is false, and nothing restores them, so a
-        // modality switch blanked the Differential panel for good.
-        // The flag is set ONLY by ensureExploreResultsReady (app.js:155). Waiting on
-        // it in a loop waits for something nothing will set, so call it instead.
-        try {
-          await pollStatus(jobId);
-          if (typeof ensureExploreResultsReady === "function") {
-            await ensureExploreResultsReady(jobId);
-          }
-          await pollStatus(jobId);
-          if (typeof setResultMode === "function") setResultMode("differential");
-        } catch (err) {
-          console.error("contrast switch failed:", err);
-        }
+      await selectViewerContrast(jobId, SV.contrast);
     });
+  }
+
+  async function selectViewerContrast(jobId, contrast) {
+    const requestId = ++contrastRequest;
+    const datasetRequest = datasetLoadRequest;
+    const isCurrent = () => requestId === contrastRequest && datasetRequest === datasetLoadRequest
+      && jobId === el("results-job-id").value.trim();
+    // Serialize server mutations so a slow earlier selection cannot finish after
+    // the last selection and silently restore the wrong comparison.
+    const write = contrastWritePromise.catch(() => {}).then(async () => {
+      if (!isCurrent()) return;
+      const response = await fetch(api(`/api/jobs/${jobId}/differential/select?contrast=${encodeURIComponent(contrast)}`),
+        { method: "POST" });
+      if (!response.ok) throw new Error(`Comparison selection failed (${response.status}).`);
+    });
+    contrastWritePromise = write;
+    try {
+      await write;
+      if (!isCurrent()) return;
+      await pollStatus(jobId);
+      if (!isCurrent()) return;
+      if (typeof ensureExploreResultsReady === "function") {
+        const ready = await ensureExploreResultsReady(jobId);
+        if (!ready || !isCurrent()) return;
+      }
+      await pollStatus(jobId);
+      if (isCurrent() && typeof setResultMode === "function") setResultMode("differential");
+    } catch (err) {
+      if (isCurrent()) console.error("comparison switch failed:", err);
+    }
   }
 
     /* The Differential panel's Modality select.
@@ -505,18 +522,7 @@
         // alone left all 77 entries in place, so the reader saw the other modalities'
         // comparisons and a prefix telling them which was which.
         fillContrastSelector(SV.contrasts, match.id, wanted);
-        try {
-          await fetch(api("/api/jobs/" + jobId + "/differential/select?contrast="
-            + encodeURIComponent(match.id)), { method: "POST" });
-          await pollStatus(jobId);
-          if (typeof ensureExploreResultsReady === "function") {
-            await ensureExploreResultsReady(jobId);
-          }
-          await pollStatus(jobId);
-          if (typeof setResultMode === "function") setResultMode("differential");
-        } catch (err) {
-          console.error("modality switch failed:", err);
-        }
+        await selectViewerContrast(jobId, match.id);
       }, true);
     }
 
@@ -769,7 +775,15 @@
   async function loadDataset(datasetId) {
     const entry = SV.datasets.find((d) => d.id === datasetId) || SV.datasets[0];
     if (!entry) return;
+    const requestId = ++datasetLoadRequest;
+    contrastRequest += 1;
+    const isCurrent = () => requestId === datasetLoadRequest && SV.current === entry
+      && entry.id === el("results-job-id").value.trim();
+    explorePayloadCache.clear();
     SV.current = entry;
+    SV.stateColors = null;
+    SV.clusterKey = "";
+    SV.covariateFields = [];
     resetExploreResultsReadiness();
     el("results-job-id").value = entry.id;
     const upload = el("upload-job-id"); if (upload) upload.value = entry.id;
@@ -780,24 +794,35 @@
     pruneDifferentialModalities();
     try {
       const stateColors = await getJson(api(`/api/jobs/${entry.id}/state-colors`));
+      if (!isCurrent()) return;
       SV.stateColors = stateColors.colors || null;
       SV.clusterKey = stateColors.cluster_key || "";
       installBundleStateColors();
-    } catch (err) { console.warn("state colours unavailable", err); }
+    } catch (err) {
+      if (!isCurrent()) return;
+      console.warn("state colours unavailable", err);
+    }
     try {
       // The same list the "Annotation 1" selector is built from (app.js:4430).
       const filters = await getJson(api(`/api/jobs/${entry.id}/display-filters`));
+      if (!isCurrent()) return;
       SV.covariateFields = filters.fields || [];
       fillCovariateSelectors(SV.covariateFields, SV.clusterKey);
-    } catch (err) { console.warn("covariate list unavailable", err); }
+    } catch (err) {
+      if (!isCurrent()) return;
+      console.warn("covariate list unavailable", err);
+    }
     await pollStatus(entry.id);
     // pollStatus starts scALABLE's own async warm-up (ensureExploreResultsReady).
     // Open Explore as soon as that reports ready; there is no Load button.
     for (let attempt = 0; attempt < 600; attempt += 1) {
-      if (areExploreResultsReady(entry.id)) break;
+      if (!isCurrent()) return;
+      if (areExploreResultsReady(entry.id)) {
+        setExplorerTab("explore");
+        return;
+      }
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
-    setExplorerTab("explore");
   }
 
   // ------------------------------------------------------------------ Study tab

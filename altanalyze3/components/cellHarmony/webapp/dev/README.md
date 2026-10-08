@@ -70,6 +70,94 @@ then `baseline ROOT` and `optimized ROOT` in separate fresh Python processes.
 `serve ROOT --port 8012` starts the isolated synthetic UI. These inputs are
 computational test data, not biological replicates or inference outputs.
 
+## Follow-up: catalogs, Morpheus, violin and DotPlot (October 6)
+
+The CombPlot changes did not address every Explore bottleneck. The follow-up now:
+
+- Reads gene catalogs directly from H5AD `var` using the standard AnnData element
+  reader, including categorical symbol fields. It reads no expression matrix,
+  cell metadata or embedding. The catalog cache is bounded to 16 MiB/16 entries.
+  Published viewers continue using their own complete feature catalog.
+- Deduplicates and caches metadata requests (8 MiB/24 entries/five minutes), loads
+  independent controls concurrently and builds complete datalists in a fragment.
+  Two RNA panels request one catalog; 32,000 features remain offered in each panel.
+- Uses one Morpheus HTML request and one dataset GET. It removes the two dataset
+  HEADs and duplicate HTML preflight, and shows HTTP/script failures inside the
+  viewer. One live iframe per panel retains its controls/selection across view
+  switches. Hidden heatmaps expire after five minutes; estimates over 64 MiB per
+  heatmap cause disposal on leaving it. Source/job/state-layer changes dispose all.
+- Partitions cell groups once for violin and DotPlot payloads. Violin selects the
+  same top states before converting their values to Python lists. CSR DotPlots
+  extract batches of eight features instead of scanning the matrix for each.
+  Every value, mean, positive fraction, order and tie decision matches the baseline.
+- Retains completed SVG violin/DotPlot DOM in place, so returning to a view avoids
+  recreating all its points and density calculation. Retention is at most two
+  hidden figures across both panels, with a 192 MiB estimate and five-minute expiry;
+  oversized figures rebuild. The estimate uses 1 KiB per plotted point plus 4 MiB.
+  This bounds retained estimates, not total browser heap or renderer memory. The
+  request URL, result generation, panel, mode, dot size and window count govern
+  reuse. Controls that change the figure invalidate reuse. Resize runs only when
+  the container width changed. Hover, zoom and vector export remain available.
+
+`explore_details_20261006.json` records independent synthetic validation. On the
+600,000-cell/1,024-feature store, median full violin payload preparation changed
+from 0.378 to 0.153 seconds and DotPlot from 0.553 to 0.184 seconds. Entire payloads
+matched the committed baseline, including 150,000 values in ten violin states.
+Observed browser switches through the full visible SVG count took 3.836 seconds
+for violin before reuse and 0.717–0.884 seconds afterward; the settled DotPlot
+switch took 0.236 seconds. These individual observations are local synthetic checks; the original online
+visitor job has not been reproduced. Browser checks also
+verified Morpheus at 12 × 50,800 cells, hiding/showing without a dataset reload,
+and a PDF from the reused DotPlot containing all 12 genes/40 states and no images.
+
+Seventy targeted Python tests and three Node test scripts passed. Reproduce the
+payload comparison with `benchmark_explore_details.py ROOT --baseline-ref
+30ade6113212382c49f43034e8073ad63b107ab0` after preparing ROOT. `serve` now publishes
+a synthetic heatmap serving fixture; it does not run or substitute MarkerFinder.
+
+Deploy `app.py` and shared `static/app.js` together and restart/refresh. No new
+package or proxy setting is required. Shared UI improvements reach web, discover
+and viewer; the H5AD catalog path is used by upload applications. First-time very
+large SVG violin rendering, large gene-expression UMAP transfer/rendering, dense
+CombPlots and reproducing the missing original saved job remain performance work.
+
+## Adversarial follow-up review (October 7)
+
+The second review fixed cached SVGs being overwritten when entering an integrated
+view, network/integrated resources surviving restoration, cleared gene lists not
+repopulating, and stale annotation replies winning a same-job rerun. Initial
+DotPlot/CombPlot requests now wait for grouping controls; returning to these views
+preserves selected groups instead of silently clearing the filter.
+
+Morpheus now checks its single HTML GET and embeds that response with `srcdoc`.
+An explicit base URL preserves the original dataset URL, filters, sampling,
+origin checks and PDF messages. This handles HTTP failures even when the browser
+does not commit an error document into an iframe. Failed views can be retried;
+disposal cancels pending HTML requests, and stale replies cannot resurrect them.
+The live frame still loads its dataset once and is reused on return.
+
+`explore_review_20261007.json` records 79 passing Python tests and five passing
+Node scripts, including reproduced failure regressions. Repeated 600,000-cell
+synthetic payload comparisons were identical to the committed baseline: median
+violin preparation was 0.408 → 0.212 seconds and DotPlot 0.609 → 0.198 seconds.
+Browser checks restored 480 DotPlot points after an integrated view (21 ms),
+all 150,000 violin points (620 ms), and the same 12 × 50,800-cell heatmap (9 ms).
+An injected heatmap HTTP failure displayed a retry message and recovered after
+its source was restored. These timings are individual local observations.
+
+A 60-second observation of the native synthetic serving process recorded
+1.41 GiB peak RSS. This excludes browser memory and the full analysis pipeline;
+it does not establish a 30 GiB bound for concurrent end-to-end analyses. The
+original online saved-job outputs remain unavailable. A fresh PDF artifact was
+not captured in this run; the previous vector-PDF check remains separately
+recorded. First-time large SVG rendering, expression UMAP transport/rendering
+and dense CombPlots remain performance work.
+
+Deployment still requires rebuilding/restarting with `app.py` and shared
+`static/app.js` together, then refreshing browsers. No added dependency or
+Apache timeout setting is needed. The original local service was left running;
+only the isolated synthetic test server was restarted for validation.
+
 I repaired three faults in the scALABLE webapp and I added two controls. This
 folder holds the scripts that prove each change.
 
@@ -103,6 +191,56 @@ All edits sit in
    columns can serve as the axes, the way ShinyCell plots one cell annotation
    against another. Pick "obs columns" in the Coordinates list and the X and Y
    lists appear.
+
+## Repeated Explore review (October 7)
+
+`explore_rescan_20261007.json` records the additional review and validation.
+Pending cached requests now cancel on result invalidation; obsolete status,
+readiness, metadata and Chat responses cannot replace the current session. Reset
+releases active and retained plots, heatmap frames and Chat resources. Failed PDF
+dependency loads can retry. Discover GO-Elite states and plots use the bounded
+shared caches and reject obsolete replies. Viewer dataset metadata is guarded,
+and precomputed comparison selections are serialized so the final selection wins.
+Analysis models, features, samples, formulas and plotted values are unchanged.
+
+Validation: 79 primary Python tests, 14 additional viewer/discover checks
+(overlapping the primary suite), and 11 JavaScript regression scripts passed.
+Repeated shared-browser switches on the synthetic 600,000-cell fixture retained
+480 DotPlot points, 150,000 violin points and the 12-by-50,800 Morpheus document.
+Reset removed every live/retained figure and iframe; reopening restored both
+complete 1,024-feature RNA catalogs. These are serving/UI checks, not a rerun of
+the missing online visitor dataset or the full analytical workflow. No new RSS or
+browser heap measurement was made in this rescan.
+
+Deployment also includes `scalable_discover/static/discover.js` and
+`visualization/scalable_viewer/static/viewer_bootstrap.js` with shared
+`webapp/static/app.js` and the serving files documented above. Rebuild/restart and
+refresh browser pages. No added dependencies or proxy timeout change. Changes
+remain uncommitted; no production service was restarted.
+
+## Additional Differential review (October 7)
+
+The additional pass in `explore_rescan_20261007.json` fixes Differential requests
+that resume after an annotation delay or result reset. Mode, population and result
+generation are captured before awaiting metadata. Reset also cancels Differential
+requests, clears state/pathway contexts and disposes integrated renderers. Shared
+completed-comparison POSTs are serialized so the latest selection wins on the
+server as well as in the UI.
+
+Raw Differential payload reuse now has eight entries, a five-minute TTL and a
+32 MiB estimated parsed-storage budget. Network adjacency reuse has eight entries,
+five minutes and an 8 MiB estimate. Entries are scoped to the current comparison;
+HTTP failures can retry, pending requests are deduplicated and stale replies cannot
+repopulate cleared caches. These budgets cover cached data estimates, not total
+browser heap or active rendering. Requested network contents are retained in full.
+
+The combined Python suite passed 83 tests; all 13 JavaScript regression scripts
+passed. New regressions reproduced the annotation/reset race and verify complete
+1,000-edge networks, retry, cache bounds, comparison changes and teardown. The
+isolated 600,000-cell fixture restored both complete 1,024-feature catalogs,
+rendered all 480 DotPlot points and removed plot SVGs/iframes on Reset. Full
+Differential browser timing and the original online visitor workflow remain
+unmeasured. No scientific model, sampling rule or statistical formula changed.
 
 ## Measurements
 
@@ -155,3 +293,40 @@ Run each from this folder with
 script asserts that it finds its target text exactly once, so the set reads as a
 precise log of every line I changed. Do not run them again: the source now holds
 the new text, and each assertion fails.
+
+## Accelerated discover UMAP projection (October 7)
+
+Accelerated discover now replaces only the landmark projection neighbor search
+with blocked, exhaustive Pearson-correlation search (`exact_correlation`). The
+same complete ordered marker panel, 30,000 cluster-stratified landmarks, minimum
+200 cells per state (all smaller states), correlation UMAP fit, random seed and
+transform graph/coordinate optimization remain. Every remaining cell is still
+projected. Exact neighbors can differ from the former approximate search; the
+embedding is not promised to be bit-identical. The fitted landmark coordinates
+are unchanged. Core ICGS3 still defaults to full fitting and its original search;
+All cells retains that behavior. Unsupported metrics, sparse inputs and small-data UMAP retain
+their existing search and record the effective backend.
+
+The search uses float32 vectors and at most 64 MiB for the similarity/partition
+tile, plus the fitted/query vectors and k-neighbor outputs. It does not allocate
+a complete query-by-landmark matrix. BLAS uses at most four threads, respecting
+lower Numba thread limits. No PCA, feature removal, cell removal, new dependency
+or shortened transform optimization was introduced. Progress reports completed
+projection cells and per-batch extraction/projection timings.
+
+The shared web/discover admission gate also checks Linux host `MemAvailable` and
+queues new workers when available memory reaches the smaller of 2 GiB or 10% of
+host RAM. This includes pressure from other services. It does not interrupt
+running jobs or reserve their future allocations. The existing 15 GiB worker
+threshold gates new launches; it is not a hard worker cap. The 27 GiB total guard
+and a 30 GiB container cap alone cannot guarantee host safety when other services
+consume RAM; instantaneous spikes and running-worker growth remain limitations.
+
+Deploy `ICGS.py`, `umap_fit.py`, the new `umap_neighbors.py`, discover `pipeline.py`
+and `tasks.py`, and shared `flask/tasks.py` and `worker_memory.py` together in a
+rebuilt worker/web image. No reference/model replacement, schema migration or
+Apache timeout change is needed. Existing completed-job UMAPs are not recomputed.
+Benchmark evidence and exact reproduction commands are recorded in
+`components/clustering/benchmarking/discover_projection_search_20261007.json`.
+These are UMAP-only measurements, not a rerun of the original cloud job or its
+complete scientific workflow.

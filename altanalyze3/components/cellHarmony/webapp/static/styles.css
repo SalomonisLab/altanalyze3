@@ -241,6 +241,31 @@ body {
   color: var(--muted);
 }
 
+.reference-study-link {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45em;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.reference-study-link span {
+  font: inherit;
+  color: inherit;
+}
+
+.reference-study-link .reference-study-marker {
+  flex: none;
+  font-size: 0.7em;
+}
+
+.reference-study-link:hover,
+.reference-study-link:focus-visible {
+  text-decoration: underline;
+}
+
 .differential-group-label {
   font-size: 0.72rem;
   line-height: 1;

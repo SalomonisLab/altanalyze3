@@ -1,0 +1,1794 @@
+{
+  "authorization": {
+    "state": "approved",
+    "proposal": "Benchmark and replace only the accelerated neighbor-search backend, retaining all marker features, correlation distance, current UMAP fit/optimization and at least 200 stratified landmarks per state. Approximate neighbors and coordinates may differ.",
+    "source": "Actual human reply in this chat on 2026-10-07: \"Yes, do that\". Approval is limited to the proposed accelerated neighbor-search replacement with the stated feature, distance, fit and landmark safeguards."
+  },
+  "selected_backend": "exact_correlation",
+  "differences_from_baseline": [
+    "Only the Accelerated discover landmark projection neighbor-search backend changes. Exact neighbors replace approximate ones and coordinates may differ.",
+    "The baseline UMAP fit, full ordered feature panel, 30,000 stratified landmarks (at least 200/state, every rare-state cell), random seed, transform graph and coordinate optimization remain.",
+    "Core ICGS3 full-fit and original search defaults remain. No imputation, counts/QC, clustering, marker or sample decisions change."
+  ],
+  "verified_input": {
+    "umap": {
+      "query_cells": 30164,
+      "seconds": 63.03413837507833,
+      "batches": [
+        {
+          "cells": 30164,
+          "seconds": 63.03315775003284
+        }
+      ],
+      "fit_coordinates_unchanged": true,
+      "finite_coordinates": 60164,
+      "search_backend": "umap",
+      "separation": {
+        "median_nearest_relative_centroid_distance": 0.42906519700750345,
+        "p10_nearest_relative_centroid_distance": 0.1436146227508943,
+        "macro_neighbor_state_purity": 0.7354109288457116,
+        "per_state": [
+          {
+            "state": "C1",
+            "cells": 29,
+            "rms_radius": 0.12529576822401267,
+            "nearest_centroid_distance": 3.596198948642249,
+            "nearest_relative_centroid_distance": 0.5137929922061548,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "C10",
+            "cells": 178,
+            "rms_radius": 1.932831334423217,
+            "nearest_centroid_distance": 1.777231274659452,
+            "nearest_relative_centroid_distance": 0.6605495049515985,
+            "neighbor_state_purity": 0.772
+          },
+          {
+            "state": "C11",
+            "cells": 51,
+            "rms_radius": 0.5974018229562666,
+            "nearest_centroid_distance": 1.5340392774420821,
+            "nearest_relative_centroid_distance": 0.7023982234507187,
+            "neighbor_state_purity": 0.19733333333333333
+          },
+          {
+            "state": "C12",
+            "cells": 688,
+            "rms_radius": 0.9056031553381129,
+            "nearest_centroid_distance": 2.795059738992029,
+            "nearest_relative_centroid_distance": 1.1873884399266446,
+            "neighbor_state_purity": 0.856
+          },
+          {
+            "state": "C13",
+            "cells": 1416,
+            "rms_radius": 1.283699960684613,
+            "nearest_centroid_distance": 1.5340392774420821,
+            "nearest_relative_centroid_distance": 0.8155004108671586,
+            "neighbor_state_purity": 0.9573333333333334
+          },
+          {
+            "state": "C14",
+            "cells": 173,
+            "rms_radius": 1.9096619126112964,
+            "nearest_centroid_distance": 1.966655811449811,
+            "nearest_relative_centroid_distance": 0.6650658049010206,
+            "neighbor_state_purity": 0.676
+          },
+          {
+            "state": "C15",
+            "cells": 35,
+            "rms_radius": 0.5088060988645301,
+            "nearest_centroid_distance": 0.9509044673610324,
+            "nearest_relative_centroid_distance": 0.6659231061144603,
+            "neighbor_state_purity": 0.48000000000000015
+          },
+          {
+            "state": "C16",
+            "cells": 52,
+            "rms_radius": 0.33369779388709214,
+            "nearest_centroid_distance": 0.9509044673610324,
+            "nearest_relative_centroid_distance": 0.9294117065612456,
+            "neighbor_state_purity": 0.8893333333333335
+          },
+          {
+            "state": "C17",
+            "cells": 191,
+            "rms_radius": 1.1618393105590374,
+            "nearest_centroid_distance": 1.1125213802592062,
+            "nearest_relative_centroid_distance": 0.6605495049515985,
+            "neighbor_state_purity": 0.7319999999999999
+          },
+          {
+            "state": "C18",
+            "cells": 80,
+            "rms_radius": 0.5451419231049628,
+            "nearest_centroid_distance": 1.1577078274372752,
+            "nearest_relative_centroid_distance": 0.6782194230409194,
+            "neighbor_state_purity": 0.6306666666666667
+          },
+          {
+            "state": "C19",
+            "cells": 107,
+            "rms_radius": 0.35881085566033855,
+            "nearest_centroid_distance": 2.6479880877922994,
+            "nearest_relative_centroid_distance": 0.3424764000490119,
+            "neighbor_state_purity": 0.5986666666666667
+          },
+          {
+            "state": "C2",
+            "cells": 1337,
+            "rms_radius": 1.2015963669689385,
+            "nearest_centroid_distance": 8.666993485867184,
+            "nearest_relative_centroid_distance": 1.8899981640599197,
+            "neighbor_state_purity": 0.9880000000000001
+          },
+          {
+            "state": "C20",
+            "cells": 72,
+            "rms_radius": 7.373073990750523,
+            "nearest_centroid_distance": 2.4932106859068184,
+            "nearest_relative_centroid_distance": 0.28329422431691154,
+            "neighbor_state_purity": 0.292
+          },
+          {
+            "state": "C21",
+            "cells": 93,
+            "rms_radius": 6.372226037238246,
+            "nearest_centroid_distance": 0.6148328907320855,
+            "nearest_relative_centroid_distance": 0.08139436393985926,
+            "neighbor_state_purity": 0.42266666666666675
+          },
+          {
+            "state": "C22",
+            "cells": 123,
+            "rms_radius": 1.4277079239479886,
+            "nearest_centroid_distance": 2.4932106859068184,
+            "nearest_relative_centroid_distance": 0.28329422431691154,
+            "neighbor_state_purity": 0.9840000000000001
+          },
+          {
+            "state": "C23",
+            "cells": 1702,
+            "rms_radius": 1.4286959271036626,
+            "nearest_centroid_distance": 5.580417702723273,
+            "nearest_relative_centroid_distance": 1.1265748266751416,
+            "neighbor_state_purity": 0.9466666666666668
+          },
+          {
+            "state": "C24",
+            "cells": 640,
+            "rms_radius": 0.8584982213791846,
+            "nearest_centroid_distance": 2.8063682453687764,
+            "nearest_relative_centroid_distance": 0.46042308021342776,
+            "neighbor_state_purity": 0.9253333333333331
+          },
+          {
+            "state": "C25",
+            "cells": 4648,
+            "rms_radius": 1.3540040063892314,
+            "nearest_centroid_distance": 2.05012006164735,
+            "nearest_relative_centroid_distance": 0.2840998433289427,
+            "neighbor_state_purity": 0.94
+          },
+          {
+            "state": "C26",
+            "cells": 202,
+            "rms_radius": 1.181526593427604,
+            "nearest_centroid_distance": 0.6148328907320855,
+            "nearest_relative_centroid_distance": 0.08139436393985926,
+            "neighbor_state_purity": 0.3613333333333334
+          },
+          {
+            "state": "C27",
+            "cells": 6872,
+            "rms_radius": 8.411057975466017,
+            "nearest_centroid_distance": 1.3607216116760483,
+            "nearest_relative_centroid_distance": 0.0920446100140327,
+            "neighbor_state_purity": 0.6986666666666665
+          },
+          {
+            "state": "C28",
+            "cells": 2818,
+            "rms_radius": 1.4234894359409391,
+            "nearest_centroid_distance": 2.5387548312076254,
+            "nearest_relative_centroid_distance": 0.42906519700750345,
+            "neighbor_state_purity": 0.8293333333333334
+          },
+          {
+            "state": "C29",
+            "cells": 251,
+            "rms_radius": 1.157024319135238,
+            "nearest_centroid_distance": 2.096096971303005,
+            "nearest_relative_centroid_distance": 0.21907179586924308,
+            "neighbor_state_purity": 0.6533333333333333
+          },
+          {
+            "state": "C3",
+            "cells": 74,
+            "rms_radius": 6.9184316385198095,
+            "nearest_centroid_distance": 0.40408643273531814,
+            "nearest_relative_centroid_distance": 0.04067743185569033,
+            "neighbor_state_purity": 0.4066666666666666
+          },
+          {
+            "state": "C30",
+            "cells": 394,
+            "rms_radius": 1.3173712984915746,
+            "nearest_centroid_distance": 4.3341074001466255,
+            "nearest_relative_centroid_distance": 1.4303974464217952,
+            "neighbor_state_purity": 0.8893333333333334
+          },
+          {
+            "state": "C31",
+            "cells": 170,
+            "rms_radius": 1.1504308519619584,
+            "nearest_centroid_distance": 0.32676850616650077,
+            "nearest_relative_centroid_distance": 0.1163085779849024,
+            "neighbor_state_purity": 0.5426666666666666
+          },
+          {
+            "state": "C32",
+            "cells": 75,
+            "rms_radius": 1.6590653333401901,
+            "nearest_centroid_distance": 0.32676850616650077,
+            "nearest_relative_centroid_distance": 0.1163085779849024,
+            "neighbor_state_purity": 0.5266666666666667
+          },
+          {
+            "state": "C33",
+            "cells": 449,
+            "rms_radius": 4.108920531678741,
+            "nearest_centroid_distance": 1.0141722571932625,
+            "nearest_relative_centroid_distance": 0.1938776842462118,
+            "neighbor_state_purity": 0.38933333333333336
+          },
+          {
+            "state": "C34",
+            "cells": 394,
+            "rms_radius": 1.305469245819017,
+            "nearest_centroid_distance": 2.4945731401136273,
+            "nearest_relative_centroid_distance": 0.6976510106637196,
+            "neighbor_state_purity": 0.2826666666666667
+          },
+          {
+            "state": "C35",
+            "cells": 9888,
+            "rms_radius": 2.0626391544581355,
+            "nearest_centroid_distance": 2.7838528985208524,
+            "nearest_relative_centroid_distance": 0.8265330469446224,
+            "neighbor_state_purity": 0.9786666666666668
+          },
+          {
+            "state": "C36",
+            "cells": 751,
+            "rms_radius": 1.1220696213980361,
+            "nearest_centroid_distance": 1.0141722571932625,
+            "nearest_relative_centroid_distance": 0.1938776842462118,
+            "neighbor_state_purity": 0.7533333333333333
+          },
+          {
+            "state": "C37",
+            "cells": 1271,
+            "rms_radius": 1.0737293930581044,
+            "nearest_centroid_distance": 2.4945731401136273,
+            "nearest_relative_centroid_distance": 0.6989329642634837,
+            "neighbor_state_purity": 0.9173333333333333
+          },
+          {
+            "state": "C38",
+            "cells": 26,
+            "rms_radius": 2.4935120024082997,
+            "nearest_centroid_distance": 0.5974034651854053,
+            "nearest_relative_centroid_distance": 0.22587708417493496,
+            "neighbor_state_purity": 0.7769230769230769
+          },
+          {
+            "state": "C39",
+            "cells": 225,
+            "rms_radius": 0.5584481690876805,
+            "nearest_centroid_distance": 1.7013382793138865,
+            "nearest_relative_centroid_distance": 0.8052471323896813,
+            "neighbor_state_purity": 0.8613333333333333
+          },
+          {
+            "state": "C4",
+            "cells": 122,
+            "rms_radius": 0.7137521626603529,
+            "nearest_centroid_distance": 2.755559277394442,
+            "nearest_relative_centroid_distance": 0.4807224677378757,
+            "neighbor_state_purity": 0.8066666666666665
+          },
+          {
+            "state": "C40",
+            "cells": 98,
+            "rms_radius": 1.1731663418516105,
+            "nearest_centroid_distance": 0.9099404861157786,
+            "nearest_relative_centroid_distance": 0.5339235202713298,
+            "neighbor_state_purity": 0.836
+          },
+          {
+            "state": "C41",
+            "cells": 1438,
+            "rms_radius": 0.8752070926144561,
+            "nearest_centroid_distance": 2.8063682453687764,
+            "nearest_relative_centroid_distance": 0.5712160684994314,
+            "neighbor_state_purity": 0.9706666666666667
+          },
+          {
+            "state": "C42",
+            "cells": 350,
+            "rms_radius": 3.5708976319110075,
+            "nearest_centroid_distance": 0.6284699287863854,
+            "nearest_relative_centroid_distance": 0.15044113394239222,
+            "neighbor_state_purity": 0.2613333333333333
+          },
+          {
+            "state": "C43",
+            "cells": 322,
+            "rms_radius": 0.5634221817936912,
+            "nearest_centroid_distance": 1.6619912965657586,
+            "nearest_relative_centroid_distance": 0.4019987256565124,
+            "neighbor_state_purity": 0.8333333333333333
+          },
+          {
+            "state": "C44",
+            "cells": 130,
+            "rms_radius": 0.6066162721455968,
+            "nearest_centroid_distance": 0.6284699287863854,
+            "nearest_relative_centroid_distance": 0.15044113394239222,
+            "neighbor_state_purity": 0.48133333333333334
+          },
+          {
+            "state": "C45",
+            "cells": 259,
+            "rms_radius": 0.9753699044107331,
+            "nearest_centroid_distance": 1.0335282830092418,
+            "nearest_relative_centroid_distance": 0.3525170369943639,
+            "neighbor_state_purity": 0.8786666666666666
+          },
+          {
+            "state": "C46",
+            "cells": 40,
+            "rms_radius": 0.7224833082465371,
+            "nearest_centroid_distance": 0.7438949715292267,
+            "nearest_relative_centroid_distance": 0.4911925361927945,
+            "neighbor_state_purity": 0.7783333333333333
+          },
+          {
+            "state": "C47",
+            "cells": 60,
+            "rms_radius": 0.5310861429487671,
+            "nearest_centroid_distance": 0.7438949715292267,
+            "nearest_relative_centroid_distance": 0.5339235202713298,
+            "neighbor_state_purity": 0.5973333333333334
+          },
+          {
+            "state": "C48",
+            "cells": 76,
+            "rms_radius": 0.34336187631689796,
+            "nearest_centroid_distance": 0.8652321514626584,
+            "nearest_relative_centroid_distance": 0.881989838919002,
+            "neighbor_state_purity": 0.88
+          },
+          {
+            "state": "C49",
+            "cells": 129,
+            "rms_radius": 0.5328169229121483,
+            "nearest_centroid_distance": 0.8652321514626584,
+            "nearest_relative_centroid_distance": 0.8045035769941663,
+            "neighbor_state_purity": 0.7706666666666666
+          },
+          {
+            "state": "C5",
+            "cells": 4619,
+            "rms_radius": 1.3154306362338308,
+            "nearest_centroid_distance": 2.559167228720051,
+            "nearest_relative_centroid_distance": 0.6765530522782943,
+            "neighbor_state_purity": 0.8946666666666667
+          },
+          {
+            "state": "C50",
+            "cells": 969,
+            "rms_radius": 0.6803490786278666,
+            "nearest_centroid_distance": 1.0296945645825286,
+            "nearest_relative_centroid_distance": 0.7869636116509837,
+            "neighbor_state_purity": 0.8973333333333333
+          },
+          {
+            "state": "C51",
+            "cells": 289,
+            "rms_radius": 0.628090789922492,
+            "nearest_centroid_distance": 1.0296945645825286,
+            "nearest_relative_centroid_distance": 0.7869636116509837,
+            "neighbor_state_purity": 0.6293333333333334
+          },
+          {
+            "state": "C52",
+            "cells": 21,
+            "rms_radius": 0.1883316472699193,
+            "nearest_centroid_distance": 2.1721118443774614,
+            "nearest_relative_centroid_distance": 0.6055736001670113,
+            "neighbor_state_purity": 0.980952380952381
+          },
+          {
+            "state": "C53",
+            "cells": 20,
+            "rms_radius": 0.1516923231853053,
+            "nearest_centroid_distance": 3.0921622512529217,
+            "nearest_relative_centroid_distance": 1.0483770465375768,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "C54",
+            "cells": 13,
+            "rms_radius": 1.7536173238955373,
+            "nearest_centroid_distance": 1.391944265998289,
+            "nearest_relative_centroid_distance": 0.17696961057568636,
+            "neighbor_state_purity": 0.5435897435897437
+          },
+          {
+            "state": "C55",
+            "cells": 303,
+            "rms_radius": 3.3985351576542286,
+            "nearest_centroid_distance": 0.9471865301808086,
+            "nearest_relative_centroid_distance": 0.2226756594761647,
+            "neighbor_state_purity": 0.6653333333333333
+          },
+          {
+            "state": "C56",
+            "cells": 678,
+            "rms_radius": 0.8551247727082807,
+            "nearest_centroid_distance": 0.9471865301808086,
+            "nearest_relative_centroid_distance": 0.2226756594761647,
+            "neighbor_state_purity": 0.9173333333333333
+          },
+          {
+            "state": "C57",
+            "cells": 55,
+            "rms_radius": 0.2015127814385509,
+            "nearest_centroid_distance": 0.5494887713785942,
+            "nearest_relative_centroid_distance": 0.41264536287074083,
+            "neighbor_state_purity": 0.932
+          },
+          {
+            "state": "C58",
+            "cells": 21,
+            "rms_radius": 0.15130461264386913,
+            "nearest_centroid_distance": 0.5494887713785942,
+            "nearest_relative_centroid_distance": 0.22587708417493496,
+            "neighbor_state_purity": 0.9555555555555555
+          },
+          {
+            "state": "C59",
+            "cells": 261,
+            "rms_radius": 0.5922889386816526,
+            "nearest_centroid_distance": 1.7625544352034974,
+            "nearest_relative_centroid_distance": 0.654689558341998,
+            "neighbor_state_purity": 0.9640000000000002
+          },
+          {
+            "state": "C6",
+            "cells": 725,
+            "rms_radius": 2.2713079923223347,
+            "nearest_centroid_distance": 2.2309850341860904,
+            "nearest_relative_centroid_distance": 0.3803723163947452,
+            "neighbor_state_purity": 0.25866666666666666
+          },
+          {
+            "state": "C60",
+            "cells": 147,
+            "rms_radius": 1.5939083765746636,
+            "nearest_centroid_distance": 1.7625544352034974,
+            "nearest_relative_centroid_distance": 0.5418271918414445,
+            "neighbor_state_purity": 0.8946666666666667
+          },
+          {
+            "state": "C61",
+            "cells": 154,
+            "rms_radius": 0.8786147683684483,
+            "nearest_centroid_distance": 1.215893775654419,
+            "nearest_relative_centroid_distance": 0.23761005815356448,
+            "neighbor_state_purity": 0.7706666666666667
+          },
+          {
+            "state": "C62",
+            "cells": 228,
+            "rms_radius": 1.2678967533838077,
+            "nearest_centroid_distance": 1.215893775654419,
+            "nearest_relative_centroid_distance": 0.3886551838011558,
+            "neighbor_state_purity": 0.848
+          },
+          {
+            "state": "C63",
+            "cells": 359,
+            "rms_radius": 2.064803823968866,
+            "nearest_centroid_distance": 1.5241567299705139,
+            "nearest_relative_centroid_distance": 0.1864040501043545,
+            "neighbor_state_purity": 0.8813333333333334
+          },
+          {
+            "state": "C64",
+            "cells": 105,
+            "rms_radius": 2.126794663033176,
+            "nearest_centroid_distance": 1.8178401902795551,
+            "nearest_relative_centroid_distance": 0.4014922227192438,
+            "neighbor_state_purity": 0.8533333333333333
+          },
+          {
+            "state": "C65",
+            "cells": 425,
+            "rms_radius": 1.260534976277062,
+            "nearest_centroid_distance": 2.7349168483553137,
+            "nearest_relative_centroid_distance": 0.6276124113129284,
+            "neighbor_state_purity": 0.9266666666666667
+          },
+          {
+            "state": "C66",
+            "cells": 3389,
+            "rms_radius": 1.1200019433729957,
+            "nearest_centroid_distance": 2.7349168483553137,
+            "nearest_relative_centroid_distance": 0.9955811727674375,
+            "neighbor_state_purity": 0.9786666666666668
+          },
+          {
+            "state": "C67",
+            "cells": 144,
+            "rms_radius": 2.442628847695279,
+            "nearest_centroid_distance": 1.5436603769917325,
+            "nearest_relative_centroid_distance": 0.3325718575128765,
+            "neighbor_state_purity": 0.6226666666666667
+          },
+          {
+            "state": "C68",
+            "cells": 143,
+            "rms_radius": 6.111825005271946,
+            "nearest_centroid_distance": 1.391944265998289,
+            "nearest_relative_centroid_distance": 0.17696961057568636,
+            "neighbor_state_purity": 0.4146666666666667
+          },
+          {
+            "state": "C69",
+            "cells": 759,
+            "rms_radius": 2.198955646362416,
+            "nearest_centroid_distance": 1.5436603769917325,
+            "nearest_relative_centroid_distance": 0.3325718575128765,
+            "neighbor_state_purity": 0.7346666666666666
+          },
+          {
+            "state": "C7",
+            "cells": 4004,
+            "rms_radius": 1.268903321333981,
+            "nearest_centroid_distance": 1.6055294322073617,
+            "nearest_relative_centroid_distance": 0.1960991507102127,
+            "neighbor_state_purity": 0.8613333333333333
+          },
+          {
+            "state": "C8",
+            "cells": 2594,
+            "rms_radius": 1.7033596666387787,
+            "nearest_centroid_distance": 1.5725260541193429,
+            "nearest_relative_centroid_distance": 0.22873507277795022,
+            "neighbor_state_purity": 0.5986666666666668
+          },
+          {
+            "state": "C9",
+            "cells": 1240,
+            "rms_radius": 3.0154903005268623,
+            "nearest_centroid_distance": 0.40408643273531814,
+            "nearest_relative_centroid_distance": 0.04067743185569033,
+            "neighbor_state_purity": 0.4693333333333333
+          }
+        ],
+        "scope": "Existing-cluster geometry diagnostic; not biological validation. All states included."
+      }
+    },
+    "exact_correlation": {
+      "query_cells": 30164,
+      "seconds": 19.34316629206296,
+      "batches": [
+        {
+          "cells": 30164,
+          "seconds": 19.20747658307664
+        }
+      ],
+      "fit_coordinates_unchanged": true,
+      "finite_coordinates": 60164,
+      "search_backend": "exact_correlation",
+      "separation": {
+        "median_nearest_relative_centroid_distance": 0.42831901365434727,
+        "p10_nearest_relative_centroid_distance": 0.1426937018406941,
+        "macro_neighbor_state_purity": 0.7344621047229744,
+        "per_state": [
+          {
+            "state": "C1",
+            "cells": 29,
+            "rms_radius": 0.12529576822401267,
+            "nearest_centroid_distance": 3.596198948642249,
+            "nearest_relative_centroid_distance": 0.5137929922061548,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "C10",
+            "cells": 178,
+            "rms_radius": 1.932831334423217,
+            "nearest_centroid_distance": 1.777231274659452,
+            "nearest_relative_centroid_distance": 0.6605495049515985,
+            "neighbor_state_purity": 0.764
+          },
+          {
+            "state": "C11",
+            "cells": 51,
+            "rms_radius": 0.5974018229562666,
+            "nearest_centroid_distance": 1.5341006610399444,
+            "nearest_relative_centroid_distance": 0.7023982234507187,
+            "neighbor_state_purity": 0.196
+          },
+          {
+            "state": "C12",
+            "cells": 688,
+            "rms_radius": 0.9058536471165175,
+            "nearest_centroid_distance": 2.7901093173354767,
+            "nearest_relative_centroid_distance": 1.1884222707091097,
+            "neighbor_state_purity": 0.8666666666666667
+          },
+          {
+            "state": "C13",
+            "cells": 1416,
+            "rms_radius": 1.2847588016229359,
+            "nearest_centroid_distance": 1.5341006610399444,
+            "nearest_relative_centroid_distance": 0.8150742508402681,
+            "neighbor_state_purity": 0.9426666666666667
+          },
+          {
+            "state": "C14",
+            "cells": 173,
+            "rms_radius": 1.9096619126112964,
+            "nearest_centroid_distance": 1.966655811449811,
+            "nearest_relative_centroid_distance": 0.6650658049010206,
+            "neighbor_state_purity": 0.6759999999999999
+          },
+          {
+            "state": "C15",
+            "cells": 35,
+            "rms_radius": 0.5088060988645301,
+            "nearest_centroid_distance": 0.9509044673610324,
+            "nearest_relative_centroid_distance": 0.6659231061144603,
+            "neighbor_state_purity": 0.4971428571428572
+          },
+          {
+            "state": "C16",
+            "cells": 52,
+            "rms_radius": 0.33369779388709214,
+            "nearest_centroid_distance": 0.9509044673610324,
+            "nearest_relative_centroid_distance": 0.9294117065612456,
+            "neighbor_state_purity": 0.8893333333333335
+          },
+          {
+            "state": "C17",
+            "cells": 191,
+            "rms_radius": 1.1618393105590374,
+            "nearest_centroid_distance": 1.1125213802592062,
+            "nearest_relative_centroid_distance": 0.6605495049515985,
+            "neighbor_state_purity": 0.728
+          },
+          {
+            "state": "C18",
+            "cells": 80,
+            "rms_radius": 0.5451419231049628,
+            "nearest_centroid_distance": 1.1577078274372752,
+            "nearest_relative_centroid_distance": 0.6782194230409194,
+            "neighbor_state_purity": 0.6386666666666667
+          },
+          {
+            "state": "C19",
+            "cells": 107,
+            "rms_radius": 0.35881085566033855,
+            "nearest_centroid_distance": 2.6479880877922994,
+            "nearest_relative_centroid_distance": 0.3424764000490119,
+            "neighbor_state_purity": 0.5973333333333334
+          },
+          {
+            "state": "C2",
+            "cells": 1337,
+            "rms_radius": 1.2044466306547952,
+            "nearest_centroid_distance": 8.666177835413981,
+            "nearest_relative_centroid_distance": 1.888547280963986,
+            "neighbor_state_purity": 0.9840000000000001
+          },
+          {
+            "state": "C20",
+            "cells": 72,
+            "rms_radius": 7.373073990750523,
+            "nearest_centroid_distance": 2.4932106859068184,
+            "nearest_relative_centroid_distance": 0.28329422431691154,
+            "neighbor_state_purity": 0.284
+          },
+          {
+            "state": "C21",
+            "cells": 93,
+            "rms_radius": 6.372226037238246,
+            "nearest_centroid_distance": 0.6148328907320855,
+            "nearest_relative_centroid_distance": 0.08139436393985926,
+            "neighbor_state_purity": 0.42933333333333334
+          },
+          {
+            "state": "C22",
+            "cells": 123,
+            "rms_radius": 1.4277079239479886,
+            "nearest_centroid_distance": 2.4932106859068184,
+            "nearest_relative_centroid_distance": 0.28329422431691154,
+            "neighbor_state_purity": 0.9853333333333333
+          },
+          {
+            "state": "C23",
+            "cells": 1702,
+            "rms_radius": 1.2226444859942005,
+            "nearest_centroid_distance": 5.599551814676373,
+            "nearest_relative_centroid_distance": 1.1593360581092311,
+            "neighbor_state_purity": 0.9359999999999999
+          },
+          {
+            "state": "C24",
+            "cells": 640,
+            "rms_radius": 0.865724729669848,
+            "nearest_centroid_distance": 2.8066786803579538,
+            "nearest_relative_centroid_distance": 0.4600536165732949,
+            "neighbor_state_purity": 0.9453333333333334
+          },
+          {
+            "state": "C25",
+            "cells": 4648,
+            "rms_radius": 1.3688248600529618,
+            "nearest_centroid_distance": 2.0494008691561083,
+            "nearest_relative_centroid_distance": 0.28366942081560315,
+            "neighbor_state_purity": 0.932
+          },
+          {
+            "state": "C26",
+            "cells": 202,
+            "rms_radius": 1.181526593427604,
+            "nearest_centroid_distance": 0.6148328907320855,
+            "nearest_relative_centroid_distance": 0.08139436393985926,
+            "neighbor_state_purity": 0.34266666666666673
+          },
+          {
+            "state": "C27",
+            "cells": 6872,
+            "rms_radius": 8.411801050576715,
+            "nearest_centroid_distance": 1.3576431656259607,
+            "nearest_relative_centroid_distance": 0.09183175582415797,
+            "neighbor_state_purity": 0.6920000000000001
+          },
+          {
+            "state": "C28",
+            "cells": 2818,
+            "rms_radius": 1.41803574660959,
+            "nearest_centroid_distance": 2.527238578273428,
+            "nearest_relative_centroid_distance": 0.42831901365434727,
+            "neighbor_state_purity": 0.8386666666666666
+          },
+          {
+            "state": "C29",
+            "cells": 251,
+            "rms_radius": 1.160333691453703,
+            "nearest_centroid_distance": 2.098228151767518,
+            "nearest_relative_centroid_distance": 0.21920169411681797,
+            "neighbor_state_purity": 0.6746666666666666
+          },
+          {
+            "state": "C3",
+            "cells": 74,
+            "rms_radius": 6.9184316385198095,
+            "nearest_centroid_distance": 0.4044491140250191,
+            "nearest_relative_centroid_distance": 0.040676027119614884,
+            "neighbor_state_purity": 0.4093333333333334
+          },
+          {
+            "state": "C30",
+            "cells": 394,
+            "rms_radius": 1.3183057288014075,
+            "nearest_centroid_distance": 4.339613070519938,
+            "nearest_relative_centroid_distance": 1.4307827822997674,
+            "neighbor_state_purity": 0.872
+          },
+          {
+            "state": "C31",
+            "cells": 170,
+            "rms_radius": 1.1504308519619584,
+            "nearest_centroid_distance": 0.32676850616650077,
+            "nearest_relative_centroid_distance": 0.1163085779849024,
+            "neighbor_state_purity": 0.5426666666666666
+          },
+          {
+            "state": "C32",
+            "cells": 75,
+            "rms_radius": 1.6590653333401901,
+            "nearest_centroid_distance": 0.32676850616650077,
+            "nearest_relative_centroid_distance": 0.1163085779849024,
+            "neighbor_state_purity": 0.5506666666666666
+          },
+          {
+            "state": "C33",
+            "cells": 449,
+            "rms_radius": 4.1048100831683065,
+            "nearest_centroid_distance": 1.0214744183391513,
+            "nearest_relative_centroid_distance": 0.19556864927570863,
+            "neighbor_state_purity": 0.3773333333333333
+          },
+          {
+            "state": "C34",
+            "cells": 394,
+            "rms_radius": 1.30837283830935,
+            "nearest_centroid_distance": 2.4783310504471663,
+            "nearest_relative_centroid_distance": 0.6986563294253112,
+            "neighbor_state_purity": 0.2786666666666666
+          },
+          {
+            "state": "C35",
+            "cells": 9888,
+            "rms_radius": 2.0650868158769224,
+            "nearest_centroid_distance": 2.7921134024466636,
+            "nearest_relative_centroid_distance": 0.8276706078229834,
+            "neighbor_state_purity": 0.9746666666666667
+          },
+          {
+            "state": "C36",
+            "cells": 751,
+            "rms_radius": 1.1182889264234497,
+            "nearest_centroid_distance": 1.0214744183391513,
+            "nearest_relative_centroid_distance": 0.19556864927570863,
+            "neighbor_state_purity": 0.7480000000000001
+          },
+          {
+            "state": "C37",
+            "cells": 1271,
+            "rms_radius": 1.0716989623208477,
+            "nearest_centroid_distance": 2.4783310504471663,
+            "nearest_relative_centroid_distance": 0.6999932660846131,
+            "neighbor_state_purity": 0.9186666666666666
+          },
+          {
+            "state": "C38",
+            "cells": 26,
+            "rms_radius": 2.4935120024082997,
+            "nearest_centroid_distance": 0.5974034651854053,
+            "nearest_relative_centroid_distance": 0.22587708417493496,
+            "neighbor_state_purity": 0.7410256410256412
+          },
+          {
+            "state": "C39",
+            "cells": 225,
+            "rms_radius": 0.5624059891073487,
+            "nearest_centroid_distance": 1.701280972716389,
+            "nearest_relative_centroid_distance": 0.8042499076847114,
+            "neighbor_state_purity": 0.856
+          },
+          {
+            "state": "C4",
+            "cells": 122,
+            "rms_radius": 0.7137521626603529,
+            "nearest_centroid_distance": 2.755559277394442,
+            "nearest_relative_centroid_distance": 0.4807224677378757,
+            "neighbor_state_purity": 0.7919999999999999
+          },
+          {
+            "state": "C40",
+            "cells": 98,
+            "rms_radius": 1.1731663418516105,
+            "nearest_centroid_distance": 0.9099404861157786,
+            "nearest_relative_centroid_distance": 0.5339235202713298,
+            "neighbor_state_purity": 0.8306666666666667
+          },
+          {
+            "state": "C41",
+            "cells": 1438,
+            "rms_radius": 0.873405738503569,
+            "nearest_centroid_distance": 2.8066786803579538,
+            "nearest_relative_centroid_distance": 0.5718019465987219,
+            "neighbor_state_purity": 0.9573333333333334
+          },
+          {
+            "state": "C42",
+            "cells": 350,
+            "rms_radius": 3.5891103774521147,
+            "nearest_centroid_distance": 0.6263799593714205,
+            "nearest_relative_centroid_distance": 0.149289982804642,
+            "neighbor_state_purity": 0.23733333333333334
+          },
+          {
+            "state": "C43",
+            "cells": 322,
+            "rms_radius": 0.5537335104107601,
+            "nearest_centroid_distance": 1.6616560703557208,
+            "nearest_relative_centroid_distance": 0.40109067957491923,
+            "neighbor_state_purity": 0.852
+          },
+          {
+            "state": "C44",
+            "cells": 130,
+            "rms_radius": 0.6066162721455968,
+            "nearest_centroid_distance": 0.6263799593714205,
+            "nearest_relative_centroid_distance": 0.149289982804642,
+            "neighbor_state_purity": 0.4666666666666666
+          },
+          {
+            "state": "C45",
+            "cells": 259,
+            "rms_radius": 0.9759882967731774,
+            "nearest_centroid_distance": 1.0373855841855366,
+            "nearest_relative_centroid_distance": 0.35152918734243527,
+            "neighbor_state_purity": 0.8786666666666666
+          },
+          {
+            "state": "C46",
+            "cells": 40,
+            "rms_radius": 0.7224833082465371,
+            "nearest_centroid_distance": 0.7438949715292267,
+            "nearest_relative_centroid_distance": 0.4911925361927945,
+            "neighbor_state_purity": 0.78
+          },
+          {
+            "state": "C47",
+            "cells": 60,
+            "rms_radius": 0.5310861429487671,
+            "nearest_centroid_distance": 0.7438949715292267,
+            "nearest_relative_centroid_distance": 0.5339235202713298,
+            "neighbor_state_purity": 0.608
+          },
+          {
+            "state": "C48",
+            "cells": 76,
+            "rms_radius": 0.34336187631689796,
+            "nearest_centroid_distance": 0.8652321514626584,
+            "nearest_relative_centroid_distance": 0.8820443220030402,
+            "neighbor_state_purity": 0.8826666666666667
+          },
+          {
+            "state": "C49",
+            "cells": 129,
+            "rms_radius": 0.5328169229121483,
+            "nearest_centroid_distance": 0.8652321514626584,
+            "nearest_relative_centroid_distance": 0.804527344829842,
+            "neighbor_state_purity": 0.7693333333333334
+          },
+          {
+            "state": "C5",
+            "cells": 4619,
+            "rms_radius": 1.318208563097111,
+            "nearest_centroid_distance": 2.5603195326611465,
+            "nearest_relative_centroid_distance": 0.6762809276757882,
+            "neighbor_state_purity": 0.872
+          },
+          {
+            "state": "C50",
+            "cells": 969,
+            "rms_radius": 0.6856444560903062,
+            "nearest_centroid_distance": 1.0337020627699074,
+            "nearest_relative_centroid_distance": 0.7816907530945874,
+            "neighbor_state_purity": 0.8839999999999999
+          },
+          {
+            "state": "C51",
+            "cells": 289,
+            "rms_radius": 0.636748138011195,
+            "nearest_centroid_distance": 1.0337020627699074,
+            "nearest_relative_centroid_distance": 0.7816907530945874,
+            "neighbor_state_purity": 0.6333333333333333
+          },
+          {
+            "state": "C52",
+            "cells": 21,
+            "rms_radius": 0.1883316472699193,
+            "nearest_centroid_distance": 2.171877301541177,
+            "nearest_relative_centroid_distance": 0.6044995037274677,
+            "neighbor_state_purity": 0.980952380952381
+          },
+          {
+            "state": "C53",
+            "cells": 20,
+            "rms_radius": 0.1516923231853053,
+            "nearest_centroid_distance": 3.092116713488024,
+            "nearest_relative_centroid_distance": 1.0483770465375768,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "C54",
+            "cells": 13,
+            "rms_radius": 1.7536173238955373,
+            "nearest_centroid_distance": 1.391944265998289,
+            "nearest_relative_centroid_distance": 0.17696961057568636,
+            "neighbor_state_purity": 0.5435897435897437
+          },
+          {
+            "state": "C55",
+            "cells": 303,
+            "rms_radius": 3.404520436394231,
+            "nearest_centroid_distance": 0.9397345544912673,
+            "nearest_relative_centroid_distance": 0.2204759334224947,
+            "neighbor_state_purity": 0.6586666666666666
+          },
+          {
+            "state": "C56",
+            "cells": 678,
+            "rms_radius": 0.8577794886069624,
+            "nearest_centroid_distance": 0.9397345544912673,
+            "nearest_relative_centroid_distance": 0.2204759334224947,
+            "neighbor_state_purity": 0.92
+          },
+          {
+            "state": "C57",
+            "cells": 55,
+            "rms_radius": 0.2015127814385509,
+            "nearest_centroid_distance": 0.5494887713785942,
+            "nearest_relative_centroid_distance": 0.412582352517446,
+            "neighbor_state_purity": 0.932
+          },
+          {
+            "state": "C58",
+            "cells": 21,
+            "rms_radius": 0.15130461264386913,
+            "nearest_centroid_distance": 0.5494887713785942,
+            "nearest_relative_centroid_distance": 0.22587708417493496,
+            "neighbor_state_purity": 0.9365079365079365
+          },
+          {
+            "state": "C59",
+            "cells": 261,
+            "rms_radius": 0.5969669724583351,
+            "nearest_centroid_distance": 1.762186948273742,
+            "nearest_relative_centroid_distance": 0.6543747690424304,
+            "neighbor_state_purity": 0.968
+          },
+          {
+            "state": "C6",
+            "cells": 725,
+            "rms_radius": 2.273033680744242,
+            "nearest_centroid_distance": 2.2315168332465127,
+            "nearest_relative_centroid_distance": 0.38050477254480114,
+            "neighbor_state_purity": 0.24666666666666667
+          },
+          {
+            "state": "C60",
+            "cells": 147,
+            "rms_radius": 1.5939083765746636,
+            "nearest_centroid_distance": 1.762186948273742,
+            "nearest_relative_centroid_distance": 0.5418271918414445,
+            "neighbor_state_purity": 0.9
+          },
+          {
+            "state": "C61",
+            "cells": 154,
+            "rms_radius": 0.8786147683684483,
+            "nearest_centroid_distance": 1.2190176359320657,
+            "nearest_relative_centroid_distance": 0.23761005815356448,
+            "neighbor_state_purity": 0.7706666666666666
+          },
+          {
+            "state": "C62",
+            "cells": 228,
+            "rms_radius": 1.2684856713880297,
+            "nearest_centroid_distance": 1.2190176359320657,
+            "nearest_relative_centroid_distance": 0.3890553658773029,
+            "neighbor_state_purity": 0.8546666666666667
+          },
+          {
+            "state": "C63",
+            "cells": 359,
+            "rms_radius": 2.059459898428853,
+            "nearest_centroid_distance": 1.5112431396361787,
+            "nearest_relative_centroid_distance": 0.18494559392387996,
+            "neighbor_state_purity": 0.8760000000000001
+          },
+          {
+            "state": "C64",
+            "cells": 105,
+            "rms_radius": 2.126794663033176,
+            "nearest_centroid_distance": 1.8293513454390622,
+            "nearest_relative_centroid_distance": 0.4014922227192438,
+            "neighbor_state_purity": 0.8533333333333333
+          },
+          {
+            "state": "C65",
+            "cells": 425,
+            "rms_radius": 1.2560281196406327,
+            "nearest_centroid_distance": 2.7360686953252658,
+            "nearest_relative_centroid_distance": 0.627702221063013,
+            "neighbor_state_purity": 0.92
+          },
+          {
+            "state": "C66",
+            "cells": 3389,
+            "rms_radius": 1.119772681247643,
+            "nearest_centroid_distance": 2.7360686953252658,
+            "nearest_relative_centroid_distance": 0.9955792396382991,
+            "neighbor_state_purity": 0.972
+          },
+          {
+            "state": "C67",
+            "cells": 144,
+            "rms_radius": 2.442628847695279,
+            "nearest_centroid_distance": 1.5503395313591166,
+            "nearest_relative_centroid_distance": 0.33411556131182685,
+            "neighbor_state_purity": 0.6240000000000001
+          },
+          {
+            "state": "C68",
+            "cells": 143,
+            "rms_radius": 6.111825005271946,
+            "nearest_centroid_distance": 1.391944265998289,
+            "nearest_relative_centroid_distance": 0.17696961057568636,
+            "neighbor_state_purity": 0.42133333333333334
+          },
+          {
+            "state": "C69",
+            "cells": 759,
+            "rms_radius": 2.197500828612134,
+            "nearest_centroid_distance": 1.5503395313591166,
+            "nearest_relative_centroid_distance": 0.33411556131182685,
+            "neighbor_state_purity": 0.7280000000000001
+          },
+          {
+            "state": "C7",
+            "cells": 4004,
+            "rms_radius": 1.261362078914917,
+            "nearest_centroid_distance": 1.607849564972693,
+            "nearest_relative_centroid_distance": 0.19656358344901298,
+            "neighbor_state_purity": 0.8759999999999999
+          },
+          {
+            "state": "C8",
+            "cells": 2594,
+            "rms_radius": 1.7016172202590734,
+            "nearest_centroid_distance": 1.5758184120338716,
+            "nearest_relative_centroid_distance": 0.2293360492317986,
+            "neighbor_state_purity": 0.648
+          },
+          {
+            "state": "C9",
+            "cells": 1240,
+            "rms_radius": 3.0247497060020305,
+            "nearest_centroid_distance": 0.4044491140250191,
+            "nearest_relative_centroid_distance": 0.040676027119614884,
+            "neighbor_state_purity": 0.4946666666666667
+          }
+        ],
+        "scope": "Existing-cluster geometry diagnostic; not biological validation. All states included."
+      }
+    },
+    "neighbor_validation": {
+      "anchors": 176,
+      "all_features": 1273,
+      "baseline_exact_recall": 0.9990909090909091,
+      "candidate_exact_recall": 1.0,
+      "max_distance_error": 1.6674079349687787e-05
+    },
+    "cells": 60164,
+    "features": 1273,
+    "states": 69,
+    "fit_seconds": 121.05375620897394,
+    "landmarks": 30000,
+    "authorization": {
+      "state": "approved",
+      "proposal": "Benchmark and replace only the accelerated neighbor-search backend, retaining all marker features, correlation distance, current UMAP fit/optimization and at least 200 stratified landmarks per state. Approximate neighbors and coordinates may differ.",
+      "source": "Actual human reply in this chat on 2026-10-07: \"Yes, do that\". Approval is limited to the proposed accelerated neighbor-search replacement with the stated feature, distance, fit and landmark safeguards."
+    },
+    "provenance": {
+      "kind": "verified prepared input",
+      "sha256": {
+        "X.npy": "2447d626970cc7ab97e40343dcd4da474d2ae1b15c8ea542f903e3bd66797c15",
+        "states.npy": "2619b23dee6ff0201c2e99f486d945f1b9ef90c0206a684d41991778fb7111c1",
+        "cells.txt": "8a8bc43b7e79f378f6abe4c55c0e7ad09ac066d4b2709bf2cda700e6f65b6de1",
+        "features.txt": "7652eb2435437898505dc0a2b01bca67d90c69de5f07fda42284dd6e5e00708a"
+      },
+      "source_sha256": "81c7f92a4ed949b28d24c8a0a698c43fee1088983144e76183dc2df8b6973804",
+      "parameters": {
+        "n_neighbors": 50,
+        "min_dist": 0.75,
+        "metric": "correlation",
+        "random_state": 0
+      }
+    },
+    "peak_rss_gib": 2.3040008544921875,
+    "versions": {
+      "numpy": "2.4.6",
+      "scipy": "1.17.1",
+      "numba": "0.66.0",
+      "umap-learn": "0.5.7",
+      "pynndescent": "0.6.0",
+      "scikit-learn": "1.5.2"
+    },
+    "scope": "UMAP-only benchmark; does not establish full-workflow or visitor-job performance"
+  },
+  "container_synthetic": {
+    "umap": {
+      "query_cells": 12000,
+      "seconds": 141.95054551199428,
+      "batches": [
+        {
+          "cells": 12000,
+          "seconds": 141.94776337000076
+        }
+      ],
+      "fit_coordinates_unchanged": true,
+      "finite_coordinates": 42000,
+      "search_backend": "umap"
+    },
+    "exact_correlation": {
+      "query_cells": 210414,
+      "seconds": 122.13050567999016,
+      "batches": [
+        {
+          "cells": 42083,
+          "seconds": 25.054419569001766
+        },
+        {
+          "cells": 42083,
+          "seconds": 24.920458341992344
+        },
+        {
+          "cells": 42083,
+          "seconds": 24.026007477994426
+        },
+        {
+          "cells": 42083,
+          "seconds": 23.88418461299443
+        },
+        {
+          "cells": 42082,
+          "seconds": 24.101518181007123
+        }
+      ],
+      "fit_coordinates_unchanged": true,
+      "finite_coordinates": 240414,
+      "search_backend": "exact_correlation",
+      "separation": {
+        "median_nearest_relative_centroid_distance": 3.4875518932747247,
+        "p10_nearest_relative_centroid_distance": 3.2310756427925402,
+        "macro_neighbor_state_purity": 1.0,
+        "per_state": [
+          {
+            "state": "0",
+            "cells": 4714,
+            "rms_radius": 0.5952984424826653,
+            "nearest_centroid_distance": 4.205285119657749,
+            "nearest_relative_centroid_distance": 3.5297384808260635,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "1",
+            "cells": 4714,
+            "rms_radius": 0.5870864437787283,
+            "nearest_centroid_distance": 3.8493325679260715,
+            "nearest_relative_centroid_distance": 3.2817267992581756,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "10",
+            "cells": 4714,
+            "rms_radius": 0.5908679225393575,
+            "nearest_centroid_distance": 3.973973930848643,
+            "nearest_relative_centroid_distance": 3.368937074800355,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "11",
+            "cells": 4714,
+            "rms_radius": 0.5852840229948955,
+            "nearest_centroid_distance": 4.394514471235054,
+            "nearest_relative_centroid_distance": 3.737173101732198,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "12",
+            "cells": 4714,
+            "rms_radius": 0.5809418706497197,
+            "nearest_centroid_distance": 4.437994106536718,
+            "nearest_relative_centroid_distance": 3.7783258109681266,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "13",
+            "cells": 4714,
+            "rms_radius": 0.5936508798361267,
+            "nearest_centroid_distance": 3.8581930137838905,
+            "nearest_relative_centroid_distance": 3.2630618071170825,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "14",
+            "cells": 4714,
+            "rms_radius": 0.5904273747461435,
+            "nearest_centroid_distance": 4.642628373983369,
+            "nearest_relative_centroid_distance": 3.9356119264869385,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "15",
+            "cells": 4714,
+            "rms_radius": 0.5849339677598868,
+            "nearest_centroid_distance": 3.6912015524493853,
+            "nearest_relative_centroid_distance": 3.139998068976223,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "16",
+            "cells": 4714,
+            "rms_radius": 0.5944721818501496,
+            "nearest_centroid_distance": 4.120747021827075,
+            "nearest_relative_centroid_distance": 3.4875518932747247,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "17",
+            "cells": 4714,
+            "rms_radius": 0.5900261457937331,
+            "nearest_centroid_distance": 4.495337063515573,
+            "nearest_relative_centroid_distance": 3.797773350482585,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "18",
+            "cells": 4714,
+            "rms_radius": 0.5985406227603772,
+            "nearest_centroid_distance": 4.5839901515467885,
+            "nearest_relative_centroid_distance": 3.842364586391247,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "19",
+            "cells": 4714,
+            "rms_radius": 0.5878625138068585,
+            "nearest_centroid_distance": 4.009456682921129,
+            "nearest_relative_centroid_distance": 3.3281070054136235,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "2",
+            "cells": 4714,
+            "rms_radius": 0.59642402616975,
+            "nearest_centroid_distance": 4.563406124630354,
+            "nearest_relative_centroid_distance": 3.856154506777386,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "20",
+            "cells": 4714,
+            "rms_radius": 0.5780436375648572,
+            "nearest_centroid_distance": 3.9353960258897986,
+            "nearest_relative_centroid_distance": 3.372011863961518,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "21",
+            "cells": 4714,
+            "rms_radius": 0.590040210937193,
+            "nearest_centroid_distance": 5.147947067759247,
+            "nearest_relative_centroid_distance": 4.3664245543215525,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "22",
+            "cells": 4714,
+            "rms_radius": 0.5887334088613059,
+            "nearest_centroid_distance": 3.8581930137838905,
+            "nearest_relative_centroid_distance": 3.2630618071170825,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "23",
+            "cells": 4714,
+            "rms_radius": 0.5906086508548051,
+            "nearest_centroid_distance": 3.611135034113551,
+            "nearest_relative_centroid_distance": 3.057432003748875,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "24",
+            "cells": 4714,
+            "rms_radius": 0.5821783053355701,
+            "nearest_centroid_distance": 3.955630070763287,
+            "nearest_relative_centroid_distance": 3.390829055932921,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "25",
+            "cells": 4714,
+            "rms_radius": 0.5887248815453381,
+            "nearest_centroid_distance": 3.973973930848643,
+            "nearest_relative_centroid_distance": 3.368937074800355,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "26",
+            "cells": 4714,
+            "rms_radius": 0.5911935813618754,
+            "nearest_centroid_distance": 3.897859051344039,
+            "nearest_relative_centroid_distance": 3.314031112860712,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "27",
+            "cells": 4714,
+            "rms_radius": 0.5889994604822086,
+            "nearest_centroid_distance": 4.494614730694637,
+            "nearest_relative_centroid_distance": 3.815350230953186,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "28",
+            "cells": 4714,
+            "rms_radius": 0.5858730386486941,
+            "nearest_centroid_distance": 3.7221701473554734,
+            "nearest_relative_centroid_distance": 3.1671792793076787,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "29",
+            "cells": 4714,
+            "rms_radius": 0.5894283697584761,
+            "nearest_centroid_distance": 4.107448057883203,
+            "nearest_relative_centroid_distance": 3.483682030070211,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "3",
+            "cells": 4714,
+            "rms_radius": 0.5843889280795544,
+            "nearest_centroid_distance": 3.955630070763287,
+            "nearest_relative_centroid_distance": 3.390829055932921,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "30",
+            "cells": 4714,
+            "rms_radius": 0.5866052594834188,
+            "nearest_centroid_distance": 4.310321161674571,
+            "nearest_relative_centroid_distance": 3.687869415191611,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "31",
+            "cells": 4714,
+            "rms_radius": 0.6168633788399814,
+            "nearest_centroid_distance": 4.009456682921129,
+            "nearest_relative_centroid_distance": 3.3281070054136235,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "32",
+            "cells": 4714,
+            "rms_radius": 0.6350788201486347,
+            "nearest_centroid_distance": 4.666518521682823,
+            "nearest_relative_centroid_distance": 3.8160466573831413,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "33",
+            "cells": 4714,
+            "rms_radius": 0.5904920341925655,
+            "nearest_centroid_distance": 3.611135034113551,
+            "nearest_relative_centroid_distance": 3.057432003748875,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "34",
+            "cells": 4714,
+            "rms_radius": 0.5892185000765648,
+            "nearest_centroid_distance": 4.24321993741975,
+            "nearest_relative_centroid_distance": 3.6048665192725577,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "35",
+            "cells": 4714,
+            "rms_radius": 0.5869845007992648,
+            "nearest_centroid_distance": 4.239193117517837,
+            "nearest_relative_centroid_distance": 3.599086807073712,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "36",
+            "cells": 4714,
+            "rms_radius": 0.595228575179589,
+            "nearest_centroid_distance": 4.703027286833394,
+            "nearest_relative_centroid_distance": 3.9586959593739675,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "37",
+            "cells": 4714,
+            "rms_radius": 0.5906451246794486,
+            "nearest_centroid_distance": 4.164588700820812,
+            "nearest_relative_centroid_distance": 3.5302689133001173,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "38",
+            "cells": 4714,
+            "rms_radius": 0.5890329281938419,
+            "nearest_centroid_distance": 3.9353960258897986,
+            "nearest_relative_centroid_distance": 3.372011863961518,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "39",
+            "cells": 4714,
+            "rms_radius": 0.5890351781810291,
+            "nearest_centroid_distance": 4.164588700820812,
+            "nearest_relative_centroid_distance": 3.5302689133001173,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "4",
+            "cells": 4714,
+            "rms_radius": 0.5889443343618214,
+            "nearest_centroid_distance": 4.948448793325937,
+            "nearest_relative_centroid_distance": 4.200801620389601,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "40",
+            "cells": 4714,
+            "rms_radius": 0.5929893927314198,
+            "nearest_centroid_distance": 4.822904144375883,
+            "nearest_relative_centroid_distance": 4.081277724539322,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "41",
+            "cells": 4714,
+            "rms_radius": 0.5877884403064285,
+            "nearest_centroid_distance": 4.666518521682823,
+            "nearest_relative_centroid_distance": 3.8160466573831413,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "42",
+            "cells": 4714,
+            "rms_radius": 0.587604056130455,
+            "nearest_centroid_distance": 4.507089572711015,
+            "nearest_relative_centroid_distance": 3.8665967402403836,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "43",
+            "cells": 4714,
+            "rms_radius": 0.5863410890778595,
+            "nearest_centroid_distance": 3.996582723009883,
+            "nearest_relative_centroid_distance": 3.399451334347593,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "44",
+            "cells": 4714,
+            "rms_radius": 0.586392148089268,
+            "nearest_centroid_distance": 3.876206732477123,
+            "nearest_relative_centroid_distance": 3.278029125778957,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "45",
+            "cells": 4714,
+            "rms_radius": 0.5863177591626041,
+            "nearest_centroid_distance": 3.7985555807665574,
+            "nearest_relative_centroid_distance": 3.2310756427925402,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "46",
+            "cells": 4714,
+            "rms_radius": 0.5893588693376172,
+            "nearest_centroid_distance": 3.7221701473554734,
+            "nearest_relative_centroid_distance": 3.1671792793076787,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "47",
+            "cells": 4714,
+            "rms_radius": 0.593911003229536,
+            "nearest_centroid_distance": 4.877824578631438,
+            "nearest_relative_centroid_distance": 4.130614912149308,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "48",
+            "cells": 4714,
+            "rms_radius": 0.592795798275233,
+            "nearest_centroid_distance": 4.639248112492085,
+            "nearest_relative_centroid_distance": 3.9047812482725766,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "49",
+            "cells": 4714,
+            "rms_radius": 0.5907481816855239,
+            "nearest_centroid_distance": 4.064263922783666,
+            "nearest_relative_centroid_distance": 3.4458302181574743,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "5",
+            "cells": 4714,
+            "rms_radius": 0.5914287439223868,
+            "nearest_centroid_distance": 4.973612748246661,
+            "nearest_relative_centroid_distance": 4.22196026079679,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "50",
+            "cells": 4714,
+            "rms_radius": 0.5917923864202523,
+            "nearest_centroid_distance": 4.331421102580475,
+            "nearest_relative_centroid_distance": 3.6741868558699817,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "6",
+            "cells": 4714,
+            "rms_radius": 0.5960887218926365,
+            "nearest_centroid_distance": 3.876206732477123,
+            "nearest_relative_centroid_distance": 3.278029125778957,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "7",
+            "cells": 4714,
+            "rms_radius": 0.5893141358194515,
+            "nearest_centroid_distance": 3.7985555807665574,
+            "nearest_relative_centroid_distance": 3.2310756427925402,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "8",
+            "cells": 4714,
+            "rms_radius": 0.5896252931271748,
+            "nearest_centroid_distance": 4.107448057883203,
+            "nearest_relative_centroid_distance": 3.483682030070211,
+            "neighbor_state_purity": 1.0
+          },
+          {
+            "state": "9",
+            "cells": 4714,
+            "rms_radius": 0.5913950274990567,
+            "nearest_centroid_distance": 4.7365927975524045,
+            "nearest_relative_centroid_distance": 4.01746944787349,
+            "neighbor_state_purity": 1.0
+          }
+        ],
+        "scope": "Existing-cluster geometry diagnostic; not biological validation. All states included."
+      }
+    },
+    "neighbor_validation": {
+      "anchors": 255,
+      "all_features": 827,
+      "baseline_exact_recall": 0.8028758169934641,
+      "candidate_exact_recall": 1.0,
+      "max_distance_error": 9.938530339814733e-07
+    },
+    "cells": 240414,
+    "features": 827,
+    "states": 51,
+    "fit_seconds": 42.52568641799735,
+    "landmarks": 30000,
+    "authorization": {
+      "state": "approved",
+      "proposal": "Benchmark and replace only the accelerated neighbor-search backend, retaining all marker features, correlation distance, current UMAP fit/optimization and at least 200 stratified landmarks per state. Approximate neighbors and coordinates may differ.",
+      "source": "Actual human reply in this chat on 2026-10-07: \"Yes, do that\". Approval is limited to the proposed accelerated neighbor-search replacement with the stated feature, distance, fit and landmark safeguards."
+    },
+    "provenance": {
+      "kind": "synthetic computational fixture",
+      "seed": 20261007,
+      "parameters": {
+        "n_neighbors": 15,
+        "min_dist": 0.75,
+        "metric": "correlation",
+        "random_state": 0
+      },
+      "matrix_sha256": "9cefa7e2ff50d35cd71ec8d195f306e5de7e6fa76dfffb4576d8a736059c3de4"
+    },
+    "peak_rss_gib": 2.112274169921875,
+    "versions": {
+      "numpy": "2.4.6",
+      "scipy": "1.17.1",
+      "numba": "0.68.0",
+      "umap-learn": "0.5.12",
+      "pynndescent": "0.6.0",
+      "scikit-learn": "1.9.1"
+    },
+    "scope": "UMAP-only benchmark; does not establish full-workflow or visitor-job performance"
+  },
+  "synthetic_alternatives": {
+    "exact": {
+      "seconds": 7.114874292048626,
+      "finite": true
+    },
+    "baseline": {
+      "seconds": 120.93696208298206,
+      "finite": true,
+      "exact_neighbor_recall": 0.6991666666666667
+    },
+    "angular": {
+      "seconds": 5.051701999967918,
+      "finite": true,
+      "exact_neighbor_recall": 0.2125
+    },
+    "peak_rss_gib": 1.450225830078125,
+    "scope": "Matched native synthetic 30,000 fit / 12,000 query / 827 full features; original UMAP fit and transform optimization retained.",
+    "selected": "exact blocked correlation",
+    "angular_rejected_reason": "Prototype recall 21.25%; graph-width mismatch produced a warning. Corrected graph-width rerun also recovered only 21.14%, so this prototype is not selected.",
+    "corrected_graph_width_rerun": {
+      "exact": {
+        "seconds": 7.117063125013374,
+        "finite": true
+      },
+      "angular": {
+        "seconds": 4.910673625068739,
+        "finite": true,
+        "exact_neighbor_recall": 0.2113888888888889
+      },
+      "peak_rss_gib": 1.498779296875
+    }
+  },
+  "container": {
+    "memory_limit_gib": 30,
+    "cpu_limit": 4,
+    "architecture": "aarch64",
+    "oom_events": 0,
+    "oom_kill_events": 0,
+    "sampled_container_working_set_gib": 3.533,
+    "working_set_is_sample_not_continuous_peak": true
+  },
+  "quality": {
+    "verified_exact_neighbor_recall": 1.0,
+    "verified_float64_reference_distance_max_error": 1.6674079349687787e-05,
+    "median_relative_centroid_separation_change_percent": -0.17390908383164705,
+    "p10_relative_centroid_separation_change_percent": -0.6412445282800827,
+    "macro_neighbor_purity_change_percentage_points": -0.0948824122737224,
+    "unchanged_landmark_coordinates": true,
+    "all_input_cells_and_features_retained": true,
+    "gate": "Complete roster/hash verification, exact fitted landmark coordinates, finite all-cell output, every state retained, candidate anchor-neighbor recall >= baseline, median/p10 separation within 1%, macro-purity change within one percentage point.",
+    "gate_passed": true,
+    "scope": "Geometry and neighbor diagnostics; not biological validation."
+  },
+  "speedups": {
+    "native_verified_projection": 3.258729073788865,
+    "native_matched_synthetic_projection": 16.997765121182486,
+    "no_full_container_speedup_claim": "The container baseline timed 12,000 queries; the candidate timed all 210,414 remaining cells. These totals are not a matched speed ratio."
+  },
+  "validation": {
+    "native_tests": {
+      "test_discover_umap_and_worker_memory_admission": 44,
+      "umap_input_separation_discover_integration": 22
+    },
+    "container_tests": {
+      "test_discover_umap_and_worker_memory_admission": 44,
+      "seconds": 10.89
+    },
+    "git_diff_check": "passed",
+    "py_compile": "passed",
+    "native_final_combined": {
+      "passed": 66,
+      "seconds": 14.79
+    }
+  },
+  "memory_policy": {
+    "host_admission": "Queue new workers when Linux MemAvailable <= min(2 GiB, 10% of host total). No interruption of running jobs.",
+    "limits": "15 GiB is an admission threshold, not a worker cap. The host check does not reserve future allocations or guarantee a running worker cannot exhaust host RAM."
+  },
+  "reproduce": {
+    "native_verified": "PYTHONPATH=<git-root> NUMBA_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 python -m altanalyze3.components.clustering.benchmarking.benchmark_projection_search --input <verified-root> --output <new-scratch-output>",
+    "container_synthetic": "docker exec -e PYTHONPATH=/app -e NUMBA_NUM_THREADS=4 -e OPENBLAS_NUM_THREADS=4 -e OMP_NUM_THREADS=4 <30GiB-4CPU-container> python -m altanalyze3.components.clustering.benchmarking.benchmark_projection_search --synthetic 240414 --baseline-query-cells 12000 --output <new-scratch-output>"
+  },
+  "scope_limits": "UMAP-only tests. The original cloud visitor matrix was not obtained or rerun, and full workflow/one-million-cell/production-host safety is not claimed. Changes are uncommitted and no live service was restarted.",
+  "production_source_sha256": {
+    "components/clustering/umap_neighbors.py": "b235ece96f3ef1fd605f177fbd66c9d35732ea004f78a0805559a54ef0191091",
+    "components/clustering/umap_fit.py": "33331303c8a37246b07fb39df61820c1532b2139417cc741fdaccf38c5bd3945",
+    "components/clustering/ICGS.py": "26087f77dac6f0585142e6c11e4620f5219e963b4df5621103232ffb4fbb44c0",
+    "components/cellHarmony/scalable_discover/pipeline.py": "a546c7d00c15136741228aaa213858567800cfcb7ac7376925ae87f951e7f849",
+    "components/cellHarmony/scalable_discover/tasks.py": "4455ff988d499b032af95ff96d38cc679a73d5dfe07c0ca9ee50a16ca9e42a97",
+    "components/cellHarmony/flask/tasks.py": "9e3a3985fa8fc3052fc76d588d2bf9ac9cb9caaac36a73b103f27b5bb74a1c14",
+    "components/cellHarmony/flask/worker_memory.py": "cdda065468cda5b620fd23c263cfa9095390f2ae7de3a14cd325289bdafb49eb"
+  }
+}

@@ -7,8 +7,9 @@ const source = fs.readFileSync(path.join(__dirname, '../../altanalyze3/component
 const start = source.indexOf('class ExplorePayloadCache');
 const end = source.indexOf('const explorePayloadCache', start);
 let calls = [], responder, now = 0;
-const ctx = vm.createContext({performance: {now: () => now},
-  fetch: async url => {calls.push(url); return responder(url);},
+let lastSignal;
+const ctx = vm.createContext({AbortController,performance: {now: () => now},
+  fetch: async (url,options) => {calls.push(url);lastSignal=options.signal; return responder(url);},
   setTimeout: callback => {queueMicrotask(callback);}});
 vm.runInContext(source.slice(start, end) + '\nthis.Cache = ExplorePayloadCache;', ctx);
 const ok = (value, status = 200) => ({ok: true, status, text: async () => JSON.stringify(value)});
@@ -40,9 +41,11 @@ const ok = (value, status = 200) => ({ok: true, status, text: async () => JSON.s
   cache.clear();
   responder = () => new Promise(resolve => {release = resolve;});
   const old = cache.fetch('/old');
+  const obsoleteSignal=lastSignal;
   cache.setIdentity('new-job-state-layer');
+  assert.ok(obsoleteSignal.aborted,'result changes must cancel unfinished downloads');
   release(ok({stale: true}));
-  await old;
+  await assert.rejects(old,/Visualization changed/);
   assert.equal(cache.get('/old'), null);
 
   let fail = true;

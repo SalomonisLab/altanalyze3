@@ -1,0 +1,124 @@
+{
+  "date": "2026-10-07",
+  "scope": "Repeated code review, deterministic request/lifecycle regressions and isolated synthetic serving UI checks. No scientific model or analysis algorithm changes; no original visitor job reconstruction.",
+  "fixes": [
+    "Abort pending cached requests and reject obsolete payloads across reset, dataset changes and same-job reruns.",
+    "Dispose active plots, retained SVGs, heatmap frames and Chat resources when result identity changes.",
+    "Prevent obsolete readiness/warmup/download responses from changing the current session.",
+    "Refresh grouping and UMAP controls on new result generations; preserve same-generation selections and retry metadata failures.",
+    "Reject out-of-order status replies and obsolete saved-session restoration.",
+    "Release failed export script nodes and loader promises so PDF dependency loading can retry.",
+    "Cancel superseded Chat questions and reject late Chat plot responses.",
+    "Deduplicate/cache discover GO-Elite states and plot requests; guard generation, state and panel ownership; clear discover-specific metadata on reset.",
+    "Guard viewer dataset colors, covariates and readiness against stale loads. Serialize comparison selection POSTs and skip superseded selections."
+  ],
+  "validation": {
+    "python_primary": {
+      "passed": 79,
+      "warnings": 26,
+      "seconds": 12.35,
+      "scope": "Serving, payload parity, expression bundle, sampling and web/discover integration suites."
+    },
+    "python_additional": {
+      "passed": 14,
+      "warnings": 4,
+      "seconds": 3.62,
+      "files": [
+        "test_viewer_asset_paths.py",
+        "test_discover_integration.py"
+      ],
+      "overlaps_primary_suite": true
+    },
+    "node": {
+      "scripts_passed": 11,
+      "scripts": [
+        "test_explore_payload_cache.cjs",
+        "test_explore_metadata_views.cjs",
+        "test_explore_figure_reuse.cjs",
+        "test_explore_annotation_races.cjs",
+        "test_explore_group_controls.cjs",
+        "test_explore_session_races.cjs",
+        "test_explore_status_races.cjs",
+        "test_explore_export_retry.cjs",
+        "test_explore_chat_races.cjs",
+        "test_discover_result_races.cjs",
+        "test_viewer_dataset_races.cjs"
+      ]
+    },
+    "syntax": "All three changed production JavaScript files passed node --check; git diff --check passed.",
+    "browser": {
+      "fixture_cells": 600000,
+      "fixture_features": 1024,
+      "integrated_dotplot_switch_cycles": 3,
+      "dotplot_violin_switch_cycles": 3,
+      "dotplot_points_each_cycle": 480,
+      "violin_points_each_cycle": 150000,
+      "morpheus": {
+        "rows": 12,
+        "columns": 50800,
+        "same_document_reused": true
+      },
+      "reset": {
+        "job_cleared": true,
+        "retained_figures": 0,
+        "iframes": 0,
+        "svg_figures": 0,
+        "chat_cleared": true
+      },
+      "saved_session_reopened": true,
+      "rna_catalog_options_each_panel": 1024,
+      "scope": "Shared UI in an isolated local synthetic serving fixture; wrapper request ownership verified by production-body Node tests and Python integration checks, not a full published-viewer browser run."
+    }
+  },
+  "scientific_behavior": "No model feature panel, sample roster, inference algorithm, sampling rule, plotted values or differential formula changed. Synthetic network fixture data only exercised UI lifecycle; it is not inferred biology.",
+  "memory_scope": "Reset resource release checked via DOM and production lifecycle tests. No new process RSS or browser heap measurement in this rescan.",
+  "remaining": [
+    "The reported online visitor saved-job validation remains incomplete because its outputs are unavailable.",
+    "Cold very-large SVG violin draws, expression UMAP transfer/rendering and dense CombPlots remain performance targets.",
+    "Full analytical workflow and concurrent browser memory were not retested by these serving checks."
+  ],
+  "deployment": "Include shared webapp/static/app.js, scalable_discover/static/discover.js and scalable_viewer/static/viewer_bootstrap.js with the previously documented serving changes; rebuild/restart and refresh browsers. No new dependency or Apache timeout change. No deployment, production restart or commit performed.",
+  "additional_scan": {
+    "scope": "Focused scan of shared Differential async requests, comparison selection, cache scope and resource teardown.",
+    "reproduction": "The new production-body regression failed before the fix: a same-job reset during feature-annotation loading allowed an obsolete request to redraw the view.",
+    "fixes": [
+      "Capture mode/population/result generation before awaiting annotations and check ownership before any Differential UI mutation.",
+      "Invalidate pending Differential views, selected comparison replies, current state and cross-pathway contexts on result reset.",
+      "Dispose integrated Differential renderers as well as Plotly/Cytoscape on reset and empty views.",
+      "Deduplicate/cache raw Differential responses (32 MiB estimated parsed storage, eight entries, five-minute TTL), scoped to job, run, status and configuration.",
+      "Bound network adjacency reuse to eight entries/8 MiB estimated storage/five minutes; retry transient failures, deduplicate in-flight requests and reject obsolete cache writes.",
+      "Serialize shared completed-comparison POSTs, skip superseded queued selections and reject obsolete UI/navigation updates."
+    ],
+    "validation": {
+      "python": {
+        "passed": 83,
+        "warnings": 26,
+        "seconds": 12.3,
+        "scope": "Previous primary serving/parity/integration suite plus test_viewer_asset_paths.py."
+      },
+      "node": {
+        "scripts_passed": 13,
+        "new_scripts": [
+          "test_differential_result_races.cjs",
+          "test_differential_cache_selection.cjs"
+        ],
+        "checks": "Includes all previous 11 scripts; new tests retain every one of 1,000 network edges, exercise cache bounds/TTL/retry, duplicate requests, comparison scope, serialized selections and integrated teardown."
+      },
+      "browser": {
+        "scope": "Isolated shared UI with the existing 600,000-cell synthetic serving fixture; full precomputed Differential UI not browser-benchmarked.",
+        "saved_session_ready": true,
+        "gene_options_each_panel": 1024,
+        "dotplot_points": 480,
+        "reset": {
+          "job_cleared": true,
+          "plot_svgs": 0,
+          "iframes": 0,
+          "gene_detail_markup_empty": true
+        }
+      },
+      "syntax": "Changed app.js passed node --check; git diff --check passed."
+    },
+    "limits": "Cache bytes are estimates, not a total browser heap limit. No new RSS/timing benchmark or full analytical/online visitor workflow rerun. Statistical formulas, samples, features and requested network contents remain unchanged.",
+    "deployment": "Includes shared webapp/static/app.js with the previously recorded files. Rebuild/restart and refresh browsers. No added dependency, proxy change, production restart or commit."
+  }
+}

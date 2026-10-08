@@ -1,0 +1,78 @@
+{
+  "scope": "Synthetic UMAP-only diagnostic, not the reported visitor dataset or full workflow",
+  "fit_cells": 30000,
+  "query_cells": 12000,
+  "features": 827,
+  "states": 51,
+  "metric": "correlation",
+  "n_neighbors": 15,
+  "min_dist": 0.75,
+  "random_state": 0,
+  "numba_threads": 4,
+  "fit_seconds": 37.47975841606967,
+  "transforms": [
+    {
+      "attempt": 1,
+      "total_seconds": 122.05574791703839,
+      "phases": {
+        "neighbor_search": 119.84891837497707,
+        "smooth_knn_dist": 0.011708208010531962,
+        "compute_membership_strengths": 0.4843596670543775,
+        "init_graph_transform": 0.41951841698028147,
+        "optimize_layout_euclidean": 1.2225369589868933
+      },
+      "finite_cells": 12000
+    },
+    {
+      "attempt": 2,
+      "total_seconds": 115.85072445799597,
+      "phases": {
+        "neighbor_search": 114.05911516596097,
+        "smooth_knn_dist": 0.01190979196690023,
+        "compute_membership_strengths": 0.0016304169548675418,
+        "init_graph_transform": 0.4439332499168813,
+        "optimize_layout_euclidean": 1.2678183329990134
+      },
+      "finite_cells": 12000
+    }
+  ],
+  "peak_rss_gib": 1.2247467041015625,
+  "versions": {
+    "numpy": "2.4.6",
+    "scipy": "1.17.1",
+    "numba": "0.66.0",
+    "umap-learn": "0.5.7",
+    "pynndescent": "0.6.0",
+    "scikit-learn": "1.5.2"
+  },
+  "reported_job": {
+    "id": "d36a26c86d8545bdb091f81bb8cf2a7c",
+    "evidence": "User-supplied job log; remote page could not be retrieved. Original matrices were not accessed or reanalyzed.",
+    "log_sha256": "43d1dece403c615533310a6e2664c0b0a26ea25d8d932744919c330523be90c9",
+    "retained_for_umap": 240414,
+    "landmarks": 30000,
+    "remaining_projection_cells": 210414,
+    "marker_features": 827,
+    "fit_seconds": 45.6,
+    "projection_seconds": 1427.1,
+    "umap_output_seconds": 1473.2
+  },
+  "conclusion": "Neighbor search accounted for 98.2% and 98.5% of synthetic transform time. This locates the existing projection bottleneck; it does not establish a speedup on the visitor dataset.",
+  "fixes": [
+    "Log per-batch input extraction and model.transform timings without changing the algorithm.",
+    "Report completed/total projection-cell counts and update discover progress messages for each completed batch.",
+    "Release each loaded projection input after its existing transform call."
+  ],
+  "validation": {
+    "test_suite": "tests/test_discover_umap.py",
+    "passed": 21,
+    "seconds": 3.66,
+    "checks": "Baseline landmark selection, feature/order preservation, all-cell coordinate parity with deterministic fake model, unchanged full mode, parameter handoff and progress parsing."
+  },
+  "decision": {
+    "state": "approved",
+    "proposal": "Benchmark and replace only the accelerated neighbor-search backend, retaining all marker features, correlation distance, current UMAP fit/optimization and at least 200 stratified landmarks per state. Approximate neighbors and coordinates may differ.",
+    "source": "Actual human reply in this chat on 2026-10-07: \"Yes, do that\". Approval is limited to the proposed accelerated neighbor-search replacement with the stated feature, distance, fit and landmark safeguards."
+  },
+  "scope_limits": "Native synthetic UMAP-only process, not a 30 GiB container test or the full production workflow. No real input reconstruction, marker changes, sample removal or core ICGS3-default change. Source files remain uncommitted."
+}

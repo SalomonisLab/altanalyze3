@@ -5,6 +5,8 @@ const APP_ROOT_PATH = normalizeRootPath(window.__APP_ROOT_PATH__ || "");
 let registry = window.__REFERENCE_REGISTRY__ || { species: [] };
 let sampleCount = 0;
 let pollTimer = null;
+let jobStatusRequest = 0;
+let appliedJobStatusRequest = 0;
 const VISUALIZATION_PANELS = ["viz1", "viz2"];
 const VISUALIZATION_DEFAULT_MODE = {
   viz1: "cluster",
@@ -26,7 +28,10 @@ class ExplorePayloadCache {
     this.identity = "";
   }
   clear() {
-    this.entries.clear(); this.pending.clear(); this.bytes = 0; this.generation += 1;
+    this.generation += 1;
+    for (const entry of this.pending.values()) entry.controller.abort();
+    this.entries.clear(); this.pending.clear(); this.bytes = 0;
+    this.onClear?.();
   }
   setIdentity(identity) {
     if (identity !== this.identity) {this.clear(); this.identity = identity;}
@@ -54,13 +59,15 @@ class ExplorePayloadCache {
   async fetch(url, onPending = () => {}) {
     const cached = this.get(url);
     if (cached) return cached;
-    if (this.pending.has(url)) return this.pending.get(url);
+    if (this.pending.has(url)) return this.pending.get(url).request;
     const generation = this.generation;
+    const controller = new AbortController();
     const request = (async () => {
       for (;;) {
         if (generation !== this.generation) throw new Error("Visualization changed.");
-        const response = await fetch(url);
+        const response = await fetch(url, {signal: controller.signal});
         const text = await response.text();
+        if (generation !== this.generation) throw new Error("Visualization changed.");
         let payload;
         try {payload = text ? JSON.parse(text) : {};}
         catch (_) {throw new Error(text.trim() || `HTTP ${response.status}`);}
@@ -74,12 +81,41 @@ class ExplorePayloadCache {
         return payload;
       }
     })();
-    this.pending.set(url, request);
+    const entry = {request, controller};
+    this.pending.set(url, entry);
     try {return await request;}
-    finally {if (this.pending.get(url) === request) this.pending.delete(url);}
+    finally {if (this.pending.get(url) === entry) this.pending.delete(url);}
   }
 }
 const explorePayloadCache = new ExplorePayloadCache();
+const exploreMetadataCache = new ExplorePayloadCache(8 * 1024 * 1024, 24);
+explorePayloadCache.onClear = () => {
+  exploreMetadataCache.clear();
+  loadedGeneSuggestionsSignature = "";
+  loadedDisplayFiltersJobId = null;
+  plotVariablesCache = null;
+  featureAnnotationCache.clear();
+  disposeMarkerHeatmapViews();
+  disposePanelFigures();
+  resetExploreResultsReadiness();
+  replicateStates = null;
+  loadedResultsJobId = null;
+  panelPlotData = {viz1: null, viz2: null};
+  ++savedComparisonSelectionRequest;
+  ++differentialVisualizationRequest;
+  differentialPayloadCache.clear();
+  currentDifferentialState = null;
+  resetDifferentialResults();
+  currentDifferentialInteraction = null;
+  delete crossPathwayContexts.marker;
+  delete crossPathwayContexts.differential;
+  clearChatOutput();
+  VISUALIZATION_PANELS.forEach(panel => {
+    panelVisualizationRequest[panel] += 1;
+    resetVisualizationSurface(panel);
+    setPanelSummary(panel, "");
+  });
+};
 const panelVisualizationRequest = {viz1: 0, viz2: 0};
 let loadedResultsJobId = null;
 let loadedGeneSuggestionsSignature = "";
@@ -98,6 +134,9 @@ let currentJobReference = "";
 let referenceRerunPending = false;
 let restoringSavedSession = Boolean(new URLSearchParams(window.location.search).get("job_id"));
 const markerHeatmapRenderTokens = {};
+const markerHeatmapViews = new Map();
+const retainedPanelFigures = new Map();
+let retainedFigureSerial = 0;
 let currentMarkerAnalysis = null;
 let currentMarkerAnalysisByModality = { rna: null };
 let currentFastCommAnalysis = null;
@@ -115,7 +154,9 @@ let differentialCy = null;
 // `differentialNetworkAdjacencyCache` holds one adjacency map per (job, cell state), so
 // switching between Heatmap, Volcano, Network and GO Terms costs one network fetch.
 let currentDifferentialGeneFilter = "";
-let differentialNetworkAdjacencyCache = {};
+const differentialPayloadCache = new ExplorePayloadCache(32 * 1024 * 1024, 8);
+const differentialNetworkAdjacencyCache = new ExplorePayloadCache(8 * 1024 * 1024, 8);
+const differentialNetworkRequests = new Map();
 let expressionCyByPanel = {
   viz1: null,
   viz2: null,
@@ -140,20 +181,15 @@ const GENE_SET_MODES = new Set(["dotplot", "combplot"]);
 // The backend scopes this catalog to the source study. Original feature IDs stay
 // in plot coordinates, requests and click handlers; only presentation is expanded.
 const featureAnnotationCache = new Map();
-const featureAnnotationRequests = new Map();
 async function ensureFeatureAnnotations(jobId) {
   if (!jobId || featureAnnotationCache.has(jobId)) return;
-  if (!featureAnnotationRequests.has(jobId)) {
-    featureAnnotationRequests.set(jobId, (async () => {
-      try {
-        const response = await fetch(apiPath(`/jobs/${jobId}/feature-annotations?modality=metabolite`));
-        if (!response.ok) throw new Error(`Feature annotations: ${response.status}`);
-        featureAnnotationCache.set(jobId, await response.json());
-      } catch (error) { console.warn("Feature source annotations unavailable", error); }
-      finally { featureAnnotationRequests.delete(jobId); }
-    })());
-  }
-  await featureAnnotationRequests.get(jobId);
+  const generation = explorePayloadCache.generation;
+  try {
+    // The shared metadata cache scopes in-flight requests to the current result
+    // generation. A rerun must not wait for annotations from its old source.
+    const data = await exploreMetadataCache.fetch(apiPath(`/jobs/${jobId}/feature-annotations?modality=metabolite`));
+    if (generation === explorePayloadCache.generation && jobId === getResultsJobId()) featureAnnotationCache.set(jobId, data);
+  } catch (error) { console.warn("Feature source annotations unavailable", error); }
 }
 function featureAnnotation(feature, modality) {
   if (!String(modality || "").toLowerCase().startsWith("metabolite")) return null;
@@ -245,6 +281,8 @@ function resetExploreResultsReadiness(jobId = null) {
 
 async function ensureExploreResultsReady(jobId, statusData = null) {
   const normalizedJobId = String(jobId || "").trim();
+  const generation = explorePayloadCache.generation;
+  const isCurrent = () => generation === explorePayloadCache.generation && getResultsJobId() === normalizedJobId;
   if (!normalizedJobId) {
     return false;
   }
@@ -260,10 +298,11 @@ async function ensureExploreResultsReady(jobId, statusData = null) {
   updateWorkflowPanels(referenceRerunPending ? "uploaded" : currentJobStatus);
 
   const readinessPromise = (async () => {
-    await populateDownloadLinks(normalizedJobId, statusData);
-    await loadGeneSuggestions(normalizedJobId);
+    await Promise.all([populateDownloadLinks(normalizedJobId, statusData),
+      loadGeneSuggestions(normalizedJobId), loadDisplayFilters(normalizedJobId)]);
+    if (!isCurrent()) return false;
     await warmExploreResults(normalizedJobId);
-    if (getResultsJobId() !== normalizedJobId) {
+    if (!isCurrent()) {
       return false;
     }
     exploreResultsReadyJobId = normalizedJobId;
@@ -292,6 +331,7 @@ async function ensureExploreResultsReady(jobId, statusData = null) {
     }
     return true;
   })().catch((error) => {
+    if (!isCurrent()) return false;
     if (exploreResultsPendingJobId === normalizedJobId) {
       exploreResultsPendingJobId = null;
     }
@@ -305,7 +345,7 @@ async function ensureExploreResultsReady(jobId, statusData = null) {
     }
     throw error;
   }).finally(() => {
-    if (exploreResultsPendingJobId !== normalizedJobId) {
+    if (exploreResultsReadyPromise === readinessPromise) {
       exploreResultsReadyPromise = null;
     }
   });
@@ -347,7 +387,10 @@ function loadExternalScript(src) {
       script.dataset.loaded = "true";
       resolve();
     }, { once: true });
-    script.addEventListener("error", () => reject(new Error(`Failed to load ${src}`)), { once: true });
+    script.addEventListener("error", () => {
+      script.remove();
+      reject(new Error(`Failed to load ${src}`));
+    }, { once: true });
     document.head.appendChild(script);
   });
 }
@@ -374,7 +417,7 @@ async function ensureJsPdfLoaded() {
         }
       }
       throw lastError || new Error("Unable to load jsPDF.");
-    })();
+    })().catch(error => {jsPdfLoaderPromise = null; throw error;});
   }
   return jsPdfLoaderPromise;
 }
@@ -402,7 +445,7 @@ async function ensureSvg2PdfLoaded() {
         }
       }
       throw lastError || new Error("Unable to load svg2pdf.js.");
-    })();
+    })().catch(error => {svg2PdfLoaderPromise = null; throw error;});
   }
   await svg2PdfLoaderPromise;
 }
@@ -433,7 +476,7 @@ async function ensureCytoscapeSvgLoaded() {
         }
       }
       throw lastError || new Error("Unable to load the Cytoscape SVG exporter.");
-    })();
+    })().catch(error => {cytoscapeSvgLoaderPromise = null; throw error;});
   }
   await cytoscapeSvgLoaderPromise;
 }
@@ -771,24 +814,87 @@ function setPanelSummary(panelKey, text) {
   }
 }
 
+// Retain completed SVG views in place, bounded independently of JSON responses.
+// The byte estimate includes 1 KiB per point plus a fixed renderer allowance;
+// this is a retention budget, not a measurement of the browser's total heap.
+function removePanelFigure(key) {
+  const entry = retainedPanelFigures.get(key);
+  if (!entry) return;
+  clearTimeout(entry.timer);
+  try {Plotly.purge(entry.plot);} catch (_) {}
+  entry.plot.remove(); retainedPanelFigures.delete(key);
+}
+function disposePanelFigures() {
+  for (const key of [...retainedPanelFigures.keys()]) removePanelFigure(key);
+  VISUALIZATION_PANELS.forEach(panel => {
+    const plot = document.getElementById(panelPlotId(panel));
+    if (plot) plot._reusableFigure = null;
+  });
+}
+function parkPanelFigure(panelKey) {
+  const plot = document.getElementById(panelPlotId(panelKey));
+  const entry = plot?._reusableFigure;
+  if (!entry || !plot.querySelector(".main-svg")) return;
+  const budget = 192 * 1024 * 1024;
+  if (entry.bytes > budget) {plot._reusableFigure = null; return;}
+  removePanelFigure(entry.key);
+  let bytes = [...retainedPanelFigures.values()].reduce((sum, item) => sum + item.bytes, 0);
+  while (retainedPanelFigures.size && (retainedPanelFigures.size >= 2 || bytes + entry.bytes > budget)) {
+    const key = retainedPanelFigures.keys().next().value;
+    bytes -= retainedPanelFigures.get(key).bytes; removePanelFigure(key);
+  }
+  // Leave the existing Plotly DOM attached; moving it discards expensive state.
+  entry.width = plot.clientWidth;
+  plot.id = `${panelKey}-retained-${++retainedFigureSerial}`;
+  plot.classList.add("hidden");
+  const replacement = document.createElement("div");
+  replacement.id = panelPlotId(panelKey); replacement.className = "plot-area";
+  plot.after(replacement);
+  entry.plot = plot;
+  entry.timer = setTimeout(() => removePanelFigure(entry.key), 300000);
+  retainedPanelFigures.set(entry.key, entry);
+}
+function restorePanelFigure(panelKey, key) {
+  const plot = document.getElementById(panelPlotId(panelKey));
+  if (plot?._reusableFigure?.key === key) return true;
+  const entry = retainedPanelFigures.get(key);
+  if (!entry) return false;
+  clearTimeout(entry.timer); retainedPanelFigures.delete(key);
+  parkPanelFigure(panelKey);
+  const placeholder = document.getElementById(panelPlotId(panelKey));
+  releaseVisualizationResources(panelKey, placeholder);
+  placeholder?.remove();
+  entry.plot.id = panelPlotId(panelKey); entry.plot.classList.remove("hidden");
+  if (entry.width !== entry.plot.clientWidth) Plotly.Plots.resize(entry.plot);
+  return true;
+}
+
+function releaseVisualizationResources(panelKey, plot) {
+  const cy = expressionCyByPanel[panelKey];
+  if (cy) {
+    try {cy.destroy();} catch (error) {console.warn("Network cleanup failed", error);}
+    expressionCyByPanel[panelKey] = null;
+  }
+  try {plot?._integratedDispose?.();} catch (error) {console.warn("Integrated view cleanup failed", error);}
+  if (plot) {
+    delete plot._integratedDispose;
+    delete plot._integratedResize;
+    delete plot._integratedPdf;
+  }
+  try {Plotly.purge(plot);} catch (_) {}
+}
+
 function resetVisualizationSurface(panelKey) {
+  parkPanelFigure(panelKey);
+  hideMarkerHeatmapView(panelKey);
   markerHeatmapRenderTokens[panelKey] = null;
   const plot = document.getElementById(panelPlotId(panelKey));
   if (!plot) {
     return;
   }
-  const cy = expressionCyByPanel[panelKey];
-  if (cy) {
-    cy.destroy();
-    expressionCyByPanel[panelKey] = null;
-  }
-  plot._integratedDispose?.();
+  plot.classList.remove("hidden");
+  releaseVisualizationResources(panelKey, plot);
   plot.classList.remove("integrated-view");
-  try {
-    Plotly.purge(plot);
-  } catch (_) {
-    // Ignore Plotly cleanup errors when the plot is not initialized.
-  }
   plot.innerHTML = "";
   plot.style.height = "";
   plot.style.minHeight = "";
@@ -1083,7 +1189,6 @@ function updateExpressionModeOptions() {
     const groupsField = document.getElementById(panelElementId(panelKey, "groups-field"));
     if (groupByField) groupByField.classList.toggle("hidden", !wantsGeneSet);
     if (groupsField) groupsField.classList.toggle("hidden", !wantsGeneSet);
-    if (wantsGeneSet) refreshGroupControls(panelKey);
     const combUnitField = document.getElementById(panelElementId(panelKey, "combunit-field"));
     if (combUnitField) combUnitField.classList.toggle("hidden", mode !== "combplot");
     if (combMinField) combMinField.classList.toggle("hidden", mode !== "combplot" || panelCombUnit(panelKey) !== "donor");
@@ -1266,85 +1371,102 @@ async function logClientEvent(jobId, message) {
   }
 }
 
+// Keep one live heatmap per panel in its original DOM location. Detaching an
+// iframe reloads its document; hiding its sibling host preserves Morpheus state.
+// Hidden views expire after five minutes, and large matrices are released on
+// leaving the view. Job/state-layer changes release every retained iframe.
+function removeMarkerHeatmapView(panelKey) {
+  const view = markerHeatmapViews.get(panelKey);
+  if (!view) return;
+  clearTimeout(view.timer);
+  view.controller?.abort();
+  view.host.remove();
+  markerHeatmapViews.delete(panelKey);
+}
+function disposeMarkerHeatmapViews() {
+  for (const panelKey of [...markerHeatmapViews.keys()]) removeMarkerHeatmapView(panelKey);
+}
+function hideMarkerHeatmapView(panelKey) {
+  const view = markerHeatmapViews.get(panelKey);
+  if (!view) return;
+  view.host.classList.add("hidden");
+  clearTimeout(view.timer);
+  if (view.failed || view.bytes > 64 * 1024 * 1024) removeMarkerHeatmapView(panelKey);
+  else view.timer = setTimeout(() => removeMarkerHeatmapView(panelKey), 300000);
+}
+function showMarkerHeatmapView(panelKey, view) {
+  clearTimeout(view.timer);
+  document.getElementById(panelPlotId(panelKey)).classList.add("hidden");
+  view.host.classList.remove("hidden");
+  setPanelSummary(panelKey, view.summary);
+}
+window.addEventListener("message", event => {
+  if (event.origin !== window.location.origin || !["marker-heatmap-dataset", "marker-heatmap-error"].includes(event.data?.type)) return;
+  for (const [panelKey, view] of markerHeatmapViews) {
+    if (event.source !== view.iframe.contentWindow) continue;
+    if (event.data.type === "marker-heatmap-error") {
+      view.failed = true;
+      view.summary = String(event.data.message || "Unable to load marker heatmap.");
+      if (view.host.classList.contains("hidden")) removeMarkerHeatmapView(panelKey);
+      else setPanelSummary(panelKey, view.summary);
+      continue;
+    }
+    const count = Number(event.data.columns), rows = Number(event.data.rows);
+    if (Number.isFinite(count) && count >= 0 && Number.isFinite(rows) && rows >= 0) {
+      view.bytes = rows * count * 32; // conservative matrix/text/renderer estimate
+      view.summary = `${count} individual cells; ${view.limit ? `up to ${view.limit} per sample per cell type` : "all cells"}. ${event.data.sampleField ? `Sample annotation: ${event.data.sampleField}.` : "Dataset treated as one sample."} Colours show per-gene standardized expression.`;
+      if (!view.host.classList.contains("hidden")) setPanelSummary(panelKey, view.summary);
+      else if (view.bytes > 64 * 1024 * 1024) removeMarkerHeatmapView(panelKey);
+    }
+  }
+});
 async function renderMarkerHeatmapViewer(jobId, panelKey) {
-  resetVisualizationSurface(panelKey);
-  const token = {};
-  markerHeatmapRenderTokens[panelKey] = token;
-  const isCurrent = () => markerHeatmapRenderTokens[panelKey] === token;
-  const plot = document.getElementById(panelPlotId(panelKey));
   const params = getDisplayFilterParams(panelKey);
   params.set("modality", panelModality(panelKey));
   params.set("cells_per_sample", String(panelCellsPerSample(panelKey)));
-  const suffix = params.toString() ? `?${params.toString()}` : "";
-  const datasetPath = apiPath(`/jobs/${jobId}/marker/heatmap.tsv${suffix}`);
-  const datasetUrl = `${window.location.origin}${datasetPath}`;
-  const viewerPath = `${withRootPath(`/jobs/${jobId}/marker/heatmap/viewer`)}${suffix}`;
-  const viewerUrl = `${window.location.origin}${viewerPath}`;
-  await logClientEvent(jobId, `MarkerHeatmap requested. dataset_url=${datasetUrl}`);
-  await logClientEvent(jobId, `MarkerHeatmap viewer_url=${viewerUrl}`);
-  try {
-    const resp = await fetch(datasetPath, {
-      method: "HEAD",
-      cache: "no-store",
-    });
-    await logClientEvent(
-      jobId,
-      `MarkerHeatmap preflight status=${resp.status} ok=${resp.ok} content_type=${resp.headers.get("content-type") || "-"} content_length=${resp.headers.get("content-length") || "-"}`
-    );
-    if (resp.ok) {
-      const count = resp.headers.get("X-Marker-Columns");
-      const field = resp.headers.get("X-Sample-Field");
-      const limit = panelCellsPerSample(panelKey);
-      setPanelSummary(panelKey, `${count || ""} individual cells; ${limit ? `up to ${limit} per sample per cell type` : "all cells"}. ${field ? `Sample annotation: ${field}.` : "Dataset treated as one sample."} Colours show per-gene standardized expression.`);
-    }
-    if (!resp.ok) {
-      throw new Error(`Marker heatmap TSV returned ${resp.status}.`);
-    }
-  } catch (err) {
-    if (!isCurrent()) return;
-    await logClientEvent(jobId, `MarkerHeatmap preflight failed: ${err.message || err}`);
-    renderVisualizationMessage(
-      panelKey,
-      `Marker heatmap TSV preflight failed.\n${err.message || err}`,
-      "MarkerHeatmap"
-    );
-    return;
-  }
-  try {
-    const viewerResp = await fetch(viewerPath, {
-      method: "GET",
-      cache: "no-store",
-    });
-    await logClientEvent(
-      jobId,
-      `MarkerHeatmap viewer preflight status=${viewerResp.status} ok=${viewerResp.ok} content_type=${viewerResp.headers.get("content-type") || "-"}`
-    );
-    if (!viewerResp.ok) {
-      throw new Error(`Marker heatmap viewer returned ${viewerResp.status}.`);
-    }
-  } catch (err) {
-    if (!isCurrent()) return;
-    await logClientEvent(jobId, `MarkerHeatmap viewer preflight failed: ${err.message || err}`);
-    renderVisualizationMessage(
-      panelKey,
-      `Marker heatmap viewer preflight failed.\n${err.message || err}`,
-      "MarkerHeatmap"
-    );
-    return;
-  }
-  if (!isCurrent()) return;
+  const viewerPath = `${withRootPath(`/jobs/${jobId}/marker/heatmap/viewer`)}?${params.toString()}`;
+  const key = `${explorePayloadCache.generation}|${viewerPath}`;
+  const existing = markerHeatmapViews.get(panelKey);
+  if (existing?.key === key && !existing.failed) {showMarkerHeatmapView(panelKey, existing); return;}
+  removeMarkerHeatmapView(panelKey);
+  resetVisualizationSurface(panelKey);
+  const plot = document.getElementById(panelPlotId(panelKey));
+  const host = document.createElement("div");
+  host.className = "morpheus-host";
   const iframe = document.createElement("iframe");
   iframe.className = "morpheus-frame";
-  iframe.loading = "lazy";
+  iframe.title = "Interactive marker heatmap";
+  iframe.loading = "eager";
   iframe.referrerPolicy = "no-referrer";
-  iframe.addEventListener("load", () => {
-    logClientEvent(jobId, `MarkerHeatmap iframe loaded src=${iframe.src}`);
-  });
-  iframe.addEventListener("error", () => {
-    logClientEvent(jobId, `MarkerHeatmap iframe error event fired src=${iframe.src}`);
-  });
-  iframe.src = viewerPath;
-  plot.appendChild(iframe);
+  host.appendChild(iframe);
+  plot.after(host);
+  const view = {key, host, iframe, controller: new AbortController(), bytes: Infinity, limit: panelCellsPerSample(panelKey),
+    summary: "Preparing interactive marker heatmap…", timer: null};
+  const viewerFailed = () => {
+    if (markerHeatmapViews.get(panelKey) !== view) return;
+    view.failed = true;
+    view.summary = "Marker heatmap viewer could not load. Select another view and return to retry.";
+    if (host.classList.contains("hidden")) removeMarkerHeatmapView(panelKey);
+    else setPanelSummary(panelKey, view.summary);
+  };
+  iframe.addEventListener("error", viewerFailed);
+  markerHeatmapViews.set(panelKey, view);
+  showMarkerHeatmapView(panelKey, view);
+  try {
+    // Fetch the HTML once, so HTTP errors are observable even when the browser
+    // never commits the failed iframe navigation. No duplicate HTML preflight.
+    const response = await fetch(viewerPath, {signal: view.controller.signal});
+    if (!response.ok) throw new Error(`Marker heatmap viewer returned HTTP ${response.status}.`);
+    const html = await response.text();
+    if (markerHeatmapViews.get(panelKey) !== view) return;
+    const base = document.createElement("base");
+    base.href = new URL(viewerPath, window.location.href).href;
+    iframe.srcdoc = html.replace(/<head>/i, `<head>${base.outerHTML}`);
+  } catch (error) {
+    viewerFailed();
+  }
+  // The viewer handles script/dataset errors visibly. Its single dataset GET
+  // supplies counts; no dataset HEAD or duplicate HTML request is needed.
 }
 
 // A missing or zero fold is neutral; it is not evidence of upregulation.
@@ -1961,10 +2083,18 @@ document.addEventListener("DOMContentLoaded", () => {
 async function restoreJobFromUrl() {
   const jobId = new URLSearchParams(window.location.search).get("job_id");
   if (!jobId) return;
+  const generation = explorePayloadCache.generation;
+  const request = ++jobStatusRequest;
+  const isCurrent = () => generation === explorePayloadCache.generation
+    && request >= appliedJobStatusRequest && (!getResultsJobId() || getResultsJobId() === jobId);
+  let accepted = false;
   try {
     const response = await fetch(apiPath(`/jobs/${encodeURIComponent(jobId)}/status`), {cache:"no-store"});
     const data = await parseApiResponse(response);
+    if (!isCurrent()) return;
+    appliedJobStatusRequest = request;
     if (!response.ok) throw new Error(data.detail || "Unable to reopen this job.");
+    accepted = true;
     document.getElementById("species-select").value = data.species;
     document.getElementById("species-select").dispatchEvent(new Event("change"));
     document.getElementById("reference-select").value = data.reference;
@@ -1981,15 +2111,34 @@ async function restoreJobFromUrl() {
       startStatusPolling(jobId);
     }
     if (data.status === "completed") {
-      await ensureExploreResultsReady(jobId, data);
-      setExplorerTab("explore");
+      if (await ensureExploreResultsReady(jobId, data)) setExplorerTab("explore");
     }
   } catch (error) {
+    if (!accepted && !isCurrent()) return;
     alert(error.message || "Unable to reopen this job.");
   } finally {
     restoringSavedSession = false;
     if (!currentJobStatus) loadReferencePreview();
   }
+}
+
+function updateReferenceStudyLink() {
+  const link = document.getElementById("reference-study-link");
+  const text = document.getElementById("reference-study-citation");
+  if (!link || !text) return;
+  link.classList.add("hidden");
+  link.removeAttribute("href");
+  text.textContent = "";
+  const reference = selectedReferenceConfig();
+  const citation = typeof reference?.study_citation === "string" ? reference.study_citation.trim() : "";
+  const address = typeof reference?.study_url === "string" ? reference.study_url.trim() : "";
+  if (!citation || !address) return;
+  let url;
+  try { url = new URL(address); } catch (_) { return; }
+  if (!['http:', 'https:'].includes(url.protocol)) return;
+  link.href = url.href;
+  text.textContent = citation;
+  link.classList.remove("hidden");
 }
 
 function initSpeciesSelect() {
@@ -2007,6 +2156,7 @@ function initSpeciesSelect() {
     const selected = registry.species.find((sp) => sp.id === speciesSelect.value);
     referenceSelect.innerHTML = "";
     if (!selected) {
+      updateReferenceStudyLink();
       updateImputeModalityField();
       return;
     }
@@ -2021,6 +2171,7 @@ function initSpeciesSelect() {
   });
 
   referenceSelect.addEventListener("change", () => {
+    updateReferenceStudyLink();
     updateImputeModalityField();
     updateReferenceChangeState();
     loadReferencePreview();
@@ -2150,6 +2301,7 @@ function hookForms() {
       const datalist = document.getElementById(`${panelKey}-feature-suggestions`);
       if (datalist) {
         datalist.innerHTML = "";
+        delete datalist.dataset.catalogKey;
       }
       updatePanelFeatureInput(panelKey, { value: "" });
       loadedGeneSuggestionsSignature = "";
@@ -2325,19 +2477,32 @@ function hookForms() {
 }
 
 let savedComparisonSelectionRequest = 0;
+let savedComparisonWritePromise = Promise.resolve();
 async function selectCompletedDifferential(contrast) {
   const request = ++savedComparisonSelectionRequest;
+  const jobId = getResultsJobId();
+  const generation = explorePayloadCache.generation;
+  const isCurrent = () => request === savedComparisonSelectionRequest
+    && generation === explorePayloadCache.generation && jobId === getResultsJobId();
   ++differentialVisualizationRequest;
   ++differentialDetailRequest;
-  try {
-    const response = await fetch(apiPath(`/jobs/${getResultsJobId()}/differential/select?contrast=${encodeURIComponent(contrast)}`), {method: "POST"});
+  const write = savedComparisonWritePromise.catch(() => {}).then(async () => {
+    if (!isCurrent()) return null;
+    const response = await fetch(apiPath(`/jobs/${jobId}/differential/select?contrast=${encodeURIComponent(contrast)}`), {method: "POST"});
     const body = await response.json();
-    if (request !== savedComparisonSelectionRequest) return;
     if (!response.ok) throw new Error(body.detail || "Comparison selection failed");
+    return body;
+  });
+  savedComparisonWritePromise = write;
+  try {
+    const body = await write;
+    if (!isCurrent() || !body) return false;
     updateDifferentialUi(body);
     setResultMode("differential");
+    return true;
   } catch (error) {
-    if (request === savedComparisonSelectionRequest) document.getElementById("differential-message").textContent = error.message;
+    if (isCurrent()) document.getElementById("differential-message").textContent = error.message;
+    return false;
   }
 }
 
@@ -2734,16 +2899,26 @@ function handleResultsSubmit(evt) {
   refreshResults();
 }
 
-async function loadJobState(jobId) {
+async function loadJobState(jobId, quiet = false) {
+  const generation = explorePayloadCache.generation;
+  const request = ++jobStatusRequest;
+  const isCurrent = () => generation === explorePayloadCache.generation
+    && request >= appliedJobStatusRequest && getResultsJobId() === jobId;
+  let accepted = false;
   try {
     const resp = await fetch(apiPath(`/jobs/${jobId}/status?t=${Date.now()}`), { cache: "no-store" });
     const data = await resp.json();
+    if (!isCurrent()) return;
+    appliedJobStatusRequest = request;
     if (!resp.ok) {
       throw new Error(data.detail || "Status request failed.");
     }
+    accepted = true;
     applyJobStatus(jobId, data);
   } catch (err) {
-    alert(err.message);
+    if (!accepted && !isCurrent()) return;
+    if (quiet) console.warn(err);
+    else alert(err.message);
   }
 }
 
@@ -2756,16 +2931,7 @@ function startStatusPolling(jobId) {
 }
 
 async function pollStatus(jobId) {
-  try {
-    const resp = await fetch(apiPath(`/jobs/${jobId}/status?t=${Date.now()}`), { cache: "no-store" });
-    const data = await resp.json();
-    if (!resp.ok) {
-      throw new Error(data.detail || "Status request failed.");
-    }
-    applyJobStatus(jobId, data);
-  } catch (err) {
-    console.warn(err);
-  }
+  await loadJobState(jobId, true);
 }
 
 function setSessionUrl(jobId) {
@@ -3494,7 +3660,7 @@ function buildQcCellSummary(data) {
 
 async function populateDownloadLinks(jobId, statusData = null) {
   const container = document.getElementById("download-links");
-  container.innerHTML = "";
+  const generation = explorePayloadCache.generation;
   let data = statusData;
   if (!data) {
     const resp = await fetch(apiPath(`/jobs/${jobId}/status`));
@@ -3503,6 +3669,8 @@ async function populateDownloadLinks(jobId, statusData = null) {
       return;
     }
   }
+  if (generation !== explorePayloadCache.generation || jobId !== getResultsJobId()) return;
+  container.innerHTML = "";
   const artifacts = data.artifacts || {};
   const versions = Object.entries(data.model_versions || {});
   if (versions.length) {
@@ -3562,6 +3730,7 @@ async function populateDownloadLinks(jobId, statusData = null) {
 }
 
 function updateDifferentialUi(state) {
+  differentialPayloadCache.setIdentity(JSON.stringify([getResultsJobId(), state?.run_id, state?.status, state?.config]));
   if (currentDifferentialState?.run_id !== state?.run_id ||
       currentDifferentialState?.config?.modality !== state?.config?.modality) {
     ++differentialVisualizationRequest;
@@ -4012,42 +4181,62 @@ function describeCommunicationGeneFilter(geneFilter, population, kept, total, no
 }
 
 async function differentialNetworkAdjacency(jobId, population) {
-  const key = `${jobId}::${population}`;
-  if (differentialNetworkAdjacencyCache[key]) {
-    return differentialNetworkAdjacencyCache[key];
-  }
-  let payload = null;
-  try {
-    payload = await fetchDifferentialJson(
-      apiPath(`/jobs/${jobId}/differential/interactive/network?population=${encodeURIComponent(population)}`),
-    );
-  } catch (error) {
-    payload = null;
-  }
-  const adjacency = new Map();
-  const geneNetwork = Boolean(payload) && payload.network_type !== "cell_communication_diff";
-  if (geneNetwork) {
-    (payload.elements || []).forEach((element) => {
-      const data = element && element.data ? element.data : null;
-      if (!data) {
-        return;
+  const generation = differentialNetworkAdjacencyCache.generation;
+  const resultGeneration = explorePayloadCache.generation;
+  const runId = currentDifferentialState?.run_id;
+  const key = JSON.stringify([jobId, runId, differentialFeatureModality(), population]);
+  const cached = differentialNetworkAdjacencyCache.get(key);
+  if (cached) return cached;
+  if (differentialNetworkRequests.has(key)) return differentialNetworkRequests.get(key);
+  const request = (async () => {
+    let payload = null;
+    try {
+      payload = await fetchDifferentialJson(
+        apiPath(`/jobs/${jobId}/differential/interactive/network?population=${encodeURIComponent(population)}`),
+      );
+    } catch (error) {
+      payload = null;
+    }
+    const adjacency = new Map();
+    const geneNetwork = Boolean(payload) && payload.network_type !== "cell_communication_diff";
+    if (geneNetwork) {
+      (payload.elements || []).forEach((element) => {
+        const data = element && element.data ? element.data : null;
+        if (!data) {
+          return;
+        }
+        if (data.source && data.target) {
+          const source = String(data.source);
+          const target = String(data.target);
+          if (!adjacency.has(source)) adjacency.set(source, new Set());
+          if (!adjacency.has(target)) adjacency.set(target, new Set());
+          adjacency.get(source).add(target);
+          adjacency.get(target).add(source);
+        } else if (data.id) {
+          const node = String(data.id);
+          if (!adjacency.has(node)) adjacency.set(node, new Set());
+        }
+      });
+    }
+    const entry = { adjacency, geneNetwork, available: Boolean(payload) && adjacency.size > 0 };
+    // Cache successful empty networks too, but retry transient HTTP failures. The
+    // estimate covers Map/Set overhead and every retained gene/edge, without caps
+    // on the contents of the requested network.
+    if (payload && generation === differentialNetworkAdjacencyCache.generation
+        && resultGeneration === explorePayloadCache.generation && runId === currentDifferentialState?.run_id
+        && jobId === getResultsJobId()) {
+      let bytes = 256;
+      for (const [gene, partners] of adjacency) {
+        bytes += 128 + gene.length * 4;
+        for (const partner of partners) bytes += 64 + partner.length * 4;
       }
-      if (data.source && data.target) {
-        const source = String(data.source);
-        const target = String(data.target);
-        if (!adjacency.has(source)) adjacency.set(source, new Set());
-        if (!adjacency.has(target)) adjacency.set(target, new Set());
-        adjacency.get(source).add(target);
-        adjacency.get(target).add(source);
-      } else if (data.id) {
-        const node = String(data.id);
-        if (!adjacency.has(node)) adjacency.set(node, new Set());
-      }
-    });
-  }
-  const entry = { adjacency, geneNetwork, available: Boolean(payload) && adjacency.size > 0 };
-  differentialNetworkAdjacencyCache[key] = entry;
-  return entry;
+      differentialNetworkAdjacencyCache.put(key, entry, bytes);
+    }
+    return entry;
+  })();
+  differentialNetworkRequests.set(key, request);
+  try { return await request; }
+  finally { if (differentialNetworkRequests.get(key) === request) differentialNetworkRequests.delete(key); }
 }
 
 // Returns null when no gene is typed, so every render path stays unfiltered by default.
@@ -4090,7 +4279,8 @@ function describeDifferentialGeneFilter(filter, population, kept, total, noun) {
 
 function clearDifferentialGeneFilter() {
   currentDifferentialGeneFilter = "";
-  differentialNetworkAdjacencyCache = {};
+  differentialNetworkAdjacencyCache.clear();
+  differentialNetworkRequests.clear();
   const input = differentialGeneFilterInput();
   if (input) {
     input.value = "";
@@ -4114,6 +4304,7 @@ function markDifferentialGeneFilterMatched(matched) {
 const crossPathwayContexts = {};
 async function openCrossPathway(row, spec) {
   const jobId = getResultsJobId();
+  const generation = explorePayloadCache.generation;
   const mode = "integrated_cross_pathway";
   const context = {...spec, id:row.id, jobId, crossModal:true, kind:"integrated_pathway"};
   const setOption = (id, value, label) => {
@@ -4122,8 +4313,9 @@ async function openCrossPathway(row, spec) {
     select.value=value;
   };
   if (spec.source === "differential") {
-    await selectCompletedDifferential(spec.contrast);
-    if (currentDifferentialState?.run_id !== spec.contrast) return;
+    const selected = await selectCompletedDifferential(spec.contrast);
+    if (!selected || generation !== explorePayloadCache.generation || jobId !== getResultsJobId()
+        || currentDifferentialState?.run_id !== spec.contrast) return;
     crossPathwayContexts.differential=context;
     setOption("differential-viz-mode", mode, "Pathway (cross-modality)");
     setOption("differential-result-population", spec.cell_state);
@@ -4159,17 +4351,20 @@ async function loadDifferentialVisualization() {
   const state = currentDifferentialState;
   const plotEmpty = document.getElementById("differential-plot-empty");
   const jobId = document.getElementById("results-job-id").value.trim();
+  const generation = explorePayloadCache.generation;
+  const population = document.getElementById("differential-result-population").value;
+  const mode = document.getElementById("differential-viz-mode").value;
+  const isCurrent = () => request === differentialVisualizationRequest
+    && generation === explorePayloadCache.generation && state?.run_id === currentDifferentialState?.run_id
+    && jobId === getResultsJobId() && mode === document.getElementById("differential-viz-mode").value
+    && population === document.getElementById("differential-result-population").value;
   await ensureFeatureAnnotations(jobId);
+  if (!isCurrent()) return;
   if (!state || state.status !== "completed") {
     resetDifferentialResults();
     return;
   }
 
-  const population = document.getElementById("differential-result-population").value;
-  const mode = document.getElementById("differential-viz-mode").value;
-  const isCurrent = () => request === differentialVisualizationRequest &&
-    state.run_id === currentDifferentialState?.run_id &&
-    jobId === document.getElementById("results-job-id").value.trim();
   const integratedMode=mode.startsWith("integrated_");
   document.getElementById("differential-results-view").classList.toggle("show-integrated",integratedMode);
   if(!integratedMode)document.getElementById("differential-plot-area")._integratedDispose?.();
@@ -4295,12 +4490,7 @@ async function loadDifferentialVisualization() {
 }
 
 async function fetchDifferentialJson(url) {
-  const resp = await fetch(url);
-  const data = await parseApiResponse(resp);
-  if (!resp.ok) {
-    throw new Error(data.detail || "Differential data request failed.");
-  }
-  return data;
+  return differentialPayloadCache.fetch(url);
 }
 
 // The two bar colours, read from the reference figure Nathan supplied.
@@ -5133,7 +5323,9 @@ async function loadDifferentialGeneDetail(gene, population, options) {
   const request = ++differentialDetailRequest;
   const runId = currentDifferentialState?.run_id;
   const jobId = document.getElementById("results-job-id").value.trim();
+  const generation = explorePayloadCache.generation;
   const isCurrent = () => request === differentialDetailRequest &&
+    generation === explorePayloadCache.generation &&
     runId === currentDifferentialState?.run_id &&
     jobId === document.getElementById("results-job-id").value.trim();
   if (!gene || !population || !jobId) {
@@ -5391,6 +5583,7 @@ function destroyDifferentialNetwork() {
 function renderDifferentialEmpty(message) {
   destroyDifferentialNetwork();
   const plot = document.getElementById("differential-plot-area");
+  plot._integratedDispose?.();
   Plotly.purge(plot);
   plot.classList.add("hidden");
   const empty = document.getElementById("differential-plot-empty");
@@ -5399,10 +5592,12 @@ function renderDifferentialEmpty(message) {
 }
 
 function resetDifferentialResults() {
+  ++differentialVisualizationRequest;
   destroyDifferentialNetwork();
   const vizModes = ((currentDifferentialState && currentDifferentialState.visualization_modes) || []).map((entry) => entry.label);
   const vizSummary = vizModes.length ? vizModes.join(", ") : "Heatmap, Volcano, Network, or GO terms";
   const plot = document.getElementById("differential-plot-area");
+  plot._integratedDispose?.();
   Plotly.purge(plot);
   plot.classList.add("hidden");
   const empty = document.getElementById("differential-plot-empty");
@@ -5447,6 +5642,7 @@ function clearGeneSuggestions() {
     const datalist = document.getElementById(`${panelKey}-feature-suggestions`);
     if (datalist) {
       datalist.innerHTML = "";
+      delete datalist.dataset.catalogKey;
     }
   });
   loadedGeneSuggestionsSignature = "";
@@ -5482,8 +5678,9 @@ function clearDisplayFilters() {
 }
 
 async function loadGeneSuggestions(jobId) {
-  await ensureFeatureAnnotations(jobId);
+  const generation = explorePayloadCache.generation;
   const signature = [
+    generation,
     String(jobId || "").trim(),
     ...VISUALIZATION_PANELS.map((panelKey) => `${panelKey}:${panelModality(panelKey)}`),
   ].join("|");
@@ -5491,18 +5688,22 @@ async function loadGeneSuggestions(jobId) {
     return;
   }
   try {
-    for (const panelKey of VISUALIZATION_PANELS) {
-      const modality = panelModality(panelKey);
+    const panels = VISUALIZATION_PANELS.map(panelKey => ({panelKey, modality: panelModality(panelKey)}));
+    const catalogs = new Map();
+    await Promise.all([ensureFeatureAnnotations(jobId), ...[...new Set(panels.map(p => p.modality))].map(async modality => {
+      catalogs.set(modality, await exploreMetadataCache.fetch(apiPath(`/jobs/${jobId}/genes?modality=${encodeURIComponent(modality)}`)));
+    })]);
+    if (generation !== explorePayloadCache.generation || jobId !== getResultsJobId()) return;
+    for (const {panelKey, modality} of panels) {
+      if (modality !== panelModality(panelKey)) continue;
       const datalist = document.getElementById(`${panelKey}-feature-suggestions`);
       if (!datalist) {
         continue;
       }
-      datalist.innerHTML = "";
-      const resp = await fetch(apiPath(`/jobs/${jobId}/genes?modality=${encodeURIComponent(modality)}`));
-      const data = await parseApiResponse(resp);
-      if (!resp.ok) {
-        throw new Error(data.detail || "Unable to load gene suggestions.");
-      }
+      const catalogKey = `${generation}|${jobId}|${modality}`;
+      if (datalist.dataset.catalogKey === catalogKey) continue;
+      const data = catalogs.get(modality);
+      const fragment = document.createDocumentFragment();
       const seen = new Set();
       // `accepted` is what may stay in the box; `seen` is what the box offers.
       const accepted = new Set();
@@ -5518,8 +5719,10 @@ async function loadGeneSuggestions(jobId) {
         const option = document.createElement("option");
         option.value = value;
         option.label = featureDisplayName(value, modality);
-        datalist.appendChild(option);
+        fragment.appendChild(option);
       });
+      datalist.replaceChildren(fragment);
+      datalist.dataset.catalogKey = catalogKey;
       // A NAME THE SERVER CAN RESOLVE IS NEVER OVERWRITTEN.
       //
       // Nathan, 2026-09-08: "every name I select defaults to CE(18:2)". The reset below
@@ -5621,11 +5824,9 @@ async function loadDisplayFilters(jobId) {
     return;
   }
   try {
-    const resp = await fetch(apiPath(`/jobs/${jobId}/display-filters`));
-    const data = await parseApiResponse(resp);
-    if (!resp.ok) {
-      throw new Error(data.detail || "Unable to load display filters.");
-    }
+    const generation = explorePayloadCache.generation;
+    const data = await exploreMetadataCache.fetch(apiPath(`/jobs/${jobId}/display-filters`));
+    if (generation !== explorePayloadCache.generation || jobId !== getResultsJobId()) return;
     populateDisplayFilterControls(data);
     loadedDisplayFiltersJobId = jobId;
   } catch (err) {
@@ -5634,6 +5835,8 @@ async function loadDisplayFilters(jobId) {
 }
 
 async function warmExploreResults(jobId) {
+  const generation = explorePayloadCache.generation;
+  const isCurrent = () => generation === explorePayloadCache.generation && jobId === getResultsJobId();
   if (!jobId) {
     return;
   }
@@ -5642,18 +5845,20 @@ async function warmExploreResults(jobId) {
   }
   const warmupPromise = (async () => {
     await loadDisplayFilters(jobId);
+    if (!isCurrent()) return;
     if (loadedResultsJobId !== jobId) {
       loadedResultsJobId = jobId;
     }
     await refreshResults();
   })();
   exploreWarmupJobId = jobId;
-  exploreWarmupPromise = warmupPromise.finally(() => {
-    if (exploreWarmupJobId === jobId) {
+  const ownedPromise = warmupPromise.finally(() => {
+    if (exploreWarmupPromise === ownedPromise) {
       exploreWarmupJobId = null;
       exploreWarmupPromise = null;
     }
   });
+  exploreWarmupPromise = ownedPromise;
   return exploreWarmupPromise;
 }
 
@@ -5796,8 +6001,10 @@ async function loadVisualizationPanel(panelKey) {
   }
 
   if(mode.startsWith("integrated_")) {
-    const host=document.getElementById(panelElementId(panelKey,"plot"));
     resetVisualizationSurface(panelKey);
+    // Reset can park a cached SVG and replace the panel's plot element.
+    // Resolve the host afterward so integrated markup cannot overwrite it.
+    const host=document.getElementById(panelElementId(panelKey,"plot"));
     setPanelSummary(panelKey, "");
     host.classList.remove("hidden");
     await ScalableIntegrated.mount(host,integratedOptions(jobId,mode,getPanelSelectValue(panelKey,"marker-population"),modality,"marker"));
@@ -5807,6 +6014,10 @@ async function loadVisualizationPanel(panelKey) {
   // Gene-set plot types fetch their own payload and draw it here, so they do not
   // travel through the single-molecule expression path below.
   if (GENE_SET_MODES.has(mode)) {
+    // Use initialized grouping controls for the first request as well as later
+    // ones. Otherwise the first URL omits group_by and misses the reuse cache.
+    await refreshGroupControls(panelKey);
+    if (!isCurrent()) return;
     const genes = panelGeneSet(panelKey);
     const params = new URLSearchParams();
     // The DotPlot and CombPlot read the same modality the panel is set to. Without
@@ -5834,7 +6045,7 @@ async function loadVisualizationPanel(panelKey) {
       const payload = await explorePayloadCache.fetch(apiPath(`/api/jobs/${jobId}/${mode}${query}`),
         message => {if (isCurrent()) setPanelSummary(panelKey, message);});
       if (!isCurrent()) return;
-      panelPlotData[panelKey] = { source: mode, payload };
+      panelPlotData[panelKey] = { source: mode, payload, requestUrl: apiPath(`/api/jobs/${jobId}/${mode}${query}`) };
     } catch (err) {
       if (!isCurrent()) return;
       panelPlotData[panelKey] = { source: "error", payload: { message: err.message } };
@@ -5968,7 +6179,7 @@ async function loadVisualizationPanel(panelKey) {
       if (data?.gene && data.gene !== gene && geneInput) {
         geneInput.value = data.gene;
       }
-      panelPlotData[panelKey] = { source: "expression", payload: expandPlotColumns(data) };
+      panelPlotData[panelKey] = { source: "expression", payload: expandPlotColumns(data), requestUrl: apiPath(`/jobs/${jobId}/expression?${params.toString()}`) };
       renderVisualizationPanel(panelKey);
       return;
     }
@@ -6402,6 +6613,32 @@ function renderPanelExpression(panelKey, expressionData, mode, dotScale) {
 
 function renderVisualizationPanel(panelKey) {
   const mode = getPanelSelectValue(panelKey, "mode");
+  const data = panelPlotData[panelKey];
+  const reusable = data?.requestUrl && ((mode === "violin" && data.source === "expression")
+    || (mode === "dotplot" && data.source === "dotplot"));
+  const key = reusable ? `${panelKey}|${explorePayloadCache.generation}|${mode}|${getPlotDotScale()}|${singleWindowActive()}|${data.requestUrl}` : "";
+  if (key && restorePanelFigure(panelKey, key)) {
+    hideMarkerHeatmapView(panelKey);
+    document.getElementById(panelPlotId(panelKey)).classList.remove("hidden");
+    if (mode === "violin") updateBaselineFilterSummaries(panelKey);
+    else setPanelSummary(panelKey, "");
+    return;
+  }
+  parkPanelFigure(panelKey);
+  drawVisualizationPanel(panelKey);
+  if (key) {
+    const points = mode === "violin" ? (data.payload.violin || []).reduce((n, state) => n + (state.values?.length || 0), 0)
+      : (data.payload.genes?.length || 0) * (data.payload.states?.length || 0);
+    document.getElementById(panelPlotId(panelKey))._reusableFigure = {key, bytes: points * 1024 + 4 * 1024 * 1024};
+  }
+}
+
+function drawVisualizationPanel(panelKey) {
+  const mode = getPanelSelectValue(panelKey, "mode");
+  if (mode !== "marker_heatmap") {
+    hideMarkerHeatmapView(panelKey);
+    document.getElementById(panelPlotId(panelKey))?.classList.remove("hidden");
+  }
   // Integrated views own their live SVG/Cytoscape state. Repainting an old
   // expression payload here replaces a pathway when the window count changes.
   if (mode.startsWith("integrated_")) {
@@ -6838,6 +7075,9 @@ function initGeneSetBoxes() {
  * nothing on this panel is a generated statistic.
  */
 let chatLastResult = null;
+let chatRequest = 0;
+let chatPlotRequest = 0;
+let chatController = null;
 
 function initChatTab() {
   const send = document.getElementById("chat-send");
@@ -6879,9 +7119,11 @@ async function loadChatExamples(jobId) {
   const host = document.getElementById("chat-examples");
   const box = document.getElementById("chat-question");
   if (!host || !jobId) return;
+  const generation = explorePayloadCache.generation;
   try {
     const response = await fetch(apiPath(`/jobs/${jobId}/chat-examples`));
     const data = await response.json();
+    if (generation !== explorePayloadCache.generation || jobId !== getResultsJobId()) return;
     if (!response.ok) throw new Error(data.detail || "examples unavailable");
     host.innerHTML = "";
     const label = document.createElement("span");
@@ -6912,13 +7154,25 @@ async function loadChatExamples(jobId) {
  * one answer. Plotly holds its own state on the node, so purging it is what
  * actually removes the figure; emptying `innerHTML` alone leaves the chart
  * registered and the next `newPlot` inherits its layout. */
-function clearChatOutput() {
+function releaseChatVisualization() {
   const correlationPlot = document.getElementById("chat-correlation-plot");
   if (correlationPlot) Plotly.purge(correlationPlot);
+  if (chatNetworkCy) {
+    try {chatNetworkCy.destroy();} catch (_) {}
+    chatNetworkCy = null;
+  }
+  releaseVisualizationResources("chat", document.getElementById("chat-plot"));
+}
+
+function clearChatOutput() {
+  chatRequest += 1;
+  chatPlotRequest += 1;
+  chatController?.abort();
+  chatController = null;
+  releaseChatVisualization();
   chatResultState = null;
   document.getElementById("chat-result-controls")?.classList.add("hidden");
   chatLastResult = null;
-  try { Plotly.purge("chat-plot"); } catch (err) { /* nothing drawn yet */ }
   ["chat-answer", "chat-table", "chat-plot", "chat-followups"].forEach((id) => {
     const host = document.getElementById(id);
     if (host) host.innerHTML = "";
@@ -6929,6 +7183,8 @@ function clearChatOutput() {
   if (table) table.classList.add("hidden");
   const views = document.getElementById("chat-views");
   if (views) views.classList.add("hidden");
+  const status = document.getElementById("chat-status");
+  if (status) status.textContent = "";
 }
 
 async function askChat() {
@@ -6941,21 +7197,32 @@ async function askChat() {
   // rather than when the answer arrives.
   clearChatOutput();
   if (!jobId) { status.textContent = "Load a dataset first."; return; }
+  const request = chatRequest;
+  const generation = explorePayloadCache.generation;
+  const controller = new AbortController();
+  chatController = controller;
+  const isCurrent = () => request === chatRequest && generation === explorePayloadCache.generation && jobId === getResultsJobId();
   await ensureFeatureAnnotations(jobId);
+  if (!isCurrent()) return;
   status.textContent = "Working...";
   try {
     const response = await fetch(apiPath(`/api/jobs/${jobId}/chat`), {
       method: "POST",
+      signal: controller.signal,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ question }),
     });
     const data = await response.json();
+    if (!isCurrent()) return;
     if (!response.ok) throw new Error(data.detail || `chat failed (${response.status})`);
     chatLastResult = data;
     renderChatAnswer(data);
     status.textContent = "";
   } catch (err) {
+    if (!isCurrent()) return;
     status.textContent = err.message;
+  } finally {
+    if (chatController === controller) chatController = null;
   }
 }
 
@@ -7527,9 +7794,9 @@ async function loadPlotVariables(jobId) {
   if (plotVariablesCache && plotVariablesCache.jobId === jobId) return plotVariablesCache;
   // apiPath honours CELLHARMONY_ROOT_PATH; a bare path 404s wherever the app
   // is mounted under a prefix, which is how the Group by list stayed empty.
-  const response = await fetch(apiPath(`/api/jobs/${jobId}/plot-variables`));
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.detail || "plot variables unavailable");
+  const generation = explorePayloadCache.generation;
+  const data = await exploreMetadataCache.fetch(apiPath(`/api/jobs/${jobId}/plot-variables`));
+  if (generation !== explorePayloadCache.generation || jobId !== getResultsJobId()) throw new Error("Visualization changed.");
   plotVariablesCache = { jobId, ...data };
   const clusterVariable = (data.variables || []).find(
     (variable) => String(variable.field) === String(data.cluster_key));
@@ -7545,18 +7812,26 @@ async function refreshGroupControls(panelKey) {
   const groupBy = document.getElementById(panelElementId(panelKey, "groupby"));
   const groups = document.getElementById(panelElementId(panelKey, "groups"));
   if (!jobId || !groupBy || !groups) return;
+  const generation = explorePayloadCache.generation;
+  const metadataKey = `${generation}|${jobId}`;
+  const isCurrent = () => generation === explorePayloadCache.generation && jobId === getResultsJobId();
+  if (groupBy.dataset.metadataKey === metadataKey) return;
   let info;
   try {
     info = await loadPlotVariables(jobId);
   } catch (err) {
+    if (!isCurrent()) return;
     // Swallowing this left an empty Group by select with nothing said, so the
     // control looked broken rather than unavailable.
     console.warn("plot variables unavailable:", err);
     groupBy.innerHTML = '<option value="">unavailable</option>';
+    groups.innerHTML = "";
+    delete groupBy.dataset.metadataKey;
     return;
   }
-
-  if (!groupBy.options.length) {
+  if (!isCurrent()) return;
+  if (groupBy.dataset.metadataKey !== metadataKey) {
+    groupBy.innerHTML = "";
     info.variables.forEach((variable) => {
       const option = document.createElement("option");
       option.value = variable.field;
@@ -7564,13 +7839,14 @@ async function refreshGroupControls(panelKey) {
       groupBy.appendChild(option);
     });
     groupBy.value = info.cluster_key;
-    groupBy.addEventListener("change", () => {
+    groupBy.onchange = () => {
       fillGroupLevels(panelKey, info);
       loadVisualizationPanel(panelKey);
-    });
-    groups.addEventListener("change", () => loadVisualizationPanel(panelKey));
+    };
+    groups.onchange = () => loadVisualizationPanel(panelKey);
+    fillGroupLevels(panelKey, info);
+    groupBy.dataset.metadataKey = metadataKey;
   }
-  fillGroupLevels(panelKey, info);
 }
 
 /* The levels of the chosen variable. Nothing is selected to start with, which
@@ -7601,17 +7877,22 @@ async function refreshUmapOptions(panelKey) {
   const colorBy = document.getElementById(panelElementId(panelKey, "colorby"));
   const coords = document.getElementById(panelElementId(panelKey, "coords"));
   if (!jobId || !colorBy || !coords) return;
-  if (colorBy.dataset.jobId === jobId && coords.dataset.jobId === jobId) return;
+  const generation = explorePayloadCache.generation;
+  const metadataKey = `${generation}|${jobId}`;
+  const isCurrent = () => generation === explorePayloadCache.generation && jobId === getResultsJobId();
+  if (colorBy.dataset.metadataKey === metadataKey && coords.dataset.metadataKey === metadataKey) return;
   let info;
   try {
     info = await loadPlotVariables(jobId);
   } catch (err) {
+    if (!isCurrent()) return;
     // Say it rather than leaving two empty lists that look broken.
     console.warn("UMAP options unavailable:", err);
     colorBy.innerHTML = '<option value="">unavailable</option>';
     coords.innerHTML = '<option value="">unavailable</option>';
     return;
   }
+  if (!isCurrent()) return;
 
   const previousColor = colorBy.value;
   colorBy.innerHTML = "";
@@ -7628,6 +7909,7 @@ async function refreshUmapOptions(panelKey) {
   });
   colorBy.value = Array.from(colorBy.options).some((o) => o.value === previousColor) ? previousColor : "";
   colorBy.dataset.jobId = jobId;
+  colorBy.dataset.metadataKey = metadataKey;
 
   const previousCoords = coords.value;
   coords.innerHTML = "";
@@ -7646,6 +7928,7 @@ async function refreshUmapOptions(panelKey) {
   });
   coords.value = Array.from(coords.options).some((o) => o.value === previousCoords) ? previousCoords : "";
   coords.dataset.jobId = jobId;
+  coords.dataset.metadataKey = metadataKey;
 
   // The axis lists. A field shows its range and how many cells carry a value,
   // because a metadata column recorded for part of the dataset draws a panel
@@ -7761,10 +8044,8 @@ async function drawChatPlot() {
   const host = document.getElementById("chat-plot");
   if (!host) return;
 
-  // Release the container before reusing it, or the second draw is blank.
-  try { Plotly.purge("chat-plot"); } catch (err) { /* never drawn yet */ }
-  const previousCorrelation = document.getElementById("chat-correlation-plot");
-  if (previousCorrelation) Plotly.purge(previousCorrelation);
+  // Release Plotly, integrated and network resources before another figure.
+  releaseChatVisualization();
   host.innerHTML = "";
 
   if (!spec) {
@@ -7772,6 +8053,10 @@ async function drawChatPlot() {
     return;
   }
   const jobId = document.getElementById("results-job-id").value.trim();
+  const request = ++chatPlotRequest;
+  const generation = explorePayloadCache.generation;
+  const isCurrent = () => request === chatPlotRequest && result === chatLastResult
+    && generation === explorePayloadCache.generation && jobId === getResultsJobId();
 
   if (spec.kind === "cross_pathways") {
     const all=filteredChatRows(), limit=chatResultState.limit || Math.max(1,all.length);
@@ -7786,6 +8071,7 @@ async function drawChatPlot() {
       xaxis:{title:{text:"Unique features per pathway, counted within each modality"},rangemode:"tozero",dtick:Math.max(1,Math.ceil(Math.max(...rows.map(r=>r.total_hits))/10))},
       yaxis:{tickvals:rows.map(r=>r.id),ticktext:rows.map(r=>r.pathway),categoryorder:"array",categoryarray:rows.map(r=>r.id).reverse(),automargin:true},
       legend:{orientation:"h",y:1.12}}, {responsive:true,displaylogo:false});
+    if (!isCurrent()) return;
     host.on("plotly_click",event=>{const id=event.points?.[0]?.customdata?.[0];const row=rows.find(r=>r.id===id);if(row)openCrossPathway(row,spec);});
     return;
   }
@@ -7852,9 +8138,6 @@ async function drawChatPlot() {
   // all return one. Without this the panel said "no figure" for three of the
   // protocols that do the most work.
   if (spec.kind === "combplot" && (spec.genes || []).length) {
-    const generation = explorePayloadCache.generation;
-    const isCurrent = () => result === chatLastResult && generation === explorePayloadCache.generation
-      && jobId === document.getElementById("results-job-id").value.trim();
     try {
       const bits = [`genes=${encodeURIComponent(spec.genes.join(","))}`, "min_cells=5", "unit=donor"];
       if (spec.group_by) bits.push(`group_by=${encodeURIComponent(spec.group_by)}`);
@@ -7865,7 +8148,7 @@ async function drawChatPlot() {
       renderCombPlotFigure("chat-plot", data);
     } catch (err) {
       if (!isCurrent()) return;
-      host.innerHTML = `<span class="warn">${err.message}</span>`;
+      host.innerHTML = `<span class="warn">${escapeHtml(err.message)}</span>`;
     }
     return;
   }
@@ -7878,13 +8161,13 @@ async function drawChatPlot() {
   if (spec.kind === "heatmap") { drawChatHeatmap(result); return; }
   if (spec.kind === "dotplot" && (spec.genes || []).length) {
     try {
-      const response = await fetch(
+      const data = await explorePayloadCache.fetch(
         apiPath(`/api/jobs/${jobId}/dotplot?genes=${encodeURIComponent(spec.genes.join(","))}`));
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || "dotplot failed");
+      if (!isCurrent()) return;
       renderDotPlotFigure("chat-plot", data);
     } catch (err) {
-      host.innerHTML = `<span class="warn">${err.message}</span>`;
+      if (!isCurrent()) return;
+      host.innerHTML = `<span class="warn">${escapeHtml(err.message)}</span>`;
     }
     return;
   }

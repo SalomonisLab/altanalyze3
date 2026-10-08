@@ -622,6 +622,7 @@ registry's own directory.
 | Key | Required | Meaning |
 | --- | --- | --- |
 | `id`, `label` | yes | the menu value and the menu text |
+| `study_citation`, `study_url` | no | citation displayed with a filled triangle directly below the selected reference; opens the study's HTTP(S) webpage in a new tab |
 | `states_tsv` | yes | cellHarmony centroid matrix; its file stem becomes the query cluster key |
 | `reference_clusters_tsv` | yes | barcode to cell state, for the reference UMAP |
 | `reference_coords_tsv` | yes | barcode to UMAP1, UMAP2 |

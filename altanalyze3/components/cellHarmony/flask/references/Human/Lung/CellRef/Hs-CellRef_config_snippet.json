@@ -7,5 +7,7 @@
   "ambient_options": [
     "default"
   ],
-  "states_tsv": "/path/to/cellHarmony_reference_states.tsv"
+  "states_tsv": "/path/to/cellHarmony_reference_states.tsv",
+  "study_citation": "Guo 2023 et al. Nat Commun. 2023",
+  "study_url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC10387117/"
 }

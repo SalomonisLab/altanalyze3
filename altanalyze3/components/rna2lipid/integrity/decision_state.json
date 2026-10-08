@@ -155,6 +155,52 @@
       "further_source_audit_authorized": false,
       "diagnostic_completed": true,
       "diagnostic_user_answer": "1. Use the same method you used for the lipid then fit the original on the fitted models\n2. Yes"
+    },
+    {
+      "id": "bulk_IPF_eight_RNA_gene_mappings_20261007",
+      "status": "resolved",
+      "required_for": [
+        "bulk_IPF_candidate_vs_prior_20261007"
+      ],
+      "question": "May I reconcile eight historical unresolved GSE213001 gene mappings using the supplied Ensembl IDs and annotations, preserving all 1303 inputs, or should both models use their original zero-fill inference handling?",
+      "user_answer": "Reconcile the eight gene mappings first",
+      "gene_ids": [
+        "ADORA3",
+        "CHGA",
+        "FABP7",
+        "FFAR1",
+        "GGT1",
+        "HBG1",
+        "ST6GALNAC6",
+        "STAR"
+      ],
+      "evidence": "Prior saved excluded_RNA_genes.csv identifies these eight initial mapping failures. Current source filenames contain Entrez but their verified first row is an Ensembl identifier. No further reconciliation, zero filling or inference has been performed for this new comparison.",
+      "audit": "components/rna2lipid/artifacts/IPF_candidate_validation_20261001/excluded_RNA_genes.csv",
+      "diagnostic_authorized": true,
+      "user_followup": "Use the same skills applied for fillining NAs that is currently approved",
+      "resolution_evidence": "User explicitly authorizes established median filling. Official/current local Ensembl gene IDs for all eight have no rows in the supplied 15065-gene count table. Use each gene median from the verified 45-profile RNA training reference for absent entries, identically in both models. Keep all 1303 inputs and 202 outputs.",
+      "NA_filling_authorized": true
+    },
+    {
+      "id": "Abby_external_IPF_saved_results_20261007",
+      "status": "partially_resolved_waiting_for_saved_results",
+      "question": "Where are the original saved matched/top-lipid results needed to verify the exact lipids and concordant numerator/denominator, and the donor-aggregated update when available?",
+      "scope": "Identify and numerically reproduce the reported 50% from original saved outputs. Read-only archive/code/model audit completed independently; no re-inference or source matching changes authorized by this audit.",
+      "source_archive": "/Users/saljh8/Downloads/External_validation_IPF_rna2lipid.zip",
+      "audit": "components/rna2lipid/artifacts/Abby_external_validation_audit_20261007/audit.json",
+      "resolved_metric_definition": "User relayed Abby confirmation: approximate 50% is measured FDR<0.05 top up-to-15 increases and up-to-15 decreases; predicted significance not required.",
+      "clarification_record": "components/rna2lipid/artifacts/Abby_external_validation_audit_20261007/ABBY_CLARIFICATION_20261007.md"
+    },
+    {
+      "id": "lung_RNA_training_matrix_preprocessing_20261007",
+      "status": "pending",
+      "question": "Which previously sent file/protocol documents Clair cell RNA normalization units, log base and pseudocount? Please give the filename/path.",
+      "evidence": "Delivered train_sparse_lipidwise_delivered_2026-08-19.py loads the supplied numeric RNA matrix directly, without documenting the transformation that generated it. The original rna_lipid-main archive also loads it directly. Deployed CP10k inference does not establish the training matrix normalization.",
+      "scope": "Adjudicate CPM versus CP10k versus another RNA representation and any subsequent scale-dependent changes; no further reconstruction or inference pending this answer.",
+      "not_blocked_by_this_question": "Read-only explanation of already verified donor replication, existing statistical tests, approved median filling, fold definitions and concordance denominators.",
+      "source_identity_clarification": "User relayed Abby: renamed copy of Clair cell data with previously supplied normalization.",
+      "external_file_role_clarification": "Not reopened by external validation; training source determines saved RNA scaler and coefficient input representation.",
+      "clarification_record": "components/rna2lipid/artifacts/Abby_external_validation_audit_20261007/ABBY_CLARIFICATION_20261007.md"
     }
   ],
   "approval": {
@@ -397,5 +443,54 @@
     "service_restarted": false,
     "clinical_data_rerun": false,
     "encoding": "Normalized relative log2; invert as 2**Y, zero offset in normalized space; no panel-total normalization"
+  },
+  "bulk_IPF_head_to_head_authorization_20261007": {
+    "granted_by": "user",
+    "user_message": "Yes, I am asking you to do this",
+    "scope": "Run fixed current 202-lipid candidate and prior 202-lipid model on supplied GSE213001 bulk RNA; compare to corrected lung-tissue 10_results_with_statistics.csv with identical inputs and statistical settings. No retraining, source filtering or outcome-directed calibration.",
+    "candidate": "components/rna2lipid/rna2lipid_hs_lung_native_log2_20261005_bundle.pkl",
+    "prior": "components/rna2lipid/rna2lipid_hs_lung_lipidwise_bundle.pkl",
+    "required_lipids_per_model": 202,
+    "required_RNA_inputs_per_model": 1303,
+    "RNA_source_profiles": 139,
+    "RNA_IPF_donors": 20,
+    "RNA_control_donors": 14,
+    "model_training_authorized": false,
+    "status": "completed_fixed_model_inference_and_verified_comparison",
+    "inference_started": true,
+    "differentials_started": true,
+    "pending": [],
+    "NA_authorization": {
+      "granted_by": "user",
+      "user_message": "Use the same skills applied for fillining NAs that is currently approved",
+      "policy": "Per-gene median from the authorized 45-profile RNA training reference on the model input scale; same filled input matrix for candidate and prior; no omitted input features."
+    },
+    "inference_completed": true,
+    "differentials_completed": true,
+    "independent_verification_passed": true,
+    "tests_passed": 13,
+    "report": "components/rna2lipid/artifacts/bulk_IPF_full202_comparison_20261007/BULK_IPF_CANDIDATE_VS_PRIOR_REPORT.md",
+    "verification": "components/rna2lipid/artifacts/bulk_IPF_full202_comparison_20261007/independent_verification.json",
+    "primary_BH_010": {
+      "candidate_concordant": 39,
+      "candidate_significant_in_both": 62,
+      "prior_concordant": 22,
+      "prior_significant_in_both": 63,
+      "same_lipid_denominator": 41,
+      "same_lipid_candidate_concordant": 23,
+      "same_lipid_prior_concordant": 18
+    },
+    "models_changed": false,
+    "training_executed": false
+  },
+  "Abby_external_validation_clarification_20261007": {
+    "source": "Abby reply relayed by user",
+    "record": "components/rna2lipid/artifacts/Abby_external_validation_audit_20261007/ABBY_CLARIFICATION_20261007.md",
+    "reported_metric_definition_confirmed": true,
+    "original_numeric_result_reproduced": false,
+    "donor_aggregation_update_promised_by_Abby": true,
+    "RNA_preprocessing_units_confirmed": false,
+    "new_inference_or_training_executed": false,
+    "author_reply_is_not_model_change_authorization": true
   }
 }

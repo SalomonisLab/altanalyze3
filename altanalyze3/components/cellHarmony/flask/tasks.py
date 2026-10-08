@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Dict
 
 from .job_manager import JobStore
-from .worker_memory import process_memory, tree_rss, container_memory
+from .worker_memory import process_memory, tree_rss, container_memory, host_memory
 from .pipeline import run_cellharmony_differential, run_cellharmony_pipeline
 
 
@@ -89,6 +89,9 @@ class JobRunner:
             ceiling = min(self.total_memory_limit, int(limit * 0.9)) if container else limit
             if used >= ceiling:
                 return "The server is currently using its available analysis memory."
+            host = host_memory()
+            if host is not None and host[0] <= min(2 * 1024**3, int(host[1] * 0.1)):
+                return "The host is low on available memory, including memory used by other services."
         except (OSError, ValueError, subprocess.SubprocessError):
             return "Worker memory usage is temporarily unavailable."
         return None

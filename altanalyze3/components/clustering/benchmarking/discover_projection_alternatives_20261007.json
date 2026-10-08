@@ -1,0 +1,32 @@
+{
+  "exact": {
+    "seconds": 7.114874292048626,
+    "finite": true
+  },
+  "baseline": {
+    "seconds": 120.93696208298206,
+    "finite": true,
+    "exact_neighbor_recall": 0.6991666666666667
+  },
+  "angular": {
+    "seconds": 5.051701999967918,
+    "finite": true,
+    "exact_neighbor_recall": 0.2125
+  },
+  "peak_rss_gib": 1.450225830078125,
+  "scope": "Matched native synthetic 30,000 fit / 12,000 query / 827 full features; original UMAP fit and transform optimization retained.",
+  "selected": "exact blocked correlation",
+  "angular_rejected_reason": "Prototype recall 21.25%; graph-width mismatch produced a warning. Corrected graph-width rerun also recovered only 21.14%, so this prototype is not selected.",
+  "corrected_graph_width_rerun": {
+    "exact": {
+      "seconds": 7.117063125013374,
+      "finite": true
+    },
+    "angular": {
+      "seconds": 4.910673625068739,
+      "finite": true,
+      "exact_neighbor_recall": 0.2113888888888889
+    },
+    "peak_rss_gib": 1.498779296875
+  }
+}

@@ -135,6 +135,7 @@ def test_discover_handoff_preserves_scale_and_passes_option(tmp_path, monkeypatc
             assert "--nmf-k" not in ICGS.cli_equivalent(config)
         assert config.umap_fit_mode == ("full" if fit_mode == "full" else "landmark")
         assert config.umap_n_neighbors == (0 if fit_mode == "full" else 15)
+        assert config.umap_transform_backend == ("umap" if fit_mode == "full" else "exact_correlation")
         assert config.umap_min_dist == 0.75
         report = ICGS.report_expression_scale(staged, config)
         assert report["X"]["verdict"] == ("counts" if holds_counts else "log")
@@ -237,3 +238,151 @@ def test_discover_ui_and_qc_api_round_trip(tmp_path):
                 assert app.state.job_store.get_job("test")["qc"]["max_k"] is None
     finally:
         app.state.job_runner.executor.shutdown(wait=True)
+
+
+def test_projection_logs_all_cells_and_timings_without_changing_outputs():
+    x = np.arange(2000 * 3, dtype=np.float32).reshape(2000, 3)
+    labels = np.array(['c1'] * 1000 + ['c2'] * 1000)
+    class Model:
+        n_neighbors = 15
+        def fit_transform(self, values): return values[:, :2]
+        def transform(self, values): return values[:, :2]
+    logs = []
+    coords, _, selected = fit_umap(Model(), lambda rows: x[rows], len(x), mode='landmark',
+                                   labels=labels, max_fit_cells=500, batch_cells=500, log=logs.append)
+    np.testing.assert_array_equal(coords, x[:, :2])
+    assert len(selected) == 500
+    progress = [line for line in logs if line.startswith('UMAP transformed')]
+    assert len(progress) == 3
+    assert '(500/1,500 completed;' in progress[0]
+    assert '(1,500/1,500 completed;' in progress[-1]
+    assert all('input ' in line and 'projection ' in line for line in progress)
+    assert len([line for line in logs if line.startswith('UMAP projection input loaded:')]) == 3
+
+
+def test_discover_projection_progress_changes_message_for_each_completed_block():
+    from altanalyze3.components.cellHarmony.scalable_discover.tasks import _StageLogStream
+    updates = []
+    store = SimpleNamespace(append_log=lambda *a: None,
+                            update_job=lambda job, **fields: updates.append(fields))
+    stream = _StageLogStream(store, 'job')
+    for line in ['UMAP mapping 42,083 remaining cells',
+                 'UMAP transformed 42,083 remaining cells (42,083/210,414 completed; input 1.0 s; projection 2.0 s)',
+                 'UMAP transformed 42,083 remaining cells (84,166/210,414 completed; input 1.0 s; projection 2.0 s)',
+                 'UMAP transformed 42,082 remaining cells (210,414/210,414 completed; input 1.0 s; projection 2.0 s)',
+                 'UMAP fit completed in 45.6 s; transform in 1427.1 s']:
+        stream.write(line+'\n')
+    assert [update['progress'] for update in updates] == [72, 72, 73, 75, 75]
+    assert '42,083 of 210,414' in updates[1]['message']
+    assert 'writing UMAP' in updates[-1]['message']
+    count = len(updates)
+    stream.write('UMAP transformed 1 remaining cells (211,000/210,414 completed; invalid)\n')
+    assert len(updates) == count
+
+
+def test_exact_projection_search_matches_full_panel_correlation_and_bounds_tiles():
+    from altanalyze3.components.clustering.umap_neighbors import ExactCorrelationIndex
+    from scipy.spatial.distance import cdist
+    rng = np.random.default_rng(53)
+    train = rng.normal(size=(73, 93)).astype(np.float32)
+    query = rng.normal(size=(41, 93)).astype(np.float32)
+    before = train.copy(), query.copy()
+    search = ExactCorrelationIndex(train, working_memory_bytes=73 * 12 * 3)
+    assert search.block_rows == 3
+    indices, distances = search.query(query, k=11)
+    reference = cdist(query.astype(np.float64), train.astype(np.float64), metric='correlation')
+    np.testing.assert_array_equal(indices, np.argsort(reference, axis=1)[:, :11])
+    np.testing.assert_allclose(distances, np.take_along_axis(reference, indices, axis=1), atol=3e-7)
+    np.testing.assert_array_equal(train, before[0])
+    np.testing.assert_array_equal(query, before[1])
+
+
+def test_exact_correlation_preserves_negative_correlations_and_constant_rules():
+    from altanalyze3.components.clustering.umap_neighbors import ExactCorrelationIndex
+    train = np.array([[0, 1, 2], [2, 1, 0], [4, 4, 4], [0, 0, 0]], dtype=np.float32)
+    index = ExactCorrelationIndex(train)
+    indices, distances = index.query(train, k=4)
+    matrix = np.empty((4, 4))
+    np.put_along_axis(matrix, indices, distances, axis=1)
+    np.testing.assert_allclose(matrix, [[0, 2, 1, 1], [2, 0, 1, 1],
+                                       [1, 1, 0, 0], [1, 1, 0, 0]], atol=3e-7)
+    with pytest.raises(ValueError, match='complete feature panel'):
+        index.query(np.ones((3, 2)), k=2)
+    with pytest.raises(ValueError, match='finite'):
+        index.query(np.array([[np.nan, 0, 0]]), k=2)
+
+
+def test_projection_replacement_restores_fitted_index_on_success_and_error():
+    from altanalyze3.components.clustering.umap_fit import projection_search
+    from altanalyze3.components.clustering.umap_neighbors import ExactCorrelationIndex
+    original = object()
+    model = SimpleNamespace(metric='correlation', _small_data=False,
+                            _knn_search_index=original, _raw_data=np.eye(7, dtype=np.float32))
+    with projection_search(model, 'exact_correlation') as backend:
+        assert backend == 'exact_correlation'
+        assert isinstance(model._knn_search_index, ExactCorrelationIndex)
+        assert model._knn_search_index._data.shape == model._raw_data.shape
+    assert model._knn_search_index is original
+    with pytest.raises(RuntimeError, match='deliberate'):
+        with projection_search(model, 'exact_correlation'):
+            raise RuntimeError('deliberate')
+    assert model._knn_search_index is original
+    model.metric = 'euclidean'
+    with projection_search(model, 'exact_correlation') as backend:
+        assert backend == 'umap'
+        assert model._knn_search_index is original
+    model.metric = 'correlation'
+    model._sparse_data = True
+    with projection_search(model, 'exact_correlation') as backend:
+        assert backend == 'umap'
+        assert model._knn_search_index is original
+
+
+def test_full_fit_keeps_established_search_even_when_projection_backend_requested():
+    x = np.arange(30, dtype=np.float32).reshape(10, 3)
+    class Model:
+        def fit_transform(self, rows):
+            return rows[:, :2]
+        def transform(self, rows):
+            raise AssertionError('Full fit must not project cells')
+    coords, info, selected = fit_umap(Model(), lambda rows: x[rows], len(x),
+                                     transform_backend='exact_correlation')
+    np.testing.assert_array_equal(coords, x[:, :2])
+    np.testing.assert_array_equal(selected, np.arange(len(x)))
+    assert info['transform_search_backend'] == 'umap'
+    config = ICGS.ICGS3Config(input_paths=[], output_dir='unused')
+    assert config.umap_transform_backend == 'umap'
+    config.umap_transform_backend = 'exact_correlation'
+    assert '--umap-transform-backend exact_correlation' in ICGS.cli_equivalent(config)
+
+
+def test_landmark_projection_installs_exact_search_and_preserves_complete_roster():
+    from altanalyze3.components.clustering.umap_neighbors import ExactCorrelationIndex
+    rng = np.random.default_rng(8)
+    x = rng.normal(size=(2002, 17)).astype(np.float32)
+    labels = np.array(['large'] * 1700 + ['small'] * 300 + ['rare'] * 2)
+    original = object()
+    class Model:
+        n_neighbors = 15
+        metric = 'correlation'
+        _small_data = False
+        _knn_search_index = original
+        calls = 0
+        def fit_transform(self, rows):
+            self._raw_data = rows.copy()
+            return rows[:, :2]
+        def transform(self, rows):
+            assert isinstance(self._knn_search_index, ExactCorrelationIndex)
+            assert self._knn_search_index._data.shape == self._raw_data.shape
+            positions, distances = self._knn_search_index.query(rows, self.n_neighbors)
+            assert positions.shape == distances.shape == (len(rows), self.n_neighbors)
+            self.calls += 1
+            return rows[:, :2]
+    model = Model()
+    coords, info, selected = fit_umap(model, lambda rows: x[rows], len(x),
+        mode='landmark', labels=labels, max_fit_cells=600, batch_cells=501,
+        transform_backend='exact_correlation')
+    assert info['transform_search_backend'] == 'exact_correlation'
+    assert model._knn_search_index is original and model.calls == 3
+    np.testing.assert_array_equal(coords, x[:, :2])
+    np.testing.assert_array_equal(selected, select_landmarks(labels, 600, 0, 200))

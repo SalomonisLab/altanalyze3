@@ -1,0 +1,93 @@
+{
+  "date": "2026-10-07",
+  "scope": "Independent synthetic serving/browser review, not the missing online visitor job or a full analysis workflow.",
+  "fixes": [
+    "Dispose live network/integrated resources when restoring cached SVGs.",
+    "Mount integrated views on the replacement host so retained SVGs are not overwritten.",
+    "Invalidate cleared gene-datalist markers, including modality changes.",
+    "Discard stale feature-annotation replies across same-job reruns.",
+    "Wait for initial grouping metadata and preserve selected groups during view switches.",
+    "Use one HTML fetch for embedded Morpheus with explicit HTTP error handling, retry, cancellation and stale-frame guards."
+  ],
+  "python_validation": {
+    "passed": 79,
+    "warnings": 26,
+    "seconds": 11.05
+  },
+  "node_validation": {
+    "scripts_passed": 5,
+    "scripts": [
+      "test_explore_payload_cache.cjs",
+      "test_explore_metadata_views.cjs",
+      "test_explore_figure_reuse.cjs",
+      "test_explore_annotation_races.cjs",
+      "test_explore_group_controls.cjs"
+    ]
+  },
+  "payload_comparison": {
+    "scope": "Synthetic expression serving; all input observations retained",
+    "cells": 600000,
+    "features": 1024,
+    "baseline_ref": "30ade6113212382c49f43034e8073ad63b107ab0",
+    "baseline_violin_seconds": [
+      0.4081289579626173,
+      0.5262214579852298,
+      0.4005861250916496
+    ],
+    "optimized_violin_seconds": [
+      0.21233104192651808,
+      0.21872037497814745,
+      0.21020049997605383
+    ],
+    "plotted_states": 10,
+    "plotted_observations": 150000,
+    "baseline_dotplot_seconds": [
+      0.6380201670108363,
+      0.6020319579401985,
+      0.609205250046216
+    ],
+    "optimized_dotplot_seconds": [
+      0.20043608301784843,
+      0.1939868340268731,
+      0.198033457971178
+    ],
+    "violin_median_baseline_seconds": 0.4081289579626173,
+    "violin_median_optimized_seconds": 0.21233104192651808,
+    "dotplot_median_baseline_seconds": 0.609205250046216,
+    "dotplot_median_optimized_seconds": 0.198033457971178
+  },
+  "browser_validation": {
+    "fixture_cells": 600000,
+    "features": 1024,
+    "dotplot_points_restored": 480,
+    "integrated_to_dotplot_observed_ms": 21,
+    "integrated_cached_svg_preserved": true,
+    "violin_points_restored": 150000,
+    "violin_return_observed_ms": 620,
+    "morpheus": {
+      "rows": 12,
+      "columns": 50800,
+      "http_failure_then_recovery_verified": true,
+      "same_document_reused": true,
+      "observed_return_ms": 9,
+      "html_gets_per_load": 1,
+      "dataset_gets_per_load": 1
+    },
+    "timing_scope": "Individual local wall-clock observations from selector action through visible DOM checks; not an online benchmark or browser heap measurement.",
+    "pdf_export": "Download button exercised, but a fresh PDF artifact was not captured in this run. Prior exported vector PDF validation is recorded separately in explore_details_20261006.json."
+  },
+  "memory_observation": {
+    "scope": "Native isolated synthetic serving process; not the browser or full analysis container",
+    "baseline_rss_gib": 0.591461181640625,
+    "peak_rss_gib": 1.4115142822265625,
+    "peak_cpu_percent": 110.2,
+    "seconds": 60.0
+  },
+  "unchanged_scientific_behavior": "Entire benchmark payloads matched the committed baseline. No scientific model, feature panel, sampling rule, plotted values or differential-analysis algorithm was replaced.",
+  "remaining": [
+    "Real online saved-job validation requires its missing outputs.",
+    "Cold very-large SVG violin rendering, expression UMAP transfer/rendering and dense CombPlots remain performance work.",
+    "Full analytical workflow and concurrent browser heap usage were not retested by these serving checks."
+  ],
+  "deployment": "Rebuild/restart with app.py and shared static/app.js together, then refresh browsers. No added dependency or Apache timeout change. Changes remain uncommitted."
+}
