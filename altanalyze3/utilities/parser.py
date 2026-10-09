@@ -50,10 +50,11 @@ except Exception as _e:
 try:
     from altanalyze3.components.snaf.cli import (run_snaf, run_snaf_ts, run_snaf_b,
                                                  run_snaf_precompute_control,
-                                                 run_snaf_build_surface_db)
+                                                 run_snaf_build_surface_db,
+                                                 run_snaf_t_summary)
 except Exception as _e:
     run_snaf = run_snaf_ts = run_snaf_b = run_snaf_precompute_control = \
-        run_snaf_build_surface_db = _missing_subcommand("snaf", _e)
+        run_snaf_build_surface_db = run_snaf_t_summary = _missing_subcommand("snaf", _e)
 from altanalyze3.utilities.io import (
     get_indexed_references,
     is_bam_indexed
@@ -777,6 +778,27 @@ class ArgsParser():
         snaf_parser.add_argument("--galaxy_workflow", default=None, help="Optional .ga workflow to read length/input requirements (default: bundled OneClick iPepGen contract)")
         snaf_parser.add_argument("--galaxy_peptide_bed", default=None, help="Optional complete-peptide BED12 with names matching exported SNAF accessions")
         snaf_parser.add_argument("--galaxy_assembly", default="hg38", help="Assembly identifier for supplied peptide BED coordinates (default: hg38)")
+        snaf_parser.add_argument("--event_annotation", default=None, type=str, help="AltAnalyze *-PSI_EventAnnotation.txt. Adds the splicing event, protein consequence and dPSI to the collapsed SNAF-T summary written at the end of the run.")
+        snaf_parser.add_argument("--no_t_summary", action="store_true", help="Skip the collapsed per-(peptide, junction) SNAF-T summary. It is written by default as T_candidates/summary/collapsed_SNAF-T.txt.")
+
+        # SNAF-T candidate summarization, re-runnable on a finished run
+        snaf_t_sum_parser = subparsers.add_parser(
+            "snaf-t-summary",
+            parents=[parent_parser],
+            help="Collapse SNAF-T per-sample candidates into one row per (peptide, junction): sample set, binding and immunogenicity summaries, HLA promiscuity and the splicing event. Port of updatedSNAFTMerge in AltAnalyze's stats_scripts/SNAFintegration.py."
+        )
+        snaf_t_sum_parser.set_defaults(func=run_snaf_t_summary)
+        snaf_t_sum_parser.add_argument("--candidate_dir", required=True, type=str, help="SNAF-T <output>/T_candidates directory")
+        snaf_t_sum_parser.add_argument("--out", default=None, type=str, help="Output TSV (default: <candidate_dir>/summary/collapsed_SNAF-T.txt)")
+        snaf_t_sum_parser.add_argument("--event_annotation", default=None, type=str, help="AltAnalyze *-PSI_EventAnnotation.txt; adds UID, ClusterID, Coordinates, EventAnnotation, ProteinPredictions, dPSI and AltExons")
+        snaf_t_sum_parser.add_argument("--survival", default=None, type=str, help="Optional survival table (uid, peptide, junction, n_sample, Zscore, Wald)")
+        snaf_t_sum_parser.add_argument("--custom_peptide", default=None, type=str, help="Optional table keyed on (peptide, junction); its columns are appended")
+        snaf_t_sum_parser.add_argument("--custom_junction", default=None, type=str, help="Optional table keyed on junction; its columns are appended")
+        snaf_t_sum_parser.add_argument("--sample_filter", default=None, type=str, help="Optional file of sample names to keep, one per line")
+        snaf_t_sum_parser.add_argument("--cohort_size", default=None, type=int, help="Denominator for Sample Frequency (default: the samples present in the candidate files)")
+        # `parent_parser` carries nothing; --loglevel, --tmp and --output come from here, and
+        # assert_common_args reads them on every subcommand.
+        self.add_common_arguments(snaf_t_sum_parser)
         self.add_common_arguments(snaf_parser)
 
         # SNAF-B: surface / B-antigen pipeline (pure-python: tmhmm.py + Biopython; no REST)
@@ -789,7 +811,7 @@ class ArgsParser():
         snaf_b_parser.add_argument("--juncounts", required=True, type=str, help="Junction-count matrix (TSV; rows=junction UIDs, cols=tumor samples)")
         snaf_b_parser.add_argument("--db_dir", required=True, type=str, help="SNAF reference dir containing Alt91_db/ and controls/")
         snaf_b_parser.add_argument("--freq_path", default=None, type=str, help="T-antigen frequency table from a prior `snaf` run (frequency_stage0_verbosity1_uid_gene_symbol_coord_mean_mle.txt). OPTIONAL: omit it and SNAF-B derives the equivalent table over its membrane neojunctions, so no SNAF-T run and no HLA types are needed.")
-        snaf_b_parser.add_argument("--surface_db", default=None, type=str, help="Custom cell-surface gene database REPLACING the built-in Alt91_db surfaceome: a directory from `snaf-build-surface-db`, or a bare gene table with an Ensembl-gene-ID column. Genes with no reference protein are excluded and counted.")
+        snaf_b_parser.add_argument("--surface_db", default=None, type=str, help="Cell-surface gene database. Default: the bundled SURFY + SurfaceGenie union (4,009 genes listed, 3,584 with a reference protein). 'alt91' selects the legacy built-in Alt91_db surfaceome (2,810 genes). Otherwise a directory from `snaf-build-surface-db`, or a bare gene table with an Ensembl-gene-ID column. Genes with no reference protein are excluded and counted.")
         snaf_b_parser.add_argument("--mode", default="short_read", choices=["short_read", "long_read", "find_full_length"], help="Surface prediction mode. Default: short_read")
         snaf_b_parser.add_argument("--isoform_method", default="learned", choices=["learned", "evidence", "legacy"], help="short_read reconstruction: learned (default; best mean protein similarity), evidence (explicit two-edit rule; best exact-chain recovery), or legacy")
         snaf_b_parser.add_argument("--isoform_ranker", default=None, help="Optional fitted JSON/pickle ranking bundle; learned defaults to the bundled model")

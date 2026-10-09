@@ -142,17 +142,23 @@ def enable_differential(meta, original, path, population_keys):
     meta["differential_history"] = {}
 
 
-def association_payload(obs, filters=None):
+def association_payload(obs, filters=None, x_by=UNSUPERVISED):
     """Complete barcode contingency table; descriptive counts, no inferential test."""
     if not all(k in obs for k in (SUPERVISED, UNSUPERVISED)):
         raise ValueError("Cluster associations require a completed Both analysis.")
+    x_fields = [{"value": UNSUPERVISED, "label": "Unsupervised clusters"}]
+    if "unsupervised_state" in obs:
+        x_fields.append({"value": "unsupervised_state", "label": "Unsupervised cell states (GO-Elite)"})
+    if x_by not in {field["value"] for field in x_fields}:
+        raise ValueError(f"Unavailable association X-axis: {x_by}")
+    x_label = next(field["label"] for field in x_fields if field["value"] == x_by)
     mask = np.ones(len(obs), dtype=bool)
     for field, values in filters or []:
         if field not in obs:
             raise ValueError(f"Unknown annotation field: {field}")
         mask &= obs[field].astype(str).isin(values).to_numpy()
     subset = obs.loc[mask]
-    table = pd.crosstab(subset[UNSUPERVISED].astype(str), subset[SUPERVISED].astype(str))
+    table = pd.crosstab(subset[x_by].astype(str), subset[SUPERVISED].astype(str))
     rows = []
     for cluster in table.index:
         total = int(table.loc[cluster].sum())
@@ -163,6 +169,7 @@ def association_payload(obs, filters=None):
                              "cluster_cells": total, "percent": 100 * n / total})
     return {"rows": rows, "clusters": table.index.tolist(), "states": table.columns.tolist(),
             "cells": int(len(subset)), "unfiltered_cells": int(len(obs)),
+            "x_by": x_by, "x_label": x_label, "x_fields": x_fields,
             "description": "Dots count shared cell barcodes. Area shows cell count; color shows the percentage of each unsupervised cluster. Unaligned cells did not pass the reference alignment threshold. Not clustered cells received no ICGS3 assignment. These are descriptive assignments, not independent biological replicates or a statistical test."}
 
 

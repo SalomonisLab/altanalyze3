@@ -1052,6 +1052,8 @@ select:disabled {
    names and the gene box takes a pasted column. Both get two tracks, which
    still leaves every visible control on a single row at full width. */
 @media (min-width: 760px) {
+  #viz1-association-x-field,
+  #viz2-association-x-field,
   #viz1-groups-field,
   #viz2-groups-field,
   #viz1-geneset-field,

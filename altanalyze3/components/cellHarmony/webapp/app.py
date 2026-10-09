@@ -6720,7 +6720,8 @@ def create_app(test_config: dict | None = None) -> FastAPI:
 
     @app.get("/api/jobs/{job_id}/cluster-associations")
     def cluster_associations(job_id: str, subset_by: str = Query(""), subset_values: List[str] = Query([]),
-                             subset2_by: str = Query(""), subset2_values: List[str] = Query([])):
+                             subset2_by: str = Query(""), subset2_values: List[str] = Query([]),
+                             x_by: str = Query("unsupervised_cluster")):
         from .analysis_workflow import association_payload
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
@@ -6730,7 +6731,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Cluster associations require a completed Both analysis.")
         filters = [(field, values) for field, values in ((subset_by, subset_values), (subset2_by, subset2_values)) if field and values]
         try:
-            return JSONResponse(association_payload(pipeline_mod._read_h5ad_obs(Path(meta["artifacts"]["combined_h5ad"])), filters))
+            return JSONResponse(association_payload(pipeline_mod._read_h5ad_obs(Path(meta["artifacts"]["combined_h5ad"])), filters, x_by=x_by))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

@@ -1,0 +1,12 @@
+{
+  "date": "2026-10-08",
+  "job_id": "41f2c98c18684478b20b6c7a70b76db8",
+  "workflow_tests_passed": 28,
+  "javascript_axis_regression": "passed for both panels and both X-axis options",
+  "actual_job_cells": 8437,
+  "actual_job_categories": 27,
+  "api_validation": "Cluster IDs and GO-Elite inferred state names preserve identical barcode counts and percentages. Unaligned and Not clustered are retained. Invalid axes return HTTP 400.",
+  "browser_validation": "Both panels expose the independent X-axis selector; switching either way renders the selected labels. All 27 categories remain labelled, including Dendritic Cells_c20 and Not clustered.",
+  "analysis_rerun": false,
+  "production_deployed": false
+}

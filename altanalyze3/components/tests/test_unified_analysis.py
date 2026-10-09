@@ -149,6 +149,7 @@ def test_association_endpoint_counts_union_and_recomputes_filtered_denominator(t
     matrix=ad.AnnData(obs=pd.DataFrame({
         'Library':['a','a','b'],
         'unsupervised_cluster':['c1','c1','c2'],
+        'unsupervised_state':['Macrophage_c1','Macrophage_c1','T cell_c2'],
         'supervised_state':['A','Unaligned','A']},index=['s1','s2','s3']))
     path=tmp_path/'fixture.h5ad';matrix.write_h5ad(path)
     store.update_job(job,status='completed',analysis_mode='both',artifacts={'combined_h5ad':str(path)})
@@ -158,12 +159,36 @@ def test_association_endpoint_counts_union_and_recomputes_filtered_denominator(t
         assert response.status_code==200
         assert sum(r['cells'] for r in response.json()['rows'])==3
         assert 'Unaligned' in response.json()['states']
+        assert response.json()['x_by']=='unsupervised_cluster'
+        named=client.get(url,params={'x_by':'unsupervised_state'})
+        assert named.status_code==200
+        assert set(named.json()['clusters'])=={'Macrophage_c1','T cell_c2'}
+        assert sum(r['cells'] for r in named.json()['rows'])==3
+        assert 'Unaligned' in named.json()['states']
+        assert sorted(r['percent'] for r in named.json()['rows'])==sorted(r['percent'] for r in response.json()['rows'])
+        named_filtered=client.get(url,params={'x_by':'unsupervised_state','subset_by':'Library','subset_values':'b'})
+        assert named_filtered.json()['clusters']==['T cell_c2']
+        assert named_filtered.json()['cells']==1 and named_filtered.json()['rows'][0]['percent']==100
+        assert client.get(url,params={'x_by':'Library'}).status_code==400
         filtered=client.get(url,params={'subset_by':'Library','subset_values':'b'})
         assert filtered.json()['cells']==1 and filtered.json()['rows'][0]['percent']==100
         assert client.get(url,params={'subset_by':'unknown','subset_values':'b'}).status_code==400
         store.update_job(job,status='processing')
         assert client.get(url).status_code==404
     app.state.job_runner.executor.shutdown(wait=True)
+
+
+def test_association_axes_require_available_names_and_preserve_unclustered():
+    obs=pd.DataFrame({'unsupervised_cluster':['c1','Not clustered'],
+                      'supervised_state':['A','Unaligned']})
+    payload=association_payload(obs)
+    assert len(payload['x_fields'])==1
+    with pytest.raises(ValueError,match='Unavailable association X-axis'):
+        association_payload(obs,x_by='unsupervised_state')
+    obs['unsupervised_state']=['Macrophage_c1','Not clustered']
+    named=association_payload(obs,x_by='unsupervised_state')
+    assert 'Not clustered' in named['clusters']
+    assert named['cells']==2 and sum(row['cells'] for row in named['rows'])==2
 
 
 @pytest.mark.parametrize('mode,coords,overlay',[

@@ -1225,6 +1225,7 @@ function updateExpressionModeOptions() {
     if (coordsField) coordsField.classList.toggle("hidden", !wantsUmapOptions);
     if (wantsUmapOptions) refreshUmapOptions(panelKey);
     syncUmapAxisFields(panelKey);
+    document.getElementById(panelElementId(panelKey, "association-x-field"))?.classList.toggle("hidden", mode !== "cluster_associations");
 
     const modalityLabel = modalityField.querySelector("span");
     modalitySelect.innerHTML = "";
@@ -2356,6 +2357,7 @@ function hookForms() {
     if (densitySelect) {
       densitySelect.addEventListener("change", () => loadVisualizationPanel(panelKey));
     }
+    document.getElementById(panelElementId(panelKey, "association-x"))?.addEventListener("change", () => loadVisualizationPanel(panelKey));
     ["grn-genes", "grn-sample", "grn-cellstate", "grn-limit"].forEach((suffix) => {
       const el = document.getElementById(panelElementId(panelKey, suffix));
       if (el) {
@@ -6119,6 +6121,7 @@ async function loadVisualizationPanel(panelKey) {
 
   if (mode === "cluster_associations") {
     const params = new URLSearchParams();
+    params.set("x_by", getPanelSelectValue(panelKey, "association-x") || "unsupervised_cluster");
     appendGeneSetSubsetParams(params, panelKey);
     try {
       const payload = await explorePayloadCache.fetch(apiPath(`/jobs/${jobId}/cluster-associations?${params}`));
@@ -9043,6 +9046,16 @@ function renderAnalysisLayers(jobId) {
 }
 
 function renderClusterAssociations(panelKey, payload) {
+  const selector = document.getElementById(panelElementId(panelKey, "association-x"));
+  if (selector) {
+    selector.replaceChildren(...(payload.x_fields || [{value:"unsupervised_cluster",label:"Unsupervised clusters"}]).map(field => {
+      const option = document.createElement("option");
+      option.value = field.value;
+      option.textContent = field.label;
+      return option;
+    }));
+    selector.value = payload.x_by || "unsupervised_cluster";
+  }
   const rows = payload.rows || [];
   const largest = Math.max(1, ...rows.map(row => row.cells));
   Plotly.newPlot(panelPlotId(panelKey), [{
@@ -9055,7 +9068,8 @@ function renderClusterAssociations(panelKey, payload) {
   }], {
     title:{text:"Supervised assignments within unsupervised clusters",font:{size:15}},
     margin:{l:200,r:90,t:48,b:110}, height:Math.max(450, 22*(payload.states?.length||0)+190),
-    xaxis:{title:{text:"Unsupervised cluster"},categoryorder:"array",categoryarray:payload.clusters,tickangle:-45,automargin:true},
+    xaxis:{title:{text:payload.x_label || "Unsupervised cluster"},categoryorder:"array",categoryarray:payload.clusters,
+      tickmode:"array",tickvals:payload.clusters,ticktext:payload.clusters,tickangle:-45,automargin:true},
     yaxis:{title:{text:"Supervised cell state"},categoryorder:"array",categoryarray:payload.states,automargin:true},
     annotations:[{text:`${payload.cells.toLocaleString()} cells; dot area = barcode count; color = % within cluster`,xref:"paper",yref:"paper",x:0,y:-0.27,showarrow:false,xanchor:"left",font:{size:10}}]
   }, {responsive:true,displaylogo:false});
