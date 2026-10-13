@@ -68,6 +68,99 @@ RNA scaling validation stays enabled. If raw counts need normalization, use the 
 
 `--skip-expression-tsv` matches the web harness and omits its large expression/fold TSVs while retaining markers, centroids, cache and static heatmaps. Omit that flag when those matrix TSVs are requested. Do not pass `--markers-only`, `--skip-heatmap-render`, `--skip-svg` or `--skip-heatmap-cache` for a normal MarkerFinder request: the standard well-established heatmap and companion artifacts are required. Network exports use the existing NetPerspective route; report missing dependencies rather than fabricating substitutes.
 
+## Splicing events (PSI) and other inputs with missing values
+
+The same hook runs PSI. NaN is a missing value, never a measurement. MarkerFinder scores each event
+over the samples that measured it, with that event's own n - 2 degrees of freedom, as AltAnalyze2
+`markerFinder.advancedPearsonCorrelationAnalysis` did. Means (`Query Exp`, `Ref Exp`, centroids)
+divide by the measured samples. Input without NaN takes the unchanged code path.
+
+The PSI options are PSI-specific. None changes gene-expression output.
+- `--max-missing-fraction` acts only on a matrix that holds NaN.
+- `--fdr-threshold` defaults to the API's `pval_threshold` of 0.001.
+- `--max-sample-missing-above-group-median`, `--label-events` and `--collapse-shared-exons` are off unless given. `--psi` turns on the first and third.
+- The `SYMBOL:junction|junction` label applies only to splicing-event IDs.
+
+Validated 2026-10-11 on the scVelo pancreas data (3,696 cells, raw counts) against commit 3e979dd:
+- **Default scanpy route:** every TSV is byte-identical, and the PDF text and images are identical.
+- **RNA MarkerFinder route** (`--marker-method markerfinder --scale-data --top-n 50 --cells-per-cluster 100`): the same holds. The heatmap cache h5ad has identical contents.
+
+Log: `logs/validate_gene_defaults_unchanged.log` in the approved PSI run folder.
+
+PSI invocation: `--psi` applies the PSI defaults (Nathan, 2026-10-11: "appropriate for PSI analysis in
+general"). They are the settings of the KINNEX-5 healthy run he approved:
+`/Volumes/salomonis-archive/LabFiles/Nathan/Revio/MDS-AML-KINNEX-5/analysis/PSI/healthy8_markerfinder_min5_depthz3_state70_pbmiss10_present45_top100_rho025_fdr01_noMultiLinGMP3_MEP1_20261011/MarkerFinder/cell_state_marker_heatmap.pdf`.
+A flag given explicitly overrides its preset value. API: `generate_marker_heatmap_from_adata(..., **PSI_DEFAULTS)`.
+Pass `--top-n` explicitly so the heatmap cut is a stated choice (100 in the approved run; 50 also made).
+
+```bash
+python -m altanalyze3.components.visualization.marker_heatmap_h5ad --h5ad <psi.h5ad> \
+  --cluster-key <state column> --psi --top-n 100 --seed 0 --species human \
+  --out <dir>/cell_state_marker_heatmap.pdf
+```
+
+| Option | Hook default | `--psi` value | Effect |
+|---|---|---|---|
+| `--marker-method` | scanpy | markerfinder | MarkerFinder statistics |
+| `--no-scaling-check` | off | on | PSI is not a count matrix |
+| `--centroid-method` | log2_cp10k | mean | Centroids are mean PSI over measured samples |
+| `--max-sample-missing-above-group-median` | off | 0.10 | Remove a sample (pseudobulk) whose NaN fraction exceeds its state's median by more than 10 points: a low-coverage outlier. Every decision goes to `*_sample_missing_filter.tsv` |
+| `--max-missing-fraction` | 0.15 | 0.55 | An event missing in this fraction of samples or more is not considered |
+| `--min-rho` | none (rho > 0) | 0.25 | Minimum MarkerFinder score for assignment |
+| `--fdr-threshold` | 0.001 | 0.01 | Maximum Benjamini-Hochberg FDR (per population) for assignment; the API's `pval_threshold` |
+| `--collapse-shared-exons` | off | on | Of the assigned events that share an exon block, keep the most significant (FDR, then rho); the rest go to `*_shared_exon_excluded.tsv` |
+| `--top-n` | 5 | 100 | Events per state on the HEATMAP only; the marker table keeps every assigned event |
+
+Upstream of the hook, the approved run prepared its input with analysis scripts, not the hook: healthy donors only;
+pseudobulks with |robust z| > 3 of log10 junction reads within their state removed; states with >= 5 pseudobulks and
+<= 70% missing PSI kept; then one HSC, one LMPP and one MEP state, and other states with >= 3 events
+(`scripts/` in that run folder).
+
+`--psi` validated 2026-10-11: on the unfiltered 318-pseudobulk input restricted to the approved run's 32 states, it
+reproduced that run's marker table byte for byte (3,567 events), the same 199 retained pseudobulks and the same 2,955
+shared-exon exclusions. Without `--psi`, output is unchanged (marker table byte-identical to a prior run). Log:
+`logs/validate_psi_preset.log` in the approved run folder.
+
+Keep the hook's rasterized heatmap PDF for PSI. Nathan rejected a `--no-rasterize` (one pixel per cell) render on
+2026-10-11.
+
+Row labels for splicing events (Nathan, 2026-10-11). The heatmap prints each event as
+`SYMBOL:junction|junction`, for example `ATP5J:E1.7-E3.1|E1.11-E3.1`. The gene ID becomes its symbol
+from the bundled `long_read/resources/<Hs|Mm>_Ensembl-annotations.txt.gz` (`--species`). The second
+junction drops the repeated gene. Other labels, such as gene symbols, are unchanged. Tables keep the full UIDs.
+
+`--label-events <file>` labels only the listed events and their related rows, as callouts with leader
+lines to the right of the heatmap. It changes no heatmap row, column or value.
+- **File:** text or TSV. The hook reads its `UID` column, else its first column.
+- **Which rows get a label:** a listed event in either junction order (A|B or B|A). A row that shares an
+  exon block with a listed event is labelled too; that is the shared-exon collapse's redundancy rule
+  (Nathan, 2026-10-11). `--label-events-exact` turns the shared-exon rows off.
+- **Label text:** each label shows the heatmap row's own junction order.
+- **Record:** `*_label_events.tsv` lists every labelled row, its state, its listed event and the shared exons.
+- **Fit:** the callout font shrinks so the longest label fits on the page; the page and heatmap keep their size.
+- **Where it works:** on a full run and with `--render-from-cache`.
+
+The approved run's 16-event list is `MarkerFinder_label_whitelist/label_events.tsv` in that run folder.
+Its top-100 heatmap labels 14 of its 2,160 rows: 3 listed events (ERICH1, ERP29 and MBNL1, all in
+reciprocal order) and 11 rows that share an exon with a listed event.
+
+```bash
+python -m altanalyze3.components.visualization.marker_heatmap_h5ad \
+  --render-from-cache <run>/MarkerFinder/cell_state_marker_heatmap_fold_matrix.h5ad \
+  --out <run>/MarkerFinder_label_whitelist/cell_state_marker_heatmap.pdf \
+  --label-events <events.tsv> --species human
+```
+
+The cache fixes the heatmap rows, so `--render-from-cache` takes no `--top-n`.
+
+Never fill NaN before the hook: a PSI of 0 means full exclusion. Never pass `--matrix-tsv` PSI:
+that loader still fills NaN with 0 (`_load_text_expression_inputs`). Build an h5ad with NaN kept.
+
+Validated 2026-10-11 against the AltAnalyze2 healthy PSI run
+(`/Users/saljh8/Dropbox/Revio/BoneMarrow/BAMs/AltAnalyze-Healthy/Restricted`): rho for 13,382 events x 19
+states and all 13,382 p-values reproduced (max |diff| 5.5e-15; relative p 9.8e-13). Scripts and logs:
+`/Volumes/salomonis-archive/LabFiles/Nathan/Revio/MDS-AML-KINNEX-5/analysis/PSI/healthy8_markerfinder_test_20261010/`.
+
 ## Completion checks
 
 Confirm success in the hook's log and inspect the standard outputs:

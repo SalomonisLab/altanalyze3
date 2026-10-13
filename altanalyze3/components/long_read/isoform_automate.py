@@ -379,7 +379,8 @@ def export_junction_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict):
 
 def export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, reference_gff, genome_fasta,
                         deleteGFF=False, collapse_method='wta', force_recollapse=False, write_h5ad=True,
-                        min_total=3, sample_collapse=False, tier1_dir=None, reuse_tier1=False):
+                        min_total=3, sample_collapse=False, tier1_dir=None, reuse_tier1=False,
+                        protect_intronic_evidence=False):
     """Cross-sample isoform consolidation + per-sample isoform h5ad + protein prediction.
 
     Uses the memory/compute-optimized ``isoform_collapse`` pipeline instead of the legacy combined
@@ -412,7 +413,8 @@ def export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, refe
     # or the collapse method (WTA vs EM) may differ, so an existing catalog must NOT silently
     # short-circuit it. The skip is only honored when explicitly NOT forcing a re-collapse (e.g. a
     # resumed run that deliberately reuses the prior catalog).
-    if _io_exists(catalog_path) and deleteGFF == False and not force_recollapse:
+    if (_io_exists(catalog_path) and deleteGFF == False and not force_recollapse
+            and not protect_intronic_evidence):
         print(f"Isoform catalog exists, skipping collapse: {catalog_path}")
     else:
         # Annotate the GENCODE/Ensembl reference ONCE (run separately through gff_process), cache the
@@ -434,6 +436,7 @@ def export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, refe
             enst_cache=enst_cache, barcode_clusters=barcode_sample_dict,
             collapse_method=collapse_method, sample_collapse=sample_collapse,
             tier1_dir=tier1_dir, reuse_tier1=reuse_tier1,
+            protect_intronic_evidence=protect_intronic_evidence,
         )
         # The collapse's stage3 already wrote each "<library>-isoform.h5ad" (keyed on the final clean
         # isoform set) next to the sample, plus protein_summary.txt / *sequences.fasta from the final
@@ -743,7 +746,7 @@ def export_sample_gene(sample_entry_list, barcode_sample_dict, uid=None):
     For each library: ensure '<library>-gene.h5ad' exists (aggregate from the molecule h5ad if not),
     join the barcode->cluster labels onto its obs IN MEMORY (gene h5ads carry no obs['cluster']),
     honoring the per-sample reverse-complement flag, then write the per-sample pseudobulk
-    '<library>-gene.txt' (+ '<library>-gene_cpm.txt') beside the gene h5ad -- the SAME local directory
+    '<library>-gene.txt' (counts) beside the gene h5ad -- the SAME local directory
     as the isoform/junction outputs. NO cluster-annotated gene h5ad copy is written anywhere (no
     '_gene_clustered/'); the annotation lives only in memory for the duration of the pseudobulk.
 
@@ -774,10 +777,10 @@ def export_sample_gene(sample_entry_list, barcode_sample_dict, uid=None):
         bc.name = 'cluster'
         adata = iso.calculate_barcode_match_percentage(
             adata, bc, context=f"gene h5ad '{lib}' (reverse={bool(s.get('reverse'))})")
-        # Write the per-sample pseudobulk '<prefix>-gene.txt' (+_cpm) beside the gene h5ad.
+        # Write the per-sample COUNT pseudobulk '<prefix>-gene.txt' beside the gene h5ad; gene CPM is computed
+        # once from the cohort counts by the combine (isoform_matrix.write_cpm_and_ratio_h5ads).
         prefix = gene_h5ad[:-5] if gene_h5ad.endswith('.h5ad') else gene_h5ad
-        iso.pseudo_cluster_counts_optimized(prefix, adata, cell_threshold=0, count_threshold=0,
-                                            compute_cpm=True, cpm_threshold=1, status=False)
+        iso.pseudo_cluster_counts_optimized(prefix, adata, cell_threshold=0, count_threshold=0, status=False)
         print(f"[gene] {lib}: {adata.shape[0]} cells x {adata.shape[1]} genes "
               f"-> {os.path.basename(prefix)}.txt", flush=True)
         del adata
@@ -791,22 +794,23 @@ def export_sample_gene(sample_entry_list, barcode_sample_dict, uid=None):
 # ---------------------------------------------------------------------------
 
 def _pseudobulk_one_h5ad(h5ad_path, dataType, compute_cpm):
-    """Compute the per-sample pseudobulk <prefix>.txt (+_cpm/_ratio for isoform) for ONE sample h5ad,
-    using the exact same routine the cross-sample concat uses (so outputs are byte-identical whether
-    built here per-sample or inline during concat)."""
+    """Compute the per-sample COUNT pseudobulk <prefix>.txt for ONE sample h5ad, using the same routine the
+    cross-sample concat uses. CPM and isoform ratio are never computed per sample: the cohort combine
+    computes them once from the cohort counts (isoform_matrix.write_cpm_and_ratio_h5ads). `compute_cpm` is
+    accepted for call compatibility and ignored."""
     h5ad_path = str(h5ad_path)
     prefix = h5ad_path[:-5] if h5ad_path.endswith('.h5ad') else h5ad_path
     adata = ad.read_h5ad(h5ad_path)
     adata.obs.index = adata.obs.index.astype(str)
     adata.obs_names_make_unique()
     iso.pseudo_cluster_counts_optimized(prefix, adata, cell_threshold=0, count_threshold=0,
-                                        compute_cpm=compute_cpm, cpm_threshold=1, status=False)
+                                        compute_cpm=False, status=False)
     del adata
     _trim_memory()
-    # Compress the text exports. Readers go through io_utils.smart_open, so both this run's .gz and
+    # Compress the text export. Readers go through io_utils.smart_open, so both this run's .gz and
     # any earlier uncompressed run resolve from the same logical name.
     from .io_utils import compress_many as _compress_many
-    _compress_many([f"{prefix}.txt", f"{prefix}_cpm.txt", f"{prefix}_ratio.txt"], log=print)
+    _compress_many([f"{prefix}.txt"], log=print)
     return f"{prefix}.txt"
 
 
@@ -991,7 +995,8 @@ def combine_junctions(metadata_file, barcode_cluster_dirs, ensembl_exon_dir, min
 
 def build_isoform_catalog(metadata_file, ensembl_exon_dir, gencode_gff, genome_fasta,
                           collapse_method='wta', force_recollapse=True, min_total=3,
-                          sample_collapse=False, tier1_dir=None, reuse_tier1=False):
+                          sample_collapse=False, tier1_dir=None, reuse_tier1=False,
+                          protect_intronic_evidence=False):
     """P3: cross-sample isoform COLLAPSE (catalog) + translation/FASTA only. Skips the per-sample
     stage3 re-key (that is P4, export_sample_isoform). Persists FINAL_isoform_catalog.tsv,
     FINAL_structure_to_exemplar.tsv and (EM) FINAL_structure_to_exemplar_soft.tsv so P4 can re-key
@@ -1000,6 +1005,7 @@ def build_isoform_catalog(metadata_file, ensembl_exon_dir, gencode_gff, genome_f
     export_isoform_h5ad(sample_dict, ensembl_exon_dir, None, gencode_gff, genome_fasta,
                         sample_collapse=sample_collapse, tier1_dir=tier1_dir,
                         reuse_tier1=reuse_tier1,
+                        protect_intronic_evidence=protect_intronic_evidence,
                         collapse_method=collapse_method, force_recollapse=force_recollapse,
                         write_h5ad=False, min_total=min_total)
 

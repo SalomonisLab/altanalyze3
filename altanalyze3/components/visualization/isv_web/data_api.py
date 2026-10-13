@@ -713,7 +713,7 @@ def _attach_structure_reads(ctx, res, gene, cell_states, conds, panel_by):
 
 
 def query_reads(ctx: RunContext, gene, cell_types, conditions=None, max_isoforms=300,
-                panel_by="covariate"):
+                panel_by="covariate", isoform_filter=None):
     """Read-level (molecule) view: drive the engine's plot_isoform_structures_by_conditions to emit its
     per-molecule rows (the *_isoform_ids.tsv files), then parse them into stacked pileup panels. Each
     molecule keeps its EXACT structure (tokens_raw -> exon segments) and cluster_index, reproducing the
@@ -727,10 +727,15 @@ def query_reads(ctx: RunContext, gene, cell_types, conditions=None, max_isoforms
     symbol = ctx.gene_symbol_dict.get(gene, gene)
     cell_states = [str(c) for c in cell_types] if cell_types else None
     conds = list(conditions) if conditions else sorted(ctx.groups.keys())
+    # isoform_filter: exon/junction patterns (isoform_structure_view syntax, e.g. ["E1.2|E3.1", "E2.1|E3.1"]);
+    # a read is kept when its structure contains ANY pattern. Applied on the fast index path only.
+    if isoform_filter and not _reads_index_available(ctx, conds):
+        raise ValueError("isoform_filter needs the pre-built reads index (_isv_web_cache/mol_index)")
 
     # FAST PATH: per-gene retrieval index present -> fetch molecules in ~ms, cluster at viz time.
     if _reads_index_available(ctx, conds):
-        fast = _query_reads_index(ctx, gene, symbol, cell_states, conds, max_isoforms, panel_by)
+        fast = _query_reads_index(ctx, gene, symbol, cell_states, conds, max_isoforms, panel_by,
+                                  isoform_filter=isoform_filter)
         if fast is not None:
             return _attach_structure_reads(ctx, fast, gene, cell_states, conds, panel_by)
 
@@ -885,13 +890,15 @@ def _order_clusters_by_final(ctx, gene, uids, final_by_uid, tokens_by_uid, union
     return {u: order.get(final_by_uid.get(u, u), 0) for u in uids}
 
 
-def _query_reads_index(ctx, gene, symbol, cell_states, conds, max_isoforms, panel_by):
+def _query_reads_index(ctx, gene, symbol, cell_states, conds, max_isoforms, panel_by, isoform_filter=None):
     """Fast read-level path: fetch the gene's molecules from the per-sample reads index (~ms), cluster
     DYNAMICALLY (group_structures) over the union, then split into panels. Returns None to signal the
     caller to fall back to the engine path (e.g. unexpected empty structures)."""
     from . import precompute_reads_index as pri
+    from . import precompute_final_isoform_index as pfi
     cond_set = set(conds)
     cs_set = set(cell_states) if cell_states else None
+    filter_clauses = isv._normalize_isoform_filter_spec(isoform_filter) if isoform_filter else []
     sel_libs = [lib for lib in ctx.viewer_sample_dict if ctx.samples.get(lib, {}).get("group") in cond_set]
     if not sel_libs:
         sel_libs = list(ctx.viewer_sample_dict)
@@ -901,13 +908,23 @@ def _query_reads_index(ctx, gene, symbol, cell_states, conds, max_isoforms, pane
     tokens_by_uid = {}                  # uid -> tokens
     uid_src = {}                        # uid -> (bare molecule_id, library) for the mol->final lookup
     union_count = defaultdict(float)
+    pre_final = {}                      # uid -> final isoform read from <lib>.reads_final.db (None = unresolved)
     for lib in sel_libs:
         db = pri.reads_db_path(ctx.reads_index_dir, lib)
         if not os.path.exists(db):
             continue
+        # <lib>.reads_final.db keeps each read's final isoform beside it, clustered by gene: one range read
+        # replaces the per-read mol2final probes (81% of a cold KLF2 query over 40 libraries, 2026-10-09 profile).
+        rf_db = pfi.reads_final_db_path(ctx.reads_index_dir, lib)
+        use_rf = os.path.exists(rf_db) and not os.environ.get("ISV_NO_READS_FINAL")
         try:
-            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-            recs = con.execute("SELECT mol, ct, cnt FROM mol WHERE gene=?", (gene,)).fetchall()
+            if use_rf:
+                con = sqlite3.connect(f"file:{rf_db}?mode=ro", uri=True)
+                recs = con.execute("SELECT mol, ct, cnt, final FROM rf WHERE gene=?", (gene,)).fetchall()
+            else:
+                con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+                recs = [(m, c, n, None) for m, c, n in
+                        con.execute("SELECT mol, ct, cnt FROM mol WHERE gene=?", (gene,)).fetchall()]
             con.close()
         except Exception:
             return None
@@ -916,7 +933,7 @@ def _query_reads_index(ctx, gene, symbol, cell_states, conds, max_isoforms, pane
         sdb = ctx.viewer_sample_dict[lib][0].get("transcript_associations") or os.path.join(
             os.path.dirname(ctx.viewer_sample_dict[lib][0]["matrix"]), "gff-output", "gene_indexes_v2", "transcripts.db")
         structs = isv.load_transcript_associations_from_sqlite(sdb, gene)[0] if os.path.exists(sdb) else {}
-        for mol, ct, cnt in recs:
+        for mol, ct, cnt, fin in recs:
             if cnt <= 0 or (cs_set is not None and ct not in cs_set):
                 continue
             mol = str(mol)
@@ -930,8 +947,12 @@ def _query_reads_index(ctx, gene, symbol, cell_states, conds, max_isoforms, pane
                     tk = structs.get(r) if r else None
                 if not tk:
                     continue
+                if filter_clauses and not isv._isoform_matches_filters(tk, filter_clauses):
+                    continue
                 tokens_by_uid[uid] = tk
                 uid_src[uid] = (mol, lib)
+                if use_rf:
+                    pre_final[uid] = fin
             rows_by_uid[uid].append((lib, ct, float(cnt)))
             union_count[uid] += float(cnt)
 
@@ -961,7 +982,12 @@ def _query_reads_index(ctx, gene, symbol, cell_states, conds, max_isoforms, pane
     # 3) assign each molecule a cluster_index. Two modes (ctx.molecule_grouping):
     uids = [u for u in selected if u in tokens_by_uid]
     # 3a) resolve every selected read to the FINAL collapsed isoform it maps to (own-id fallback).
-    final_by_uid = _resolve_finals(ctx, uids, uid_src)
+    final_by_uid = _resolve_finals(ctx, [u for u in uids if u not in pre_final], uid_src)
+    for u in uids:
+        if u in pre_final:
+            mol = uid_src[u][0]
+            # same rule as _resolve_finals: ENST reads are their own final; unresolved reads keep their own id
+            final_by_uid[u] = mol if mol.startswith("ENST") else (pre_final[u] or u)
     cidx = {}
     if uids and ctx.molecule_grouping == "final_isoform":
         # GROUP BY FINAL ISOFORM: each final isoform is a cluster; order the finals via group_structures

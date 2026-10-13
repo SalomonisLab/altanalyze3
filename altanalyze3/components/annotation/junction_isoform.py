@@ -2,10 +2,13 @@ import os,sys
 import logging
 import pandas as pd
 import glob
+import json
 from tqdm import tqdm
 
 sys.path.insert(1, os.path.join(sys.path[0], '..'))
 from . import splice_event as se
+from .trans_splicing import JunctionGeometry
+from ..long_read import io_utils as IO
 
 """ This module assigns isoform annotations to the statistical output from comparisons.py """
 
@@ -13,7 +16,7 @@ from . import splice_event as se
 def load_transcript_associations(file_path, dataType='junction'):
     transcript_dict = {}
 
-    with open(file_path, 'r') as f:
+    with IO.smart_open(file_path) as f:
         total_lines = sum(1 for _ in f)  # Count total lines for tqdm
         f.seek(0)  # Reset file pointer
 
@@ -39,7 +42,7 @@ def load_transcript_associations(file_path, dataType='junction'):
 # 2. Load gene symbols {Ensembl ID: Gene Symbol}
 def load_gene_symbols(file_path):
     gene_symbol_dict = {}
-    with open(file_path, 'r') as f:
+    with IO.smart_open(file_path) as f:
         for line in f:
             parts = line.strip().split('\t')
             if len(parts) >= 2:  # Ensure there are at least two columns
@@ -50,6 +53,7 @@ def load_gene_symbols(file_path):
 # 3. Load junction coordinates {junction_id: coordinates}
 def load_junction_coordinates(file_input):
     coord_dict = {}
+    if isinstance(file_input, os.PathLike):file_input=os.fspath(file_input)
 
     # h5ad input: the junction feature ids (var_names) ARE 'uid=chrom:start-end', the same strings the
     # text path parsed from each line's first column. Build the identical coord_dict from var_names so
@@ -66,7 +70,7 @@ def load_junction_coordinates(file_input):
         return coord_dict
 
     if isinstance(file_input, str):
-        with open(file_input, 'r') as f:
+        with IO.smart_open(file_input) as f:
             total_lines = sum(1 for _ in f)  # Count total lines for tqdm
             f.seek(0)  # Reset file pointer
 
@@ -101,22 +105,27 @@ def _strip_version(x):
 def load_protein_summary(file_path):
     protein_dict = {}
 
-    with open(file_path, 'r') as f:
+    with IO.smart_open(file_path) as f:
         total_lines = sum(1 for _ in f)  # Count total lines for tqdm
         f.seek(0)  # Reset file pointer
 
         for line in tqdm(f, total=total_lines, desc="Processing protein summary", unit=" lines"):
             gene_id, isoform, length, nmd_status, _, longest_length = line.strip().split('\t')
-            if '_' in isoform:
-                isoform = isoform.split('_')[1]  
             if ';' in gene_id:
                 gene_id = gene_id.split(';')[0]
+            # The legacy export may prefix an ID with ENSG..._. Sample-scoped
+            # molecule IDs themselves contain underscores and must stay exact.
+            original_isoform=isoform
+            prefix=isoform.split('_',1)[0]
+            if '_' in isoform and _strip_version(prefix)==_strip_version(gene_id) and prefix.startswith('ENSG'):
+                isoform=isoform.split('_',1)[1]
             try:
                 length = int(length)
             except:
                 continue
             val = (length, nmd_status, longest_length)
             protein_dict[(gene_id, isoform)] = val
+            protein_dict[(gene_id, original_isoform)] = val
             # Also index by VERSION-STRIPPED gene+isoform so the diff's version-stripped ENST/gene ids
             # (e.g. 'ENSG00000000419'/'ENST00000371588') match the summary's versioned keys
             # ('ENSG00000000419.14'/'ENST00000371588.10'). Without this every ENST lookup misses -> 0.
@@ -403,8 +412,8 @@ def get_prioritized_isoform_pair(gene, isoforms1, isoforms2, protein_dict, top_k
     return iso1, exons1, iso2, exons2
 
 # 6. Annotate a stats file
-def annotate_junction_stats_file(file_path, transcript_dict, gene_symbol_dict, coord_dict, protein_dict, output_folder):
-    stats_df = pd.read_csv(file_path, sep='\t')
+def annotate_junction_stats_file(file_path, transcript_dict, gene_symbol_dict, coord_dict, protein_dict, output_folder, geometry=None):
+    stats_df = pd.read_csv(file_path, sep='\t',float_precision='round_trip')
     # The junction stats file writes the feature id as the (unnamed) FIRST column, so pandas names it
     # 'Unnamed: 0' and there is no literal 'Feature' column. Normalize: if 'Feature' is absent, rename
     # the first column to 'Feature' so the row lookup below works for both the junction stats layout
@@ -421,7 +430,7 @@ def annotate_junction_stats_file(file_path, transcript_dict, gene_symbol_dict, c
 
         if feature in event_isoform_db:
             # Do not re-generate prior produced associations from other stat files
-            gene_symbol, longest_isoform1, longest_isoform2, coord1, coord2, event_type, proximity = event_isoform_db[feature]
+            gene_symbol, longest_isoform1, longest_isoform2, coord1, coord2, event_type, proximity, trans_status, trans_evidence = event_isoform_db[feature]
         else:
             junction1, junction2 = feature.split('|')
             ### A bulk PSI identifier appends '=chr:start-end', because the junction name alone is
@@ -484,9 +493,12 @@ def annotate_junction_stats_file(file_path, transcript_dict, gene_symbol_dict, c
             ### classify_splicing_event parses the feature itself, so it must receive the junction
             ### names without the '=chr:start-end' suffix a bulk identifier carries.
             clean_feature = "|".join(part.split("=", 1)[0] for part in feature.split("|"))
+            evidence = []
             try:
                 strand = "+" if int(coord1.split(":")[1].split("-")[1]) > int(coord1.split(":")[1].split("-")[0]) else "-"
-                event_type, proximity = se.classify_splicing_event(clean_feature,strand,longest_exons1,longest_exons2,coord1,coord2)
+                if geometry is not None:
+                    evidence = [geometry.classify(junction, coordinate, strand) for junction, coordinate in zip(clean_feature.split('|'), (coord1, coord2))]
+                event_type, proximity = se.classify_splicing_event(clean_feature,strand,longest_exons1,longest_exons2,coord1,coord2,geometry=geometry)
             except Exception as e:
                 ### A failure here is not evidence of trans-splicing. Reporting it as such labelled
                 ### 82% of one bulk run that way, against 3.3% real trans-splicing in the reference
@@ -494,7 +506,9 @@ def annotate_junction_stats_file(file_path, transcript_dict, gene_symbol_dict, c
                 event_type, proximity = 'Unclassified', 'null'
                 logging.debug(f"Could not classify {clean_feature}: {type(e).__name__}: {e}")
             
-            event_isoform_db[feature] = gene_symbol, longest_isoform1, longest_isoform2, coord1, coord2, event_type, proximity
+            trans_status = '|'.join(e['status'] for e in evidence) if evidence else 'geometry_unavailable'
+            trans_evidence = json.dumps(evidence,separators=(',',':'))
+            event_isoform_db[feature] = gene_symbol, longest_isoform1, longest_isoform2, coord1, coord2, event_type, proximity, trans_status, trans_evidence
 
         # If dPSI is negative, invert the value of proximity 
         prox_dict = {"distal": "proximal", "proximal": "distal", "inclusion": "exclusion", "exclusion": "inclusion"}
@@ -502,25 +516,25 @@ def annotate_junction_stats_file(file_path, transcript_dict, gene_symbol_dict, c
 
         # Add new annotated row
         annotations.append([
-            gene_symbol, longest_isoform1, longest_isoform2, coord1, coord2, event_type, proximity
+            gene_symbol, longest_isoform1, longest_isoform2, coord1, coord2, event_type, proximity, trans_status, trans_evidence
         ])
 
     # Create DataFrame with annotations
     annotated_df = pd.DataFrame(
         annotations, 
-        columns=['Gene_Symbol', 'Isoform_1|Length', 'Isoform_2|Length', 'Coord_1', 'Coord_2', 'Event_Type', 'Event_Direction']
+        columns=['Gene_Symbol', 'Isoform_1|Length', 'Isoform_2|Length', 'Coord_1', 'Coord_2', 'Event_Type', 'Event_Direction', 'Trans_Splicing_Status', 'Trans_Splicing_Evidence']
     )
 
     # Merge with original stats DataFrame
     final_df = pd.concat([annotated_df, stats_df], axis=1)
 
     # Save annotated file
-    output_file = os.path.join(output_folder, os.path.basename(file_path).replace('.txt', '-annotated.txt'))
+    output_file = _annotated_path(file_path, output_folder)
     final_df.to_csv(output_file, sep='\t', index=False)
 
 # 6. Annotate a stats file
 def annotate_iso_stats_file(file_path, transcript_dict, gene_symbol_dict, protein_dict, output_folder):
-    stats_df = pd.read_csv(file_path, sep='\t')
+    stats_df = pd.read_csv(file_path, sep='\t',float_precision='round_trip')
     # Isoform stats files write the feature id as the (unnamed) FIRST column -> pandas names it
     # 'Unnamed: 0' and there is no literal 'Feature' column. Normalize: if 'Feature' is absent, rename
     # the first column to 'Feature' (same fix as annotate_junction_stats_file).
@@ -556,17 +570,24 @@ def annotate_iso_stats_file(file_path, transcript_dict, gene_symbol_dict, protei
     final_df = pd.concat([annotated_df, stats_df], axis=1)
 
     # Save annotated file
-    output_file = os.path.join(output_folder, os.path.basename(file_path).replace('.txt', '-annotated.txt'))
+    output_file = _annotated_path(file_path, output_folder)
     final_df.to_csv(output_file, sep='\t', index=False)
 
 # 7. Annotate all stats files in the folder
-def annotate_all_stats_files(stats_folder, transcript_dict, gene_symbol_dict, coord_dict, protein_dict, dataType='junction', freshness_refs=None):
+def _annotated_path(file_path, output_folder):
+    name=os.path.basename(file_path)
+    if name.endswith('.gz'):name=name[:-3]
+    return os.path.join(output_folder,name[:-4]+'-annotated.txt')
+
+
+def annotate_all_stats_files(stats_folder, transcript_dict, gene_symbol_dict, coord_dict, protein_dict, dataType='junction', freshness_refs=None, geometry=None):
     global event_isoform_db
     event_isoform_db={}
     output_folder = stats_folder
 
     # Get a list of all .txt files excluding '-annotated.txt' files
-    stats_files = [f for f in glob.glob(f"{stats_folder}/*.txt") if f.endswith("stats.txt")]
+    logical={f[:-3] if f.endswith('.gz') else f for f in glob.glob(f"{stats_folder}/*") if f.endswith(('stats.txt','stats.txt.gz'))}
+    stats_files=[IO.resolve(f) for f in sorted(logical)]
 
     # ALWAYS regenerate the -annotated.txt when stats are (re-)run. Re-running the differential means
     # the stats and/or the annotation inputs (protein_summary.txt, transcript_associations.txt, or a
@@ -580,16 +601,16 @@ def annotate_all_stats_files(stats_folder, transcript_dict, gene_symbol_dict, co
         if not os.path.exists(stats_file):
             print(f"[annotate] skipping missing stats file: {stats_file}")
             continue
-        annotated_file = os.path.join(output_folder, os.path.basename(stats_file).replace('.txt', '-annotated.txt'))
+        annotated_file = _annotated_path(stats_file, output_folder)
         if os.path.exists(annotated_file):
             print(f"Re-annotating {stats_file} (regenerating annotated file).")
 
         if dataType == 'junction':
-            annotate_junction_stats_file(stats_file, transcript_dict, gene_symbol_dict, coord_dict, protein_dict, output_folder)
+            annotate_junction_stats_file(stats_file, transcript_dict, gene_symbol_dict, coord_dict, protein_dict, output_folder, geometry=geometry)
         else:
             annotate_iso_stats_file(stats_file, transcript_dict, gene_symbol_dict, protein_dict, output_folder)
 
-def annotate(gene_symbol_file,transcript_assoc_file,junction_coords_file,protein_summary_file,stats_folder,dataType='junction'):
+def annotate(gene_symbol_file,transcript_assoc_file,junction_coords_file,protein_summary_file,stats_folder,dataType='junction',exon_reference=None,reference_gff=None):
     if junction_coords_file == None:
         #isoform expression/ratio
         coord_dict = None
@@ -609,12 +630,20 @@ def annotate(gene_symbol_file,transcript_assoc_file,junction_coords_file,protein
     transcript_dict = load_transcript_associations(transcript_assoc_file,dataType=dataType)
     gene_symbol_dict = load_gene_symbols(gene_symbol_file)
     protein_dict = load_protein_summary(protein_summary_file)
+    geometry=None
+    if dataType=='junction':
+        exon_reference=exon_reference or os.environ.get('ALTANALYZE_EVENT_EXON_REFERENCE')
+        reference_gff=reference_gff or os.environ.get('ALTANALYZE_EVENT_REFERENCE_GFF')
+        if exon_reference is None:
+            logical=os.path.join(os.path.dirname(str(gene_symbol_file)), 'Hs_Ensembl_exon.txt')
+            exon_reference=IO.resolve(logical,missing_ok=True)
+        if exon_reference is not None:geometry=JunctionGeometry(exon_reference,reference_gff)
 
     # Annotate all stats files. Pass the content-determining inputs so an annotated file that
     # predates a corrected protein_summary / transcript_associations is regenerated, not skipped.
     freshness_refs = [p for p in (protein_summary_file, transcript_assoc_file) if p]
     annotate_all_stats_files(stats_folder, transcript_dict, gene_symbol_dict, coord_dict, protein_dict,
-                             dataType=dataType, freshness_refs=freshness_refs)
+                             dataType=dataType, freshness_refs=freshness_refs,geometry=geometry)
 
 if __name__ == '__main__':
     # File paths

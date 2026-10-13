@@ -97,7 +97,7 @@ def require_review(state, manifest_digest, analysis_phase=None):
         question = pending[0].get('question', '') if pending else 'The user has not approved resuming this analysis.'
         raise IntegrityError('ANALYSIS BLOCKED. ' + question +
                              ' Wait for the user. Safeguard tests, silence and generic proceed instructions do not resolve it.')
-    approval = state.get('approval')
+    approval = state.get('phase_approvals', {}).get(analysis_phase, state.get('approval'))
     if not isinstance(approval, dict) or approval.get('manifest_sha256') != manifest_digest:
         raise IntegrityError('No user approval for this exact run manifest; do not reuse approval for a different run.')
     for field in ('user_message', 'conversation_reference'):
@@ -184,6 +184,7 @@ def validate_run_manifest(manifest_path):
     if manifest.get('schema_version') != 1 or manifest.get('baseline_contract_sha256') != sha256(CONTRACT):
         raise IntegrityError('Run manifest does not reference the reviewed baseline contract.')
     require_method(contract['method'], manifest.get('method'))
+    validate_RNA_scale_change(manifest, state)
     for label, source in manifest.get('evaluation_sources', {}).items():
         checked_file(source, 'Evaluation source: ' + label)
     inputs = manifest.get('inputs', {})
@@ -200,6 +201,51 @@ def validate_run_manifest(manifest_path):
         raise IntegrityError('Provenance is not bound to this target table.')
     validate_provenance(provenance, effective)
     return effective, paths
+
+
+def validate_RNA_scale_change(manifest, state):
+    """Permit only the user's explicit CPM-to-CPTT training representation change."""
+    change = manifest.get('approved_RNA_scale_change')
+    if change is None:
+        return
+    approved = state.get('approved_RNA_scale_change')
+    if (change != approved or not isinstance(approved, dict)
+            or approved.get('granted_by') != 'user'
+            or not approved.get('user_message')
+            or not approved.get('conversation_reference')):
+        raise IntegrityError('RNA scale change lacks matching explicit user authorization.')
+    if (manifest.get('analysis_phase') != 'lung_CPTT_model_20261008'
+            or approved.get('source_scale') != 'log2(CPM + 1)'
+            or approved.get('destination_scale') != 'log2(CP10k + 1)'
+            or approved.get('formula') != 'log2(1 + (2**X - 1) / 100)'):
+        raise IntegrityError('RNA transformation differs from the specifically approved CPTT model.')
+    evidence = approved.get('verified_source_normalization', {})
+    source_record = dict(evidence)
+    if source_record.get('path') and not Path(source_record['path']).is_absolute():
+        source_record['path'] = str(HERE.parents[1] / source_record['path'])
+    checked_file(source_record, 'Verified RNA normalization script')
+    resolved = [q for q in state.get('questions', [])
+                if q.get('id') == 'lung_RNA_training_matrix_preprocessing_20261007']
+    if (len(resolved) != 1 or resolved[0].get('status') != 'resolved'
+            or resolved[0].get('provided_preprocessing_script') != evidence
+            or resolved[0].get('verified_script_normalization') !=
+            'log2(1 + df / column_sum(df) * 1000000)'):
+        raise IntegrityError('Original RNA scale has not been resolved from the verified source.')
+
+
+def training_RNA_for_manifest(x, manifest, state):
+    validate_RNA_scale_change(manifest, state)
+    if manifest.get('approved_RNA_scale_change') is None:
+        return x
+    import numpy as np
+    values = x.to_numpy(dtype=float)
+    if not np.isfinite(values).all() or (values < 0).any():
+        raise IntegrityError('CPM training values must be finite nonnegative log2(CPM + 1).')
+    transformed = np.log1p(np.expm1(values * np.log(2)) / 100) / np.log(2)
+    if not np.isfinite(transformed).all():
+        raise IntegrityError('CPTT conversion produced nonfinite RNA; stop without filling or filtering.')
+    import pandas as pd
+    return pd.DataFrame(transformed, index=x.index, columns=x.columns)
 
 
 def fit_verified_candidate(manifest_path):
@@ -225,6 +271,7 @@ def fit_verified_candidate(manifest_path):
         raise IntegrityError('Pinned RNA source no longer resolves every baseline identity. Ask the user.') from exc
     # Explicit baseline feature-median policy only; target filling is not done.
     x = x.fillna(x.median())
+    x = training_RNA_for_manifest(x, read_json(manifest_path), read_json(STATE))
     y = pd.read_csv(paths['corrected_targets'], index_col=0)
     validate_tables(x, y, contract)
     try:

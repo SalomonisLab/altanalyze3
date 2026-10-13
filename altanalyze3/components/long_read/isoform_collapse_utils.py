@@ -409,4 +409,56 @@ __all__ = [
     "structure_tokens_for_containment",
     "junction_core_tokens",
     "contiguous_containment_fold",
+    "intronic_edge_compatible",
 ]
+
+
+def intronic_edge_compatible(protected_junctions, protected_coverage,
+                            parent_exons, *, splice_slop):
+    """Check already-selected intronic evidence against actual parent exon gaps.
+
+    Coordinates are inclusive, in ascending genomic order, for one gene/locus.
+    protected_junctions contains (left_exon_end, right_exon_start) pairs.
+    protected_coverage contains measured intronic intervals continuously covered
+    by the child. Selection for recurrence/distance/substantial coverage belongs
+    in collapse input preparation; this helper invents no thresholds. splice_slop is mandatory.
+    Variable transcript starts/ends are not compared as splice junctions.
+    """
+    if not isinstance(splice_slop, int) or splice_slop < 0:
+        raise ValueError("splice_slop must be an explicitly supplied nonnegative integer")
+    if not protected_junctions and not protected_coverage:
+        return True
+    if not parent_exons:
+        raise ValueError("Protected evidence requires actual parent exon coordinates")
+    # Merge overlapping/adjacent blocks: region boundaries within one continuous
+    # exon must not become invented splice gaps.
+    blocks = []
+    for start, end in sorted(parent_exons):
+        if start > end:
+            raise ValueError("Parent exon coordinates must be in genomic order")
+        if blocks and start <= blocks[-1][1] + 1:
+            blocks[-1] = (blocks[-1][0], max(blocks[-1][1], end))
+        else:
+            blocks.append((start, end))
+    junctions = [(a[1], b[0]) for a, b in zip(blocks, blocks[1:])]
+    for left, right in protected_junctions:
+        if left >= right:
+            raise ValueError("Protected junction coordinates must be in genomic order")
+        if not any(abs(left - pleft) <= splice_slop and
+                   abs(right - pright) <= splice_slop for pleft, pright in junctions):
+            return False
+    for start, end in protected_coverage:
+        if start > end:
+            raise ValueError("Protected coverage coordinates must be in genomic order")
+        # A shorter retention endpoint is allowed only when the parent actually
+        # retains part of this evidence. A purely exonic terminal model cannot
+        # explain a protected intronic continuation by ending before it.
+        if not any(max(start + splice_slop, left) <= min(end - splice_slop, right)
+                   for left, right in blocks):
+            return False
+        # Reject positive contradictions: a parent splices out sequence that the
+        # child continuously covers. A shorter terminal end alone is not a gap.
+        if any(max(start, left + 1 + splice_slop) <= min(end, right - 1 - splice_slop)
+               for left, right in junctions):
+            return False
+    return True

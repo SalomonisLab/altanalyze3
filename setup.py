@@ -17,6 +17,8 @@ setup(
     license="Apache-2.0",
     include_package_data=True,
     package_data={
+        "altanalyze3.components.cellHarmony.webapp": ["templates/*.html", "static/*.js", "static/*.css", "static/*.gif", "static/*.png", "*.md"],
+        "altanalyze3.components.cellHarmony": ["resources/biology/*.json", "resources/biology/*.md", "resources/biology/*.py", "discover_resources/source_manifest.json"],
         "altanalyze3.components.model_registry": ["catalog.json"],
         "altanalyze3.components.rna2metabolite": ["resources/*.json", "missingness_release.json", "artifacts/rna2metabolite_aml_bundle.pkl.gz", "artifacts/rna2metabolite_aml_NA30_20261006_bundle.pkl.gz"],
         "altanalyze3.components.snaf": ["docs/*.md", "surface/data/*.json"],

@@ -3798,82 +3798,118 @@ def legacy_rnaseq_gene_filter(
     return keep
 
 
+class NMFSelectionError(ValueError):
+    """A requested rank or numerical NMF fit could not produce a factorization."""
+
+
+def _fit_icgs3_nmf(sampled, config, outdir, assignment_normalization=None):
+    """Retry an unusable manual K once through the unchanged automatic workflow.
+
+    Only the feature/rank/NMF stage is repeated. The sampled cell roster, input
+    expression, random seeds and later MarkerFinder/SVM stages are unchanged.
+    Requested settings remain in config; effective rank and fallback are recorded.
+    """
+    from dataclasses import replace
+    from numbers import Integral
+
+    requested = config.rank
+    attempts = []
+
+    def fit(selected_config):
+        expr = None
+        manual = selected_config.rank is not None
+        record = {"mode": "manual" if manual else "auto",
+                  "estimator": "manual override" if manual else "UDON/ICGS2 Tracy-Widom eigenvalue rank",
+                  "requested_rank": requested, "udon_estimated_rank": None,
+                  "initial_populations": None, "nmf_k_multiplier": None,
+                  "candidate_rank": None, "max_auto_nmf_k": selected_config.max_auto_nmf_k,
+                  "final_rank": None, "status": "started", "error": ""}
+        attempts.append(record)
+        try:
+            if manual and (isinstance(selected_config.rank, bool)
+                           or not isinstance(selected_config.rank, Integral)
+                           or not 2 <= selected_config.rank <= max(2, sampled.n_obs - 1)):
+                raise NMFSelectionError(f"Requested K={selected_config.rank!r} must be an integer "
+                                        f"between 2 and {max(2, sampled.n_obs - 1)} for these sampled cells.")
+            genes = _select_icgs3_features(sampled, selected_config)
+            expr = _adata_to_dense_df(sampled, genes)
+            record.update(features=int(expr.shape[0]), sampled_cells=int(expr.shape[1]))
+            _log(f"NMF variable features: {_feature_selection_label(selected_config, expr.shape[0], sampled.n_vars)}")
+            if manual:
+                rank = int(selected_config.rank)
+                if rank > min(expr.shape):
+                    raise NMFSelectionError(f"Requested K={rank} exceeds the NMF initialization limit "
+                                            f"of {min(expr.shape)} for {expr.shape[0]} features x {expr.shape[1]} cells.")
+                _log(f"manual NMF k override: rank={rank}")
+            else:
+                record["estimator"] = ("UDON relative-eigenvalue rank" if resolve_small_feature_rank(selected_config)
+                                       else "UDON/ICGS2 Tracy-Widom eigenvalue rank")
+                udon_rank = estimate_udon_nmf_rank(expr, selected_config)
+                candidate, rank, cap = _resolve_auto_nmf_rank(udon_rank, selected_config)
+                record.update(udon_estimated_rank=int(udon_rank), candidate_rank=candidate, max_auto_nmf_k=cap)
+                _log(f"auto NMF k: {record['estimator']} estimator "
+                     f"returned rank={udon_rank}, max_auto_nmf_k={cap if cap is not None else 'none'} -> rank={rank}")
+            rank = min(int(rank), max(2, sampled.n_obs - 1))
+            record["final_rank"] = rank
+            _log(f"running UDON NMF rank={rank} on {expr.shape[1]} sampled cells x {expr.shape[0]} features "
+                 f"(assignment_normalization={assignment_normalization or 'raw'}, n_run={int(config.nmf_runs)})")
+            _, clusters = run_nmf(expr, rank=rank, n_run=int(config.nmf_runs),
+                                  assignment_normalization=assignment_normalization)
+            record["status"] = "completed"
+            return expr, clusters
+        except Exception as exc:
+            record.update(status="failed", error=f"{type(exc).__name__}: {exc}")
+            # Do not retain a dense expression frame in the exception traceback
+            # while rebuilding the ordinary automatic feature selection.
+            expr = None
+            raise
+
+    try:
+        retry_auto = False
+        try:
+            expr, clusters = fit(config)
+        except (NMFSelectionError, np.linalg.LinAlgError) as exc:
+            if requested is None:
+                raise
+            reason = f"{type(exc).__name__}: {exc}"
+            _log(f"[WARN] Requested NMF K={requested} could not be used ({reason}); "
+                 "falling back to unbiased automatic K selection.")
+            retry_auto = True
+        if retry_auto:
+            # Leave the exception handler before fitting again so its traceback
+            # cannot keep the failed solver's matrices resident during the retry.
+            import gc
+            gc.collect()
+            # Reset the rank for feature selection as well: the manual K can
+            # change its minimum feature requirement. This is the native auto path.
+            expr, clusters = fit(replace(config, rank=None))
+        return expr, clusters
+    finally:
+        os.makedirs(outdir, exist_ok=True)
+        _log("[params] nmf_rank_selection=" + json.dumps(attempts, default=str))
+        Path(os.path.join(outdir, "icgs3_nmf_rank_selection.json")).write_text(
+            json.dumps(attempts, indent=2, default=str), encoding="utf-8")
+        if _keep_intermediates(config):
+            snmf_dir = os.path.join(outdir, "sNMF")
+            os.makedirs(snmf_dir, exist_ok=True)
+            pd.DataFrame(attempts).to_csv(os.path.join(snmf_dir, "icgs3_nmf_rank_selection.tsv"), sep="\t", index=False)
+
+
 def run_nmf_marker_svm(sampled: ad.AnnData, full: ad.AnnData, config: ICGS3Config, outdir: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     # embedded below; no UDON dependency
 
-    genes = _select_icgs3_features(sampled, config)
-    expr_sampled = _adata_to_dense_df(sampled, genes)
     snmf_dir = os.path.join(outdir, "sNMF")
     marker_dir = os.path.join(outdir, "MarkerFinder")
     os.makedirs(snmf_dir, exist_ok=True)
     os.makedirs(marker_dir, exist_ok=True)
-    if _keep_intermediates(config):
-        pd.DataFrame({"feature": pd.Index(expr_sampled.index).astype(str)}).to_csv(
-            os.path.join(snmf_dir, "icgs3_nmf_variable_features.tsv"),
-            sep="\t",
-            index=False,
-        )
-    _log(f"NMF variable features: {_feature_selection_label(config, expr_sampled.shape[0], sampled.n_vars)}")
-    rank = config.rank
-    rank_rows = []
-    if rank is None:
-        udon_rank = estimate_udon_nmf_rank(expr_sampled, config)
-        candidate_rank, rank, max_auto_rank = _resolve_auto_nmf_rank(udon_rank, config)
-        rank_rows.append(
-            {
-                "mode": "auto",
-                "estimator": "UDON/ICGS2 Tracy-Widom eigenvalue rank",
-                "udon_estimated_rank": int(udon_rank),
-                "initial_populations": np.nan,
-                "nmf_k_multiplier": np.nan,
-                "candidate_rank": candidate_rank,
-                "max_auto_nmf_k": max_auto_rank,
-                "final_rank": int(rank),
-            }
-        )
-        cap_text = str(max_auto_rank) if max_auto_rank is not None else "none"
-        _log(
-            "auto NMF k: UDON/ICGS2 Tracy-Widom eigenvalue estimator "
-            f"returned rank={udon_rank}, max_auto_nmf_k={cap_text} -> rank={rank}"
-        )
-    else:
-        max_auto_rank = int(config.max_auto_nmf_k) if config.max_auto_nmf_k is not None else None
-        rank_rows.append(
-            {
-                "mode": "manual",
-                "estimator": "manual override",
-                "udon_estimated_rank": np.nan,
-                "initial_populations": np.nan,
-                "nmf_k_multiplier": np.nan,
-                "candidate_rank": np.nan,
-                "max_auto_nmf_k": max_auto_rank,
-                "final_rank": int(rank),
-            }
-        )
-        _log(f"manual NMF k override: rank={rank}")
-    rank = min(int(rank), max(2, sampled.n_obs - 1))
-    rank_rows[0]["final_rank"] = int(rank)
-    if _keep_intermediates(config):
-        pd.DataFrame(rank_rows).to_csv(os.path.join(snmf_dir, "icgs3_nmf_rank_selection.tsv"), sep="\t", index=False)
     assignment_norm = str(config.nmf_assignment_normalization or "auto").lower()
     if assignment_norm == "auto":
         assignment_norm = "rowsum" if config.modality.lower() in {"adt", "grn", "metabolite", "lipid", "psi"} else "raw"
-    if assignment_norm in {"none", "raw"}:
-        assignment_norm_arg = None
-        assignment_label = "raw"
-    else:
-        assignment_norm_arg = assignment_norm
-        assignment_label = assignment_norm
-    _log(
-        f"running UDON NMF rank={rank} on {expr_sampled.shape[1]} sampled cells x {expr_sampled.shape[0]} features "
-        f"(assignment_normalization={assignment_label}, n_run={int(config.nmf_runs)})"
-    )
-    _, nmf_clusters = run_nmf(
-        expr_sampled,
-        rank=rank,
-        n_run=int(config.nmf_runs),
-        assignment_normalization=assignment_norm_arg,
-    )
+    assignment_norm_arg = None if assignment_norm in {"none", "raw"} else assignment_norm
+    expr_sampled, nmf_clusters = _fit_icgs3_nmf(sampled, config, outdir, assignment_norm_arg)
+    if _keep_intermediates(config):
+        pd.DataFrame({"feature": pd.Index(expr_sampled.index).astype(str)}).to_csv(
+            os.path.join(snmf_dir, "icgs3_nmf_variable_features.tsv"), sep="\t", index=False)
     nmf_clusters.index = expr_sampled.columns
     nmf_clusters["cluster"] = ["P" + str(x) for x in nmf_clusters["cluster"].astype(int)]
     keep_counts = nmf_clusters["cluster"].value_counts()
@@ -6234,6 +6270,8 @@ def run_nmf(df, rank, n_run=5, assignment_normalization=None):
     Override globally without threading args via the env var UDON_NMF_RUNS (e.g. =1 for speed)."""
     import os
     import scipy.sparse as _sp
+    if int(rank) < 1 or int(rank) > min(df.shape):
+        raise NMFSelectionError(f"NMF K={rank} is outside the initialization limit 1..{min(df.shape)}.")
     n_run = int(os.environ.get("UDON_NMF_RUNS", n_run))
     engine = str(os.environ.get("UDON_NMF_ENGINE", "sklearn")).lower()
 
@@ -6275,7 +6313,7 @@ def run_nmf(df, rank, n_run=5, assignment_normalization=None):
                 w_run = model.fit_transform(mat_t)   # cells x rank
                 if best_err is None or model.reconstruction_err_ < best_err:
                     best_err, w = model.reconstruction_err_, w_run
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, MemoryError):
             raise
         except Exception as exc:
             print(f"[UDON NMF] sklearn engine failed ({type(exc).__name__}: {exc}); falling back to nimfa")
@@ -6288,10 +6326,12 @@ def run_nmf(df, rank, n_run=5, assignment_normalization=None):
                              track_factor=False)
             nmf_fit = nmf()
             w = nmf_fit.basis()
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, MemoryError):
             raise
-        except ValueError:
-            w = df.to_numpy()  # this needs to change -- how are errors handled?
+        except (ValueError, np.linalg.LinAlgError, _icgs_nimfa.utils.utils.MFError) as exc:
+            # Expression is not an NMF basis. Surface the numerical failure so
+            # manual-K callers can retry through the native automatic selector.
+            raise NMFSelectionError(f"NMF could not fit K={rank}: {exc}") from exc
     w = np.asarray(w)
 
     nmf_matrix = pd.DataFrame(w.transpose(), columns=df.columns)

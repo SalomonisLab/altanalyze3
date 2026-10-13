@@ -1,5 +1,10 @@
 # Long-read Isoform Collapse Pipeline
 
+The benchmarks and scored-collapse description below document an earlier iteration.
+The current default is `scored_collapse.collapse_gene_jc`, called by `pipeline.py`,
+with junction-core WTA, reference preference and native known/novel support floors.
+See the collapse-only option and its validation status at the end of this document.
+
 Scored, expression-and-structure-aware collapse of single-cell long-read isoforms into a
 standardized cross-dataset catalog with per-sample re-keyed h5ads. Designed for millions of
 reads/sample × up to ~200 samples. All numbers below are **measured** on the iPSC Ctrl + Aza
@@ -119,3 +124,67 @@ ANNOTATION step (after the statistics are already computed and written). This is
 affect any isoform differential run; the differential STATISTICS themselves are complete and correct.
 Suggested one-line fix (for the user to apply): in `annotate_iso_stats_file`, read with
 `index_col=0` and use the index as the feature, or rename `Unnamed: 0` -> `Feature`. Left for the user.
+
+## Optional terminal intronic evidence protection
+
+`--protect-intronic-evidence` is available for `sclr-isoforms` and `blr-isoforms`;
+it is disabled by default. The Python entry point is
+`pipeline.run_pipeline(..., protect_intronic_evidence=True)`. Use a separate
+output directory with fresh Tier-1 junction-core WTA aggregation. The option
+requires the original raw annotation table, primary source GFF exon coordinates,
+and the exact reference GFF used for the reference cache. It rejects EM,
+sample-level consensus folding and reused Tier-1 tables.
+
+The option preserves terminal intronic and external U-exon splice junctions supported by at least
+three pooled source molecules, with a bounded ±3-nt tolerance. Continuous terminal
+extension of at least 100 nt into an annotated intron or an actual reference-model
+gap is protected independently of that recurrence requirement. Both transcript
+ends and strands are supported. An RNA endpoint alone is not a splice junction.
+Variable endpoints are pooled rather than creating a class for every coordinate.
+For full-cohort runs, the reference driver copies every complete source SQLite
+database to node-local storage and verifies its SHA **before** pooled evidence
+preparation. Both the initial SQL count checks and gene workers must use those
+copies. Copying only before WTA collapse leaves preparation doing slow concurrent
+reads on shared storage. Keep the original shared source manifest for cross-node
+audits and reverify the complete local cache before reusing it for collapse.
+External U protection requires an original own-gene U coordinate at the actual
+terminal splice boundary and a terminal exon outside the annotated E/I gene body.
+The native preferred Ensembl target is retained whenever the physical evidence
+allows that association; evidence splitting does not change ordinary known priority.
+
+Evidence classes form before identical legacy strings are aggregated. The existing
+WTA still selects parents, bins and reference priorities. An optional compatibility
+check rejects parents that lack the selected splice junction or splice out the
+covered intronic sequence. A shorter retention model can remain compatible when
+it retains part of the measured continuation. The reciprocal check prevents a
+trusted observed splice from being folded into contradictory selected retention.
+Upstream annotation and native translation/NMD classification are unchanged.
+
+Original source identities and counts are verified. Repeated library labels
+receive distinct physical-source identities and explicit original-file bindings.
+Corrected references cannot overwrite observed source annotations when they share
+an old structure-cache key. The exact known reference IDs and primary exon
+coordinates are retained in emitted GFFs. P4 loads the persisted molecule-specific
+classes so count matrices and viewer molecule mappings use the same assignments.
+
+Validation records are in [the review directory](validation/splice_evidence_20261011/).
+The default replay exactly reproduces the current saved four-source baseline.
+The latest LSP1/RUNX1 local correction adds 36 models to 308,857 (0.01165%).
+All 8,878 source reads and 47 references are retained; all 4,834 protected
+assignments pass geometry checks. All four matrices preserve ordered cells and
+unmodified counts; all 8,186 frozen junction controls are accounted for.
+Historical HOPX, exemplar geometry, viewer and complete junction/PSI controls are
+documented there. The 101-test suite includes actual full-cohort failure fixtures.
+
+The original native cache strings remain matching/ranking cores. Recovered
+coordinates supply physical evidence and export, avoiding artificial E/I matching
+transitions. A shared source/reference cache key always receives separate internal
+identities. Only exact aggregates that contradict their own selected physical
+evidence are refined by observed terminal splice sites; variable RNA endpoints
+and unsupported rare sites do not create additional classes.
+
+Earlier full diagnostic candidates were rejected by their audits and are
+superseded. The final all-50 KINNEX-5 run and complete downstream audits are active;
+use its versioned reports for final counts and acceptance. Two existing terminal-U
+splice mismatches remain recorded for discussion before a U-specific extension.
+The option does not claim to protect every novel U splice.

@@ -428,6 +428,10 @@ def run_discover_pipeline(job_id: str, store: JobStore, *, h5ad_compression: Opt
     if resolved_config_path.is_file():
         from ..analysis_record import record_effective
         record_effective(store, job_id, "icgs3", resolved_native_config=json.loads(resolved_config_path.read_text()))
+    rank_selection_path = icgs3_dir / "icgs3_nmf_rank_selection.json"
+    if rank_selection_path.is_file():
+        from ..analysis_record import record_effective
+        record_effective(store, job_id, "icgs3", nmf_rank_selection=json.loads(rank_selection_path.read_text()))
     clusters = result.clusters.copy()
     clusters.index = clusters.index.astype(str)
     if "X_umap" not in result.adata.obsm:

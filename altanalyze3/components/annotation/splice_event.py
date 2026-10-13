@@ -1,6 +1,6 @@
 import re,sys
 
-def classify_splicing_event(event_id, strand, transcript1, transcript2, coord1, coord2):
+def classify_splicing_event(event_id, strand, transcript1, transcript2, coord1, coord2, geometry=None):
     """
     Determines the type of alternative mRNA processing event based on AltAnalyze format.
     Secondarily determines whether the splice/APA site is more proximal (e.g., acceptor vs. donor) 
@@ -19,6 +19,26 @@ def classify_splicing_event(event_id, strand, transcript1, transcript2, coord1, 
     """
 
     proximity = 'null'
+    junctions = [j.split('=', 1)[0] for j in event_id.split('|')]
+    multi_gene = []
+    for junction, coord in zip(junctions, (coord1, coord2)):
+        primary, body = junction.split(':', 1)
+        left, right = body.split('-', 1)
+        owners = {t.rsplit(':', 1)[0] if ':' in t else primary for t in (left, right)}
+        if len(owners) > 1:
+            evidence = geometry.classify(junction, coord, strand) if geometry else {'candidate': None, 'status': 'reference_geometry_not_supplied'}
+            multi_gene.append(evidence)
+        else:
+            multi_gene.append({'candidate': False, 'status': 'single_gene'})
+    if any(e['candidate'] is True for e in multi_gene):
+        proximity = 'distal' if multi_gene[0]['candidate'] is True and multi_gene[1]['candidate'] is not True else ('proximal' if multi_gene[1]['candidate'] is True and multi_gene[0]['candidate'] is not True else 'null')
+        return 'Trans-Splicing', proximity
+    if any(e['candidate'] is None for e in multi_gene):
+        return 'Unresolved Multi-Gene Annotation', 'null'
+    statuses = {e['status'] for e in multi_gene} - {'single_gene'}
+    if statuses:
+        return ('Overlapping-Locus Annotation' if all('overlap' in s for s in statuses)
+                else 'Unsupported Multi-Gene Annotation'), 'null'
     # Convert transcripts to lists
     if isinstance(transcript1, list):
         pass
@@ -27,8 +47,9 @@ def classify_splicing_event(event_id, strand, transcript1, transcript2, coord1, 
         transcript2 = transcript2.split("|")
 
     # Extract junctions from event ID
-    junctions = event_id.split("|")
-    junction1, junction2 = junctions[0].split(":")[1], junctions[1].split(":")[1]
+    junction1, junction2 = junctions[0].split(":",1)[1], junctions[1].split(":",1)[1]
+    junction1 = '-'.join(t.rsplit(':',1)[-1] for t in junction1.split('-',1))
+    junction2 = '-'.join(t.rsplit(':',1)[-1] for t in junction2.split('-',1))
     coords1 = list(map(int, coord1.split(":")[1].split("-")))
     coords2 = list(map(int, coord2.split(":")[1].split("-")))
     j1s,j1e = junction1.split("-")
@@ -36,14 +57,6 @@ def classify_splicing_event(event_id, strand, transcript1, transcript2, coord1, 
     if strand == "-":
         coords1 = [-x for x in coords1]
         coords2 = [-x for x in coords2]
-
-    # ---- Trans-splicing (two Ensembl genes in one junction) ----
-    if junctions[0].count("ENS") > 1 or junctions[1].count("ENS") > 1:
-        if junctions[0].count("ENS") > 1 and junctions[1].count("ENS") == 1:
-            proximity = 'distal'
-        elif junctions[0].count("ENS") == 1 and junctions[1].count("ENS") > 1:
-            proximity = 'proximal'
-        return "Trans-Splicing", proximity
 
     # ---- Retained Intron (IR) ----
     sites = [j1s,j1e,j2s,j2e]

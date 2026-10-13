@@ -79,7 +79,8 @@
       "id": "historical_API_snapshot_on_promotion",
       "status": "pending",
       "required_for": [
-        "rna2lipid_native_log2_deployment"
+        "rna2lipid_native_log2_deployment",
+        "lung_CPTT_model_20261008"
       ],
       "question": "May I locate and preserve the original API as a hash-verified immutable snapshot, keep the original baseline contract intact, and check the new runtime separately against the validated bundle? Updating the default changes the pinned api.py bytes.",
       "user_answer": null,
@@ -189,7 +190,11 @@
       "source_archive": "/Users/saljh8/Downloads/External_validation_IPF_rna2lipid.zip",
       "audit": "components/rna2lipid/artifacts/Abby_external_validation_audit_20261007/audit.json",
       "resolved_metric_definition": "User relayed Abby confirmation: approximate 50% is measured FDR<0.05 top up-to-15 increases and up-to-15 decreases; predicted significance not required.",
-      "clarification_record": "components/rna2lipid/artifacts/Abby_external_validation_audit_20261007/ABBY_CLARIFICATION_20261007.md"
+      "clarification_record": "components/rna2lipid/artifacts/Abby_external_validation_audit_20261007/ABBY_CLARIFICATION_20261007.md",
+      "required_for": [
+        "Abby_original_saved_IPF_result_reproduction"
+      ],
+      "scope_note": "This pending question concerns reproducing the original author-reported numerical result, not training a CPTT counterpart from the already verified training tables. It remains pending."
     },
     {
       "id": "lung_RNA_training_matrix_preprocessing_20261007",
@@ -210,7 +215,9 @@
       "new_inference_allowed": true,
       "user_message": "unmerged_clair_newRNA.csv = newrna_cell_clair_filtered_symbol.csv",
       "resolved_by": "user",
-      "resolved_date": "2026-10-08"
+      "resolved_date": "2026-10-08",
+      "user_answer": "unmerged_clair_newRNA.csv = newrna_cell_clair_filtered_symbol.csv",
+      "resolution_evidence": "User confirmed the training-source identity; provided source script defines log2(CPM + 1), verified by its recorded hash."
     },
     {
       "id": "bulk_IPF_separate_fold_threshold_role_20261008",
@@ -241,7 +248,10 @@
       "provisional_policy_authorization": {
         "granted_by": "user",
         "user_answer": "Run provisional log2 plus a separately labeled log10 sensitivity analysis",
-        "approved_assumed_log_bases": [2.0, 10.0],
+        "approved_assumed_log_bases": [
+          2.0,
+          10.0
+        ],
         "response_evidence": "Actual interactive response in this session to call_08b3fb2f23f74f95b17ac73e8f1dbdf2. The source log base remains unconfirmed; these are authorized assumptions, not verified provenance."
       },
       "workbook_diagnostic_evidence": "components/rna2lipid/artifacts/Geremy_original_lipid_statistics_20261008/workbook_audit.json",
@@ -624,5 +634,38 @@
     "report": "components/rna2lipid/artifacts/bulk_IPF_three_version_comparison_20261008/independent_measured_and_imputed_fold_thresholds/BULK_IPF_INDEPENDENT_THRESHOLDS.md",
     "verification": "components/rna2lipid/artifacts/bulk_IPF_three_version_comparison_20261008/independent_measured_and_imputed_fold_thresholds/independent_verification.json",
     "measured_log_base_remains_unconfirmed": true
+  },
+  "approved_RNA_scale_change": {
+    "granted_by": "user",
+    "user_message": "Let's discuss... What I am saying is that you can you CPM for evaluation of the bulk data because that is CPM input but for the single-cell imputation should default to CPTT since that is the correct deployed modality. Hence, one model for IPF bulk RNA-Seq evaluation and one for single-cell that is CPTT because they use different. Is that clear and do you have an issue with this\nSo do that... the CPM model is the default bulk RNA-Seq only and not single-cell\nStill in the model repo but clearly designated",
+    "conversation_reference": "Current thread 2026-10-08: explicit separate CPM bulk and CPTT single-cell model/default authorization",
+    "source_scale": "log2(CPM + 1)",
+    "destination_scale": "log2(CP10k + 1)",
+    "formula": "log2(1 + (2**X - 1) / 100)",
+    "verified_source_normalization": {
+      "path": "components/rna2lipid/artifacts/Abby_external_validation_audit_20261007/source/Repetitive_genes.py",
+      "sha256": "66d93453ead664f33a20b94d02eb5fc2a3a6ce1f2c759c5ef3055c848d7eece6"
+    },
+    "required_training_profiles": 45,
+    "required_RNA_inputs": 1303,
+    "required_lipid_outputs": 202,
+    "estimator_change_authorized": false,
+    "target_change_authorized": false
+  },
+  "phase_approvals": {
+    "lung_CPTT_model_20261008": {
+      "manifest_sha256": "ce421b7dfecf9d03cb45d37f0a7a549a0f31cdfda0398614f1a46d6c905601b6",
+      "analysis_phase": "lung_CPTT_model_20261008",
+      "granted_by": "user",
+      "user_message": "Let's discuss... What I am saying is that you can you CPM for evaluation of the bulk data because that is CPM input but for the single-cell imputation should default to CPTT since that is the correct deployed modality. Hence, one model for IPF bulk RNA-Seq evaluation and one for single-cell that is CPTT because they use different. Is that clear and do you have an issue with this\nSo do that... the CPM model is the default bulk RNA-Seq only and not single-cell\nStill in the model repo but clearly designated",
+      "conversation_reference": "Current thread 2026-10-08: explicit separate CPM bulk and CPTT single-cell model/default authorization",
+      "binding_note": "Digest binds the concrete requested sources and authorized transformation; it does not assert the user read the digest."
+    }
+  },
+  "lung_CPTT_release_20261008": {
+    "status": "preparing; fitting blocked by original API snapshot gate",
+    "training_started": false,
+    "bulk_model_unchanged": true,
+    "single_cell_default_changed": false
   }
 }

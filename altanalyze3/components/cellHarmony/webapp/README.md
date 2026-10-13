@@ -1141,14 +1141,26 @@ Viewer manifests can explicitly identify this catalog with
 `annotation_source: "PDC000561"` on their metabolite modality.
 
 scALABLE differential comparisons now transmit `max_cells_per_state_sample=500`.
-Both cell-level DE and pseudobulk construction randomly select at most 500 cells
+Both cell-level DE and pseudobulk construction select at most 500 cells
 per cell state per value of the selected **Group values from** observation field,
-within the selected groups. Seed 0 makes repeated selections reproducible;
-smaller strata keep every cell. Pseudobulks are rebuilt from these selected cells,
+within the selected groups. Supervised and Both runs rank cells by descending native
+reference alignment score. Unsupervised-only runs use descending native ICGS3
+winning SVM assignment scores (`SVM_score`, exported from `ICGS3_SVM_score`);
+SVM margins are not used. Ties are resolved by ascending barcode, independent of file row
+order. Smaller strata keep every cell. Pseudobulks are rebuilt from these selected cells,
 including imputed modalities, rather than using uncapped saved aggregates.
 Sampling precedes expression materialization. Cell-frequency plots continue to
 count all selected cells. This cap is specific to scALABLE and does not change
 standalone cellHarmony CLI defaults.
+The differential archive includes `selected_cells.tsv`; its checksum and selection
+policy are recorded in the run manifest and Methods export. Native reference scores
+are loaded by exact barcode from the supervised assignment artifact, including
+below-cutoff scores for Both runs. Unsupervised scores are read from the saved
+combined RNA H5AD by exact barcode without loading expression, so modality
+sidecars share the same source. Scores are not recomputed or invented. Missing,
+nonfinite or conflicting scores prevent capped selection rather than changing
+the policy. This score-selection policy is confined to the scALABLE web
+differential wrapper; general cellHarmony and ICGS3 defaults remain unchanged.
 
 The comparison defaults to pseudobulk when more than five distinct samples are
 selected across the two groups; before groups are selected, it uses the number

@@ -31,6 +31,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+from ..long_read import io_utils as IO
 
 
 def _structure_junctions(tokens: List[str]) -> List[str]:
@@ -48,7 +49,7 @@ def _strip_version(x: str) -> str:
 def load_junction_isoforms(assoc_path: str, genes_needed: set) -> Dict[str, Dict[str, List[str]]]:
     """gene -> {junction_key -> [isoform_id,...]} for the requested genes."""
     out: Dict[str, Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
-    with open(assoc_path) as fh:
+    with IO.smart_open(assoc_path) as fh:
         for line in fh:
             p = line.rstrip("\n").split("\t")
             if len(p) < 4 or p[0] not in genes_needed:
@@ -199,7 +200,7 @@ def annotate_differentials(work_dir: str, isoform_h5ad: Optional[str] = None,
     import glob
     isoform_h5ad = isoform_h5ad or os.path.join(work_dir, "isoform_combined_pseudo_cluster_counts.h5ad")
     assoc = assoc or os.path.join(work_dir, "gff-output", "transcript_associations.txt")
-    if not (os.path.exists(isoform_h5ad) and os.path.exists(assoc)):
+    if not (os.path.exists(isoform_h5ad) and IO.exists(assoc)):
         print("[isoform_importance] isoform matrix or transcript_associations missing; skipping")
         return []
     mat = IsoformMatrix(isoform_h5ad)

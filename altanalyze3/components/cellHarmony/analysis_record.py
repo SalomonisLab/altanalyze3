@@ -9,6 +9,8 @@ import hashlib
 import importlib.metadata
 import json
 import platform
+import re
+import subprocess
 import shutil
 import tempfile
 import zipfile
@@ -67,6 +69,20 @@ def file_identity(path):
     return {"filename": path.name, "bytes": path.stat().st_size, "sha256": sha.hexdigest()}
 
 
+def git_execution_identity():
+    """Capture the checkout at execution only; never backfill historical jobs."""
+    root = Path(__file__).resolve().parents[3]
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(root), *args],
+            stderr=subprocess.DEVNULL, text=True, timeout=5).strip()
+    try:
+        return {"commit": git("rev-parse", "HEAD"),
+                "commit_date": git("show", "-s", "--format=%cI", "HEAD"),
+                "working_tree_modified": bool(git("status", "--porcelain", "--untracked-files=normal"))}
+    except (OSError, subprocess.SubprocessError):
+        return {"status": "Git identity unavailable at execution"}
+
+
 def capture_execution(store, job_id, *, application="scALABLE", reference=None,
                       key="pipeline", effective=None):
     """Call at execution, including before a potentially failed stage starts."""
@@ -81,6 +97,7 @@ def capture_execution(store, job_id, *, application="scALABLE", reference=None,
     record = {"schema_version": SCHEMA_VERSION,
               "captured_at": datetime.now(timezone.utc).isoformat(),
               "application": application, "runtime_versions": versions,
+              "git_checkout": git_execution_identity(),
               "application_method": describe_application(application),
               "species": meta.get("species"), "reference_id": meta.get("reference"),
               "qc": meta.get("qc") or {}, "interface_defaults": dict(QC_DEFAULTS),
@@ -88,6 +105,7 @@ def capture_execution(store, job_id, *, application="scALABLE", reference=None,
     package_root = Path(__file__).resolve().parents[1]
     record["method_files"] = {name: file_identity(package_root / name) for name in (
         "cellHarmony/cellHarmony_lite.py", "cellHarmony/cellHarmony_differential.py",
+        "cellHarmony/differential_sampling.py", "cellHarmony/flask/pipeline.py",
         "clustering/ICGS.py", "ambient_rna/ambient_subtract.py", "visualization/approximate_umap.py",
         "visualization/marker_heatmap_h5ad.py", "cellHarmony/analysis_record.py")}
     if reference:
@@ -196,16 +214,116 @@ def build_manifest(meta, job_dir):
     }, logs
 
 
+def _display(value):
+    if value is None:
+        return "Not recorded"
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if isinstance(value, (list, tuple)):
+        return "; ".join(_display(item) for item in value) or "None"
+    if isinstance(value, dict):
+        return "; ".join(f"{key.replace('_', ' ')}: {_display(item)}" for key, item in value.items()) or "None"
+    return str(value)
+
+
+def _table(headers, rows):
+    def cell(value):
+        return _display(value).replace("\n", " ").replace("|", "&#124;")
+    return ["", "| " + " | ".join(headers) + " |",
+            "|" + "|".join("---" for _ in headers) + "|"] + [
+            "| " + " | ".join(cell(value) for value in row) + " |" for row in rows] + [""]
+
+
+def _software_methods(m):
+    result = []
+    for source, records in m["analysis_records"].items():
+        for stage, record in records.items():
+            versions = record.get("runtime_versions") or {}
+            checkout = record.get("git_checkout") or {}
+            if versions.get("altanalyze3"):
+                result.append(f"{stage} ({source}) used altanalyze3 version {versions['altanalyze3']}.")
+            if checkout.get("commit"):
+                result.append(f"Git commit `{checkout['commit']}` (commit date {checkout.get('commit_date', 'not recorded')}); "
+                              f"working tree modified at execution: {_display(checkout.get('working_tree_modified'))}. "
+                              "Execution-time code hashes identify the files used, including local modifications.")
+    return result
+
+
+def model_methods(modality, record):
+    component = record.get("component") or {"adt":"rna2adt", "lipids":"rna2lipid", "grn":"rna2grn", "grn_tf":"rna2grn"}.get(modality, modality)
+    version = record.get("model_display_id") or record.get("model_version") or record.get("model_version_id") or "not recorded"
+    lines = [f"{component} (altanalyze3) used model version **{version}**. These outputs are inferred molecular features."]
+    fields = (("model_class", "Model class"), ("architecture", "Architecture"),
+        ("model_variant", "Tissue / variant"), ("release_id", "Release identifier"),
+        ("model_gene_count", "RNA input features"), ("output_adt_count", "Protein outputs"),
+        ("output_lipid_count", "Lipid outputs"), ("n_output_edges", "Regulatory edge outputs"),
+        ("n_tfs", "Transcription factors"), ("input_rows", "Input cells"), ("output_rows", "Output cells"),
+        ("expression_scale", "Expression scale"), ("prediction_scale", "Prediction scale"),
+        ("RNA_input_log_base", "RNA input logarithm base"), ("RNA_model_log_base", "Model RNA logarithm base"),
+        ("RNA_log_base_conversion_factor", "RNA log-base conversion factor"),
+        ("abundance_units", "Abundance units"), ("pseudobulk_statistic", "Group aggregation statistic"),
+        ("n_groups", "Aggregated groups"), ("model_version_id", "Exact model identity"))
+    lines += _table(["Model property", "Recorded value"], [(label, record[key]) for key, label in fields if key in record])
+    training = [(key.replace("_", " ").capitalize(), record[key]) for key in (
+        "training_datasets", "training_provenance", "training_summary", "validation", "validation_summary", "evaluation", "confidence", "declared_method") if key in record]
+    if training:
+        lines += _table(["Training / validation record", "Recorded value"], training)
+    else:
+        lines.append("Release-specific training datasets and independent validation metrics were not retained in this job's record. Predictive accuracy cannot be established from the version identifier alone.")
+    return "\n".join(lines)
+
+
+def _preprocessing_methods(m):
+    qc = m["qc"]; defaults = m.get("interface_defaults_at_execution") or {}
+    labels = {"min_genes":"Minimum detected genes per cell", "min_counts":"Minimum counts per cell",
+        "min_cells":"Minimum cells per gene", "mit_percent":"Maximum mitochondrial counts (%)",
+        "align_cutoff":"Minimum alignment similarity", "ambient_correction":"Ambient RNA correction"}
+    rows = [(label, qc.get(key), defaults.get(key),
+             ("yes" if qc[key] != defaults[key] else "no") if key in defaults else "unknown")
+            for key, label in labels.items() if key in qc]
+    lines = ["Quality-control thresholds and the reference-alignment cutoff were configured as follows."]
+    lines += _table(["Setting", "Recorded value", "Interface default at execution", "Changed from default"], rows)
+    evidence = "\n".join(e["text"] for e in m.get("preprocessing_evidence", []))
+    if "skipping QC" in evidence or "Skipping QC filtering" in evidence:
+        lines.append("Count-based QC filtering was skipped because the input was already normalized and log-transformed.")
+    retained = list(dict.fromkeys(re.findall(r"Cells remaining after (.+?) filtering: (\d+)", evidence)))
+    if retained:
+        lines += _table(["Applied QC filter", "Cells retained"], [(label, f"{int(count):,}") for label, count in retained])
+    shapes = re.findall(r"adata shape: \((\d+), (\d+)\)", evidence)
+    if shapes:
+        cells, genes = shapes[0]
+        lines.append(f"The imported expression matrix contained {int(cells):,} cells and {int(genes):,} genes.")
+    rho = list(dict.fromkeys(re.findall(r"Auto-selected rho for library '([^']+)': ([\d.]+)", evidence)))
+    if rho or "Ambient RNA correction complete" in evidence:
+        lines.append("Ambient RNA correction was performed with AmbientSubtract (altanalyze3; unpublished, manuscript in preparation). The correction fraction was selected separately for each library when automatic selection was used.")
+        if rho:
+            lines += _table(["Library", "Selected ambient correction fraction (rho)"], rho)
+    elif str(qc.get("ambient_correction", "no")).lower() == "yes":
+        lines.append("AmbientSubtract (altanalyze3) was requested; completion and library-specific correction fractions were not established by the retained preprocessing record.")
+    else:
+        lines.append("Ambient RNA correction was not requested.")
+    if "skipping normalize_total and log1p" in evidence:
+        lines.append("The input expression scale was retained; total-count normalization and log1p were not repeated.")
+    elif re.search(r"Normalization steps:.*100%", evidence):
+        lines.append("Expression was normalized to 10,000 counts per cell and transformed using the natural logarithm of one plus the normalized count (log1p).")
+    else:
+        lines.append("The raw-count workflow uses total-count normalization to 10,000 counts per cell followed by natural-log log1p; completion of these transformations was not recorded for this run.")
+    alignment = list(dict.fromkeys(re.findall(r"Applied min_alignment_score=([\d.]+)\. Excluded (\d+) cells, kept (\d+)", evidence)))
+    for cutoff, excluded, kept in alignment:
+        lines.append(f"At an alignment similarity threshold of {cutoff}, {int(kept):,} cells were accepted and {int(excluded):,} cells fell below the threshold." +
+            (" Below-threshold cells are retained in the combined Both-mode result as Unaligned." if m["analysis_mode"] == "both" else ""))
+    return lines
+
+
 def render_methods(manifest):
     m = manifest
     mode, qc = m["analysis_mode"], m["qc"]
     paragraphs = ["# scALABLE analysis methods", "",
-        "This report was generated deterministically from saved execution metadata, model provenance and logs. It contains no LLM-generated methods. Requested settings are distinguished from stage execution evidence; failed or unfinished stages must not be reported as completed experiments.",
+        "Methods were compiled from the saved analysis record. Parameters and versions refer to this run; the complete execution record and original logs are retained separately in the download archive.",
         "", "## Analysis identity and input", "",
-        f"Job `{m['job_id']}`; status: **{m['status']}**. Analysis: **{mode}**. Species: **{m['species']}**. Reference identifier: `{m['reference_id']}`.",
-        f"Recorded start: {m.get('analysis_started_at')}; completion: {m.get('analysis_completed_at')}; worker duration (seconds): {m.get('analysis_duration_seconds')}.",
+        f"Single-cell expression data from **{m['species']}** were submitted to the **{mode}** scALABLE (altanalyze3) workflow, using reference `{m['reference_id']}`. Recorded analysis status: **{m['status']}**.",
         "Inputs retain their recorded library/sample names. For an annotated H5AD, the selected observation field defines the sample identities used in each differential comparison.",
-        "```json", _json(m["inputs"]).strip(), "```", "", "## Selected reference", ""]
+        *_table(["Library / sample", "Input file"], [(i.get("sample_name"), i.get("filename")) for i in m["inputs"]]), "", "## Selected reference", ""]
     ref = m.get("reference") or {}
     if ref:
         paragraphs += [f"Selected reference: {ref.get('label', m['reference_id'])}."]
@@ -214,65 +332,92 @@ def render_methods(manifest):
         else:
             paragraphs += ["No published study citation is recorded for this reference; no citation to a different reference version has been substituted."]
     else:
-        paragraphs += ["Reference metadata/version at execution was not recorded. The identifier and reference paths in the parameter evidence below are the available record."]
-    paragraphs += ["Reference resource SHA-256 identities, when captured, are in `run_manifest.json`.",
-        "", "## Quality control, ambient RNA correction and expression scale", "",
-        "The requested QC settings below include minimum detected genes per cell, minimum counts per cell, minimum cells per gene, mitochondrial percentage and the reference alignment score threshold. The execution log determines whether those filters were actually applied. Already normalized input can follow a different preprocessing branch.",
-        "", "| Setting | Recorded value | Interface default at execution | Difference |",
-        "|---|---|---|---|"]
-    defaults = m.get("interface_defaults_at_execution") or {}
-    for key in sorted(set(qc) | set(defaults)):
-        value = _json(qc[key]).strip().replace("\n", " ") if key in qc else "not recorded"
-        default = _json(defaults[key]).strip().replace("\n", " ") if key in defaults else "not recorded"
-        difference = "yes" if key in qc and key in defaults and qc[key] != defaults[key] else "no" if key in qc and key in defaults else "unknown"
-        paragraphs.append(f"| {key} | {value.replace('|', '&#124;')} | {default.replace('|', '&#124;')} | {difference} |")
-    paragraphs += ["", "Ambient correction was requested: **" + str(qc.get("ambient_correction", "not recorded")) + "**. The native implementation is AmbientSubtract (unpublished; manuscript in preparation), not canonical SoupX. Actual execution, counts source, selected correction fractions and any skipped normalization/QC are recorded below. The native raw-count workflow uses total-count normalization to 10,000 counts per cell followed by natural-log `log1p`; already log-normalized X is not normalized a second time. Correction of normalized H5AD input uses the recorded counts-layer branch when applicable. These are implementation descriptions, not evidence that every branch ran for this job.",
-        "", "```text"]
-    paragraphs += [e["text"] for e in m["preprocessing_evidence"]] or ["No preprocessing execution evidence was retained."]
-    paragraphs += ["```", "", "## Cell-state inference and embedding", ""]
+        paragraphs += ["Reference metadata/version at execution was not recorded. The saved identifier and resource paths in run_manifest.json are the available record."]
+    paragraphs += ["Reference resource identities are retained in Software versions and reproducibility and in `run_manifest.json`.",
+        "", "## Quality control, ambient RNA correction and expression scale", ""]
+    paragraphs += _preprocessing_methods(m)
+    paragraphs += ["", "## Cell-state inference and embedding", ""]
     if mode in {"supervised", "both"}:
-        paragraphs += ["The supervised branch uses cellHarmony-lite reference alignment. Query cells are compared with reference cell-state profiles over the reference marker panel; the native pipeline uses cosine similarity and the requested alignment cutoff. This implementation builds on cellHarmony [cellHarmony], but its centroid alignment and approximate reference placement should not be described as the original full cell-to-cell matching algorithm.",
+        paragraphs += ["The supervised branch uses cellHarmony-lite (altanalyze3) reference alignment. Query cells are compared with reference cell-state profiles over the reference marker panel; the native pipeline uses cosine similarity and the requested alignment cutoff. This implementation builds on cellHarmony [cellHarmony], but its centroid alignment and approximate reference placement should not be described as the original full cell-to-cell matching algorithm.",
             "The approximate supervised UMAP places accepted query cells using reference coordinates rather than fitting a new UMAP to all query cells. The recorded placement parameters specify the reference-cell count and jitter; a seed is only claimed if recorded."]
     if mode in {"unsupervised", "both"}:
-        paragraphs += ["The unsupervised branch invokes the native `ICGS.run_icgs3` implementation. ICGS3 is unpublished (manuscript in preparation); ICGS2 [ICGS2] is its published methodological precursor, not the version executed here. The workflow includes variable-program discovery, downsampling, NMF, MarkerFinder refinement and SVM assignment. Resolved ICGS3 configuration, including target rank, downsampling, normalization, UMAP features/backend, landmark limits, neighbors and seeds, is retained in the execution snapshots and parameter appendix when available. The accelerated UMAP setting concerns embedding; it is not an instruction to discard cells from the returned dataset."]
+        paragraphs += ["The unsupervised branch invokes ICGS3 (altanalyze3), through the native `ICGS.run_icgs3` implementation. ICGS3 is unpublished (manuscript in preparation); ICGS2 [ICGS2] is its published methodological precursor, not the version executed here. The workflow includes variable-program discovery, downsampling, NMF, MarkerFinder refinement and SVM assignment. Resolved ICGS3 configuration, including target rank, downsampling, normalization, UMAP features/backend, landmark limits, neighbors and seeds, is retained in the execution snapshots when available. The accelerated UMAP setting concerns embedding; it is not an instruction to discard cells from the returned dataset."]
+    if mode in {"unsupervised", "both"}:
+        embedding_settings = [("UMAP fitting", qc.get("umap_fit_mode")),
+            ("Requested maximum K", "Automatic (no target K)" if "max_k" in qc and qc["max_k"] is None else qc.get("max_k"))]
+        paragraphs += _table(["Embedding / clustering setting", "Recorded value"], embedding_settings)
     if mode == "both":
         paragraphs += ["Both branches share upstream QC. The combined H5AD retains the union of accepted barcodes with separate supervised and unsupervised annotation/coordinate layers. Cells without a supervised match are represented as Unaligned rather than silently removed from the combined result. Cluster-association plots summarize barcode intersections; they are not independent biological measurements."]
+    rank_selections = {source: record["icgs3"]["effective"]["nmf_rank_selection"]
+                       for source, record in m["analysis_records"].items()
+                       if (record.get("icgs3", {}).get("effective", {}).get("nmf_rank_selection"))}
+    if rank_selections:
+        paragraphs += ["An unusable manual K is retried through ICGS3's unbiased automatic feature/rank/NMF selection, retaining upstream QC and the sampled barcode roster. Requested and effective ranks are reported separately."]
+        paragraphs += _table(["Branch", "Selection", "Requested K", "Effective K", "Status"],
+            [(source, attempt.get("mode"), attempt.get("requested_rank"), attempt.get("final_rank"), attempt.get("status"))
+             for source, attempts in rank_selections.items() for attempt in attempts])
     paragraphs += ["", "## Marker identification and visualization", "",
-        "MarkerFinder runs through the standard native marker-heatmap hook. Recorded parameters distinguish the marker-ranking feature count, network export settings and display-cell sampling from analysis-cell selection. Interactive UMAP, expression, violin, dot, combined and heatmap views read saved results; a selected view does not itself establish a new statistical analysis. Per-modality and per-layer marker status is retained in the manifest.",
-        "", "## Molecular modality prediction and regulatory provenance", ""]
+        "MarkerFinder (altanalyze3) runs through the standard native marker-heatmap hook. Recorded parameters distinguish the marker-ranking feature count, network export settings and display-cell sampling from analysis-cell selection. Interactive UMAP, expression, violin, dot, combined and heatmap views read saved results; a selected view does not itself establish a new statistical analysis. Per-modality and per-layer marker status is retained in the manifest.",
+        ]
+    paragraphs += _table(["Marker display / export setting", "Recorded value"],
+        [(label, qc.get(key)) for key, label in (("marker_cells_per_cluster", "Display cells per cluster"),
+            ("marker_render_heatmap", "Render heatmap image"), ("marker_write_svg", "Write SVG"),
+            ("marker_heatmap_dpi", "Image resolution (dpi)")) if key in qc])
+    paragraphs += ["", "## Molecular modality prediction and regulatory provenance", ""]
     if m["model_versions"]:
         paragraphs += ["Model outputs are predictions, not additional measured assays. For each recorded modality, the manifest preserves the exact model/version identifier, available artifact/code checksums, input-gene coverage, expression scale, output dimensions, group aggregation and package versions. No model is loaded or retrained to generate this report. Missing fields are not inferred from a model name."]
         for modality, data in sorted(m["model_versions"].items()):
-            paragraphs += [f"### {modality}", "", "```json", _json(data).strip(), "```"]
+            paragraphs += [f"### {modality}", "", model_methods(modality, data)]
         if any(k in m["model_versions"] for k in ("grn", "grn_tf")):
             paragraphs += ["Regulatory predictions use the recorded RNA-to-GRN bundle and scale/aggregation conventions. ChromLinker [ChromLinker] is cited as regulatory-reference methodology where applicable, not as evidence that this RNA upload underwent ATAC processing, chromatin model fitting or ChromLinker execution. Exact reference applicability must be established from the bundle provenance. RNA-to-modality models and scALABLE-specific integration components without a published citation are unpublished (manuscript in preparation)."]
     else:
         paragraphs += ["No model-version provenance was retained for this job. Selected imputation settings alone do not establish that inference completed."]
     paragraphs += ["", "## Cell communication", ""]
     comm = m["fastcomm_analysis"]
-    paragraphs += [f"Recorded fastComm status: {comm.get('status', 'not recorded')}; enabled: {comm.get('enabled', 'not recorded')}. {comm.get('message', '')}"]
+    paragraphs += [f"Recorded fastComm (altanalyze3) status: {comm.get('status', 'not recorded')}; enabled: {comm.get('enabled', 'not recorded')}. {comm.get('message', '')}"]
     if comm:
-        paragraphs += ["The native fastComm workflow uses ligand–receptor resources from CellChatDB [CellChatDB]; it does not execute the CellChat inference algorithm. fastComm is unpublished (manuscript in preparation). Resolved resource checksums and execution parameters are retained when available. Optional per-sample scoring has its own success/failure status; global results do not imply valid per-sample results.", "```json", _json(comm).strip(), "```"]
+        paragraphs += ["The native fastComm (altanalyze3) workflow uses ligand–receptor resources from CellChatDB [CellChatDB]; it does not execute the CellChat inference algorithm. fastComm (altanalyze3) is unpublished (manuscript in preparation). Resolved resource checksums and execution parameters are retained when available. Optional per-sample scoring has its own success/failure status; global results do not imply valid per-sample results."]
     paragraphs += ["", "## Differential comparisons, enrichment and networks", ""]
-    paragraphs += ["The scALABLE interface caps differential selection at 500 randomly sampled cells per sample × cell state (seed 0), unless the user chooses a smaller cap. The interface defaults to pseudobulk when more than five selected samples are included; otherwise it defaults to cell-level testing. These interface policies are distinct from each recorded comparison's actual selection and effective test. Complete sample/group membership, cell-state field and cap are retained for each run."]
+    paragraphs += ["The scALABLE interface caps differential selection within sample × cell state at 500 cells, unless a smaller cap is recorded. The selection method, score source and tie-breaking rule are reported from each comparison's execution record when available; the current policy is not retroactively attributed to historical analyses. The interface defaults to pseudobulk when more than five selected samples are included; otherwise it defaults to cell-level testing. Complete sample/group membership, cell-state field and cap are retained for each run."]
+    paragraphs += ["Differential analysis uses cellHarmony-differential (altanalyze3), with modality-specific thresholds recorded below."]
     if m["differential_runs"]:
-        paragraphs += ["Each recorded comparison is listed independently below, including its status, modality, sample observation field, groups, population layer and cell/pseudobulk selection. Only completed runs constitute completed differential analyses. Cell selection is capped within sample × cell state using the recorded random seed; the cap also applies before pseudobulk aggregation where recorded. RNA pseudobulk and imputed-prediction aggregation are distinct operations. Recorded native test parameters specify the statistical test, minimum group sizes, fold threshold, significance threshold and raw-p/FDR selection. GO-Elite [GO-Elite] is cited for native pathway/ontology enrichment when its execution is recorded, with background/settings in the parameter appendix."]
+        paragraphs += ["Each recorded comparison is listed independently below, including its status, modality, sample observation field, groups, population layer and cell/pseudobulk selection. Only completed runs constitute completed differential analyses. The recorded cell-selection cap also applies before pseudobulk aggregation where recorded. RNA pseudobulk and imputed-prediction aggregation are distinct operations. Recorded native test parameters specify the statistical test, minimum group sizes, fold threshold, significance threshold and raw-p/FDR selection. GO-Elite (altanalyze3) [GO-Elite] is cited for native pathway/ontology enrichment when its execution is recorded, with recorded background/settings retained in the reproducibility record."]
         for key, run in sorted(m["differential_runs"].items()):
-            details = {k: v for k, v in run.items() if k != "artifacts"}
-            paragraphs += [f"### Comparison {key}", "", "```json", _json(details).strip(), "```"]
+            effective = (m["analysis_records"].get("main", {}).get("differential:" + key) or {}).get("effective") or {}
+            config = dict(run.get("config") or {}, **(effective.get("config") or {}))
+            params = effective.get("statistical_parameters") or {}
+            selection = effective.get("cell_selection") or {}
+            paragraphs += [f"### {config.get('modality', 'Unspecified modality')} comparison", "",
+                f"Comparison {key}; status: **{run.get('status', 'not recorded')}**. "
+                f"The comparison groups were {_display(config.get('group1_samples'))} versus {_display(config.get('group2_samples'))}."]
+            settings = [("Cell-state annotation", config.get("population_col")),
+                ("Sample observation field", config.get("sample_field")),
+                ("Analysis unit", config.get("comparison_type")),
+                ("Effective test", effective.get("actual_population_test")),
+                ("Maximum cells per sample and cell state", config.get("max_cells_per_state_sample")),
+                ("Cell-selection method", selection.get("method")),
+                ("Selection score", selection.get("metric")),
+                ("Equal-score tie-breaking", selection.get("tie_breaker")),
+                ("Cells available / selected", f"{_display(selection.get('available'))} / {_display(selection.get('selected'))}" if selection else None),
+                ("Minimum cells per group", params.get("min_cells_per_group")),
+                ("Fold-change threshold", params.get("fc_thresh")),
+                ("Significance threshold", params.get("alpha")),
+                ("P-value selection", "raw p value" if params.get("use_rawp") else "Benjamini–Hochberg FDR" if "use_rawp" in params else None)]
+            paragraphs += _table(["Parameter", "Recorded setting"], settings)
+            if selection.get("method") in {"highest_alignment_score", "highest_icgs3_svm_score"}:
+                score_description = ("cellHarmony (altanalyze3) reference alignment score" if selection["method"] == "highest_alignment_score"
+                                     else "ICGS3 (altanalyze3) winning SVM assignment score")
+                paragraphs += [f"Within each selected sample and cell state, cells were ranked by their saved {score_description} in descending order. Equal scores were resolved by ascending cell barcode. Groups below the cap retained all cells. The selected cells were ordered by barcode before testing or pseudobulk aggregation; their identifiers and scores are retained in selected_cells.tsv in the differential archive. Cell-frequency estimates use all cells in the selected groups."]
         paragraphs += ["Cell-level native expression tests use the recorded Scanpy-compatible ranking method (normally Wilcoxon). Pseudobulk dispatch uses the native limma-like moderated t-test even when the configured ranking-method string is Wilcoxon; the actual dispatch is recorded separately for new comparisons. Benjamini–Hochberg correction is applied to eligible features when FDR is selected. RNA independent filtering and the full-family correction for supported imputed outputs follow the recorded native code; raw p values remain distinct from FDR. Cell-communication comparisons use per-sample scores: replicate-group testing requires at least two samples in each arm. With fewer replicates, scores are descriptive effects, not inferential p values. The applicable correction family and test/effect status must be read from each comparison's output and parameter evidence."]
     else:
         paragraphs += ["No differential comparison was recorded. Availability of the Differential tab does not imply that a test or GO-Elite enrichment was performed."]
     paragraphs += ["", "## Software versions and reproducibility", "",
-        "scALABLE, cellHarmony-lite, ICGS3 and other scALABLE-specific unpublished components are manuscripts in preparation; published predecessors are cited separately. Execution-time software versions and code hashes are included below. Model-stage versions for historical jobs apply to those stages only. Exact replay also requires the original inputs, reference and model resource bytes; the ZIP contains no expression matrices or model files.",
-        "```json", _json(m["software_provenance"]).strip(), "```"]
+        "scALABLE (altanalyze3), cellHarmony-lite (altanalyze3), ICGS3 (altanalyze3) and other scALABLE-specific unpublished components are manuscripts in preparation; published predecessors are cited separately. Execution-time software versions and code hashes are included below. Model-stage versions for historical jobs apply to those stages only. Exact replay also requires the original inputs, reference and model resource bytes; the ZIP contains no expression matrices or model files.",
+        *_software_methods(m), "```json", _json(m["software_provenance"]).strip(), "```"]
     paragraphs += m["provenance_gaps"]
-    paragraphs += ["", "## Native execution parameter appendix", "",
-        "The following lines are the recorded effective parameters, not values guessed from current defaults.", "", "```text"]
-    paragraphs += [e["text"] for e in m["parameter_evidence"]] or ["No parameter lines were retained."]
-    paragraphs += ["```", "", "## References", ""]
+    paragraphs += ["", "## References", ""]
     for key, citation in CITATIONS.items():
-        paragraphs.append(f"- [{key}] {citation['authors']} ({citation['year']}). {citation['title']}. {citation['journal']}. https://doi.org/{citation['doi']}")
+        paragraphs.append(f"- [{key}] {citation['authors']} ({citation['year']}). {citation['title']}. {citation['journal']}. [doi:{citation['doi']}](https://doi.org/{citation['doi']})")
     paragraphs += ["", "References are a methodological catalog. Inclusion does not mean that every cited tool ran; the stage descriptions and execution evidence define applicability.", ""]
     return "\n".join(paragraphs)
 

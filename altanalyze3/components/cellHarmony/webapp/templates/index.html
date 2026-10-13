@@ -680,21 +680,27 @@
             </section>
           </div>
         </section>
-        <!-- Chat. The question is read by the LungMAP assistant, which never sees the
-             data; every number below comes from this job. See app.py /chat. -->
+        <!-- Questions use deterministic recipes. The optional biology summary
+             sends a bounded saved-result digest to the configured local model. -->
         <section class="workspace-panel" data-tab-panel="chat">
           <article class="panel">
             <div class="panel-head"><h2>Ask about this dataset</h2></div>
             <p class="panel-copy">
-              Ask a research question about this dataset. Every number below is computed
-              from the data; the model only decides which analysis to run, so it cannot
-              invent a fold change. A question it has no recipe for is refused, and an
-              analysis that lives in another tab is named rather than reprinted.
+              Ask a research question, or generate a biological summary of the saved
+              results across cell states and modalities. Summary interpretations and
+              testable hypotheses link to supporting results; numerical evidence is
+              read directly from this dataset.
             </p>
             <div class="chat-ask">
               <textarea id="chat-question" rows="2"
                 placeholder="Load a dataset to see example questions"></textarea>
               <button class="primary-btn" type="button" id="chat-send">Ask</button>
+            </div>
+            <div class="chat-summary-action">
+              <button class="ai-summary-btn" type="button" id="chat-ai-summary" disabled>
+                <picture aria-hidden="true"><source media="(prefers-reduced-motion: reduce)" srcset="{{ app_root_path }}/static/ai-summary.png"><img src="{{ app_root_path }}/static/ai-summary.gif" alt="" width="32" height="32"></picture>
+                <span>AI summary</span>
+              </button>
             </div>
             <!-- The examples name this job's own reference and cell states, so a
                  bone-marrow job never offers a lung question. app.js fills them from

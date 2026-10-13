@@ -22,6 +22,8 @@ Harness parameters, for matching a web run from the CLI:
   (pipeline.py:1580 and pipeline.py:598)
 """
 import argparse
+import gzip
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import sys
@@ -257,7 +259,8 @@ def _covariates_for_cache(h5ad_path, ordered_cells, covariate_columns):
 def render_heatmap_from_cache(cache_path, output_path, covariate_df=None, go_terms=None,
                               go_terms_max=30, run_dir=None, covariate_h5ad=None,
                               covariate_columns=None, load_go_terms=True,
-                              dpi=None, write_svg=True):
+                              dpi=None, write_svg=True, label_events=None, species=None,
+                              label_shared_exons=True):
     """Redraw a saved heatmap cache with the current plotting code.
 
     Use this to change how a finished result is drawn -- resolution, colour range, labels --
@@ -295,9 +298,164 @@ def render_heatmap_from_cache(cache_path, output_path, covariate_df=None, go_ter
         go_terms_max=go_terms_max,
         dpi=dpi,
         write_svg=write_svg,
+        label_events=label_events,
+        species=species,
+        label_shared_exons=label_shared_exons,
     )
     return output_path
 
+
+
+_ENSEMBL_GENE = re.compile(r"ENS[A-Z]*G\d+")
+
+
+def _event_uid(label):
+    """The splicing-event part of a row label: drops a leading ``cluster:`` prefix before the Ensembl ID."""
+    label = str(label)
+    match = re.search(r"ENS[A-Z]*G\d+:", label)
+    return label[match.start():] if match and match.start() > 0 else label
+
+
+def _is_event_label(label):
+    uid = _event_uid(label)
+    return "|" in uid and bool(_ENSEMBL_GENE.match(uid))
+
+
+def _event_key(label):
+    """Orientation-free identity of an event: the set of its junctions (A|B and B|A are one event)."""
+    return frozenset(_event_uid(label).split("|"))
+
+
+def _load_gene_symbols(species=None, annotation_file=None):
+    """Ensembl gene ID to symbol, from the bundled ``<Hs|Mm>_Ensembl-annotations.txt.gz``."""
+    path = annotation_file
+    if path is None:
+        prefix = {"human": "Hs", "hs": "Hs", "homo sapiens": "Hs", "mouse": "Mm", "mm": "Mm",
+                  "mus musculus": "Mm"}.get(str(species or "human").strip().lower())
+        if prefix is None:
+            print(f"[WARN] No gene annotation for species {species!r}; event labels keep Ensembl IDs.")
+            return {}
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "long_read", "resources", f"{prefix}_Ensembl-annotations.txt.gz")
+    if not os.path.exists(path):
+        print(f"[WARN] Gene annotation file not found: {path}; event labels keep Ensembl IDs.")
+        return {}
+    symbols = {}
+    with (gzip.open if path.endswith(".gz") else open)(path, "rt") as handle:
+        for line in handle:
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) > 1 and fields[0].startswith("ENS") and fields[1]:
+                symbols[fields[0]] = fields[1]
+    return symbols
+
+
+def _format_event_label(label, symbols):
+    """``ENSG00000154723:E1.7-E3.1|ENSG00000154723:E1.11-E3.1`` -> ``ATP5J:E1.7-E3.1|E1.11-E3.1``.
+
+    The gene ID becomes its symbol; a later junction drops the repeated gene. A junction into another
+    gene keeps that gene, as its symbol. An ID without a symbol stays as the ID.
+    """
+    parts = _event_uid(label).split("|")
+    first_gene = parts[0].split(":", 1)[0]
+    out = []
+    for index, part in enumerate(parts):
+        if index > 0 and part.startswith(first_gene + ":"):
+            part = part[len(first_gene) + 1:]
+        out.append(_ENSEMBL_GENE.sub(lambda m: symbols.get(m.group(0), m.group(0)), part))
+    return "|".join(out)
+
+
+def _read_label_events(path):
+    """Event IDs from a text or TSV file: the ``UID`` column when present, else the first column."""
+    table = pd.read_csv(path, sep="\t", dtype=str, header=None)
+    first = [str(v).strip() for v in table.iloc[0].tolist()]
+    if "UID" in first:
+        values = table.iloc[1:, first.index("UID")]
+    else:
+        values = table.iloc[:, 0]
+    events = [str(v).strip() for v in values if isinstance(v, str) and "|" in v]
+    print(f"[INFO] Row-label whitelist: {len(events)} events read from {path}")
+    return events
+
+
+def _draw_row_callouts(ax, labels, rows, n_rows, fontsize=6.0):
+    """Label only ``rows``, to the right of the heatmap, with 2-point leader lines spread to avoid overlap."""
+    if not rows:
+        return
+    fig = ax.figure
+    fig.canvas.draw()
+    height_pt = ax.get_window_extent().height * 72.0 / fig.dpi
+    sep = 1.2 * fontsize * n_rows / max(height_pt, 1.0)
+    order = sorted(range(len(rows)), key=lambda i: rows[i])
+    target = [float(rows[i]) for i in order]
+    placed = []
+    for value in target:
+        placed.append(max(value, placed[-1] + sep) if placed else max(value, -0.5 + sep / 2.0))
+    limit = n_rows - 0.5 - sep / 2.0
+    for i in range(len(placed) - 1, -1, -1):
+        upper = limit if i == len(placed) - 1 else placed[i + 1] - sep
+        placed[i] = min(placed[i], upper)
+    transform = ax.get_yaxis_transform()
+    artists = []
+    for i, y in zip(order, placed):
+        artists += ax.plot([1.0, 1.03], [rows[i], y], color="#000000", linewidth=0.4, transform=transform,
+                           clip_on=False)
+        artists.append(ax.text(1.035, y, labels[i], transform=transform, ha="left", va="center",
+                               fontsize=fontsize, color="#000000", clip_on=False))
+    # The page and the heatmap keep their size; a label that would run off the page shrinks the font instead.
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    extents = [a.get_window_extent(renderer) for a in artists if hasattr(a, "get_text")]
+    left = min(e.x0 for e in extents)
+    # The canvas measures text a few points narrower than the PDF draws it, so keep 1.5% of the page free.
+    overflow = max(e.x1 for e in extents) - fig.bbox.x1 * 0.985
+    if overflow > 0 and fontsize > 3.5:
+        for artist in artists:
+            artist.remove()
+        width = max(e.x1 for e in extents) - left
+        _draw_row_callouts(ax, labels, rows, n_rows, fontsize=max(3.5, fontsize * (width - overflow) / width))
+
+
+# Splicing PSI defaults (Nathan, 2026-10-11): the settings of the KINNEX-5 healthy PSI run he approved, "appropriate for
+# PSI analysis in general". The CLI applies them with --psi; any flag given explicitly overrides its preset value.
+# API: generate_marker_heatmap_from_adata(adata, cluster_key=..., out=..., **PSI_DEFAULTS).
+PSI_DEFAULTS = {
+    "marker_method": "markerfinder",
+    "validate_scaling": False,
+    "centroid_method": "mean",
+    "max_missing_fraction": 0.55,
+    "min_rho": 0.25,
+    "pval_threshold": 0.01,
+    "collapse_shared_exons": True,
+    "top_n": 100,
+    "max_sample_missing_above_group_median": 0.10,
+}
+
+
+def _drop_high_missing_samples(adata, cluster_key, use_raw, layer, threshold, removed_tsv):
+    """Remove samples whose missing-value fraction exceeds their group's median by more than ``threshold``.
+
+    For PSI pseudobulks the missing fraction tracks junction-read depth, so a sample far above its group's median
+    is a low-coverage outlier. Writes every sample with its fraction, group median and decision to ``removed_tsv``.
+    """
+    matrix, _ = _get_expression_matrix(adata, use_raw, layer)
+    values = matrix.toarray() if sparse.issparse(matrix) else np.asarray(matrix)
+    if not np.issubdtype(values.dtype, np.floating):
+        print("[INFO] Sample missing-value filter: the matrix holds no NaN; no sample removed.")
+        return adata
+    fraction = np.isnan(values).mean(axis=1)
+    groups = adata.obs[cluster_key].astype(str).to_numpy()
+    group_median = pd.Series(fraction).groupby(groups).transform("median").to_numpy()
+    drop = fraction > group_median + threshold
+    pd.DataFrame({
+        "sample": adata.obs_names.astype(str), cluster_key: groups, "missing_fraction": fraction,
+        "group_median": group_median, "removed": drop,
+    }).to_csv(removed_tsv, sep="\t", index=False)
+    kept = pd.Series(groups[~drop]).value_counts()
+    print(f"[INFO] Sample missing-value filter: removed {int(drop.sum())} of {len(drop)} samples missing more than "
+          f"their group median + {threshold:g} ({removed_tsv}); smallest group now {int(kept.min()) if len(kept) else 0} "
+          f"samples; groups emptied: {sorted(set(groups) - set(kept.index))}.")
+    return adata[~drop].copy()
 
 
 def YellowBlackSky():
@@ -363,7 +521,7 @@ def downsample_cells_per_group(adata, groupby, cells_per_cluster=50, seed=0, gro
     return adata[idx].copy()
 
 
-def _select_unique_markers(pvals_df, cluster_order, top_n, effect_df=None, pval_threshold=0.05):
+def _select_unique_markers(pvals_df, cluster_order, top_n, effect_df=None, pval_threshold=0.05, min_rho=None):
     if pvals_df.empty:
         return pd.DataFrame(columns=["gene", "cluster", "pval"])
 
@@ -376,6 +534,9 @@ def _select_unique_markers(pvals_df, cluster_order, top_n, effect_df=None, pval_
         effect_df = effect_df.reindex(index=pvals_df.index, columns=cluster_order)
         effect_df = effect_df.replace([np.inf, -np.inf], np.nan)
         pvals_df = pvals_df.where(effect_df > 0)
+        if min_rho is not None:
+            # Minimum MarkerFinder score: a feature counts for a population only at rho >= min_rho.
+            pvals_df = pvals_df.where(effect_df >= min_rho)
 
     if pval_threshold is not None:
         pvals_df = pvals_df.where(pvals_df <= pval_threshold)
@@ -426,6 +587,54 @@ def _select_unique_markers(pvals_df, cluster_order, top_n, effect_df=None, pval_
         return markers.reset_index(drop=True)
     selected = markers.groupby("cluster", sort=False).head(top_n)
     return selected.reset_index(drop=True)
+
+
+def _event_exons(feature):
+    """(gene, exon block) pairs of an AltAnalyze splicing-event ID such as
+    ENSG...:E4.5-E5.2|ENSG...:E4.5-E5.1. E4.5 and E4.2 both belong to exon E4. A suffix such as
+    _81510496 marks a novel splice site inside the region. Intron regions (I) are not exons."""
+    exons = set()
+    for junction in str(feature).split("|"):
+        if ":" not in junction:
+            continue
+        gene, regions = junction.split(":", 1)
+        for part in regions.split("-"):
+            part_gene = gene
+            if ":" in part:
+                part_gene, part = part.split(":", 1)
+            region = part.split("_", 1)[0]
+            if region.startswith("E"):
+                exons.add((part_gene, region.split(".", 1)[0]))
+    return exons
+
+
+def _collapse_shared_exon_events(markers):
+    """Keep only the most significant of the splicing events that share any exon.
+
+    Events are ranked over all populations by FDR, then by rho (the hook's own order). An event is
+    excluded when one of its exons belongs to a more significant event already kept. Returns the
+    kept markers in their original order and a table of every excluded event with the kept event
+    that shares its exon.
+    """
+    ranked = markers.assign(rank_order=np.arange(len(markers)))
+    sort_cols, ascending = ["pval"], [True]
+    if "effect" in ranked.columns:
+        sort_cols.append("effect"); ascending.append(False)
+    ranked = ranked.sort_values(sort_cols + ["gene"], ascending=ascending + [True], kind="mergesort")
+    owner, keep, excluded = {}, [], []
+    for row in ranked.itertuples(index=False):
+        exons = _event_exons(row.gene)
+        shared = sorted(e for e in exons if e in owner)
+        if shared:
+            excluded.append({"gene": row.gene, "cluster": str(row.cluster), "pval": row.pval,
+                             "rho": getattr(row, "effect", np.nan), "kept_event": owner[shared[0]],
+                             "shared_exons": ";".join(f"{g}:{e}" for g, e in shared)})
+            continue
+        keep.append(row.rank_order)
+        for exon in exons:
+            owner[exon] = row.gene
+    kept = markers.iloc[sorted(keep)].reset_index(drop=True)
+    return kept, pd.DataFrame(excluded, columns=["gene", "cluster", "pval", "rho", "kept_event", "shared_exons"])
 
 
 def _select_top_markers_per_cluster(pvals_df, cluster_order, top_n, effect_df=None):
@@ -574,18 +783,35 @@ def _prepare_marker_stats_aggregates(adata, cluster_key, genes, use_raw, layer):
                 workspace.release_pages()
         total_sum_values = total.astype(float)
     else:
-        sums_matrix = indicator.T.dot(matrix)
-        sums_values = sums_matrix.toarray() if sparse.issparse(sums_matrix) else np.asarray(sums_matrix)
-        total_sum_values = np.asarray(matrix[valid_cells, :].sum(axis=0)).ravel().astype(float)
+        measured_values = None
+        values = matrix.data if sparse.issparse(matrix) else np.asarray(matrix)
+        if np.issubdtype(values.dtype, np.floating) and np.isnan(values).any():
+            # NaN is a missing value (e.g. PSI). Sum the measured values and count them, so a
+            # mean divides by the samples that measured the feature, as MarkerFinder scores it.
+            dense = matrix.toarray() if sparse.issparse(matrix) else np.asarray(matrix, dtype=float)
+            measured = ~np.isnan(dense)
+            filled = np.where(measured, dense, 0.0)
+            sums_values = np.asarray(indicator.T.dot(filled), dtype=float)
+            total_sum_values = filled[valid_cells, :].sum(axis=0).astype(float)
+            measured_values = np.asarray(indicator.T.dot(measured.astype(np.float64)), dtype=float)
+            total_measured_values = measured[valid_cells, :].sum(axis=0).astype(float)
+        else:
+            sums_matrix = indicator.T.dot(matrix)
+            sums_values = sums_matrix.toarray() if sparse.issparse(sums_matrix) else np.asarray(sums_matrix)
+            total_sum_values = np.asarray(matrix[valid_cells, :].sum(axis=0)).ravel().astype(float)
     counts_values = np.bincount(col_idx, minlength=len(cluster_order)).astype(float)
     total_count = float(np.sum(valid_cells))
 
-    return {
+    aggregates = {
         "sums": pd.DataFrame(sums_values, index=cluster_order, columns=selected_genes),
         "counts": pd.Series(counts_values, index=cluster_order),
         "total_sum": pd.Series(total_sum_values, index=selected_genes),
         "total_count": total_count,
     }
+    if not disk_matrix and measured_values is not None:
+        aggregates["measured_counts"] = pd.DataFrame(measured_values, index=cluster_order, columns=selected_genes)
+        aggregates["total_measured"] = pd.Series(total_measured_values, index=selected_genes)
+    return aggregates
 
 
 def _compute_marker_stats(adata, cluster_key, markers_df, fdr_df, use_raw, layer, aggregates=None,
@@ -634,9 +860,17 @@ def _compute_marker_stats(adata, cluster_key, markers_df, fdr_df, use_raw, layer
 
     query_count = np.where(np.isfinite(query_count), query_count, 0.0)
     total_gene_sum = np.where(np.isfinite(total_gene_sum), total_gene_sum, np.nan)
+    ref_total_count = np.full(len(markers_df), total_count, dtype=float)
+    measured_counts = aggregates.get("measured_counts")
+    if measured_counts is not None:
+        # Missing values (NaN, e.g. PSI): each mean divides by the samples that measured the feature.
+        measured_values = measured_counts.to_numpy(dtype=float)
+        query_count = np.zeros(len(markers_df), dtype=float)
+        query_count[valid] = measured_values[row_clusters[valid], col_genes[valid]]
+        ref_total_count = aggregates["total_measured"].reindex(marker_genes).to_numpy(dtype=float)
 
     ref_sum = total_gene_sum - query_sum
-    ref_count = np.maximum(total_count - query_count, 1.0)
+    ref_count = np.maximum(ref_total_count - query_count, 1.0)
     query_mean = query_sum / np.maximum(query_count, 1.0)
     ref_mean = ref_sum / ref_count
 
@@ -771,6 +1005,12 @@ def _build_marker_centroids_from_aggregates(genes, cluster_order, aggregates, me
         # their signed means; normalizing them as library counts changes it.
         counts = aggregates["counts"].reindex(ordered_clusters).to_numpy(dtype=float)
         means = cluster_gene_sums / np.maximum(counts[:, None], 1.0)
+        if "measured_counts" in aggregates:
+            # Missing values (NaN, e.g. PSI): mean of the measured samples; NaN where none measured.
+            measured = aggregates["measured_counts"].reindex(
+                index=ordered_clusters, columns=genes, fill_value=0.0).to_numpy(dtype=float)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                means = np.where(measured > 0, cluster_gene_sums / measured, np.nan)
         return pd.DataFrame(means.T, index=genes, columns=ordered_clusters)
     # The centroid is a pseudobulk CPM: log2(cluster_sum / cluster_total * 10000 + 1). The
     # formula is defined only for non-negative counts. Summing mean-centred or z-scored values
@@ -1212,6 +1452,9 @@ def _plot_heatmap(
     go_terms_max=30,
     dpi=None,
     write_svg=True,
+    label_events=None,
+    species=None,
+    label_shared_exons=True,
 ):
     if heatmap_df.empty:
         raise ValueError("Heatmap dataframe is empty.")
@@ -1311,8 +1554,47 @@ def _plot_heatmap(
 
     gene_fontsize = _axis_label_fontsize(heatmap_df.shape[0], axis="y")
     y_positions = np.arange(heatmap_df.shape[0])
-    y_labels = heatmap_df.index
-    if ax_labels is None:
+    raw_labels = [str(g) for g in heatmap_df.index]
+    # Splicing events read as SYMBOL:junction|junction (Nathan, 2026-10-11); other labels are unchanged.
+    symbols = _load_gene_symbols(species) if any(_is_event_label(g) for g in raw_labels) else {}
+    y_labels = [_format_event_label(g, symbols) if symbols and _is_event_label(g) else g for g in raw_labels]
+    callout_rows = None
+    if label_events is not None:
+        # A row is labelled when it is a listed event (either junction order) or, unless
+        # label_shared_exons is False, when it shares an exon block with one: the redundancy rule of
+        # the shared-exon collapse (Nathan, 2026-10-11).
+        listed = {_event_key(e): _event_uid(e) for e in label_events}
+        listed_exons = {uid: _event_exons(uid) for uid in listed.values()}
+        records = []
+        for i, g in enumerate(raw_labels):
+            if _event_key(g) in listed:
+                records.append((i, "listed event", listed[_event_key(g)], ""))
+                continue
+            if not label_shared_exons:
+                continue
+            row_exons = _event_exons(_event_uid(g))
+            for uid, exons in listed_exons.items():
+                shared = sorted(row_exons & exons)
+                if shared:
+                    records.append((i, "shares an exon with a listed event", uid,
+                                    ";".join(f"{gene}:{block}" for gene, block in shared)))
+        callout_rows = sorted({r[0] for r in records})
+        n_exact = len({r[0] for r in records if r[1] == "listed event"})
+        print(f"[INFO] Row-label whitelist: {len(callout_rows)} of {len(raw_labels)} heatmap rows labelled for "
+              f"{len(listed)} listed events: {n_exact} listed events (either junction order), "
+              f"{len(callout_rows) - n_exact} sharing an exon with one")
+        label_table = os.path.splitext(output_path)[0] + "_label_events.tsv"
+        pd.DataFrame(
+            [{"heatmap_row": i + 1, "event": _event_uid(raw_labels[i]), "label": y_labels[i],
+              "cluster": row_clusters[i] if i < len(row_clusters) else "", "match": kind,
+              "listed_event": uid, "shared_exons": exons} for i, kind, uid, exons in records],
+            columns=["heatmap_row", "event", "label", "cluster", "match", "listed_event", "shared_exons"],
+        ).to_csv(label_table, sep="\t", index=False)
+        print(f"[INFO] Labelled rows and their listed events: {label_table}")
+    if ax_labels is None and callout_rows is not None:
+        ax.set_yticks([])
+        ax.tick_params(axis="y", left=False, right=False, labelleft=False, labelright=False)
+    elif ax_labels is None:
         ax.set_yticks(y_positions)
         ax.set_yticklabels(y_labels, fontsize=gene_fontsize)
         ax.yaxis.tick_right()
@@ -1396,7 +1678,9 @@ def _plot_heatmap(
         row_height_px = ax_labels.get_window_extent().height / max(1, heatmap_df.shape[0])
         row_height_pt = row_height_px * 72.0 / fig.dpi
         fitted_gene_fontsize = max(2.5, min(gene_fontsize, row_height_pt * 0.80))
-        for pos, gene in enumerate(heatmap_df.index.astype(str)):
+        for pos, gene in enumerate(y_labels):
+            if callout_rows is not None and pos not in set(callout_rows):
+                continue
             ax_labels.text(
                 0.02,
                 pos,
@@ -1425,6 +1709,9 @@ def _plot_heatmap(
     # :g not :.0f -- the default half-range is 1.5, which :.0f would print as "-2"/"2"
     cbar.ax.text(-0.08, 0.5, f"{vmin:g}", ha="right", va="center", transform=cbar.ax.transAxes)
     cbar.ax.text(1.08, 0.5, f"{vmax:g}", ha="left", va="center", transform=cbar.ax.transAxes)
+
+    if ax_labels is None and callout_rows is not None:
+        _draw_row_callouts(ax, [y_labels[i] for i in callout_rows], callout_rows, heatmap_df.shape[0])
 
     _save_figure(fig, output_path, dpi=dpi, write_svg=write_svg)
     plt.close(fig)
@@ -1507,7 +1794,7 @@ def _load_marker_finder():
 
 
 def _markerfinder_stats(adata, cluster_key, use_raw, layer, scale_data=False,
-                        scale_factor=None, validate_scaling=True):
+                        scale_factor=None, validate_scaling=True, max_missing_fraction=0.15):
     """MarkerFinder correlations for a cells x genes matrix.
 
     ``validate_scaling`` defaults to True. MarkerFinder correlates each gene against a 0/1
@@ -1524,6 +1811,7 @@ def _markerfinder_stats(adata, cluster_key, use_raw, layer, scale_data=False,
         scale_data=scale_data,
         scale_factor=scale_factor,
         validate_scaling=validate_scaling,
+        max_missing_fraction=max_missing_fraction,
     )
     return p_df, r_df
 
@@ -1645,6 +1933,12 @@ def generate_marker_heatmap_from_adata(
     scale_data=False,
     scale_factor=None,
     validate_scaling=True,
+    max_missing_fraction=0.15,
+    min_rho=None,
+    collapse_shared_exons=False,
+    max_sample_missing_above_group_median=None,
+    label_events=None,
+    label_shared_exons=True,
     centroid_method="log2_cp10k",
     cells_per_cluster=50,
     seed=0,
@@ -1710,6 +2004,12 @@ def generate_marker_heatmap_from_adata(
     if layer and layer not in adata.layers:
         raise KeyError(f"Layer '{layer}' not found in adata.layers.")
 
+    if max_sample_missing_above_group_median is not None:
+        adata = _drop_high_missing_samples(
+            adata, cluster_key, use_raw, layer, max_sample_missing_above_group_median,
+            os.path.join(out_dir, f"{base_name}_sample_missing_filter.tsv"),
+        )
+
     resolve_cluster_started = time.perf_counter()
     raw_clusters = adata.obs[cluster_key]
     lineage_order = _coerce_lineage_order(adata.uns.get("lineage_order", None))
@@ -1734,6 +2034,7 @@ def generate_marker_heatmap_from_adata(
             adata, cluster_key, use_raw, layer,
             scale_data=scale_data, scale_factor=scale_factor,
             validate_scaling=validate_scaling,
+            max_missing_fraction=max_missing_fraction,
         )
         fdr_df = pvals.copy() if pvals.empty else pvals.apply(_bh_fdr, axis=0)
     else:
@@ -1778,7 +2079,15 @@ def generate_marker_heatmap_from_adata(
         None,
         effect_df=effect_df,
         pval_threshold=pval_threshold,
+        min_rho=min_rho,
     )
+    if collapse_shared_exons and not selected_all.empty:
+        n_before = len(selected_all)
+        selected_all, excluded_events = _collapse_shared_exon_events(selected_all)
+        excluded_tsv = os.path.join(out_dir, f"{base_name}_shared_exon_excluded.tsv")
+        excluded_events.to_csv(excluded_tsv, sep="\t", index=False)
+        print(f"[INFO] Shared-exon collapse: kept {len(selected_all)} of {n_before} assigned events; "
+              f"{len(excluded_events)} share an exon with a more significant event ({excluded_tsv}).")
     selected = (
         selected_all.groupby("cluster", sort=False).head(top_n).reset_index(drop=True)
         if top_n is not None else selected_all
@@ -1895,6 +2204,9 @@ def generate_marker_heatmap_from_adata(
                 go_terms_max=go_terms_max,
                 dpi=heatmap_dpi,
                 write_svg=write_svg,
+                label_events=label_events,
+                species=species,
+                label_shared_exons=label_shared_exons,
             )
             _log_step_timing(
                 "marker_heatmap.render_heatmap_pdf",
@@ -2159,9 +2471,10 @@ def main():
             "Marker heatmap and MarkerFinder marker table. This is the module the "
             "cellHarmony-web harness uses for MarkerFinder (flask/pipeline.py:1580). "
             "The *_markers.tsv carries every gene assigned to a population at rho > 0 and "
-            "FDR <= 0.05; --top-n bounds the HEATMAP only. Harness values: RNA --top-n 50 "
+            "FDR <= --fdr-threshold (default 0.001); --top-n bounds the HEATMAP only. Harness values: RNA --top-n 50 "
             "--cells-per-cluster 100 --export-networks --network-top-n 1000; imputed "
-            "modalities --top-n 5 --no-scaling-check --centroid-method mean."
+            "modalities --top-n 5 --no-scaling-check --centroid-method mean; splicing PSI --psi --top-n 100. "
+            "The PSI options change nothing for a matrix without NaN or event IDs, so gene analysis keeps its defaults."
         )
     )
     input_group = parser.add_mutually_exclusive_group(required=True)
@@ -2352,7 +2665,89 @@ def main():
             "GRN (flask/pipeline.py:601), whose values are legitimately negative."
         ),
     )
+    parser.add_argument(
+        "--max-missing-fraction",
+        type=float,
+        default=0.15,
+        help=(
+            "MarkerFinder treats NaN as a missing value (e.g. PSI) and scores each feature over its "
+            "measured samples, as AltAnalyze2 did. A feature missing in this fraction of samples or "
+            "more is not considered (default 0.15). No effect on a matrix without NaN."
+        ),
+    )
+    parser.add_argument(
+        "--min-rho",
+        type=float,
+        default=None,
+        help=(
+            "Minimum MarkerFinder score (Pearson rho) for a feature to be assigned to a population, "
+            "on top of the FDR gate. Default: none (rho > 0). AltAnalyze2 used 0.4 for PSI."
+        ),
+    )
+    parser.add_argument(
+        "--collapse-shared-exons",
+        action="store_true",
+        help=(
+            "Splicing events: keep only the most significant (FDR, then rho) of the assigned events "
+            "that share any exon; the others go to *_shared_exon_excluded.tsv."
+        ),
+    )
+    parser.add_argument(
+        "--fdr-threshold",
+        type=float,
+        default=0.001,
+        help=(
+            "Maximum Benjamini-Hochberg FDR (per population) for a feature to be assigned "
+            "(default 0.001, the API default pval_threshold)."
+        ),
+    )
+    parser.add_argument(
+        "--max-sample-missing-above-group-median",
+        type=float,
+        default=None,
+        help=(
+            "Remove a sample whose missing-value (NaN) fraction exceeds its cluster's median by more than this "
+            "fraction, before scoring; the decision per sample goes to *_sample_missing_filter.tsv. Default: off."
+        ),
+    )
+    parser.add_argument(
+        "--label-events",
+        default=None,
+        help=(
+            "Text or TSV file of event IDs (column UID, else the first column). Only heatmap rows matching an "
+            "event, in either junction order, or sharing an exon block with one, are labelled, as callouts to "
+            "the right; *_label_events.tsv records why. Default: label every row."
+        ),
+    )
+    parser.add_argument(
+        "--label-events-exact",
+        action="store_true",
+        help="With --label-events, label only the listed events themselves, not rows that share an exon with them.",
+    )
+    parser.add_argument(
+        "--psi",
+        action="store_true",
+        help=(
+            "Splicing PSI defaults (PSI_DEFAULTS): --marker-method markerfinder --no-scaling-check "
+            "--centroid-method mean --max-missing-fraction 0.55 --min-rho 0.25 --fdr-threshold 0.01 "
+            "--collapse-shared-exons --top-n 100 --max-sample-missing-above-group-median 0.10. "
+            "A flag given explicitly overrides its preset value."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=0, help="Random seed for cell sampling.")
+    preset_args, _ = parser.parse_known_args()
+    if preset_args.psi:
+        parser.set_defaults(
+            marker_method=PSI_DEFAULTS["marker_method"],
+            no_scaling_check=not PSI_DEFAULTS["validate_scaling"],
+            centroid_method=PSI_DEFAULTS["centroid_method"],
+            max_missing_fraction=PSI_DEFAULTS["max_missing_fraction"],
+            min_rho=PSI_DEFAULTS["min_rho"],
+            fdr_threshold=PSI_DEFAULTS["pval_threshold"],
+            collapse_shared_exons=PSI_DEFAULTS["collapse_shared_exons"],
+            top_n=PSI_DEFAULTS["top_n"],
+            max_sample_missing_above_group_median=PSI_DEFAULTS["max_sample_missing_above_group_median"],
+        )
     args = parser.parse_args()
     if args.render_from_cache and (args.markers_only or args.skip_heatmap_render):
         parser.error("--render-from-cache cannot be combined with an option that skips rendering.")
@@ -2386,6 +2781,9 @@ def main():
             load_go_terms=not args.no_go_terms,
             dpi=args.dpi,
             write_svg=not args.skip_svg,
+            label_events=_read_label_events(args.label_events) if args.label_events else None,
+            species=args.species,
+            label_shared_exons=not args.label_events_exact,
         )
         print(f"Saved marker heatmap to: {written}")
         return
@@ -2490,6 +2888,13 @@ def main():
             scale_factor=args.scale_factor,
             centroid_method=args.centroid_method,
             validate_scaling=not args.no_scaling_check,
+            max_missing_fraction=args.max_missing_fraction,
+            min_rho=args.min_rho,
+            collapse_shared_exons=args.collapse_shared_exons,
+            pval_threshold=args.fdr_threshold,
+            max_sample_missing_above_group_median=args.max_sample_missing_above_group_median,
+            label_events=_read_label_events(args.label_events) if args.label_events else None,
+            label_shared_exons=not args.label_events_exact,
             cells_per_cluster=args.cells_per_cluster,
             seed=args.seed,
             export_networks=args.export_networks,

@@ -61,6 +61,15 @@ altanalyze3/components/fastComm/training_data/
 altanalyze3/components/fastComm/benchmarks/
 altanalyze3/components/fastComm/models/
 
+# Required immutable fastComm ligand-receptor resources for scALABLE deployments.
+!altanalyze3/components/fastComm/resources/
+!altanalyze3/components/fastComm/resources/cellchat_nichenet_human/
+!altanalyze3/components/fastComm/resources/cellchat_nichenet_mouse/
+!altanalyze3/components/fastComm/resources/cellchat_nichenet_human/ligand_receptor.tsv
+!altanalyze3/components/fastComm/resources/cellchat_nichenet_human/manifest.json
+!altanalyze3/components/fastComm/resources/cellchat_nichenet_mouse/ligand_receptor.tsv
+!altanalyze3/components/fastComm/resources/cellchat_nichenet_mouse/manifest.json
+
 # Per-component artifacts/ folders. Each component owns a single artifacts/
 # directory used for intermediate benchmark outputs, scratch evaluation
 # TSVs, trained-bundle scratch space, etc. Not tracked. rna2adt/artifacts
@@ -72,6 +81,7 @@ altanalyze3/components/fastComm/models/
 # has no other copy, and imputation fails with FileNotFoundError without them.
 altanalyze3/components/*/artifacts/*
 !altanalyze3/components/rna2metabolite/artifacts/rna2metabolite_aml_bundle.pkl.gz
+!altanalyze3/components/rna2metabolite/artifacts/rna2metabolite_aml_NA30_20261006_bundle.pkl.gz
 !altanalyze3/components/rna2psi/artifacts/rna2psi_leucegene_focused.pkl.gz
 !altanalyze3/components/rna2psi/artifacts/rna2psi_reclassifiers.pkl.gz
 
@@ -85,6 +95,7 @@ altanalyze3/components/rna2adt/mouse/rna2adt_mm_per_adt_metrics.tsv
 # so lipid imputation cannot run in a container without it.
 altanalyze3/components/rna2lipid/*.pkl
 !altanalyze3/components/rna2lipid/rna2lipid_hs_lung_lipidwise_bundle.pkl
+!altanalyze3/components/rna2lipid/rna2lipid_hs_lung_native_log2_20261005_bundle.pkl
 
 # cellHarmony web app — per-user runtime job state. The local jobs/ tree
 # can grow to many GB of test runs; never belongs in version control.
@@ -127,3 +138,30 @@ tmp_*
 
 # Backup files
 *.bak*
+
+# Local analysis outputs and logs kept out of the repository (Nathan, 2026-10-01)
+altanalyze3/analysis/gwas/hlca_sikkema_2023/
+altanalyze3/components/bam/bam2hla/results/
+altanalyze3/components/cellHarmony/webapp/dev/ram_benchmark_20260928/
+altanalyze3/components/cellHarmony/webapp/server_8000.log
+altanalyze3/components/clustering/benchmarking/ICGS3_ADAMS_VARIABLE_GENE_BENCHMARK.md
+altanalyze3/components/clustering/benchmarking/ICGS3_Adams_HLCA_markerfinder_top50_gt0.4_marker_database.tsv
+altanalyze3/components/clustering/benchmarking/ICGS3_Adams_markerfinder_cells_per_state.tsv
+altanalyze3/components/clustering/benchmarking/ICGS3_Adams_variable_gene_marker_capture_summary.tsv
+altanalyze3/components/clustering/benchmarking/ICGS3_Adams_variable_gene_marker_capture_summary_ge5_eligible.tsv
+/delete/COMMIT_MESSAGE_scalable_integrated_root.txt
+
+# Ambient RNA benchmarking folder and its results (Nathan, 2026-10-03)
+altanalyze3/components/ambient_rna/benchmarking/*
+
+# rna2lipid: local normalization/training reproducibility snapshot and its archive.
+# Deployment loads the canonical component bundle and release manifest, not this copy.
+/altanalyze3/components/rna2lipid/workflows/lung_native_log2_20261008/
+/altanalyze3/components/rna2lipid/workflows/lung_native_log2_20261008.zip
+
+# rna2lipid: local validation reports, downloaded references, and calibration audits.
+/altanalyze3/components/rna2lipid/validation/independent_hematopoietic_20261001/
+/altanalyze3/components/rna2lipid/validation/bulk_calibration_audit_20261001/
+
+# Local validation directories anywhere within the altanalyze3 package.
+/altanalyze3/**/validation/

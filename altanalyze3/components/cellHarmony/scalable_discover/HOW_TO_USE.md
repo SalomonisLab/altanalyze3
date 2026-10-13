@@ -54,6 +54,9 @@ QC applies the selected thresholds; UMAP fitting and Max K configure ICGS3. Clic
 
 Max K sets the target NMF rank. ICGS3's later marker and SVM steps can yield fewer
 final clusters; the field does not force the final displayed cluster count.
+If the requested K cannot be used, ICGS3 retries its native unbiased automatic
+feature/rank/NMF selection. The log and methods export record the requested K,
+failure reason and effective K; QC is not repeated.
 
 Accelerated UMAP includes every clustered cell in Explore and leaves clustering and marker
 discovery unchanged. The fitting set contains at least 200 cells per cluster, or every cell

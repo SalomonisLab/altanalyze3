@@ -2559,19 +2559,10 @@ def _read_differential_h5ad(path, *, disk_backed=False):
         return ad.AnnData(**kwargs, layers=layers)
 
 
-def _sample_differential_cells(obs, population_col, sample_col, selected_samples, limit=500):
-    """Random, reproducible cell selection per state and selected sample for scALABLE."""
-    if not 1 <= int(limit) <= 500:
-        raise ValueError("scALABLE differential cell limit must be between 1 and 500.")
-    selected = obs[sample_col].astype(str).isin([str(v) for v in selected_samples])
-    positions = np.flatnonzero(selected.to_numpy())
-    annotations = obs.iloc[positions][[population_col, sample_col]].astype(str)
-    rng = np.random.default_rng(0)
-    rows = []
-    for indices in annotations.groupby([population_col, sample_col], sort=True, observed=True).indices.values():
-        chosen = rng.choice(indices, size=limit, replace=False) if len(indices) > limit else indices
-        rows.extend(positions[chosen])
-    return np.sort(np.asarray(rows, dtype=np.int64))
+def _sample_differential_cells(obs, population_col, sample_col, selected_samples, limit=500, scores=None):
+    """Highest native score per state/sample, with canonical barcode tie-breaking."""
+    from ..differential_sampling import select_cells
+    return select_cells(obs, population_col, sample_col, selected_samples, limit, scores)
 
 
 def _materialize_differential_selection(adata, modality):
@@ -2745,12 +2736,33 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
     limit = int(config.get("max_cells_per_state_sample", 500))
     if not 1 <= limit <= 500:
         raise ValueError("scALABLE differential cell limit must be between 1 and 500.")
+    from ..differential_sampling import needs_cap, web_assignment_scores
+    scores, score_sources = None, []
+    selection_method, selection_metric = None, None
+    capped = not already_pseudobulk and needs_cap(adata.obs, population_col, sample_col,
+                                                 resolved_group1 + resolved_group2, limit)
+    if capped:
+        scores, score_sources, selection_method, selection_metric = web_assignment_scores(meta, adata.obs_names)
     rows = _sample_differential_cells(adata.obs, population_col, sample_col,
-                                      resolved_group1 + resolved_group2, limit) if not already_pseudobulk else np.flatnonzero(subset_mask)
+                                      resolved_group1 + resolved_group2, limit, scores) if not already_pseudobulk else np.flatnonzero(subset_mask)
     before = int(np.asarray(subset_mask).sum())
-    store.append_log(job_id, f"[params] differential_sampling max_cells_per_state_sample={limit} random_seed=0 selected={len(rows)} available={before} sample_col={sample_col} population_col={population_col}")
+    cell_selection = {"method": selection_method if capped else
+                      "precomputed_pseudobulk_no_cell_selection" if already_pseudobulk else "all_cells_within_cap",
+                      "metric": selection_metric,
+                      "tie_breaker": "cell_barcode_ascending", "analysis_order": "cell_barcode_ascending" if not already_pseudobulk else "stored",
+                      "max_cells_per_state_sample": limit, "available": before, "selected": len(rows),
+                      "sample_col": sample_col, "population_col": population_col, "score_sources": score_sources}
+    selection_table = adata.obs.iloc[rows][[population_col, sample_col]].copy()
+    if scores is not None:
+        selection_table["selection_score"] = scores.reindex(selection_table.index.astype(str)).to_numpy()
+    selection_path = run_root / "selected_cells.tsv"
+    selection_table.to_csv(selection_path, sep="\t", index_label="CellBarcode")
+    from ..analysis_record import file_identity, record_effective
+    cell_selection["selected_cells"] = file_identity(selection_path)
+    record_effective(store, job_id, f"differential:{run_id}", cell_selection=cell_selection)
+    store.append_log(job_id, "[params] differential_sampling " + json.dumps(cell_selection, sort_keys=True))
     handle = getattr(adata, '_analysis_h5_handle', None)
-    if len(rows) != adata.n_obs:
+    if len(rows) != adata.n_obs or not np.array_equal(rows, np.arange(adata.n_obs)):
         adata = adata[rows] if root_and_rows(adata) is not None else adata[rows].copy()
     materialized = _materialize_differential_selection(adata, modality)
     if materialized is not adata:
@@ -3070,6 +3082,7 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
         "comparison_type": comparison_type,
         "go_terms_included": show_go_terms,
         "network_count": len(networks),
+        "cell_selection": cell_selection,
     }
     write_run_provenance(run_root, meta.get("model_versions", {}), application="scALABLE-differential")
     manifest["model_version_ids"] = {key: record["model_version_id"]
@@ -3085,6 +3098,7 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
         "archive": archive_path,
         "manifest": manifest_path,
         "differentials_only_h5ad": differential_h5ad_path,
+        "selected_cells": selection_path,
     }
     if heatmap_pdf is not None:
         differential_artifacts["heatmap_pdf"] = heatmap_pdf

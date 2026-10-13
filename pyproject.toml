@@ -39,6 +39,7 @@ dependencies = [
 altanalyze3-neo = "altanalyze3.components.neoantigen.cli:main"
 
 [project.optional-dependencies]
+biology-summary = ["llama-cpp-python>=0.3.34,<0.4"]
 web = ["fastapi>=0.110,<1", "uvicorn[standard]>=0.30,<1", "python-multipart>=0.0.9,<1", "jinja2>=3.1,<4", "flask>=3,<4", "plotly>=6,<7", "igraph>=0.11,<1.1", "cairocffi>=1.7,<2"]
 # SNAF neoantigen workflow extras (all cross-platform; import lazily so the core
 # package never requires them):
@@ -59,8 +60,8 @@ exclude = ["*.jobs", "*.jobs.*", "altanalyze3.tmp", "altanalyze3.tmp.*"]
 
 [tool.setuptools.package-data]
 "altanalyze3.components.neoantigen" = ["data/*.json"]
-"altanalyze3.components.cellHarmony" = ["resources/pathways/*.json", "resources/pathways/*.md"]
-"altanalyze3.components.cellHarmony.webapp" = ["templates/*.html", "static/*.js", "static/*.css", "*.md", "requirements.docker.txt"]
+"altanalyze3.components.cellHarmony" = ["resources/pathways/*.json", "resources/pathways/*.md", "resources/biology/*.json", "resources/biology/*.md", "resources/biology/*.py", "discover_resources/source_manifest.json"]
+"altanalyze3.components.cellHarmony.webapp" = ["templates/*.html", "static/*.js", "static/*.css", "static/*.gif", "static/*.png", "*.md", "requirements.docker.txt"]
 "altanalyze3.components.cellHarmony.flask" = ["reference_config.json"]
 "altanalyze3.components.rna2lipid" = ["rna2lipid_hs_lung_native_log2_20261005_bundle.pkl", "rna2lipid_hs_lung_lipidwise_bundle.pkl", "native_log2_release.json"]
 "altanalyze3.components.visualization.scalable_viewer" = ["templates/*.html", "static/*.js", "static/*.css", "*.md"]

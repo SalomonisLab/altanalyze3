@@ -494488,3 +494488,152 @@ INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
 INFO:     127.0.0.1:52575 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58540 - "GET /api/jobs/1b0faa928a9848fbb3cd225ca26a0e42/status HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:58622 - "GET /api/jobs/1b0faa928a9848fbb3cd225ca26a0e42/status HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:58845 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58890 - "POST /api/jobs HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:58900 - "POST /api/jobs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58902 - "POST /api/jobs/b654200866b649c8896e93149a132f80/qc HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58903 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58904 - "POST /api/jobs/b654200866b649c8896e93149a132f80/run HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58908 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58924 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58926 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58927 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58930 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58931 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58932 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58934 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58935 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58937 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58940 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58942 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58943 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58945 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58948 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58949 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58951 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58963 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58964 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58965 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58967 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58968 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58970 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58972 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58973 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58975 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58983 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58985 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58987 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58989 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58990 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59400 - "GET /api/jobs/b654200866b649c8896e93149a132f80/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59437 - "POST /api/jobs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59438 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59440 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59441 - "POST /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/qc HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59442 - "POST /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/run HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59443 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59445 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59446 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59447 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59449 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59450 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59451 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59452 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59453 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59456 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59457 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59477 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59478 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59488 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59489 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59492 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59493 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59496 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59497 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59498 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59499 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59502 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59503 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59505 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59506 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59510 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59511 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59512 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59513 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59515 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59516 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59517 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59518 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59528 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59529 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59539 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59540 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59542 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59543 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59545 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59554 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59558 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59559 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59560 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59561 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59563 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59569 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59571 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59572 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59575 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59576 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59578 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59579 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59580 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59582 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59583 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59584 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61040 - "GET /api/jobs/cfad37d18ece4729bed20e2f80bda9b7/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63373 - "GET /api/jobs HTTP/1.1" 405 Method Not Allowed
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [19669]
+/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/lib/python3.11/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
+=== restart 2026-09-28 20:32:45 ===
+INFO:     Started server process [53722]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:63425 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63427 - "GET /static/app.js HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [53722]
+INFO:     Started server process [58251]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:60989 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60989 - "GET /static/styles.css?v=1791115228 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60990 - "GET /static/app.js?v=1791294367178848934 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60991 - "GET /static/integrated.js?v=1791294367178848934 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60990 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:60991 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref2_reference HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60990 - "GET /api/meta/reference-preview?species=human&reference=hs_lung_cellref2_reference HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [58251]
+=== restart 2026-10-10 12:10:03 after reboot ===
+INFO:     Started server process [9054]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:55661 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55682 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60997 - "GET /api/jobs/537ad55735014adda24cb98623882809 HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:62032 - "GET /api/jobs/537ad55735014adda24cb98623882809/status HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [9054]

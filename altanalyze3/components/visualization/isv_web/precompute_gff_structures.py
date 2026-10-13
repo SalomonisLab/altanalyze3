@@ -209,6 +209,25 @@ def final_to_tid_base(final_isoform_id):
     return f.split(".", 1)[0] if "." in f else f
 
 
+def _norm_chrom(c):
+    c = str(c or "").strip()
+    return c[3:] if c.lower().startswith("chr") else c
+
+
+def _row_at_locus(row, locus):
+    """row=(chrom, strand, exons_txt); locus=(chrom, strand, start, end). True when the row's structure lies
+    on the locus chromosome, on its strand (when both strands are known), and overlaps [start, end]."""
+    chrom, strand, txt = row
+    lchrom, lstrand, lo, hi = locus
+    if not txt or _norm_chrom(chrom) != _norm_chrom(lchrom):
+        return False
+    if strand in ("+", "-") and lstrand in ("+", "-") and strand != lstrand:
+        return False
+    segs = [seg.split("-") for seg in txt.split(",") if seg]
+    s, e = min(int(a) for a, _ in segs), max(int(b) for _, b in segs)
+    return s <= int(hi) and e >= int(lo)
+
+
 class StructureIndex:
     """Read-only lookup of registered exon coordinates by (gene, final_isoform_id)."""
 
@@ -216,6 +235,8 @@ class StructureIndex:
         self.path = path
         self._con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
         self._cache = {}
+        self.stats = defaultdict(int)
+        self.rejected = []
 
     @classmethod
     def open(cls, root, log=print):
@@ -225,22 +246,57 @@ class StructureIndex:
             return None
         return cls(p)
 
-    def exons(self, gene, final_isoform_id):
-        """-> [(start, end), ...] ascending, or None when the isoform is not registered."""
+    def exons(self, gene, final_isoform_id, locus=None):
+        """-> [(start, end), ...] ascending, or None when the isoform is not registered.
+
+        A miss on (gene, tid_base) falls back to tid_base alone, but bare molecule ids repeat across
+        libraries, so that fallback can return another gene's molecule: FLI1 40148595.WF80-N-0805 drew
+        ENSG00000106052 molecule 40148595 (chr7:27,769,688-27,828,861) on the chr11 axis. The fallback
+        therefore accepts a row only at the plotted locus=(chrom, strand, start, end): same chromosome,
+        same strand when both are known, overlapping span, and one distinct structure. Without a locus
+        it accepts only ENS ids, which are unique. Outcomes are counted in self.stats."""
         base = final_to_tid_base(final_isoform_id)
         if not base:
             return None
-        key = (gene, base)
+        # New catalogs register the complete physical-source transcript ID.
+        # Prefer that exact key globally before the historical bare molecule key;
+        # otherwise equal numeric molecules from different sources share a cache row.
+        exact = strip_version(str(final_isoform_id))
+        key = (gene, exact, tuple(locus) if locus else None)
         if key in self._cache:
             return self._cache[key]
+        if exact != base and self._con.execute(
+                "SELECT 1 FROM structures WHERE tid_base=? LIMIT 1", (exact,)).fetchone():
+            base = exact
         row = self._con.execute(
             "SELECT exons FROM structures WHERE gene=? AND tid_base=?", (gene, base)).fetchone()
-        if row is None:
-            row = self._con.execute(
-                "SELECT exons FROM structures WHERE tid_base=?", (base,)).fetchone()
+        txt = row[0] if row else None
+        if row is not None:
+            self.stats["gene_match"] += 1
+        else:
+            hits = self._con.execute(
+                "SELECT chrom, strand, exons FROM structures WHERE tid_base=?", (base,)).fetchall()
+            if locus:
+                ok = [h for h in hits if _row_at_locus(h, locus)]
+            else:
+                ok = hits if base.startswith("ENS") else []
+            distinct = {h[2] for h in ok}
+            if len(distinct) == 1:
+                txt = ok[0][2]
+                self.stats["fallback_at_locus"] += 1
+            elif len(distinct) > 1:
+                self.stats["fallback_ambiguous"] += 1
+                self.rejected.append((final_isoform_id, f"{len(distinct)} distinct structures at the locus"))
+            elif hits:
+                self.stats["fallback_rejected"] += 1
+                self.rejected.append((final_isoform_id, "registered only off-locus: " + "; ".join(
+                    f"{c}:{s} {e.split(',')[0].split('-')[0]}-{e.split(',')[-1].split('-')[-1]}"
+                    for c, s, e in hits[:3])))
+            else:
+                self.stats["not_registered"] += 1
         val = None
-        if row and row[0]:
-            val = [tuple(int(v) for v in seg.split("-")) for seg in row[0].split(",") if seg]
+        if txt:
+            val = [tuple(int(v) for v in seg.split("-")) for seg in txt.split(",") if seg]
         self._cache[key] = val
         return val
 

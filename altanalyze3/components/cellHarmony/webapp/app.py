@@ -6110,6 +6110,8 @@ def create_app(test_config: dict | None = None) -> FastAPI:
     app.state.reference_adata_cache_locks = weakref.WeakValueDictionary()
     app.state.cache_registry_lock = threading.Lock()
     app.state.plot_build_queue = PlotBuildQueue()
+    app.state.summary_build_queue = PlotBuildQueue(max_entries=4, ttl_seconds=3600,
+        pending_message="Collecting saved biological evidence and preparing the summary…")
     previous_lifespan = app.router.lifespan_context
 
     @asynccontextmanager
@@ -6119,6 +6121,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
                 yield state
             finally:
                 await run_in_threadpool(application.state.plot_build_queue.close)
+                await run_in_threadpool(application.state.summary_build_queue.close)
 
     app.router.lifespan_context = plot_lifespan
     app.state.job_runner = JobRunner(
@@ -6166,6 +6169,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
                 "app_js_version": js_version,
                 "unified_analysis_controls": cfg.get("UNIFIED_ANALYSIS_CONTROLS", True),
             },
+            headers={"Cache-Control": "no-store"},
         )
 
     @app.get("/api/meta/species")
@@ -6948,6 +6952,89 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Job not found.")
         return JSONResponse(_chat_examples(app, store.get_job(job_id)))
 
+    @app.post("/api/jobs/{job_id}/chat-summary")
+    def chat_summary(job_id: str):
+        from .biology_summary import source_identity, build_summary
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(404, "Job not found.")
+        # A summary includes all branches, independently of the viewer cookie.
+        meta = (JobStore.get_job(store, job_id) if isinstance(store, AnalysisJobStore)
+                else store.get_job(job_id))
+        if meta.get("status") != "completed":
+            raise HTTPException(409, "The summary is available after the analysis completes.")
+        identity = source_identity(meta)
+        return app.state.summary_build_queue.request(identity,
+            lambda: JSONResponse(build_summary(meta)))
+
+    @app.post("/api/jobs/{job_id}/chat-drugs")
+    def chat_drugs(job_id: str, run_id: str = Query(...), cell_state: str = Query(...),
+                   tail: str = Query("opposing", pattern="^(opposing|mimicking)$"),
+                   gene_space: str = Query("all", pattern="^(all|measured)$"),
+                   offset: int = Query(0, ge=0), limit: int = Query(25, ge=1, le=500),
+                   compound: str = Query(""), interpret: bool = Query(False)):
+        from . import drug_chat
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id): raise HTTPException(404, "Job not found.")
+        meta=store.get_job(job_id)
+        from .biology_summary import source_identity
+        params=dict(run_id=run_id, cell_state=cell_state, tail=tail, gene_space=gene_space,
+                    offset=offset, limit=limit, compound=compound)
+        identity="drug:"+source_identity(meta)+drug_chat.resource_identity()+json.dumps(dict(params,interpret=interpret),sort_keys=True)
+        def build():
+            try: return JSONResponse((drug_chat.interpret if interpret else drug_chat.screen)(meta,**params))
+            except FileNotFoundError: raise HTTPException(503, "Discover DrugMatch resource bundle is not mounted. Configure CELLREF2_DRUGSTORE to the source-signature drugstore_v1 directory.")
+            except ValueError as exc: raise HTTPException(422,str(exc))
+        return app.state.summary_build_queue.request(identity,build)
+
+    @app.post("/api/jobs/{job_id}/chat-interpret")
+    def chat_interpret(job_id: str, kind: str = Query(...,pattern="^(network|pathway|pathway_diagram)$"),
+                       run_id: str = Query(...), cell_state: str = Query(...), feature: str = Query(""),
+                       modality: str = Query("lipid",pattern="^(lipid|metabolite)$")):
+        from .biology_summary import collect_evidence,source_identity
+        from .biology_sections import SavedInterpretData
+        from .. import discover_integration as native
+        from ..discover_resources import toppgene
+        store,_=_job_resources(app)
+        if not store.job_exists(job_id):raise HTTPException(404,"Job not found.")
+        meta=store.get_job(job_id)
+        params=dict(kind=kind,run_id=run_id,cell_state=cell_state,feature=feature,modality=modality)
+        def build():
+            runs=completed_differentials(meta)
+            if run_id not in runs:raise HTTPException(422,"Choose a completed comparison.")
+            if kind=='pathway_diagram':
+                ds=SavedInterpretData(meta,run_id)
+                result=native.pathway(ds,id=feature,contrast=run_id,cell_state=cell_state,modality=modality,significance='reported')
+                return JSONResponse(dict(result,kind=kind))
+            if kind=='network':
+                ds=SavedInterpretData(meta,run_id)
+                net=native.network(ds,contrast=run_id,cell_state=cell_state,limit=80,significance='fdr')
+                sources={}
+                for e in net.get('edges',[]):sources.setdefault(e['source'],[]).append(e['target'])
+                hubs=[]
+                for factor,targets in sorted(sources.items(),key=lambda v:(-len(v[1]),v[0]))[:5]:
+                    enriched=toppgene.enrich(targets,'GeneOntologyBiologicalProcess',max_results=5)
+                    # Preserve and flag every submitted identity. Partial mappings do
+                    # not silently become a substitute target set or completed result.
+                    if enriched.get('n_unresolved'):enriched=dict(enriched,status='mapping_unresolved',terms=[],note='Target mapping requires review; no partial-target enrichment is presented.')
+                    hubs.append(dict(factor=factor,targets=targets,n_targets=len(targets),enrichment=enriched))
+                out=dict(kind=kind,interpretation=net.get('interpretation') or net.get('note'),hubs=hubs)
+            else:
+                digest=collect_evidence(meta)
+                found=next((e for e in digest['evidence'] if e['kind']=='pathway' and e['run_id']==run_id and e['state']==cell_state and e['facts'].get('term_name')==feature),None)
+                if found is None:raise HTTPException(404,'Saved pathway result not found.')
+                from .biology_synthesis import population
+                state,direction=population(cell_state)
+                genes=re.split(r'[,;\s]+',str(found['facts'].get('overlap_genes','')))
+                ds=SavedInterpretData(meta,run_id)
+                calls={r['gene']:r for r in ds.differentials(run_id,state,'rna')}
+                support=[calls[g] for g in genes if g in calls]
+                out=dict(kind=kind,facts=found['facts'],RNA_support=support,
+                    interpretation=f"{feature}: saved GO-Elite enrichment in {state}, {direction} input list; FDR {found['facts'].get('fdr')}. {len(support)} overlapping genes have exact saved RNA differential calls. Enrichment of a directional list does not establish activation, inhibition or metabolic flux.")
+            return JSONResponse(out)
+        identity="interpret:"+source_identity(meta)+json.dumps(params,sort_keys=True)
+        return app.state.summary_build_queue.request(identity,build)
+
     @app.post("/api/jobs/{job_id}/chat")
     def chat(job_id: str, payload: ChatRequest):
         """Answer one question about this job, with numbers from this job.
@@ -6964,6 +7051,13 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         question = str(payload.question or "").strip()
         if not question:
             raise HTTPException(status_code=400, detail="question is required")
+
+        from . import drug_chat
+        if drug_chat.requested(question):
+            reading=drug_chat.read(meta,question)
+            if reading.get('kind')=='drug_match_choices':return JSONResponse(reading)
+            return JSONResponse(dict(kind='drug_match_pending',intent='drug_match',query=reading,
+                answer='Preparing native Discover DrugMatch for the selected saved RNA signature.'))
 
         from .cross_pathways import answer_if_requested as pathway_answer
         pathways = pathway_answer(app, meta, question)

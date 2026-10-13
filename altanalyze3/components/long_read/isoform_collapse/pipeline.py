@@ -24,7 +24,8 @@ from .. import io_utils as _io
 import resource
 import time
 
-from ..isoform_collapse_utils import structure_tokens_for_containment, junction_core_tokens
+from ..isoform_collapse_utils import (structure_tokens_for_containment, junction_core_tokens,
+                                    intronic_edge_compatible, is_contiguous_subsequence)
 from .scored_collapse import collapse_gene, collapse_gene_em, collapse_gene_jc
 
 # Default gene->chrom reference = the gzipped exon annotation BUNDLED in the program directory
@@ -161,7 +162,13 @@ def _collapse_chrom(args):
     # the 5-tuple and gets no structure strings back: on a 6.4M-isoform atlas that payload would
     # cross the worker process boundary for every gene and buy nothing.
     want_struct = False
-    if len(args) == 6:
+    gene_evidence = None
+    source_registry = None
+    if len(args) == 8:
+        chrom, genes, sample_paths, enst_cache, collapse_method, want_struct, gene_evidence, source_registry = args
+    elif len(args) == 7:
+        chrom, genes, sample_paths, enst_cache, collapse_method, want_struct, gene_evidence = args
+    elif len(args) == 6:
         chrom, genes, sample_paths, enst_cache, collapse_method, want_struct = args
     elif len(args) == 5:
         chrom, genes, sample_paths, enst_cache, collapse_method = args
@@ -196,12 +203,40 @@ def _collapse_chrom(args):
                     d[struct] = f"{mol}.{sample}"
                     gene_mol_sample[g][f"{mol}.{sample}"] = sample
     gene_enst = _load_enst_for_genes(enst_cache, gset)
+    source_readers = {}
     out = {}
     for g, sr in gene_struct.items():
         enst = gene_enst.get(g)
+        evidence = (gene_evidence or {}).get(g)
+        if evidence is not None and 'file' in evidence:
+            from .stream_context import load_context
+            evidence = load_context(evidence)
         all_structs = list(sr) + ([s for s in enst if s not in sr] if enst else [])
-        tok = {s: tuple(structure_tokens_for_containment(s, g)) for s in all_structs}
-        if collapse_method == 'em':
+        tok = ({s: tuple(structure_tokens_for_containment(s, g)) for s in all_structs}
+               if evidence is None else None)
+        if evidence is not None:
+            if collapse_method != 'wta':
+                raise ValueError('Splice evidence is implemented for the selected junction-core WTA method')
+            candidates = evidence['candidates']
+            references = evidence['references']
+            if dict(sr) != {s: c['count'] for s, c in candidates.items()}:
+                raise ValueError(f'Complete source structure/count coverage failed for {g}')
+            if {s: r['id'] for s, r in references.items()} != dict(enst or {}):
+                raise ValueError(f'Complete instructed reference identity coverage failed for {g}')
+            for s, c in candidates.items():
+                lib, gene, mol = c['representative_source']
+                if gene != g or gene_mol[g][s] != f'{mol}.{lib}':
+                    raise ValueError(f'Representative source identity differs from native aggregation: {g}:{s}')
+            from .splice_evidence import collapse_prepared
+            runtime = dict(structure_tokens_for_containment=structure_tokens_for_containment,
+                           junction_core_tokens=junction_core_tokens,
+                           is_contiguous_subsequence=is_contiguous_subsequence,
+                           intronic_edge_compatible=intronic_edge_compatible,
+                           collapse_gene_jc=collapse_gene_jc)
+            res, evidence_final = collapse_prepared(candidates, references, g, runtime,
+                                                    splice_slop=evidence['policy'].splice_slop)
+            references = res['resolved_references']
+        elif collapse_method == 'em':
             res = collapse_gene_em(sr, tok, min_reads=1, enst=enst)
         elif collapse_method == 'wta_legacy':
             res = collapse_gene(sr, tok, min_reads=1, enst=enst)
@@ -245,6 +280,38 @@ def _collapse_chrom(args):
                                        else gene_mol_sample[g].get(gene_mol[g].get(r))) for r in reps},
             exemplar_known={exid(r): (r in enst_ids) for r in reps},
         )
+        if evidence is not None:
+            entry['exemplar_reference_structure'] = {
+                exid(r): references[r]['native_cache_structure'] for r in reps if r in enst_ids}
+            entry['exemplar_retention_coverage'] = {
+                exid(r): res['parent_retention_coverage'].get(r, []) for r in reps}
+            entry['exemplar_annotation_struct'] = {
+                exid(r): candidates[r]['annotation_structure'] if r not in enst_ids
+                else references[r].get('annotation_structure',r) for r in reps}
+            entry['exemplar_source_exons'] = {
+                exid(r): references[r]['exons'] if r in enst_ids else candidates[r]['parent_exons']
+                for r in reps}
+            entry['exemplar_source_records'] = {
+                exid(r): candidates[r]['source_record'] for r in reps
+                if r not in enst_ids and 'source_record' in candidates[r]}
+        if source_registry is not None:
+            import sqlite3
+            from ...bam.coord_store import unpack_exons
+            records = entry.setdefault('exemplar_source_records', {})
+            for r in reps:
+                ex = exid(r)
+                if r in enst_ids or ex in records:
+                    continue
+                sample = entry['exemplar_sample'][ex]
+                # This registry pins the primary FIRST source model selected by
+                # the full native aggregation, including ordinary genes.
+                if sample not in source_readers:
+                    source_readers[sample] = sqlite3.connect(f"file:{source_registry[sample]}?mode=ro", uri=True)
+                row = source_readers[sample].execute(
+                    'SELECT mol,chrom,strand,source,exons FROM models WHERE gene=? AND legacy=?', (g, r)).fetchone()
+                if row is None or f'{row[0]}.{sample}' != ex:
+                    raise ValueError(f'Actual primary representative unresolved: {g}:{ex}')
+                records[ex] = dict(chrom=row[1],strand=row[2],source=row[3],exons=unpack_exons(row[4]))
         # The representative's OWN structure string, only when the caller asked. The per-sample pass
         # needs it to write its consensus table in the 5-column form Tier 2 reads. Tier 2 does not,
         # so the default path returns exactly what it returned before this was added.
@@ -257,6 +324,8 @@ def _collapse_chrom(args):
         if collapse_method == 'em':
             entry['struct2struct_soft'] = res.get('em_weights', {})
         out[g] = entry
+    for reader in source_readers.values():
+        reader.close()
     return chrom, out, _self_peak_mb()
 
 
@@ -368,7 +437,10 @@ def _tier1_one_sample(args):
     """
     from .collapse_sample import collapse_sample
     reuse = False
-    if len(args) == 7:
+    molecule_candidates = None
+    if len(args) == 8:
+        sample, ta, out_dir, sample_collapse, enst_cache, collapse_method, reuse, molecule_candidates = args
+    elif len(args) == 7:
         sample, ta, out_dir, sample_collapse, enst_cache, collapse_method, reuse = args
     else:
         sample, ta, out_dir, sample_collapse, enst_cache, collapse_method = args
@@ -377,14 +449,17 @@ def _tier1_one_sample(args):
         if done:
             print(f"[tier1:{sample}] reusing existing table {done}")
             return sample, done
-    ex_path, _mol = collapse_sample(sample, ta, out_dir=out_dir, log=print)
+    ex_path, _mol = collapse_sample(sample, ta, out_dir=out_dir, log=print,
+                                   molecule_candidates=molecule_candidates)
     if sample_collapse:
         ex_path = _collapse_one_sample(sample, ex_path, enst_cache, collapse_method, log=print)
     return sample, ex_path
 
 
 def stage1_collapse(sample_ta_paths, nproc=8, ref=DEFAULT_REF, enst_cache=None, tier1_dir=None,
-                    collapse_method='wta', sample_collapse=False, reuse_tier1=False, log=print):
+                    collapse_method='wta', sample_collapse=False, reuse_tier1=False, log=print,
+                    gene_evidence=None, molecule_candidates=None, prepared_tier1_paths=None,
+                    source_registry=None):
     """Two-tier cross-sample collapse.
 
     collapse_method: 'wta' (default winner-takes-all -- each ambiguous substring's reads go to its
@@ -409,6 +484,21 @@ def stage1_collapse(sample_ta_paths, nproc=8, ref=DEFAULT_REF, enst_cache=None, 
     sample_ta_paths: list of (sample_name, transcript_associations_path).
     Returns (gene_results, wallclock_s, max_worker_rss_mb, n_partitions)."""
     t0 = time.time()
+    if gene_evidence is not None:
+        if collapse_method != 'wta' or sample_collapse or reuse_tier1:
+            raise ValueError('Evidence mode requires junction-core WTA, fresh Tier 1, and the selected sample_collapse=False baseline')
+        if molecule_candidates is None and prepared_tier1_paths is None:
+            raise ValueError('Evidence mode requires the complete library-scoped read candidate overrides')
+        libraries = [sample for sample, _ in sample_ta_paths]
+        if (molecule_candidates is not None and set(molecule_candidates) != set(libraries)) or len(set(libraries)) != len(libraries):
+            raise ValueError('Complete ordered source sample roster must resolve before evidence-mode aggregation')
+    if prepared_tier1_paths is not None:
+        if collapse_method != 'wta' or sample_collapse or reuse_tier1:
+            raise ValueError('Verified source tables require the selected unchanged WTA baseline')
+        if [s for s, _ in prepared_tier1_paths] != [s for s, _ in sample_ta_paths]:
+            raise ValueError('Complete ordered prepared source roster mismatch')
+        if source_registry is None or set(source_registry) != {s for s, _ in sample_ta_paths}:
+            raise ValueError('Complete primary source registry required for prepared tables')
 
     # --- TIER 1: per-sample reduction (PARALLEL across libraries; each is bounded + independent) -
     if tier1_dir is None:
@@ -418,7 +508,10 @@ def stage1_collapse(sample_ta_paths, nproc=8, ref=DEFAULT_REF, enst_cache=None, 
     # input order, so sample_exemplars is ordered exactly as the serial loop built it.
     t1args = [(sample, ta, tier1_dir, sample_collapse, enst_cache, collapse_method, reuse_tier1)
               for sample, ta in sample_ta_paths]
-    sample_exemplars = _run_parallel_or_serial(t1args, nproc, fn=_tier1_one_sample)
+    if gene_evidence is not None and prepared_tier1_paths is None:
+        t1args = [a + (molecule_candidates[a[0]],) for a in t1args]
+    sample_exemplars = (prepared_tier1_paths if prepared_tier1_paths is not None
+                        else _run_parallel_or_serial(t1args, nproc, fn=_tier1_one_sample))
     log(f"[tier1] {len(sample_exemplars)} librar{'y' if len(sample_exemplars)==1 else 'ies'} "
         f"reduced ({'with' if sample_collapse else 'without'} the sample-level consensus fold), "
         f"nproc={nproc}")
@@ -438,6 +531,14 @@ def stage1_collapse(sample_ta_paths, nproc=8, ref=DEFAULT_REF, enst_cache=None, 
         chrom_genes[gc.get(g, 'unplaced')].append(g)
     parts = sorted(chrom_genes.items(), key=lambda kv: -len(kv[1]))
     args = [(chrom, genes, sample_exemplars, enst_cache, collapse_method) for chrom, genes in parts]
+    if gene_evidence is not None:
+        if set(gene_evidence) - sgenes:
+            raise ValueError('Evidence plan contains source genes absent from the complete native aggregation')
+        args = [a + (False, {g: gene_evidence[g] for g in a[1] if g in gene_evidence}) for a in args]
+    if source_registry is not None:
+        if gene_evidence is None:
+            args = [a + (False, None) for a in args]
+        args = [a + (source_registry,) for a in args]
     t = time.time()
     results = _run_parallel_or_serial(args, nproc)
     dt = time.time() - t
@@ -500,7 +601,8 @@ def stage2_outliers(gene_results, min_total=3, return_soft=False):
 
 # ---------------------------------------------------- PROTEIN PREDICTION ------
 def stage_protein(gene_results, kept_struct2exemplar, sample_gff_paths, outdir,
-                  genome_fasta, ref_gff=None, log=print):
+                  genome_fasta, ref_gff=None, log=print, canonical_transcript_ids=False,
+                  reference_models=None):
     """Build the gff_process-style outputs for the FINAL collapsed isoforms and run the existing
     isoform_translation.gff_translate to produce protein_summary.txt (protein length / NMD per
     isoform) -- the file the downstream differential annotation consumes.
@@ -529,6 +631,10 @@ def stage_protein(gene_results, kept_struct2exemplar, sample_gff_paths, outdir,
     keep_mol_to_ex = collections.defaultdict(dict)        # sample -> {bare_molecule_id: exemplar_id}
     keep_struct_by_sample = collections.defaultdict(list)  # sample -> [(gene, structure, exemplar_id)]
     keep_enst = set()                                      # version-stripped ENST exemplar ids (known)
+    exact_source_exons = collections.defaultdict(dict)
+    exact_reference_exons = {}
+    exact_reference_ids = {}
+    verified_source_records = collections.defaultdict(dict)
     for g, r in gene_results.items():
         kept_ex = set(kept_struct2exemplar.get(g, {}).values())
         known_map = r.get('exemplar_known', {})
@@ -541,12 +647,30 @@ def stage_protein(gene_results, kept_struct2exemplar, sample_gff_paths, outdir,
                 continue
             if known_map.get(ex):
                 keep_enst.add(ex)                          # ENST id (already version stripped)
+                if reference_models is not None:
+                    own_structure = r.get('exemplar_reference_structure', {}).get(ex, ex2struct[ex])
+                    model = reference_models.get(g, {}).get(own_structure)
+                    if model is None or model['id'] != ex:
+                        raise ValueError(f'Exact primary reference identity unresolved: {g}:{ex}')
+                    full_id = model['source_transcript_id']
+                    if ex in exact_reference_ids and exact_reference_ids[ex] != full_id:
+                        raise ValueError(f'One output ENST has conflicting primary loci: {ex}')
+                    exact_reference_ids[ex] = full_id
+                    exact_reference_exons[ex] = model['exons']
+                if 'exemplar_source_exons' in r:
+                    exact_reference_exons[ex] = r['exemplar_source_exons'][ex]
                 continue
             sample = r['exemplar_sample'].get(ex)
             if not sample or sample == 'ENSEMBL':
                 continue
             mol = ex[:-(len(sample) + 1)] if ex.endswith('.' + sample) else ex
             keep_mol_to_ex[sample][mol] = ex
+            if ex in r.get('exemplar_source_records', {}):
+                verified_source_records[sample][mol] = (g, ex, r['exemplar_source_records'][ex])
+                continue
+            if 'exemplar_source_exons' in r:
+                exact_source_exons[sample][mol] = (g, r['exemplar_source_exons'][ex])
+                continue
             struct = ex2struct.get(ex)
             if struct is not None:
                 # stamp the BARE molecule id as transcript_id -- byte-identical to the source GFF /
@@ -571,6 +695,61 @@ def stage_protein(gene_results, kept_struct2exemplar, sample_gff_paths, outdir,
         # already chromosome-local in its store; we group output per chromosome within a sample).
         for sample, keep in keep_mol_to_ex.items():
             path = sample_gff_paths.get(sample)
+            source_records = verified_source_records.get(sample, {})
+            if source_records:
+                from ...bam import coord_store as record_formatter
+                from .splice_evidence import merge_exons
+                for mol, (gene, ex, record) in source_records.items():
+                    # These are exact primary blocks reconciled in the source
+                    # scan, not a legacy structure's anonymous representative.
+                    expected = gene_results[gene].get('exemplar_source_exons', {}).get(ex)
+                    if expected is not None and merge_exons(record['exons']) != merge_exons(expected):
+                        raise ValueError(f'Verified primary exemplar geometry differs: {gene}:{ex}')
+                    tid = ex if canonical_transcript_ids else mol
+                    info = record_formatter._build_info(gene, tid)
+                    block = record_formatter.format_records(record['chrom'],record['source'],record['strand'],record['exons'],info)
+                    out.write(block)
+                    written += block.count('\n')
+                    n_from_store += 1
+                keep = {mol: ex for mol, ex in keep.items() if mol not in source_records}
+                if not keep:
+                    continue
+            strict = exact_source_exons.get(sample, {})
+            if strict:
+                if not path or not os.path.exists(path):
+                    raise ValueError(f'Required primary GFF unresolved for {sample}')
+                # Evidence classes can split one legacy structure. Its indexed
+                # legacy representative is therefore not the class representative.
+                from .splice_evidence import merge_exons
+                import re
+                actual = collections.defaultdict(list)
+                opener = gzip.open if str(path).endswith('.gz') else open
+                with opener(path, 'rt') as fh:
+                    for line in fh:
+                        cols = line.rstrip('\n').split('\t')
+                        if len(cols) != 9 or cols[2] in ('CDS', 'gene'):
+                            continue
+                        match = re.search(r'(?:^|;)\s*transcript_id(?:=|\s+")([^";]+)', cols[8])
+                        if not match or match.group(1) not in strict:
+                            continue
+                        mol = match.group(1)
+                        gene = re.search(r'(?:^|;)\s*gene_id(?:=|\s+")([^";]+)', cols[8])
+                        if not gene or gene.group(1).split('.')[0] != strict[mol][0]:
+                            raise ValueError(f'Exemplar gene identity mismatch: {sample}:{mol}')
+                        if cols[2] == 'exon':
+                            actual[mol].append((int(cols[3]), int(cols[4])))
+                        out.write(line.replace(f'transcript_id "{mol}"',f'transcript_id "{keep[mol]}"')
+                                  if canonical_transcript_ids else line)
+                        written += 1
+                if set(actual) != set(strict):
+                    raise ValueError(f'Complete primary exemplar coverage failed for {sample}')
+                for mol, (_, expected) in strict.items():
+                    if merge_exons(actual[mol]) != merge_exons(expected):
+                        raise ValueError(f'Primary exon geometry differs for {sample}:{mol}')
+                n_from_scan += len(strict)
+                keep = {mol: ex for mol, ex in keep.items() if mol not in strict}
+                if not keep:
+                    continue
             store_path = None
             if path:
                 # structure_coords.sqlite lives next to the sample's gff-output/transcript_associations.txt
@@ -582,7 +761,8 @@ def stage_protein(gene_results, kept_struct2exemplar, sample_gff_paths, outdir,
             if conn is not None:
                 # FAST PATH: indexed (gene, structure) lookups; stamp exemplar id as transcript_id.
                 pairs = [(g, s) for (g, s, _mol) in keep_struct_by_sample.get(sample, [])]
-                mol_by_pair = {(g, s): mol for (g, s, mol) in keep_struct_by_sample.get(sample, [])}
+                mol_by_pair = {(g, s): keep[mol] if canonical_transcript_ids else mol
+                               for (g, s, mol) in keep_struct_by_sample.get(sample, [])}
                 # collect blocks then emit grouped by chromosome (genes group naturally per chrom)
                 by_chrom = collections.defaultdict(list)
                 for g, s, chrom, block in coord_store.fetch_structures(
@@ -625,6 +805,7 @@ def stage_protein(gene_results, kept_struct2exemplar, sample_gff_paths, outdir,
         # 2b. known (ENST) exemplars: copy genomic records from the reference GFF, matching on the
         # version-stripped transcript_id (reference is "ENST.version", exemplar is "ENST").
         n_enst_records = 0
+        actual_reference_exons = collections.defaultdict(list)
         if keep_enst and ref_gff and os.path.exists(ref_gff):
             opener = gzip.open if str(ref_gff).endswith('.gz') else open
             with opener(ref_gff, 'rt') as fh:
@@ -644,13 +825,28 @@ def stage_protein(gene_results, kept_struct2exemplar, sample_gff_paths, outdir,
                     except Exception:
                         continue
                     tid_bare = tid.split('.')[0]
+                    if tid_bare in exact_reference_ids and tid != exact_reference_ids[tid_bare]:
+                        continue
                     if tid_bare in keep_enst:   # version-stripped match
+                        if tid_bare in exact_reference_exons and cols[2] == 'exon':
+                            actual_reference_exons[tid_bare].append((int(cols[3]), int(cols[4])))
                         # Rewrite transcript_id to the version-stripped form so combined.gff,
                         # transcript_associations.txt, and the catalog all key ENST identically
                         # (our exemplar/TA ids are version-stripped; the reference is versioned).
-                        out.write(line.replace(tid, tid_bare, 1))
+                        # GENCODE GFF3 can put the versioned ID in ID/Parent
+                        # before transcript_id. Evidence-mode output must stamp
+                        # the actual transcript identity as well as those links.
+                        out.write(line.replace(tid, tid_bare) if canonical_transcript_ids or tid_bare in exact_reference_exons
+                                  else line.replace(tid, tid_bare, 1))
                         written += 1
                         n_enst_records += 1
+        if exact_reference_exons:
+            from .splice_evidence import merge_exons
+            if set(actual_reference_exons) != set(exact_reference_exons):
+                raise ValueError('Complete primary Ensembl exemplar coverage failed')
+            for ex, expected in exact_reference_exons.items():
+                if merge_exons(actual_reference_exons[ex]) != merge_exons(expected):
+                    raise ValueError(f'Primary Ensembl geometry differs for {ex}')
     log(f"[protein] wrote {combined_gz} ({n_novel:,} novel exemplars "
         f"[{n_from_store:,} via coord store, {n_from_scan:,} via GFF scan] + "
         f"{len(keep_enst):,} known ENST [{n_enst_records:,} ref records]; {written:,} lines)")
@@ -668,6 +864,7 @@ def stage_protein(gene_results, kept_struct2exemplar, sample_gff_paths, outdir,
                 seen.add(ex)
                 # exemplar's structure is the structure that maps to itself
                 ex_struct = next((s for s, e in kept.items() if e == ex and r['struct2exemplar'].get(s) == ex), struct)
+                ex_struct = r.get('exemplar_annotation_struct', {}).get(ex, ex_struct)
                 out.write(f"{g}\t.\t{ex_struct}\t{ex}\t{r['exemplar_sample'][ex]}\n")
     log(f"[protein] wrote {ta}")
 
@@ -778,8 +975,131 @@ def load_struct2candidate(tier1_dir, sample):
     return out
 
 
+def persist_molecule_candidates(outdir, by_sample):
+    """Persist evidence-class overrides for independent per-library re-key jobs."""
+    import hashlib
+    import json
+    manifest = {'version': 1, 'method': 'wta', 'samples': {}}
+    for sample, mapping in by_sample.items():
+        # Filenames are numbered; library labels are data, never path components.
+        name = f'intronic_read_classes_{len(manifest["samples"]):04d}.tsv.gz'
+        path = os.path.join(outdir, name)
+        import gzip
+        with gzip.open(path, 'wt') as out:
+            out.write('gene\tmolecule\toriginal_structure\tcandidate_class\n')
+            for (gene, mol), (original, candidate) in mapping.items():
+                fields = (gene, mol, original, candidate)
+                if any('\t' in s or '\n' in s for s in fields):
+                    raise ValueError('Invalid evidence mapping field')
+                out.write('\t'.join(fields) + '\n')
+        with open(path, 'rb') as f:
+            h = hashlib.sha256()
+            for block in iter(lambda: f.read(1024 * 1024), b''):
+                h.update(block)
+            digest = h.hexdigest()
+        manifest['samples'][sample] = dict(file=name, sha256=digest, reads=len(mapping))
+    path = os.path.join(outdir, 'intronic_evidence_manifest.json')
+    with open(path, 'w') as out:
+        json.dump(manifest, out, indent=2)
+        out.write('\n')
+
+
+def persist_override_files(outdir, paths, counts):
+    """Persist already-reconciled streaming overrides for independent P4 jobs."""
+    import hashlib
+    import json
+    manifest = {'version': 1, 'method': 'wta', 'samples': {}}
+    for i, (sample, path) in enumerate(paths.items()):
+        name = f'intronic_read_classes_{i:04d}.tsv.gz'
+        dest = os.path.join(outdir, name)
+        shutil.copyfile(path, dest)
+        h = hashlib.sha256()
+        with open(dest, 'rb') as f:
+            for block in iter(lambda: f.read(1024 * 1024), b''):
+                h.update(block)
+        manifest['samples'][sample] = dict(file=name, sha256=h.hexdigest(), reads=counts.get(sample,0))
+    with open(os.path.join(outdir, 'intronic_evidence_manifest.json'), 'w') as f:
+        json.dump(manifest, f, indent=2)
+        f.write('\n')
+
+
+def load_molecule_candidates(outdir, sample):
+    """Load the complete pinned override table, or None for the default path."""
+    import hashlib
+    import json
+    path = os.path.join(outdir, 'intronic_evidence_manifest.json')
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        manifest = json.load(f)
+    if manifest['version'] != 1 or manifest['method'] != 'wta':
+        raise ValueError('Unsupported intronic evidence manifest')
+    if sample not in manifest['samples']:
+        raise ValueError(f'Required library absent from evidence roster: {sample}')
+    entry = manifest['samples'][sample]
+    path = os.path.join(outdir, entry['file'])
+    with open(path, 'rb') as f:
+        h = hashlib.sha256()
+        for block in iter(lambda: f.read(1024 * 1024), b''):
+            h.update(block)
+        digest = h.hexdigest()
+    if digest != entry['sha256']:
+        raise ValueError(f'Changed evidence source table for {sample}')
+    mapping = {}
+    with _io.smart_open(path) as f:
+        if next(f).rstrip('\n') != 'gene\tmolecule\toriginal_structure\tcandidate_class':
+            raise ValueError('Invalid evidence table header')
+        for line in f:
+            gene, mol, original, candidate = line.rstrip('\n').split('\t')
+            if (gene, mol) in mapping:
+                raise ValueError(f'Duplicate evidence identity for {sample}:{gene}:{mol}')
+            mapping[gene, mol] = (original, candidate)
+    if len(mapping) != entry['reads']:
+        raise ValueError(f'Incomplete evidence identity table for {sample}')
+    return mapping
+
+
+def persist_source_bindings(outdir, samples, labels):
+    """Bind private source names to the original files for independent P4 jobs."""
+    import json
+    path = os.path.join(outdir, 'intronic_evidence_manifest.json')
+    with open(path) as f:
+        manifest = json.load(f)
+    if set(manifest['samples']) != {s[0] for s in samples}:
+        raise ValueError('Complete evidence/source identity coverage differs')
+    manifest['source_bindings'] = {
+        s[0]: dict(library=labels[s[0]], matrix=os.path.realpath(str(s[1])),
+                   ta=os.path.realpath(_io.resolve(str(s[2])))) for s in samples}
+    with open(path + '.tmp', 'w') as f:
+        json.dump(manifest, f, indent=2)
+        f.write('\n')
+    os.replace(path + '.tmp', path)
+
+
+def bound_sample_name(outdir, name, h5ad_path, ta_path):
+    """Resolve the exact physical input, without guessing a duplicate label."""
+    import json
+    path = os.path.join(outdir, 'intronic_evidence_manifest.json')
+    if not os.path.exists(path):
+        return name
+    with open(path) as f:
+        manifest = json.load(f)
+    bindings = manifest.get('source_bindings')
+    if bindings is None:
+        return name  # Explicitly named diagnostic plans predate file bindings.
+    matrix = os.path.realpath(str(h5ad_path))
+    ta = os.path.realpath(_io.resolve(str(ta_path)))
+    matches = [source for source, b in bindings.items()
+               if b['matrix'] == matrix and b['ta'] == ta and
+               (source == name or b['library'] == name)]
+    if len(matches) != 1:
+        raise ValueError(f'Exact original source binding unresolved for {name}: {matrix}')
+    return matches[0]
+
+
 def stage3_rekey_h5ad(sample, h5ad_path, ta_path, kept_struct2exemplar, outdir,
-                      barcode_clusters=None, kept_soft=None, struct2candidate=None):
+                      barcode_clusters=None, kept_soft=None, struct2candidate=None,
+                      molecule_candidates=None, mol2struct_output=None):
     """Re-key one sample's per-read h5ad to final isoform ids via sparse grouping matrix.
     Memory-optimized: builds var->final only for surviving molecules (no full molecule->struct map).
 
@@ -799,6 +1119,7 @@ def stage3_rekey_h5ad(sample, h5ad_path, ta_path, kept_struct2exemplar, outdir,
     import scipy.sparse as sp
     import anndata as ad
     import pandas as pd
+    import contextlib
     # Coerce path-like args to str: callers may pass pathlib.Path (e.g. argparse-resolved or
     # extraction-returned), but the string ops below (ta_path.endswith, basename().split('.h5ad'))
     # require plain strings.
@@ -827,12 +1148,28 @@ def stage3_rekey_h5ad(sample, h5ad_path, ta_path, kept_struct2exemplar, outdir,
 
     # molecule var ('gene:mol') -> {final_id: weight}
     var2final = {}
-    with _io.smart_open(ta_path) as f:
+    seen_candidates = set()
+    with _io.smart_open(ta_path) as f, contextlib.ExitStack() as writers:
+        mol_out = None
+        if mol2struct_output is not None:
+            os.makedirs(os.path.dirname(str(mol2struct_output)), exist_ok=True)
+            mol_out = writers.enter_context(open(str(mol2struct_output) + '.tmp', 'w'))
+            mol_out.write('molecule_id\tgene\tstructure\n')
         for line in f:
             p = line.rstrip("\n").split("\t")
             if len(p) < 5:
                 continue
             key = (p[0], p[2])
+            source = (p[0], p[3])
+            replacement = (molecule_candidates or {}).get(source)
+            if replacement is not None:
+                original, candidate = replacement
+                if original != p[2] or source in seen_candidates:
+                    raise ValueError(f'Evidence re-key identity/key mismatch: {sample}:{source}')
+                seen_candidates.add(source)
+                key = (p[0], candidate)
+            if mol_out is not None and p[2] and 'UNK' not in p[0]:
+                mol_out.write(f'{p[3]}\t{p[0]}\t{key[1]}\n')
             # Translate a folded Tier-1a structure to its library's consensus structure before the
             # lookup. Without this the molecule resolves to nothing and its reads are lost.
             if struct2candidate:
@@ -845,6 +1182,10 @@ def stage3_rekey_h5ad(sample, h5ad_path, ta_path, kept_struct2exemplar, outdir,
                 ex = s2e.get(key)
                 if ex is not None:
                     var2final[f"{p[0]}:{p[3]}"] = {ex: 1.0}
+    if molecule_candidates and seen_candidates != set(molecule_candidates):
+        raise ValueError(f'Required evidence reads unresolved during re-key of {sample}; no subset accepted')
+    if mol2struct_output is not None:
+        os.replace(str(mol2struct_output) + '.tmp', str(mol2struct_output))
     del s2e, s2soft
     a = ad.read_h5ad(h5ad_path)
     final_ids = sorted({fid for wm in var2final.values() for fid in wm})
@@ -942,7 +1283,9 @@ def stage3_rekey_h5ad(sample, h5ad_path, ta_path, kept_struct2exemplar, outdir,
 def run_pipeline(samples, outdir, nproc=8, min_total=3, ref=DEFAULT_REF, write_h5ad=True,
                  genome_fasta=None, ref_gff=None, enst_cache=None, barcode_clusters=None,
                  collapse_method='wta', sample_collapse=False, tier1_dir=None,
-                 reuse_tier1=False, log=print):
+                 reuse_tier1=False, log=print, gene_evidence=None, molecule_candidates=None,
+                 protect_intronic_evidence=False, prepared_tier1_paths=None,
+                 source_registry=None, reference_models=None):
     """End-to-end. samples: list of (name, h5ad_path, transcript_associations_path[, raw_gff_path]).
     If genome_fasta is given AND samples include a raw_gff_path, protein prediction is run
     (final-isoform records -> existing gff_translate -> protein_summary.txt + *sequences.fasta).
@@ -951,13 +1294,39 @@ def run_pipeline(samples, outdir, nproc=8, min_total=3, ref=DEFAULT_REF, write_h
     barcode_clusters: optional {sample_name: {barcode: cluster}} so each re-keyed -isoform.h5ad
     carries obs['cluster'] (restricted to annotated cells) for downstream pseudobulk / PSI."""
     os.makedirs(outdir, exist_ok=True)
+    streamed_context = None
+    source_labels = {s[0]: s[0] for s in samples}
+    if protect_intronic_evidence:
+        from .source_evidence import distinct_source_samples
+        samples, source_labels = distinct_source_samples(samples)
+        if barcode_clusters is not None:
+            barcode_clusters = {s[0]: barcode_clusters.get(source_labels[s[0]]) for s in samples}
+        if gene_evidence is not None or molecule_candidates is not None:
+            raise ValueError('Use either source preparation or a verified evidence plan, not both')
+        if collapse_method != 'wta' or sample_collapse or reuse_tier1:
+            raise ValueError('Intronic evidence requires the selected fresh Tier-1 junction-core WTA baseline')
+        from .stream_prepare import prepare_streaming
+        from .splice_evidence import Policy
+        streamed_context, source_registry = prepare_streaming(
+            samples, ref, enst_cache, ref_gff, os.path.join(outdir, 'intronic_source_evidence'),
+            Policy(3, 100, 3), nproc=nproc, log=log)
+        gene_evidence = streamed_context['gene_evidence']
+        prepared_tier1_paths = streamed_context['evidence_sample_paths']
+        reference_models = streamed_context['reference_models']
+    evidence_manifest = os.path.join(outdir, 'intronic_evidence_manifest.json')
+    if gene_evidence is None and os.path.exists(evidence_manifest):
+        raise ValueError('Use a separate output directory for an evidence-disabled collapse')
     sample_ta = [(s[0], s[2]) for s in samples]
     sample_gff_paths = {s[0]: s[3] for s in samples if len(s) > 3}
     gene_results, t1, max_rss, nparts = stage1_collapse(sample_ta, nproc=nproc, ref=ref,
                                                        sample_collapse=sample_collapse,
                                                        tier1_dir=tier1_dir, reuse_tier1=reuse_tier1,
                                                         enst_cache=enst_cache,
-                                                        collapse_method=collapse_method)
+                                                        collapse_method=collapse_method,
+                                                        gene_evidence=gene_evidence,
+                                                        molecule_candidates=molecule_candidates,
+                                                        prepared_tier1_paths=prepared_tier1_paths,
+                                                        source_registry=source_registry)
     n_final = sum(len(r['exemplar_total']) for r in gene_results.values())
     log(f"[stage1] genes={len(gene_results):,} final={n_final:,} {t1:.1f}s maxRSS={max_rss:.0f}MB parts={nparts}")
 
@@ -982,6 +1351,11 @@ def run_pipeline(samples, outdir, nproc=8, min_total=3, ref=DEFAULT_REF, write_h
     catpath = _io.compress(catpath, log=log)
     mappath = _io.compress(mappath, log=log)
     log(f"[stage2] wrote {catpath} and {mappath}")
+    if gene_evidence is not None and molecule_candidates is not None:
+        persist_molecule_candidates(outdir, molecule_candidates)
+    if streamed_context is not None:
+        persist_override_files(outdir, streamed_context['override_paths'], streamed_context['override_counts'])
+        persist_source_bindings(outdir, samples, source_labels)
 
     # Persist the EM soft-weight map so a SEPARATE per-sample re-key job (4-phase cluster mode) can
     # reproduce the fractional EM allocation -- otherwise these weights live only in this process and
@@ -1002,12 +1376,27 @@ def run_pipeline(samples, outdir, nproc=8, min_total=3, ref=DEFAULT_REF, write_h
         log(f"[stage2] wrote EM soft map {softpath} ({sum(len(v) for v in kept_soft.values()):,} child structures)")
 
     # PROTEIN PREDICTION: combined.gff for final isoforms -> existing gff_translate -> protein_summary.txt
+    if gene_evidence is not None:
+        coverage_path = os.path.join(outdir, 'isoform_retention_evidence.tsv')
+        with open(coverage_path, 'w') as out:
+            out.write('gene\tfinal_isoform_id\tselected_coverage_start\tselected_coverage_end\n')
+            for gene, result in gene_results.items():
+                survivors = set(kept.get(gene, {}).values())
+                for exemplar, coverage in result.get('exemplar_retention_coverage', {}).items():
+                    if exemplar not in survivors:continue
+                    for start,end in coverage:
+                        out.write(f'{gene}\t{exemplar}\t{start}\t{end}\n')
+        _io.compress(coverage_path, log=log)
     protein = None
     if genome_fasta and sample_gff_paths:
         try:
             protein = stage_protein(gene_results, kept, sample_gff_paths, outdir,
-                                    genome_fasta, ref_gff=ref_gff, log=log)
+                                    genome_fasta, ref_gff=ref_gff, log=log,
+                                    canonical_transcript_ids=(gene_evidence is not None or source_registry is not None),
+                                    reference_models=reference_models)
         except Exception as e:
+            if gene_evidence is not None or source_registry is not None:
+                raise
             log(f"[protein] FAILED ({type(e).__name__}: {e}); continuing without protein prediction")
 
     h5ad_results = []
@@ -1017,6 +1406,10 @@ def run_pipeline(samples, outdir, nproc=8, min_total=3, ref=DEFAULT_REF, write_h
             bc = (barcode_clusters or {}).get(name)
             r = stage3_rekey_h5ad(name, h5, ta, kept, outdir=None, barcode_clusters=bc,
                                   struct2candidate=load_struct2candidate(tier1_dir, name),
+                                  molecule_candidates=(load_molecule_candidates(outdir,name) if streamed_context is not None
+                                                       else (molecule_candidates or {}).get(name)),
+                                  mol2struct_output=(os.path.join(outdir, 'tier1', name + '.mol2struct.tsv')
+                                                     if streamed_context is not None else None),
                                   kept_soft=(kept_soft if collapse_method == 'em' else None))
             raw_reads, final_reads = r[2], r[3]
             kept_frac = final_reads / raw_reads if raw_reads else 0.0
@@ -1129,6 +1522,7 @@ def rekey_one_sample(name, h5ad_path, ta_path, outdir, barcode_clusters=None,
     and splits each molecule fractionally (identical to the in-process EM re-key). If 'em' is asked
     but no soft map exists on disk, it falls back to WTA (and warns) rather than failing."""
     outdir = str(outdir); h5ad_path = str(h5ad_path); ta_path = str(ta_path)
+    name = bound_sample_name(outdir, name, h5ad_path, ta_path)
     if write_dir is not None:
         write_dir = str(write_dir)
     kept = load_struct2exemplar(outdir)
@@ -1143,6 +1537,9 @@ def rekey_one_sample(name, h5ad_path, ta_path, outdir, barcode_clusters=None,
         log(f"[stage3:{name}] consensus map: {len(s2c):,} folded structures translated")
     r = stage3_rekey_h5ad(name, h5ad_path, ta_path, kept, outdir=write_dir,
                           struct2candidate=s2c,
+                          molecule_candidates=load_molecule_candidates(outdir, name),
+                          mol2struct_output=(os.path.join(outdir, 'tier1', name + '.mol2struct.tsv')
+                                             if os.path.exists(os.path.join(outdir, 'intronic_evidence_manifest.json')) else None),
                           barcode_clusters=barcode_clusters, kept_soft=kept_soft)
     raw_reads, final_reads = r[2], r[3]
     kept_frac = final_reads / raw_reads if raw_reads else 0.0

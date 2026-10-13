@@ -333,7 +333,9 @@ def collapse_gene(struct_reads: Dict[str, int], tok: Dict[str, tuple],
 
 def collapse_gene_jc(struct_reads: Dict[str, int], tok: Dict[str, tuple],
                      core: Dict[str, tuple], flen: Dict[str, int],
-                     min_reads: int = DEFAULT_MIN_READS, enst: Dict[str, str] = None):
+                     min_reads: int = DEFAULT_MIN_READS, enst: Dict[str, str] = None,
+                     edge_compatible=None, reference_evidence_cores=None, native_keys=None,
+                     preferred_reference_targets=None, reference_targets_only=False):
     """Junction-core winner-takes-all collapse (terminal-extent-insensitive).
 
     Identity and containment are decided on the JUNCTION CORE ``core[s]``
@@ -356,8 +358,31 @@ def collapse_gene_jc(struct_reads: Dict[str, int], tok: Dict[str, tuple],
     Returns the same dict shape as :func:`collapse_gene`. Invariants are checked on
     ``core`` (the key the fold edges are defined over), not the full tokens.
     """
+    if reference_evidence_cores and (edge_compatible is None or
+            not set(reference_evidence_cores).issubset(enst or {})):
+        raise ValueError('Recovered reference views require known identities and an evidence guard')
+    if native_keys is not None and set(native_keys)!=set(core):
+        raise ValueError('Every source/reference key requires its complete native identity')
+    if preferred_reference_targets is not None and (
+            edge_compatible is None or
+            not set(preferred_reference_targets).issubset(struct_reads) or
+            not set(preferred_reference_targets.values()).issubset(enst or {})):
+        raise ValueError('Native reference preferences require source identities and an evidence guard')
+    if reference_targets_only and (edge_compatible is not None or preferred_reference_targets):
+        raise ValueError('Native reference replay must use the original unguarded method')
+
+    def native_key(s):
+        return (native_keys or {}).get(s,s)
+
+    def can_fold(child, parent):
+        parent_cores=[core[parent]]+list((reference_evidence_cores or {}).get(parent, ()))
+        return (any(is_contiguous_subsequence(core[child], p) for p in parent_cores) and
+                (edge_compatible is None or edge_compatible(child, parent)))
+
     obs_structs = [s for s, n in struct_reads.items() if n >= min_reads]
     if not obs_structs:
+        if reference_targets_only:
+            return dict(source_to_reference={}, enst={})
         return dict(long_reps=[], other_reps=[], assignment={}, blocks={}, score={},
                     structs=[], enst={})
     enst = enst or {}
@@ -375,7 +400,8 @@ def collapse_gene_jc(struct_reads: Dict[str, int], tok: Dict[str, tuple],
             continue
         for os_ in obs_structs:
             oc = core[os_]
-            if ec == oc or is_contiguous_subsequence(oc, ec) or is_contiguous_subsequence(ec, oc):
+            if ((ec == oc and (edge_compatible is None or edge_compatible(os_, es)))
+                    or can_fold(os_, es) or can_fold(es, os_)):
                 kept_enst[es] = eid
                 break
 
@@ -391,20 +417,23 @@ def collapse_gene_jc(struct_reads: Dict[str, int], tok: Dict[str, tuple],
     # proper substrings, so two references with the SAME region structure are NEVER merged -- both survive.
     # Process longest-core first, so a container is a decided survivor before any shorter ENST tests it
     # (ENST parents are therefore always surviving reps -- no chained ENST->ENST->ENST parents).
-    enst_ranked = sorted(enst_set, key=lambda e: (-len(core[e]), -flen.get(e, 0), e))
+    enst_ranked = sorted(enst_set, key=lambda e: (-len(core[e]), -flen.get(e, 0), native_key(e)))
     surviving_enst: List[str] = []
     for e in enst_ranked:
         ce = core[e]
         containers = [c for c in surviving_enst
-                      if len(core[c]) > len(ce) and is_contiguous_subsequence(ce, core[c])]
+                      if len(core[c]) > len(ce) and can_fold(e, c)]
         if containers:
-            assignment[e] = max(containers, key=lambda c: (flen.get(c, 0), c))
+            assignment[e] = max(containers, key=lambda c: (flen.get(c, 0), native_key(c)))
         else:
             surviving_enst.append(e)
 
     reps: List[str] = list(surviving_enst)                 # every surviving ENST is a representative
     # ENST fold targets, longest full-length first (the "longest nucleotides" tiebreak; ENST-only).
-    enst_by_len = sorted(surviving_enst, key=lambda s: (-flen.get(s, 0), s))
+    enst_by_len = sorted(surviving_enst, key=lambda s: (-flen.get(s, 0), native_key(s)))
+    exact_reference_by_native = {native_key(e): e for e in enst_ids}
+    if native_keys is not None and len(exact_reference_by_native) != len(enst_ids):
+        raise ValueError('An original reference cache key has multiple reference identities')
 
     # ENST-FIRST fold: a non-ENST whose core is a contiguous subsequence of (or equals) a kept ENST core
     # folds into the longest-flen such ENST. This is what lets a novel that is LONGER in full structure
@@ -415,14 +444,52 @@ def collapse_gene_jc(struct_reads: Dict[str, int], tok: Dict[str, tuple],
             continue
         cs = core[s]
         target = None
-        for es in enst_by_len:
-            if is_contiguous_subsequence(cs, core[es]):
-                target = es
-                break
+        # A reference protected by other reads may now survive a native
+        # reference-to-reference fold. Its longer full representation must
+        # not redirect this source away from its still-compatible native
+        # reference. All selected evidence and reciprocal checks still apply.
+        preferred = (preferred_reference_targets or {}).get(s)
+        if preferred in surviving_enst and can_fold(s, preferred):
+            target = preferred
+        # Originally a source whose cache key WAS an ENST was already known,
+        # and kept that exact identity (or its native proper-reference parent).
+        # Namespace separation must preserve this priority, while still
+        # testing its physical evidence rather than accepting a known self
+        # match blindly. It must not turn the source into a generic fragment.
+        if native_keys is not None and target is None:
+            exact = exact_reference_by_native.get(native_key(s))
+            if exact is not None:
+                # A protected IR reference may now survive a proper fold
+                # that other fragments still reasonably follow. Preserve
+                # that native proper-container choice for each compatible
+                # source; do not send every ambiguous fragment to IR merely
+                # because another read protects the shorter reference.
+                native_containers = [e for e in surviving_enst
+                                     if len(core[e]) > len(core[exact])
+                                     and is_contiguous_subsequence(core[exact], core[e])
+                                     and can_fold(s, e)]
+                original_target = (max(native_containers,
+                                       key=lambda e: (flen.get(e, 0), native_key(e)))
+                                   if native_containers else assignment.get(exact, exact))
+                if original_target in surviving_enst and can_fold(s, original_target):
+                    target = original_target
+        if target is None:
+            for es in enst_by_len:
+                if can_fold(s, es):
+                    target = es
+                    break
         if target is not None:
             assignment[s] = target
         else:
             remaining.append(s)
+
+    if reference_targets_only:
+        # The evidence path needs original known choices, not a second
+        # novel-to-novel collapse or catalog. Reuse the native reference
+        # selection above, including exact-known and proper-container rules.
+        return dict(source_to_reference={s: assignment.get(s, s)
+                    for s in obs_structs if assignment.get(s, s) in enst_set},
+                    enst=enst_ids)
 
     # Remaining novels collapse among themselves. Process fuller-core first; among EQUAL cores the
     # highest-read structure is processed first and becomes the representative (novel winner = read count).
@@ -432,7 +499,7 @@ def collapse_gene_jc(struct_reads: Dict[str, int], tok: Dict[str, tuple],
         cs = core[s]
         parent = None
         for r in novel_reps:
-            if is_contiguous_subsequence(cs, core[r]):
+            if can_fold(s, r):
                 parent = r
                 break
         if parent is not None:
@@ -443,7 +510,12 @@ def collapse_gene_jc(struct_reads: Dict[str, int], tok: Dict[str, tuple],
 
     # ---- catalog metadata: block count (full structure), score, long/other bin ----
     blocks = {s: exon_blocks(tok[s]) for s in structs}
-    obs_blocks = [blocks[s] for s in structs if s not in enst_set]
+    native_reference_keys={native_key(s) for s in enst}
+    # Namespace separation must not turn a valid exact-reference source into
+    # a novel input when computing the existing observed-block maximum.
+    exact_known_sources={s for s in obs_structs if native_key(s) in native_reference_keys
+                         and assignment.get(s) in enst_set} if native_keys is not None else set()
+    obs_blocks = [blocks[s] for s in structs if s not in enst_set and s not in exact_known_sources]
     maxb = max(obs_blocks, default=0) or (max(blocks.values()) if blocks else 1) or 1
     score = {}
     for s in structs:
@@ -476,7 +548,11 @@ def collapse_gene_jc(struct_reads: Dict[str, int], tok: Dict[str, tuple],
         structs=structs,
         enst=enst_ids,
     )
-    _check_invariants(res, struct_reads, core)
+    _check_invariants(res, struct_reads, core, reference_evidence_cores=reference_evidence_cores)
+    if edge_compatible is not None:
+        for child, parent in assignment.items():
+            if not edge_compatible(child, parent):
+                raise ValueError('Collapse edge contradicts protected intronic evidence')
     return res
 
 
@@ -582,7 +658,7 @@ def collapse_gene_em(struct_reads: Dict[str, int], tok: Dict[str, tuple],
     return res
 
 
-def _check_invariants(res, struct_reads, tok):
+def _check_invariants(res, struct_reads, tok, *, reference_evidence_cores=None):
     structs = res['structs']
     reps = set(res['long_reps']) | set(res['other_reps'])
     assignment = res['assignment']
@@ -595,7 +671,8 @@ def _check_invariants(res, struct_reads, tok):
     for c, p in assignment.items():
         assert c != p, "self-parent"
         # 3. perfect-substring: edge is a true contiguous subsequence
-        assert is_contiguous_subsequence(tok[c], tok[p]), f"non-substring collapse {c[:30]}->{p[:30]}"
+        parent_cores=[tok[p]]+list((reference_evidence_cores or {}).get(p, ()))
+        assert any(is_contiguous_subsequence(tok[c], t) for t in parent_cores), f"non-substring collapse {c[:30]}->{p[:30]}"
     # 4. reps don't collapse into each other
     for r in reps:
         assert r not in assignment, "representative has a parent"

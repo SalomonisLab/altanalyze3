@@ -28,7 +28,7 @@ from .. import io_utils as _io
 import time
 
 
-def collapse_sample(sample_name, ta_path, out_dir, log=print):
+def collapse_sample(sample_name, ta_path, out_dir, log=print, molecule_candidates=None):
     """Tier 1: reduce one sample's per-read TA to distinct structures + counts + rep molecule.
     Returns (exemplars_path, mol2struct_path)."""
     t = time.time()
@@ -41,6 +41,7 @@ def collapse_sample(sample_name, ta_path, out_dir, log=print):
     gene_struct_mol = collections.defaultdict(dict)
     gene_strand = {}
     n_reads = 0
+    seen_candidates = set()
     with _io.smart_open(ta_path) as f, open(mol2_path, 'w') as mol_out:
         mol_out.write("molecule_id\tgene\tstructure\n")
         for line in f:
@@ -50,6 +51,15 @@ def collapse_sample(sample_name, ta_path, out_dir, log=print):
             gene, strand, struct, mol = p[0], p[1], p[2], p[3]
             if not struct or 'UNK' in gene:
                 continue
+            if molecule_candidates:
+                key = (gene, mol)
+                replacement = molecule_candidates.get(key)
+                if replacement is not None:
+                    original, candidate = replacement
+                    if original != struct or key in seen_candidates:
+                        raise ValueError(f'Collapse evidence source identity/key mismatch: {sample_name}:{gene}:{mol}')
+                    seen_candidates.add(key)
+                    struct = candidate
             gene_struct[gene][struct] += 1
             d = gene_struct_mol[gene]
             if struct not in d:
@@ -57,6 +67,10 @@ def collapse_sample(sample_name, ta_path, out_dir, log=print):
             gene_strand[gene] = strand
             mol_out.write(f"{mol}\t{gene}\t{struct}\n")
             n_reads += 1
+
+    if molecule_candidates and seen_candidates != set(molecule_candidates):
+        missing = set(molecule_candidates) - seen_candidates
+        raise ValueError(f'{len(missing)} required evidence reads did not resolve in {sample_name}; no subset accepted')
 
     n_struct = 0
     with open(exemplars_path, 'w') as o:

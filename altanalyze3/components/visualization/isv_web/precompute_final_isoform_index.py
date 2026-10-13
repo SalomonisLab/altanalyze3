@@ -31,6 +31,52 @@ def mol2final_db_path(out_dir, library):
     return os.path.join(out_dir, f"{library}.mol2final.db")
 
 
+def reads_final_db_path(out_dir, library):
+    return os.path.join(out_dir, f"{library}.reads_final.db")
+
+
+def build_reads_final(reads_db, m2f_db, out_db, workdir=None, log=print):
+    """<library>.reads_final.db: one row per (gene, molecule, cell type) with its read count and FINAL isoform, in a
+    WITHOUT ROWID table keyed (gene, mol, ct), so one gene's reads and finals come back in one contiguous range read.
+    final is NULL where <library>.mol2final.db has no entry (the query then keeps the read under its own id).
+    workdir: a job-private scratch directory (LSF $TMPDIR); inputs are copied there because the join probes m2f once
+    per read, which is slow on network storage. Nothing is deleted here; the scheduler clears its scratch."""
+    import shutil
+    if (os.path.exists(out_db) and os.path.getmtime(out_db) >= os.path.getmtime(reads_db)
+            and os.path.getmtime(out_db) >= os.path.getmtime(m2f_db)):
+        log(f"[reads_final] {os.path.basename(out_db)} up to date; skip"); return -1
+    t0 = time.time()
+    src_r, src_f, tmp = reads_db, m2f_db, out_db + ".tmp"
+    if workdir:
+        src_r = os.path.join(workdir, os.path.basename(reads_db)); shutil.copyfile(reads_db, src_r)
+        src_f = os.path.join(workdir, os.path.basename(m2f_db)); shutil.copyfile(m2f_db, src_f)
+        tmp = os.path.join(workdir, os.path.basename(out_db) + ".tmp")
+        log(f"[reads_final] copied inputs to {workdir} ({time.time() - t0:.0f}s)")
+    for p_ in {tmp, out_db + ".tmp"}:
+        if os.path.exists(p_):
+            raise FileExistsError(f"[reads_final] leftover temporary file {p_}; inspect it before rebuilding")
+    con = sqlite3.connect(tmp); cur = con.cursor()
+    for pragma in ("journal_mode=OFF", "synchronous=OFF", "temp_store=MEMORY", "cache_size=-4000000"):
+        cur.execute(f"PRAGMA {pragma}")
+    cur.execute("ATTACH DATABASE ? AS r", (src_r,)); cur.execute("ATTACH DATABASE ? AS f", (src_f,))
+    cur.execute("CREATE TABLE rf (gene TEXT NOT NULL, mol TEXT NOT NULL, ct TEXT NOT NULL, cnt REAL, final TEXT, "
+                "PRIMARY KEY (gene, mol, ct)) WITHOUT ROWID")
+    cur.execute("INSERT INTO rf SELECT x.gene, x.mol, x.ct, SUM(x.cnt), y.final FROM r.mol x "
+                "LEFT JOIN f.m2f y ON y.mol = x.mol GROUP BY x.gene, x.mol, x.ct ORDER BY x.gene, x.mol, x.ct")
+    n_src, s_src = cur.execute("SELECT COUNT(*), SUM(cnt) FROM (SELECT gene, mol, ct, SUM(cnt) AS cnt FROM r.mol "
+                               "GROUP BY gene, mol, ct)").fetchone()
+    n_out, s_out, n_fin = cur.execute("SELECT COUNT(*), SUM(cnt), COUNT(final) FROM rf").fetchone()
+    con.commit(); cur.execute("DETACH DATABASE r"); cur.execute("DETACH DATABASE f"); con.close()
+    if n_out != n_src or abs((s_out or 0) - (s_src or 0)) > 1e-6 * max(1.0, s_src or 0):
+        raise AssertionError(f"[reads_final] {os.path.basename(out_db)}: rows {n_out} vs {n_src}, reads {s_out} vs {s_src}")
+    if workdir:
+        shutil.copyfile(tmp, out_db + ".tmp")
+    os.replace(out_db + ".tmp", out_db)
+    log(f"[reads_final] {os.path.basename(out_db)}: {n_out:,} rows, {s_out:,.0f} reads, final resolved {n_fin:,} "
+        f"({100 * n_fin / max(1, n_out):.1f}%) ({time.time() - t0:.0f}s)")
+    return n_out
+
+
 def _stream_tsv(path, ncols):
     with open(path) as f:
         next(f, None)                                            # header

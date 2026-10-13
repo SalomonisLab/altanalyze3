@@ -70,6 +70,18 @@ def _load_psi_matrix():
     return pd.read_csv(src, sep='\t', index_col=0)
 
 
+def _require_cohort_cpm(a, path, filtered):
+    """Refuse a CPM pseudobulk that was not normalized once per pseudobulk over ALL features (the removed
+    per-sample/per-chunk normalization summed to many millions). Full matrix: every pseudobulk with reads
+    sums to 1e6; -filtered matrix: no pseudobulk exceeds 1e6."""
+    rs = np.asarray(a.X.sum(axis=1)).ravel()
+    bad = (rs > 1e6 + 1.0) if filtered else ((rs > 0) & (np.abs(rs - 1e6) > 1.0))
+    if bad.any():
+        raise ValueError(f"{path}: {int(bad.sum())} of {len(rs)} pseudobulks are not cohort CPM (max sum "
+                         f"{rs.max():,.0f}); rebuild it from the counts h5ad with "
+                         f"isoform_matrix.write_cpm_and_ratio_h5ads before running differentials")
+
+
 def _load_isoform_filtered_matrix(kind):
     """Load the filtered isoform pseudobulk (features x cluster-sample) for the differentials.
 
@@ -88,7 +100,18 @@ def _load_isoform_filtered_matrix(kind):
             f"(No .txt fallback -- a stale .txt would silently analyze the wrong data.)")
     import anndata as ad
     a = ad.read_h5ad(h5ad_path)
-    X = a.X.toarray() if hasattr(a.X, 'toarray') else np.asarray(a.X)
+    if kind == 'cpm':
+        _require_cohort_cpm(a, h5ad_path, filtered=True)
+    if kind == 'ratio' and 'ratio_gene_expressed' not in a.obsm:
+        raise ValueError(f"{h5ad_path}: no obsm['ratio_gene_expressed'] -- this ratio matrix predates the cohort "
+                         f"ratio; rebuild it with isoform_matrix.write_cpm_and_ratio_h5ads")
+    if kind == 'ratio':
+        # stored ratio where the isoform has reads; 0 where the gene is expressed (gene CPM >= 1) and the isoform
+        # has no reads; NaN where the gene is not expressed (isoform_matrix.ratio_dense, the single reader)
+        from .isoform_matrix import ratio_dense
+        X = ratio_dense(a)
+    else:
+        X = a.X.toarray() if hasattr(a.X, 'toarray') else np.asarray(a.X)
     # obs = cluster-sample (rows of X), var = features (cols) -> features x cluster-sample = X.T
     return pd.DataFrame(X.T, index=list(a.var_names), columns=list(a.obs_names))
 
@@ -109,6 +132,7 @@ def _load_gene_cpm_matrix():
             f"(isoform_automate.combine_genes, compute_cpm) before gene differentials.")
     import anndata as ad
     a = ad.read_h5ad(h5ad_path)
+    _require_cohort_cpm(a, h5ad_path, filtered=False)
     X = a.X.toarray() if hasattr(a.X, 'toarray') else np.asarray(a.X)
     # obs = cluster-sample (rows), var = genes (cols) -> genes x cluster-sample = X.T
     return pd.DataFrame(X.T, index=list(a.var_names), columns=list(a.obs_names))

@@ -672,20 +672,21 @@ def concatenate_h5ad_and_compute_pseudobulks(sample_files,collection_name = ''):
     combined_pseudo_pdf.to_csv(pseudo_counts, sep='\t')
 
 def pseudo_cluster_counts_optimized(sample, combined_adata, cell_threshold=0, count_threshold=0, compute_cpm=False, cpm_threshold=1, status=True):
+    """Per-sample COUNT pseudobulk: counts summed over the cells of each cluster, written to <sample>.txt
+    (features x clusters), processed in 1,000-feature chunks to bound memory.
+
+    CPM and isoform ratio are NOT computed per sample. They are computed once on the cohort counts by
+    write_cpm_and_ratio_h5ads (CPM = counts / pseudobulk total over ALL features * 1e6). compute_cpm=True
+    is refused so the removed per-sample normalization cannot be called by mistake."""
+    if compute_cpm:
+        raise ValueError("per-sample CPM/ratio was removed: CPM and ratio are computed once from the cohort "
+                         "counts (isoform_matrix.write_cpm_and_ratio_h5ads)")
     output_file = f"{sample}.txt"
     cluster_labels = combined_adata.obs['cluster'].astype(str)
     cluster_order = sorted(cluster_labels.unique().tolist())
 
     with open(output_file, 'w') as f_out:
         f_out.write('Feature\t' + '\t'.join(cluster_order) + '\n')
-
-    if compute_cpm:
-        cpm_output_file = f"{sample}_cpm.txt"
-        isoform_ratio_file = f"{sample}_ratio.txt"
-        with open(cpm_output_file, 'w') as cpm_out, open(isoform_ratio_file, 'w') as isoform_out:
-            header = 'Feature\t' + '\t'.join(cluster_order) + '\n'
-            cpm_out.write(header)
-            isoform_out.write(header)
 
     chunk_size = 1000
     num_chunks = int(np.ceil(combined_adata.shape[1] / chunk_size))
@@ -708,79 +709,11 @@ def pseudo_cluster_counts_optimized(sample, combined_adata, cell_threshold=0, co
         result.insert(0, "Feature", result.index)
         result.to_csv(output_file, sep="\t", index=False, mode="a", header=False)
 
-        if compute_cpm:
-            cpm = summed_groups.div(summed_groups.sum(axis=1), axis=0) * 1e6
-            cpm_values = cpm.T.reindex(columns=cluster_order).fillna(0)
-            cpm_values.insert(0, "Feature", cpm_values.index)
-            cpm_values.to_csv(cpm_output_file, sep="\t", index=False, mode="a", header=False)
-
-            isoform_cols = summed_groups.columns
-            gene_ids = [col.split(":")[0] for col in isoform_cols]
-
-            # CPM threshold mask (isoform level)
-            mask = cpm >= cpm_threshold
-
-            # Gene-level raw counts
-            gene_counts = summed_groups.T.groupby(lambda x: x.split(":")[0]).sum().T
-
-            
-            gene_counts_broadcasted = pd.DataFrame(
-                [[gene_counts.loc[idx, gid] if gid in gene_counts.columns else np.nan for gid in gene_ids] for idx in summed_groups.index],
-                index=summed_groups.index,
-                columns=isoform_cols
-            )
-
-            # Replace 0 with np.nan in denominator
-            safe_denominator = gene_counts_broadcasted.replace(0, np.nan)
-
-            # Calculate isoform-to-gene ratio
-            ratios = summed_groups / safe_denominator
-            ratios = ratios.where(mask)
-
-            # Optional diagnostics
-            if status:
-                for gid in set(gene_ids):
-                    if gene_ids.count(gid) > 1 and gid in gene_counts.columns:
-                        isoform_subset = [col for col in isoform_cols if col.startswith(gid + ":")]
-                        print(f"\n🔎 QC for gene: {gid}")
-                        print("\nRaw counts:\n", summed_groups[isoform_subset])
-                        print("\nCPM values:\n", cpm[isoform_subset])
-                        print("\nCPM threshold mask:\n", mask[isoform_subset])
-                        print("\nGene counts:\n", gene_counts[gid])
-                        print("\nBroadcasted gene counts:\n", gene_counts_broadcasted[isoform_subset])
-                        print("\nCalculated ratios:\n", ratios[isoform_subset])
-                        break
-
-            ratios = ratios.T.reindex(columns=cluster_order)
-            ratios.insert(0, "Feature", ratios.index)
-            ratios.to_csv(isoform_ratio_file, sep="\t", index=False, mode="a", header=False)
-
-            #print(f"Final isoform_ratios non-zero entries: {(ratios.iloc[:, 1:] > 0).sum().sum()}")
-            del cpm
-            del cpm_values
-            del isoform_cols
-            del gene_ids
-            del mask
-            del gene_counts
-            del gene_counts_broadcasted
-            del safe_denominator
-            del ratios
-
-        del chunk_data
-        del chunk_var_names
-        del chunk_df
-        del grouped
-        del valid_groups
-        del summed_groups
-        del result
+        del chunk_data, chunk_var_names, chunk_df, grouped, valid_groups, summed_groups, result
         _trim_memory()
 
-    print(f"Done writing {output_file}" + (f", {cpm_output_file}, {isoform_ratio_file}" if compute_cpm else ''))
-
-    if compute_cpm:
-        return output_file, cpm_output_file, isoform_ratio_file
-    else:
-        return output_file
+    print(f"Done writing {output_file}")
+    return output_file
 
 def just_return_dense_count_files(sample, compute_cpm=False):
     # Bypass the above function to regenerate the counts and CPM files
@@ -788,13 +721,10 @@ def just_return_dense_count_files(sample, compute_cpm=False):
     # The per-sample pseudobulk exports are gzipped after they are written (io_utils.compress), so
     # the file on disk is <sample>.txt OR <sample>.txt.gz. Return whichever exists; naming only the
     # uncompressed form made the cross-sample concat fail on a completed run.
-    output_file = _io.resolve(f"{sample}.txt")
     if compute_cpm:
-        cpm_output_file = _io.resolve(f"{sample}_cpm.txt")
-        isoform_ratio_file = _io.resolve(f"{sample}_ratio.txt")
-        return output_file, cpm_output_file, isoform_ratio_file
-    else:
-        return output_file
+        raise ValueError("per-sample CPM/ratio files are no longer produced or read; CPM and ratio are computed "
+                         "once from the cohort counts (isoform_matrix.write_cpm_and_ratio_h5ads)")
+    return _io.resolve(f"{sample}.txt")
 
 def _sample_stem(sample_file):
     base = os.path.basename(sample_file)
@@ -1090,13 +1020,13 @@ def _keep_mask_from_sparse(Xvar, columns, min_group_size):
 
 
 def write_pseudobulk_h5ad_from_sparse(Xvar, features, columns, full_path, filtered_path=None,
-                                      cell_type_order=None, min_group_size=3):
+                                      cell_type_order=None, min_group_size=3, obsm=None, uns=None):
     """Sparse twin of write_pseudobulk_h5ad_from_memmap: same obs (cluster_sample), var (feature),
     X (CSR, obs x var, float32), gzip, and the same filtered subset + column reorder."""
     X = Xvar.T.tocsr()
     obs = pd.DataFrame(index=pd.Index(list(columns), name='cluster_sample'))
     var = pd.DataFrame(index=pd.Index(list(features), name='feature'))
-    full = ad.AnnData(X=X, obs=obs, var=var)
+    full = ad.AnnData(X=X, obs=obs, var=var, obsm=obsm, uns=uns)
     full.write_h5ad(full_path, compression='gzip')
     if filtered_path is not None:
         keep = _keep_mask_from_sparse(Xvar, columns, min_group_size)
@@ -1107,8 +1037,120 @@ def write_pseudobulk_h5ad_from_sparse(Xvar, features, columns, full_path, filter
     del full, X
 
 
+def cpm_and_ratio_from_counts(X, features, cpm_threshold=1, with_ratio=True):
+    """Cohort pseudobulk CPM and isoform ratio from summed counts, in one pass over the stored counts.
+
+    X        : pseudobulks x features (CSR) of counts summed over the cells of one cell state in one sample.
+    features : feature ids; the gene is the text before the first ':' (a gene id maps to itself).
+    CPM   = counts / that pseudobulk's total over ALL features * 1e6 (row sums, then one row scaling).
+    ratio = isoform counts / the gene's counts in the same pseudobulk, defined where the gene has CPM >=
+            cpm_threshold. Only isoforms WITH reads are stored (never more entries than the counts); the
+            per-pseudobulk set of expressed genes is returned as a small mask so readers can tell ratio 0
+            (gene expressed, isoform without reads) from missing (gene not expressed). Read it with ratio_dense().
+    Returns (cpm CSR float32, ratio CSR float32, expressed CSR uint8 [pseudobulks x genes], gene ids);
+    with_ratio=False (gene collection: a gene / gene ratio is always 1) returns (cpm, None, None, None).
+    """
+    from scipy import sparse
+    X = sparse.csr_matrix(X, dtype=np.float64)
+    X.sum_duplicates()
+    X.sort_indices()
+    if not np.all(np.isfinite(X.data)):
+        raise ValueError(f"counts contain {int((~np.isfinite(X.data)).sum())} non-finite values; CPM not computed")
+    if (X.data < 0).any():
+        raise ValueError(f"counts contain {int((X.data < 0).sum())} negative values; CPM not computed")
+    n_pb, n_f = X.shape
+    totals = np.asarray(X.sum(axis=1)).ravel()
+    scale = np.divide(1e6, totals, out=np.zeros_like(totals), where=totals > 0)
+    cpm = (sparse.diags(scale) @ X).astype(np.float32).tocsr()
+    if not with_ratio:
+        return cpm, None, None, None
+
+    gene_codes, genes = pd.factorize(pd.Index([str(f).split(':')[0] for f in features]))
+    n_g = len(genes)
+    G = sparse.csr_matrix((np.ones(n_f), (np.arange(n_f), gene_codes)), shape=(n_f, n_g))
+    GC = (X @ G).tocsr()                                    # pseudobulks x genes, summed counts
+    GC.sort_indices()
+    gc_rows = np.repeat(np.arange(n_pb, dtype=np.int64), np.diff(GC.indptr))
+    expressed = GC.data * scale[gc_rows] >= cpm_threshold   # gene CPM >= threshold
+    E = sparse.csr_matrix((np.ones(int(expressed.sum()), dtype=np.uint8),
+                           (gc_rows[expressed], GC.indices[expressed])), shape=GC.shape)
+
+    # each stored count -> its gene's count in the same pseudobulk (sorted-key lookup; always present)
+    x_rows = np.repeat(np.arange(n_pb, dtype=np.int64), np.diff(X.indptr))
+    pos = np.searchsorted(gc_rows * n_g + GC.indices, x_rows * n_g + gene_codes[X.indices])
+    keep = expressed[pos] & (X.data > 0)
+    ratio = sparse.csr_matrix(((X.data[keep] / GC.data[pos[keep]]).astype(np.float32),
+                               (x_rows[keep], X.indices[keep])), shape=X.shape)
+    return cpm, ratio, E, np.asarray(genes, dtype=str)
+
+
+def ratio_dense(adata):
+    """Dense pseudobulks x features float32 isoform ratio from a ratio h5ad written by write_cpm_and_ratio_h5ads:
+    stored value where the isoform has reads; 0 where the gene is expressed (obsm 'ratio_gene_expressed') and the
+    isoform has no reads; NaN where the gene is not expressed. Files without the mask are returned as stored."""
+    from scipy import sparse
+    X = adata.X
+    if "ratio_gene_expressed" not in adata.obsm:
+        return X.toarray() if sparse.issparse(X) else np.asarray(X)
+    genes = pd.Index(adata.uns["ratio_genes"])
+    gidx = genes.get_indexer([str(f).split(':')[0] for f in adata.var_names])
+    gidx = np.where(gidx < 0, len(genes), gidx)              # unknown gene -> never expressed
+    E = sparse.csr_matrix(adata.obsm["ratio_gene_expressed"])
+    out = np.full(adata.shape, np.nan, dtype=np.float32)
+    g_on = np.zeros(len(genes) + 1, dtype=bool)
+    for r in range(adata.shape[0]):
+        g = E.indices[E.indptr[r]:E.indptr[r + 1]]
+        g_on[g] = True
+        out[r, g_on[gidx]] = 0.0
+        g_on[g] = False
+    C = sparse.csr_matrix(X).tocoo()
+    out[C.row, C.col] = C.data
+    return out
+
+
+def write_cpm_and_ratio_h5ads(collection_name, X=None, features=None, columns=None, counts_h5ad=None,
+                              cluster_order=None, min_group_size=3, cpm_threshold=1):
+    """Write <collection>_combined_pseudo_cluster_{cpm,ratio}.h5ad and their -filtered twins from the cohort
+    COUNTS (in memory X = pseudobulks x features, or read from counts_h5ad). Same obs/var, filter rule and
+    column order as the counts h5ads (write_pseudobulk_h5ad_from_sparse)."""
+    t0 = time.time()
+    if X is None:
+        a = ad.read_h5ad(counts_h5ad or f'{collection_name}_combined_pseudo_cluster_counts.h5ad')
+        X, features, columns = a.X, list(a.var_names), list(a.obs_names)
+        del a
+    with_ratio = collection_name != "gene"          # isoform / gene ratio; meaningless for genes
+    cpm, ratio, E, genes = cpm_and_ratio_from_counts(X, features, cpm_threshold=cpm_threshold, with_ratio=with_ratio)
+    sums = np.asarray(cpm.sum(axis=1)).ravel()
+    live = np.asarray(X.sum(axis=1)).ravel() > 0
+    if live.any() and np.abs(sums[live] - 1e6).max() > 1.0:
+        raise ValueError(f"{collection_name}: CPM rows do not sum to 1e6 (max deviation "
+                         f"{np.abs(sums[live] - 1e6).max():.3f})")
+    t1 = time.time()
+    print(f"[cpm] {collection_name}: {cpm.shape[0]:,} pseudobulks x {cpm.shape[1]:,} features; CPM nnz={cpm.nnz:,}; "
+          + (f"ratio stored={ratio.nnz:,}; expressed gene-pseudobulk pairs={E.nnz:,}; " if with_ratio else "")
+          + f"computed in {t1 - t0:.1f}s", flush=True)
+    write_pseudobulk_h5ad_from_sparse(
+        cpm.T, features, columns, f'{collection_name}_combined_pseudo_cluster_cpm.h5ad',
+        filtered_path=f'{collection_name}_combined_pseudo_cluster_cpm-filtered.h5ad',
+        cell_type_order=cluster_order, min_group_size=min_group_size)
+    if not with_ratio:
+        print(f"[cpm] {collection_name}: cpm h5ads written in {time.time() - t1:.1f}s", flush=True)
+        return
+    write_pseudobulk_h5ad_from_sparse(
+        ratio.T, features, columns, f'{collection_name}_combined_pseudo_cluster_ratio.h5ad',
+        filtered_path=f'{collection_name}_combined_pseudo_cluster_ratio-filtered.h5ad',
+        cell_type_order=cluster_order, min_group_size=min_group_size,
+        obsm={"ratio_gene_expressed": E},
+        uns={"ratio_genes": genes, "ratio_cpm_threshold": cpm_threshold,
+             "ratio_encoding": "stored = isoform counts / gene counts where the isoform has reads and gene CPM >= "
+                               "threshold; not stored and gene expressed (obsm ratio_gene_expressed) = 0; "
+                               "not stored and gene not expressed = NaN; read with isoform_matrix.ratio_dense"})
+    print(f"[cpm] {collection_name}: cpm + ratio h5ads written in {time.time() - t1:.1f}s (total {time.time() - t0:.1f}s)",
+          flush=True)
+
+
 def _concatenate_pseudobulks_sparse(file_info, column_names, collection_name, compute_cpm,
-                                    cluster_order, min_group_size):
+                                    cluster_order, min_group_size, cpm_threshold=1):
     """Sparse body of concatenate_h5ad_and_compute_pseudobulks_optimized: writes the same h5ads and
     returns the same values as the dense body."""
     t0 = time.time()
@@ -1117,18 +1159,14 @@ def _concatenate_pseudobulks_sparse(file_info, column_names, collection_name, co
         Xc, union, column_names, f'{collection_name}_combined_pseudo_cluster_counts.h5ad',
         filtered_path=f'{collection_name}_combined_pseudo_cluster_counts-filtered.h5ad',
         cell_type_order=cluster_order, min_group_size=min_group_size)
-    del Xc
-    _trim_memory()
     combined_pseudo_file = f'{collection_name}_combined_pseudo_cluster_counts.txt'
     if compute_cpm:
-        for key, stem in (("cpm_file", "cpm"), ("ratio_file", "ratio")):
-            _, Xm = _sparse_matrix_from_files(file_info, key, union=union)
-            write_pseudobulk_h5ad_from_sparse(
-                Xm, union, column_names, f'{collection_name}_combined_pseudo_cluster_{stem}.h5ad',
-                filtered_path=f'{collection_name}_combined_pseudo_cluster_{stem}-filtered.h5ad',
-                cell_type_order=cluster_order, min_group_size=min_group_size)
-            del Xm
-            _trim_memory()
+        # CPM and ratio are computed ONCE here from the cohort counts (never per sample).
+        write_cpm_and_ratio_h5ads(collection_name, X=Xc.T.tocsr(), features=list(union), columns=list(column_names),
+                                  cluster_order=cluster_order, min_group_size=min_group_size,
+                                  cpm_threshold=cpm_threshold)
+        del Xc
+        _trim_memory()
         print(f"[sparse-combine] {collection_name}: done in {time.time() - t0:.1f}s", flush=True)
         return (combined_pseudo_file, f'{collection_name}_combined_pseudo_cluster_cpm.txt',
                 f'{collection_name}_combined_pseudo_cluster_ratio.txt')
@@ -1171,15 +1209,10 @@ def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_
         print(f'Processing {sample_file}')
         _memtrace(f"sample_start {sample_label}")
 
+        # Per-sample stage = summed COUNTS only. CPM and isoform ratio are computed once on the cohort
+        # counts after the concat (write_cpm_and_ratio_h5ads); no per-sample CPM or ratio file is read.
         if only_import_existing:
-            # Pass the SAME compute_cpm through: with compute_cpm=True this returns the
-            # (counts, cpm, ratio) triple to unpack; with False it returns just the counts path.
-            # (Previously called with compute_cpm=False then unpacked as a triple -> ValueError.)
-            res = just_return_dense_count_files(sample_prefix, compute_cpm=compute_cpm)
-            if compute_cpm:
-                pseudo_pdf_file, cpm_file, isoform_ratio_file = res
-            else:
-                pseudo_pdf_file = res
+            pseudo_pdf_file = just_return_dense_count_files(sample_prefix, compute_cpm=False)
         else:
             # Load the data
             adata = ad.read_h5ad(sample_file)
@@ -1189,15 +1222,10 @@ def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_
             adata.obs.index = adata.obs.index.astype(str)
             adata.obs_names_make_unique()
 
-            # Generate pseudobulks for the current sample
-            if compute_cpm:
-                pseudo_pdf_file, cpm_file, isoform_ratio_file = pseudo_cluster_counts_optimized(
-                    sample_prefix, adata, cell_threshold=0, count_threshold=0, compute_cpm=compute_cpm, cpm_threshold=cpm_threshold, status=False
-                )
-            else:
-                pseudo_pdf_file = pseudo_cluster_counts_optimized(
-                    sample_prefix, adata, cell_threshold=0, count_threshold=0, compute_cpm=compute_cpm, cpm_threshold=cpm_threshold, status=False
-                )
+            # Generate the count pseudobulks for the current sample
+            pseudo_pdf_file = pseudo_cluster_counts_optimized(
+                sample_prefix, adata, cell_threshold=0, count_threshold=0, compute_cpm=False, status=False
+            )
             _memtrace("after_pseudobulk")
             del adata
 
@@ -1206,8 +1234,6 @@ def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_
         file_info.append({
             "sample": sample_label,
             "pseudo_file": pseudo_pdf_file,
-            "cpm_file": cpm_file if compute_cpm else None,
-            "ratio_file": isoform_ratio_file if compute_cpm else None,
             "col_offset": total_cols,
             "ncols": len(sample_cols),
         })
@@ -1223,7 +1249,7 @@ def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_
     if not _dense_combine_requested():
         # DEFAULT: sparse combine (identical outputs, no dense memmap). Dense path below = fallback.
         return _concatenate_pseudobulks_sparse(file_info, column_names, collection_name, compute_cpm,
-                                               cluster_order, min_group_size)
+                                               cluster_order, min_group_size, cpm_threshold=cpm_threshold)
     feature_to_row, features = _collect_feature_order([info["pseudo_file"] for info in file_info])
     _memtrace("after_collect_features")
 
@@ -1269,54 +1295,12 @@ def concatenate_h5ad_and_compute_pseudobulks_optimized(sample_files, collection_
         pass
 
     if compute_cpm:
-        cpm_memmap_path = f'{collection_name}_combined_pseudo_cluster_cpm.memmap'
-        cpm_mm = _fill_memmap_from_files(
-            file_info,
-            feature_to_row,
-            total_cols,
-            "cpm_file",
-            np.float32,
-            cpm_memmap_path,
-        )
-        _memtrace("after_fill_cpm_memmap")
-
-        ratio_memmap_path = f'{collection_name}_combined_pseudo_cluster_ratio.memmap'
-        ratio_mm = _fill_memmap_from_files(
-            file_info,
-            feature_to_row,
-            total_cols,
-            "ratio_file",
-            np.float32,
-            ratio_memmap_path,
-        )
-        _memtrace("after_fill_ratio_memmap")
-
         combined_cpm_file = f'{collection_name}_combined_pseudo_cluster_cpm.txt'
         combined_isoform_ratio_file = f'{collection_name}_combined_pseudo_cluster_ratio.txt'
-        # h5ad-only: write cpm + ratio as SPARSE h5ad (full + filtered), mirroring counts. NO dense
-        # .txt. The differentials read '<collection>_combined_pseudo_cluster_{cpm,ratio}-filtered.h5ad'.
-        write_pseudobulk_h5ad_from_memmap(
-            cpm_mm, features, column_names,
-            f'{collection_name}_combined_pseudo_cluster_cpm.h5ad',
-            filtered_path=f'{collection_name}_combined_pseudo_cluster_cpm-filtered.h5ad',
-            cell_type_order=cluster_order, min_group_size=min_group_size,
-        )
-        write_pseudobulk_h5ad_from_memmap(
-            ratio_mm, features, column_names,
-            f'{collection_name}_combined_pseudo_cluster_ratio.h5ad',
-            filtered_path=f'{collection_name}_combined_pseudo_cluster_ratio-filtered.h5ad',
-            cell_type_order=cluster_order, min_group_size=min_group_size,
-        )
+        # CPM and ratio computed ONCE from the cohort counts h5ad written above (never per sample).
+        write_cpm_and_ratio_h5ads(collection_name, counts_h5ad=h5ad_full, cluster_order=cluster_order,
+                                  min_group_size=min_group_size, cpm_threshold=cpm_threshold)
         _memtrace("after_write_combined_cpm")
-
-        del cpm_mm
-        del ratio_mm
-        _trim_memory()
-        for path in (cpm_memmap_path, ratio_memmap_path):
-            try:
-                os.remove(path)
-            except OSError:
-                pass
 
         del feature_to_row
         del features

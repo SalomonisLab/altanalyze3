@@ -444,6 +444,65 @@ def _marker_finder_rows(matrix, groups, gene_names, *, row_block_size=None):
     return r_df, p_df
 
 
+def _has_missing(matrix) -> bool:
+    values = matrix.data if sparse.issparse(matrix) else np.asarray(matrix)
+    return bool(np.issubdtype(values.dtype, np.floating) and np.isnan(values).any())
+
+
+def _marker_finder_missing_as_na(matrix, groups, gene_names, _indicator=None, block_size=4096,
+                                 max_missing_fraction=0.15):
+    """AltAnalyze2 PSI MarkerFinder: a NaN is a missing value, never a measurement.
+
+    AltAnalyze2 ``markerFinder.advancedPearsonCorrelationAnalysis`` (altanalyze/markerFinder.py:101-128)
+    correlates each feature with each group template over only the samples that measured the
+    feature, and scipy ``pearsonr`` gives its p-value from that feature's own n - 2. This does the
+    same in matrix form. A group with no measured member, or holding every measured sample, has no
+    defined correlation for that feature and stays NaN there; the feature's other groups keep their
+    scores. A feature with no variance among its measured samples is NaN in every group and drops.
+    A feature missing in ``max_missing_fraction`` or more of the samples is not considered.
+    """
+    n_cells, n_features = matrix.shape
+    if len(groups) != n_cells:
+        raise ValueError("Group labels must match the number of rows in the expression matrix.")
+    indicator, cluster_names = _build_cluster_indicator(groups) if _indicator is None else _indicator
+    y = np.asarray(indicator.toarray() if sparse.issparse(indicator) else indicator, dtype=np.float64)
+    if sparse.issparse(matrix):
+        matrix = matrix.tocsc()
+    names = pd.Index(range(n_features)).astype(str) if gene_names is None else pd.Index(gene_names)
+    r_parts, p_parts = [], []
+    n_with_missing = n_excluded = 0
+    for start in range(0, n_features, block_size):
+        stop = min(start + block_size, n_features)
+        block = matrix[:, start:stop]
+        x = np.asarray(block.toarray() if sparse.issparse(block) else block, dtype=np.float64)
+        measured = ~np.isnan(x)
+        n_measured = measured.sum(axis=0).astype(np.float64)
+        too_sparse = (n_cells - n_measured) / n_cells >= max_missing_fraction
+        n_with_missing += int((n_measured < n_cells).sum())
+        n_excluded += int(too_sparse.sum())
+        with np.errstate(divide="ignore", invalid="ignore"):
+            mean_x = np.where(measured, x, 0.0).sum(axis=0) / n_measured
+            centered = np.where(measured, x - mean_x, 0.0)
+            ssx = (centered**2).sum(axis=0)
+            in_group = measured.T.astype(np.float64) @ y
+            ssy = in_group - in_group**2 / n_measured[:, None]
+            r = np.clip((centered.T @ y) / np.sqrt(ssx[:, None] * ssy), -1.0, 1.0)
+            r[(ssx <= 0) | too_sparse, :] = np.nan
+            r[ssy <= 0] = np.nan
+            df = np.broadcast_to((n_measured - 2)[:, None], r.shape)
+            p = t.sf(np.abs(r * np.sqrt(df) / np.sqrt(1 - r**2)), df=df) * 2
+        # scipy pearsonr returns p = 1 for 2 points, which AltAnalyze2 recorded.
+        p = np.where((df <= 0) & np.isfinite(r), 1.0, p)
+        r_parts.append(pd.DataFrame(r, index=names[start:stop], columns=cluster_names))
+        p_parts.append(pd.DataFrame(p, index=names[start:stop], columns=cluster_names))
+    r_df = pd.concat(r_parts).dropna(axis=0, how="all")
+    p_df = pd.concat(p_parts).loc[r_df.index, r_df.columns]
+    print("[MarkerFinder] Missing values: %d of %d features hold NaN; %d are missing in >= %.0f%% of "
+          "%d samples and are not considered; %d features scored." % (
+              n_with_missing, n_features, n_excluded, 100 * max_missing_fraction, n_cells, len(r_df)))
+    return r_df, p_df
+
+
 def marker_finder(
     expression_matrix: sparse.spmatrix,
     groups: Sequence[str],
@@ -453,6 +512,7 @@ def marker_finder(
     scale_factor: Optional[float] = None,
     validate_scaling: bool = False,
     feature_block_size: Optional[int] = None,
+    max_missing_fraction: float = 0.15,
     _indicator=None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Point-biserial Pearson r between every feature and every group indicator.
@@ -471,6 +531,12 @@ def marker_finder(
             (expression_matrix.data, expression_matrix.indices, expression_matrix.indptr),
             shape=expression_matrix.shape, copy=False)
     disk = isinstance(expression_matrix, h5py.Dataset)
+    if not disk and _has_missing(expression_matrix):
+        if validate_scaling or scale_data:
+            raise MarkerFinderInputError("The matrix holds NaN (missing values, e.g. PSI). Depth scaling "
+                                         "is undefined for it; pass validate_scaling=False.")
+        return _marker_finder_missing_as_na(expression_matrix, groups, gene_names, _indicator,
+                                            max_missing_fraction=max_missing_fraction)
     n_cells, n_features = expression_matrix.shape
     if (disk or n_cells >= 50_000) and feature_block_size is None:
         if validate_scaling or scale_data:

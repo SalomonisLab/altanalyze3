@@ -450,6 +450,7 @@ class ArgsParser():
         sclr_iso_parser.add_argument("--ref_gff", required=True, type=str, help="GENCODE/Ensembl reference GFF/GTF")
         sclr_iso_parser.add_argument("--genome_fasta", required=True, type=str, help="Genome FASTA for protein sequence prediction")
         sclr_iso_parser.add_argument("--collapse_method", default="wta", choices=["wta", "em"], help="Isoform read collapse: wta (winner-takes-all, default) or em (fractional EM allocation)")
+        sclr_iso_parser.add_argument("--protect-intronic-evidence", action="store_true", help="Opt-in collapse-only protection of terminal intronic splice sites (3 pooled source molecules, +/-3 nt) and continuous intronic extension >=100 nt. Requires original raw annotations, primary GFFs and a fresh WTA collapse.")
         sclr_iso_parser.add_argument("--species", default="human", choices=["human", "mouse"], help="Default: human")
         sclr_iso_parser.add_argument("--exon_annot", default=None, type=str, help="Exon annotation file. Default: bundled gzipped <species> Ensembl exon file")
         sclr_iso_parser.add_argument("--cell_annot", default=None, type=str, help="Optional explicit barcode->cluster file/dir (else discovered from the sclr cellHarmony outputs)")
@@ -550,6 +551,7 @@ class ArgsParser():
         blr_iso_parser.add_argument("--ref_gff", required=True, type=str, help="GENCODE/Ensembl reference GFF/GTF, used to inject reference (ENST) structures and for translation")
         blr_iso_parser.add_argument("--genome_fasta", required=True, type=str, help="Genome FASTA. Required to emit gff-output/combined.gff.gz and the protein summary")
         blr_iso_parser.add_argument("--collapse_method", default="wta", choices=["wta", "em"], help="Ambiguous-substring allocation: wta (winner-takes-all, default) or em (fractional)")
+        blr_iso_parser.add_argument("--protect-intronic-evidence", action="store_true", help="Opt-in collapse-only terminal intronic evidence protection: >=3 pooled source molecules, +/-3 nt splice tolerance, >=100 nt continuation. Requires original sources and fresh Tier-1 WTA aggregation.")
         blr_iso_parser.add_argument("--min_total", default=3, type=int, help="Drop a final isoform below this many reads summed over all samples. Default 3 (the single-cell default). Lower it for a study with few samples.")
         blr_iso_parser.add_argument("--tier1_dir", default=None, type=str, help="Directory holding the per-library Tier-1 tables. Set it to the SAME path the blr-tier1 array used.")
         blr_iso_parser.add_argument("--reuse_tier1", action="store_true", help="Consume the per-library Tier-1 tables already in --tier1_dir instead of recomputing them (what the array produced).")
@@ -823,6 +825,13 @@ class ArgsParser():
         snaf_b_parser.add_argument("--validation_gtf", default=None, type=str, nargs="+", help="Long-read/EST GTF or GFF, plain or gzipped (e.g. SQANTI, or a long-read combined.gff.gz) enabling stringency-4/5 support gates; omit for stringency-3-only (fully offline). Repeatable: pass several catalogs (space- or comma-separated) and they are merged into one query structure, each keeping its own cached index")
         snaf_b_parser.add_argument("--allow_trans_splicing", action="store_true", help="Also keep trans-spliced junctions whose PARTNER gene is the surface gene, but ONLY when --validation_gtf contains a full-length isoform joining exactly those two sites. Off by default. Cross-chromosome partners cannot be supported by the GTF index and are never admitted.")
         snaf_b_parser.add_argument("--no_tmhmm", action="store_true", help="Disable the transmembrane-topology gate (otherwise pure-python tmhmm.py is used)")
+        # Opt-in resume. surface.run() is the per-antigen phase; it ends by writing
+        # surface_antigen_<sr|lr>.p, which is the ONLY thing generate_full_results then reads
+        # (every other global it needs comes from surface.initialize(), not from run()). A job
+        # that already wrote that pickle and died, or was restarted to pick up a code fix, had
+        # no way to say so and paid the whole phase again: 20 to 90 hours per POSEIDON cohort.
+        # OFF by default, so a run that does not pass it behaves exactly as before.
+        snaf_b_parser.add_argument("--resume_surface", action="store_true", help="Reuse an existing surface_antigen_*.p instead of recomputing the per-antigen phase. Refuses a pickle that is absent or empty and runs normally.")
         snaf_b_parser.add_argument("--tmhmm_path", default=None, type=str, help="Path to a legacy TMHMM 2.0c binary (Linux); if unset, the pure-python tmhmm.py is used")
         snaf_b_parser.add_argument("--n_stride", default=2, type=int, help="ORF-check stride. Default: 2")
         snaf_b_parser.add_argument("--gtex_db", default=None, type=str, help="Override control h5ad path (default: <db_dir>/controls/GTEx_junction_counts.h5ad)")

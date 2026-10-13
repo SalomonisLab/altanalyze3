@@ -92,6 +92,9 @@ Click `Save QC and run`.
 7. The app writes the combined h5ad and the download files.
 
 The Run tab shows a progress bar, the QC cell counts, and the pipeline log while the job runs.
+For Unsupervised and Both analyses, an unusable Max K triggers ICGS3's native
+unbiased automatic feature/rank/NMF selection. The log and methods export retain
+the requested K, fallback reason and effective K. QC is not repeated.
 When it finishes, the app switches to `Explore`.
 
 ## Explore tab
@@ -263,8 +266,9 @@ terms first; a term can pass the FDR cut and still fold into a broader one.
 
 Type a question and click `Ask`, or click one of the example questions the app builds from your
 job. The app sends the question to an assistant service that reads it into one of 17 named
-analyses, then computes the answer from your job's own data. The assistant never sees a value
-and never states a number.
+analyses, then computes the answer from your job's own data. For these Ask recipes, the routing
+assistant sees only the question; numerical results are computed by code. The separate AI summary
+button sends a bounded digest of saved results to the configured interpretation model.
 
 | Ask about | Example | Answer |
 | --- | --- | --- |
@@ -296,3 +300,45 @@ Each job lives in one folder under
 `/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/jobs/<job id>/`
 with `uploads/`, `outputs/` and `logs/pipeline.log`. The README lists every output file. The
 server deletes finished jobs older than 8 hours when a new upload arrives.
+
+### AI summary
+
+In **Chat**, select **AI summary** after analysis completes. This gathers species,
+reference, recorded QC, annotated covariates, state/sample composition, completed
+comparisons across modalities, MarkerFinder markers, GO-Elite enrichment, saved
+GRN sample/state predictions, and fastComm communication evidence. It also supplies
+stored LungMAP CellCards biology and literature links for exact matching lung states.
+Unmatched states remain in the report. Predictions and proposed hypotheses are
+identified separately from measured evidence.
+
+Code evaluates an explicit question catalogue spanning host defense, surfactant,
+lipid handling, matrix remodeling, barriers, mucociliary clearance, development/repair
+and cellular stress. Saved directional RNA/GO results anchor each question. Regulatory
+links require recorded target RNA and pathway-gene overlap in the same state/contrast.
+The framework records alternatives, missing analyses and distinguishing experiments;
+its editorial priority hierarchy does not count agreement among RNA-derived predictions
+as replication. Every observed state remains represented, including states without a
+supported functional question. Absence of a question does not establish no effect.
+
+Each eligible modality receives a code-defined biological question, proposition and
+experiment. Code supplies the title, comparison, evidence links and competing
+explanations. A configured local model selects experimental priorities from these
+recorded choices; it does not author biological conclusions. Missing tasks,
+out-of-range choices and incomplete responses are rejected. The report identifies
+this model role and includes the complete question/evidence ledger. A model-selected
+experiment is a proposal, not validation of the hypothesis.
+Untested communication remains descriptive. One library per arm cannot establish
+biological replication, even when a cell-level FDR is small.
+If no covariate comparison has been completed, the summary does not invent a
+disease/development effect. It does not automatically choose comparison arms or
+rerun an analysis. Code counts saved FDR ≤ 0.05 calls for descriptive up/down
+patterns; this summary prioritization criterion is separate from original analysis
+filters. Communication ranks and GRNs do not establish causality or spatial niches.
+
+Model generation runs in a separate background queue with short HTTP polls, cached
+on disk for one hour. Source changes invalidate the cache. RNA/count matrices are
+not read; saved regulatory sample/state aggregates are scanned in bounded blocks.
+Without a configured model, the button returns computed cross-modality synthesis
+and evidence-linked hypotheses, explicitly labelled as computed, rather than
+presenting them as an AI narrative. The animated button is available after new
+analyses and in saved sessions, with a static icon for reduced-motion preferences.

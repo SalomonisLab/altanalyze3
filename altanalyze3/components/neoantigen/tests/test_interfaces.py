@@ -113,9 +113,26 @@ def test_hla_genotype_adapter_preserves_inferred_no_call(tmp_path, monkeypatch):
             'HLA-C':{'gene':'HLA-C','call':['C*07:02','C*07:02'],'n_positions':50,'mean_depth':20}}}
     monkeypatch.setattr(bam2hla,'type_bam',infer)
     output,qc=tmp_path/'hla.tsv',tmp_path/'qc.tsv'
-    prepare_hla('S1',output,qc,bam='fixture.bam')
+    prepare_hla('S1',output,qc,bam='fixture.bam',typer='v1')
     rows,_=read_table(qc)
     assert rows[1]['status']=='no_call' and rows[1]['reason']=='insufficient coverage'
+    assert read_hla_table(output)['S1']==['HLA-A*02:01','HLA-C*07:02']
+
+
+def test_hla_genotype_adapter_v2_default_preserves_no_call(tmp_path, monkeypatch):
+    from altanalyze3.components.bam.bam2hla import bam2hla_reads
+    def infer(*args, **kwargs):
+        return {'build':'hg38','genes':{
+            'HLA-A':{'gene':'HLA-A','call':('A*02:01','A*02:01'),'n_assigned_reads':500,'gene_specific_call':('A*02:01','A*02:01')},
+            'HLA-B':{'gene':'HLA-B','call':None,'reason':'no reads assigned','n_assigned_reads':0},
+            'HLA-C':{'gene':'HLA-C','call':('C*07:02','C*07:02'),'n_assigned_reads':300}}}
+    monkeypatch.setattr(bam2hla_reads,'type_bam_reads',infer)
+    output,qc=tmp_path/'hla.tsv',tmp_path/'qc.tsv'
+    prepare_hla('S1',output,qc,bam='fixture.bam')
+    rows,_=read_table(qc)
+    assert [r['origin'] for r in rows]==['bam2hla_v2']*3
+    assert rows[1]['status']=='no_call' and rows[1]['reason']=='no reads assigned'
+    assert rows[0]['gene_specific_call']=='A*02:01/A*02:01'
     assert read_hla_table(output)['S1']==['HLA-A*02:01','HLA-C*07:02']
 
 

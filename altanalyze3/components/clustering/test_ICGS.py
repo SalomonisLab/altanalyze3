@@ -49,10 +49,17 @@ def _write_sparse_h5ad(path):
     adata.write_h5ad(path)
 
 
-def test_ICGS_sparse_pipeline(tmp_path):
+@pytest.mark.parametrize("requested_k", [3, 1000])
+def test_ICGS_sparse_pipeline(tmp_path, requested_k):
     input_path = tmp_path / "synthetic.h5ad"
     outdir = tmp_path / "icgs3"
     _write_sparse_h5ad(input_path)
+    # This test uses artificial gene0..gene44 IDs, so provide their complete
+    # artificial annotation catalog rather than query a real human atlas.
+    biomarker_path = tmp_path / "synthetic_biomarkers.tsv"
+    pd.DataFrame({"Gene": [f"gene{i}" for i in range(45)],
+                  "Term": [f"synthetic_state_{i // 5}" for i in range(45)]}).to_csv(
+        biomarker_path, sep="\t", index=False)
 
     result = run_icgs3(
         ICGS3Config(
@@ -72,8 +79,9 @@ def test_ICGS_sparse_pipeline(tmp_path):
             n_neighbors=8,
             marker_top_n=5,
             marker_min_per_cluster=1,
-            rank=3,
+            rank=requested_k,
             species="Hs",
+            biomarker_file=str(biomarker_path),
             generate_umap=False,
             write_h5ad=False,
             heatmap_cells_per_cluster=10,
@@ -100,13 +108,22 @@ def test_ICGS_sparse_pipeline(tmp_path):
     assert (outdir / "sNMF" / "icgs3_pagerank_downsampling.tsv").exists()
     assert (outdir / "MarkerFinder" / "icgs3_marker_heatmap.pdf").exists()
     assert (outdir / "MarkerFinder" / "icgs3_marker_heatmap.svg").exists()
-    assert (outdir / "MarkerFinder" / "icgs3_marker_heatmap_fold_matrix.npz").exists()
+    fold_path = outdir / "MarkerFinder" / "icgs3_marker_heatmap_fold_matrix.h5ad"
+    assert fold_path.exists()
+    import anndata as ad
+    fold = ad.read_h5ad(fold_path)
+    assert fold.n_obs > 0 and fold.n_vars > 0
     assert not (outdir / "MarkerFinder" / "icgs3_marker_heatmap_exp_matrix.tsv").exists()
     logs = list((outdir / "logs").glob("icgs3_*.log"))
     assert logs
     log_text = logs[0].read_text()
     assert "cli equivalent:" in log_text
     assert "NMF variable features:" in log_text
+    if requested_k == 1000:
+        assert "falling back to unbiased automatic K selection" in log_text
+        ranks = pd.read_json(outdir / "icgs3_nmf_rank_selection.json")
+        assert ranks['mode'].tolist() == ['manual', 'auto']
+        assert ranks['status'].tolist() == ['failed', 'completed']
     assert not result.markers.empty
 
 
@@ -357,10 +374,7 @@ def test_batch_key_resolvers_combine_generic_technology_and_tissue_keys():
 
 
 def test_nmf_rowsum_assignment_normalization_balances_component_scale():
-    from altanalyze3.components.clustering.ICGS import _add_udon_path
-
-    _add_udon_path()
-    from nmf import binarize_nmf
+    from altanalyze3.components.clustering.ICGS import binarize_nmf
 
     # Shape mirrors nimfa basis output: samples x components. Raw argmax is
     # dominated by the first component scale; rowsum normalization recovers the
@@ -774,10 +788,7 @@ def test_estimate_udon_nmf_rank_forwards_small_feature_and_rel_threshold(monkeyp
     parameter was dead. Capturing the call proves both values now arrive, and that ADT turns
     the branch on while RNA leaves it off.
     """
-    from altanalyze3.components.clustering.ICGS import _add_udon_path
-
-    _add_udon_path()
-    import nmf as udon_nmf
+    from altanalyze3.components.clustering import ICGS as native_icgs
 
     captured = {}
 
@@ -786,7 +797,7 @@ def test_estimate_udon_nmf_rank_forwards_small_feature_and_rel_threshold(monkeyp
         captured["rel_threshold"] = rel_threshold
         return 7
 
-    monkeypatch.setattr(udon_nmf, "determine_nmf_ranks", fake_determine_nmf_ranks)
+    monkeypatch.setattr(native_icgs, "determine_nmf_ranks", fake_determine_nmf_ranks)
     expr = pd.DataFrame(np.ones((3, 4)), index=list("abc"), columns=list("wxyz"))
 
     rank = estimate_udon_nmf_rank(expr, _occupancy_config(rank_rel_threshold=0.42))

@@ -44,6 +44,21 @@ def test_report_defaults_match_interface_schema():
     assert QC_DEFAULTS == QCSettings().model_dump()
 
 
+def test_rank_fallback_methods_preserve_requested_and_effective_k(tmp_path):
+    store, job = fixture_job(tmp_path, "unsupervised")
+    capture_execution(store, job, key="icgs3")
+    attempts = [{"mode":"manual", "requested_rank":1000, "final_rank":None,
+                 "status":"failed", "error":"K exceeds initialization limit"},
+                {"mode":"auto", "requested_rank":1000, "final_rank":4,
+                 "status":"completed", "error":""}]
+    record_effective(store, job, "icgs3", nmf_rank_selection=attempts)
+    manifest, _ = build_manifest(store.get_job(job), store.logs_dir(job).parent)
+    report = render_methods(manifest)
+    assert "| main | auto | 1000 | 4 | completed |" in report
+    assert "unbiased automatic feature/rank/NMF selection" in report
+    assert manifest['analysis_records']['main']['icgs3']['effective']['nmf_rank_selection']==attempts
+
+
 @pytest.mark.parametrize("mode", ["supervised", "unsupervised", "both"])
 def test_zip_is_deterministic_complete_and_notebook_unexecuted(tmp_path, mode, monkeypatch):
     store, job = fixture_job(tmp_path, mode)
@@ -62,8 +77,10 @@ def test_zip_is_deterministic_complete_and_notebook_unexecuted(tmp_path, mode, m
                                          "model_provenance.json", "references.json", "logs/pipeline.log"}
         assert archive.read("logs/pipeline.log") == (store.logs_dir(job) / "pipeline.log").read_bytes()
         methods = archive.read("methods.md").decode()
-        assert "| min_genes | 700 | 500 | yes |" in methods
-        assert "skipping QC: input is already scaled" in methods
+        assert "| Minimum detected genes per cell | 700 | 500 | yes |" in methods
+        assert "QC filtering was skipped" in methods
+        assert "[scale]" not in methods and "[params]" not in methods
+        assert "```json" in methods.split("## Software versions and reproducibility")[1]
         assert "No built fastComm ligand-receptor bundle" in methods
         assert "original-bundle-hash" in methods and "Selected study citation" in methods
         assert "ICGS.run_icgs3" in methods if mode != "supervised" else "ICGS.run_icgs3" not in methods
@@ -90,6 +107,30 @@ def test_historical_report_does_not_invent_original_versions_or_defaults(tmp_pat
         assert "original-version" in archive.read("methods.md").decode()
 
 
+@pytest.mark.parametrize('method,metric,description', [
+    ('highest_alignment_score','AlignmentScore','cellHarmony (altanalyze3) reference alignment score'),
+    ('highest_icgs3_svm_score','SVM_score','ICGS3 (altanalyze3) winning SVM assignment score')])
+def test_recorded_score_selection_is_reported_without_relabelling_historical_runs(tmp_path,method,metric,description):
+    store,job=fixture_job(tmp_path)
+    config={'modality':'rna','population_col':'state','sample_field':'Library','comparison_type':'cells',
+            'group1_samples':['a'],'group2_samples':['b'],'max_cells_per_state_sample':500}
+    capture_execution(store,job,key='differential:ranked',effective={'config':config})
+    selection={'method':method,'metric':metric,'tie_breaker':'cell_barcode_ascending',
+               'available':1200,'selected':1000,'selected_cells':{'filename':'selected_cells.tsv','sha256':'stored-selection-hash'}}
+    record_effective(store,job,'differential:ranked',cell_selection=selection)
+    store.update_job(job,differential_history={k:{'status':'completed','config':config} for k in ['ranked','historical']})
+    with zipfile.ZipFile(io.BytesIO(read_archive(store,job))) as archive:
+        methods=archive.read('methods.md').decode()
+        manifest=json.loads(archive.read('run_manifest.json'))
+    assert f'| Cell-selection method | {method} |' in methods
+    assert f'| Selection score | {metric} |' in methods
+    assert description in methods
+    assert '| Cell-selection method | Not recorded |' in methods
+    assert 'descending order' in methods and 'selected_cells.tsv' in methods
+    assert manifest['analysis_records']['main']['differential:ranked']['effective']['cell_selection']==selection
+    assert '500 randomly sampled cells' not in methods
+
+
 def test_all_differential_runs_preserve_layer_groups_and_actual_dispatch(tmp_path):
     store, job = fixture_job(tmp_path, "both")
     capture_execution(store, job)
@@ -107,7 +148,7 @@ def test_all_differential_runs_preserve_layer_groups_and_actual_dispatch(tmp_pat
         "configured_method": "wilcoxon", "actual_population_test": "limma_like_moderated_t"}
     methods = render_methods(manifest)
     assert "supervised_state" in methods and "unsupervised_cluster" in methods
-    assert "limma_like_moderated_t" in methods and '"status": "failed"' in methods
+    assert "limma_like_moderated_t" in methods and "status: **failed**" in methods
 
 
 def test_unstarted_differential_is_not_reported_as_executed(tmp_path):
@@ -131,7 +172,8 @@ def test_branch_records_and_logs_retained_without_external_paths(tmp_path):
         assert not any("external" in name for name in archive.namelist())
         assert any("branches/unsupervised" in name for name in archive.namelist())
         manifest = json.loads(archive.read("run_manifest.json"))
-        assert "input_normalized=True" in archive.read("methods.md").decode()
+        assert "input_normalized=True" not in archive.read("methods.md").decode()
+        assert "input_normalized=True" in json.dumps(manifest["parameter_evidence"])
         assert len(manifest["analysis_records"]) == 2
 
 
@@ -169,3 +211,31 @@ def test_complete_packaged_lr_matches_existing_native_resource_and_fallback(tmp_
     assert resources.inference_bundle_paths_for_species(species) == packaged
     lr, response, resolved = _resolve_default_resource_paths(FastCommParams(species=species, response_matrix=None))
     assert lr == packaged["lr_table"] and response is None and resolved == species
+
+
+def test_manuscript_qc_summarizes_actual_filters_without_log_dump(tmp_path):
+    store, job = fixture_job(tmp_path)
+    for line in ("[mem][timing] start loading inputs rss=296.2MB",
+        "adata shape: (10107, 32738) (cells x genes)",
+        "Auto-selected rho for library 'Control': 0.20 (fraction_removed=0.14)",
+        "Cells remaining after min_genes 500 filtering: 9003"):
+        store.append_log(job, line)
+    capture_execution(store, job)
+    manifest, _ = build_manifest(store.get_job(job), store.logs_dir(job).parent)
+    report = render_methods(manifest)
+    qc = report.split('## Quality control, ambient RNA correction and expression scale')[1].split('## Cell-state')[0]
+    assert '| Control | 0.20 |' in qc and '| min_genes 500 | 9,003 |' in qc
+    assert '10,107 cells and 32,738 genes' in qc
+    assert '[mem]' not in report and 'rss=' not in report
+    assert 'AmbientSubtract (altanalyze3' in qc
+    assert 'cellHarmony-lite (altanalyze3)' in report
+    software = report.split('## Software versions and reproducibility')[1].split('## References')[0]
+    assert '```json' in software and 'git_checkout' in software
+
+
+def test_historical_methods_do_not_query_current_git(tmp_path, monkeypatch):
+    store, job = fixture_job(tmp_path)
+    module = import_module('altanalyze3.components.cellHarmony.analysis_record')
+    monkeypatch.setattr(module, 'git_execution_identity', lambda: pytest.fail('Historical report queried current Git'))
+    report = render_methods(build_manifest(store.get_job(job), store.logs_dir(job).parent)[0])
+    assert 'original-version' in report

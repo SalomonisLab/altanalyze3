@@ -1364,8 +1364,42 @@ def is_support_by_est_or_long_read(sa,op,strict=True):
                 continue
     return_value = False
     return_cand = None
+    # Order matters here, and the original order cost SNAF-B days per cohort. The junction-site
+    # test is a list lookup over this transcript's own exon bounds; the peptide needs the whole
+    # mRNA rebuilt base by base, every ORF enumerated, ~23 of them scored, and one translated.
+    # The original did the expensive half FIRST and then discarded it for every transcript that
+    # fails the cheap test, which is nearly all of 453 candidates per task. Worse, `max_pep` is
+    # read ONLY under `if strict`, so for strict=False -- half of every prewarm task list -- the
+    # entire reconstruction was computed and never looked at.
+    #
+    # Measured 2026-10-09 (job 1416585, cProfile over 300 real tasks): 701 s total, of which
+    # prioritize_orf 410 s, score_coding_potential 280 s, query_from_dict_fa 118 s and
+    # Bio reverse_complement 94 s -- all of it inside the block now skipped.
+    #
+    # The reorder is semantics-preserving: exon_sites depends only on `cand`, not on `sequence`,
+    # and no skipped call mutates state. ONE behaviour does change, stated rather than hidden:
+    # orf2pep asserts on its input, so a transcript that FAILS the junction test and WOULD have
+    # tripped that assert no longer raises. Such a transcript could never have contributed a
+    # result -- the original discarded it one line later -- so the assert was guarding work that
+    # does not reach the output.
     for cand in candidate_transcripts:
         attrs = cand[0]
+        # cheap test first: does this transcript carry the junction as adjacent exon bounds?
+        exon_sites = []
+        for exon in cand[1:]:
+            exon_sites.extend([int(item) for item in exon])
+        try:
+            si = exon_sites.index(start_coord)
+            ei = exon_sites.index(end_coord)
+        except ValueError:
+            continue
+        if ei != si + 1:
+            continue
+        if not strict:
+            return_value = True
+            return_cand = attrs
+            break
+        # strict: only now is the peptide needed
         sequence = ''
         if strand == '+':
             for exon in cand[1:]:
@@ -1376,25 +1410,10 @@ def is_support_by_est_or_long_read(sa,op,strict=True):
         candidate_orfs = transcript2orf(sequence)
         max_orf = prioritize_orf(candidate_orfs)
         max_pep = orf2pep(max_orf)
-        # junction site present
-        exon_sites = []
-        for exon in cand[1:]:
-            exon_sites.extend([int(item) for item in exon])
-        try:
-            si = exon_sites.index(start_coord)
-            ei = exon_sites.index(end_coord)
-        except ValueError:
-            continue
-        if strict:
-            if ei == si + 1 and max_pep == op:
-                return_value = True
-                return_cand = attrs
-                break
-        else:
-            if ei == si + 1:
-                return_value = True
-                return_cand = attrs
-                break
+        if max_pep == op:
+            return_value = True
+            return_cand = attrs
+            break
     _SUPPORT_CACHE[_key] = (return_value, return_cand)
     return return_value, return_cand
 

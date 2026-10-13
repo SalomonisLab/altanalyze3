@@ -595,16 +595,34 @@ def run_snaf_b(args):
     # short_read/find_full_length: validation_gtf feeds the str4/5 support gate in
     # generate_full_results. long_read: the gtf is the primary transcript source in run().
     run_gtf = validation_gtf if mode == 'long_read' else None
-    surface.run(uids=membrane_tuples, outdir=outdir, prediction_mode=mode, n_stride=args.n_stride,
-                gtf=run_gtf, tmhmm=(not args.no_tmhmm),
-                cores=args.cpus, junction_counts=df, isoform_method=isoform_method,
-                genome_fasta=genome_fasta, isoform_ranker=isoform_ranker,
-                first_exon_junctions=first_exons,
-                isoform_sample=getattr(args, 'isoform_sample', None),
-                isoform_min_reads=getattr(args, 'isoform_min_reads', 3),
-                isoform_max_edits=getattr(args, 'isoform_max_edits', None),
-                isoform_top_k=getattr(args, 'isoform_top_k', 5),
-                software_path=(str(args.tmhmm_path) if getattr(args, 'tmhmm_path', None) else None))
+    # --resume_surface: skip the per-antigen phase when its pickle is already on disk. That
+    # pickle is the only thing generate_full_results takes from run(); every other global it
+    # reads was set by surface.initialize() above. Log what is being reused so the provenance
+    # of the reused artefact is in the run's own log, not only in this comment.
+    _pkl = os.path.join(outdir, {'short_read': 'surface_antigen_sr.p',
+                                 'long_read': 'surface_antigen_lr.p',
+                                 'find_full_length': 'surface_antigen_sr_ffl.p'}[mode])
+    _resume = bool(getattr(args, 'resume_surface', False)) and \
+        os.path.exists(_pkl) and os.path.getsize(_pkl) > 0
+    if getattr(args, 'resume_surface', False) and not _resume:
+        logger.warning('--resume_surface given but %s is absent or empty; running the '
+                       'per-antigen phase normally', _pkl)
+    if _resume:
+        import time as _time
+        logger.warning('--resume_surface: skipping surface.run(); reusing %s (%.1f MB, written %s)',
+                       _pkl, os.path.getsize(_pkl) / 1e6,
+                       _time.strftime('%Y-%m-%d %H:%M:%S', _time.localtime(os.path.getmtime(_pkl))))
+    else:
+        surface.run(uids=membrane_tuples, outdir=outdir, prediction_mode=mode, n_stride=args.n_stride,
+                    gtf=run_gtf, tmhmm=(not args.no_tmhmm),
+                    cores=args.cpus, junction_counts=df, isoform_method=isoform_method,
+                    genome_fasta=genome_fasta, isoform_ranker=isoform_ranker,
+                    first_exon_junctions=first_exons,
+                    isoform_sample=getattr(args, 'isoform_sample', None),
+                    isoform_min_reads=getattr(args, 'isoform_min_reads', 3),
+                    isoform_max_edits=getattr(args, 'isoform_max_edits', None),
+                    isoform_top_k=getattr(args, 'isoform_top_k', 5),
+                    software_path=(str(args.tmhmm_path) if getattr(args, 'tmhmm_path', None) else None))
     surface.generate_full_results(outdir=outdir, freq_path=freq_path, mode=mode,
                                   validation_gtf=validation_gtf, cores=args.cpus)
     print('SNAF-B surface results written to {}'.format(os.path.join(outdir, 'B_candidates')))

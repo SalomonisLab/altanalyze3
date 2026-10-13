@@ -68,7 +68,8 @@ def load_exon_coords(exon_path: str, genes: set) -> Tuple[Dict, Dict[str, str]]:
     """(gene, base_token) -> (lo, hi) genomic; gene -> strand. Streams the file."""
     coords: Dict[Tuple[str, str], Tuple[int, int]] = {}
     strand: Dict[str, str] = {}
-    with open(exon_path) as fh:
+    from ..long_read import io_utils as IO
+    with IO.smart_open(exon_path) as fh:
         next(fh)
         for line in fh:
             p = line.rstrip("\n").split("\t")
@@ -332,7 +333,8 @@ def attribute_event_table(event_tsv: str, isoform_stats_tsv: str, exon_db: str,
 
 
 def _find_exon_db(work_dir: str, exon_db: Optional[str]) -> Optional[str]:
-    if exon_db and os.path.exists(exon_db):
+    from ..long_read import io_utils as IO
+    if exon_db and IO.exists(exon_db):
         return exon_db
     import glob
     for pat in ("*_Ensembl_exon.txt", "*Ensembl_exon.txt"):

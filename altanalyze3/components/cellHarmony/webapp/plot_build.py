@@ -11,13 +11,15 @@ from fastapi.responses import JSONResponse, Response
 
 
 class PlotBuildQueue:
-    def __init__(self, max_entries=8, ttl_seconds=300, clock=time.monotonic):
+    def __init__(self, max_entries=8, ttl_seconds=300, clock=time.monotonic,
+                 pending_message="Preparing CombPlot…"):
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="plot-build")
         self.directory = TemporaryDirectory(prefix="scalable-plots-")
         self.entries = {}
         self.lock = threading.Lock()
         self.max_entries, self.ttl, self.clock = max_entries, ttl_seconds, clock
         self.serial = 0
+        self.pending_message = pending_message
 
     def _discard(self, key):
         _, _, path = self.entries.pop(key)
@@ -36,7 +38,7 @@ class PlotBuildQueue:
                     if finished is not None:
                         self._discard(finished)
                     else:
-                        return self._pending("Waiting for a plot worker.")
+                        return self._pending("Waiting for a background worker.")
                 self.serial += 1
                 path = Path(self.directory.name) / f"{self.serial}.json"
 
@@ -59,7 +61,7 @@ class PlotBuildQueue:
                 entry = self.entries[key]
             future, ready_at, path = entry
             if not future.done():
-                return self._pending("Preparing CombPlot…")
+                return self._pending(self.pending_message)
             if ready_at is None:
                 self.entries[key] = (future, now, path)
             # Completed results live on disk, including plots too large for a

@@ -1327,6 +1327,17 @@ select:disabled {
 .chat-ask textarea { flex: 1; font: 13px/1.4 inherit; resize: vertical; min-height: 44px; }
 .chat-examples { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 10px; font-size: 12px; }
 .chat-examples .ghost-btn { font-size: 11px; padding: 3px 8px; }
+.chat-summary-action { margin: 18px 0 24px; }
+.ai-summary-btn { zoom: .7; display: inline-flex; align-items: center; gap: 10px; padding: 10px 20px; border-radius: 12px; border: 1px solid #243dc9; background: linear-gradient(110deg,#243dc9,#6b3fa5); color: #fff; font: inherit; font-weight: 750; cursor: pointer; box-shadow: 0 4px 14px #243dc933; }
+.ai-summary-btn:hover:not(:disabled) { box-shadow: 0 5px 18px #243dc955; }
+.ai-summary-btn:focus-visible { outline: 3px solid #7eaaff; outline-offset: 3px; }
+.ai-summary-btn:disabled { opacity: .65; cursor: default; }
+.ai-summary-btn picture,.ai-summary-btn img { display: block; width: 32px; height: 32px; }
+.summary-program { margin: 16px 0; padding: 14px 18px; background: #f6f8ff; border-left: 3px solid #5267c9; border-radius: 8px; }
+.summary-design-limit { color: #664d12; background: #fff8e7; border-radius: 8px; padding: 10px 14px; }
+.summary-patterns { border-collapse: collapse; font-size: 13px; width: 100%; }
+.summary-patterns td,.summary-patterns th { padding: 8px; text-align: left; border-bottom: 1px solid #e0e6f0; vertical-align: top; }
+.summary-patterns th { background: #f6f8ff; }
 .chat-views { display: flex; gap: 6px; margin: 8px 0; }
 .chat-views .ghost-btn.active { font-weight: 600; text-decoration: underline; }
 #chat-plot { min-height: 320px; }
@@ -1394,3 +1405,30 @@ select:disabled {
   cursor: pointer;
   font-size: inherit;
 }
+
+.summary-modality { margin: 18px 0; padding: 12px 16px; border: 1px solid #dce4ed; border-radius: 12px; }
+.summary-links { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 8px 0; }
+.summary-evidence-link { display: block; overflow-wrap: anywhere; margin: 4px 0; }
+#chat-answer details { margin: 12px 0; }
+#chat-answer pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; font-size: 12px; }
+#chat-views.hidden { display: none; }
+
+.biology-summary-section { margin: 12px 0; padding: 10px 14px; border: 1px solid #dfe5ed; border-radius: 10px; min-width: 0; }
+.biology-summary-section > summary { font-weight: 700; cursor: pointer; }
+.biology-summary-section pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85em; max-height: 440px; overflow: auto; }
+.biology-summary-section a { display: block; overflow-wrap: anywhere; margin: 6px 0; }
+.drug-chat-controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.drug-chat-controls select,.drug-chat-controls input { width: auto; max-width: 300px; }
+.drug-table-scroll { max-width: 100%; overflow-x: auto; }
+.drug-chat-table { min-width: 1100px; }
+
+.summary-methods-body { font-family: inherit; line-height: 1.55; font-size: .95em; }
+.summary-methods-body p { margin: 14px 0; }
+.summary-methods-table-wrap { overflow-x: auto; margin: 16px 0; }
+.summary-methods-body table { border-collapse: collapse; width: 100%; font-size: .92em; }
+.summary-methods-body th, .summary-methods-body td { padding: 10px 12px; border: 1px solid #dfe5ed; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+.summary-methods-body th { background: #f0f4f8; font-weight: 700; }
+.summary-methods-body tbody tr:nth-child(even) { background: #f8fafc; }
+.summary-methods-body a { display: inline; margin: 0; }
+.summary-methods-body code { font-size: .9em; overflow-wrap: anywhere; }
+.summary-methods-body pre { background: #f8fafc; padding: 12px; border-radius: 6px; }

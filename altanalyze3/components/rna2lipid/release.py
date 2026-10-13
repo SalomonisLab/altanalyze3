@@ -20,8 +20,11 @@ MANIFEST_SHA256 = "4d8adc116d7de0e2abbfc10aa2d3ca1d6dac8b8f5efe544bf6af2506b6468
 
 
 def file_sha256(path):
+    digest = hashlib.sha256()
     with Path(path).open("rb") as handle:
-        return hashlib.file_digest(handle, "sha256").hexdigest()
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def release_manifest():

@@ -1,0 +1,36 @@
+{
+  "source_application": "LungMAP Discover",
+  "imported_on": "2026-10-11",
+  "files": {
+    "drug_matching.py": {
+      "source": "molecule/drug_matching.py",
+      "sha256": "e8c0ad42526dad044b32c286ce8d88218a83ff716bb6acef3bc5bc3d18c0501b"
+    },
+    "drug_facts.py": {
+      "source": "drug_facts.py",
+      "sha256": "c6085587d463e65c433d6db3f85a65d05822a952d839c0aa6b8230d0661cbf56"
+    },
+    "toppgene.py": {
+      "source": "molecule/toppgene.py",
+      "sha256": "452b4edce4fdffa6caf91985f1e85f07bbea44f392c68cb3a39fb1c2a85306aa"
+    },
+    "gene_literature.py": {
+      "source": "gene_literature.py",
+      "sha256": "a1e640c12564891db9d0909fc27e7254831c63bd90095c9b73f843a7fc3ab998",
+      "scope": "_get, pubmed_url, phrase_terms unchanged"
+    }
+  },
+  "changes": "Resource/config adapter only. Native DrugMatch statistic, selection, partitions, row identity and pagination unchanged.",
+  "native_method_ast_sha256": {
+    "PreparedQuery": "6c921f79878922371493e947743c3805646362d3abe71239c5880d57b14235da",
+    "prepare_query": "687e23a602a5d3c39e427e3e154045d340cf0623be1436814dca97e612096b33",
+    "_average_ranks": "c4b931eea88d3b6f2f51cbd5f8c29b15bf6f6d45b2609e559d83c2ba10be0ae7",
+    "_spearman_block": "234ee1298ebc30c072f20759a63159b20d7c1f0eec5fcc02758c793d57f301fe",
+    "_direction_counts": "b4106428ef5182226fcc58a362323850c0d1f9bacc9d79025ebd1f8d53ed77d6",
+    "_midrank_percentiles": "63a0cac22aa394e058336934a49fec95d8d030b25ca87fd4e400e499d639cc81",
+    "score_library": "6e6f8d4a6bc42df767c824376ea373c4ea733f656e68a0e9ef53a861a0dd4894",
+    "row_at": "6e4d02782a6edc5f113f87cb517e505aa6b14303f55af7c6902d2186879794fa",
+    "page": "6073f264f97529acf1b1ce7722f0a6eefe29430c7e1d0a35c595ed138d487014",
+    "iter_rows": "57912d00a3e322f94c0ef135eec23af263caa74278f84c8e4b11b10609922131"
+  }
+}

@@ -152,6 +152,7 @@ def _plot_gene_groups(
     pairwise_test: str = "none",
     pairwise_correction: str = "holm",
     pairwise_alpha: float = 0.05,
+    hide_center_line: bool = False,
 ) -> List[dict]:
     positions = np.arange(1, len(group_payload) + 1)
     labels = [entry["label"] for entry in group_payload]
@@ -160,7 +161,7 @@ def _plot_gene_groups(
         [entry["values"] for entry in group_payload],
         positions=positions,
         showmeans=False,
-        showmedians=True,
+        showmedians=not hide_center_line,
         showextrema=False,
     )
     for body, entry in zip(parts["bodies"], group_payload):
@@ -299,6 +300,7 @@ def write_lineage_violin_pdf(
     pairwise_test: str = "none",
     pairwise_correction: str = "holm",
     pairwise_alpha: float = 0.05,
+    hide_center_line: bool = False,
     also_png: bool = False,
 ) -> str:
     step_started_at = time.perf_counter()
@@ -376,6 +378,7 @@ def write_lineage_violin_pdf(
                 point_color=point_color,
                 point_size=point_size,
                 point_alpha=point_alpha,
+                hide_center_line=hide_center_line,
                 pairwise_test=pairwise_test,
                 pairwise_correction=pairwise_correction,
                 pairwise_alpha=pairwise_alpha,
@@ -450,6 +453,11 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Multiple-testing correction across the pairs of one panel (default holm).",
     )
     parser.add_argument("--pairwise-alpha", type=float, default=0.05, help="Adjusted p threshold for a bracket (default 0.05).")
+    parser.add_argument(
+        "--hide-center-line",
+        action="store_true",
+        help="Omit the median line inside each violin (default: the median line is drawn).",
+    )
     parser.add_argument("--png", action="store_true", help="Also write a 300 dpi PNG beside the PDF.")
     parser.add_argument("--verbose", action="store_true", help="Enable INFO logging.")
     return parser.parse_args(argv)
@@ -487,6 +495,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         pairwise_test=args.pairwise_test,
         pairwise_correction=args.pairwise_correction,
         pairwise_alpha=args.pairwise_alpha,
+        hide_center_line=args.hide_center_line,
         also_png=args.png,
     )
     _log_timing("lineage_violin.total", main_started_at)

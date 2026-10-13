@@ -71,6 +71,11 @@ mpl.rcParams['font.family'] = 'Arial'
 _DARWIN_FORK_WARNED = False
 
 
+# The 20 standard amino acids. BioPython translates a codon containing an unresolved
+# base to 'X', and mhcflurry refuses any peptide outside this alphabet.
+_STANDARD_AA = frozenset('ACDEFGHIKLMNPQRSTVWY')
+
+
 def ensure_darwin_fork_safety():
     '''On macOS, guarantee OBJC_DISABLE_INITIALIZE_FORK_SAFETY is in the ENVIRONMENT by
     re-exec'ing the process once if it isn't. This must be done before the Obj-C runtime /
@@ -751,6 +756,17 @@ class JunctionCountMatrixQuery():
         left to its own per-call path.'''
         if binding_method != 'MHCflurry':
             return
+        # SNAF_NO_PRECOMPUTE_BINDING=1 skips this pre-pass. It is an OPTIMISATION, not a result:
+        # the docstring above records that it fills the exact cache run_MHCflurry fills lazily,
+        # so the per-junction path computes the same numbers, only slower. Skipping it trades
+        # wall clock for memory. MDS_Ogawa snaf_t (342 samples, 97 HLA alleles) gathers
+        # 100,675,750 unique (peptide, allele) pairs and 6,069,675 unique peptides in the PARENT
+        # before the fork, and was killed by TERM_MEMLIMIT at both 128,000 and 250,000 MB on
+        # 2026-10-11/12. 250,000 is the ceiling, so the only way through is to not hold them all.
+        if os.environ.get('SNAF_NO_PRECOMPUTE_BINDING') == '1':
+            print('[STAGE-TIMING] precompute binding SKIPPED (SNAF_NO_PRECOMPUTE_BINDING=1); '
+                  'the per-junction MHCflurry path computes the same values lazily', flush=True)
+            return
         import time as _t
         from . import binding as _binding
         from collections import defaultdict
@@ -814,6 +830,14 @@ class JunctionCountMatrixQuery():
             print('[STAGE-TIMING]   affinity+presentation: {} pairs, {:.1f}s'.format(n_pairs, _t.time() - ta), flush=True)
         print('[STAGE-TIMING] precompute binding total: {} alleles, {} unique pairs, {:.1f}s'.format(
             len(allele_to_peps), n_pairs, _t.time() - t0))
+        # Report the peptides translation dropped for carrying an unresolved residue. Silence
+        # here would hide how much of a cohort was unscoreable, so the count is always printed.
+        n_drop = sum(getattr(nj, 'n_nonstandard_dropped', 0) or 0
+                     for nj in self.translated if nj is not None)
+        n_njs = sum(1 for nj in self.translated
+                    if nj is not None and getattr(nj, 'n_nonstandard_dropped', 0))
+        print('[STAGE-TIMING] nonstandard-residue peptides dropped: {} across {} neojunctions'.format(
+            n_drop, n_njs), flush=True)
 
     def _precompute_immunogenicity(self):
         '''Global batched immunogenicity pre-pass for the binders (presentation
@@ -1396,6 +1420,7 @@ class NeoJunction():
 
     def in_silico_translation(self,ks=[9,10],strict=False):
         peptides = {k:[] for k in ks}
+        self.n_nonstandard_dropped = 0
         coord = uid_to_coord(self.uid)  # chr1:555-666(+)
         if '$' not in self.junction and '*' not in self.junction and '#' not in self.junction and 'unknown' not in coord:
             first,second = self.junction.split(',')
@@ -1421,6 +1446,19 @@ class NeoJunction():
                 for k in ks:  
                     peptides[k].extend(pep_dict[k])
                     peptides[k] = list(set(peptides[k]))
+        # Drop peptides carrying a non-standard residue before anything scores them.
+        # BioPython translates a codon holding an unresolved base (N) to 'X', so a junction
+        # over an unresolved region yields peptides such as 'HMFSLIXXX' or 'XXXXXXXXXX'.
+        # mhcflurry refuses them -- "23 peptides have nonstandard amino acids" killed the
+        # 382-sample MDS_COMMAND snaf_t run on 2026-10-11 -- and it is right to: no MHC
+        # predictor can score an unknown residue. They are removed HERE, at the single point
+        # peptides are produced, rather than at the three mhcflurry call sites, because a
+        # peptide dropped later would still be expected in _MHCFLURRY_SCORE_CACHE downstream
+        # and raise KeyError. mhcflurry's own check is left untouched.
+        for k in list(peptides.keys()):
+            kept = [rec for rec in peptides[k] if not (set(rec[0]) - _STANDARD_AA)]
+            self.n_nonstandard_dropped += len(peptides[k]) - len(kept)
+            peptides[k] = kept
         self.peptides = peptides
         return peptides
 
