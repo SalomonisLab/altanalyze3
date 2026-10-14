@@ -6983,7 +6983,9 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         identity="drug:"+source_identity(meta)+drug_chat.resource_identity()+json.dumps(dict(params,interpret=interpret),sort_keys=True)
         def build():
             try: return JSONResponse((drug_chat.interpret if interpret else drug_chat.screen)(meta,**params))
-            except FileNotFoundError: raise HTTPException(503, "Discover DrugMatch resource bundle is not mounted. Configure CELLREF2_DRUGSTORE to the source-signature drugstore_v1 directory.")
+            except FileNotFoundError:
+                logging.exception("DrugMatch resource unavailable: configured directory=%s", drug_chat.dm._store_dir())
+                raise HTTPException(503, "Drug signature matching is unavailable on this server because its reference library is missing or incomplete. Your completed analysis and other results remain available. Please contact the site administrator.")
             except ValueError as exc: raise HTTPException(422,str(exc))
         return app.state.summary_build_queue.request(identity,build)
 

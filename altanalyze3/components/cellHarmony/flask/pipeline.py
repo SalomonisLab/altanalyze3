@@ -1276,6 +1276,39 @@ def _update_differential_state(store: JobStore, job_id: str, **changes) -> Dict[
     return current
 
 
+def _differential_de_progress(store, job_id, modality):
+    """Persist real native-DE stages so polling does not stay at 35%."""
+    import time
+    feature = "GRN edges" if modality == "grn" else str(_modality_definition(modality).get("label", modality))
+    previous = [None, 0.0]
+
+    def report(*, phase, label, completed, total):
+        fraction = completed / max(1, total)
+        if phase == "population":
+            progress = 35 + int(17 * fraction)
+            detail = f"testing cell state {completed + 1} of {total}: {label}"
+        elif phase == "pooled":
+            progress, detail = 53, "testing the pooled comparison"
+        elif phase == "patterns":
+            progress, detail = 54, "identifying cross-state patterns"
+        elif phase == "coreg":
+            progress, detail = 55 + int(fraction), f"testing co-regulated pattern {completed + 1} of {total}"
+        elif phase == "assignment":
+            progress, detail = 57 + int(2 * fraction), f"classifying differential features ({completed:,} of {total:,})"
+        else:
+            progress, detail = 59, "assembling differential results"
+        identity = (phase, label)
+        now = time.monotonic()
+        if identity == previous[0] and now - previous[1] < 1.0:
+            return
+        previous[:] = [identity, now]
+        message = f"Differential {feature}: {detail}."
+        _update_differential_state(store, job_id, message=message, progress=progress)
+        store.append_log(job_id, "[differential progress] " + message)
+
+    return report
+
+
 def _group_display_label(samples: List[str]) -> str:
     ordered = [str(sample).strip() for sample in samples if str(sample).strip()]
     if len(ordered) <= 3:
@@ -2847,6 +2880,7 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
         min_cells_per_group=int(de_params["min_cells_per_group"]),
         use_rawp=bool(de_params["use_rawp"]),
         progress_callback=None,
+        stage_callback=_differential_de_progress(store, job_id, modality),
     )
     pop_order = cellHarmony_differential._extract_lineage_order(adata, population_col)
     if not pop_order:

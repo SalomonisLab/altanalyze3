@@ -1162,6 +1162,12 @@ nonfinite or conflicting scores prevent capped selection rather than changing
 the policy. This score-selection policy is confined to the scALABLE web
 differential wrapper; general cellHarmony and ICGS3 defaults remain unchanged.
 
+Differential progress reports the current cell state, pooled comparison,
+cross-state patterns and feature classification before heatmap/export stages.
+Wide GRN-edge comparisons use indexed feature membership instead of repeated
+full-panel searches. This preserves the complete edge panel and statistical
+tests, and zero-DE states remain in the summary with zero significant features.
+
 The comparison defaults to pseudobulk when more than five distinct samples are
 selected across the two groups; before groups are selected, it uses the number
 of available values in the selected group field. An explicit cell-level choice

@@ -155,3 +155,21 @@ def test_async_drug_and_pathway_api(tmp_path,monkeypatch):
                 time.sleep(.01)
             assert response.status_code==200,response.text
         assert c.post(f'/api/jobs/{job}/chat-drugs?run_id=r&cell_state=AT2&tail=garbage').status_code==422
+
+
+def test_missing_drug_library_returns_clear_503_without_setup_details(tmp_path,monkeypatch,caplog):
+    store,job=fixture(tmp_path);web=importlib.import_module('altanalyze3.components.cellHarmony.webapp.app')
+    app=web.create_app({'JOB_STORAGE':str(store.root)})
+    def missing(*args,**kwargs):raise FileNotFoundError('fixture missing library')
+    monkeypatch.setattr(drug_chat,'screen',missing)
+    with TestClient(app) as client:
+        for _ in range(100):
+            response=client.post(f'/api/jobs/{job}/chat-drugs?run_id=run_rna&cell_state=AT2')
+            if response.status_code!=202:break
+            time.sleep(.01)
+        assert response.status_code==503
+        detail=response.json()['detail']
+        assert 'reference library is missing or incomplete' in detail
+        assert 'other results remain available' in detail
+        assert 'CELLREF2_DRUGSTORE' not in detail
+        assert 'configured directory=' in caplog.text

@@ -1099,7 +1099,8 @@ def run_de_for_comparisons(adata,
                            use_rawp=False,
                            progress_callback=None,
                            min_replicates_per_group=2,
-                           cell_state_override=None):
+                           cell_state_override=None,
+                           stage_callback=None):
 
     # Filter to cells with both labels present
     keep = adata.obs[covariate_col].isin([case_label, control_label])
@@ -1180,7 +1181,9 @@ def run_de_for_comparisons(adata,
 
     # Per-population DE
     all_fold_values = {}
-    for pop, pop_mask in de_units:
+    for pop_number, (pop, pop_mask) in enumerate(de_units):
+        if stage_callback is not None:
+            stage_callback(phase="population", label=str(pop), completed=pop_number, total=len(de_units))
         pop_data = sub[pop_mask] if disk_dense else sub[pop_mask].copy()
 
         # size checks
@@ -1332,16 +1335,11 @@ def run_de_for_comparisons(adata,
         per_pop_de[str(pop)] = df.set_index("gene")
         # detailed only for DEGs
 
-        # --- Defensive check to avoid KeyErrors ---
-        missing_genes = [g for g in deg_names if g not in df["gene"].values]
-        if len(missing_genes) == len(deg_names):
-            if diagnostic_report:
-                print(f"[WARN] No DE genes from {pop} match df['gene']; likely symbol mismatch ({len(df)} genes tested).")
-                print(f"[DEBUG] df['gene'] example: {df['gene'].head().tolist()[:5]}")
-            continue
-        else:
-            found_genes = [g for g in deg_names if g in df["gene"].values]
-            long_stats.append(df[df["gene"].isin(found_genes)].copy())
+        # deg_names came from this same frame after its identifier mapping.
+        # Hash membership once instead of scanning the full edge panel twice
+        # for every significant feature (quadratic on wide GRN matrices).
+        if len(deg_names):
+            long_stats.append(df[df["gene"].isin(deg_names)].copy())
 
         # Count only genes with valid (finite) t-values or fdr for tested genes
         tested_genes = int(adata.uns.get(f"tested_genes_{pop}", df["fdr"].notna().sum()))
@@ -1373,6 +1371,8 @@ def run_de_for_comparisons(adata,
 
     # Pooled overall test pO (all cells case vs control, regardless of population)
     pooled = sub
+    if stage_callback is not None:
+        stage_callback(phase="pooled", label="", completed=0, total=1)
     # Ensure both groups present
     gvc = pooled.obs[covariate_col].value_counts()
     if int(gvc.get(case_label, 0)) >= min_cells and int(gvc.get(control_label, 0)) >= min_cells:
@@ -1400,6 +1400,8 @@ def run_de_for_comparisons(adata,
     # Assemble per-gene vector over populations (for co-reg patterning)
     # vector entries: 1 if (p<0.10 & log2fc>0), -1 if (p<0.10 & log2fc<0), else 0
     pattern_mat = {}
+    if stage_callback is not None:
+        stage_callback(phase="patterns", label="", completed=0, total=1)
     pop_order = populations
     for pop in pop_order:
         dfp = per_pop_de.get(str(pop), None)
@@ -1454,7 +1456,9 @@ def run_de_for_comparisons(adata,
 
     # For each top pattern, pool those populations and compute pooled DE -> p(co-reg)
     coreg_tables = []
-    for pat in top_patterns:
+    for pattern_number, pat in enumerate(top_patterns):
+        if stage_callback is not None:
+            stage_callback(phase="coreg", label="", completed=pattern_number, total=len(top_patterns))
         idx_pops = [i for i, v in enumerate(pat) if v != 0]
         if len(idx_pops) == 0:
             continue
@@ -1516,7 +1520,12 @@ def run_de_for_comparisons(adata,
                 continue
             perpop_lookup[pop] = dfp
 
-        for g in deg_genes:
+        # Reuse exact row positions rather than rescan every pooled feature
+        # for every DEG. Preserve original row order and duplicate index labels.
+        coreg_rows = coreg_df.groupby("gene", sort=False).indices if not coreg_df.empty else {}
+        for gene_number, g in enumerate(deg_genes):
+            if stage_callback is not None and gene_number % 1000 == 0:
+                stage_callback(phase="assignment", label="", completed=gene_number, total=len(deg_genes))
             # collect per-pop signs where significance metric < alpha
             s = []
             for pop in pop_order:
@@ -1583,8 +1592,8 @@ def run_de_for_comparisons(adata,
                 continue
 
             # co-reg: among top patterns, if pooled comparison has smallest p
-            if not coreg_df.empty and (g in coreg_df["gene"].values):
-                rows = coreg_df[coreg_df["gene"] == g]
+            if g in coreg_rows:
+                rows = coreg_df.iloc[coreg_rows[g]]
                 if not rows.empty:
                     valid_rows = rows.loc[np.isfinite(rows["fdr"].astype(float))]
                     if valid_rows.empty:
@@ -1629,6 +1638,8 @@ def run_de_for_comparisons(adata,
                                 columns=["gene", "group", "key_p", "key_log2fc", "population_or_pattern"])
 
     # Aggregate outputs
+    if stage_callback is not None:
+        stage_callback(phase="assembling", label="", completed=0, total=1)
     de_store = {
         "summary_per_population": summary,
         "detailed_deg": detailed,

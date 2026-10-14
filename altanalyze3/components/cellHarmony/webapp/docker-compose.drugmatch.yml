@@ -1,0 +1,13 @@
+# Add to docker-compose.scalable.yml after copying the complete existing
+# Discover drugstore_v1 bundle to the deployment host. No data go into Git.
+services:
+  scalable-web:
+    environment:
+      CELLREF2_DRUGSTORE: /resources/cellref2/drugstore_v1
+    volumes:
+      - type: bind
+        source: ${SCALABLE_DRUGSTORE_HOST:?Set SCALABLE_DRUGSTORE_HOST to the existing production drugstore_v1 directory}
+        target: /resources/cellref2/drugstore_v1
+        read_only: true
+        bind:
+          create_host_path: false

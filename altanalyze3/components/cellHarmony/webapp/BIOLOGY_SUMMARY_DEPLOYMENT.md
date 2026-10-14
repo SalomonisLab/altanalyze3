@@ -22,6 +22,52 @@ that resource has a different purpose. The DrugMatch data volume is external to
 the Git source package. An optional `SCALABLE_INTERPRET_CACHE` sets the writable
 native enrichment-cache directory; otherwise it lives under `webapp/jobs`.
 
+### Mounting DrugMatch on the scALABLE server
+
+The Python image contains the scorer, not the approximately 5.6 GB source library.
+Rebuilding Git code alone does not install it. The verified production source is
+`/Users/saljh8/Dropbox/LungMAP/refactored_website/lungmap-data/cellref2/drugstore_v1/`.
+Transfer that **entire directory**, including all four partitions, to the server;
+do not use the separate `lungmap-data-test` or `lungmap-data-s3test` fixtures.
+
+From `cellHarmony/webapp`, set `SCALABLE_DRUGSTORE_HOST` to its existing absolute
+directory on the server, then add the supplied read-only mount override:
+
+```bash
+docker compose -f docker-compose.scalable.yml -f docker-compose.drugmatch.yml config --quiet
+docker compose -f docker-compose.scalable.yml -f docker-compose.drugmatch.yml up -d --build
+docker compose -f docker-compose.scalable.yml -f docker-compose.drugmatch.yml exec scalable-web python -m altanalyze3.components.cellHarmony.discover_resources.verify_drugstore
+```
+
+The override refuses to create an empty host directory for a missing source.
+The check uses the native reader and validates the complete declared signature
+roster, array dimensions, metadata offsets, source p-values and measured-gene
+masks without loading effect matrices into RAM. The expected production version
+is `drugstore_v1_20260908_083141`: 333,562 source signatures across four partitions,
+of which 323,661 are treatment signatures eligible for the native drug screen.
+For another service layout, apply the same read-only bind and
+`CELLREF2_DRUGSTORE` environment value to that service; the optional override
+targets the repository's `scalable-web` service. A configured path alone is
+insufficient unless the complete source library exists inside the container.
+
+The complete production bundle is already published at:
+
+```text
+s3://lungmap-breath-data/deploy/lungmap/full/cellref2/drugstore_v1/
+```
+
+Verified on 2026-10-13: all 25 objects (6,045,138,558 bytes) matched freshly
+computed local SHA-256 hashes against S3 `sha256` object metadata and byte sizes.
+No re-upload was required. On the deployment host, sync that existing prefix
+into the host directory before applying the mount override:
+
+```bash
+aws s3 sync s3://lungmap-breath-data/deploy/lungmap/full/cellref2/drugstore_v1/ "${SCALABLE_DRUGSTORE_HOST:?Set the absolute destination directory}/"
+```
+
+Keep AWS credentials out of Compose files and Git; use the host's normal AWS
+credential chain or instance role for the download.
+
 `/chat-drugs` and `/chat-interpret` return 202 while building and 200 when ready,
 using the bounded summary worker/cache. Compound matching uses local partition
 memmaps. Interpret requires outbound HTTPS to ToppGene, PubChem, openFDA,
