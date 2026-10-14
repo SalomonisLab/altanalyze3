@@ -1415,6 +1415,10 @@ select:disabled {
 
 .biology-summary-section { margin: 12px 0; padding: 10px 14px; border: 1px solid #dfe5ed; border-radius: 10px; min-width: 0; }
 .biology-summary-section > summary { font-weight: 700; cursor: pointer; }
+.summary-lazy-loading { display: flex; align-items: center; gap: .6em; }
+.summary-lazy-loading::before { content: ""; width: 1em; height: 1em; flex: 0 0 1em; border: 2px solid #dfe5ed; border-top-color: #116f79; border-radius: 50%; animation: summary-loading-spin .8s linear infinite; }
+@keyframes summary-loading-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .summary-lazy-loading::before { animation: none; } }
 .biology-summary-section pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85em; max-height: 440px; overflow: auto; }
 .biology-summary-section a { display: block; overflow-wrap: anywhere; margin: 6px 0; }
 .drug-chat-controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }

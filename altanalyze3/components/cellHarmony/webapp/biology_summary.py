@@ -27,7 +27,7 @@ from .grn_data import completed_differentials, comparison_entry
 from ..modalities import modality_artifacts, normalize_modality_id
 
 KNOWLEDGE = Path(__file__).parents[1] / 'resources/biology/lungmap.json'
-VERSION = 4
+VERSION = 5
 CHUNK = 25000
 
 
@@ -665,15 +665,33 @@ Code owns the hypotheses, evidence bindings and narrative."""
                       "scope":"Rule guards and code-owned evidence bindings; not a proof of biological accuracy."}},''
 
 
-def build_summary(meta):
+def build_summary(meta, *, eager=True):
     from .summary_runtime import trace
     with trace() as timings:
-        result=_build_summary(meta)
+        result=_build_summary(meta,eager=eager)
     result['timings']=timings
     return result
 
 
-def _build_summary(meta):
+def build_surface(meta):
+    """Saved evidence first: no model inference or remote literature requests."""
+    return build_summary(meta,eager=False)
+
+
+def build_summary_detail(surface, section, source_id=None):
+    """Interpret only the server-owned evidence requested by an expanded panel."""
+    digest=surface['digest']
+    if section=='literature':
+        from .biology_literature import review
+        return {'kind':'summary_literature','review':review(digest)}
+    if section=='priorities':
+        narrative,message=interpret(digest)
+        return {'kind':'summary_priorities','narrative':narrative,'message':message}
+    from .biology_interpretation import interpret_sections
+    return {'kind':'summary_interpretation','review':interpret_sections(digest,section=section,source_id=source_id)}
+
+
+def _build_summary(meta, *, eager=True):
     from .summary_runtime import phase
     with phase('evidence','Reading saved analysis results…'):
         digest=collect_evidence(meta)
@@ -688,17 +706,27 @@ def _build_summary(meta):
         digest['integrated_pathway_review']=pathway_sections(meta,digest)
     from .biology_literature import review
     digest['reviewed_observations']=knowledge().get('reviewed_observations',[])
-    with phase('literature','Checking the literature for the leading findings…'):
-        digest['literature_review']=review(digest)
-    try: narrative,message=interpret(digest)
+    digest['literature_review']={'status':'deferred'}
+    if eager:
+        with phase('literature','Checking the literature for the leading findings…'):
+            digest['literature_review']=review(digest)
+    try: narrative,message=interpret(digest) if eager else (None,'Detailed model interpretations load when requested.')
     except Exception as exc:
         narrative=None
         message=(f'Model interpretation rejected: {clean(str(exc),200)}. Computed biological questions remain available.'
                  if isinstance(exc,ValueError) else f'Local model interpretation unavailable ({type(exc).__name__}). Computed evidence remains available.')
     from .biology_interpretation import interpret_sections
     try:
-        with phase('section_interpretation','Interpreting biological consequences across result sections…'):
-            digest['section_interpretation']=interpret_sections(digest)
+        if eager:
+            with phase('section_interpretation','Interpreting biological consequences across result sections…'):
+                digest['section_interpretation']=interpret_sections(digest)
+        else:
+            from .biology_interpretation import context
+            evidence,_=context(digest)
+            digest['section_interpretation']={'status':'deferred','sections':{},'sources':{}}
+            digest['deferred_sections']={key:[{'source_id':r['source_id'],'state':r['state'],
+                'title':r.get('name') or r.get('title') or r.get('comparison') or r['state']}
+                for r in records] for key,records in evidence['sections'].items()}
     except Exception as exc:
         digest['section_interpretation']={'status':'unavailable','message':f'Biological systems interpretation unavailable ({type(exc).__name__}); saved evidence remains available.','sections':{},'sources':{}}
     from .biology_synthesis import narrative_from_synthesis

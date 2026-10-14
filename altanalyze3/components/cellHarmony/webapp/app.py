@@ -6112,6 +6112,8 @@ def create_app(test_config: dict | None = None) -> FastAPI:
     app.state.plot_build_queue = PlotBuildQueue()
     app.state.summary_build_queue = PlotBuildQueue(max_entries=4, ttl_seconds=3600,
         pending_message="Collecting saved biological evidence and preparing the summary…")
+    app.state.summary_detail_queue = PlotBuildQueue(max_entries=32, ttl_seconds=3600,
+        pending_message="Interpreting the requested biological result…", cache_errors=False)
     previous_lifespan = app.router.lifespan_context
 
     @asynccontextmanager
@@ -6122,6 +6124,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             finally:
                 await run_in_threadpool(application.state.plot_build_queue.close)
                 await run_in_threadpool(application.state.summary_build_queue.close)
+                await run_in_threadpool(application.state.summary_detail_queue.close)
 
     app.router.lifespan_context = plot_lifespan
     app.state.job_runner = JobRunner(
@@ -6954,7 +6957,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
 
     @app.post("/api/jobs/{job_id}/chat-summary")
     def chat_summary(job_id: str):
-        from .biology_summary import source_identity, build_summary
+        from .biology_summary import source_identity, build_surface
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(404, "Job not found.")
@@ -6969,8 +6972,37 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             queue = app.state.summary_build_queue
             with reporting(lambda **progress: queue.report_progress(identity, **progress),
                            cache_dir=Path(app.state.config['JOB_STORAGE']) / job_id / 'summary_cache'):
-                return JSONResponse(build_summary(meta))
+                return JSONResponse(dict(build_surface(meta),source_identity=identity))
         return app.state.summary_build_queue.request(identity, build)
+
+    @app.post("/api/jobs/{job_id}/chat-summary-section")
+    def chat_summary_section(job_id: str,
+                             section: str = Query(..., pattern="^(grn|pathways|multimodal_pathways|communication|cell_frequency|literature|priorities)$"),
+                             source_id: str = Query("", max_length=32),
+                             expected_identity: str = Query("", max_length=64)):
+        from .biology_summary import source_identity, build_summary_detail
+        store,_=_job_resources(app)
+        if not store.job_exists(job_id):raise HTTPException(404,"Job not found.")
+        meta=(JobStore.get_job(store,job_id) if isinstance(store,AnalysisJobStore) else store.get_job(job_id))
+        if meta.get('status')!='completed':raise HTTPException(409,"The summary is available after the analysis completes.")
+        identity=source_identity(meta)
+        if expected_identity and expected_identity!=identity:
+            raise HTTPException(409,"Saved results changed. Reopen AI summary to read the updated evidence.")
+        surface_response=chat_summary(job_id)
+        if surface_response.status_code!=200:return surface_response
+        surface=json.loads(surface_response.body)
+        if section not in ('literature','priorities'):
+            sources=surface['digest'].get('deferred_sections',{}).get(section,[])
+            if not source_id or not any(r['source_id']==source_id for r in sources):
+                raise HTTPException(422,"Choose an available biological interpretation source.")
+        key='summary-detail:'+identity+':'+section+':'+source_id
+        def build():
+            from .summary_runtime import reporting
+            queue=app.state.summary_detail_queue
+            with reporting(lambda **progress:queue.report_progress(key,**progress),
+                           cache_dir=Path(app.state.config['JOB_STORAGE'])/job_id/'summary_cache'):
+                return JSONResponse(dict(build_summary_detail(surface,section,source_id or None),source_identity=identity))
+        return app.state.summary_detail_queue.request(key,build)
 
     @app.post("/api/jobs/{job_id}/chat-drugs")
     def chat_drugs(job_id: str, run_id: str = Query(...), cell_state: str = Query(...),

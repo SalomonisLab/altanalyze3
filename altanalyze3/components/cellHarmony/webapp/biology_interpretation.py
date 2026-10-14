@@ -144,12 +144,19 @@ def context(digest):
 
 
 
-def interpret_sections(digest):
+def interpret_sections(digest, *, section=None, source_id=None):
     from .biology_summary import _check_interpretation_scope, clean
     url=os.environ.get('SCALABLE_SUMMARY_URL','').strip();model=os.environ.get('SCALABLE_SUMMARY_MODEL','').strip()
     if not url or not model:
         return {'status':'unavailable','message':'Biological systems interpretation requires the configured summary model.','sections':{},'sources':{}}
     evidence,sources=context(digest)
+    if section is not None:
+        records=evidence['sections'].get(section,[])
+        if source_id is not None:
+            records=[r for r in records if r['source_id']==source_id]
+        if not records:raise ValueError('Requested biological interpretation source is not available')
+        evidence=dict(evidence,sections={section:records})
+        sources={r['source_id']:sources[r['source_id']] for r in records}
     if not sources:return {'status':'no_supported_results','sections':{},'sources':{}}
     raw=json.dumps(evidence,ensure_ascii=False,default=str)
     if len(raw.encode())>180000:raise ValueError('Section evidence exceeds interpretation transport budget')

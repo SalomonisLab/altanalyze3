@@ -137,10 +137,10 @@ def test_poll_is_async_deduplicated_and_ignores_selected_layer(tmp_path,monkeypa
     import threading
     store,job=fixture(tmp_path);w=import_module('altanalyze3.components.cellHarmony.webapp.app')
     app=w.create_app({'JOB_STORAGE':str(store.root)});client=TestClient(app)
-    release=threading.Event();calls=[];original=summary.build_summary
+    release=threading.Event();calls=[];original=summary.build_surface
     def slow(meta):
         calls.append(meta['cluster_key']);assert release.wait(5);return original(meta)
-    monkeypatch.setattr(summary,'build_summary',slow)
+    monkeypatch.setattr(summary,'build_surface',slow)
     try:
         url=f'/api/jobs/{job}/chat-summary';t=time.monotonic()
         assert client.post(url+'?state_layer=unsupervised_state').status_code==202

@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse, Response
 
 class PlotBuildQueue:
     def __init__(self, max_entries=8, ttl_seconds=300, clock=time.monotonic,
-                 pending_message="Preparing CombPlot…"):
+                 pending_message="Preparing CombPlot…", cache_errors=True):
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="plot-build")
         self.directory = TemporaryDirectory(prefix="scalable-plots-")
         self.entries = {}
@@ -21,6 +21,7 @@ class PlotBuildQueue:
         self.max_entries, self.ttl, self.clock = max_entries, ttl_seconds, clock
         self.serial = 0
         self.pending_message = pending_message
+        self.cache_errors = cache_errors
 
     def _discard(self, key):
         _, _, path = self.entries.pop(key)
@@ -79,7 +80,10 @@ class PlotBuildQueue:
             # Completed results live on disk, including plots too large for a
             # RAM cache. Failures propagate through the normal API error handler.
             status = future.result()
-            return Response(path.read_bytes(), status_code=status, media_type="application/json")
+            body = path.read_bytes()
+            if status >= 400 and not self.cache_errors:
+                self._discard(key)
+            return Response(body, status_code=status, media_type="application/json")
 
     @staticmethod
     def _pending(message, **progress):

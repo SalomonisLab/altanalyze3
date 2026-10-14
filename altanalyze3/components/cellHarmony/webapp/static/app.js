@@ -9268,6 +9268,7 @@ function renderMethodsMarkdown(host, markdown) {
 function renderBiologySummary(data) {
   const host=document.getElementById("chat-answer"); host.replaceChildren();
   const digest=data.digest || {}; const evidence=new Map((digest.evidence || []).map(e=>[e.id,e]));
+  digest.summary_identity=data.source_identity || "";
   const text=(parent,tag,value)=>{const node=document.createElement(tag);node.textContent=value;parent.append(node);return node;};
   const references=(parent,ids)=>{const links=document.createElement("div");links.className="summary-links";parent.append(links);(ids || []).forEach(id=>{if(evidence.has(id))appendSummaryEvidenceLink(links,evidence.get(id));});};
   text(host,"h3","Biological summary");
@@ -9288,6 +9289,14 @@ function renderBiologySummary(data) {
     modality_provenance:digest.modality_provenance,qc:digest.qc,reference_alignment_used:digest.reference_alignment_used},null,2));
   const synthesisHost=summarySection(host,"Systems-level synthesis",true);
   (data.overview || []).forEach(row=>{const part=document.createElement("section");part.className="summary-program";synthesisHost.append(part);text(part,"p",row.text);references(part,row.evidence_ids);});
+  if(digest.section_interpretation?.status === "deferred"){
+    text(host,"p","Saved evidence is ready. Expand an interpretation to load its biological synthesis; unopened interpretations do not run.");
+    summaryLazySection(synthesisHost,"AI review of experimental priorities",digest,{section:"priorities"},(body,result)=>{
+      if(!result.narrative){text(body,"p",result.message || "Model interpretation is unavailable.");return;}
+      (result.narrative.overview || []).forEach(row=>{text(body,"p",row.text);references(body,row.evidence_ids);});
+      (result.narrative.hypotheses || []).forEach(row=>{text(body,"h4",row.title);text(body,"p",row.rationale);if(row.priority_alternative)text(body,"p",row.priority_alternative);references(body,row.evidence_ids);});
+    });
+  }
   const framework=digest.question_framework;
   if(framework){
     text(synthesisHost,"h4","Biological questions evaluated from saved analyses");
@@ -9414,15 +9423,46 @@ function summaryCitation(parent,title,url) {
   if(parsed.protocol!=="https:")return;
   const a=document.createElement("a");a.href=parsed.href;a.textContent=title || url;a.target="_blank";a.rel="noopener noreferrer";parent.append(a);
 }
-async function summaryPoll(path,signal) {
+async function summaryPoll(path,signal,onProgress) {
   for (;;) {
     const response=await fetch(apiPath(path),{method:"POST",signal});const data=await response.json();
     if(!response.ok)throw new Error(data.detail || data.error || "Request failed ("+response.status+")");
     if(response.status!==202)return data;
+    onProgress?.(data);
     await new Promise((resolve,reject)=>{const abort=()=>{clearTimeout(timer);reject(new DOMException("Aborted","AbortError"));};
       const timer=setTimeout(()=>{signal?.removeEventListener("abort",abort);resolve();},1000);
       if(signal?.aborted)abort();else signal?.addEventListener("abort",abort,{once:true});});
   }
+}
+function summaryLazySection(parent,title,digest,params,render) {
+  const panel=summarySection(parent,title);
+  const body=summaryText(panel,"div","");
+  const jobId=getResultsJobId(),request=chatRequest;
+  let pending=false,loaded=false;
+  const load=async()=>{
+    if(!panel.open || pending || loaded)return;
+    pending=true;body.replaceChildren();panel.setAttribute("aria-busy","true");
+    const status=summaryText(body,"p","Loading biological interpretation…");status.className="summary-lazy-loading";status.setAttribute("role","status");
+    const controller=new AbortController();
+    const current=()=>panel.isConnected && jobId===getResultsJobId() && request===chatRequest;
+    try {
+      const query=new URLSearchParams({...params,expected_identity:digest.summary_identity || ""});
+      const result=await summaryPoll("/api/jobs/"+encodeURIComponent(jobId)+"/chat-summary-section?"+query,controller.signal,progress=>{
+        if(!current()){controller.abort();return;}
+        status.textContent=progress.detail || "Loading biological interpretation…";
+      });
+      if(!current())return;
+      body.replaceChildren();render(body,result);loaded=true;
+    } catch(error) {
+      if(error.name!=="AbortError" && current()){
+        body.replaceChildren();summaryText(body,"p",error.message);
+        const retry=summaryText(body,"button","Retry");retry.type="button";retry.className="ghost-btn";
+        retry.onclick=load;
+      }
+    } finally {pending=false;panel.removeAttribute("aria-busy");}
+  };
+  panel.addEventListener("toggle",event=>{if(event.target===panel)load();});
+  return panel;
 }
 function summaryInterpret(parent,params) {
   const button=summaryText(parent,"button","Interpret");button.type="button";button.className="ghost-btn";
@@ -9443,8 +9483,18 @@ function summaryInterpret(parent,params) {
 }
 function appendBiologicalSectionSynthesis(host,digest,key) {
   const review=digest.section_interpretation || {};
+  if(review.status === "deferred"){
+    (digest.deferred_sections?.[key] || []).forEach(source=>{
+      summaryLazySection(host,"Interpret biology · "+source.state+" · "+source.title,digest,
+        {section:key,source_id:source.source_id},(body,result)=>appendBiologicalSectionSynthesis(body,{...digest,section_interpretation:result.review},key));
+    });
+    return;
+  }
   const rows=review.sections?.[key] || [];
-  if(!rows.length){if(review.message)summaryText(host,"p",review.message);return;}
+  if(!rows.length){
+    summaryText(host,"p",review.message || (review.status === "rejected" ? "The model interpretation did not pass the evidence checks. Saved results remain available below." : "No supported biological interpretation was returned for this result."));
+    return;
+  }
   summaryText(host,"h4","Biological systems interpretation");
   const used=[...new Set(rows.flatMap(row=>row.source_ids || []))];
   used.forEach(id=>{
@@ -9477,6 +9527,18 @@ function appendBiologicalSectionSynthesis(host,digest,key) {
     });
   });
   summaryText(host,"small","Model interpretation of saved results; proposed biological consequences require experimental validation.");
+}
+function renderSummaryLiterature(host,literature) {
+  const known=summarySection(host,"Verified known biology");summaryText(known,"p",literature.verification_note);
+  if(!(literature.verified_known_biology || []).length)summaryText(known,"p","No exact disease/cell-state directional claim is certified from retrieved titles alone. Related publications below remain candidates for verification.");
+  (literature.verified_known_biology || []).forEach(r=>{const part=summarySection(known,r.feature+" · "+r.state+" · "+r.comparison);
+    summaryText(part,"p",r.observation);r.verification_sources.forEach(s=>{summaryText(part,"p",s.claim);summaryText(part,"blockquote",s.evidence_excerpt);summaryCitation(part,"Reviewed primary source",s.citation_url);summaryText(part,"small","Claim reviewed by "+s.reviewed_by+" on "+s.reviewed_at);});});
+  (literature.literature_candidates || []).forEach(r=>{const part=summarySection(known,r.feature+" · "+r.state+" · "+r.comparison);
+    r.literature.papers.forEach(p=>{summaryCitation(part,p.title,p.url);summaryText(part,"small",p.journal+" · "+p.year);});
+    (r.literature.searches || []).forEach(q=>summaryCitation(part,q.scope+" · "+q.count+" results",q.url));});
+  const predictions=summarySection(host,"Novel predictions");summaryText(predictions,"p","Testable predictions from this dataset; novelty remains unconfirmed. A missing publication or failed search is not evidence of novelty.");
+  (literature.novel_predictions || []).forEach(r=>{const part=summarySection(predictions,r.modality+" · "+r.feature+" · "+r.state+" · "+r.comparison);
+    summaryText(part,"p",r.observation);summaryText(part,"p",r.literature.note);if(r.literature.search_url)summaryCitation(part,"Literature search",r.literature.search_url);});
 }
 function renderExtendedBiologySections(host,digest) {
   const grn=summarySection(host,"Gene Regulatory Networks");
@@ -9523,17 +9585,10 @@ function renderExtendedBiologySections(host,digest) {
       summaryText(row,"pre",JSON.stringify(r.supervised_assignments,null,2));});
     const all=summarySection(part,"All clusters, including those that do not meet the criteria");summaryText(all,"pre",JSON.stringify(missing.rows || [],null,2));
   }
-  const literature=digest.literature_review || {};
-  const known=summarySection(host,"Verified known biology");summaryText(known,"p",literature.verification_note);
-  if(!(literature.verified_known_biology || []).length)summaryText(known,"p","No exact disease/cell-state directional claim is certified from retrieved titles alone. Related publications below remain candidates for verification.");
-  (literature.verified_known_biology || []).forEach(r=>{const part=summarySection(known,r.feature+" · "+r.state+" · "+r.comparison);
-    summaryText(part,"p",r.observation);r.verification_sources.forEach(s=>{summaryText(part,"p",s.claim);summaryText(part,"blockquote",s.evidence_excerpt);summaryCitation(part,"Reviewed primary source",s.citation_url);summaryText(part,"small","Claim reviewed by "+s.reviewed_by+" on "+s.reviewed_at);});});
-  (literature.literature_candidates || []).forEach(r=>{const part=summarySection(known,r.feature+" · "+r.state+" · "+r.comparison);
-    r.literature.papers.forEach(p=>{summaryCitation(part,p.title,p.url);summaryText(part,"small",p.journal+" · "+p.year);});
-    (r.literature.searches || []).forEach(q=>summaryCitation(part,q.scope+" · "+q.count+" results",q.url));});
-  const predictions=summarySection(host,"Novel predictions");summaryText(predictions,"p","Testable predictions from this dataset; novelty remains unconfirmed. A missing publication or failed search is not evidence of novelty.");
-  (literature.novel_predictions || []).forEach(r=>{const part=summarySection(predictions,r.modality+" · "+r.feature+" · "+r.state+" · "+r.comparison);
-    summaryText(part,"p",r.observation);summaryText(part,"p",r.literature.note);if(r.literature.search_url)summaryCitation(part,"Literature search",r.literature.search_url);});
+  if(digest.literature_review?.status === "deferred"){
+    summaryLazySection(host,"Literature checks: verified biology and novel predictions",digest,{section:"literature"},
+      (body,result)=>renderSummaryLiterature(body,result.review));
+  }else renderSummaryLiterature(host,digest.literature_review || {});
   const drugs=summarySection(host,"Drug signature reversal and mimicry");summaryText(drugs,"p","Screen a completed RNA comparison with native Discover DrugMatch. Source-signature context and registry/trial Interpret are available in Chat.");
   (digest.comparisons || []).filter(c=>c.modality==="rna").forEach(c=>{
     const states=Object.keys(digest.observations?.layers?.[c.config.population_col]?.counts || {});
