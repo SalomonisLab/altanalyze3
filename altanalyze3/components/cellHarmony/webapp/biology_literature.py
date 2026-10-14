@@ -1,5 +1,6 @@
 """Auditable PubMed checks of job-derived hypotheses; search absence is not novelty."""
 from functools import lru_cache
+from concurrent.futures import ThreadPoolExecutor
 import re
 import urllib.parse
 
@@ -59,8 +60,7 @@ def review(digest,limit=8):
     for m in digest['modalities']:
         selected.extend([r for r in rows if r['modality']==m][:1])
     selected.extend(r for r in rows if r not in selected)
-    checked=[]
-    for r in selected[:limit]:
+    def check(r):
         c=comparisons[r['run_id']];disease=c['comparison'].split(' vs ')[0]
         row=dict(r,comparison=c['comparison'],species=digest['species'],disease=disease)
         background=next((v for v in digest.get('cell_state_biology',{}).get('matched',[]) if v['state']==r['state']),{})
@@ -68,7 +68,11 @@ def review(digest,limit=8):
         row['literature_state_terms']=list(aliases)
         try:row['literature']=search(r['feature'],aliases,disease,str(digest['species']))
         except Exception as exc:row['literature']={'status':'unavailable','papers':[],'error':type(exc).__name__,'note':'Literature could not be checked; no novelty inference made.'}
-        checked.append(row)
+        return row
+    # Independent HTTP waits can overlap. Every request still passes through the
+    # native shared NCBI rate limiter; map preserves the original result order.
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        checked=list(pool.map(check,selected[:limit]))
     # Exact verified observations must have a reviewed claim/source mapping. The
     # existing CellCards are background, not proof of this disease differential.
     known=[];predictions=[]

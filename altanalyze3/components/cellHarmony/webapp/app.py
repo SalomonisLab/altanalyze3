@@ -6964,8 +6964,13 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         if meta.get("status") != "completed":
             raise HTTPException(409, "The summary is available after the analysis completes.")
         identity = source_identity(meta)
-        return app.state.summary_build_queue.request(identity,
-            lambda: JSONResponse(build_summary(meta)))
+        def build():
+            from .summary_runtime import reporting
+            queue = app.state.summary_build_queue
+            with reporting(lambda **progress: queue.report_progress(identity, **progress),
+                           cache_dir=Path(app.state.config['JOB_STORAGE']) / job_id / 'summary_cache'):
+                return JSONResponse(build_summary(meta))
+        return app.state.summary_build_queue.request(identity, build)
 
     @app.post("/api/jobs/{job_id}/chat-drugs")
     def chat_drugs(job_id: str, run_id: str = Query(...), cell_state: str = Query(...),

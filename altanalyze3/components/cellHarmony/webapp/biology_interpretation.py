@@ -158,11 +158,14 @@ def interpret_sections(digest):
     token=os.environ.get('SCALABLE_SUMMARY_API_KEY','')
     if token:headers['Authorization']='Bearer '+token
     parsed={};model_name=model
+    total_calls=sum(len(rows) for rows in evidence['sections'].values())
+    call_number=0
     # Independent contexts prevent another section's observations contaminating
     # the GRN interpretation; these calls share the already-loaded model.
     for section,all_records in evidence['sections'].items():
         parsed[section]=[]
         for record in all_records:
+            call_number+=1
             records=[record]
             section_context={k:v for k,v in evidence.items() if k!='sections'}
             section_context.update(section=section,findings=interpretation_findings(section,records))
@@ -180,9 +183,10 @@ def interpret_sections(digest):
                     'properties':{'sections':{'type':'object','properties':{section:{'type':'array','items':paragraph,'minItems':1,'maxItems':1}},
                         'required':[section],'additionalProperties':False}},'required':['sections'],'additionalProperties':False}}
             request=urllib.request.Request(url,data=json.dumps(payload).encode(),headers=headers,method='POST')
-            with urllib.request.urlopen(request,timeout=240) as response:reply=response.read(2*1024*1024+1)
-            if len(reply)>2*1024*1024:raise ValueError('Interpretation response exceeds size limit')
-            answer=json.loads(reply);model_name=answer.get('model',model)
+            from .summary_runtime import completion
+            answer=completion(request,f'model.section.{record["source_id"]}',
+                              f'Interpreting {section.replace("_", " ")}: model request {call_number} of {total_calls}…')
+            model_name=answer.get('model',model)
             if protocol=='ollama':content=answer['message']['content']
             else:
                 if answer['choices'][0].get('finish_reason')=='length':raise ValueError('Incomplete section interpretation rejected')

@@ -75,19 +75,28 @@ def worker_main():
         try:
             request = json.loads(line)
             options, payload = request['options'], request['payload']
+            load_started = time.monotonic()
+            load_seconds = 0.0
             if engine is None:
                 engine = Llama(model_path=options['model_path'], n_ctx=options['ctx_size'],
                     n_threads=options['threads'], n_threads_batch=options['threads'],
                     n_gpu_layers=options['gpu_layers'], verbose=False)
+                load_seconds = time.monotonic() - load_started
             # Independent jobs must not inherit a prior conversation/KV context.
             engine.reset()
             messages = payload.get('messages')
             if not isinstance(messages, list) or not messages:
                 raise ValueError('messages must be a nonempty list')
+            generation_started = time.monotonic()
             reply = engine.create_chat_completion(messages=messages,
                 temperature=0.1, max_tokens=min(int(payload.get('max_tokens', 3000)), 3000),
                 response_format=payload.get('response_format', {'type':'json_object'}))
             reply['model'] = options['model_name']
+            seconds = time.monotonic() - generation_started
+            reply['scalable_runtime'] = {'model_load_seconds': round(load_seconds, 3),
+                'generation_seconds': round(seconds, 3), 'threads': options['threads'],
+                'gpu_layers': options['gpu_layers'], 'ctx_size': options['ctx_size'],
+                'completion_tokens_per_second': round(reply.get('usage', {}).get('completion_tokens', 0) / max(seconds, .001), 3)}
         except Exception as exc:
             reply = {'error': f'{type(exc).__name__}: {exc}'}
         print(json.dumps(reply), flush=True)

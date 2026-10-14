@@ -9169,7 +9169,7 @@ async function askBiologySummary() {
       const data = await parseApiResponse(response);
       if (!current()) return;
       if (response.status === 202) {
-        status.textContent = data.detail || "Preparing biological summary…";
+        status.textContent = (data.detail || "Preparing biological summary…") + (Number.isFinite(data.elapsed_seconds) ? ` (${Math.round(data.elapsed_seconds)} s elapsed)` : "");
         await new Promise((resolve, reject) => {
           const cancel = () => {clearTimeout(timer); reject(new DOMException("Aborted","AbortError"));};
           const timer = setTimeout(() => {controller.signal.removeEventListener("abort",cancel); resolve();},1500);

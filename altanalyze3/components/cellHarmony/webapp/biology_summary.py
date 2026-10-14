@@ -27,7 +27,7 @@ from .grn_data import completed_differentials, comparison_entry
 from ..modalities import modality_artifacts, normalize_modality_id
 
 KNOWLEDGE = Path(__file__).parents[1] / 'resources/biology/lungmap.json'
-VERSION = 3
+VERSION = 4
 CHUNK = 25000
 
 
@@ -204,7 +204,7 @@ def _source_paths(meta):
 def source_identity(meta):
     files=[]
     for name in _source_paths(meta)+[str(KNOWLEDGE),str(Path(__file__)),str(Path(__file__).with_name('biology_synthesis.py')),str(Path(__file__).with_name('biology_sections.py')),str(Path(__file__).with_name('biology_literature.py')),
-                                   str(Path(__file__).with_name('biology_questions.py')),
+                                   str(Path(__file__).with_name('biology_questions.py')), str(Path(__file__).with_name('summary_runtime.py')),
                                    str(Path(__file__).parent.parent/'analysis_record.py'), str(Path(__file__).with_name('biology_interpretation.py'))]:
         p=Path(name); stat=p.stat(); files.append((name,stat.st_size,stat.st_mtime_ns))
     model={k:os.environ.get(k,'') for k in ('SCALABLE_SUMMARY_URL','SCALABLE_SUMMARY_MODEL','SCALABLE_SUMMARY_PROTOCOL')}
@@ -575,10 +575,8 @@ Code owns the hypotheses, evidence bindings and narrative."""
     token=os.environ.get('SCALABLE_SUMMARY_API_KEY','')
     if token: headers['Authorization']='Bearer '+token
     request=urllib.request.Request(url,data=json.dumps(payload).encode(),headers=headers,method='POST')
-    with urllib.request.urlopen(request,timeout=240) as response:
-        raw=response.read(2*1024*1024+1)
-    if len(raw)>2*1024*1024: raise ValueError('Summary model response exceeds size limit')
-    answer=json.loads(raw)
+    from .summary_runtime import completion
+    answer=completion(request,'model.priorities','Asking the model to prioritize the biological hypotheses…')
     content=answer['message']['content'] if protocol=='ollama' else answer['choices'][0]['message']['content']
     if protocol != 'ollama' and answer['choices'][0].get('finish_reason') == 'length':
         raise ValueError('Interpretation exceeded output budget; incomplete narrative rejected')
@@ -668,22 +666,39 @@ Code owns the hypotheses, evidence bindings and narrative."""
 
 
 def build_summary(meta):
-    digest=collect_evidence(meta)
+    from .summary_runtime import trace
+    with trace() as timings:
+        result=_build_summary(meta)
+    result['timings']=timings
+    return result
+
+
+def _build_summary(meta):
+    from .summary_runtime import phase
+    with phase('evidence','Reading saved analysis results…'):
+        digest=collect_evidence(meta)
     from .biology_sections import methods, missing_states, regulatory_sections, pathway_sections
-    digest['methods']=methods(meta)
-    digest['missing_reference_states']=missing_states(meta,(meta.get('artifacts') or {}).get('combined_h5ad'))
-    digest['regulatory_review']=regulatory_sections(meta,digest)
-    digest['integrated_pathway_review']=pathway_sections(meta,digest)
+    with phase('methods','Preparing methods and reproducibility information…'):
+        digest['methods']=methods(meta)
+    with phase('reference_gaps','Checking unsupervised clusters against reference assignments…'):
+        digest['missing_reference_states']=missing_states(meta,(meta.get('artifacts') or {}).get('combined_h5ad'))
+    with phase('regulatory_review','Examining regulatory networks and hub targets…'):
+        digest['regulatory_review']=regulatory_sections(meta,digest)
+    with phase('pathway_review','Integrating saved pathway results…'):
+        digest['integrated_pathway_review']=pathway_sections(meta,digest)
     from .biology_literature import review
     digest['reviewed_observations']=knowledge().get('reviewed_observations',[])
-    digest['literature_review']=review(digest)
+    with phase('literature','Checking the literature for the leading findings…'):
+        digest['literature_review']=review(digest)
     try: narrative,message=interpret(digest)
     except Exception as exc:
         narrative=None
         message=(f'Model interpretation rejected: {clean(str(exc),200)}. Computed biological questions remain available.'
                  if isinstance(exc,ValueError) else f'Local model interpretation unavailable ({type(exc).__name__}). Computed evidence remains available.')
     from .biology_interpretation import interpret_sections
-    try: digest['section_interpretation']=interpret_sections(digest)
+    try:
+        with phase('section_interpretation','Interpreting biological consequences across result sections…'):
+            digest['section_interpretation']=interpret_sections(digest)
     except Exception as exc:
         digest['section_interpretation']={'status':'unavailable','message':f'Biological systems interpretation unavailable ({type(exc).__name__}); saved evidence remains available.','sections':{},'sources':{}}
     from .biology_synthesis import narrative_from_synthesis

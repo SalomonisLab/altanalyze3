@@ -2643,13 +2643,13 @@
           "species_scope": "as stated in excerpt; do not transfer mouse findings to human"
         },
         "Regenerative_potential": {
-          "excerpt": "during development, undergo epithelium-to mesenchyme transition and contribute to lung mesenchymal cells such as vascular smooth muscles and pericytes von Gise, et al., 2016 ; [Que, et al., 2008](https://doi.org/0808649105 [pii] In mouse: during development, undergo epithelium-to mesenchyme transition and contribute to lung mesenchymal cells such as vascular smooth muscles and pericytes von Gise, et al., 2016 , Que, et al., 2008",
+          "excerpt": "during development, undergo epithelium-to mesenchyme transition and contribute to lung mesenchymal cells such as vascular smooth muscles and pericytes von Gise, et al., 2016 ; [Que, et al., 2008](https://doi.org/10.1073/pnas.0808649105) In mouse: during development, undergo epithelium-to mesenchyme transition and contribute to lung mesenchymal cells such as vascular smooth muscles and pericytes von Gise, et al., 2016 , Que, et al., 2008",
           "truncated": false,
           "species_scope": "as stated in excerpt; do not transfer mouse findings to human"
         }
       },
       "literature": [
-        "https://doi.org/0808649105",
+        "https://doi.org/10.1073/pnas.0808649105",
         "https://doi.org/10.1126/sciimmunol.aax0416",
         "https://doi.org/10.1165/rcmb.2014-0461OC",
         "https://doi.org/10.1242/dev.065110"
