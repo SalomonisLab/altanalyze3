@@ -138,7 +138,7 @@ def collect(app, meta, state, source='marker', contrast=''):
             features[mod] = {r.Gene: dict(statistic='MarkerFinder r', value=float(r.rho)) for r in subset.itertuples()}
     else:
         from .integration_data import integration_data
-        ds = integration_data(app, meta)
+        ds = integration_data(app, meta, contrast=contrast or (meta.get('differential') or {}).get('run_id',''))
         contrast = contrast or ds.current_contrast
         # Validate a run identity before asking the adapter for same-contrast siblings.
         manifest = ds.deg_manifest().get('comparisons', []) if hasattr(ds, 'deg_manifest') else ds.ds.deg_manifest().get('comparisons', [])

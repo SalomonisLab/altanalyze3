@@ -75,7 +75,7 @@ def test_differential_uses_requested_contrast_and_no_new_threshold(monkeypatch,l
         def differentials(self,contrast,state,modality):
             return [{'feature_key':'G1','gene':'Display name','log2fc':.01,'fdr':.8}]
     from altanalyze3.components.cellHarmony.webapp import integration_data
-    monkeypatch.setattr(integration_data,'integration_data',lambda a,m:Dataset())
+    monkeypatch.setattr(integration_data,'integration_data',lambda a,m,contrast='':Dataset())
     meta={'modalities':{'available':[{'id':'rna'},{'id':'adt'}]}}
     result=C.collect(None,meta,'HSC-1','differential','run-a')
     assert result['features']['rna']['G1']['value']==.01

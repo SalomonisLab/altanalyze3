@@ -8,10 +8,12 @@ from .integration_data import integration_data
 
 
 def install(app):
-    def data(job_id):
+    def data(job_id,contrast='',source='marker'):
         store=app.state.job_store
         if not store.job_exists(job_id):raise HTTPException(404,'Job not found.')
-        return integration_data(app,store.get_job(job_id))
+        meta=store.get_job(job_id)
+        selected=(contrast or (meta.get('differential') or {}).get('run_id','')) if source=='differential' else ''
+        return integration_data(app,meta,contrast=selected)
 
     @app.get('/api/jobs/{job_id}/integrated/network')
     def network(job_id:str,cell_state:str='',contrast:str='',features:str='',source:str=Query('differential',pattern='^(differential|marker)$'),
@@ -19,7 +21,7 @@ def install(app):
                 max_fdr:float=Query(.05,ge=0,le=1),min_expression:float=Query(.5,ge=0),
                 significance:str=Query('reported',pattern='^(reported|fdr|pval)$'),min_score:float=Query(0,ge=0)):
         try:
-            return integration.network(data(job_id),contrast=contrast,cell_state=cell_state,
+            return integration.network(data(job_id,contrast,source),contrast=contrast,cell_state=cell_state,
                 features=[x.strip() for x in features.split(',') if x.strip()],source=source,
                 limit=limit,min_fold=min_fold,gene_fold=gene_fold,max_fdr=max_fdr,min_expression=min_expression,significance=significance,min_score=min_score)
         except (ValueError,KeyError,FileNotFoundError) as exc:
@@ -50,12 +52,12 @@ def install(app):
     @app.get('/api/jobs/{job_id}/integrated/pathways')
     def pathways(job_id:str,cell_state:str='',contrast:str='',source:str=Query('differential',pattern='^(differential|marker)$'),features:str='',modality:str=Query('lipid',pattern='^(lipid|lipids|metabolite)$'),
                  max_fdr:float=Query(.05,ge=0,le=1),significance:str=Query('reported',pattern='^(reported|fdr|pval)$')):
-        return integration.pathways(data(job_id),contrast=contrast,cell_state=cell_state,modality=modality,max_fdr=max_fdr,significance=significance,source=source,features=[x for x in features.split(',') if x])
+        return integration.pathways(data(job_id,contrast,source),contrast=contrast,cell_state=cell_state,modality=modality,max_fdr=max_fdr,significance=significance,source=source,features=[x for x in features.split(',') if x])
 
     @app.get('/api/jobs/{job_id}/integrated/pathway')
     def pathway(job_id:str,id:str,cell_state:str='',contrast:str='',modality:str=Query('lipid',pattern='^(lipid|lipids|metabolite)$'),
                 max_fdr:float=Query(.05,ge=0,le=1),significance:str=Query('reported',pattern='^(reported|fdr|pval)$')):
-        return integration.pathway(data(job_id),id=id,contrast=contrast,cell_state=cell_state,modality=modality,max_fdr=max_fdr,significance=significance)
+        return integration.pathway(data(job_id,contrast,'differential'),id=id,contrast=contrast,cell_state=cell_state,modality=modality,max_fdr=max_fdr,significance=significance)
 
     @app.get('/api/jobs/{job_id}/integrated/cross-pathways')
     def cross_pathways(job_id: str, cell_state: str, source: str=Query('marker', pattern='^(marker|differential)$'), contrast: str=''):

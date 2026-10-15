@@ -69,7 +69,7 @@ class ModelWorker:
 
 
 def worker_main():
-    from llama_cpp import Llama
+    from llama_cpp import Llama, LlamaGrammar
     engine = None
     for line in sys.stdin:
         try:
@@ -87,6 +87,11 @@ def worker_main():
             messages = payload.get('messages')
             if not isinstance(messages, list) or not messages:
                 raise ValueError('messages must be a nonempty list')
+            # llama-cpp's chat formatter can silently fall back to generic JSON
+            # after a schema compilation error. Reject that error explicitly.
+            response_format = payload.get('response_format') or {'type': 'json_object'}
+            if response_format.get('type') == 'json_object' and 'schema' in response_format:
+                LlamaGrammar.from_json_schema(json.dumps(response_format['schema']), verbose=False)
             generation_started = time.monotonic()
             reply = engine.create_chat_completion(messages=messages,
                 temperature=0.1, max_tokens=min(int(payload.get('max_tokens', 3000)), 3000),

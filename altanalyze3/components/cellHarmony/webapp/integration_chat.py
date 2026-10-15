@@ -28,6 +28,8 @@ def answer(app,meta,question,reading):
     norm=lambda s:re.sub(r'[^a-z0-9]+',' ',s.lower()).strip()
     named=next((c['id'] for c in entries if c.get('comparison') and norm(c['comparison']) in norm(question)),None)
     contrast=named or contrast
+    if reading['source']=='differential' and contrast:
+        ds=integration_data(app,meta,contrast=contrast)
     if reading['modality']=='lipid' and not ds.available(contrast,'lipid',state) and ds.available(contrast,'lipids',state):
         reading=dict(reading,modality='lipids')
     spec=dict(kind=reading['intent'],cell_state=state,contrast=contrast,modality=reading['modality'],

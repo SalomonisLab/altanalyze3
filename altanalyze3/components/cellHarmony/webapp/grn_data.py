@@ -5,6 +5,7 @@ come from retained, completed comparisons with matching groups and cell-state fi
 """
 from functools import cached_property
 from types import SimpleNamespace
+from pathlib import Path
 import json
 
 import numpy as np
@@ -32,10 +33,47 @@ def comparison_entry(run_id, run):
             "modality": config.get("modality", "rna")}
 
 
+def comparison_metadata(meta, contrast):
+    """A completed comparison owns its population field, independent of Explore."""
+    run = completed_differentials(meta).get(contrast)
+    if run is None:
+        raise ValueError("Unknown completed comparison.")
+    column = (run.get("config") or {}).get("population_col")
+    if not column:
+        raise ValueError("The completed comparison has no recorded cell-state field.")
+    from .state_layers import apply_layer
+    return dict(apply_layer(meta, column), cluster_key=column,
+                active_cell_state_layer=column, differential=run)
+
+
+def aggregate_state_column(meta, record, adata, key):
+    """Resolve the recorded supervised rename without regrouping native aggregates."""
+    if key in adata.obs:return key
+    if key != 'supervised_state':raise KeyError(f"GRN output has no {key} cell-state column")
+    alias=(record.get('state_columns') or {}).get(key)
+    source=Path(record.get('h5ad') or record.get('differential_h5ad') or '')
+    # Older Both jobs retained the native branch record rather than an alias map.
+    branch=source.parent.parent/'job.json'
+    if not alias and branch.is_file():
+        native=json.loads(branch.read_text())
+        if native.get('job_id')==meta['job_id'] and branch.parent.parent.name=='supervised':
+            alias=native.get('cluster_key')
+    if not alias or alias not in adata.obs or not source.is_file():
+        raise KeyError(f"GRN output has no recorded {key} cell-state column")
+    import h5py
+    from anndata.io import read_elem
+    with h5py.File(source,'r') as f:obs=read_elem(f['obs'])
+    if key not in obs or alias not in obs or obs[[key,alias]].isna().any().any() or not np.array_equal(obs[key].astype(str).to_numpy(),obs[alias].astype(str).to_numpy()):
+        raise ValueError('The recorded supervised GRN annotation alias does not match every source cell; no aggregate labels were substituted.')
+    return alias
+
+
 class UploadedGrnData:
-    def __init__(self, app, meta):
+    def __init__(self, app, meta, contrast=""):
         from importlib import import_module
         web = import_module("altanalyze3.components.cellHarmony.webapp.app")
+        if contrast:
+            meta = comparison_metadata(meta, contrast)
         self.web, self.app, self.meta = web, app, meta
         self.id = meta["job_id"]
         self.runs = completed_differentials(meta)
@@ -77,8 +115,7 @@ class UploadedGrnData:
         if modality == "grn":
             adata = self.web._grn_edges_adata(self.meta)
             key = self.rna["cluster_key"]
-            if key not in adata.obs:
-                raise KeyError(f"GRN output has no {key} cell-state column")
+            key = aggregate_state_column(self.meta,self.modality_manifest()[modality],adata,key)
             labels = adata.obs[key].astype(str).to_numpy()
             kind = "per_sample_cell_state"
         else:

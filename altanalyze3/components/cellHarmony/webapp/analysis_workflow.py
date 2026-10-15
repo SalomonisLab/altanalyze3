@@ -131,14 +131,15 @@ def enable_differential(meta, original, path, population_keys):
     if not P._upload_profile(original).get("allow_alternate_population_fields"):
         populations = [v for v in populations if v["value"] in population_keys]
     enabled = any(len(v) >= 2 for v in values.values())
+    default_population = SUPERVISED if SUPERVISED in population_keys else meta["cluster_key"]
     meta["differential_options"] = {
         "enabled": enabled, "sample_names": P._job_sample_names(original),
         "sample_fields": fields, "sample_values": values, "default_sample_field": sample_field,
-        "population_columns": populations, "default_population_col": meta["cluster_key"],
+        "population_columns": populations, "default_population_col": default_population,
         "modalities": meta["modalities"]["available"], "default_modality": "rna",
         "comparison_types": ["cells", "pseudobulk"], "upload_profile": P._upload_profile(original),
     }
-    meta["differential"] = P._default_differential_state(enabled, meta["cluster_key"], sample_field)
+    meta["differential"] = P._default_differential_state(enabled, default_population, sample_field)
     meta["differential_history"] = {}
 
 
@@ -277,6 +278,7 @@ def _combine(job_id, store, prepared, cells, genes, supervised, unsupervised, co
     for modality, record in (sup.get("modality_artifacts") or {}).items():
         if modality == "rna":
             continue
+        record.setdefault("state_columns", {})[SUPERVISED] = sup["cluster_key"]
         for key in ("h5ad", "differential_h5ad"):
             source = record.get(key)
             if not source or not Path(source).is_file():

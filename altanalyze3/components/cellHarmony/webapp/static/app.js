@@ -780,9 +780,15 @@ function buildStableUmapPopulationOrder(umapData) {
     ordered.push(label);
   };
 
+  (umapData?.population_order || []).forEach(appendPopulation);
   (umapData?.reference || []).forEach((point) => appendPopulation(point.population));
   (umapData?.query || []).forEach((point) => appendPopulation(point.population));
   return ordered;
+}
+
+function buildPlotPopulationColors(payload) {
+  return payload.population_colors ? new Map(Object.entries(payload.population_colors))
+    : buildReferencePreviewColorMap(buildStableUmapPopulationOrder(payload));
 }
 
 function networkEdgeColor(edge) {
@@ -2079,6 +2085,14 @@ function buildSquareUmapAxes(points, paddingFraction = 0.08) {
       ticks: "",
     },
   };
+}
+
+function buildParentUmapAxes(payload, fallbackPoints) {
+  const bounds=payload?.coordinate_bounds;
+  const points=bounds ? [{x:bounds.x[0],y:bounds.y[0]},{x:bounds.x[1],y:bounds.y[1]}] : fallbackPoints;
+  const axes=buildSquareUmapAxes(points,0.06);
+  for(const axis of [axes.xaxis,axes.yaxis])if(axis)axis.autorange=false;
+  return axes;
 }
 
 function median(values) {
@@ -6441,6 +6455,7 @@ function renderPanelUmap(panelKey, umapData, mode, dotScale) {
       return;
     }
 
+    const colorMap = buildPlotPopulationColors(umapData);
     const countsBySample = new Map();
     queryPoints.forEach((point) => {
       const sample = String(point.sample || "").trim();
@@ -6502,7 +6517,7 @@ function renderPanelUmap(panelKey, umapData, mode, dotScale) {
             .join("<br>"),
         ]),
         marker: {
-          color: ranked.map((entry) => interpolatePairedColor(Math.min(1, Math.max(0, entry.meanFraction)))),
+          color: ranked.map((entry) => colorMap.get(entry.population)),
         },
         hovertemplate: "%{y}<br>Mean normalized frequency=%{x:.3f}<br>%{customdata[0]}<extra></extra>",
       },
@@ -6551,12 +6566,13 @@ function renderPanelUmap(panelKey, umapData, mode, dotScale) {
       name: "Query",
     });
     layout.legend = { orientation: "h" };
+    Object.assign(layout, buildParentUmapAxes(umapData, [...umapData.reference,...umapData.query]));
     Plotly.newPlot(panelPlotId(panelKey), traces, layout);
     return;
   }
   setUmapPanelSummary(panelKey, umapData);
   const populations = buildStableUmapPopulationOrder(umapData);
-  const colorMap = buildReferencePreviewColorMap(populations);
+  const colorMap = buildPlotPopulationColors(umapData);
   const labelPoints = relaxReferencePreviewLabels(
     buildPopulationCentroids(umapData.query),
     umapData.query,
@@ -6609,11 +6625,11 @@ function renderPanelUmap(panelKey, umapData, mode, dotScale) {
     // A UMAP hides its tick labels because the numbers mean nothing. A metadata
     // axis is the opposite: the value is the point of the plot, so it is
     // labelled and its ticks are shown.
-    layout.xaxis = { title: { text: umapData.x_label, font: { size: 12 } }, showgrid: false, zeroline: false };
-    layout.yaxis = { title: { text: umapData.y_label, font: { size: 12 } }, showgrid: false, zeroline: false };
+    layout.xaxis = { ...buildParentUmapAxes(umapData,umapData.query).xaxis, showticklabels: true, ticks: "outside", title: { text: umapData.x_label, font: { size: 12 } } };
+    layout.yaxis = { ...buildParentUmapAxes(umapData,umapData.query).yaxis, showticklabels: true, ticks: "outside", title: { text: umapData.y_label, font: { size: 12 } } };
     layout.margin = { t: 20, l: 60, r: 20, b: 55 };
   } else {
-    Object.assign(layout, buildSquareUmapAxes(umapData.query, 0.06));
+    Object.assign(layout, buildParentUmapAxes(umapData, [...umapData.reference,...umapData.query]));
   }
   Plotly.newPlot(panelPlotId(panelKey), traces, layout);
 }
@@ -6775,7 +6791,7 @@ function renderPanelExpression(panelKey, expressionData, mode, dotScale) {
       font: { size: 12, color: "#64748b" },
     });
   }
-  Object.assign(expressionLayout, buildSquareUmapAxes(expressionData.umap, 0.06));
+  Object.assign(expressionLayout, buildParentUmapAxes(expressionData, expressionData.umap));
   resetVisualizationSurface(panelKey);
   Plotly.newPlot(panelPlotId(panelKey), traces, expressionLayout);
 }
@@ -9269,14 +9285,17 @@ function renderBiologySummary(data) {
   const host=document.getElementById("chat-answer"); host.replaceChildren();
   const digest=data.digest || {}; const evidence=new Map((digest.evidence || []).map(e=>[e.id,e]));
   digest.summary_identity=data.source_identity || "";
+  digest.interpretation_model=data.model?.name || "configured model";
   const text=(parent,tag,value)=>{const node=document.createElement(tag);node.textContent=value;parent.append(node);return node;};
   const references=(parent,ids)=>{const links=document.createElement("div");links.className="summary-links";parent.append(links);(ids || []).forEach(id=>{if(evidence.has(id))appendSummaryEvidenceLink(links,evidence.get(id));});};
   text(host,"h3","Biological summary");
   text(host,"p",`${digest.species || "Species not recorded"} · ${digest.reference || "Reference not recorded"} · ${digest.observations?.cells?.toLocaleString() || "Unknown number of"} cells · ${digest.analysis_mode}`);
-  text(host,"p",["completed","partial"].includes(digest.section_interpretation?.status) ? `Biological section synthesis: ${digest.section_interpretation.model}. Interpretations cite saved native results; numerical evidence and comparisons are defined by code.` : data.interpretation_review?.model_role ? `Biological propositions and evidence links are defined by code. ${data.model.name} selected experimental priorities from the recorded alternatives.` : data.model?.used ? `Interpretation model: ${data.model.name}. Numerical evidence below is computed from saved results.` : "Computed cross-modality synthesis of saved results. This is not an LLM narrative.");
+  text(host,"p",digest.section_interpretation?.status === "deferred" ? "Evidence overview computed from saved results. AI biological interpretation loads within the result sections you open." : ["completed","partial"].includes(digest.section_interpretation?.status) ? `Biological section synthesis: ${digest.section_interpretation.model}. Interpretations cite saved native results; numerical evidence and comparisons are defined by code.` : data.interpretation_review?.model_role ? `Biological propositions and evidence links are defined by code. ${data.model.name} selected experimental priorities from the recorded alternatives.` : data.model?.used ? `Interpretation model: ${data.model.name}. Numerical evidence below is computed from saved results.` : "Computed cross-modality synthesis of saved results.");
   const methodsHost=summarySection(host,"Methods",false);
   (digest.methods?.sections || []).forEach(section=>{const part=summarySection(methodsHost,section.title);renderMethodsMarkdown(part,section.text);});
   (digest.methods?.models || []).forEach(model=>{const part=summarySection(methodsHost,model.modality+": model, training datasets and confidence");renderMethodsMarkdown(part,model.methods_text || model.confidence_note);});
+  summaryLazySection(host,"Systems-level synthesis",digest,{section:"synthesis"},
+    (body,result)=>renderIntegratedBiologyNarrative(body,result.narrative,digest));
   renderExtendedBiologySections(host,digest);
   if(data.interpretation_review?.rejected_sections?.length){
   text(host,"p","Model explanations that exceeded their evidence were omitted or replaced with labelled, code-defined hypotheses.");
@@ -9287,16 +9306,9 @@ function renderBiologySummary(data) {
   const inventory=document.createElement("details");host.append(inventory);text(inventory,"summary","Dataset, covariates, modalities and comparison inventory");
   text(inventory,"pre",JSON.stringify({observations:digest.observations,comparisons:digest.comparisons,
     modality_provenance:digest.modality_provenance,qc:digest.qc,reference_alignment_used:digest.reference_alignment_used},null,2));
-  const synthesisHost=summarySection(host,"Systems-level synthesis",true);
+  const synthesisHost=summarySection(host,"Computed cross-state evidence");
   (data.overview || []).forEach(row=>{const part=document.createElement("section");part.className="summary-program";synthesisHost.append(part);text(part,"p",row.text);references(part,row.evidence_ids);});
-  if(digest.section_interpretation?.status === "deferred"){
-    text(host,"p","Saved evidence is ready. Expand an interpretation to load its biological synthesis; unopened interpretations do not run.");
-    summaryLazySection(synthesisHost,"AI review of experimental priorities",digest,{section:"priorities"},(body,result)=>{
-      if(!result.narrative){text(body,"p",result.message || "Model interpretation is unavailable.");return;}
-      (result.narrative.overview || []).forEach(row=>{text(body,"p",row.text);references(body,row.evidence_ids);});
-      (result.narrative.hypotheses || []).forEach(row=>{text(body,"h4",row.title);text(body,"p",row.rationale);if(row.priority_alternative)text(body,"p",row.priority_alternative);references(body,row.evidence_ids);});
-    });
-  }
+  text(host,"p","Open a biological section to request its AI interpretation. Loading progress appears during literature retrieval and model inference; completed interpretations are reused.");
   const framework=digest.question_framework;
   if(framework){
     text(synthesisHost,"h4","Biological questions evaluated from saved analyses");
@@ -9330,11 +9342,13 @@ function renderBiologySummary(data) {
   });
   const hypothesesHost=summarySection(host,"Top hypotheses by modality");
   (digest.modalities || []).forEach(mod=>{
-    const part=summarySection(hypothesesHost,mod === "cell_communication" ? "Cell communication" : modalityDefinition(mod).label || mod);part.className="summary-modality";
-    if(mod === "cell_communication")appendBiologicalSectionSynthesis(part,digest,"communication");
+    const part=summaryLazySection(hypothesesHost,mod === "cell_communication" ? "Cell communication" : modalityDefinition(mod).label || mod,
+      digest,{section:"synthesis",source_id:mod},(body,result)=>renderIntegratedBiologyNarrative(body,result.narrative,digest));
+    part.className="biology-summary-section summary-modality";
+    const candidates=summarySection(part,"Computed candidate evidence");
     const hypotheses=(data.hypotheses || []).filter(h=>h.modality===mod);
-    if (!hypotheses.length) text(part,"p","No feature-specific hypothesis can be supported by the saved results for this modality. See evidence coverage below.");
-    hypotheses.forEach(h=>{text(part,"h4",h.title);text(part,"p",h.rationale);if(h.priority_alternative)text(part,"p",`Priority explanation to distinguish: ${h.priority_alternative}`);text(part,"p",`Proposed validation: ${h.validation}`);text(part,"small",h.origin);references(part,h.evidence_ids);});
+    if (!hypotheses.length) text(candidates,"p","No feature-specific hypothesis can be supported by the saved results for this modality. See evidence coverage below.");
+    hypotheses.forEach(h=>{text(candidates,"h4",h.title);text(candidates,"p",h.rationale);if(h.priority_alternative)text(candidates,"p",`Priority explanation to distinguish: ${h.priority_alternative}`);text(candidates,"p",`Proposed validation: ${h.validation}`);text(candidates,"small",h.origin);references(candidates,h.evidence_ids);});
   });
   const details=document.createElement("details");host.append(details);text(details,"summary","Computed supporting evidence");
   (digest.evidence || []).forEach(item=>{
@@ -9449,7 +9463,7 @@ function summaryLazySection(parent,title,digest,params,render) {
       const query=new URLSearchParams({...params,expected_identity:digest.summary_identity || ""});
       const result=await summaryPoll("/api/jobs/"+encodeURIComponent(jobId)+"/chat-summary-section?"+query,controller.signal,progress=>{
         if(!current()){controller.abort();return;}
-        status.textContent=progress.detail || "Loading biological interpretation…";
+        status.textContent=(progress.detail || "Loading biological interpretation…")+(Number.isFinite(progress.elapsed_seconds) ? ` (${Math.round(progress.elapsed_seconds)} s elapsed)` : "");
       });
       if(!current())return;
       body.replaceChildren();render(body,result);loaded=true;
@@ -9481,14 +9495,53 @@ function summaryInterpret(parent,params) {
     }catch(e){if(e.name!=="AbortError")summaryText(host,"p",e.message);}finally{button.disabled=false;if(chatController===controller)chatController=null;}
   };
 }
+function summarySectionInference(host,digest,key) {
+  const sources=digest.deferred_sections?.[key] || [];
+  if(!sources.length){
+    summaryText(host,"p","AI interpretation is unavailable here because no supported result source is recorded for this section. No model request was made.");
+    return null;
+  }
+  const block=summaryText(host,"div","");block.className="summary-section-inference";
+  summaryText(block,"h4","AI biological interpretation");
+  const label=summaryText(block,"label","Result to interpret ");
+  const select=document.createElement("select");select.setAttribute("aria-label","Result to interpret");label.append(select);
+  sources.forEach(source=>{const option=document.createElement("option");option.value=source.source_id;option.textContent=source.state+" · "+source.title;select.append(option);});
+  select.value=(sources.find(source=>!source.state.startsWith("coreg_")) || sources[0]).source_id;
+  const body=summaryText(block,"div","");
+  const jobId=getResultsJobId(),request=chatRequest,cache=new Map();
+  let controller=null,pendingId="",generation=0;
+  const load=async()=>{
+    if(!host.open || pendingId===select.value)return;
+    const id=select.value,version=++generation;
+    controller?.abort();controller=new AbortController();const activeController=controller;
+    const current=()=>host.isConnected && jobId===getResultsJobId() && request===chatRequest && version===generation;
+    const render=result=>{body.replaceChildren();appendBiologicalSectionSynthesis(body,{...digest,section_interpretation:result.review},key);summaryText(body,"small","AI interpretation · "+(result.review?.model || digest.interpretation_model));};
+    if(cache.has(id)){pendingId="";block.removeAttribute("aria-busy");render(cache.get(id));return;}
+    pendingId=id;body.replaceChildren();block.setAttribute("aria-busy","true");
+    const status=summaryText(body,"p","Generating AI biological interpretation…");status.className="summary-lazy-loading";status.setAttribute("role","status");
+    try {
+      const query=new URLSearchParams({section:key,source_id:id,expected_identity:digest.summary_identity || ""});
+      const result=await summaryPoll("/api/jobs/"+encodeURIComponent(jobId)+"/chat-summary-section?"+query,activeController.signal,progress=>{
+        if(!current()){activeController.abort();return;}
+        status.textContent=(progress.detail || "Generating AI biological interpretation…")+(progress.elapsed_seconds!=null ? " ("+Math.round(progress.elapsed_seconds)+" s elapsed)" : "");
+      });
+      if(!current())return;
+      cache.set(id,result);render(result);
+    } catch(error) {
+      if(error.name!=="AbortError" && current()){
+        body.replaceChildren();summaryText(body,"p",error.message);
+        const retry=summaryText(body,"button","Retry AI interpretation");retry.type="button";retry.className="ghost-btn";retry.onclick=load;
+      }
+    } finally {if(version===generation){pendingId="";block.removeAttribute("aria-busy");}}
+  };
+  host.addEventListener("toggle",event=>{if(event.target===host && host.open)load();});
+  select.addEventListener("change",load);
+  return sourceId=>{if(!sources.some(source=>source.source_id===sourceId))return;select.value=sourceId;load();};
+}
 function appendBiologicalSectionSynthesis(host,digest,key) {
   const review=digest.section_interpretation || {};
   if(review.status === "deferred"){
-    (digest.deferred_sections?.[key] || []).forEach(source=>{
-      summaryLazySection(host,"Interpret biology · "+source.state+" · "+source.title,digest,
-        {section:key,source_id:source.source_id},(body,result)=>appendBiologicalSectionSynthesis(body,{...digest,section_interpretation:result.review},key));
-    });
-    return;
+    return summarySectionInference(host,digest,key);
   }
   const rows=review.sections?.[key] || [];
   if(!rows.length){
@@ -9499,6 +9552,7 @@ function appendBiologicalSectionSynthesis(host,digest,key) {
   const used=[...new Set(rows.flatMap(row=>row.source_ids || []))];
   used.forEach(id=>{
     const source=review.sources?.[id];if(!source)return;
+    if(source.tf_activity_status)summaryText(host,"p",source.tf_activity_status);
     let observation="";
     if(key === "grn"){
       const hub=source.hubs?.[0];if(hub)observation=`${source.state}: predicted hub ${hub.factor}; retained target RNA calls include ${hub.target_RNA_up} higher and ${hub.target_RNA_down} lower features. `+(hub.saved_pathway_overlaps?.length ? `Target overlaps: ${hub.saved_pathway_overlaps.slice(0,3).map(p=>p.term).join("; ")}.` : "");
@@ -9528,6 +9582,32 @@ function appendBiologicalSectionSynthesis(host,digest,key) {
   });
   summaryText(host,"small","Model interpretation of saved results; proposed biological consequences require experimental validation.");
 }
+function renderIntegratedBiologyNarrative(host,result,digest) {
+  if(!result){summaryText(host,"p","No model interpretation was returned. Reopen or retry this section.");return;}
+  if(result.message)summaryText(host,"p",result.message);
+  if(result.model)summaryText(host,"small",`AI biological interpretation · ${result.model}`);
+  const evidence=new Map((digest.evidence || []).map(e=>[e.id,e]));
+  (result.sections || []).forEach(row=>{
+    const part=document.createElement("section");part.className="summary-program";host.append(part);
+    summaryText(part,"h4",row.kind === "hypothesis" ? "Testable biological hypothesis" : row.kind === "literature" ? "Literature context" : "Biological synthesis");
+    const sources=(row.source_ids || []).map(id=>result.sources?.[id]).filter(Boolean);
+    summaryText(part,"small",[...new Set(sources.map(s=>`${s.state} · ${s.comparison} · ${s.layer}`))].join("; "));
+    summaryText(part,"p",row.text);
+    if(row.alternative)summaryText(part,"p",`Alternative explanation: ${row.alternative}`);
+    if(row.experiment)summaryText(part,"p",`Distinguishing experiment: ${row.experiment}`);
+    const supporting=summarySection(part,"Supporting saved results");
+    const links=summaryText(supporting,"div","");links.className="summary-links";
+    [...new Set(sources.flatMap(s=>s.evidence_ids || []))].forEach(id=>{if(evidence.has(id))appendSummaryEvidenceLink(links,evidence.get(id));});
+    (row.citation_ids || []).forEach(id=>{const paper=result.citations?.[id];if(paper){
+      const citation=summaryText(part,"p","");summaryCitation(citation,paper.title,paper.url);
+      summaryText(citation,"small",`${paper.journal || ""} · ${paper.year || ""} · ${paper.evidence_scope || "related literature"}`);
+    }});
+  });
+  if(result.coverage)summaryText(host,"small",`${result.coverage.prioritized_state_comparisons} prioritized state/comparisons of ${result.coverage.available_state_comparisons}. ${result.coverage.note}`);
+  if(result.rejected_sections?.length){const audit=summarySection(host,"Interpretation evidence checks");
+    summaryText(audit,"p","Some model passages failed evidence checks and were not presented as biological conclusions.");
+    result.rejected_sections.forEach(row=>summaryText(audit,"p",row.reason));}
+}
 function renderSummaryLiterature(host,literature) {
   const known=summarySection(host,"Verified known biology");summaryText(known,"p",literature.verification_note);
   if(!(literature.verified_known_biology || []).length)summaryText(known,"p","No exact disease/cell-state directional claim is certified from retrieved titles alone. Related publications below remain candidates for verification.");
@@ -9542,13 +9622,16 @@ function renderSummaryLiterature(host,literature) {
 }
 function renderExtendedBiologySections(host,digest) {
   const grn=summarySection(host,"Gene Regulatory Networks");
-  appendBiologicalSectionSynthesis(grn,digest,"grn");
+  const chooseGrnSource=appendBiologicalSectionSynthesis(grn,digest,"grn");
   summaryText(grn,"p",(digest.regulatory_review?.states_examined || 0)+" state/comparison combinations examined. "+(digest.regulatory_review?.scope || ""));
   const reviewMethod=(digest.regulatory_review?.rows || []).find(r=>r.method)?.method;
   if(reviewMethod)summaryText(grn,"p",`The hub review uses up to ${reviewMethod.target_limit} displayed targets per state (gene fold ${reviewMethod.gene_fold}, edge fold ${reviewMethod.edge_fold}, FDR ${reviewMethod.max_fdr}, TF expression floor ${reviewMethod.TF_expression_floor}). The linked interactive network can display additional targets. `+(digest.regulatory_review?.selection || ""));
   (digest.regulatory_review?.rows || []).forEach(r=>{
     const part=summarySection(grn,r.state+" · "+r.comparison+" · "+(r.n_edges || 0)+" retained edges");
     summaryText(part,"p",r.interpretation);
+    if(r.tf_activity_status)summaryText(part,"p",r.tf_activity_status);
+    const source=(digest.deferred_sections?.grn || []).find(source=>source.state===r.state && source.run_id===r.run_id);
+    if(source && chooseGrnSource)part.addEventListener("toggle",event=>{if(event.target===part && part.open)chooseGrnSource(source.source_id);});
     r.hubs.forEach(h=>{summaryText(part,"h4",h.factor+" · "+h.n_targets+" targets");
       summaryText(part,"p","Target RNA: "+h.target_RNA_up+" higher, "+h.target_RNA_down+" lower. Predicted TF activity: "+(h.TF_log2fc ?? "no saved call")+" log2 change; FDR "+(h.TF_fdr ?? "not recorded")+".");
       summaryText(part,"p","Targets: "+h.targets.join(", "));h.saved_pathway_overlaps.forEach(p=>summaryText(part,"p",p.term+": "+p.genes.join(", ")+" · saved enrichment FDR "+p.fdr));});
@@ -9557,9 +9640,12 @@ function renderExtendedBiologySections(host,digest) {
 
   });
   const paths=summarySection(host,"Gene Set Enrichment and pathways");
-  appendBiologicalSectionSynthesis(paths,digest,"pathways");
+  const choosePathwaySource=appendBiologicalSectionSynthesis(paths,digest,"pathways");
   (digest.evidence || []).filter(e=>e.kind==="pathway").forEach(e=>{
-    const part=summarySection(paths,e.title);summaryText(part,"p",e.state+" · FDR "+e.facts.fdr+" · "+(e.facts.namespace || "recorded gene set"));
+    const part=summarySection(paths,e.title);
+    const source=(digest.deferred_sections?.pathways || []).find(source=>source.evidence_id===e.id);
+    if(source && choosePathwaySource)part.addEventListener("toggle",event=>{if(event.target===part && part.open)choosePathwaySource(source.source_id);});
+    summaryText(part,"p",e.state+" · FDR "+e.facts.fdr+" · "+(e.facts.namespace || "recorded gene set"));
     summaryText(part,"p","Overlapping genes: "+(e.facts.overlap_genes || "not retained"));appendSummaryEvidenceLink(part,e);
     summaryInterpret(part,{kind:"pathway",run_id:e.run_id,cell_state:e.state,feature:e.facts.term_name || ""});
   });
@@ -9587,7 +9673,7 @@ function renderExtendedBiologySections(host,digest) {
   }
   if(digest.literature_review?.status === "deferred"){
     summaryLazySection(host,"Literature checks: verified biology and novel predictions",digest,{section:"literature"},
-      (body,result)=>renderSummaryLiterature(body,result.review));
+      (body,result)=>{renderIntegratedBiologyNarrative(body,result.narrative,digest);renderSummaryLiterature(body,result.review || {});});
   }else renderSummaryLiterature(host,digest.literature_review || {});
   const drugs=summarySection(host,"Drug signature reversal and mimicry");summaryText(drugs,"p","Screen a completed RNA comparison with native Discover DrugMatch. Source-signature context and registry/trial Interpret are available in Chat.");
   (digest.comparisons || []).filter(c=>c.modality==="rna").forEach(c=>{

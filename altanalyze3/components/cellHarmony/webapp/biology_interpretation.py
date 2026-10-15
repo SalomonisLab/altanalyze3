@@ -18,11 +18,22 @@ statistics separately. Mention only genes or regulators supplied in this one sou
 without restating their changes or any numerical result. Explain the functional
 meaning of the processes rather than merely listing genes.
 Implication is a question starting "Could the predicted program ..." and ending ?.
+Copy required_question_prefix exactly at the start of the implication. Keep the
+literal cell-state identifier in that prefix: AM must appear as AM, even when
+background describes alveolar macrophages. A longer name alone is invalid.
 Connect the supplied processes to a specific physiological consequence in 35-60
 words. For example: a lipid-handling program could affect membrane renewal during
 repair; immune-response programs could affect recruitment or pathogen clearance.
 Use supplied cell-state background to make the consequence specific; do not rename
-or expand the cell-state label. Do not assert any effect was demonstrated.
+or expand the cell-state label. Use the recorded comparison labels verbatim.
+Never invent an expansion for a disease, group or covariate abbreviation. The
+covariate_biology records supply known meanings; absent meanings remain unknown.
+Do not turn an observational disease comparison into an experimental challenge,
+exposure or treatment that was not performed.
+Functional consequences are unmeasured questions: use "alter" or "affect", not
+"contribute to the impaired/increased/reduced ... observed in" a condition.
+Never call a physiological phenotype observed, documented or measured here.
+Do not assert any effect was demonstrated.
 Alternative is one competing donor/library, cell-identity, or prediction-dependence
 explanation in 15-30 words. Never restate observed molecular changes.
 Experiment is a functional assay plus cell-identity controls in independent donors,
@@ -42,6 +53,7 @@ def interpretation_findings(section, records):
     for r in records:
         item={k:r.get(k) for k in ('state','layer','comparison')}
         if section=='grn':
+            item['TF_activity_evidence']=r.get('tf_activity_status','')
             item['predicted_regulatory_programs']=[]
             for h in r['hubs']:
                 item['predicted_regulatory_programs'].append({
@@ -75,7 +87,7 @@ def interpretation_findings(section, records):
     return findings
 
 
-def context(digest):
+def context(digest, *, all_sources=False):
     sections={}; sources={}
     def add(section, prefix, rows):
         if not rows:return
@@ -88,32 +100,34 @@ def context(digest):
     for r in digest.get('regulatory_review',{}).get('rows',[]):
         if not r.get('hubs'):continue
         grn.append({k:r[k] for k in ('state','layer','comparison','run_id','grn_run_id','tf_run_id','hubs')})
-        if len(grn)==3:break
+        grn[-1]['tf_activity_status']=r.get('tf_activity_status','')
+        if not all_sources and len(grn)==3:break
     add('grn','G',grn)
     pathways=[]
     # Retain each exact arm/state/direction; no join across incompatible results.
     seen=set()
     for e in digest['evidence']:
         if e['kind']!='pathway':continue
-        key=(e['layer'],e['run_id'],e['state'])
+        key=(e['layer'],e['run_id'],e['state'],e['id']) if all_sources else (e['layer'],e['run_id'],e['state'])
         if key in seen:continue
         seen.add(key)
         pathways.append({'state':re.sub(r'__(up|down)$','',e['state']), 'layer':e['layer'],
             'run_id':e['run_id'],'evidence_id':e['id'],'feature':e['feature'],
             'facts':e['facts'],'title':e['title'],'direction':e['state'].rsplit('__',1)[-1] if '__' in e['state'] else e['facts'].get('direction'),
             'comparison':next((c['comparison'] for c in digest['comparisons'] if c['id']==e['run_id']),'not recorded')})
-        if len(pathways)==6:break
+        if not all_sources and len(pathways)==6:break
     add('pathways','P',pathways)
     diagrams=[];states=set()
     for r in digest.get('integrated_pathway_review',{}).get('rows',[]):
         if r['state'] in states or not r.get('nodes'):continue
         states.add(r['state'])
         diagrams.append({k:r[k] for k in ('state','layer','comparison','run_id','modality','id','name','nodes')})
-        if len(diagrams)==3:break
+        if not all_sources and len(diagrams)==3:break
     add('multimodal_pathways','M',diagrams)
     for section,kind in (('communication','communication_contrast'),('cell_frequency','cell_frequency')):
         rows=[{k:e[k] for k in ('state','layer','run_id','feature','facts','title','id')} | {'comparison':next((c['comparison'] for c in digest['comparisons'] if c['id']==e['run_id']),'not recorded')}
-              for e in digest['evidence'] if e['kind']==kind][:3]
+              for e in digest['evidence'] if e['kind']==kind]
+        if not all_sources:rows=rows[:3]
         add(section,'C' if section=='communication' else 'F',rows)
     # Exclude rendering coordinates and repeated diagram glyphs from the prompt,
     # preserving every distinct reported molecular node and all saved result sources.
@@ -140,7 +154,21 @@ def context(digest):
         for v in digest.get('cell_state_biology',{}).get('matched',[]) if v['state'] in states]
     return {'species':digest['species'],'reference':digest['reference'],
         'design_limits':digest.get('synthesis',{}).get('design_limits',[]),
+        'covariate_biology':digest.get('covariate_biology',[]),
         'cell_state_background':background,'sections':projected},sources
+
+
+def check_covariate_labels(text, annotations):
+    """A model cannot replace a stored disease abbreviation with a guessed meaning."""
+    for record in annotations:
+        term,name=record.get('term',''),record.get('name','')
+        if not term or not name:continue
+        for match in re.finditer(r'([^.;?!()]{1,160})\s*\('+re.escape(term)+r'\)',text,re.I):
+            if not match.group(1).strip().casefold().endswith(name.casefold()):
+                raise ValueError('Model invented an expansion of a recorded comparison label')
+        for match in re.finditer(r'\b'+re.escape(term)+r'\s*\(([^)]+)\)',text,re.I):
+            if match.group(1).strip().casefold()!=name.casefold():
+                raise ValueError('Model invented an expansion of a recorded comparison label')
 
 
 
@@ -149,7 +177,7 @@ def interpret_sections(digest, *, section=None, source_id=None):
     url=os.environ.get('SCALABLE_SUMMARY_URL','').strip();model=os.environ.get('SCALABLE_SUMMARY_MODEL','').strip()
     if not url or not model:
         return {'status':'unavailable','message':'Biological systems interpretation requires the configured summary model.','sections':{},'sources':{}}
-    evidence,sources=context(digest)
+    evidence,sources=context(digest,all_sources=section is not None)
     if section is not None:
         records=evidence['sections'].get(section,[])
         if source_id is not None:
@@ -176,6 +204,7 @@ def interpret_sections(digest, *, section=None, source_id=None):
             records=[record]
             section_context={k:v for k,v in evidence.items() if k!='sections'}
             section_context.update(section=section,findings=interpretation_findings(section,records))
+            section_context['required_question_prefix']='Could the predicted program in '+str(record['state'])+' '
             supported_states={r['state'] for r in records}
             section_context['cell_state_background']=[v for v in evidence['cell_state_background'] if v['state'] in supported_states]
             payload={'model':model,'messages':[{'role':'system','content':SYSTEM},
@@ -221,6 +250,7 @@ def interpret_sections(digest, *, section=None, source_id=None):
                 structured=all(k in row for k in ('implication','alternative','experiment'))
                 if structured:
                     implication=clean(row['implication'],1200);alternative=clean(row['alternative'],800);experiment=clean(row['experiment'],800)
+                    check_covariate_labels(implication,evidence.get('covariate_biology',[]))
                     if not re.match(r'^(Could|Does)\b',implication) or not implication.endswith('?'):
                         raise ValueError('Biological implication is not a testable question')
                     text=f'Biological implication to test: {implication} Alternative explanation (code-defined): State composition, donor/library effects or RNA-derived prediction dependence could account for the association; distinguish these from a functional phenotype.'
@@ -252,6 +282,10 @@ def interpret_sections(digest, *, section=None, source_id=None):
                         raise ValueError('Interpretation borrows an uncited feature')
                 if re.search(r'\b(significant\w*|proven|demonstrates|upregulat\w*|downregulat\w*)\b',text,re.I):
                     raise ValueError('Model restates or overclaims the observed results')
+                if re.search(r'\b(observed|documented|demonstrated|measured)\b',implication,re.I):
+                    raise ValueError('Model describes an unmeasured functional phenotype as an observation')
+                if re.search(r'\bcontribute\s+to\s+(?:the\s+)?(?:impaired|increased|reduced|enhanced)\b',implication,re.I):
+                    raise ValueError('Model assumes a functional phenotype not measured in this analysis')
                 if section=='communication' and re.search(r'\b(reduced|increased|diminished|enhanced)\s+communication\b',text,re.I):
                     raise ValueError('Expression compatibility is not measured communication')
                 if re.search(r'\bpredicted\s+(activation|inactivation|repression)\b',implication,re.I):

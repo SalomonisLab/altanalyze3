@@ -906,6 +906,8 @@ def _differential_options(meta: Dict) -> Dict:
     layer_entries = (meta.get("cell_state_layers") or {}).get("layers") or []
     if layer_entries:
         layer_labels = {layer["key"]: layer.get("label", layer["key"]) for layer in layer_entries}
+        if "supervised_state" in layer_labels and any(entry.get("value")=="supervised_state" for entry in population_columns):
+            default_population_col = "supervised_state"
         population_columns = [dict(entry, label=layer_labels.get(entry["value"], entry.get("label", entry["value"])))
                               for entry in population_columns]
         generated = set(layer_labels) | {"supervised_accepted", "unsupervised_accepted", "original_NMF_cluster"}
@@ -980,6 +982,8 @@ def _build_differential_payload(app: FastAPI, job_id: str, meta: Dict, root_path
     differential = dict(meta.get("differential") or {})
     artifacts = differential.get("artifacts") or {}
     config = differential.get("config") or {}
+    if meta.get("cell_state_layers") and str(differential.get("status") or "") not in {"queued","processing","completed","failed"}:
+        config = dict(config,population_col=options.get("default_population_col"))
     selected_modality = _normalize_modality_id(config.get("modality") or options.get("default_modality") or "rna")
     modality_info = _modality_definition(meta, selected_modality)
     result_populations: List[str] = []
@@ -4374,6 +4378,69 @@ def _chat_read_question(question: str, cache: Dict[str, Any], meta: Dict) -> Dic
                 "cellHarmony web holds no model of its own."))
 
 
+def _plot_population_colors(order):
+    """The existing browser palette, also used by exports (same LCG shuffle)."""
+    if len(order) <= 4:
+        return {name: matplotlib.colors.to_hex(rgb) for name, rgb in _build_preview_palette(order).items()}
+    indices = _custom_shuffle_indices(list(range(len(order))))
+    state = 1
+    for i in range(len(indices) - 1, 0, -1):
+        state = (1664525 * state + 1013904223) & 0xffffffff
+        j = int((state / 4294967296) * (i + 1))
+        indices[i], indices[j] = indices[j], indices[i]
+    return {name: "#" + "".join(f"{int(channel * 255 + .5):02x}" for channel in _interpolate_paired_color(index / (len(order) - 1)))
+            for name, index in zip(order, indices)}
+
+
+def _parent_plot_context(app, meta, cache, populations, x, y, *, color_by="", coords_key="", x_field="", y_field=""):
+    """Small, cached display metadata from the complete parent, before filtering.
+
+    This reads coordinates/labels only. It never refits an embedding or changes
+    the selected cells, expression values, frequency counts or denominators.
+    """
+    contexts = cache.setdefault("parent_plot_contexts", {})
+    key = (color_by, coords_key, x_field, y_field)
+    if key in contexts:
+        return contexts[key]
+    mode = meta.get("analysis_mode", "supervised")
+    ref_key = meta.get("reference_cluster_key") or meta.get("cluster_key")
+    color_key = color_by or cache.get("cluster_key", meta.get("cluster_key", ""))
+    reference_colors = (mode == "supervised" and color_key == cache.get("cluster_key", meta.get("cluster_key", ""))
+                        or mode == "both" and color_key in {"supervised_state", ref_key})
+    x = np.asarray(x, dtype=float); y = np.asarray(y, dtype=float)
+    valid = np.isfinite(x) & np.isfinite(y)
+    groups = [(x[valid], y[valid])]
+    reference_frame = None
+    if mode == "supervised":
+        reference_frame = (cache["umap_x"], cache["umap_y"])
+    elif mode == "both":
+        matrix = cache.get("branch_embeddings", {}).get("X_umap_supervised")
+        if matrix is None:
+            matrix = getattr(cache["adata"], "obsm", {}).get("X_umap_supervised")
+        if matrix is not None:
+            reference_frame = (np.asarray(matrix)[:, 0], np.asarray(matrix)[:, 1])
+    matches_reference = reference_frame is not None and all(
+        np.shape(axis) == np.shape(native) and np.allclose(axis, native, rtol=0, atol=1e-6, equal_nan=True)
+        for axis, native in zip((x, y), reference_frame))
+    reference = _load_reference_adata(app, meta) if mode != "unsupervised" and (reference_colors or matches_reference) else None
+    ordered = []
+    if reference is not None and reference_colors and ref_key in reference.obs:
+        ordered.extend(pd.unique(reference.obs[ref_key].astype(str)).tolist())
+    ordered.extend(pd.unique(np.asarray(populations)).tolist())
+    order = list(dict.fromkeys(str(v) for v in ordered if str(v).strip()))
+    if reference is not None and matches_reference:
+        coordinates = np.asarray(reference.obsm["X_umap"], dtype=float)
+        finite = np.isfinite(coordinates[:, :2]).all(axis=1)
+        groups.append((coordinates[finite, 0], coordinates[finite, 1]))
+    groups = [(a, b) for a, b in groups if len(a)]
+    bounds = ({"x": [min(float(a.min()) for a, _ in groups), max(float(a.max()) for a, _ in groups)],
+               "y": [min(float(b.min()) for _, b in groups), max(float(b.max()) for _, b in groups)]}
+              if groups else None)
+    context = {"population_order": order, "population_colors": _plot_population_colors(order), "coordinate_bounds": bounds}
+    contexts[key] = context
+    return context
+
+
 def _build_umap_payload(
     app: FastAPI,
     meta: Dict,
@@ -4402,6 +4469,8 @@ def _build_umap_payload(
         resolved_x, resolved_y = str(x_field).strip(), str(y_field).strip()
         resolved_coords = ""
     axes_source = "obs" if resolved_x else ("obsm" if resolved_coords else "cellharmony")
+    parent_context = _parent_plot_context(app, meta, cache_entry, populations, umap_x, umap_y,
+        color_by=resolved_color_by, coords_key=resolved_coords, x_field=resolved_x, y_field=resolved_y)
     display_mask = _apply_display_filter_mask(cache_entry, display_filters)
 
     if compact:
@@ -4472,7 +4541,7 @@ def _build_umap_payload(
                                      "population": np.asarray(populations)[display_mask]})
                         .value_counts().rename("cells").reset_index().to_dict("records")
                         if meta.get("analysis_mode") == "both" and sample_labels is not None else None)
-    return {"reference": reference_points, "query": query_points,
+    return {**parent_context, "reference": reference_points, "query": query_points,
             "frequency_counts": frequency_counts,
             "sample_field": sample_field,
             "color_by": resolved_color_by,
@@ -5112,6 +5181,9 @@ def _build_expression_payload(
     _ay = _axis_values(cache_entry, y_field)
     if _ax is not None and _ay is not None:
         umap_x, umap_y = _ax, _ay
+    parent_context = (_parent_plot_context(app, meta, cache_entry, populations, umap_x, umap_y,
+        x_field=str(x_field) if _ax is not None and _ay is not None else "",
+        y_field=str(y_field) if _ax is not None and _ay is not None else "") if view != "violin" else {})
     display_mask = _apply_display_filter_mask(cache_entry, display_filters)
     resolved_gene = _resolve_expression_gene(cache_entry, gene)
     if not resolved_gene and not str(gene or "").strip() and len(cache_entry["var_names"]):
@@ -5185,6 +5257,7 @@ def _build_expression_payload(
     shown_gene = (str(gene).strip() if str(gene).strip() in lookup.suggestions
                   and str(gene).strip() not in lookup.rows else resolved_gene)
     return {
+        **parent_context,
         "gene": shown_gene,
         "requested_gene": gene,
         "resolved_gene": resolved_gene,
@@ -5385,13 +5458,15 @@ def _filter_marker_heatmap_matrix(
     )
 
 
-def _square_umap_axes(ax: plt.Axes, point_groups: List[List[Dict]]) -> None:
+def _square_umap_axes(ax: plt.Axes, point_groups: List[List[Dict]], bounds=None) -> None:
     coords = [
         (float(point["x"]), float(point["y"]))
         for group in point_groups
         for point in group
         if _is_finite_number(point.get("x")) and _is_finite_number(point.get("y"))
     ]
+    if bounds:
+        coords = [(bounds["x"][0], bounds["y"][0]), (bounds["x"][1], bounds["y"][1])]
     if not coords:
         return
 
@@ -5440,35 +5515,17 @@ def _render_umap_pdf(payload: Dict[str, List[Dict]], mode: str) -> io.BytesIO:
                 .sort_values(ascending=False)
                 .index.tolist()
             )
-            pivot = (
-                counts.pivot_table(index="population", columns="sample", values="fraction", aggfunc="first")
-                .reindex(ranked)
-                .fillna(0.0)
-            )
-            positions = np.arange(len(pivot.index), dtype=float)
-            left = np.zeros(len(pivot.index), dtype=float)
-            samples = list(pivot.columns)
-            palette = _build_preview_palette(samples)
-            for sample in samples:
-                values = pivot[sample].to_numpy(dtype=float)
-                ax.barh(
-                    positions,
-                    values,
-                    left=left,
-                    color=palette.get(sample, matplotlib.colors.to_rgb("#94a3b8")),
-                    edgecolor="none",
-                    label=sample,
-                    height=0.8,
-                )
-                left = left + values
+            means = counts.groupby("population", observed=False)["fraction"].mean().reindex(ranked)
+            positions = np.arange(len(ranked), dtype=float)
+            palette = payload.get("population_colors") or _plot_population_colors(payload.get("population_order") or ranked)
+            ax.barh(positions, means.to_numpy(dtype=float), height=0.8,
+                    color=[palette[name] for name in ranked], edgecolor="none")
             ax.set_yticks(positions)
-            ax.set_yticklabels(pivot.index.tolist())
+            ax.set_yticklabels(ranked)
             ax.invert_yaxis()
             ax.set_xlim(0, 1)
-            ax.set_xlabel(f"Fraction of filtered cells per {sample_field}")
+            ax.set_xlabel(f"Mean fraction of filtered cells per {sample_field}")
             ax.set_title("Cell frequency")
-            if samples:
-                ax.legend(frameon=False, fontsize=8, loc="lower right")
     elif mode == "cluster":
         if payload["reference"]:
             ax.scatter(
@@ -5480,7 +5537,7 @@ def _render_umap_pdf(payload: Dict[str, List[Dict]], mode: str) -> io.BytesIO:
                 linewidths=0,
             )
         populations = list(dict.fromkeys(p["population"] for p in payload["query"] if p.get("population")))
-        palette = _build_preview_palette(populations)
+        palette = payload.get("population_colors") or _plot_population_colors(payload.get("population_order") or populations)
         for population in populations:
             subset = [p for p in payload["query"] if p["population"] == population]
             ax.scatter(
@@ -5526,7 +5583,7 @@ def _render_umap_pdf(payload: Dict[str, List[Dict]], mode: str) -> io.BytesIO:
         ax.legend(frameon=False)
         ax.set_title("UMAP broad")
     if mode != "frequency":
-        _square_umap_axes(ax, [payload["reference"], payload["query"]])
+        _square_umap_axes(ax, [payload["reference"], payload["query"]], payload.get("coordinate_bounds"))
         ax.set_xlabel("UMAP1")
         ax.set_ylabel("UMAP2")
     fig.tight_layout()
@@ -5617,7 +5674,7 @@ def _render_expression_pdf(payload: Dict, mode: str) -> io.BytesIO:
         ax.set_xlabel("UMAP1")
         ax.set_ylabel("UMAP2")
         ax.set_title(f"{gene} {measurement}")
-        _square_umap_axes(ax, [umap_points])
+        _square_umap_axes(ax, [umap_points], payload.get("coordinate_bounds"))
     fig.tight_layout()
     buf = io.BytesIO()
     fig.savefig(buf, format="pdf", bbox_inches="tight")
@@ -6565,9 +6622,11 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(404, "Job not found.")
-        ds = UploadedGrnData(app, store.get_job(job_id))
-        if contrast and contrast not in ds.runs:
+        meta = store.get_job(job_id)
+        selected = contrast or (meta.get("differential") or {}).get("run_id", "")
+        if selected and selected not in completed_differentials(meta):
             raise HTTPException(404, "Unknown completed comparison.")
+        ds = UploadedGrnData(app, meta, contrast=selected)
         return gnet.regulator_network(ds, cell_state, contrast=contrast or ds.current_contrast,
                                       features=features.replace(",", " ").split() or None,
                                       limit=limit, edge_percentile=edge_percentile,
@@ -6579,9 +6638,11 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(404, "Job not found.")
-        ds = UploadedGrnData(app, store.get_job(job_id))
-        if contrast and contrast not in ds.runs:
+        meta = store.get_job(job_id)
+        selected = contrast or (meta.get("differential") or {}).get("run_id", "")
+        if selected and selected not in completed_differentials(meta):
             raise HTTPException(404, "Unknown completed comparison.")
+        ds = UploadedGrnData(app, meta, contrast=selected)
         return gnet.tf_activity_profile(ds, cell_state=cell_state, contrast=contrast or ds.current_contrast,
                                        factors=factors.replace(",", " ").split() or None, limit=limit)
 
@@ -6977,7 +7038,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
 
     @app.post("/api/jobs/{job_id}/chat-summary-section")
     def chat_summary_section(job_id: str,
-                             section: str = Query(..., pattern="^(grn|pathways|multimodal_pathways|communication|cell_frequency|literature|priorities)$"),
+                             section: str = Query(..., pattern="^(grn|pathways|multimodal_pathways|communication|cell_frequency|literature|priorities|synthesis)$"),
                              source_id: str = Query("", max_length=32),
                              expected_identity: str = Query("", max_length=64)):
         from .biology_summary import source_identity, build_summary_detail
@@ -6991,7 +7052,9 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         surface_response=chat_summary(job_id)
         if surface_response.status_code!=200:return surface_response
         surface=json.loads(surface_response.body)
-        if section not in ('literature','priorities'):
+        if section=='synthesis' and source_id and source_id not in surface['digest'].get('modalities',[]):
+            raise HTTPException(422,"Choose a modality recorded in this analysis.")
+        if section not in ('literature','priorities','synthesis'):
             sources=surface['digest'].get('deferred_sections',{}).get(section,[])
             if not source_id or not any(r['source_id']==source_id for r in sources):
                 raise HTTPException(422,"Choose an available biological interpretation source.")

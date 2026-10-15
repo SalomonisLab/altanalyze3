@@ -36,3 +36,24 @@ def test_worker_timeout_releases_native_memory(monkeypatch):
     import pytest
     with pytest.raises(TimeoutError):worker.complete({'messages':[]})
     assert process.killed and worker.process is None
+
+
+def test_invalid_schema_is_reported_before_generation(monkeypatch):
+    import sys,types
+    generated=[]
+    class Engine:
+        def __init__(self,**kwargs):pass
+        def reset(self):pass
+        def create_chat_completion(self,**kwargs):generated.append(kwargs);return {}
+    class Grammar:
+        @staticmethod
+        def from_json_schema(schema,verbose=False):raise ValueError('invalid fixture schema')
+    monkeypatch.setitem(sys.modules,'llama_cpp',types.SimpleNamespace(Llama=Engine,LlamaGrammar=Grammar))
+    options={'model_path':'installed.gguf','ctx_size':4096,'threads':2,'gpu_layers':0}
+    request={'options':options,'payload':{'messages':[{'role':'user','content':'fixture'}],
+        'response_format':{'type':'json_object','schema':{'invalid':'fixture'}}}}
+    monkeypatch.setattr(sys,'stdin',io.StringIO(json.dumps(request)+'\n'))
+    output=io.StringIO();monkeypatch.setattr(sys,'stdout',output)
+    model.worker_main()
+    result=json.loads(output.getvalue())
+    assert 'invalid fixture schema' in result['error'] and generated==[]

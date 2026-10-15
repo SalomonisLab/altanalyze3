@@ -117,7 +117,12 @@ def test_native_network_hubs_all_states_and_counts(tmp_path):
     # Different arm identities cannot supply a TF comparison.
     m['differential_history']['run_grn_tf']['config']['group2_samples']=['Different']
     assert sections.regulatory_sections(m,d)['states_examined']==2  # digest identity is immutable
-    assert sections.regulatory_sections(m,collect_evidence(m))['states_examined']==0
+    without_tf=sections.regulatory_sections(m,collect_evidence(m))
+    assert without_tf['states_examined']==2
+    hit=next(v for v in without_tf['rows'] if v['state']=='AT2')
+    assert hit['hubs'] and hit['tf_run_id']==''
+    assert hit['hubs'][0]['TF_log2fc'] is None
+    assert 'No matching TF-activity differential' in hit['tf_activity_status']
 
 
 def test_pubmed_title_hits_are_not_declared_verified_or_proven_novel(monkeypatch):

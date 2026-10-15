@@ -5,6 +5,7 @@ The GRN reader delegates gates and graph construction to the shared Discover cod
 """
 from collections import Counter, defaultdict
 from functools import cached_property
+from types import SimpleNamespace
 import json
 from pathlib import Path
 import re
@@ -35,7 +36,8 @@ def methods(meta):
         sections.append({'title':title.strip(),'text':body.strip()})
     sections.append({'title':'Biological summary and on-demand Discover interpretation',
         'text':('The summary reads completed differential tables, GO-Elite results and row-chunked observation/count metadata. '
-                'Regulatory synthesis requires exact matching RNA, GRN-edge and TF-activity comparisons (state layer, sample field, unit and both arms). '
+                'Regulatory synthesis requires exact matching RNA and GRN-edge comparisons (state layer, sample field, unit and both arms). '
+                'TF-activity differentials are included only when an exactly matching comparison was performed; otherwise their absence is reported. '
                 'The native Discover network uses FDR ≤ 0.05, absolute RNA/edge fold change ≥ 1.2, '
                 'and a factor-expression floor of 0.5 on sample-pseudobulk log2(1 + CP10k) in either arm. '
                 'Up to 80 target features define each network; the five factors with the most retained targets are displayed as hubs. '
@@ -159,8 +161,9 @@ class SavedInterpretData:
         if not path:raise FileNotFoundError('Saved sample × state GRN aggregate not recorded')
         with h5py.File(path,'r') as f:
             obs=f['obs'];n=_length(obs[obs.attrs.get('_index','_index')])
-            if self.layer not in obs:raise ValueError(f'GRN aggregate has no {self.layer} layer')
-            idx=np.flatnonzero(_column(obs[self.layer],0,n).astype(str)==state)
+            from .grn_data import aggregate_state_column
+            layer=aggregate_state_column(self.meta,record,SimpleNamespace(obs=read_elem(obs)),self.layer)
+            idx=np.flatnonzero(_column(obs[layer],0,n).astype(str)==state)
             names=read_elem(f['var']).index.astype(str);total=np.zeros(len(names))
             matrix=f['X'] if isinstance(f['X'],h5py.Dataset) else sparse_dataset(f['X'])
             for i in idx:
@@ -201,17 +204,18 @@ class SavedInterpretData:
 
 
 def regulatory_sections(meta,digest):
-    """Evaluate every state, only when edge and TF contrasts share full identities."""
+    """Evaluate matching RNA/edge contrasts; annotate TF evidence only if available."""
     groups=defaultdict(dict)
     for c in digest['comparisons']:groups[c['contrast']][c['modality']]=c
     result=[]
     for same in groups.values():
-        if not all(m in same for m in ('rna','grn','grn_tf')):continue
+        if not all(m in same for m in ('rna','grn')):continue
         c=same['rna'];ds=SavedInterpretData(meta,c['id']);layer=c['config']['population_col']
         states=digest['observations']['layers'].get(layer,{}).get('counts',{})
         for state,n in states.items():
             item={'state':state,'layer':layer,'cells':n,'comparison':c['comparison'],'run_id':c['id'],
-                'grn_run_id':same['grn']['id'],'tf_run_id':same['grn_tf']['id'],'hubs':[]}
+                'grn_run_id':same['grn']['id'],'tf_run_id':same.get('grn_tf',{}).get('id',''),
+                'tf_activity_status':'matching differential available' if 'grn_tf' in same else 'No matching TF-activity differential was performed; TF-activity changes are not inferred.', 'hubs':[]}
             try:
                 net=discover_integration.network(ds,contrast=c['id'],cell_state=state,limit=80,significance='fdr')
                 by_source=defaultdict(list);nodes={v['id']:v for v in net.get('nodes',[])}
@@ -235,7 +239,7 @@ def regulatory_sections(meta,digest):
             result.append(item)
     result.sort(key=lambda r:(not bool(r['hubs']),-max((h['n_targets'] for h in r['hubs']),default=0),r['state']))
     return {'rows':result,'states_examined':len(result),'selection':'Top hubs by number of native displayed targets; no causal importance or independent validation inferred.',
-        'scope':'Requires matching RNA, GRN edge and TF activity comparisons: population layer, sample field, comparison unit and both arms.'}
+        'scope':'Requires matching RNA and GRN-edge comparisons: population layer, sample field, comparison unit and both arms. Matching TF-activity differentials are included when available; their absence does not prevent RNA/edge interpretation.'}
 
 
 def pathway_sections(meta,digest):

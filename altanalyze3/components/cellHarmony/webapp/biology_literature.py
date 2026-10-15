@@ -22,20 +22,22 @@ def search(feature,state,disease,species):
     if not feature:return {'status':'not_searched','papers':[],'note':'No feature-specific literature query defined.'}
     # Explicit broader context searches prevent abbreviated atlas labels from
     # hiding related work. They retrieve candidates, never verify a claim.
-    queries=[('feature_disease_state',query),('feature_disease',query_terms(feature,'',disease,species))]
+    queries=[('feature_disease_state',query),('feature_disease',query_terms(feature,'',disease,species)),
+             ('feature_state_background',query_terms(feature,state,'',species))]
     queries=list(dict((q,(scope,q)) for scope,q in queries).values())
-    searches=[];ids=[]
+    searches=[];ids=[];scopes={}
     for scope,q in queries:
         found=_get(EUTILS+'esearch.fcgi?'+urllib.parse.urlencode({'db':'pubmed','retmode':'json','retmax':3,'sort':'relevance','term':q}))['esearchresult']
         searches.append({'scope':scope,'query':q,'count':int(found.get('count',0)),'url':pubmed_url(q)})
         ids.extend(p for p in found.get('idlist',[]) if p not in ids)
+        for pmid in found.get('idlist',[]):scopes.setdefault(pmid,[]).append(scope)
     papers=[]
     if ids:
         summaries=_get(EUTILS+'esummary.fcgi?'+urllib.parse.urlencode({'db':'pubmed','retmode':'json','id':','.join(ids)}))['result']
         for pmid in ids:
             p=summaries.get(pmid,{})
             papers.append({'pmid':pmid,'title':p.get('title',''),'year':p.get('pubdate',''),
-                'journal':p.get('fulljournalname',''),'url':f'https://pubmed.ncbi.nlm.nih.gov/{pmid}/'})
+                'journal':p.get('fulljournalname',''),'url':f'https://pubmed.ncbi.nlm.nih.gov/{pmid}/','retrieval_scopes':scopes.get(pmid,[])})
     return {'status':'searched','query':query,'search_url':pubmed_url(query),'searches':searches,'count':searches[0]['count'],
         'papers':papers,'classification':'prior_literature_candidates' if papers else 'unverified_prediction',
         'note':'Retrieved publications are candidates for verifying the exact finding, not proof of its direction, species or mechanism. Zero hits do not establish novelty.'}
@@ -59,14 +61,28 @@ def review(digest,limit=8):
     selected=[]
     for m in digest['modalities']:
         selected.extend([r for r in rows if r['modality']==m][:1])
-    selected.extend(r for r in rows if r not in selected)
+    # Give distinct states literature coverage before adding more genes from one
+    # state. Full job evidence remains available regardless of prompt ranking.
+    covered={r['state'] for r in selected}
+    for r in rows:
+        if r['state'] not in covered:selected.append(r);covered.add(r['state'])
+    buckets={}
+    for r in rows:
+        if r not in selected:buckets.setdefault((r['state'],r['modality']),[]).append(r)
+    while any(buckets.values()):
+        for bucket in buckets.values():
+            if bucket:selected.append(bucket.pop(0))
     def check(r):
         c=comparisons[r['run_id']];disease=c['comparison'].split(' vs ')[0]
         row=dict(r,comparison=c['comparison'],species=digest['species'],disease=disease)
+        from .biology_summary import _normal
+        search_disease=next((v['name'] for v in digest.get('covariate_biology',[])
+                            if _normal(disease) in {_normal(v['term']),_normal(v['name'])}),disease)
+        row['literature_disease_term']=search_disease
         background=next((v for v in digest.get('cell_state_biology',{}).get('matched',[]) if v['state']==r['state']),{})
         aliases=tuple(dict.fromkeys([r['state']]+background.get('card',{}).get('names',[])))
         row['literature_state_terms']=list(aliases)
-        try:row['literature']=search(r['feature'],aliases,disease,str(digest['species']))
+        try:row['literature']=search(r['feature'],aliases,search_disease,str(digest['species']))
         except Exception as exc:row['literature']={'status':'unavailable','papers':[],'error':type(exc).__name__,'note':'Literature could not be checked; no novelty inference made.'}
         return row
     # Independent HTTP waits can overlap. Every request still passes through the

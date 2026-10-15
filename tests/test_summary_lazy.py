@@ -104,3 +104,40 @@ def test_failed_detail_can_be_retried_without_caching_transport_errors():
         assert poll().status_code==200
         assert poll().status_code==200 and len(calls)==2
     finally:queue.close()
+
+
+def test_on_demand_keeps_every_pathway_source_accessible_without_running_models():
+    d=digest();d['comparisons']=[{'id':'r','comparison':'Case vs Control'}]
+    d['evidence'] += [{'kind':'pathway','state':'AM__up','layer':'state','run_id':'r','id':f'E{i}',
+        'feature':f'pathway{i}','facts':{'term_name':f'pathway{i}','overlap_genes':'STAT3','fdr':.01},'title':f'pathway{i}'} for i in range(20)]
+    limited,_=interpretation.context(d)
+    full,sources=interpretation.context(d,all_sources=True)
+    assert len(limited['sections']['pathways'])==1  # Original eager per-state overview.
+    assert len(full['sections']['pathways'])==20
+    assert {r['evidence_id'] for r in full['sections']['pathways']}=={f'E{i}' for i in range(20)}
+    assert sources['P20']['feature']=='pathway19'
+
+
+def test_integrative_requests_are_first_access_only_and_cached(tmp_path,monkeypatch):
+    store,job=fixture(tmp_path)
+    web=importlib.import_module('altanalyze3.components.cellHarmony.webapp.app')
+    app=web.create_app({'JOB_STORAGE':str(store.root)})
+    calls=[]
+    monkeypatch.setattr(summary,'build_summary_detail',lambda surface,section,source_id=None:
+        calls.append((section,source_id)) or {'narrative':{'model':'fixture','sections':[{'text':'Real generated fixture prose'}]}})
+    def poll(client,url):
+        for _ in range(300):
+            r=client.post(url)
+            if r.status_code!=202:return r
+            time.sleep(.01)
+        raise AssertionError('Section did not finish')
+    with TestClient(app) as client:
+        base=f'/api/jobs/{job}/chat-summary'
+        surface=poll(client,base)
+        assert surface.status_code==200 and calls==[]
+        for section,source in [('synthesis',None),('synthesis','rna'),('literature',None)]:
+            url=base+'-section?section='+section+('&source_id='+source if source else '')
+            r=poll(client,url);assert r.status_code==200,r.text
+            count=len(calls);assert poll(client,url).content==r.content and len(calls)==count
+        assert calls==[('synthesis',None),('synthesis','rna'),('literature',None)]
+        assert client.post(base+'-section?section=synthesis&source_id=not-a-modality').status_code==422

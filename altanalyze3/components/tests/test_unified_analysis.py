@@ -402,7 +402,7 @@ def test_both_imputed_sidecars_keep_barcode_coordinates_and_differential_layers(
                 assert {p['barcode']:p['value'] for p in response.json()['umap']}==expected
                 assert next(p for p in response.json()['umap'] if p['barcode']=='s2')['x']==(2. if layer=='supervised_state' else 0.)
             status=client.get(f'/api/jobs/{job}/status').json()['differential_ui']
-            assert status['default_population_col']==layer
+            assert status['default_population_col']=='supervised_state'
             assert {p['value'] for p in status['population_columns']}=={'unsupervised_cluster','unsupervised_state','supervised_state'}
             assert status['enabled']
             assert not {'supervised_state','unsupervised_cluster','supervised_accepted','original_NMF_cluster'} & {p['value'] for p in status['sample_fields']}

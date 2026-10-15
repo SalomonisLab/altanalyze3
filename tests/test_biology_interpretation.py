@@ -116,3 +116,24 @@ def test_state_name_prefix_is_not_a_borrowed_cell_state(monkeypatch):
     response(monkeypatch,text)
     r=section.interpret_sections(d)
     assert text in r['sections']['grn'][0]['text']
+
+
+def test_known_covariate_meaning_reaches_prompt_and_invented_expansion_is_rejected(monkeypatch):
+    d=digest();d['covariate_biology']=[{'term':'BOS','name':'bronchiolitis obliterans syndrome'}]
+    d['regulatory_review']['rows'][0]['comparison']='BOS vs Control'
+    prompt,_=section.context(d,all_sources=True)
+    assert prompt['covariate_biology']==d['covariate_biology']
+    response(monkeypatch,'Could the predicted matrix program in AM affect repair during biological oxygen supply (BOS)?')
+    result=section.interpret_sections(d,section='grn',source_id='G1')
+    assert result['status']=='rejected'
+    assert 'invented an expansion' in result['rejected_sections'][0]['reason']
+    for text in ['Could the predicted matrix program in AM affect repair in BOS?',
+                 'Could the predicted matrix program in AM affect repair in bronchiolitis obliterans syndrome (BOS)?']:
+        section.check_covariate_labels(text,d['covariate_biology'])
+
+
+def test_question_cannot_smuggle_in_an_unmeasured_functional_observation(monkeypatch):
+    response(monkeypatch,'Could the predicted matrix program in AM contribute to the impaired tissue repair observed in BOS?')
+    result=section.interpret_sections(digest(),section='grn',source_id='G1')
+    assert result['status']=='rejected'
+    assert 'functional phenotype' in result['rejected_sections'][0]['reason']

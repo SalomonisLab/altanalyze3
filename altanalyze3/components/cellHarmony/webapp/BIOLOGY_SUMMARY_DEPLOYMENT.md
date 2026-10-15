@@ -38,14 +38,21 @@ analysis container.
 
 For the eight-CPU model service, pass `--threads 8` when starting `biology_model.py`.
 Rebuild/restart the web app for summary progress and persistent response caching;
-restart the model service to expose inference timing and thread/GPU settings.
+restart the model service for strict response-schema validation, inference timing
+and thread/GPU settings.
 The initial summary now reads saved evidence without model inference or literature
 lookups. Expanding an interpretation requests only that result, with a loading
-indicator and cached responses. Literature checks and AI prioritization are also
-loaded on demand. Rebuild the web app and viewer to enable this behavior.
+indicator and cached responses. Systems-level synthesis, each modality’s hypotheses, and literature interpretation
+each run their own model request on first expansion and reuse the completed result.
+No model sections are preloaded. Rejected model passages are reported explicitly;
+they are not replaced by static prose labelled as AI interpretation. Rebuild the web app and viewer to enable this behavior.
+Opening the GRN or pathway section directly starts one interpretation, with a
+spinner and elapsed time. The result selector loads another state or pathway on
+request. RNA/edge synthesis does not require a TF-activity differential; absent
+TF evidence is explicitly labelled.
 
-Rebuild the scALABLE viewer from `f6ecf18` as well: it imports the shared
-cellHarmony web app. Keep its existing viewer bundles and assets.
+Rebuild the scALABLE viewer from the same updated source as the web app: it
+imports the shared cellHarmony web app. Keep its existing viewer bundles and assets.
 
 Allow outbound HTTPS for interpretation lookups to ToppGene, PubChem, openFDA,
 ClinicalTrials.gov and NCBI.

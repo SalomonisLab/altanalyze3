@@ -367,6 +367,10 @@ def test_scalable_caps_cells_before_each_differential_mode(uploaded, monkeypatch
     expanded = u.edges[np.repeat(np.arange(u.edges.n_obs), 50)].copy()
     expanded.obs_names = [f'expanded{i}' for i in range(expanded.n_obs)]
     expanded.write_h5ad(u.paths['grn'])
+    assignments=u.root/'fixture_assignments.tsv'
+    pd.DataFrame({'CellBarcode':expanded.obs_names,'AlignmentScore':np.linspace(.4,.99,expanded.n_obs)}).to_csv(assignments,sep='\t',index=False)
+    meta=u.store.get_job(u.job)
+    u.store.update_job(u.job,artifacts=dict(meta['artifacts'],assignments=str(assignments)))
     observed = []
     monkeypatch.setattr(pipeline.cellHarmony_differential, '_write_cell_frequency_plots',
                         lambda **kwargs: observed.append(kwargs['adata'].n_obs) or {})
@@ -384,4 +388,86 @@ def test_scalable_caps_cells_before_each_differential_mode(uploaded, monkeypatch
     assert set(detail.n_case)=={expected} and set(detail.n_control)=={expected}
     assert observed==[9600]  # Abundance retains all cells.
     log=(u.store.logs_dir(u.job)/'pipeline.log').read_text()
-    assert 'selected=8000 available=9600' in log
+    assert '"selected": 8000' in log and '"available": 9600' in log
+    assert 'highest_alignment_score' in log
+
+
+@pytest.mark.parametrize('with_tf',[False,True])
+def test_supervised_comparison_owns_network_layer_despite_unsupervised_explore(uploaded,with_tf):
+    """Both job, supervised-only DE, and supervised-only aggregate annotations."""
+    u=uploaded
+    for name,path in u.paths.items():
+        matrix=ad.read_h5ad(path)
+        if name not in ('grn_pb','grn_tf_pb'):
+            matrix.obs['supervised_state']=matrix.obs['cell_type'].copy()
+        if name not in ('grn_pb','grn_tf_pb'):
+            matrix.obs['unsupervised_cluster']=matrix.obs['cell_type'].map({'AT1':'c1','AT2':'c2'})
+        matrix.write_h5ad(path)
+    runs=seed_comparisons(u)
+    for run in runs.values():run['config']['population_col']='supervised_state'
+    if not with_tf:runs.pop('run-grn_tf')
+    meta=u.store.get_job(u.job)
+    for record in meta['modality_artifacts'].values():
+        record['state_columns']={'supervised_state':'cell_type'}
+    u.store.update_job(u.job,analysis_mode='both',cluster_key='unsupervised_cluster',modality_artifacts=meta['modality_artifacts'],
+        cell_state_layers={'default':'unsupervised_cluster','layers':[
+            {'key':'unsupervised_cluster','marker_analysis':{}},
+            {'key':'supervised_state','marker_analysis':{}}]},
+        differential_options={'enabled':True,'default_population_col':'unsupervised_cluster',
+            'population_columns':[{'value':'unsupervised_cluster'},{'value':'supervised_state'}],
+            'default_sample_field':'condition'},differential=runs['run-grn'],differential_history=runs)
+    base=f'/api/jobs/{u.job}'
+    def network(layer,contrast='run-grn'):
+        r=u.client.get(base+'/integrated/network',params={'contrast':contrast,'cell_state':'AT1','state_layer':layer})
+        assert r.status_code==200,r.text
+        return r.json()
+    expected=network('supervised_state')
+    assert expected['edges'],expected
+    assert network('unsupervised_cluster')==expected
+    assert network('unsupervised_cluster','run-rna')==network('supervised_state','run-rna')
+    u.client.cookies.set('scalable_layer_'+u.job,'unsupervised_cluster')
+    r=u.client.get(base+'/integrated/network',params={'contrast':'run-grn','cell_state':'AT1'})
+    assert r.json()==expected
+    tsv=u.client.get(base+'/integrated/network.tsv',params={'contrast':'run-grn','cell_state':'AT1'})
+    assert tsv.status_code==200 and 'TF1\tTARGET1' in tsv.text
+    for endpoint in ('grn/regulator-network','grn/tf-activity'):
+        r=u.client.get(base+'/'+endpoint,params={'contrast':'run-grn','cell_state':'AT1'})
+        assert r.status_code==200,r.text
+    state=u.client.get(base+'/status').json()['differential_ui']
+    assert state['default_population_col']=='supervised_state'
+    assert state['config']['population_col']=='supervised_state'
+    # Viewing a result never rewrites saved analyses or their scientific inputs.
+    assert u.store.get_job(u.job)['cluster_key']=='unsupervised_cluster'
+    assert u.store.get_job(u.job)['differential_history']==runs
+
+
+def test_layer_round_trip_restores_canonical_annotations_and_preserves_de_default():
+    from altanalyze3.components.cellHarmony.webapp.state_layers import apply_layer
+    meta={'cluster_key':'supervised_state','marker_analysis':{'source':'supervised'},
+          'differential_options':{'default_population_col':'supervised_state'},
+          'cell_state_layers':{'default':'supervised_state','layers':[
+              {'key':'supervised_state','marker_analysis':{'source':'supervised'}},
+              {'key':'unsupervised_cluster','marker_analysis':{'source':'unsupervised'}}]}}
+    unsup=apply_layer(meta,'unsupervised_cluster')
+    restored=apply_layer(unsup,'supervised_state')
+    assert unsup['cluster_key']=='unsupervised_cluster'
+    assert restored['cluster_key']=='supervised_state' and restored['marker_analysis']==meta['marker_analysis']
+    assert unsup['differential_options']['default_population_col']=='supervised_state'
+
+
+def test_aggregate_alias_requires_recorded_provenance_and_every_source_cell(tmp_path):
+    from altanalyze3.components.cellHarmony.webapp.grn_data import aggregate_state_column
+    native=ad.AnnData(np.ones((2,1)),obs=pd.DataFrame({'native':['AM','AT2'],'supervised_state':['AM','AT2']},index=['a','b']))
+    source=tmp_path/'source.h5ad';native.write_h5ad(source)
+    aggregate=ad.AnnData(np.ones((2,1)),obs=pd.DataFrame({'native':['AM','AT2']},index=['x','y']))
+    meta={'job_id':'fixture'};record={'h5ad':str(source),'state_columns':{'supervised_state':'native'}}
+    assert aggregate_state_column(meta,record,aggregate,'supervised_state')=='native'
+    with pytest.raises(KeyError):aggregate_state_column(meta,{'h5ad':str(source)},aggregate,'supervised_state')
+    with pytest.raises(KeyError):aggregate_state_column(meta,record,aggregate,'unsupervised_cluster')
+    native.obs.loc['b','supervised_state']='AM';native.write_h5ad(source)
+    with pytest.raises(ValueError,match='every source cell'):aggregate_state_column(meta,record,aggregate,'supervised_state')
+    # Legacy branch metadata explicitly records the same native state identity.
+    native.obs['supervised_state']=native.obs['native'];branch=tmp_path/'supervised'/'fixture'
+    (branch/'outputs').mkdir(parents=True);source=branch/'outputs'/'source.h5ad';native.write_h5ad(source)
+    (branch/'job.json').write_text(json.dumps({'job_id':'fixture','analysis_mode':'both','cluster_key':'native'}))
+    assert aggregate_state_column(meta,{'h5ad':str(source)},aggregate,'supervised_state')=='native'

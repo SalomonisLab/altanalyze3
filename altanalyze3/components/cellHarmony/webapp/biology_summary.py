@@ -27,7 +27,7 @@ from .grn_data import completed_differentials, comparison_entry
 from ..modalities import modality_artifacts, normalize_modality_id
 
 KNOWLEDGE = Path(__file__).parents[1] / 'resources/biology/lungmap.json'
-VERSION = 5
+VERSION = 7
 CHUNK = 25000
 
 
@@ -205,7 +205,8 @@ def source_identity(meta):
     files=[]
     for name in _source_paths(meta)+[str(KNOWLEDGE),str(Path(__file__)),str(Path(__file__).with_name('biology_synthesis.py')),str(Path(__file__).with_name('biology_sections.py')),str(Path(__file__).with_name('biology_literature.py')),
                                    str(Path(__file__).with_name('biology_questions.py')), str(Path(__file__).with_name('summary_runtime.py')),
-                                   str(Path(__file__).parent.parent/'analysis_record.py'), str(Path(__file__).with_name('biology_interpretation.py'))]:
+                                   str(Path(__file__).parent.parent/'analysis_record.py'), str(Path(__file__).with_name('biology_interpretation.py')),
+                                   str(Path(__file__).with_name('biology_narrative.py')),str(Path(__file__).parent.parent/'discover_resources/gene_literature.py')]:
         p=Path(name); stat=p.stat(); files.append((name,stat.st_size,stat.st_mtime_ns))
     model={k:os.environ.get(k,'') for k in ('SCALABLE_SUMMARY_URL','SCALABLE_SUMMARY_MODEL','SCALABLE_SUMMARY_PROTOCOL')}
     identity={"version":VERSION,"job":meta['job_id'],"files":files,"metadata":meta,"model":model}
@@ -681,9 +682,13 @@ def build_surface(meta):
 def build_summary_detail(surface, section, source_id=None):
     """Interpret only the server-owned evidence requested by an expanded panel."""
     digest=surface['digest']
+    if section=='synthesis':
+        from .biology_narrative import synthesize
+        return {'kind':'summary_synthesis','narrative':synthesize(digest,source_id or 'systems')}
     if section=='literature':
-        from .biology_literature import review
-        return {'kind':'summary_literature','review':review(digest)}
+        from .biology_narrative import synthesize
+        result=synthesize(digest,'literature')
+        return {'kind':'summary_literature','review':result.get('literature_review',{}),'narrative':result}
     if section=='priorities':
         narrative,message=interpret(digest)
         return {'kind':'summary_priorities','narrative':narrative,'message':message}
@@ -722,10 +727,11 @@ def _build_summary(meta, *, eager=True):
                 digest['section_interpretation']=interpret_sections(digest)
         else:
             from .biology_interpretation import context
-            evidence,_=context(digest)
+            evidence,_=context(digest,all_sources=True)
             digest['section_interpretation']={'status':'deferred','sections':{},'sources':{}}
             digest['deferred_sections']={key:[{'source_id':r['source_id'],'state':r['state'],
-                'title':r.get('name') or r.get('title') or r.get('comparison') or r['state']}
+                'title':r.get('name') or r.get('title') or r.get('comparison') or r['state'],
+                'run_id':r.get('run_id'),'evidence_id':r.get('evidence_id')}
                 for r in records] for key,records in evidence['sections'].items()}
     except Exception as exc:
         digest['section_interpretation']={'status':'unavailable','message':f'Biological systems interpretation unavailable ({type(exc).__name__}); saved evidence remains available.','sections':{},'sources':{}}

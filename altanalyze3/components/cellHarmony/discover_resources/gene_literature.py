@@ -5,7 +5,7 @@ TIMEOUT=8.0
 _LOCK=threading.Lock()
 _LAST=[0.0]
 
-def _get(url: str) -> dict:
+def _fetch(url: str) -> bytes:
     """One E-utilities call, spaced to NCBI's 3 requests a second without an API key.
 
     The first version sent seven calls back to back and PubMed answered HTTP 429 on the
@@ -24,14 +24,18 @@ def _get(url: str) -> dict:
             _LAST[0] = time.monotonic()
         try:
             with urllib.request.urlopen(url, timeout=TIMEOUT) as r:
-                return json.loads(r.read().decode())
+                return r.read()
         except urllib.error.HTTPError as exc:
             # Several site workers share one IP and each has its own lock, so a 429 can
             # still arrive; two retries with a growing wait absorb it.
             if exc.code != 429 or attempt == 2:
                 raise
             time.sleep(1.1 * (attempt + 1))
-    return {}
+    return b'{}'
+
+
+def _get(url: str) -> dict:
+    return json.loads(_fetch(url).decode())
 
 
 def pubmed_url(query: str) -> str:
@@ -47,4 +51,3 @@ def phrase_terms(*phrases: str) -> str:
             seen.add(p.lower())
             out.append(f'"{p}"[tiab]')
     return " OR ".join(out)
-

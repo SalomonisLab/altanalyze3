@@ -104,6 +104,25 @@ def infer_species_from_gene_symbols(genes: Sequence[str]) -> Optional[str]:
     return None
 
 
+def _anndata_readers():
+    """Resolve public I/O readers on AnnData 0.10 and newer without eager reads."""
+    try:
+        import anndata
+    except ImportError as exc:
+        raise ImportError("AnnData input requires the 'anndata' package") from exc
+    try:
+        from anndata.io import read_elem, sparse_dataset
+    except ImportError:
+        try:
+            from anndata.experimental import read_elem, sparse_dataset
+        except ImportError as exc:
+            raise ImportError(
+                f"Installed anndata {anndata.__version__} does not expose compatible "
+                "read_elem and sparse_dataset readers"
+            ) from exc
+    return read_elem, sparse_dataset
+
+
 def _peek_input_genes(params: FastCommParams) -> list[str]:
     if params.adata is not None:
         adata = params.adata
@@ -111,11 +130,8 @@ def _peek_input_genes(params: FastCommParams) -> list[str]:
             return adata.var[params.gene_symbol_col].astype(str).tolist()
         return adata.var_names.astype(str).tolist()
     if params.h5ad is not None:
-        try:
-            import h5py
-            from anndata.io import read_elem
-        except ImportError:
-            return []
+        import h5py
+        read_elem, _ = _anndata_readers()
         with h5py.File(params.h5ad, "r") as handle:
             var = read_elem(handle["var"])
             if params.gene_symbol_col and params.gene_symbol_col in var.columns:
@@ -250,12 +266,9 @@ def _matrix_inputs_from_h5ad(
 ) -> tuple[object, list[str], list[str], pd.DataFrame, Dict[str, object]]:
     if params.h5ad is None:
         raise ValueError("h5ad path is required")
-    try:
-        import h5py
-        from anndata.io import read_elem, sparse_dataset
-        from scipy import sparse
-    except ImportError as exc:  # pragma: no cover - exercised only in minimal envs
-        raise ImportError("AnnData input requires the 'anndata' package") from exc
+    import h5py
+    from scipy import sparse
+    read_elem, sparse_dataset = _anndata_readers()
 
     # AnnData's backed reader still loads layers/raw eagerly. Read only the
     # requested matrix and annotations, never unrelated count matrices.

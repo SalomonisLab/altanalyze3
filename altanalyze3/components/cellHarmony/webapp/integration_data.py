@@ -227,8 +227,8 @@ def _arm_means(path,mtime_ns,size,state):
 def _edge_index(path):
     return json.loads(Path(path).read_text())
 
-def integration_data(app,meta):
+def integration_data(app,meta,contrast=''):
     if hasattr(app.state.job_store,'dataset'):
         return BundleIntegrationData(app.state.job_store.dataset(meta['job_id']),meta,
                                      (getattr(app.state,'assets',{}) or {}).get(meta['job_id'],{}))
-    return UploadedIntegrationData(app,meta)
+    return UploadedIntegrationData(app,meta,contrast=contrast)
