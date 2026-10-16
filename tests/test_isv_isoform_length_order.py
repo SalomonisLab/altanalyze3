@@ -141,3 +141,34 @@ def test_main_passes_given_only_with_isoforms():
                             "altanalyze3", "components", "visualization", "isv_web",
                             "isv_web_remote.py")).read()
     assert 'iso_order=("given" if a.isoforms else "length")' in src
+
+
+def test_sparse_panel_rows_are_visible(tmp_path):
+    """A 5-read single-isoform panel must not collapse into one band.
+
+    The panel height floor counted colour groups, not rows, so 5 reads of one isoform were scaled to
+    13 px and each row drew 2.6 px tall. LRFN4 35292108.AML-7_1_CITE_GEX rendered as a single block.
+    """
+    from altanalyze3.components.visualization.isv_web.isv_web_remote import ROW_VIS
+    res = _res()
+    res["panels"][0]["molecules"] = [m for m in res["panels"][0]["molecules"]
+                                     if m["final_isoform_id"] == "LONG"]          # 2 reads, 1 isoform
+    out = str(tmp_path / "sparse.pdf")
+    assert render(res, out, isoform_track=True) is not False
+    rows = res["panels"][0]["_rows"]
+    assert len(rows) == 2
+    assert min(r["h"] for r in rows) >= ROW_VIS - 1e-9
+
+
+def test_dense_panel_height_is_unchanged(tmp_path):
+    """The repair must not fire where every row already fits: 100 rows would need 800 px."""
+    from altanalyze3.components.visualization.isv_web.isv_web_remote import MAXPANEL, ROW_VIS
+    res = _res()
+    base = res["panels"][0]["molecules"][0]
+    res["panels"][0]["molecules"] = [dict(base, isoform_id="r%d" % i) for i in range(100)]
+    out = str(tmp_path / "dense.pdf")
+    assert render(res, out, isoform_track=True) is not False
+    rows = res["panels"][0]["_rows"]
+    assert len(rows) == 100
+    assert 100 * ROW_VIS > MAXPANEL
+    assert sum(r["h"] for r in rows) <= MAXPANEL + 1e-6

@@ -7,7 +7,9 @@ or change upstream annotation.
 """
 from __future__ import annotations
 from collections import Counter, defaultdict
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
+from functools import lru_cache
 import hashlib
 import json
 
@@ -35,6 +37,25 @@ def merge_exons(exons):
     if not result:
         raise ValueError('A source exon record is required for every input read')
     return result
+
+
+def splice_spans_compatible(spans, parent_exons, splice_slop):
+    """A parent cannot splice out sequence observed continuously across a trusted gap.
+
+    A shorter terminal endpoint is not a splice contradiction. Spans are selected
+    before aggregation only where a source exon covers both flanks of an actual
+    reference or recurrent source junction. They are not inferred intron labels.
+    """
+    if not spans:
+        return True
+    blocks = merge_exons(parent_exons)
+    gaps = [(a[1],b[0]) for a,b in zip(blocks,blocks[1:])]
+    # Require the actual target splice, not merely an overlapping interval.
+    # A short source fragment spanning a different nested gap does not prove
+    # both flanks of this parent gap were observed. Partial terminal coverage
+    # remains governed by the existing minimum-continuation policy.
+    return not any(max(abs(left-a),abs(right-b)) <= splice_slop
+                   for left,right in spans for a,b in gaps)
 
 
 def terminal_parent_gap_coverage(source_exons, parent_exons):
@@ -147,7 +168,8 @@ def junction_anchors(records, slop):
 
 
 def prepare_gene(rows, introns, policy, *, annotation_corrector=None, parent_models=None,
-                 required_identities=None, terminal_event_provider=None):
+                 required_identities=None, terminal_event_provider=None,
+                 protect_splice_geometry=False):
     """Return complete read -> candidate mappings and pooled candidate evidence.
 
     Each row must contain library, gene, molecule, legacy_structure and actual
@@ -177,25 +199,79 @@ def prepare_gene(rows, introns, policy, *, annotation_corrector=None, parent_mod
               else terminal_event_provider(row))
         events.append(ev)
         support_source=tuple(row.get('support_source',source))
-        junction_records.extend((region,junction,support_source) for kind,region,junction,coverage in ev if kind=='exon')
+        junction_records.extend((region,junction,support_source) for kind,region,junction,coverage in ev if kind in ('exon','splice'))
     if len(genes)!=1:
         raise ValueError('prepare_gene requires one complete gene and its reference regions')
     anchor_for,support = junction_anchors(junction_records,policy.splice_slop)
+    # Selection is complete. Do not retain this temporary per-observation
+    # index while allocating the final source-to-class mappings.
+    del junction_records
+    trusted = set()
+    if protect_splice_geometry:
+        for exons in (parent_models or {}).values():
+            blocks=merge_exons(exons)
+            trusted.update((a[1],b[0]) for a,b in zip(blocks,blocks[1:]))
+        trusted.update(anchor for (region,anchor),count in support.items()
+                       if region=='physical_splice' and count>=policy.minimum_junction_support)
+    trusted = sorted(trusted)
+    trusted_left = [a for a,b in trusted]
+    from ..isoform_collapse_utils import intronic_edge_compatible
     candidates = {}
     mapping = {}
     prepared_rows = []
+    first_known_targets = {}
+    mixed_known_targets = set()
+    @lru_cache(maxsize=4096)
+    def evidence_key(base, signature):
+        # JSON encodes tuples/lists identically. Cache only the deterministic
+        # class name, never observations, counts or source membership.
+        digest = hashlib.sha256(json.dumps(signature).encode()).hexdigest()[:20]
+        return base+'~intronic='+digest
+    @lru_cache(maxsize=65536)
+    def prepared_evidence(junctions, coverage, terminal_blocks, splice_spans, selected):
+        # Share equal immutable values, never RNA identities or observations.
+        # Highly expressed genes can otherwise allocate the same selected
+        # reference/recurrent splice evidence millions of times.
+        return junctions, coverage, terminal_blocks, splice_spans, selected
+    @lru_cache(maxsize=65536)
+    def compatible_known_references(junctions, coverage, splice_spans):
+        # Bounded site anchors can pool RNAs with different feasible references:
+        # sites 100 and 103 are within 3 nt, but only 103 fits reference 106.
+        # Partition before pooling so known preference remains applicable to
+        # each compatible RNA. This does not rank or select any parent.
+        return tuple(sorted(name for name,exons in (parent_models or {}).items()
+                            if intronic_edge_compatible(junctions,coverage,exons,
+                                                       splice_slop=policy.splice_slop)
+                            and splice_spans_compatible(splice_spans,exons,policy.splice_slop)))
+    @lru_cache(maxsize=65536)
+    def span_evidence(spans):
+        return (spans,tuple(('splice_span',left,right) for left,right in spans),
+                tuple(('splice_span','physical_splice',None,(left,right)) for left,right in spans))
+    @lru_cache(maxsize=65536)
+    def source_splice_spans(exons):
+        # Trusted gaps and policy are fixed for this complete gene. Reuse only
+        # the pure geometric result; every RNA still follows the full mapping
+        # and count path. Intern equal outputs across different RNA endpoints.
+        spans=set()
+        for start,end in merge_exons(exons):
+            lo=bisect_left(trusted_left,start+policy.splice_slop)
+            hi=bisect_right(trusted_left,end-policy.splice_slop)
+            for left,right in trusted[lo:hi]:
+                if right<=end-policy.splice_slop:spans.add((left,right))
+        return span_evidence(tuple(sorted(spans)))
     for row,ev in zip(rows,events):
         protected_junctions = []
         protected_coverage = []
         protected_terminal_blocks = set()
+        protected_splice_spans = set()
         selected_events = []
         signature = []
         for kind,region,junction,coverage in ev:
-            if kind=='exon':
+            if kind in ('exon','splice'):
                 anchor = anchor_for[region,tuple(junction)]
                 if support[region,anchor] >= policy.minimum_junction_support:
                     protected_junctions.append(tuple(junction))
-                    signature.append(('exon',region,*anchor))
+                    signature.append((kind,region,*anchor))
                     selected_events.append((kind,region,junction,coverage))
             elif kind=='parent_gap_continuation' and coverage[1]-coverage[0]+1>=policy.minimum_continuation:
                 protected_terminal_blocks.add(tuple(junction))
@@ -207,6 +283,17 @@ def prepare_gene(rows, introns, policy, *, annotation_corrector=None, parent_mod
                 # End extent is evidence, not a new isoform identity per offset.
                 signature.append(('continuation',region))
                 selected_events.append((kind,region,junction,coverage))
+        if protect_splice_geometry:
+            protected_splice_spans,span_signature,span_events=source_splice_spans(
+                tuple(tuple(exon) for exon in row['source_exons']))
+            signature.extend(span_signature)
+            selected_events.extend(span_events)
+        selected_value=tuple((kind,region,tuple(junction) if junction is not None else None,
+                              tuple(coverage)) for kind,region,junction,coverage in selected_events)
+        prepared=prepared_evidence(tuple(protected_junctions),tuple(protected_coverage),
+                                   tuple(protected_terminal_blocks),tuple(protected_splice_spans),selected_value)
+        known_targets=(compatible_known_references(prepared[0],prepared[1],prepared[3])
+                       if protect_splice_geometry and signature and parent_models else None)
         base = row['legacy_structure']
         # Evidence must not leave the corrected candidate annotated as purely
         # exonic when the original terminal-strip bug removed its I region.
@@ -215,8 +302,9 @@ def prepare_gene(rows, introns, policy, *, annotation_corrector=None, parent_mod
         missing = {s[1] for s in signature if s[0]=='continuation'}-regions
         if missing and annotation_corrector is None:
             raise ValueError(f'Protected continuation requires collapse-side evidence recovery: {missing}')
-        if selected_events and annotation_corrector is not None:
-            annotation = annotation_corrector(row,selected_events,policy)
+        terminal_selected = [ev for ev in selected_events if ev[0] not in ('splice','splice_span')]
+        if terminal_selected and annotation_corrector is not None:
+            annotation = annotation_corrector(row,terminal_selected,policy)
             present = {t.rsplit(':',1)[-1].split('_')[0] for t in annotation.split('|')
                        if ':' not in t or t.rsplit(':',1)[0]==row['gene']}
             if missing-present:
@@ -227,36 +315,48 @@ def prepare_gene(rows, introns, policy, *, annotation_corrector=None, parent_mod
         # key per transcript endpoint. Variable ends remain in one class.
         key = base
         if signature:
-            digest = hashlib.sha256(json.dumps(sorted(signature)).encode()).hexdigest()[:20]
-            key = base+'~intronic='+digest
+            key = evidence_key(base,tuple(sorted(signature)))
         source = row['library'],row['gene'],row['molecule']
         mapping[source] = key
+        if known_targets is not None:
+            if key in first_known_targets and first_known_targets[key]!=known_targets:
+                mixed_known_targets.add(key)
+            else:
+                first_known_targets.setdefault(key,known_targets)
         if key not in candidates:
             candidates[key] = dict(annotation_structure=annotation,count=0,
                 representative_source=source,parent_exons=merge_exons(row['source_exons']),
                 protected_junctions=set(),protected_coverage=set(),protected_terminal_blocks=set(),
+                protected_splice_spans=set(),
                 minimum_continuation=policy.minimum_continuation)
         item = candidates[key]
         item['count'] += 1
         item['protected_junctions'].update(protected_junctions)
         item['protected_coverage'].update(protected_coverage)
         item['protected_terminal_blocks'].update(protected_terminal_blocks)
-        prepared_rows.append((row,key,annotation,set(protected_junctions),
-                              set(protected_coverage),set(protected_terminal_blocks),selected_events))
+        item['protected_splice_spans'].update(protected_splice_spans)
+        # Refinement only iterates these values; avoid three per-molecule set
+        # allocations (including empty sets) across complete source rosters.
+        prepared_rows.append((row,key,annotation,*prepared))
     # Exact legacy strings can also pool incompatible continuation boundaries.
     # Refine ONLY a class whose first physical representative contradicts its
     # selected evidence. Observed terminal splice sites use the existing +/-3
     # tolerance; variable RNA endpoints never enter the splice signature.
-    from ..isoform_collapse_utils import intronic_edge_compatible
     bad={key for key,c in candidates.items() if not intronic_edge_compatible(
-        c['protected_junctions'],c['protected_coverage'],c['parent_exons'],splice_slop=policy.splice_slop)}
+        c['protected_junctions'],c['protected_coverage'],c['parent_exons'],splice_slop=policy.splice_slop)
+        or not splice_spans_compatible(c['protected_splice_spans'],c['parent_exons'],policy.splice_slop)}
+    # Preserve the exact existing class keys and native tie-breaking when
+    # reference compatibility is homogeneous. Refine only mixed classes.
+    bad.update(mixed_known_targets)
     if bad:
         intron_bounds={name:(a,b) for name,a,b in introns}
         groups=defaultdict(list)
-        for row,key,annotation,pj,pc,pt,selected in prepared_rows:
+        for row,key,annotation,pj,pc,pt,ps,selected in prepared_rows:
             if key not in bad:continue
             exons=merge_exons(row['source_exons'])
-            sites=(() if len(exons)==1 else ((exons[0][1],exons[1][0]),(exons[-2][1],exons[-1][0])))
+            sites=(tuple((a[1],b[0]) for a,b in zip(exons,exons[1:]))
+                   if any(ev[0] in ('splice','splice_span') for ev in selected) else
+                   (() if len(exons)==1 else ((exons[0][1],exons[1][0]),(exons[-2][1],exons[-1][0]))))
             sides=[]
             if not sites:
                 for kind,region,junction,coverage in selected:
@@ -266,26 +366,34 @@ def prepare_gene(rows, introns, policy, *, annotation_corrector=None, parent_mod
                     s,e=exons[0]
                     sides.append((region,s<a<=e,s<=b<e))
             shape=(sites,tuple(sorted(sides)))
+            known_targets=(compatible_known_references(pj,pc,ps)
+                           if key in mixed_known_targets else None)
             target=next((group for group in groups[key]
                          if len(group['sites'])==len(sites) and group['sides']==shape[1]
+                         and group['known_targets']==known_targets
                          and all(max(abs(a-b) for a,b in zip(j,k))<=policy.splice_slop
                                  for j,k in zip(sites,group['sites']))),None)
             if target is None:
-                digest=hashlib.sha256(json.dumps(['compatible_terminal_evidence',key,shape]).encode()).hexdigest()[:20]
+                partition_shape=(shape+('known_reference_compatibility',known_targets)
+                                 if key in mixed_known_targets else shape)
+                digest=hashlib.sha256(json.dumps(['compatible_terminal_evidence',key,partition_shape]).encode()).hexdigest()[:20]
                 new_key=key.rsplit('~intronic=',1)[0]+'~intronic='+digest
                 if new_key in candidates:raise ValueError('Refined source evidence key collision')
-                target=dict(key=new_key,sites=sites,sides=shape[1])
+                target=dict(key=new_key,sites=sites,sides=shape[1],known_targets=known_targets)
                 groups[key].append(target)
                 candidates[new_key]=dict(annotation_structure=annotation,count=0,
                     representative_source=(row['library'],row['gene'],row['molecule']),parent_exons=exons,
                     protected_junctions=set(),protected_coverage=set(),protected_terminal_blocks=set(),
+                    protected_splice_spans=set(),
                     minimum_continuation=policy.minimum_continuation)
             c=candidates[target['key']];c['count']+=1
             c['protected_junctions'].update(pj);c['protected_coverage'].update(pc);c['protected_terminal_blocks'].update(pt)
+            c['protected_splice_spans'].update(ps)
             mapping[row['library'],row['gene'],row['molecule']]=target['key']
         for key in bad:del candidates[key]
         if any(not intronic_edge_compatible(c['protected_junctions'],c['protected_coverage'],
-                c['parent_exons'],splice_slop=policy.splice_slop) for c in candidates.values()):
+                c['parent_exons'],splice_slop=policy.splice_slop) or not splice_spans_compatible(
+                    c['protected_splice_spans'],c['parent_exons'],policy.splice_slop) for c in candidates.values()):
             raise ValueError('A refined source class still contradicts its measured intronic evidence')
     if len(mapping)!=len(rows) or sum(c['count'] for c in candidates.values())!=len(rows):
         raise ValueError('Read identity/count conservation failed before collapse')
@@ -367,6 +475,9 @@ def collapse_prepared(candidates, references, gene, runtime, *, splice_slop):
     def compatible(evidence,parent):
         if evidence is None:
             return True
+        if not splice_spans_compatible(evidence.get('protected_splice_spans',()),
+                                       parent_exons[parent],splice_slop):
+            return False
         if not runtime['intronic_edge_compatible'](
             evidence['protected_junctions'],evidence['protected_coverage'],
             parent_exons[parent],splice_slop=splice_slop):
@@ -379,7 +490,7 @@ def collapse_prepared(candidates, references, gene, runtime, *, splice_slop):
     reference_constraints={}
     for ref in references:
         reference_constraints[ref]=[(k,e) for k,e in candidates.items()
-            if (e['protected_junctions'] or e['protected_coverage'] or e['protected_terminal_blocks'])
+            if (e['protected_junctions'] or e['protected_coverage'] or e['protected_terminal_blocks'] or e.get('protected_splice_spans'))
             and any(runtime['is_contiguous_subsequence'](core[k],t)
                     for t in [core[ref]]+reference_evidence_cores.get(ref,[]))
             and compatible(e,ref)]

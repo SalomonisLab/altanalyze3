@@ -62,6 +62,19 @@ def build_event_index(regions,parent_models):
                 gap_ends=ends,gap_end_coords=[b for b,a in ends])
 
 
+def measured_splice_events(exons):
+    """Measure every physical splice gap, independent of annotation membership.
+
+    Canonical sources can also be misassigned to coordinate-normalized alternative
+    references. Neither reference membership nor a native region edge exempts an
+    observed junction from the same pooled recurrence/compatibility policy.
+    RNA endpoints and adjacent subregions are never treated as splice junctions.
+    """
+    blocks = merge_exons(exons)
+    return [('splice', 'physical_splice', (left[1], right[0]), (left[1], right[0]))
+            for left, right in zip(blocks, blocks[1:])]
+
+
 def measured_terminal_events(exons,index):
     """Equivalent to terminal_events, querying only overlapping/boundary gaps."""
     exons=merge_exons(exons);events=[]
@@ -89,7 +102,8 @@ def measured_terminal_events(exons,index):
     return list(dict.fromkeys(events))
 
 
-def scan_sample(sample,regions,event_indexes,workdir,policy,*,limit=None,log=print):
+def scan_sample(sample,regions,event_indexes,workdir,policy,*,limit=None,log=print,
+                protect_novel_junctions=False):
     """Reconcile sources and retain all counts before any optional evidence fold.
 
     limit is exclusively a bounded diagnostic/benchmark; such outputs are marked
@@ -129,7 +143,14 @@ def scan_sample(sample,regions,event_indexes,workdir,policy,*,limit=None,log=pri
                 if gene not in regions:raise ValueError(f'Required gene annotation unresolved: {gene}')
                 ev=measured_terminal_events(exons,event_indexes[gene])
                 ev.extend(terminal_u_events(r[2],exons,regions[gene],gene,policy.splice_slop))
-                ev=[e for e in ev if e[0]=='exon' or e[3][1]-e[3][0]+1>=policy.minimum_continuation]
+                if protect_novel_junctions:
+                    ev.extend(measured_splice_events(exons))
+                    # Continuous mono-exon records can contradict a reference
+                    # or recurrent alternative splice. Preserve their geometry
+                    # before exact aggregation, even without a terminal event.
+                ev=[e for e in ev if e[0] in ('exon','splice') or e[3][1]-e[3][0]+1>=policy.minimum_continuation]
+                if protect_novel_junctions and not ev:
+                    ev.append(('geometry','source_geometry',None,(0,0)))
                 key=gene,legacy
                 if key not in models:
                     models[key]=[1,mol,ordinal,strand,chrom,source,pack_exons(exons),bool(ev)]
@@ -150,13 +171,19 @@ def scan_sample(sample,regions,event_indexes,workdir,policy,*,limit=None,log=pri
                          ((g,s,*m) for (g,s),m in ordinary.items()))
         conn.commit()
         if sum(m[0] for m in models.values())!=eligible:raise ValueError('Native read count conservation failed')
+        if protect_novel_junctions and (possible!=eligible or
+                conn.execute('SELECT COUNT(*) FROM events').fetchone()[0]!=eligible):
+            raise ValueError('Every eligible source geometry must survive before aggregation')
         for p,before in stats.items():
             after=Path(p).stat()
             if before!=(after.st_size,after.st_mtime_ns):raise ValueError(f'Original source changed during scan: {p}')
         manifest=dict(library=lib,sources={p:dict(bytes=n,mtime_ns=mt) for p,(n,mt) in stats.items()},
             total_annotation_rows=total,native_eligible_reads=eligible,native_structures=len(models),
             possible_evidence_reads=possible,primary_blocks_outside_native_annotation=extra,
-            complete=limit is None,policy=policy.__dict__,database=str(path))
+            complete=limit is None,policy=policy.__dict__,database=str(path),
+            protect_novel_junctions=protect_novel_junctions,
+            novel_junction_scope=('all_physical_junctions_and_continuity_v4'
+                                  if protect_novel_junctions else 'terminal_only'))
         (out/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
         log(f'[source-scan:{lib}] complete={manifest["complete"]}; all {eligible:,} native reads counted')
         return manifest

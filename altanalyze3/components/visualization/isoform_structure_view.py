@@ -1506,117 +1506,270 @@ def split_token(token, default_gene):
     return gene_id, base, coord
 
 
+def _exon_block_key(base):
+    """'E3.1' -> 'E3'. Sub-blocks of one exon region share a key; E3 and I3 do not."""
+    core = (base or '').strip()
+    if len(core) > 1 and '.' in core:
+        return core[0] + core[1:].split('.', 1)[0]
+    return core or None
+
+
+def _gene_feature_index(exon_lookup, genes):
+    """Per gene: its features sorted by start, and the maximal stretches its EXON features cover."""
+    feats, spans = {}, {}
+    for (g, base), seg in (exon_lookup or {}).items():
+        if g not in genes:
+            continue
+        fs, fe = seg['start'], seg['end']
+        if fs > fe:
+            fs, fe = fe, fs
+        ftype = seg.get('type') or 'E'
+        feats.setdefault(g, []).append((fs, fe, base, ftype))
+        if ftype == 'E':
+            spans.setdefault(g, []).append((fs, fe))
+    merged = {}
+    for g, sp in spans.items():
+        sp.sort()
+        out = []
+        for a, b in sp:
+            if out and a <= out[-1][1] + 1:
+                out[-1] = (out[-1][0], max(out[-1][1], b))
+            else:
+                out.append((a, b))
+        merged[g] = out
+    for g in feats:
+        feats[g].sort()
+    return feats, merged
+
+
+def _tokens_run_backwards(parsed, exon_lookup):
+    """Do these tokens descend in genomic coordinate, as a minus-strand gene's do?
+
+    The gene model's strand decides it. When no token names a feature the model carries, the
+    coordinates themselves decide, and a tie leaves the order alone.
+    """
+    strands = set()
+    for gene_id, base, _coord, fs, _fe, _t, _b in parsed:
+        if fs is None:
+            continue
+        seg = (exon_lookup or {}).get((gene_id, base)) or {}
+        st = (seg.get('strand') or '').strip()
+        if st:
+            strands.add(st)
+    if strands == {'-'}:
+        return True
+    if strands and '+' in strands:
+        return False
+    starts = [p[3] for p in parsed if p[3] is not None]
+    down = sum(1 for a, b in zip(starts, starts[1:]) if b < a)
+    up = sum(1 for a, b in zip(starts, starts[1:]) if b > a)
+    return down > up
+
+
+def _block_continues(exon_spans, open_end, next_start):
+    """Does the open block run into the next feature, or did the read splice between them?
+
+    The read continues only when every base between them is exonic in the gene model. LRFN4 E3.1
+    ends 66,857,735 and E3.3 starts 66,857,790, with E3.2 66,857,735-66,857,790 covering the gap,
+    so a read crosses from one to the other without splicing. FLI1 E3.4 to E5.2 crosses I3.1,
+    I4.1 and more, so that is a splice.
+    """
+    if open_end is None or next_start is None:
+        return True
+    if next_start <= open_end + 1:
+        return True
+    for a, b in exon_spans or []:
+        if a <= open_end + 1 and b >= next_start - 1:
+            return True
+    return False
+
+
+def exon_string_key(tokens):
+    """The structure key gff_process stores coordinates under.
+
+    `gff_process.exon_str` drops the first and the last token when they carry a coordinate, because
+    those are the read's own 5' and 3' ends, and writes the remainder as the (gene, structure) key
+    of `<sample>/gff-output/structure_coords.sqlite`, whose blob holds that read's exon blocks in
+    source-GFF order.
+    """
+    t = [x for x in (tokens or []) if x]
+    if t and '_' in t[0]:
+        t = t[1:]
+    if t and '_' in t[-1]:
+        t = t[:-1]
+    return '|'.join(t)
+
+
+def terminal_bound(token, default_gene, exon_lookup, which):
+    """A read's own 5' or 3' limit: the token's coordinate, else the named feature's own edge.
+
+    Reads that share a structure key differ only at their ends, and the store keeps one of them, so
+    the ends come from the read's own token string. A bare terminal token means the read stops at
+    that feature's edge.
+    """
+    gene_id, base, coord = split_token(token or '', default_gene)
+    if coord is not None:
+        return coord
+    seg = (exon_lookup or {}).get((gene_id, base))
+    if not seg:
+        return None
+    lo, hi = min(seg['start'], seg['end']), max(seg['start'], seg['end'])
+    return lo if which == 'lo' else hi
+
+
+def apply_terminal_bounds(blocks, tokens, default_gene, exon_lookup, strand):
+    """Trim the first and last stored block to this read's own ends."""
+    if not blocks:
+        return blocks
+    toks = [x for x in (tokens or []) if x]
+    if not toks:
+        return blocks
+    out = [[min(a, b), max(a, b)] for a, b in blocks]
+    out.sort()
+    first, last = (toks[-1], toks[0]) if strand == '-' else (toks[0], toks[-1])
+    lo = terminal_bound(first, default_gene, exon_lookup, 'lo')
+    hi = terminal_bound(last, default_gene, exon_lookup, 'hi')
+    # A terminal coordinate is applied only while the block stays a real interval. On a minus-strand
+    # gene the last token can carry a block's END rather than the read's outer edge: RUNX1 read
+    # 34716389 ends '...|E116.1_34792542|E116.1_34791917' for the GFF block
+    # 34,791,786-34,791,917, and writing 34,791,917 as that block's START collapsed it to 1 bp.
+    if lo is not None and lo < out[0][1]:
+        out[0][0] = lo
+    if hi is not None and hi > out[-1][0]:
+        out[-1][1] = hi
+    return [(a, b) for a, b in out if a <= b]
+
+
+def segments_from_blocks(blocks, exon_lookup, default_gene):
+    """Split genomic blocks by the gene's annotated features, typing retained introns 'I'."""
+    feats, _ = _gene_feature_index(exon_lookup, {default_gene})
+    segments = []
+    for a, b in sorted((min(x, y), max(x, y)) for x, y in (blocks or [])):
+        covered = []
+        for fs, fe, base, ftype in feats.get(default_gene, []):
+            lo, hi = max(a, fs), min(b, fe)
+            if lo > hi:
+                continue
+            covered.append((lo, hi, base, ftype))
+        covered.sort()
+        pos = a
+        for lo, hi, base, ftype in covered:
+            if lo > pos:
+                segments.append({'gene': default_gene, 'start': pos, 'end': lo - 1,
+                                 'type': 'E', 'label': None})
+                pos = lo
+            if hi >= pos:
+                segments.append({'gene': default_gene, 'start': max(lo, pos), 'end': hi,
+                                 'type': ftype,
+                                 'label': normalize_token(base, default_gene, 'block') if ftype == 'E' else None})
+                pos = hi + 1
+        if pos <= b:
+            segments.append({'gene': default_gene, 'start': pos, 'end': b, 'type': 'E', 'label': None})
+    return segments
+
+
 def build_isoform_segments(tokens, exon_lookup, default_gene):
+    """Genomic segments for one isoform, from its exon-ID token string.
+
+    The token string is a boundary list, not a feature list. A coordinate suffix marks where a
+    genomic block starts or ends; bare tokens name the annotated features a block runs through.
+    The implementation before 2026-10-15 grouped consecutive tokens that shared a base and spanned
+    min(coords)..max(coords), which is wrong whenever a base carries two coordinates belonging to
+    DIFFERENT blocks. On LRFN4 the tokens 'E4.1|E4.1_66859679|E4.1_66859746' were drawn as one
+    68 bp block 66,859,679-66,859,746, which is the intron between two GFF exons, and the real
+    43 bp exon 66,859,637-66,859,679 was lost. Read off the rendered PDF, the drawn blocks
+    disagreed with the source GFF for 5 of 5 reads of isoform 35292108.AML-7_1_CITE_GEX.
+
+    This parses the boundaries instead, in two steps:
+
+    1. Scan the tokens in order, keeping one open block.
+       * A coordinate with no block open OPENS a block there.
+       * A coordinate while a block is open CLOSES it at that coordinate, when the block runs into
+         the incoming feature without crossing a spliced-out gap, or when the incoming token names
+         a feature this gene model does not carry (a terminal U token).
+       * A coordinate that is NOT continuous with the open block closes the block at the feature
+         end reached so far and opens a new block at the coordinate.
+       * A bare token extends the open block to its feature end, or closes the block and opens a
+         new one at its feature start when it is not continuous.
+       Continuity is decided on the gene's merged EXON stretches, not on direct abutment: LRFN4
+       read 39053794.Y863 holds 'E3.1_66857513|E3.3_66858795' for the single GFF block
+       66,857,513-66,858,795, which E3.2 bridges. Requiring abutment split it in two and moved the
+       start of the next block.
+    2. Split each block by the annotated features it covers, so retained introns stay typed 'I'
+       and exon labels are preserved for the callers that use them. A stretch of a block with no
+       annotated feature, e.g. a 5' extension beyond the first exon, is kept and typed 'E'.
+
+    Returns the same shape as before: [{'gene', 'start', 'end', 'type', 'label'}, ...].
+    """
     parsed = []
-    for token in tokens:
+    for token in tokens or []:
         gene_id, base, coord = split_token(token, default_gene)
-        parsed.append({'gene': gene_id, 'base': base, 'coord': coord})
+        seg = (exon_lookup or {}).get((gene_id, base))
+        if seg is None and coord is None:
+            continue                      # unknown feature, no coordinate: nothing to place
+        if seg is None:
+            parsed.append((gene_id, base, coord, None, None, None, None))
+            continue
+        fs, fe = seg['start'], seg['end']
+        if fs > fe:
+            fs, fe = fe, fs
+        ftype = seg.get('type') or 'E'
+        parsed.append((gene_id, base, coord, fs, fe, ftype, _exon_block_key(base)))
 
-    grouped = []
-    for item in parsed:
-        if grouped and grouped[-1]['gene'] == item['gene'] and grouped[-1]['base'] == item['base']:
-            if item['coord'] is not None:
-                grouped[-1]['coords'].append(item['coord'])
+    # Tokens are listed in TRANSCRIPTION order. On a minus-strand gene that runs from the highest
+    # genomic coordinate downwards, and the scan below walks a block from its start to its end, so
+    # the list is reversed first. Without this every minus-strand read collapses into one block,
+    # because each next feature starts below the open block's end and so always looks continuous.
+    if _tokens_run_backwards(parsed, exon_lookup):
+        parsed.reverse()
+
+    feats, merged = _gene_feature_index(exon_lookup, {p[0] for p in parsed})
+
+    blocks = []                           # (start, end, gene) in genomic order
+    open_start = open_end = open_gene = None
+    for gene_id, base, coord, fs, fe, _t, _bkey in parsed:
+        spans = merged.get(gene_id) or []
+        if coord is not None:
+            if open_start is None:
+                open_start, open_end, open_gene = coord, fe, gene_id
+            elif fs is None or _block_continues(spans, open_end, fs):
+                blocks.append((open_start, coord, open_gene))
+                open_start = open_end = open_gene = None
+            else:
+                blocks.append((open_start, open_end, open_gene))
+                open_start, open_end, open_gene = coord, fe, gene_id
         else:
-            grouped.append({
-                'gene': item['gene'],
-                'base': item['base'],
-                'coords': [item['coord']] if item['coord'] is not None else []
-            })
-
-    direction = None
-    for group in grouped:
-        seg = exon_lookup.get((group['gene'], group['base']))
-        if seg and seg.get('strand') in ('+', '-'):
-            direction = -1 if seg['strand'] == '-' else 1
-            break
-    if direction is None:
-        for i in range(len(grouped) - 1):
-            seg1 = exon_lookup.get((grouped[i]['gene'], grouped[i]['base']))
-            seg2 = exon_lookup.get((grouped[i + 1]['gene'], grouped[i + 1]['base']))
-            if seg1 and seg2:
-                if seg2['start'] > seg1['start']:
-                    direction = 1
-                elif seg2['start'] < seg1['start']:
-                    direction = -1
-                break
-    if direction is None:
-        direction = 1
+            if open_start is None:
+                open_start, open_end, open_gene = fs, fe, gene_id
+            elif _block_continues(spans, open_end, fs):
+                open_end = max(open_end if open_end is not None else fs, fe)
+            else:
+                blocks.append((open_start, open_end, open_gene))
+                open_start, open_end, open_gene = fs, fe, gene_id
+    if open_start is not None and open_end is not None:
+        blocks.append((open_start, open_end, open_gene))
+    blocks = [(min(a, b), max(a, b), g) for a, b, g in blocks if a is not None and b is not None]
 
     segments = []
-    for idx, group in enumerate(grouped):
-        seg = exon_lookup.get((group['gene'], group['base']))
-        if not seg:
-            continue
-        start, end = seg['start'], seg['end']
-        if start > end:
-            start, end = end, start
-        coords = [c for c in group['coords'] if c is not None]
-        if seg['type'] == 'I' and not coords:
-            # Only draw intron retention when explicit coordinates are provided.
-            continue
-        if coords:
-            coord_min = min(coords)
-            coord_max = max(coords)
-            if seg['type'] == 'I' and len(coords) > 1:
-                # Intron tokens with explicit boundaries can encode multiple segments.
-                if len(coords) % 2 == 0:
-                    for i in range(0, len(coords), 2):
-                        pair = coords[i:i + 2]
-                        pair_start = max(start, min(pair))
-                        pair_end = min(end, max(pair))
-                        if pair_end < pair_start:
-                            pair_start, pair_end = pair_end, pair_start
-                        segments.append({
-                            'gene': group['gene'],
-                            'start': pair_start,
-                            'end': pair_end,
-                            'type': seg['type'],
-                            'label': None
-                        })
-                    continue
-                # Fall back to a single bounded intron span if tokens are unmatched.
-                start = max(start, coord_min)
-                end = min(end, coord_max)
-            else:
-                if seg['type'] == 'I' and len(coords) == 1:
-                    coord = max(start, min(end, coord_min))
-                    if abs(coord - start) <= abs(coord - end):
-                        end = coord
-                    else:
-                        start = coord
-                else:
-                    if seg['type'] == 'E' and len(coords) == 1 and idx not in (0, len(grouped) - 1):
-                        coord = coord_min
-                        if abs(coord - start) <= abs(coord - end):
-                            start = max(start, coord)
-                        else:
-                            end = min(end, coord)
-                    if idx == 0:
-                        if direction == 1:
-                            start = max(start, coord_min)
-                        else:
-                            end = min(end, coord_max)
-                    if idx == len(grouped) - 1:
-                        if direction == 1:
-                            end = min(end, coord_max)
-                        else:
-                            start = max(start, coord_min)
-                    if idx != 0 and idx != len(grouped) - 1 and len(coords) > 1:
-                        start = max(start, coord_min)
-                        end = min(end, coord_max)
-        if end < start:
-            start, end = end, start
-        label = None
-        if seg['type'] == 'E':
-            label = normalize_token(group['base'], default_gene, 'block')
-        segments.append({
-            'gene': group['gene'],
-            'start': start,
-            'end': end,
-            'type': seg['type'],
-            'label': label
-        })
+    for a, b, g in blocks:
+        covered = []
+        for fs, fe, base, ftype in feats.get(g, []):
+            lo, hi = max(a, fs), min(b, fe)
+            if lo > hi:
+                continue
+            covered.append((lo, hi, base, ftype))
+        covered.sort()
+        pos = a
+        for lo, hi, base, ftype in covered:
+            if lo > pos:                  # block sequence with no annotated feature
+                segments.append({'gene': g, 'start': pos, 'end': lo - 1, 'type': 'E', 'label': None})
+                pos = lo
+            if hi >= pos:
+                segments.append({'gene': g, 'start': max(lo, pos), 'end': hi, 'type': ftype,
+                                 'label': normalize_token(base, default_gene, 'block') if ftype == 'E' else None})
+                pos = hi + 1
+        if pos <= b:
+            segments.append({'gene': g, 'start': pos, 'end': b, 'type': 'E', 'label': None})
     return segments
 
 
@@ -2774,6 +2927,25 @@ def _parse_isoform_filter_pattern(pattern):
     return [part.strip() for part in raw.split("|") if part.strip()]
 
 
+def _split_and_patterns(raw):
+    """'A + B' -> the two patterns a read must BOTH contain.
+
+    Clauses already OR together and the patterns inside one clause AND together, but nothing
+    reached the AND from the command line. '+' does not occur in an exon id, a coordinate or a
+    gene id, so it separates the ANDed patterns of one clause.
+    """
+    text = str(raw)
+    if "+" not in text:
+        pattern = _parse_isoform_filter_pattern(text)
+        return [pattern] if pattern else []
+    patterns = []
+    for part in text.split("+"):
+        pattern = _parse_isoform_filter_pattern(part)
+        if pattern:
+            patterns.append(pattern)
+    return patterns
+
+
 def _normalize_isoform_filter_spec(filter_spec):
     if not filter_spec:
         return []
@@ -2792,8 +2964,8 @@ def _normalize_isoform_filter_spec(filter_spec):
                 normalized.append(clause_norm)
         return normalized
     if isinstance(filter_spec, str):
-        pattern = _parse_isoform_filter_pattern(filter_spec)
-        return [[pattern]] if pattern else []
+        patterns = _split_and_patterns(filter_spec)
+        return [patterns] if patterns else []
     if isinstance(filter_spec, tuple):
         patterns = []
         for item in filter_spec:
@@ -2813,9 +2985,9 @@ def _normalize_isoform_filter_spec(filter_spec):
                 if patterns:
                     clauses.append(patterns)
             else:
-                pattern = _parse_isoform_filter_pattern(entry)
-                if pattern:
-                    clauses.append([pattern])
+                patterns = _split_and_patterns(entry)
+                if patterns:
+                    clauses.append(patterns)
         return clauses
     pattern = _parse_isoform_filter_pattern(filter_spec)
     return [[pattern]] if pattern else []

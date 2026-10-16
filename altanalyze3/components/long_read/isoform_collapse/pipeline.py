@@ -1045,15 +1045,23 @@ def load_molecule_candidates(outdir, sample):
         digest = h.hexdigest()
     if digest != entry['sha256']:
         raise ValueError(f'Changed evidence source table for {sample}')
+    from functools import lru_cache
+    @lru_cache(maxsize=65536)
+    def shared_gene(gene):return gene
+    @lru_cache(maxsize=65536)
+    def shared_class_pair(original,candidate):return original,candidate
     mapping = {}
     with _io.smart_open(path) as f:
         if next(f).rstrip('\n') != 'gene\tmolecule\toriginal_structure\tcandidate_class':
             raise ValueError('Invalid evidence table header')
         for line in f:
             gene, mol, original, candidate = line.rstrip('\n').split('\t')
+            # Reuse identical immutable strings/class pairs. Every molecule
+            # retains its own verified key and assignment; counts are not pooled.
+            gene=shared_gene(gene)
             if (gene, mol) in mapping:
                 raise ValueError(f'Duplicate evidence identity for {sample}:{gene}:{mol}')
-            mapping[gene, mol] = (original, candidate)
+            mapping[gene, mol] = shared_class_pair(original,candidate)
     if len(mapping) != entry['reads']:
         raise ValueError(f'Incomplete evidence identity table for {sample}')
     return mapping
@@ -1285,7 +1293,7 @@ def run_pipeline(samples, outdir, nproc=8, min_total=3, ref=DEFAULT_REF, write_h
                  collapse_method='wta', sample_collapse=False, tier1_dir=None,
                  reuse_tier1=False, log=print, gene_evidence=None, molecule_candidates=None,
                  protect_intronic_evidence=False, prepared_tier1_paths=None,
-                 source_registry=None, reference_models=None):
+                 source_registry=None, reference_models=None, protect_novel_junctions=False):
     """End-to-end. samples: list of (name, h5ad_path, transcript_associations_path[, raw_gff_path]).
     If genome_fasta is given AND samples include a raw_gff_path, protein prediction is run
     (final-isoform records -> existing gff_translate -> protein_summary.txt + *sequences.fasta).
@@ -1296,6 +1304,8 @@ def run_pipeline(samples, outdir, nproc=8, min_total=3, ref=DEFAULT_REF, write_h
     os.makedirs(outdir, exist_ok=True)
     streamed_context = None
     source_labels = {s[0]: s[0] for s in samples}
+    if protect_novel_junctions and not protect_intronic_evidence:
+        raise ValueError('Novel junction protection requires the complete source-evidence preparation path')
     if protect_intronic_evidence:
         from .source_evidence import distinct_source_samples
         samples, source_labels = distinct_source_samples(samples)
@@ -1309,7 +1319,8 @@ def run_pipeline(samples, outdir, nproc=8, min_total=3, ref=DEFAULT_REF, write_h
         from .splice_evidence import Policy
         streamed_context, source_registry = prepare_streaming(
             samples, ref, enst_cache, ref_gff, os.path.join(outdir, 'intronic_source_evidence'),
-            Policy(3, 100, 3), nproc=nproc, log=log)
+            Policy(3, 100, 3), nproc=nproc, log=log,
+            protect_novel_junctions=protect_novel_junctions)
         gene_evidence = streamed_context['gene_evidence']
         prepared_tier1_paths = streamed_context['evidence_sample_paths']
         reference_models = streamed_context['reference_models']

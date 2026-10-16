@@ -11,16 +11,19 @@ _REGIONS = _INDEXES = None
 
 
 def _scan_task(args):
-    sample,regions,indexes,folder,policy=args
-    return scan_sample(sample,regions,indexes,folder,policy)
+    sample,regions,indexes,folder,policy,protect_novel_junctions=args
+    return scan_sample(sample,regions,indexes,folder,policy,
+                       protect_novel_junctions=protect_novel_junctions)
 
 
 def _fork_scan_task(args):
-    sample,folder,policy=args
-    return scan_sample(sample,_REGIONS,_INDEXES,folder,policy)
+    sample,folder,policy,protect_novel_junctions=args
+    return scan_sample(sample,_REGIONS,_INDEXES,folder,policy,
+                       protect_novel_junctions=protect_novel_junctions)
 
 
-def prepare_streaming(samples,exon_reference,enst_cache,ref_gff,workdir,policy,*,nproc=1,log=print):
+def prepare_streaming(samples,exon_reference,enst_cache,ref_gff,workdir,policy,*,nproc=1,log=print,
+                      protect_novel_junctions=False):
     """Measure complete source inputs, then form classes without altering WTA."""
     names=[s[0] for s in samples]
     if not names or len(set(names))!=len(names):
@@ -36,7 +39,7 @@ def prepare_streaming(samples,exon_reference,enst_cache,ref_gff,workdir,policy,*
             regions[g][k]=value
     refs=load_reference_models(str(enst_cache),str(ref_gff))
     indexes={g:build_event_index(m,{s:r['exons'] for s,r in refs.get(g,{}).items()}) for g,m in regions.items()}
-    tasks=[(s,regions,indexes,str(work/f'sample_{i:04d}'),policy) for i,s in enumerate(samples)]
+    tasks=[(s,regions,indexes,str(work/f'sample_{i:04d}'),policy,protect_novel_junctions) for i,s in enumerate(samples)]
     if nproc>1 and os.name=='posix':
         # On Linux fork shares the immutable annotation/ref index. Existing
         # platform callers can select serial mode when parallelism is unavailable.
@@ -44,7 +47,7 @@ def prepare_streaming(samples,exon_reference,enst_cache,ref_gff,workdir,policy,*
         _REGIONS, _INDEXES = regions, indexes
         try:
             with multiprocessing.get_context('fork').Pool(min(nproc,len(samples))) as pool:
-                scans=pool.map(_fork_scan_task,[(s,str(work/f'sample_{i:04d}'),policy)
+                scans=pool.map(_fork_scan_task,[(s,str(work/f'sample_{i:04d}'),policy,protect_novel_junctions)
                                               for i,s in enumerate(samples)],chunksize=1)
         finally:
             _REGIONS = _INDEXES = None

@@ -380,7 +380,7 @@ def export_junction_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict):
 def export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, reference_gff, genome_fasta,
                         deleteGFF=False, collapse_method='wta', force_recollapse=False, write_h5ad=True,
                         min_total=3, sample_collapse=False, tier1_dir=None, reuse_tier1=False,
-                        protect_intronic_evidence=False):
+                        protect_intronic_evidence=False, protect_novel_junctions=False):
     """Cross-sample isoform consolidation + per-sample isoform h5ad + protein prediction.
 
     Uses the memory/compute-optimized ``isoform_collapse`` pipeline instead of the legacy combined
@@ -437,6 +437,7 @@ def export_isoform_h5ad(sample_dict, ensembl_exon_dir, barcode_sample_dict, refe
             collapse_method=collapse_method, sample_collapse=sample_collapse,
             tier1_dir=tier1_dir, reuse_tier1=reuse_tier1,
             protect_intronic_evidence=protect_intronic_evidence,
+            protect_novel_junctions=protect_novel_junctions,
         )
         # The collapse's stage3 already wrote each "<library>-isoform.h5ad" (keyed on the final clean
         # isoform set) next to the sample, plus protein_summary.txt / *sequences.fasta from the final
@@ -996,7 +997,7 @@ def combine_junctions(metadata_file, barcode_cluster_dirs, ensembl_exon_dir, min
 def build_isoform_catalog(metadata_file, ensembl_exon_dir, gencode_gff, genome_fasta,
                           collapse_method='wta', force_recollapse=True, min_total=3,
                           sample_collapse=False, tier1_dir=None, reuse_tier1=False,
-                          protect_intronic_evidence=False):
+                          protect_intronic_evidence=False, protect_novel_junctions=False):
     """P3: cross-sample isoform COLLAPSE (catalog) + translation/FASTA only. Skips the per-sample
     stage3 re-key (that is P4, export_sample_isoform). Persists FINAL_isoform_catalog.tsv,
     FINAL_structure_to_exemplar.tsv and (EM) FINAL_structure_to_exemplar_soft.tsv so P4 can re-key
@@ -1006,6 +1007,7 @@ def build_isoform_catalog(metadata_file, ensembl_exon_dir, gencode_gff, genome_f
                         sample_collapse=sample_collapse, tier1_dir=tier1_dir,
                         reuse_tier1=reuse_tier1,
                         protect_intronic_evidence=protect_intronic_evidence,
+                        protect_novel_junctions=protect_novel_junctions,
                         collapse_method=collapse_method, force_recollapse=force_recollapse,
                         write_h5ad=False, min_total=min_total)
 

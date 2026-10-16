@@ -1,5 +1,6 @@
 """Complete pooled evidence contexts and native Tier-1 tables from verified scans."""
 from collections import defaultdict,Counter
+from functools import lru_cache
 import gzip
 import hashlib
 import json
@@ -11,17 +12,35 @@ from .splice_evidence import (Policy,prepare_gene,recover_selected_terminal_toke
 from ...bam.coord_store import unpack_exons
 
 
-def _record(mol,ordinal,strand,chrom,source,blob,library,gene):
+def make_source_decoders(event_kinds=None,*,cache_values=True):
+    """Share immutable repeated values, never RNA identities or observations.
+
+    Highly expressed genes contain millions of distinct source RNAs with the
+    same junction list. Keeping a separate decoded copy for every RNA wastes
+    memory. Caches are bounded, scoped to one gene, and preserve exact values.
+    """
+    kinds=None if event_kinds is None else frozenset(event_kinds)
+    def text(value):return value
+    def raw(blob):return zlib.decompress(blob).decode()
+    def exons(blob):return tuple(unpack_exons(blob))
+    def events(value):
+        return tuple((k,a,tuple(j) if j is not None else None,tuple(cv))
+                     for k,a,j,cv in json.loads(value) if kinds is None or k in kinds)
+    decoders=(text,raw,exons,events)
+    return tuple(lru_cache(maxsize=65536)(f) for f in decoders) if cache_values else decoders
+
+
+def _record(mol,ordinal,strand,chrom,source,blob,library,gene,*,exon_unpacker=unpack_exons):
     return dict(library=library,gene=gene,molecule=mol,ordinal=ordinal,strand=strand,
-                chromosome=chrom,gff_source=source,source_exons=unpack_exons(blob))
+                chromosome=chrom,gff_source=source,source_exons=exon_unpacker(blob))
 
 
 def dump_context(path,context):
     payload={'policy':context['policy'].__dict__,'references':context['references'],'candidates':{}}
     for k,c in context['candidates'].items():
         item=dict(c)
-        for field in ('protected_junctions','protected_coverage','protected_terminal_blocks'):
-            item[field]=sorted(item[field])
+        for field in ('protected_junctions','protected_coverage','protected_terminal_blocks','protected_splice_spans'):
+            item[field]=sorted(item.get(field,()))
         payload['candidates'][k]=item
     with gzip.open(path,'wt') as f:json.dump(payload,f,separators=(',',':'))
     h=hashlib.sha256(Path(path).read_bytes()).hexdigest()
@@ -37,13 +56,14 @@ def load_context(entry):
     # JSON preserves values but changes tuple/set evidence to lists. Restore
     # the preparation API's types before pooled reference constraints use them.
     for candidate in result['candidates'].values():
-        for field in ('protected_junctions','protected_coverage','protected_terminal_blocks'):
-            candidate[field]={tuple(value) for value in candidate[field]}
+        for field in ('protected_junctions','protected_coverage','protected_terminal_blocks','protected_splice_spans'):
+            candidate[field]={tuple(value) for value in candidate.get(field,())}
     return result
 
 
 def build_contexts(scans,regions,references,outdir,policy,*,log=print,
-                   _gene_partition=None, _partition_read_counts=None):
+                   _gene_partition=None, _partition_read_counts=None,
+                   event_kinds=None):
     """Preserve all native counts and actual representative source identities.
 
     references contains the COMPLETE instructed cache for observed genes, each
@@ -54,6 +74,12 @@ def build_contexts(scans,regions,references,outdir,policy,*,log=print,
     libs=[s['library'] for s in scans]
     if len(set(libs))!=len(libs) or not all(s['complete'] for s in scans):
         raise ValueError('Complete unique physical-source scans required; no benchmark subset accepted')
+    physical_scopes={s.get('novel_junction_scope','terminal_only') for s in scans}
+    if len(physical_scopes)!=1:
+        raise ValueError('All physical-source scans must use the same evidence scope')
+    physical_geometry=(event_kinds is None and physical_scopes=={'all_physical_junctions_and_continuity_v4'})
+    full_geometry_records=physical_scopes=={'all_physical_junctions_and_continuity_v4'}
+    physical_files=[list(s['sources'])[-1] for s in scans]
     conns=[sqlite3.connect(f"file:{s['database']}?mode=ro",uri=True) for s in scans]
     handles=[];baseline_handles=[];override_handles=[]
     sample_paths=[];baseline_paths=[];override_paths={};override_counts=Counter();contexts={}
@@ -78,15 +104,18 @@ def build_contexts(scans,regions,references,outdir,policy,*,log=print,
             handles.append(eh);baseline_handles.append(bh);override_handles.append(oh)
             sample_paths.append((lib,str(ep)));baseline_paths.append((lib,str(bp)));override_paths[lib]=str(op)
         for gene in sorted(genes):
+            text_value,raw_value,exon_value,event_value=make_source_decoders(
+                event_kinds,cache_values=full_geometry_records)
             rows=[];event_rows_by_lib=[];models_by_lib=[];ordinary_by_lib=[]
             for i,c in enumerate(conns):
                 evrows=[]
                 for mol,ordinal,legacy,raw,strand,chrom,source,blob,ev in c.execute(
                     'SELECT mol,ordinal,legacy,raw,strand,chrom,source,exons,events FROM events WHERE gene=? ORDER BY ordinal',(gene,)):
-                    r=_record(mol,ordinal,strand,chrom,source,blob,libs[i],gene)
-                    r.update(legacy_structure=legacy,raw_structure=zlib.decompress(raw).decode(),
-                             measured_events=json.loads(ev),
-                             support_source=(list(scans[i]['sources'])[-1],gene,mol))
+                    r=_record(mol,ordinal,text_value(strand),text_value(chrom),text_value(source),
+                              blob,libs[i],gene,exon_unpacker=exon_value)
+                    r.update(legacy_structure=text_value(legacy),raw_structure=raw_value(raw),
+                             measured_events=event_value(ev),
+                             support_source=(physical_files[i],gene,mol))
                     rows.append(r);evrows.append(r)
                 event_rows_by_lib.append(evrows)
                 models={}
@@ -111,10 +140,11 @@ def build_contexts(scans,regions,references,outdir,policy,*,log=print,
             introns=[(k,*v) for k,v in regions[gene].items() if k.startswith('I')]
             ref=references.get(gene,{})
             mapping,candidates=prepare_gene(rows,introns,policy,
+                protect_splice_geometry=physical_geometry,
+                parent_models={s:r['exons'] for s,r in ref.items()},
                 annotation_corrector=lambda r,e,p:recover_selected_terminal_tokens(r,e,p,regions[gene]),
                 required_identities=[(r['library'],gene,r['molecule']) for r in rows],
-                terminal_event_provider=lambda r:[(k,a,tuple(j) if j is not None else None,tuple(cv))
-                                                  for k,a,j,cv in r['measured_events']])
+                terminal_event_provider=lambda r:r['measured_events'])
             original_counts=Counter(r['legacy_structure'] for r in rows)
             # Per-library native class totals and the actual FIRST unprotected
             # molecule after splitting must be resolved before pooled collapse.

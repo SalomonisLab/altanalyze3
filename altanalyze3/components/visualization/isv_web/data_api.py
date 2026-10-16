@@ -38,6 +38,7 @@ from functools import lru_cache
 import numpy as np
 
 from .. import isoform_structure_view as isv
+from ...bam import coord_store as _coord_store
 from ...annotation.junction_isoform import load_gene_symbols
 
 
@@ -712,6 +713,135 @@ def _attach_structure_reads(ctx, res, gene, cell_states, conds, panel_by):
     return res
 
 
+
+# --- exact read coordinates -------------------------------------------------------------------
+# The exon-ID token string is lossy. gff_process writes it with `exon_str`, which drops the first
+# and last token's coordinate, and `uniqueList`, which drops a repeated token, so two different
+# block layouts can share one string. Measured over 1,358 reads of FLI1 and LRFN4 in two libraries,
+# parsing the string reproduced the sample GFF for 1,281; the store reproduced it for 1,358.
+# gff_process also persists every structure's genomic exon blocks in
+# <sample>/gff-output/structure_coords.sqlite, keyed by (gene, structure). Read rows come from
+# there, and fall back to the parser only when a sample has no store or no row.
+_STRUCT_DB_NAME = "structure_coords.sqlite"
+_struct_conn_lock = threading.Lock()
+_struct_conns = {}
+_struct_stats = defaultdict(int)
+
+
+def _metadata_sources(ctx):
+    """library -> the BAM and GFF paths the run metadata lists for it, read once."""
+    cached = getattr(ctx, "_struct_source_map", None)
+    if cached is not None:
+        return cached
+    out = defaultdict(list)
+    path = getattr(ctx, "metadata_file", None)
+    try:
+        with open(path) as fh:
+            header = fh.readline().rstrip("\n").split("\t")
+            idx = [header.index(c) for c in ("bam", "gff") if c in header] or [1]
+            il = header.index("library") if "library" in header else 2
+            for line in fh:
+                f = line.rstrip("\n").split("\t")
+                if len(f) <= il or not f[il]:
+                    continue
+                for i in idx:
+                    if len(f) > i and f[i]:
+                        out[f[il]].append(f[i])
+    except (OSError, TypeError, ValueError):
+        pass
+    ctx._struct_source_map = out
+    return out
+
+
+def _struct_db_path(ctx, lib):
+    """The sample's coordinate store, which sits in its gff-output directory.
+
+    Three layouts have to resolve. `transcript_associations` in viewer_sample_dict is the
+    gene_indexes_v2/transcripts.db path, one directory below the store. A run that stages a sample
+    SYMLINKS its files into isv/reads/<lib>/ while creating a real gene_indexes_v2 there, so the
+    store only appears once the links are resolved. And the run metadata names the sample's BAM or
+    GFF, whose directory holds gff-output.
+    """
+    rec = (ctx.viewer_sample_dict.get(lib) or [{}])[0]
+    roots = []
+
+    def add(path, *parts):
+        if not path:
+            return
+        for base in (path, os.path.realpath(path)):
+            roots.append(os.path.join(base, *parts) if parts else base)
+
+    ta = rec.get("transcript_associations")
+    if ta:
+        d = os.path.dirname(ta)
+        add(d)
+        add(os.path.dirname(d))
+    for src in _metadata_sources(ctx).get(lib, []):
+        for f in (src, os.path.realpath(src)):      # a staged sample's files are symlinks
+            add(os.path.dirname(f), "gff-output")
+            add(os.path.dirname(f))
+    matrix = rec.get("matrix")
+    if matrix:
+        for f in (matrix, os.path.realpath(matrix)):
+            add(os.path.dirname(f), "gff-output")
+            add(os.path.dirname(f))
+
+    seen = set()
+    for root in roots:
+        if not root or root in seen:
+            continue
+        seen.add(root)
+        cand = os.path.join(root, _STRUCT_DB_NAME)
+        if os.path.exists(cand):
+            return cand
+    return None
+
+
+def _struct_conn(ctx, lib):
+    with _struct_conn_lock:
+        if lib in _struct_conns:
+            return _struct_conns[lib]
+        path = _struct_db_path(ctx, lib)
+        conn = None
+        if path and os.path.exists(path):
+            try:
+                conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
+            except sqlite3.Error:
+                conn = None
+        _struct_conns[lib] = conn
+        return conn
+
+
+def read_segments(ctx, gene, tokens, lib):
+    """One read's drawn segments: its stored genomic blocks, trimmed to its own ends.
+
+    Falls back to parsing the token string when the sample has no coordinate store or the structure
+    is absent from it. `_struct_stats` counts both outcomes so a run can report the fallback rate.
+    """
+    conn = _struct_conn(ctx, lib) if lib else None
+    if conn is not None:
+        key = isv.exon_string_key(tokens)
+        try:
+            row = conn.execute(
+                "SELECT strand, blob FROM structures WHERE gene=? AND structure=?",
+                (gene, key)).fetchone()
+        except sqlite3.Error:
+            row = None
+        if row:
+            blocks = _coord_store.unpack_exons(row[1])
+            if blocks:
+                blocks = isv.apply_terminal_bounds(blocks, tokens, gene, ctx.exon_lookup, row[0])
+                _struct_stats["store"] += 1
+                return isv.segments_from_blocks(blocks, ctx.exon_lookup, gene)
+    _struct_stats["parsed"] += 1
+    return isv.build_isoform_segments(tokens, ctx.exon_lookup, gene)
+
+
+def read_segment_stats():
+    """(from the coordinate store, parsed from the token string) since this process started."""
+    return dict(_struct_stats)
+
+
 def query_reads(ctx: RunContext, gene, cell_types, conditions=None, max_isoforms=300,
                 panel_by="covariate", isoform_filter=None):
     """Read-level (molecule) view: drive the engine's plot_isoform_structures_by_conditions to emit its
@@ -1012,7 +1142,7 @@ def _query_reads_index(ctx, gene, symbol, cell_states, conds, max_isoforms, pane
         for uid, c in panel_sel[key]:
             if uid not in tokens_by_uid:
                 continue
-            segs = isv.build_isoform_segments(tokens_by_uid[uid], ctx.exon_lookup, gene)
+            segs = read_segments(ctx, gene, tokens_by_uid[uid], (uid_src.get(uid) or (None, None))[1])
             fin = final_by_uid.get(uid, uid)
             # in final-isoform mode the collapsed isoform IS the unit -> its protein meta + FASTA apply to all reads
             pmeta = ctx.protein_meta(fin if ctx.molecule_grouping == "final_isoform" else uid) or {}
@@ -1089,7 +1219,7 @@ def _parse_reads_tsv(ctx, path, gene):
             if not iid:
                 continue
             toks = [t for t in (r.get("tokens_raw") or "").split("|") if t]
-            segs = isv.build_isoform_segments(toks, ctx.exon_lookup, gene) if toks else []
+            segs = read_segments(ctx, gene, toks, _sample_suffix(iid)) if toks else []
             try:
                 ci = int(r.get("cluster_index") or 0)
             except (TypeError, ValueError):

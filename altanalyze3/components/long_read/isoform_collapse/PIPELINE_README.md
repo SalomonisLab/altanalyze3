@@ -5,6 +5,69 @@ The current default is `scored_collapse.collapse_gene_jc`, called by `pipeline.p
 with junction-core WTA, reference preference and native known/novel support floors.
 See the collapse-only option and its validation status at the end of this document.
 
+## Supported physical novel junctions (2026-10-15 candidate)
+
+`--protect-novel-junctions`, together with `--protect-intronic-evidence`, extends
+the source-evidence preparation to physical splice junctions throughout a
+transcript. This includes alternative sites inside one annotated exon region,
+which the native normalized junction core cannot distinguish. The Python option
+is `run_pipeline(..., protect_intronic_evidence=True,
+protect_novel_junctions=True)`. Both options remain disabled by default.
+
+Every original source annotation is reconciled with its primary GFF blocks.
+All observed physical junctions are pooled using the existing bounded +/-3-nt grouping
+and >=3 distinct original source-molecule policy. Repeated technical source
+aliases do not manufacture recurrence. Canonical sources require protection too:
+they can otherwise be redirected into incompatible GENCODE alternative sites
+whose coordinates disappear in the older native annotation. Reference membership
+and native-region boundaries therefore do not exempt a recurrent observed gap
+from the compatibility check. Temporary per-read evidence uses compact sequences
+and a bounded deterministic class-name cache; identities/counts are never cached
+away or subsampled.
+Within a bounded splice-site group, individual RNAs can differ in which known
+references they fit. Only classes with mixed reference compatibility are
+refined further before WTA. This preserves compatible known assignments at the
+3-nt boundary without relabelling homogeneous classes or changing native
+parent ranking, support floors or tie-breaking.
+Full-source preparation also shares identical immutable decoded exon blocks,
+annotation strings and measured-event tuples through bounded per-gene caches.
+Selected prepared evidence also shares equal immutable junction, coverage and
+splice-span tuples; this avoids copying common splice evidence per RNA.
+The pure continuity calculation is cached by the complete observed exon
+geometry within each gene; equal span results are shared across variable ends.
+Each RNA retains its own identity, ordinal, count and class mapping. Exact
+actual-source comparisons verify that sharing changes no class, evidence,
+annotation, first representative or parent geometry. The temporary observation
+index is released after recurrence selection, before final mappings are built.
+Unsupported rare sites retain the native fallback; endpoints do not become new
+isoform identities. No new source exclusion or reference substitution is made.
+
+Positive continuity is checked in the other direction too. A source exon that
+covers both flanks of a reference or recurrent source splice cannot be assigned
+to a parent that removes the observed continuous sequence. This is measured
+before aggregation, including mono-exon source records. A shorter parent
+endpoint alone is allowed. The span signature uses established gap coordinates,
+not variable RNA endpoints, and does not invent intron annotations or change the
+100-nt terminal-continuation policy.
+
+Selected junctions form classes before aggregation and veto physically
+contradictory parent assignments through the existing WTA evidence guard. The
+native token core, compatible reference priority, novel ranking, >=3 novel-model
+support floor, positive-support known handling, terminal continuation rule and
+translation/NMD procedure remain unchanged. Terminal annotation recovery receives
+only its original event types; physical junction evidence does not invent exon
+region annotations. The legacy containment-token helper is not changed.
+
+This is a new, conditional candidate for `isoform_final_20261015`, evaluated
+against the complete protected October13 catalog as well as the older native
+baseline. Focused tests alone do not authorize a complete replacement release.
+Full source coverage, exact frozen baseline replay, LRFN4 and prior controls,
+protected junction geometry, compatible known preference, catalog-growth
+attribution, all50 P4 source/cell/count checks and downstream numerical and visual
+QA must pass. The historical local counts and earlier pending-run descriptions
+below are not the status of this candidate. The accepted October13 catalog has
+2,195,354 models; its final release report is in the versioned validation release.
+
 Scored, expression-and-structure-aware collapse of single-cell long-read isoforms into a
 standardized cross-dataset catalog with per-sample re-keyed h5ads. Designed for millions of
 reads/sample × up to ~200 samples. All numbers below are **measured** on the iPSC Ctrl + Aza

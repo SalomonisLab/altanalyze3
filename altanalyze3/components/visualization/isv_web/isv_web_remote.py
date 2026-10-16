@@ -40,6 +40,7 @@ plt.rcParams["ps.fonttype"] = 42
 # ---- drawReads() layout constants (static/app.js R = {...}) ----
 LEFT, RIGHT, READ_PX, ROW_MIN, ROW_CAP = 152, 24, 1.6, 0.9, 60
 MAXPANEL, PANEL_GAP, PAD, HDR, RULER_H, REF_H, MAX_ROWS, RMARGIN = 340, 14, 8, 22, 30, 26, 4000, 16
+ROW_VIS = 8.0          # minimum drawn height of one read row, px, enforced only where it fits in MAXPANEL
 KNOWN, NOVEL, REF_FILL = "#1d5fa8", "#b0306b", "#3d4a5c"
 CLUSTER_COLORS = [
     "#2b6cb0", "#c0531f", "#2f8a4e", "#7a4fb5", "#c2306b", "#0e8a9c", "#b8902a",
@@ -77,6 +78,34 @@ def truncate(s, n):
 
 def fmt(v):
     return f"{int(round(v)):,}"
+
+
+def isoform_label(m, with_length=True, id_max=None, style="paren"):
+    """An isoform's name with its protein length.
+
+    Nathan, 2026-10-15: "the AA length only goes in parentheses for the view that doesn't already
+    have the AA". The read-panel group labels never carried a length, so they take
+    `<id> (568aa)`, with ", NMD" inside the brackets. The isoform structure rows already carried
+    one and keep their own `<id>|568` form, style="bar".
+    """
+    iid = str(m.get("final_isoform_id") or m.get("isoform_id") or "")
+    # the id is shortened, never the length: truncating the whole label hid the "(635aa)" it was
+    # added for
+    if id_max and len(iid) > id_max:
+        iid = iid[:max(1, id_max - 1)] + "\u2026"
+    if not with_length:
+        return iid
+    aa = m.get("protein_length")
+    nmd = str(m.get("nmd_status") or "").strip() in ("NMD", "Potential-NMD")
+    if aa in (None, ""):
+        return iid + (" (NMD)" if nmd else "")
+    try:
+        aa = int(float(aa))
+    except (TypeError, ValueError):
+        return iid + (" (NMD)" if nmd else "")
+    if style == "bar":
+        return f"{iid}|{aa}" + (" (NMD)" if nmd else "")
+    return f"{iid} ({aa}aa, NMD)" if nmd else f"{iid} ({aa}aa)"
 
 
 def merge_segments(segs):
@@ -333,7 +362,7 @@ def read_label_positions(centers, body_height, gap):
 def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
            font_scale=1.0, show_ruler=True, show_read_labels=True, trim_to_reads=False,
            title_gene=None, title_event=None, show_read_counts=True, show_structure_header=True,
-           label_protein_length=False, dense_exon_labels=False, structure_labels_above=False,
+           label_protein_length=True, dense_exon_labels=False, structure_labels_above=False,
            region=None, iso_order="length"):
     """Render query_reads() panels as the drawReads molecule pileup to a single-page vector PDF.
     intron_scale<1.0 shrinks intron display spans (enlarging exons); 1.0 = true genomic scale.
@@ -404,7 +433,20 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
     # gene model (ha="right" at track_x0 - 6, 9*FS pt). Reserve its rendered width, or it is clipped:
     # "chr2" at FS 2.6 is 56pt wide against a 39pt margin, which printed as "hr2".
     _chrom_w = (0.62 * 9.0 * FS * len(_chrom) + 12.0) if (structure_labels_above and _chrom) else 0.0
-    LEFT_ = min(LEFT * FS, width * 0.45) if _need_left else max(28.0, 15.0 * FS, _chrom_w)
+    # The margin has to hold the longest label drawn in it. Adding the protein length to every name
+    # pushed "52751007.WF86-MDS-0609-6020_CD34 (635aa)" past the page edge at the fixed 152 pt.
+    _lbl_w = 0.0
+    if _need_left:
+        for _m in all_mol:
+            _lbl_w = max(_lbl_w,
+                         0.60 * 8.0 * FS * len(isoform_label(_m, label_protein_length, id_max=26)))
+        if isoform_track and not structure_labels_above:
+            for _m in all_mol:
+                _lbl_w = max(_lbl_w,
+                             0.60 * 7.0 * FS * len(isoform_label(_m, label_protein_length,
+                                                                  style="bar", id_max=32)))
+    LEFT_ = (min(max(LEFT * FS, _lbl_w + 12.0), width * 0.45) if _need_left
+             else max(28.0, 15.0 * FS, _chrom_w))
     HDR_ = HDR * FS                                   # panel header band grows with its text
     RULER_H_ = (RULER_H * FS) if show_ruler else 0.0
     EXON_LBL_H = 22 * FS                              # row under the gene model holding the exon labels
@@ -499,6 +541,14 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
         raw_sum = sum(raw) or 1
         n_clusters = len({m.get("cluster_index", 0) for m in p["mol"]})
         scale = min(MAXPANEL, max(raw_sum, n_clusters * 13)) / raw_sum
+        # A sparse panel used to collapse into one band. The floor above counts COLOUR GROUPS, not
+        # rows, so a 5-read single-isoform panel was scaled to 13 px andeach read drew 2.6 px tall,
+        # which reads as a single block. When the rows would be thinner than ROW_VIS and giving every
+        # row ROW_VIS still fits inside MAXPANEL, the panel is scaled to n_rows * ROW_VIS instead.
+        # Dense panels are untouched: 100 reads would need 800 px, more than MAXPANEL, so the branch
+        # does not fire and their geometry is unchanged.
+        if p["mol"] and min(raw) * scale < ROW_VIS and len(p["mol"]) * ROW_VIS <= MAXPANEL:
+            scale = (len(p["mol"]) * ROW_VIS) / raw_sum
         h, rows = 0.0, []
         for i, m in enumerate(p["mol"]):
             hh = max(0.55, raw[i] * scale)
@@ -592,7 +642,7 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
                     ax.plot([LEFT_ - 7, track_x0 - 2], [p["_y"] + ly, p["_y"] + center],
                             color="#b8c0ca", linewidth=0.45, zorder=1)
                 ax.text(LEFT_ - 8, p["_y"] + ly,
-                        truncate(m.get("final_isoform_id") or m.get("isoform_id"), 20),
+                        isoform_label(m, label_protein_length, id_max=26),
                         fontsize=8 * FS, ha="right", va="center", color=(KNOWN if m.get("known") else NOVEL))
         for r in p["_rows"]:
             m = r["m"]
@@ -724,13 +774,8 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
                     ax.text(_tx + 2.3 * _h, _ly, f"{int(_aa)}aa" + (" NMD" if _nmd else ""),
                             fontsize=_lfs, ha="left", va=_va, color=color, weight="bold")
             else:
-                if label_protein_length:
-                    _lab = f"{_iid}|{int(_aa)}" if _aa not in (None, "") else _iid
-                    if _nmd:
-                        _lab += " (NMD)"
-                    _lab = truncate(_lab, 34)
-                else:
-                    _lab = truncate(_iid, 22)
+                _lab = isoform_label(m, label_protein_length, style="bar",
+                                     id_max=32 if label_protein_length else 22)
                 ax.text(LEFT_ - 8, rc, _lab,
                         fontsize=7 * FS, ha="right", va="center", color=(KNOWN if m.get("known") else NOVEL))
 
@@ -934,6 +979,11 @@ def build_arg_parser():
                          "ENSG00000159216:28775276.EP_SRSF2_Ctrl). Applied after --isoform_filter and before "
                          "--max_reads; exits if any named id carries no read in the selection. Two ids draw in "
                          "the gold/blue two-isoform palette, in the order given")
+    ap.add_argument("--no-protein-length", "--no_protein_length", dest="no_protein_length",
+                    action="store_true",
+                    help="write bare isoform ids. By default every isoform name carries its protein "
+                         "length, as '<id> (568aa)', and ', NMD' inside the brackets when the "
+                         "isoform is NMD.")
     ap.add_argument("--figure-mode", "--figure_mode", dest="figure_mode", action="store_true",
                     help="multi-gene figure preset: large fonts (--font_scale, default 1.9) and a panel stripped "
                          "for a small reproduction -- no coordinate ruler or chromosome label, no per-read isoform "
@@ -1048,8 +1098,8 @@ def main(argv=None):
     ctx._load_gene_symbols()
     ctx._index_genes_from_var_names()
     ctx._build_viewer_inputs()
-    if a.figure_mode:
-        # figure mode writes <id> > <protein length>aa under each structure. The lite loader above skips
+    if a.figure_mode or not a.no_protein_length:
+        # every isoform name carries its protein length. The lite loader above skips
         # protein_summary.txt, so without this the length is missing and the label degrades to the bare id.
         try:
             ctx._index_protein_summary()
@@ -1098,6 +1148,12 @@ def main(argv=None):
               f"conditions={conditions or 'ALL'} grouping={ctx.molecule_grouping}", flush=True)
         res = da.query_reads(ctx, gene, cell_states, conditions=conditions,
                              max_isoforms=a.max_isoforms, panel_by="cell_type", isoform_filter=a.isoform_filter)
+
+    _src = da.read_segment_stats()
+    if _src:
+        _tot = sum(_src.values())
+        print("[isv_web_remote] read blocks: %d of %d from the sample coordinate store, %d parsed "
+              "from the exon string" % (_src.get("store", 0), _tot, _src.get("parsed", 0)), flush=True)
 
     if a.export_molecules:
         # UNCAPPED re-query so EVERY molecule is exported (the render caps at max_isoforms; the
@@ -1172,6 +1228,14 @@ def main(argv=None):
                           for p in res.get("panels", [])), flush=True)
     if a.min_isoform_pct and a.min_isoform_pct > 0:
         res = filter_low_fraction_isoforms(res, a.min_isoform_pct)
+    if not a.no_protein_length:
+        # the read-panel group labels carry the length too, so this runs with or without the track
+        for p in res.get("panels", []):
+            for m in p.get("molecules", []):
+                if m.get("protein_length") in (None, ""):
+                    _pm = ctx.protein_meta(m.get("final_isoform_id") or m.get("isoform_id")) or {}
+                    m["protein_length"] = _pm.get("protein_length")
+                    m["nmd_status"] = m.get("nmd_status") or _pm.get("nmd_status")
     if a.isoform_track:
         # attach CDS genomic span to each plotted molecule for the bottom structure track (UCSC CDS/UTR)
         for p in res.get("panels", []):
@@ -1179,10 +1243,6 @@ def main(argv=None):
                 _fin = m.get("final_isoform_id") or m.get("isoform_id")
                 cds = ctx.coding_region(_fin)
                 m["cds_min"], m["cds_max"] = (cds[0], cds[1]) if cds else (None, None)
-                if m.get("protein_length") in (None, ""):
-                    _pm = ctx.protein_meta(_fin) or {}
-                    m["protein_length"] = _pm.get("protein_length")
-                    m["nmd_status"] = m.get("nmd_status") or _pm.get("nmd_status")
         # attach each final isoform's REGISTERED exon structure from gff-output/combined.gff.gz, so the
         # bottom structure track draws the registered isoform rather than one representative read.
         # Absent index -> registered_exons stays None and render() falls back, with a printed count.
@@ -1228,7 +1288,7 @@ def main(argv=None):
                          show_ruler=not a.figure_mode, show_read_labels=not a.figure_mode,
                          trim_to_reads=a.figure_mode, title_gene=t_gene, title_event=t_event,
                          show_read_counts=not a.figure_mode, show_structure_header=not a.figure_mode,
-                         label_protein_length=a.figure_mode, dense_exon_labels=a.figure_mode,
+                         label_protein_length=not a.no_protein_length, dense_exon_labels=a.figure_mode,
                          structure_labels_above=a.figure_mode, region=_region,
                          iso_order=("given" if a.isoforms else "length")) else 2)
 

@@ -302,6 +302,7 @@ def run_sclr_isoforms(args):
         str(args.metadata), exon_annot, str(args.ref_gff), str(args.genome_fasta),
         collapse_method=collapse_method, force_recollapse=True,
         protect_intronic_evidence=bool(getattr(args, "protect_intronic_evidence", False)),
+        protect_novel_junctions=bool(getattr(args, "protect_novel_junctions", False)),
     )
     logging.info("sclr-isoforms: collapse catalog (%s) + translation/FASTA complete (re-key is P4).",
                  collapse_method)
@@ -589,6 +590,7 @@ def run_blr_isoforms(args):
         tier1_dir=(str(args.tier1_dir) if getattr(args, "tier1_dir", None) else None),
         reuse_tier1=bool(getattr(args, "reuse_tier1", False)),
         protect_intronic_evidence=bool(getattr(args, "protect_intronic_evidence", False)),
+        protect_novel_junctions=bool(getattr(args, "protect_novel_junctions", False)),
     )
     logging.info("blr-isoforms: collapse catalog + combined.gff.gz + translation complete.")
 
