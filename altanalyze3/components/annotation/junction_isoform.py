@@ -543,8 +543,8 @@ def annotate_iso_stats_file(file_path, transcript_dict, gene_symbol_dict, protei
 
     annotations = []  # Store annotated rows
 
-    for index, row in stats_df.iterrows():
-        feature = row['Feature']
+    # Only the identifier column is used; avoid constructing a Series per row.
+    for feature in stats_df['Feature']:
 
         gene_id, isoform = feature.split(':')  # Extract gene ID
         gene_symbol = gene_symbol_dict.get(gene_id, 'N/A')
