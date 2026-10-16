@@ -410,6 +410,11 @@ def collapse_prepared(candidates, references, gene, runtime, *, splice_slop):
     # A corrected reference and an ordinary source class can share the OLD
     # cache key while having different annotations. Never overwrite the read's
     # observed structure with the reference's restored intronic evidence.
+    # Parent matching repeatedly checks the same immutable geometry within a
+    # gene. The index implements the same closed +/-slop predicate, with caches
+    # released on return; public scan-based checks remain independent.
+    from .splice_span_index import make_checker
+    spans_compatible = make_checker(merge_exons)
     resolved_references={}
     for s,r in references.items():
         item=dict(r,native_cache_structure=s)
@@ -475,7 +480,7 @@ def collapse_prepared(candidates, references, gene, runtime, *, splice_slop):
     def compatible(evidence,parent):
         if evidence is None:
             return True
-        if not splice_spans_compatible(evidence.get('protected_splice_spans',()),
+        if not spans_compatible(evidence.get('protected_splice_spans',()),
                                        parent_exons[parent],splice_slop):
             return False
         if not runtime['intronic_edge_compatible'](

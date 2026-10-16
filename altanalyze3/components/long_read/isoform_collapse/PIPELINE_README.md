@@ -50,6 +50,13 @@ endpoint alone is allowed. The span signature uses established gap coordinates,
 not variable RNA endpoints, and does not invent intron annotations or change the
 100-nt terminal-continuation policy.
 
+Parent comparisons use an exact per-gene splice-span index. It tests the same
+closed +/-splice-tolerance bounds as the public scan-based predicate, while
+reusing sorted source-span endpoints and merged parent gaps. Its input geometry
+is immutable within a gene, and all cached objects are released after that gene.
+This changes lookup cost only; source preparation, candidate identities and
+counts, WTA selection, thresholds and prediction methods remain the same.
+
 Selected junctions form classes before aggregation and veto physically
 contradictory parent assignments through the existing WTA evidence guard. The
 native token core, compatible reference priority, novel ranking, >=3 novel-model
