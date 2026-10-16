@@ -240,7 +240,10 @@ def load_isoform_abundances(stats_tsv: str, control_label: Optional[str]):
     else:
         ctrl_col, dis_col = m1, m2     # default: first Mean_ is control
     genes: Dict[str, dict] = defaultdict(lambda: {"iso": [], "struct": [], "x0": [], "x1": []})
-    for _, r in df.iterrows():
+    # The input is all strings; stream only the four fields used below.
+    columns = ("Feature", "Junctions", ctrl_col, dis_col)
+    for values in df.reindex(columns=columns, fill_value="").itertuples(index=False, name=None):
+        r = dict(zip(columns, values))
         feat = r.get("Feature", "")
         if ":" not in feat:
             continue
