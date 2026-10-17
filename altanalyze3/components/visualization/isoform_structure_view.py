@@ -999,9 +999,65 @@ def _namespace_transcript_structures(transcript_structures, source_key):
     return namespaced
 
 
+class _GeneIndexedExonLookup(dict):
+    """Keep every reference entry while indexing its keys by gene.
+
+    Values stay live: editing a feature's coordinates is reflected on the next
+    lookup. Normal dictionary mutations invalidate only the derived key index.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._gene_keys = None
+
+    def __setitem__(self, key, value):
+        self._gene_keys = None
+        super().__setitem__(key, value)
+
+    def __delitem__(self, key):
+        self._gene_keys = None
+        super().__delitem__(key)
+
+    def update(self, *args, **kwargs):
+        self._gene_keys = None
+        return super().update(*args, **kwargs)
+
+    def clear(self):
+        self._gene_keys = None
+        return super().clear()
+
+    def pop(self, *args):
+        self._gene_keys = None
+        return super().pop(*args)
+
+    def popitem(self):
+        self._gene_keys = None
+        return super().popitem()
+
+    def setdefault(self, *args):
+        self._gene_keys = None
+        return super().setdefault(*args)
+
+    def __ior__(self, other):
+        self._gene_keys = None
+        return super().__ior__(other)
+
+    def _feature_items(self, genes):
+        if self._gene_keys is None:
+            by_gene = {}
+            for ordinal, key in enumerate(self):
+                gene, _base = key
+                by_gene.setdefault(gene, []).append((ordinal, key))
+            self._gene_keys = by_gene
+        # Preserve the full dictionary's insertion order across requested genes.
+        keys = sorted(entry for gene in genes
+                      for entry in self._gene_keys.get(gene, ()))
+        return ((key, self[key]) for _ordinal, key in keys)
+
+
 def read_gene_model(path):
     gene_segments = defaultdict(list)
-    exon_lookup = {}
+    exon_lookup = _GeneIndexedExonLookup()
 
     with open(path, 'r') as handle:
         first = handle.readline()
@@ -1517,7 +1573,11 @@ def _exon_block_key(base):
 def _gene_feature_index(exon_lookup, genes):
     """Per gene: its features sorted by start, and the maximal stretches its EXON features cover."""
     feats, spans = {}, {}
-    for (g, base), seg in (exon_lookup or {}).items():
+    entries = (exon_lookup._feature_items(genes)
+               if isinstance(exon_lookup, _GeneIndexedExonLookup)
+               and isinstance(genes, (set, frozenset))
+               else (exon_lookup or {}).items())
+    for (g, base), seg in entries:
         if g not in genes:
             continue
         fs, fe = seg['start'], seg['end']
