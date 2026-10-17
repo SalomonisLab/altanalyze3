@@ -258,3 +258,42 @@ superseded. The final all-50 KINNEX-5 run and complete downstream audits are act
 use its versioned reports for final counts and acceptance. Two existing terminal-U
 splice mismatches remain recorded for discussion before a U-specific extension.
 The option does not claim to protect every novel U splice.
+
+## Cleanup of an existing retained catalog by physical splice structure
+
+`terminal_cleanup.plan_cleanup` provides an explicit post-collapse step for a
+retained catalog whose complete identities and physical exon geometry have been
+reconciled. It matches the entire exact ordered genomic junction chain within
+the same gene, chromosome and strand, ignoring only the non-splice outer
+coordinates. Continuous adjacent annotation blocks are joined before extracting
+actual splice gaps. Supported changes of even one base at a splice site remain
+separate; internal intron retention, exon skipping and partial-chain containment
+are not merged by this step. Single-exon records remain separate.
+
+The caller supplies `CatalogModel` records, the independently pinned complete
+`expected_identities`, and frozen native ranking inputs. For known models the
+rank is `(-native_full_token_length, native_reference_cache_key)`; for novels it
+is `(-original_own_class_support, complete_evidence_class_key)`. An already
+aggregated catalog count must not replace original own-class support. Known
+models take priority and existing known identities are retained independently.
+All original IDs appear in the direct, idempotent crosswalk, including those
+that merge into another retained record. Original source structures, sequences,
+ORFs and NMD predictions must accompany this crosswalk as provenance.
+
+`terminal_merge_preserves_evidence` checks every contributing original source
+class against the unchanged original-parent predicates and the new exact-chain
+parent. It permits terminal-only coverage differences while preserving selected
+junctions, internal covered sequence and continuous spans. It never clips a
+measured coverage interval into a synthetic interval at a splice boundary.
+`remap_sparse_counts` sums existing raw count columns using the crosswalk and
+checks every observation's exact count sum. Recompute normalization, isoform
+ratios, affected differential analyses and isoform associations afterwards;
+preserve the complete source/sample/cell roster. This stage does not repeat raw
+collapse or rescue previously excluded source classes.
+
+This endpoint-insensitive definition measures a splice-junction class. A class
+can contain terminal variants with different predicted proteins; its pooled RNA
+abundance must not be presented as sequence-specific protein evidence. The
+KINNEX-5 terminal merge decision, actual examples, source checks and release
+acceptance are versioned separately in the Oct15 validation directory. Module
+tests alone do not establish full-cohort or downstream release acceptance.
