@@ -11,7 +11,7 @@ COPY altanalyze3/deployment/containers/requirements-linux-*.txt /tmp/locks/
 RUN case "${TARGETARCH}" in amd64) platform=x86_64;; arm64) platform=aarch64;; *) exit 2;; esac \
     && apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev \
     && lock="/tmp/locks/requirements-linux-${platform}.txt" \
-    && awk '/^(numpy|packaging|setuptools|wheel)==/{p=1} p{print; if ($0 !~ /\\$/) p=0}' "$lock" > /tmp/build-requirements.txt \
+    && awk '/^(cython|numpy|packaging|setuptools|wheel)==/{p=1} p{print; if ($0 !~ /\\$/) p=0}' "$lock" > /tmp/build-requirements.txt \
     && pip install --require-hashes -r /tmp/build-requirements.txt \
     && pip install --require-hashes --no-build-isolation -r "$lock" \
     && apt-get purge -y --auto-remove gcc libc6-dev && rm -rf /var/lib/apt/lists/*

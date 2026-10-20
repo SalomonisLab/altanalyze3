@@ -33,7 +33,7 @@ jobs:
       - name: Install locked runtime and local package
         run: |
           lock=altanalyze3/deployment/containers/requirements-linux-x86_64.txt
-          awk '/^(numpy|packaging|setuptools|wheel)==/{p=1} p{print; if ($0 !~ /\\$/) p=0}' "$lock" > "$RUNNER_TEMP/build-requirements.txt"
+          awk '/^(cython|numpy|packaging|setuptools|wheel)==/{p=1} p{print; if ($0 !~ /\\$/) p=0}' "$lock" > "$RUNNER_TEMP/build-requirements.txt"
           pip install --require-hashes -r "$RUNNER_TEMP/build-requirements.txt"
           pip install --require-hashes --no-build-isolation -r "$lock"
           pip install --no-deps -e .

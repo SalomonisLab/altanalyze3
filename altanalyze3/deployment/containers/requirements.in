@@ -10,5 +10,6 @@ tf-keras==2.21.0
 pyro-ppl==1.9.1
 torch==2.6.0+cpu
 tmhmm.py==1.2.1
+cython
 mygene==3.2.2
 xmltodict==1.0.4
