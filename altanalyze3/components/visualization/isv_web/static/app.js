@@ -12,7 +12,10 @@
   "use strict";
   const $ = (s) => document.querySelector(s);
   const $$ = (s) => Array.from(document.querySelectorAll(s));
-  const api = (p, o) => fetch(p, o).then((r) => { if (!r.ok) throw new Error(r.status + " " + p); return r; });
+  const api = (p, o) => fetch(p, o).then(async (r) => {
+    if (!r.ok) { const detail = await r.json().catch(() => ({})); throw new Error(detail.detail || r.status + " " + p); }
+    return r;
+  });
   const state = {
     catalog: null, tab: "heatmap", gene: null, combineBy: "cell_type_x_covariate", panelBy: "covariate", netPanelBy: "covariate",
     samples: new Set(), groups: new Set(), cellTypes: new Set(), cellTypeOrder: [], junctions: new Set(),
@@ -32,7 +35,7 @@
   const clusterColor = (i) => CLUSTER_COLORS[(((i | 0) % CLUSTER_COLORS.length) + CLUSTER_COLORS.length) % CLUSTER_COLORS.length];
   // color by the backend's stable structure-keyed color_index (consistent across panels + modes);
   // fall back to per-panel cluster_index if absent.
-  const colorFor = (m) => clusterColor(m.color_index != null ? m.color_index : m.cluster_index);
+  const colorFor = (m) => m.display_color || clusterColor(m.color_index != null ? m.color_index : m.cluster_index);
 
   // ===================================================================== catalog / menus
   async function loadCatalog() {
@@ -127,7 +130,7 @@
   $("#grp-all").onclick = () => { state.catalog.groups.forEach((g) => state.groups.add(g)); refreshChips("#groups", state.groups); autoRender(); };
   function refreshChips(sel, store) { $$(sel + " .chip").forEach((c) => c.classList.toggle("on", store.has(c.dataset.id))); }
   // every threshold/option control auto-renders on change (replaces the removed Render button)
-  ["#maxreads", "#msf", "#strategy", "#mincount", "#maxiso", "#mode", "#introns", "#rownorm"].forEach((sel) => {
+  ["#maxreads", "#hide-bleeding", "#valid-read-cap", "#bleed-tolerance", "#msf", "#strategy", "#mincount", "#maxiso", "#mode", "#introns", "#rownorm"].forEach((sel) => {
     const el = $(sel); if (el) el.addEventListener("change", autoRender);
   });
   $("#zoom-in").onclick = () => view && view.svg.transition().duration(160).call(view.zoom.scaleBy, 1.6);
@@ -162,6 +165,10 @@
     const body = {
       gene, cell_types, conditions: state.groups.size ? [...state.groups] : null,
       max_isoforms: +$("#maxreads").value || 300, panel_by: state.panelBy,
+      hide_bleeding_reads: $("#hide-bleeding").checked,
+      max_reads_per_isoform: +$("#valid-read-cap").value || 200,
+      bleed_tolerance: +$("#bleed-tolerance").value || 0,
+      protein_features: $("#protein-features").checked,
     };
     await run("/api/reads", body, gene, "reads", true);
   }
@@ -237,7 +244,9 @@
     try {
       const res = await api(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then((r) => r.json());
       res._mode = mode; state.last = res; draw(res);
-      setStatus(`rendered in ${Math.round(performance.now() - t0)} ms`);
+      const filterNote = res.read_filter?.enabled
+        ? ` · ${res.read_filter.hidden_rows} bleeding rows hidden · ${res.read_filter.eligible_rows} eligible before sampling · up to ${res.display_read_cap_per_isoform}/isoform` : "";
+      setStatus(`rendered in ${Math.round(performance.now() - t0)} ms${filterNote}`);
     } catch (e) { setStatus("error: " + e.message); }
     finally { stopLoading(); }
   }
@@ -257,17 +266,20 @@
   // ===================================================================== geometry helpers
   function mergeSegments(segs) {
     const es = (segs || []).filter((s) => s.start != null && s.end != null && (s.type || "E").toUpperCase().startsWith("E"))
-      .map((s) => ({ a: Math.min(s.start, s.end), b: Math.max(s.start, s.end), label: (s.exon_id || s.label || "").split(".")[0] }))
+      .map((s) => ({ a: Math.min(s.start, s.end), b: Math.max(s.start, s.end), gene: s.gene, chrom: s.chrom,
+        genomic_start: s.genomic_start, genomic_end: s.genomic_end,
+        label: (s.exon_id || s.label || "").split(".")[0] }))
       .sort((p, q) => p.a - q.a);
     const out = [];
     es.forEach((s) => {
       const last = out[out.length - 1];
-      if (last && s.a <= last.b + 2 && s.label === last.label) last.b = Math.max(last.b, s.b);
-      else if (last && s.a <= last.b) { last.b = Math.max(last.b, s.b); if (s.label && !last.label) last.label = s.label; }
-      else out.push({ a: s.a, b: s.b, label: s.label });
+      if (last && last.gene === s.gene && s.a <= last.b + 2 && s.label === last.label) { last.b = Math.max(last.b, s.b); if (s.genomic_end != null) last.genomic_end = Math.max(last.genomic_end, s.genomic_end); }
+      else if (last && last.gene === s.gene && s.a <= last.b) { last.b = Math.max(last.b, s.b); if (s.genomic_end != null) last.genomic_end = Math.max(last.genomic_end, s.genomic_end); if (s.label && !last.label) last.label = s.label; }
+      else out.push({ ...s });
     });
     const introns = (segs || []).filter((s) => s.start != null && s.end != null && (s.type || "").toUpperCase().startsWith("I"))
-      .map((s) => ({ a: Math.min(s.start, s.end), b: Math.max(s.start, s.end) }));
+      .map((s) => ({ a: Math.min(s.start, s.end), b: Math.max(s.start, s.end), gene: s.gene, chrom: s.chrom,
+        genomic_start: s.genomic_start, genomic_end: s.genomic_end }));
     return { exons: out, introns };
   }
   function extentOf(items, gm) {
@@ -298,7 +310,36 @@
   }
 
   // genomic ruler + reference gene-model track (exon boxes + intron spine + strand arrows + exon labels)
+  const LOCUS_REF_ROW = 96;
   function drawAxis(g, xz, gm, lo, hi, trackX0, trackX1, rulerBaseY, refTopY, refH, withLabels) {
+    if (gm && gm.loci) {
+      gm.loci.forEach((locus, index) => {
+        const offset = gm.stack_reference_loci ? index * LOCUS_REF_ROW : 0;
+        const windows = ISVLocusLayout.referenceWindows(gm.loci, locus, gm.stack_reference_loci);
+        windows.forEach((window) => {
+        const [a, b] = window.genomic_extent, [da, db] = window.display_extent;
+        const left = Math.max(trackX0, xz(da)), right = Math.min(trackX1, xz(db));
+        if (right <= left) return;
+        const scale = (v) => xz(da + (v - a) / (b - a) * (db - da));
+        const va = a + (left - xz(da)) / (xz(db) - xz(da)) * (b - a);
+        const vb = a + (right - xz(da)) / (xz(db) - xz(da)) * (b - a);
+        scale.ticks = () => d3.scaleLinear().domain([va, vb]).ticks(Math.max(2, Math.round((right - left) / 130)));
+        const reference = gm.stack_reference_loci ? { ...locus, blocks: (locus.blocks || [])
+          .filter((exon) => exon.end >= a && exon.start <= b).map((exon) => ({ ...exon,
+            genomic_start: exon.start, genomic_end: exon.end,
+            start: Math.max(a, exon.start), end: Math.min(b, exon.end) })) } : locus;
+        if (window.coordinates_available) drawAxis(g, scale, reference, a, b, left, right, rulerBaseY + offset, refTopY + offset, refH, withLabels);
+        });
+        const [da, db] = locus.display_extent;
+        const left = Math.max(trackX0, xz(da)), right = Math.min(trackX1, xz(db));
+        g.append("text").attr("class", "locus-heading").attr("x", (left + right) / 2)
+          .attr("y", rulerBaseY + offset - 26).attr("text-anchor", "middle").attr("font-size", 11)
+          .text(`${locus.symbol || locus.gene} · ${locus.chrom || "chromosome unknown"} ${locus.strand || ""}`);
+        if (!locus.coordinates_available) g.append("text").attr("x", (left + right) / 2)
+          .attr("y", refTopY + offset + 12).attr("text-anchor", "middle").attr("font-size", 10).text("Coordinates unavailable");
+      });
+      return;
+    }
     const ticks = xz.ticks(Math.max(4, Math.round((trackX1 - trackX0) / 120)));
     g.append("line").attr("class", "ruler-axis").attr("x1", trackX0).attr("x2", trackX1).attr("y1", rulerBaseY).attr("y2", rulerBaseY);
     ticks.forEach((tk) => {
@@ -315,7 +356,7 @@
       const xa = xz(b.start), xb = xz(b.end);
       if (xb < trackX0 || xa > trackX1) return;
       g.append("rect").attr("class", "ref-exon").attr("x", xa).attr("y", refTopY + 3).attr("width", Math.max(1.6, xb - xa)).attr("height", refH - 6)
-        .on("mousemove", (ev) => showTip(ev, `<b>${b.exon_id || "exon"}</b><br>${gm.chrom ? gm.chrom + ":" : ""}${fmt(b.start)}–${fmt(b.end)}<br><span class="muted">reference gene model</span>`))
+        .on("mousemove", (ev) => showTip(ev, `<b>${b.exon_id || "exon"}</b><br>${gm.chrom ? gm.chrom + ":" : ""}${fmt(b.genomic_start ?? b.start)}–${fmt(b.genomic_end ?? b.end)}<br><span class="muted">reference gene model</span>`))
         .on("mouseleave", hideTip);
       if (withLabels) {
         const lbl = (b.exon_id || "").split(".")[0];
@@ -337,8 +378,42 @@
   function draw(res) {
     const plot = $("#plot"); plot.innerHTML = ""; view = null;
     if (res._mode === "network") return drawNetwork(res);
+    res = ISVLocusLayout.prepare(res);
     titleBlock(res);
     return res._mode === "reads" ? drawReads(res) : res._mode === "lines" ? drawLines(res) : drawHeatmap(res);
+  }
+
+  function segmentPosition(s, gm) {
+    return `${s.chrom || gm.chrom || ""}:${fmt(s.genomic_start ?? s.a)}–${fmt(s.genomic_end ?? s.b)}`;
+  }
+  function locusTip(row) {
+    const labels = { distinct_loci_candidate: "Trans-splicing candidate: non-overlapping reference loci",
+      overlapping_gene_annotations: "Multiple gene annotations overlap: not a distinct-locus candidate",
+      unresolved_loci: "Multiple genes; reference locus coordinates unresolved" };
+    return row.locus_genes && row.locus_genes.length > 1
+      ? `<br>${labels[row.locus_status] || "Multiple gene annotations"}<br>${row.gene_path.join(" → ")}<br>Coordinates from exon annotation; mechanism unconfirmed`
+        + ((row.unplaced_genes || []).length ? `<br>Unplaced genes: ${row.unplaced_genes.join(", ")}` : "") : "";
+  }
+  function drawBackbone(g, xz, exs, y, color, row, readPileup = false, readHeight = null) {
+    const readWidth = readHeight == null ? 0.7 : Math.min(0.7, Math.max(0.02, readHeight * 0.35));
+    const genes = new Set(exs.map((s) => s.gene));
+    genes.forEach((gene) => {
+      const parts = exs.filter((s) => s.gene === gene);
+      if (parts.length) g.append("line").attr("class", "backbone")
+        .attr("x1", xz(Math.min(...parts.map((s) => s.a)))).attr("x2", xz(Math.max(...parts.map((s) => s.b))))
+        .attr("y1", y).attr("y2", y).attr("stroke", color).attr("opacity", 0.55)
+        .style("stroke-width", readPileup && readHeight != null ? readWidth : null);
+    });
+    (row.locus_joins || []).forEach((j) => {
+      if (j.display_from == null || j.display_to == null) return;
+      const a = xz(j.display_from), b = xz(j.display_to);
+      g.append("path").attr("class", "locus-join").attr("fill", "none")
+        .attr("stroke", readPileup ? color : (row.trans_splicing_candidate ? "#b85b16" : "#777"))
+        .attr("stroke-width", readPileup ? readWidth : 1.4).attr("opacity", readPileup ? 0.55 : 1)
+        .attr("stroke-dasharray", readPileup ? null : "4,3")
+        .attr("d", readPileup ? `M${a},${y} L${b},${y}`
+          : `M${a},${y} C${a},${y - 9} ${b},${y - 9} ${b},${y}`);
+    });
   }
 
   // ============================ READ-LEVEL PILEUP (molecule view) ============================
@@ -356,7 +431,7 @@
     panels.forEach((p) => {
       p.mol = p.molecules.map((m) => ({ ...m, merged: mergeSegments(m.exon_segments) }))
         .sort((a, b) => (a.cluster_index - b.cluster_index) || (b.count - a.count) || (a.isoform_id < b.isoform_id ? -1 : 1));
-      if (p.mol.length > R.MAX_ROWS) { truncated += p.mol.length - R.MAX_ROWS; p.mol = p.mol.slice(0, R.MAX_ROWS); }
+      if (!res.read_filter?.enabled && p.mol.length > R.MAX_ROWS) { truncated += p.mol.length - R.MAX_ROWS; p.mol = p.mol.slice(0, R.MAX_ROWS); }
     });
     const allMol = panels.flatMap((p) => p.mol);
     const [lo, hi] = extentOf(allMol, gm);
@@ -391,8 +466,11 @@
     });
     let y = 10;
     panels.forEach((p) => { p._top = y; p._y = y + R.HDR; y += R.HDR + p._bodyH + R.PAD + R.PANEL_GAP; });
-    const axisTop = y + 2;
-    const height = axisTop + R.RULER_H + R.REF_H + 22;
+    const axisTop = y + 2 + (res.has_multiple_loci ? 28 : 0);
+    const genomicHeight = axisTop + R.RULER_H + R.REF_H + 22 + (gm.stack_reference_loci ? Math.max(0, (gm.loci || []).length - 1) * LOCUS_REF_ROW : 0);
+    const protein = res.protein_architecture;
+    const proteinScale = protein ? (trackX1 - trackX0) / protein.width : 1;
+    const height = genomicHeight + (protein ? protein.height * proteinScale + 20 : 0);
     const rulerBaseY = axisTop + R.RULER_H - 4;
     const refTopY = axisTop + R.RULER_H;
 
@@ -400,6 +478,22 @@
     svg.append("defs").append("clipPath").attr("id", "rclip").append("rect")
       .attr("x", trackX0).attr("y", 0).attr("width", trackX1 - trackX0).attr("height", height);
     const gStatic = svg.append("g");
+    if (protein) {
+      const pg = gStatic.append("g").attr("transform", `translate(${trackX0},${genomicHeight + 20}) scale(${proteinScale})`);
+      protein.primitives.forEach((p) => {
+        let element;
+        if (p.kind === "rect") {
+          element = pg.append("rect").attr("x", p.x).attr("y", p.y).attr("width", p.width).attr("height", p.height)
+            .attr("fill", p.color).attr("stroke", p.edge || p.color).attr("stroke-width", 0.5);
+        } else {
+          element = pg.append("text").attr("x", p.x).attr("y", p.y).attr("font-family", "DejaVu Sans, sans-serif")
+            .attr("font-size", p.size).attr("fill", p.color).attr("text-anchor", p.anchor || "start")
+            .attr("dominant-baseline", p.valign === "center" ? "central" : "text-after-edge")
+            .attr("transform", p.rotation ? `rotate(${-p.rotation},${p.x},${p.y})` : null).text(p.text);
+        }
+        if (p.tooltip) element.append("title").text(p.tooltip);
+      });
+    }
     // exon/backbone layer is drawn ON TOP; make it transparent to the mouse so hovering an exon falls through
     // to the per-panel hit overlay below (so exons, labels, and gaps all trigger the isoform tooltip).
     const gx = svg.append("g").attr("clip-path", "url(#rclip)").style("pointer-events", "none");
@@ -452,10 +546,7 @@
           const exs = m.merged.exons;
           const eh = Math.max(0.7, r.h > 3 ? r.h - 0.8 : r.h);
           const ey = yTop + (r.h - eh) / 2;
-          if (exs.length) {
-            const a = xz(Math.min(...exs.map((e) => e.a))), b = xz(Math.max(...exs.map((e) => e.b)));
-            gx.append("line").attr("class", "backbone").attr("x1", a).attr("x2", b).attr("y1", yTop + r.h / 2).attr("y2", yTop + r.h / 2).attr("stroke", color).attr("opacity", 0.55);
-          }
+            drawBackbone(gx, xz, exs, yTop + r.h / 2, color, m, true, res.has_multiple_loci ? r.h : null);
           m.merged.introns.forEach((s) => {
             const xa = xz(s.a), xb = xz(s.b);
             gx.append("rect").attr("x", xa).attr("y", yTop + r.h / 2 - eh * 0.3).attr("width", Math.max(1, xb - xa)).attr("height", Math.max(1, eh * 0.6)).attr("fill", color).attr("opacity", 0.45);
@@ -497,7 +588,7 @@
       + where
       + `<br>reads (this structure · ${cond}): <b>${fmtCount(structTotal)}</b>`
       + `<br>protein length: ${m.protein_length != null ? m.protein_length + " aa" : "n/a"}`
-      + (m.nmd_status ? `<br>NMD: ${m.nmd_status}` : "");
+      + (m.nmd_status ? `<br>NMD: ${m.nmd_status}` : "") + locusTip(m);
   }
 
   // ============================ HEATMAP (cell type × covariate) ============================
@@ -516,7 +607,8 @@
     // duplicates the column header below -> suppress it.
     const showBlocks = cols.some((c) => c.group && c.group !== c.label);
     const annoHdrH = (showBlocks ? H.BLOCK_LBL : 0) + H.COLHDR_H;
-    const HEADER = Math.max(annoHdrH, H.RULER_H + H.REF_H, 40);
+    const extraRefHeight = (gm.stack_reference_loci ? Math.max(0, (gm.loci || []).length - 1) * LOCUS_REF_ROW : 0);
+    const HEADER = Math.max(annoHdrH, H.RULER_H + H.REF_H + (res.has_multiple_loci ? 28 : 0), 40) + extraRefHeight;
     const annoW = Math.max(H.CELL_W, cols.length * H.CELL_W);
     const exprX0 = H.LEFT, trackX0 = H.LEFT + annoW + H.GAP;
     const containerW = plot.clientWidth || 1100;
@@ -524,7 +616,7 @@
     const trackX1 = width - H.RMARGIN;
     const bodyH = isos.length * (H.ROW_H + H.ROW_GAP);
     const height = HEADER + bodyH + 22;
-    const refTop = HEADER - H.REF_H, rulerBase = refTop - 6;
+    const refTop = HEADER - H.REF_H - extraRefHeight, rulerBase = refTop - 6;
     const x0 = d3.scaleLinear().domain([lo, hi]).range([trackX0, trackX1]);
 
     const svg = d3.select(plot).append("svg").attr("width", width).attr("height", height);
@@ -552,15 +644,12 @@
         const y = HEADER + r * (H.ROW_H + H.ROW_GAP);
         const g = gx.append("g").attr("transform", `translate(0,${y})`);
         const color = iso.known ? KNOWN : NOVEL, exs = iso.merged.exons;
-        if (exs.length) {
-          const a = xz(Math.min(...exs.map((e) => e.a))), b = xz(Math.max(...exs.map((e) => e.b)));
-          g.append("line").attr("class", "backbone").attr("x1", a).attr("x2", b).attr("y1", H.ROW_H / 2).attr("y2", H.ROW_H / 2).attr("stroke", color).attr("opacity", 0.5);
-        }
+        drawBackbone(g, xz, exs, H.ROW_H / 2, color, iso);
         const exportIso = (ev) => { ev.preventDefault(); ev.stopPropagation(); showCtx(ev, iso, isos.map((i) => i.isoform_id), iso.cluster_id, res.isoforms); };
         iso.merged.introns.forEach((s) => {
           const xa = xz(s.a), xb = xz(s.b);
           g.append("rect").attr("class", "seg intron").attr("x", xa).attr("y", H.ROW_H / 2 - 2.5).attr("width", Math.max(1.5, xb - xa)).attr("height", 5).attr("fill", color).attr("opacity", 0.5).style("cursor", "pointer")
-            .on("mousemove", (ev) => showTip(ev, `<b>intron retention</b><br>${fmt(s.a)}–${fmt(s.b)}<br><span class="muted">${iso.isoform_id}</span>`)).on("mouseleave", hideTip)
+            .on("mousemove", (ev) => showTip(ev, `<b>intron retention</b><br>${segmentPosition(s, gm)}<br><span class="muted">${iso.isoform_id}</span>`)).on("mouseleave", hideTip)
             .on("click", exportIso).on("contextmenu", (ev) => ev.preventDefault());
         });
         // UCSC genome-browser style: coding (CDS) exon portions full-height (tall), non-coding (5'/3'-UTR)
@@ -570,10 +659,16 @@
         const cdsLo = iso.cds_min, cdsHi = iso.cds_max;
         const exonRect = (s, ga, gb, y, h) => g.append("rect").attr("class", "seg exon")
           .attr("x", xz(ga)).attr("y", y).attr("width", Math.max(1.5, xz(gb) - xz(ga))).attr("height", h).attr("fill", color).style("cursor", "pointer")
-          .on("mousemove", (ev) => showTip(ev, `<b>${s.label || "exon"}</b><br>${gm.chrom ? gm.chrom + ":" : ""}${fmt(s.a)}–${fmt(s.b)}<br>${iso.protein_length != null ? iso.protein_length + " aa · " : ""}<span class="muted">${iso.isoform_id}</span>`))
+          .on("mousemove", (ev) => showTip(ev, `<b>${s.label || "exon"}</b><br>${segmentPosition(s, gm)}<br>${iso.protein_length != null ? iso.protein_length + " aa · " : ""}<span class="muted">${iso.isoform_id}</span>`))
           .on("mouseleave", hideTip).on("click", exportIso).on("contextmenu", (ev) => ev.preventDefault());
         exs.forEach((s) => {
-          if (cdsLo != null && cdsHi != null) {
+          if (iso._locus_cds_intervals != null) {
+            exonRect(s, s.a, s.b, utrY, utrH);
+            iso._locus_cds_intervals.filter((c) => c.gene === s.gene).forEach((c) => {
+              const ca = Math.max(s.a, c.a), cb = Math.min(s.b, c.b);
+              if (cb > ca) exonRect(s, ca, cb, exY, exH);
+            });
+          } else if (cdsLo != null && cdsHi != null) {
             exonRect(s, s.a, s.b, utrY, utrH);                          // UTR (thin) across the whole exon
             const ca = Math.max(s.a, cdsLo), cb = Math.min(s.b, cdsHi);
             if (cb > ca) exonRect(s, ca, cb, exY, exH);                 // CDS (tall) over the coding overlap
@@ -615,8 +710,8 @@
     const plotX0 = LP.LEFT, plotX1 = width - LP.RMARGIN, trackX0 = LP.LEFT, trackX1 = plotX1;
     let y = 12;
     conds.forEach((cd) => { cd._titleY = y; cd._plotTop = y + LP.TITLE_H; cd._plotBot = cd._plotTop + LP.PANEL_H; y = cd._plotBot + LP.XLAB_H + LP.PANEL_GAP; });
-    const structTop = y + 4, rulerBase = structTop + LP.RULER_H - 6, refTop = structTop + LP.RULER_H;
-    const rowsTop = refTop + LP.REF_H + 10;
+    const structTop = y + 4 + (res.has_multiple_loci ? 28 : 0), rulerBase = structTop + LP.RULER_H - 6, refTop = structTop + LP.RULER_H;
+    const rowsTop = refTop + LP.REF_H + 10 + (gm.stack_reference_loci ? Math.max(0, (gm.loci || []).length - 1) * LOCUS_REF_ROW : 0);
     const height = rowsTop + isos.length * (LP.ROW_H + LP.ROW_GAP) + 22;
     const x0 = d3.scaleLinear().domain([lo, hi]).range([trackX0, trackX1]);
 
@@ -671,20 +766,23 @@
         const g = gx.append("g").attr("transform", `translate(0,${yy})`);
         const col = color.get(iso.isoform_id), exs = iso.merged.exons;
         const exportIso = (ev) => { ev.preventDefault(); ev.stopPropagation(); showCtx(ev, iso, isos.map((i) => i.isoform_id), iso.cluster_id, res.isoforms); };
-        if (exs.length) {
-          const a = xz(Math.min(...exs.map((e) => e.a))), b = xz(Math.max(...exs.map((e) => e.b)));
-          g.append("line").attr("class", "backbone").attr("x1", a).attr("x2", b).attr("y1", LP.ROW_H / 2).attr("y2", LP.ROW_H / 2).attr("stroke", col).attr("opacity", 0.5);
-        }
+        drawBackbone(g, xz, exs, LP.ROW_H / 2, col, iso);
         iso.merged.introns.forEach((s) => {
           g.append("rect").attr("class", "seg intron").attr("x", xz(s.a)).attr("y", LP.ROW_H / 2 - 2.5).attr("width", Math.max(1.5, xz(s.b) - xz(s.a))).attr("height", 5).attr("fill", col).attr("opacity", 0.5).style("cursor", "pointer")
-            .on("mousemove", (ev) => showTip(ev, `<b>intron retention</b><br>${fmt(s.a)}–${fmt(s.b)}<br><span class="muted">${iso.isoform_id}</span>`)).on("mouseleave", hideTip).on("click", exportIso).on("contextmenu", (ev) => ev.preventDefault());
+            .on("mousemove", (ev) => showTip(ev, `<b>intron retention</b><br>${segmentPosition(s, gm)}<br><span class="muted">${iso.isoform_id}</span>`)).on("mouseleave", hideTip).on("click", exportIso).on("contextmenu", (ev) => ev.preventDefault());
         });
         const exH = LP.ROW_H - 6, exY = 3, utrH = Math.max(3, exH * 0.5), utrY = exY + (exH - utrH) / 2;
         const cdsLo = iso.cds_min, cdsHi = iso.cds_max;
         const exonRect = (s, ga, gb, ry, h) => g.append("rect").attr("class", "seg exon").attr("x", xz(ga)).attr("y", ry).attr("width", Math.max(1.5, xz(gb) - xz(ga))).attr("height", h).attr("fill", col).style("cursor", "pointer")
-          .on("mousemove", (ev) => showTip(ev, `<b>${s.label || "exon"}</b><br>${gm.chrom ? gm.chrom + ":" : ""}${fmt(s.a)}–${fmt(s.b)}<br>${iso.protein_length != null ? iso.protein_length + " aa · " : ""}<span class="muted">${iso.isoform_id}</span>`)).on("mouseleave", hideTip).on("click", exportIso).on("contextmenu", (ev) => ev.preventDefault());
+          .on("mousemove", (ev) => showTip(ev, `<b>${s.label || "exon"}</b><br>${segmentPosition(s, gm)}<br>${iso.protein_length != null ? iso.protein_length + " aa · " : ""}<span class="muted">${iso.isoform_id}</span>`)).on("mouseleave", hideTip).on("click", exportIso).on("contextmenu", (ev) => ev.preventDefault());
         exs.forEach((s) => {
-          if (cdsLo != null && cdsHi != null) { exonRect(s, s.a, s.b, utrY, utrH); const ca = Math.max(s.a, cdsLo), cb = Math.min(s.b, cdsHi); if (cb > ca) exonRect(s, ca, cb, exY, exH); }
+          if (iso._locus_cds_intervals != null) {
+            exonRect(s, s.a, s.b, utrY, utrH);
+            iso._locus_cds_intervals.filter((c) => c.gene === s.gene).forEach((c) => {
+              const ca = Math.max(s.a, c.a), cb = Math.min(s.b, c.b);
+              if (cb > ca) exonRect(s, ca, cb, exY, exH);
+            });
+          } else if (cdsLo != null && cdsHi != null) { exonRect(s, s.a, s.b, utrY, utrH); const ca = Math.max(s.a, cdsLo), cb = Math.min(s.b, cdsHi); if (cb > ca) exonRect(s, ca, cb, exY, exH); }
           else exonRect(s, s.a, s.b, exY, exH);
         });
       });
@@ -897,7 +995,7 @@
       + `<br>protein length: <b>${iso.protein_length != null ? iso.protein_length + " aa" : "n/a"}</b>`
       + `<br>NMD: ${iso.nmd_status || "n/a"}`
       + (iso.intron_retention && iso.intron_retention !== "False" ? `<br>intron retention: ${iso.intron_retention}` : "")
-      + `<br>total count: ${fmtCount(iso.total_count)} · cluster ${iso.cluster_id}`;
+      + `<br>total count: ${fmtCount(iso.total_count)} · cluster ${iso.cluster_id}` + locusTip(iso);
   }
 
   // ===================================================================== tooltip / context menu
@@ -1046,11 +1144,16 @@
     try {
       const w = Math.ceil(+svg.getAttribute("width") || svg.clientWidth || 1000);
       const h = Math.ceil(+svg.getAttribute("height") || svg.clientHeight || 700);
-      const doc = new window.jspdf.jsPDF({ unit: "pt", format: [w, h], compress: true });
+      const multi = state.last && state.last.has_multiple_loci;
+      const caption = multi ? `${state.last.symbol || state.last.gene}. Cell states: ${selectedCellTypes().join(", ") || "all"}; covariates: ${[...state.groups].join(", ") || "all"}. Each gene has an independent genomic axis; panel widths and gaps do not encode genomic distance. Orange dashed links connect non-overlapping reference loci (trans-splicing candidates); gray links indicate overlapping or unresolved annotations. Coordinates derive from exon annotations; Thick CDS and thin UTR portions use saved coding annotations on matching chromosomes; unsupported cross-chromosome coding boundaries remain unknown. Counts are recorded RNA support, not independent donors. These views do not establish a trans-splicing mechanism. No statistical test is performed.` : "";
+      const footerH = multi ? 30 + Math.ceil(caption.length / Math.max(30, (w - 40) / 5)) * 12 : 0;
+      const doc = new window.jspdf.jsPDF({ unit: "pt", format: [w, h + footerH],
+        orientation: w > h + footerH ? "landscape" : "portrait", compress: true });
       const exp = svgForExport(svg);   // inline computed styles + white bg (svg2pdf ignores external CSS -> black)
       if (typeof doc.svg === "function") await doc.svg(exp, { x: 0, y: 0, width: w, height: h });
       else if (window.svg2pdf) await window.svg2pdf(exp, doc, { x: 0, y: 0, width: w, height: h });
       else throw new Error("svg2pdf not loaded");
+      if (multi) { doc.setFontSize(9); doc.text(doc.splitTextToSize(caption, w - 40), 20, h + 18); }
       blob = doc.output("blob");
     } catch (e) { setStatus("PDF render error: " + ((e && e.message) || e)); return; }
     if (handle) {
@@ -1095,6 +1198,11 @@
       el.innerHTML = `<div class="lg-row"><span>expression</span><div class="lg-grad" style="background:linear-gradient(90deg,${stops})"></div></div>
         <div class="lg-row"><span class="muted">low</span><span class="muted" style="margin-left:auto">high</span></div>
         <div class="lg-row"><span class="sw" style="background:${KNOWN}"></span>known<span class="sw" style="background:${NOVEL};margin-left:10px"></span>novel</div>`;
+    }
+    if (res && res.has_multiple_loci) {
+      el.innerHTML += `<div class="lg-row muted">Separate genomic axes per gene; locus widths and gaps do not represent inter-locus distance.</div>
+        <div class="lg-row muted">Orange dashed link: non-overlapping loci, trans-splicing candidate. Gray dashed link: overlapping or unresolved loci.</div>
+        <div class="lg-row muted">Multi-gene coordinates are derived from exon annotations; Thick CDS and thin UTR portions use saved coding annotations on matching chromosomes; unsupported cross-chromosome coding boundaries remain unknown. A link does not establish a trans-splicing mechanism.</div>`;
     }
   }
 

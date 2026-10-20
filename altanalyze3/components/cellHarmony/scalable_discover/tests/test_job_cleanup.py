@@ -11,7 +11,7 @@ from altanalyze3.components.cellHarmony.scalable_discover import app as discover
 from altanalyze3.components.cellHarmony.flask import job_manager
 
 
-def seed_job(root, job_id, *, status="completed", age_hours=9, differential="idle"):
+def seed_job(root, job_id, *, status="completed", age_hours=73, differential="idle"):
     directory = root / job_id
     directory.mkdir()
     for name in ("uploads", "outputs", "logs"):

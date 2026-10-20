@@ -165,3 +165,6 @@ altanalyze3/components/ambient_rna/benchmarking/*
 
 # Local validation directories anywhere within the altanalyze3 package.
 /altanalyze3/**/validation/
+
+# Local analysis output directory.
+/altanalyze3/output/

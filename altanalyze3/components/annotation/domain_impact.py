@@ -23,6 +23,30 @@ from collections import defaultdict, namedtuple
 Domain = namedtuple("Domain", "protein interpro name description aa_start aa_stop start stop intervals")
 
 
+def legacy_feature_fragment(sequence, start, end):
+    """Reproduce AltAnalyze2 FeatureAlignment.importEnsemblFTdata literally.
+
+    This historical baseline slices [start:end] and expands short features. Its
+    indexing differs from the annotated 1-based inclusive interval. Keep it
+    explicit for parity audits; do not use it to silently change coordinates.
+    """
+    length = end - start
+    lo, hi = ((start, end) if length > 6 else
+              (start - 3, end + 3) if length < 3 else (start - 1, end + 1))
+    return sequence[lo:hi]
+
+
+def feature_sequence_present(fragment, protein):
+    """AltAnalyze2 ExonAnalyze.compareProteinFeatures exact substring baseline.
+
+    Reject empty fragments: Python otherwise treats the empty string as present
+    in every protein, which is not biological evidence of feature retention.
+    """
+    if not fragment:
+        raise ValueError("An empty feature sequence cannot establish retention")
+    return fragment in protein
+
+
 def load_protein_coding_blocks(protein_coordinates_tab):
     """Map each Ensembl protein to its coding blocks, from ``Hs_ProteinCoordinates_build_<b>.tab``."""
     blocks = defaultdict(list)

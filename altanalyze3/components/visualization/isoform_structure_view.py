@@ -1761,6 +1761,20 @@ def build_isoform_segments(tokens, exon_lookup, default_gene):
 
     Returns the same shape as before: [{'gene', 'start', 'end', 'type', 'label'}, ...].
     """
+    # Different loci may use the same numerical coordinates, or opposite strands.
+    # Parse each consecutive gene run independently so a partner exon can never
+    # extend/close a block belonging to the preceding gene. Single-gene parsing
+    # below is unchanged, including its terminal-boundary handling.
+    gene_runs = []
+    for token in tokens or []:
+        gene_id = split_token(token, default_gene)[0]
+        if not gene_runs or gene_runs[-1][0] != gene_id:
+            gene_runs.append((gene_id, []))
+        gene_runs[-1][1].append(token)
+    if len(gene_runs) > 1:
+        return [segment for _, run in gene_runs
+                for segment in build_isoform_segments(run, exon_lookup, default_gene)]
+
     parsed = []
     for token in tokens or []:
         gene_id, base, coord = split_token(token, default_gene)

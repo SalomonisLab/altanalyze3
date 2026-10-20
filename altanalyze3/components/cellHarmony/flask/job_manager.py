@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import tempfile
@@ -27,6 +28,9 @@ class JobStore:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
+        self.retention_hours = float(os.environ.get("CELLHARMONY_JOB_RETENTION_HOURS", "72"))
+        if not math.isfinite(self.retention_hours) or self.retention_hours <= 0:
+            raise ValueError("CELLHARMONY_JOB_RETENTION_HOURS must be positive and finite.")
 
     # ------------------------------------------------------------------ helpers
     def _job_dir(self, job_id: str) -> Path:
@@ -97,6 +101,13 @@ class JobStore:
                 metadata = json.loads(meta_path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, FileNotFoundError):
                 continue
+            access_path = job_dir / ".last_access"
+            try:
+                last_access = datetime.fromtimestamp(access_path.stat().st_mtime, timezone.utc)
+            except FileNotFoundError:
+                last_access = None
+            if last_access is not None and last_access >= cutoff:
+                continue
             if not self._is_purge_eligible(metadata, cutoff):
                 continue
             try:
@@ -108,9 +119,12 @@ class JobStore:
         return deleted
 
     # ------------------------------------------------------------------- public
-    def purge_old_jobs(self, *, max_age_hours: float = 8.0) -> int:
+    def purge_old_jobs(self, *, max_age_hours: Optional[float] = None) -> int:
         with self._lock:
-            return self._purge_old_jobs_unlocked(max_age_hours=max_age_hours)
+            hours = self.retention_hours if max_age_hours is None else float(max_age_hours)
+            if not math.isfinite(hours) or hours <= 0:
+                raise ValueError("Job retention hours must be positive and finite.")
+            return self._purge_old_jobs_unlocked(max_age_hours=hours)
 
     def create_job(
         self,
@@ -120,7 +134,7 @@ class JobStore:
         files: List[Dict[str, str]],
     ) -> Dict:
         with self._lock:
-            self._purge_old_jobs_unlocked(max_age_hours=8.0)
+            self._purge_old_jobs_unlocked(max_age_hours=self.retention_hours)
             job_id = uuid4().hex
             job_dir = self._job_dir(job_id)
             job_dir.mkdir(parents=True, exist_ok=True)
@@ -143,6 +157,20 @@ class JobStore:
             }
             self._write_metadata(job_id, metadata)
             return metadata
+
+    def touch_job(self, job_id: str) -> None:
+        """Renew retention on user visits without rewriting scientific metadata."""
+        with self._lock:
+            if not self.job_exists(job_id):
+                return
+            path = self._job_dir(job_id) / ".last_access"
+            now = datetime.now(timezone.utc).timestamp()
+            try:
+                if now - path.stat().st_mtime < 300:
+                    return
+            except FileNotFoundError:
+                pass
+            path.touch()
 
     def get_job(self, job_id: str) -> Dict:
         return self._read_metadata(job_id)

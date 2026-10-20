@@ -100,6 +100,14 @@
         <div class="field inline" data-for="molecule">
           <label>Max molecules / panel</label><input id="maxreads" type="number" min="10" step="10" value="300"/>
         </div>
+        <div class="field" data-for="molecule">
+          <label class="check"><input id="protein-features" type="checkbox"/> Show protein domains and coding exons</label>
+          <div class="hint">Uses saved iso2function annotations. Protein tracks run N to C on their own amino-acid scale.</div>
+          <label class="check"><input id="hide-bleeding" type="checkbox"/> Hide reads extending into model introns</label>
+          <div class="hint">Display only. Checks the full read pool before sampling; keeps whole reads.</div>
+          <label>Valid reads per isoform <input id="valid-read-cap" type="number" min="1" value="200"/></label>
+          <label>Splice-edge tolerance (nt) <input id="bleed-tolerance" type="number" min="0" value="0"/></label>
+        </div>
         <section class="field" data-for="heatmap">
           <label>Restrict by junctions</label>
           <div id="junctions" class="multi scroll small"></div>
@@ -159,6 +167,7 @@
   <div id="tooltip" class="tooltip hidden"></div>
   <div id="ctxmenu" class="ctxmenu hidden"></div>
 
+  <script src="/static/locus_layout.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

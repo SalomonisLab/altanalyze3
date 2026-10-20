@@ -95,6 +95,7 @@ class RunContext:
         # protein layer
         self._protein_meta = {}        # transcript_id -> {protein_length, nmd_status, intron_retention, longest}
         self._coding = {}              # transcript_id -> (cds_genomic_min, cds_genomic_max, strand) for UCSC coding/UTR
+        self._coding_chrom = {}        # saved CDS chromosome; required before splitting across gene axes
         self._fasta_index = {}         # transcript_id -> (path, offset, length) for protein_sequences.fasta
         self._mrna_index = {}          # transcript_id -> (path, offset, length) for transcript_sequences.fasta
         self._orf_index = {}           # transcript_id -> (path, offset, length) for orf_sequences.fasta (CDS)
@@ -339,6 +340,7 @@ class RunContext:
                 lo, hi = _to_int(p[6]), _to_int(p[7])                # CDS Genomic Min / Max
                 if lo is not None and hi is not None:
                     self._coding[p[0].strip()] = (lo, hi, p[3].strip())
+                    self._coding_chrom[p[0].strip()] = p[2].strip()
         if self._coding:
             print(f"[isv_web] coding regions: {len(self._coding):,} isoforms (CDS/UTR exon rendering)")
 
@@ -348,6 +350,13 @@ class RunContext:
             v = self._coding.get(key)
             if v:
                 return v
+        return None
+
+    def coding_chromosome(self, isoform_id):
+        for key in _id_lookup_keys(isoform_id):
+            value = self._coding_chrom.get(key)
+            if value:
+                return value
         return None
 
     def _index_protein_fasta(self):
@@ -523,9 +532,11 @@ def query_isoforms(ctx: RunContext, gene, samples, groups, cell_types, combine_b
                     "isoform_id": iid,
                     "known": bool(str(iid).startswith("ENST")),
                     "cluster_id": cluster_id,
+                    "annotation_tokens": list(tokens),
                     "exon_segments": [_seg_json(seg) for seg in segs],
                     "cds_min": cds[0] if cds else None,             # coding (CDS) genomic span -> tall blocks
                     "cds_max": cds[1] if cds else None,             # outside this span = UTR -> thin blocks
+                    "cds_chrom": ctx.coding_chromosome(iid),
                     "expression": {c["key"]: round(col_counts[c["key"]].get(iid, 0.0), 3) for c in columns},
                     "total_count": round(total_counts.get(iid, 0.0), 3),
                     "protein_length": pmeta.get("protein_length"),
@@ -533,7 +544,7 @@ def query_isoforms(ctx: RunContext, gene, samples, groups, cell_types, combine_b
                     "intron_retention": pmeta.get("intron_retention"),
                 })
 
-    return {
+    return _with_loci(ctx, {
         "gene": gene,
         "symbol": ctx.gene_symbol_dict.get(gene, gene),
         "combine_by": combine_by,
@@ -541,7 +552,12 @@ def query_isoforms(ctx: RunContext, gene, samples, groups, cell_types, combine_b
         "isoforms": out_isoforms,
         "cluster_count": len(grouped),
         "gene_model": gene_model_track(ctx, gene),
-    }
+    })
+
+
+def _with_loci(ctx, response):
+    from .locus_view import annotate_response
+    return annotate_response(ctx, response, gene_model_track)
 
 
 def gene_model_track(ctx: RunContext, gene):
@@ -605,6 +621,7 @@ def query_molecules(ctx: RunContext, gene, scope="combined", sample=None, sample
         out_isoforms.append({
             "isoform_id": iid,
             "known": bool(str(iid).startswith("ENST")),
+            "annotation_tokens": list(tokens),
             "exon_segments": [_seg_json(seg) for seg in segs],
             "count": round(total_counts.get(iid, 0.0), 3),
             "by_sample": {k: round(v, 3) for k, v in (a.get("by_sample") or {}).items()},
@@ -615,7 +632,7 @@ def query_molecules(ctx: RunContext, gene, scope="combined", sample=None, sample
         })
     out_isoforms.sort(key=lambda d: d["count"], reverse=True)
 
-    return {
+    return _with_loci(ctx, {
         "gene": gene,
         "symbol": ctx.gene_symbol_dict.get(gene, gene),
         "scope": scope,
@@ -625,7 +642,7 @@ def query_molecules(ctx: RunContext, gene, scope="combined", sample=None, sample
         "isoforms": out_isoforms,
         "isoform_count": len(out_isoforms),
         "total_reads": round(sum(total_counts.values()), 1),
-    }
+    })
 
 
 def _molecule_counts(ctx, gene, sel_samples, cell_states):
@@ -689,7 +706,10 @@ def _attach_structure_reads(ctx, res, gene, cell_states, conds, panel_by):
     """Attach per-panel, per-(final)isoform TRUE read totals from the counts matrix -- the SAME
     authoritative source as the isoform view. The molecule pileup returns only the top-N molecules per
     panel, so summing the displayed molecules undercounts; the tooltip uses these totals instead."""
-    if not res or not res.get("panels"):
+    if not res:
+        return res
+    res = _with_loci(ctx, res)
+    if not res.get("panels"):
         return res
     try:
         g = ctx.resolve_gene(gene) or gene
@@ -818,6 +838,13 @@ def read_segments(ctx, gene, tokens, lib):
     Falls back to parsing the token string when the sample has no coordinate store or the structure
     is absent from it. `_struct_stats` counts both outcomes so a run can report the fallback rate.
     """
+    # The legacy coordinate store holds bare (start,end) pairs without chromosome
+    # or partner-gene identity. It cannot disambiguate multi-locus blocks. Keep
+    # the gene-qualified tokens instead, and label their coordinate source in the
+    # response rather than mislabelling all blocks as the primary gene.
+    if len({isv.split_token(t, gene)[0] for t in (tokens or [])}) > 1:
+        _struct_stats["parsed"] += 1
+        return isv.build_isoform_segments(tokens, ctx.exon_lookup, gene)
     conn = _struct_conn(ctx, lib) if lib else None
     if conn is not None:
         key = isv.exon_string_key(tokens)
@@ -1160,6 +1187,7 @@ def _query_reads_index(ctx, gene, symbol, cell_states, conds, max_isoforms, pane
                 "isoform_id": uid, "final_isoform_id": fin,
                 "sample": _sample_suffix(uid), "known": uid.startswith("ENST"),
                 "count": round(c, 3), "cluster_index": ci, "color_index": ci,
+                "annotation_tokens": list(tokens_by_uid[uid]),
                 "exon_segments": [_seg_json(s) for s in segs],
                 "detections": det,
                 "protein_length": pmeta.get("protein_length"), "nmd_status": pmeta.get("nmd_status"),
@@ -1239,6 +1267,7 @@ def _parse_reads_tsv(ctx, path, gene):
                 # normalized cluster structure signature (stable across engine calls -> stable color)
                 "_cstruct": (r.get("cluster_tokens_exon_intron") or r.get("cluster_tokens_exon")
                              or r.get("tokens_trimmed") or "").strip(),
+                "annotation_tokens": list(toks),
                 "exon_segments": [_seg_json(s) for s in segs],
                 "protein_length": pmeta.get("protein_length"),
                 "nmd_status": pmeta.get("nmd_status"),
@@ -1407,6 +1436,8 @@ def _resolve_selected_samples(ctx, samples, groups):
 
 def _seg_json(seg):
     return {
+        "gene": seg.get("gene"),
+        "chrom": seg.get("chrom"),
         "exon_id": seg.get("exon_id") or seg.get("label") or seg.get("base"),
         "label": seg.get("label"),
         "type": seg.get("type"),
@@ -1529,3 +1560,42 @@ def _find_transcripts_db(run_dir, gff_output_dir):
             return cand
     hits = glob.glob(os.path.join(run_dir, "**", "transcripts.db"), recursive=True)
     return hits[0] if hits else None
+
+
+def prepare_bleeding_read_filter(ctx, response, tolerance=0):
+    """Resolve native read/model coordinates for the explicitly enabled display filter."""
+    from copy import deepcopy
+    from .precompute_gff_structures import StructureIndex
+    from .read_filters import filter_bleeding_reads
+    if ctx.molecule_grouping != 'final_isoform':
+        raise ValueError('The bleeding-read filter requires grouping by assigned final isoform')
+    sidx = StructureIndex.open(ctx.run_dir, log=lambda *a, **k: None)
+    if sidx is None:
+        raise ValueError('Registered GFF coordinate index required for the bleeding-read filter')
+    res = deepcopy(response); cache = {}
+    primary = res['gene']; gm = gene_model_track(ctx, primary)
+    locus = ((gm['chrom'], gm.get('strand'), *gm['extent']) if gm.get('chrom') and gm.get('extent') else None)
+    for panel in res.get('panels', []):
+        for m in panel.get('molecules', []):
+            fin = m.get('final_isoform_id')
+            if fin not in cache:
+                record = sidx.geometry(primary, fin, locus=locus)
+                if not record:
+                    raise ValueError('Exact registered GFF model unresolved for display filter: '+str(fin))
+                cache[fin] = [dict(gene=primary, chrom=record['chrom'], start=a, end=b, type='E') for a,b in record['exons']]
+            m['registered_exon_segments'] = cache[fin]
+            detections = m.get('detections', []); libs = {d['sample'] for d in detections}
+            if len(libs) != 1:
+                raise ValueError('One original sample identity per RNA row required for display filter: '+str(m['isoform_id']))
+            lib = next(iter(libs)); tokens = m.get('annotation_tokens')
+            if not tokens:
+                raise ValueError('Original read annotation required for display filter: '+str(m['isoform_id']))
+            conn = _struct_conn(ctx, lib)
+            row = conn.execute('SELECT chrom,strand,blob FROM structures WHERE gene=? AND structure=?',
+                               (primary, isv.exon_string_key(tokens))).fetchone() if conn else None
+            if not row:
+                raise ValueError('Native read coordinates unresolved for display filter: '+str(m['isoform_id']))
+            blocks = isv.apply_terminal_bounds(_coord_store.unpack_exons(row[2]), tokens, primary, ctx.exon_lookup, row[1])
+            # Filtering compares original chromosome coordinates, before any axis projection.
+            m['filter_alignment_segments'] = [dict(gene=primary,chrom=row[0],start=a,end=b,type='E') for a,b in blocks]
+    return filter_bleeding_reads(res, tolerance=tolerance)

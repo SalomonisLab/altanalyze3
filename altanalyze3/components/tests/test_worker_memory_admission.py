@@ -174,3 +174,70 @@ def test_host_headroom_can_queue_despite_room_in_cgroup(tmp_path, monkeypatch, a
             assert 'host' in reason
     finally:
         runner.executor.shutdown()
+
+
+@pytest.mark.parametrize('v1', [False, True])
+def test_repeated_input_active_clean_cache_is_reclaimable(tmp_path, v1):
+    gib = 1024**3
+    counters = {'file': 19*gib, 'active_file': 17*gib, 'inactive_file': 2*gib,
+                'shmem': 0, 'file_dirty': gib, 'file_writeback': 0,
+                'file_mapped': 0, 'unevictable': 0}
+    if v1:
+        names = {'file': 'cache', 'file_dirty': 'dirty', 'file_writeback': 'writeback',
+                 'file_mapped': 'mapped_file'}
+        counters = {'total_' + names.get(k, k): v for k, v in counters.items()}
+        # A child-local value must not override hierarchical usage.
+        counters['inactive_file'] = 0
+    (tmp_path / 'memory.stat').write_text('\n'.join(f'{k} {v}' for k,v in counters.items()))
+    used = int(29.4*gib)
+    assert worker_memory._working_set(tmp_path, used) == used - 18*gib
+
+
+@pytest.mark.parametrize('protected', ['shmem', 'file_dirty', 'file_writeback', 'file_mapped', 'unevictable'])
+def test_guard_keeps_protected_cache_charged(tmp_path, protected):
+    gib = 1024**3
+    (tmp_path / 'memory.stat').write_text(
+        f'file {20*gib}\nactive_file {20*gib}\n{protected} {19*gib}\n')
+    assert worker_memory._working_set(tmp_path, 28*gib) == 27*gib
+
+
+def test_unreadable_or_invalid_cache_counters_fail_conservatively(tmp_path):
+    assert worker_memory._working_set(tmp_path, 123) == 123
+    (tmp_path / 'memory.stat').write_text('file invalid\n')
+    assert worker_memory._working_set(tmp_path, 123) == 123
+
+
+@pytest.mark.parametrize('charge_gib,host_available,stopped', [(11,20,False),(28,20,True),(11,.5,True)])
+def test_running_worker_survives_cache_but_stops_for_real_pressure(tmp_path, monkeypatch, charge_gib, host_available, stopped):
+    gib = 1024**3
+    runner = tasks.JobRunner(JobStore(tmp_path), tmp_path / 'registry.json')
+    class Process:
+        pid = 999
+        returncode = None
+        calls = 0
+        killed = False
+        def wait(self, timeout=None):
+            if self.killed:
+                return -15
+            self.calls += 1
+            if self.calls <= 5:
+                raise tasks.subprocess.TimeoutExpired('fixture', timeout)
+            return 0
+        def poll(self):
+            return None
+    process = Process()
+    runner._active_workers[999] = process
+    monkeypatch.setattr(tasks, 'container_memory', lambda: (int(charge_gib*gib), 30*gib))
+    monkeypatch.setattr(tasks, 'host_memory', lambda: (int(host_available*gib),32*gib))
+    monkeypatch.setattr(tasks, 'process_memory', lambda: {os.getpid():(0,gib),999:(os.getpid(),8*gib)})
+    monkeypatch.setattr(tasks.os, 'killpg', lambda *args: setattr(process,'killed',True))
+    try:
+        if stopped:
+            with pytest.raises(MemoryError):
+                runner._wait_for_worker(process)
+            assert process.killed
+        else:
+            assert runner._wait_for_worker(process) == 0
+            assert not process.killed
+    finally:
+        runner.executor.shutdown()

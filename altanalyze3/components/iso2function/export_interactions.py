@@ -41,6 +41,78 @@ _EI_RE = re.compile(r"[EI][0-9]")
 _TID_RE = re.compile(r'transcript_id[ =]"?([^";]+)"?')
 
 
+def export_query_results(query_dir, out_path, interaction_type="all"):
+    """Export a completed query, retaining raw calls, native aliases, reads and expression QC.
+
+    This is a serialization of the query's decisions, never a second scientific filter.
+    PDI rows retain their DNA-bait expression status; TF RNA support is not target-gene RNA.
+    """
+    import csv
+    import hashlib
+    import json
+    from pathlib import Path
+    from .network.build import assay_call
+
+    if not out_path:
+        raise ValueError("export --query-results requires --out <text file>")
+    if interaction_type not in ("all", "ppi", "pdi"):
+        raise ValueError("interaction_type must be all, ppi or pdi")
+    base = Path(config.require(query_dir, "completed query directory"))
+    manifest_path = base / "query_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    if manifest.get("status") != "complete":
+        raise ValueError("Only a completed query may be exported")
+    def read(path):
+        from .query import _table
+        with path.open() as handle:
+            reader = csv.DictReader(handle, delimiter="\t")
+            columns = reader.fieldnames
+        return _table(path), columns
+    targets_path, pairs_path = base / "divergent_interactions.tsv", base / "retained_pairs.tsv"
+    rows, columns = read(targets_path)
+    pairs, pair_columns = read(pairs_path)
+    if len(rows) != manifest["divergent_pair_targets"] or len(pairs) != manifest["pairs_retained"]:
+        raise ValueError("Query table coverage disagrees with completion manifest")
+    pair_index = {(r["clone_A"], r["clone_B"]): r for r in pairs}
+    if len(pair_index) != len(pairs):
+        raise ValueError("Duplicate retained pairs")
+    out_rows, seen = [], set()
+    for row in rows:
+        pair = pair_index.get((row["clone_A"], row["clone_B"]))
+        calls = assay_call(row["call_A"]), assay_call(row["call_B"])
+        key = row["clone_A"], row["clone_B"], row["modality"], row["target"]
+        if key in seen or pair is None or pair["gene"] != row["gene"]:
+            raise ValueError("Duplicate or unresolved pair-target identity")
+        seen.add(key)
+        if (assay_call(pair["retained"]) is not True or assay_call(row["qualifying_difference"]) is not True
+                or assay_call(row["passes_expression"]) is not True or None in calls or calls[0] == calls[1]
+                or row["comparison"] != ("A_only" if calls[0] else "B_only")):
+            raise ValueError("Invalid measured differential in query export")
+        if manifest["parameters"].get("pseudobulk") and assay_call(pair["native_supported"]) is not True:
+            raise ValueError("Native support missing for retained query pair")
+        if interaction_type == "all" or row["modality"] == interaction_type:
+            out_rows.append(dict(row, **{k: pair[k] for k in pair_columns if k not in columns}))
+    output = Path(out_path)
+    if output.resolve() in {manifest_path.resolve(), targets_path.resolve(), pairs_path.resolve()}:
+        raise ValueError("Export may not overwrite query sources")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns + [k for k in pair_columns if k not in columns], delimiter="\t")
+        writer.writeheader()
+        writer.writerows(out_rows)
+    digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+    report = dict(status="complete", interaction_type=interaction_type, exported_rows=len(out_rows),
+                  exporter_sha256={str(Path(__file__)): digest(Path(__file__))},
+                  source_sha256={str(p): digest(p) for p in [manifest_path, targets_path, pairs_path]},
+                  output_sha256=digest(output), query_parameters=manifest["parameters"],
+                  interpretation=manifest["interpretation"],
+                  PDI_expression_note="PDI rows describe DNA-bait binding by RNA-supported TF isoforms; "
+                                      "bait expression is undefined and is not a target-gene CPM measurement.")
+    Path(str(output) + ".manifest.json").write_text(json.dumps(report, indent=2) + "\n")
+    logger.info("[iso2function.export] %d %s query rows -> %s", len(out_rows), interaction_type, output)
+    return 0
+
+
 def _read(path, what):
     p = config.resolve_shared(path)
     if not os.path.exists(p):

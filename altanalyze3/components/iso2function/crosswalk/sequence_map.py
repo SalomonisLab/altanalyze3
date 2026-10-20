@@ -22,6 +22,33 @@ from Bio.Seq import Seq
 logger = logging.getLogger(__name__)
 
 
+def iter_literal_proteins(fasta_path, wanted=None):
+    """Stream (native ID, header gene, literal AA sequence), preserving stops and case.
+
+    Supports AltAnalyze protein headers (gene_id:ENSG) and Ensembl gene:ENSG.
+    Only FASTA line endings are removed; there is no relaxed sequence normalization.
+    Every requested alias is yielded, including novel IDs with periods.
+    """
+    import gzip
+    import re
+    opener = gzip.open if str(fasta_path).endswith(".gz") else open
+    header, sequence = None, []
+    def record():
+        name = header.split()[0]
+        match = re.search(r"(?:gene_id|gene):(ENSG\d+)(?:\.\d+)?", header)
+        return name, match.group(1) if match else "", "".join(sequence)
+    with opener(fasta_path, "rt") as handle:
+        for line in handle:
+            if line.startswith(">"):
+                if header is not None and (wanted is None or header.split()[0] in wanted):
+                    yield record()
+                header, sequence = line[1:].rstrip("\r\n"), []
+            elif header is not None and (wanted is None or header.split()[0] in wanted):
+                sequence.append(line.rstrip("\r\n"))
+        if header is not None and (wanted is None or header.split()[0] in wanted):
+            yield record()
+
+
 # --------------------------------------------------------------------------- translation
 def translate_orf(nt_seq):
     """Translate an ORF NUCLEOTIDE sequence (ATG..stop) to protein, trimming a trailing stop. Returns

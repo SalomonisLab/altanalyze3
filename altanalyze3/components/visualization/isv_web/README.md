@@ -59,6 +59,76 @@ Switch at runtime without restart: `curl -X POST 'http://HOST:PORT/api/grouping?
 `?mode=final_isoform`); `GET /api/grouping` reports the current mode. Env `ISV_GROUPING` sets the startup default.
 Thresholds/strategy stay dynamic in `structure` mode.
 
+## Optional filter for reads extending into model introns
+
+In Molecule view → Advanced, enable **Hide reads extending into model introns**.
+The option is off by default. It examines the full eligible read pool for the selected
+isoforms, samples and populations **before** drawing up to **200 valid reads per isoform**.
+It therefore refills each pileup from passing reads that the previous sample did not include.
+If fewer than 200 pass, all passing reads are shown. The read cap is adjustable.
+
+A read is hidden when one of its continuous aligned blocks crosses an assigned isoform's
+splice-site boundary into an intron removed in that isoform. The default tolerance is 0 nt.
+The comparison uses original alignment coordinates and the registered model's exon coordinates,
+before any display compression. Whole read rows are hidden; exons are never clipped to make a
+read appear compatible. Free transcript-end extensions are allowed. This is specifically a
+splice-edge-extension filter, not a test of every possible difference between a read and model.
+
+The response records examined, hidden, eligible and drawn counts separately, with every hidden
+read identity and conflicting coordinates in `hidden_bleeding_reads`. Source read assignments,
+count matrices, model definitions and other analyses are unchanged. Unresolved required alignment
+or model coordinates produce an error rather than silently excluding the read.
+
+Headless export supports `--hide-bleeding-reads --bleed-tolerance 0
+--max-reads-per-isoform 200`. Omit `--max_reads` when requesting this per-isoform cap:
+that older option imposes an additional cap across the whole panel. API equivalents are
+`hide_bleeding_reads`, `bleed_tolerance` and `max_reads_per_isoform` on `/api/reads`.
+
+## Trans-splicing candidates and other multi-gene transcripts
+
+Transcripts containing gene-qualified exon tokens from multiple genes automatically use **separate
+genomic axes for each locus** in the heatmap, molecule and usage views, and in PDF export. When a trans-splicing candidate is displayed, each locus has its own vertically stacked reference row, naming its gene, chromosome and strand. Ordinary views retain one reference row; multiple or overlapping gene labels alone do not add rows. Equal panel widths and the gaps between panels do not encode
+genomic distance. Hover labels retain the original genomic coordinates, RNA support and read/final
+isoform identities. Counts, collapse assignments, clustering and sequence exports are unchanged.
+
+Read pileups use solid thin connectors to avoid aligned-dash stripe artifacts. Isoform model views retain dashed inter-gene connectors.
+For these stacked reference rows, each genomic backbone continues through every displayed window on
+the same chromosome. Real annotated exons are clipped to each window; the backbone does not imply
+that the gene annotation extends across that whole span. Other chromosomes remain separate.
+
+An orange dashed connector denotes a **candidate connecting non-overlapping reference loci**.
+Reference gene extents must be pairwise disjoint on the same chromosome (different chromosomes are
+also distinct). Overlapping gene annotations use gray connectors and are **not** called distinct-locus
+trans-splicing candidates. Unresolved reference loci are labeled unresolved rather than classified
+as candidates. Neither category establishes a trans-splicing mechanism: read-through,
+rearrangements and sequencing/alignment artifacts remain possible.
+This display flag does not replace the catalogue's physical-evidence audit or recalculate its
+trans-splicing statistics.
+
+Multi-gene exon coordinates are reconstructed separately for each gene from the annotated token
+sequence. The legacy read-coordinate store contains untagged coordinate pairs, so it cannot safely
+identify their chromosomes/genes for a multi-locus read. The view explicitly labels this coordinate
+source. Saved coding-region annotations now distinguish thick CDS portions from thin UTR portions
+in multi-gene models: the original CDS is intersected with each gene's exons before independent
+axis projection. This requires every participating gene to match the saved CDS chromosome.
+A single-chromosome CDS record is not extrapolated onto another chromosome; unsupported CDS/UTR
+coverage remains unknown. Single-gene CDS/UTR rendering is unchanged.
+The API adds `gene_models`, `has_multiple_loci` and per-row `gene_path`, `locus_status`,
+`locus_joins` and `trans_splicing_candidate`; exon segments retain `gene`, `chrom` and `strand`.
+Existing single-gene queries retain their previous coordinate and rendering path. No index rebuild,
+recollapse or requantification is needed.
+
+Headless PDFs extend the existing `isv_web_remote.render()` pileup, reference exon track and
+registered isoform structure track, including its two-isoform gold/blue palette and predicted protein
+length labels. There is no separate multi-locus plot renderer. Every RNA retains its individual
+indexed exon annotation; registered structures identify the final isoforms independently of those
+reads. Multi-locus registered models require gene-qualified segments; the CLI obtains these from
+final transcript associations and retains registered GFF exons for single-gene structures. Shared
+registered lists are projected once. Single-gene rendering follows its existing path.
+
+For headless multi-locus PDFs, omit the ambiguous single
+`--region` option; `--intron_scale` applies independently within each locus.
+
 ## Run
 ```bash
 pip install -r requirements.txt   # fastapi, uvicorn, jinja2 (component-local)
@@ -114,3 +184,61 @@ Protein length/NMD come from `protein_summary.txt` (indexed at startup); protein
 - `run.py` — CLI launcher (`--build_reads_index` builds/refreshes the retrieval index at startup).
 - `templates/index.html`, `static/app.js`, `static/styles.css` — frontend (two tabs + shared IGV-style renderer).
 - `_tests/` — engine-vs-API parity + speed + e2e smoke.
+
+## Optional protein-domain architecture tracks
+
+The headless ISV exporter accepts `--protein-features FIGURE_DIRECTORY`. The directory
+must be a completed standard `altanalyze3 sclr-iso2func protein-impact-plots` output
+created with `--protein-plot-style compact --coding-exon-map EXON_MAP`. ISV verifies
+the saved manifest hashes and reads only the small domain-placement and coding-exon
+tables. It does not realign sequences, download annotations, or scan FASTAs/GFFs.
+
+```bash
+python -m altanalyze3.components.visualization.isv_web.isv_web_remote \
+  --run_dir RUN --gene NR4A2 \
+  --cell_groups 'HSC-MPP=HSC-1,HSC-2,MPP-1,MPP-2' --conditions young,aged \
+  --isoforms ENST00000339562 NATIVE_ALTERNATIVE_ID \
+  --figure-mode --intron-scale 0.1 \
+  --protein-features ISO2FUNCTION_FIGURES \
+  --save-render-input NR4A2.render_input.json.gz --out NR4A2_with_protein.pdf
+```
+
+This adds native N-to-C protein tracks under the genomic read/reference/transcript
+tracks. Protein tracks share their own amino-acid scale; they do **not** use the
+genomic x-coordinate scale, even on the minus strand. Exon colors and AltAnalyze exon
+IDs come from the saved coding-exon map. Domain bars use the existing iso2function
+placements and conventional labels. `partial` denotes sequence-alignment coverage,
+not measured activity. Native IDs appear beneath each protein in the same color as
+its RNA pileup/transcript. The optional view uses regular panel/transcript labels,
+an italic gene title, and no narrative footer. Existing caption arguments remain
+available. Every input feature and its source remain in the original complete
+iso2function annotation audit. Unplaced annotations are explicitly listed.
+
+Missing, conflicting, or ambiguous native IDs, exon labels, reference projections,
+and unexpected protein lengths stop export; ISV never drops those isoforms. An
+explicit source-table/native-FASTA length discrepancy remains labeled on the protein
+track. All selected isoforms require registered transcript models. No residues are
+highlighted as substitutions. The default ISV layout is unchanged when the option
+is omitted. A `.protein_tracks.json` sidecar records all native exon/feature
+coordinates, source-manifest hashes, display colors, RNA counts, and PDF hash.
+
+A previously saved response can be rendered without reopening the dataset:
+
+```bash
+python -m altanalyze3.components.visualization.isv_web.isv_web_remote \
+  --run_dir RUN --gene NR4A2 --render-input NR4A2.render_input.json.gz \
+  --figure-mode --intron-scale 0.1 --protein-features ISO2FUNCTION_FIGURES \
+  --out NR4A2_with_protein.pdf
+```
+
+The saved response already defines the read/isoform selection. Query/filter arguments
+are rejected with `--render-input`; rendering options remain available. Save each
+selection's source provenance with the input. This path preserves its read counts,
+original alignment coordinates, sampling and transcript models.
+
+For the interactive viewer, add the same `--protein-features FIGURE_DIRECTORY` to
+`python -m altanalyze3.components.visualization.isv_web.run ...`, then enable
+**Molecule view → Advanced → Show protein domains and coding exons**. The `/api/reads`
+request uses `protein_features: true`; its response contains the same vector
+primitives as the PDF renderer. Protein tracks stay on their amino-acid scale during
+genomic zoom/pan and are included in the existing vector SVG/PDF export.

@@ -235,6 +235,7 @@ class StructureIndex:
         self.path = path
         self._con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
         self._cache = {}
+        self._geometry = {}
         self.stats = defaultdict(int)
         self.rejected = []
 
@@ -269,8 +270,9 @@ class StructureIndex:
                 "SELECT 1 FROM structures WHERE tid_base=? LIMIT 1", (exact,)).fetchone():
             base = exact
         row = self._con.execute(
-            "SELECT exons FROM structures WHERE gene=? AND tid_base=?", (gene, base)).fetchone()
-        txt = row[0] if row else None
+            "SELECT chrom, strand, exons FROM structures WHERE gene=? AND tid_base=?", (gene, base)).fetchone()
+        txt = row[2] if row else None
+        metadata = row
         if row is not None:
             self.stats["gene_match"] += 1
         else:
@@ -283,6 +285,7 @@ class StructureIndex:
             distinct = {h[2] for h in ok}
             if len(distinct) == 1:
                 txt = ok[0][2]
+                metadata = ok[0]
                 self.stats["fallback_at_locus"] += 1
             elif len(distinct) > 1:
                 self.stats["fallback_ambiguous"] += 1
@@ -298,7 +301,15 @@ class StructureIndex:
         if txt:
             val = [tuple(int(v) for v in seg.split("-")) for seg in txt.split(",") if seg]
         self._cache[key] = val
+        self._geometry[key] = (dict(chrom=metadata[0], strand=metadata[1], exons=val)
+                               if val and metadata else None)
         return val
+
+    def geometry(self, gene, final_isoform_id, locus=None):
+        """The chromosome and exon blocks selected by the existing identity lookup."""
+        self.exons(gene, final_isoform_id, locus=locus)
+        key = (gene, strip_version(str(final_isoform_id)), tuple(locus) if locus else None)
+        return self._geometry.get(key)
 
 
 def main(argv=None):

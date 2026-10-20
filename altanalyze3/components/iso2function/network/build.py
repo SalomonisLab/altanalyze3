@@ -40,6 +40,21 @@ def _as_bool(v):
     return str(v).strip().lower() in config.TRUE_TOKENS
 
 
+def assay_call(value):
+    """Authors' explicit Boolean call; an absent/unrecognized call stays unknown."""
+    token = str(value).strip().lower()
+    if token in config.TRUE_TOKENS:
+        return True
+    if token in config.FALSE_TOKENS:
+        return False
+    return None
+
+
+def _row_call(row, fallback=None):
+    value = row.get("detected", row.get(fallback, "") if fallback else "")
+    return None if assay_call(row.get("tested")) is False else assay_call(value)
+
+
 def build_graph(clone_ids=None, data_dir=None, crosswalk_structure=None, detected_only=False):
     """Build (nodes_df, edges_df) for the interaction graph.
 
@@ -73,7 +88,7 @@ def build_graph(clone_ids=None, data_dir=None, crosswalk_structure=None, detecte
             src = r.get("ad_clone_id")
             if clone_filter is not None and str(src) not in clone_filter:
                 continue
-            detected = _as_bool(r.get("detected", r.get("y2h_result_raw", "")))
+            detected = _row_call(r, "y2h_result_raw")
             if detected_only and not detected:
                 continue
             partner = r.get("db_gene_symbol") or r.get("db_orf_id")
@@ -81,7 +96,7 @@ def build_graph(clone_ids=None, data_dir=None, crosswalk_structure=None, detecte
             _touch(partner, "protein", gene_symbol=r.get("db_gene_symbol"),
                    category=r.get("db_gene_category"))
             edge_rows.append({"source": src, "target": partner, "edge_type": "ppi", "assay": "y2h",
-                              "detected": detected, "tested": True, "score": ""})
+                              "detected": detected, "tested": detected is not None, "score": ""})
 
     # N2H is deliberately NOT added as edges (score-only, no binary cutoff in metadata). Its log2 NLR
     # scores remain available in data/ppi_n2h.tsv for reference / future annotation if a cutoff is set.
@@ -93,17 +108,18 @@ def build_graph(clone_ids=None, data_dir=None, crosswalk_structure=None, detecte
             src = r.get("clone_id")
             if clone_filter is not None and str(src) not in clone_filter:
                 continue
-            detected = _as_bool(r.get("detected", ""))
+            detected = _row_call(r)
             if detected_only and not detected:
                 continue
             bait = r.get("bait_id")
             _touch(src, "isoform", gene_symbol=r.get("gene_symbol"))
             _touch(bait, "dna_target")
             edge_rows.append({"source": src, "target": bait, "edge_type": "pdi", "assay": "ey1h",
-                              "detected": detected, "tested": True, "score": ""})
+                              "detected": detected, "tested": detected is not None, "score": ""})
 
     nodes_df = pd.DataFrame(list(node_attr.values()))
-    edges_df = pd.DataFrame(edge_rows)
+    edges_df = pd.DataFrame(edge_rows, columns=["source", "target", "edge_type", "assay",
+                                               "detected", "tested", "score"])
 
     # annotate isoform nodes with the paper-defined M1H call (activator/repressor/neither), if ingested
     m1h_path = os.path.join(data_dir or config.DATA_DIR, "activation_m1h.tsv")
@@ -137,6 +153,7 @@ def _detected_partners(edges_df, clone_id, edge_type=None):
     if not len(edges_df):
         return set()
     m = (edges_df["source"].astype(str) == str(clone_id)) & (edges_df["detected"] == True)  # noqa: E712
+    m &= edges_df["tested"].map(assay_call).eq(True)
     if edge_type:
         m &= (edges_df["edge_type"] == edge_type)
     return set(edges_df.loc[m, "target"].astype(str))
@@ -152,8 +169,16 @@ def differential_interactome(clone_up, clone_down, edges_df, edge_type=None):
     """
     up_pos = _detected_partners(edges_df, clone_up, edge_type)
     down_pos = _detected_partners(edges_df, clone_down, edge_type)
-    up_tested = set(edges_df.loc[edges_df["source"].astype(str) == str(clone_up), "target"].astype(str))
-    down_tested = set(edges_df.loc[edges_df["source"].astype(str) == str(clone_down), "target"].astype(str))
+    tested = edges_df.loc[edges_df["tested"].map(assay_call).eq(True) &
+                          edges_df["detected"].map(assay_call).notna()]
+    if edge_type:
+        tested = tested.loc[tested["edge_type"] == edge_type]
+    # Contradictory replicate calls are unresolved, never simultaneously positive and negative.
+    conflicts = tested.groupby(["source", "target", "edge_type"])["detected"].nunique()
+    if (conflicts > 1).any():
+        raise ValueError("Conflicting assay calls for clone/target/modality")
+    up_tested = set(tested.loc[tested["source"].astype(str) == str(clone_up), "target"].astype(str))
+    down_tested = set(tested.loc[tested["source"].astype(str) == str(clone_down), "target"].astype(str))
     co_tested = up_tested & down_tested
     return {
         "clone_up": clone_up, "clone_down": clone_down, "edge_type": edge_type or "all",

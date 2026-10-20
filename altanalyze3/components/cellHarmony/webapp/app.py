@@ -6462,6 +6462,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         store, runner = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
+        store.touch_job(job_id)
         meta = _job_metadata_with_recovery(store, runner, job_id)
         log_path = store.logs_dir(job_id) / "pipeline.log"
         from .log_snapshot import read_pipeline_log, analysis_duration_seconds

@@ -1,0 +1,18 @@
+[
+  {
+    "gene_symbol": "CITED2",
+    "reference_accession": "Q99967",
+    "type": "Region",
+    "description": "CBP/p300-binding activation segment (literature construct)",
+    "location": {"start": {"value": 216, "modifier": "EXACT"}, "end": {"value": 269, "modifier": "EXACT"}},
+    "evidences": [{"source": "Primary research", "url": "https://pubs.rsc.org/en/content/articlehtml/2022/cb/d2cb00026a", "note": "CITED2 residues 216-269 used in the binding/sequence-variation analysis; not asserted as minimal domain boundaries."}]
+  },
+  {
+    "gene_symbol": "MLLT3",
+    "reference_accession": "P42568",
+    "type": "Region",
+    "description": "AHD C-terminal partner-binding segment (literature construct)",
+    "location": {"start": {"value": 497, "modifier": "EXACT"}, "end": {"value": 568, "modifier": "EXACT"}},
+    "evidences": [{"source": "Primary research", "url": "https://www.jbc.org/article/S0021925820857378/pdf", "note": "AF9 residues 497-568 are the experimentally used C-terminal hydrophobic construct; not asserted as exclusive minimal binding boundaries."}]
+  }
+]

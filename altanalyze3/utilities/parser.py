@@ -44,9 +44,11 @@ def _missing_subcommand(_name, _err):
             "The '%s' subcommand is unavailable in this altanalyze3 checkout: %s" % (_n, _e))
     return _stub
 try:
-    from altanalyze3.components.iso2function.cli import run_iso2function
+    from altanalyze3.components.iso2function.cli import run_iso2function, add_arguments as add_iso2function_arguments
 except Exception as _e:
     run_iso2function = _missing_subcommand("sclr-iso2func", _e)
+    def add_iso2function_arguments(parser, include_loglevel=False):
+        parser.add_argument("action")
 try:
     from altanalyze3.components.snaf.cli import (run_snaf, run_snaf_ts, run_snaf_b,
                                                  run_snaf_precompute_control,
@@ -714,12 +716,7 @@ class ArgsParser():
             help="Annotate isoform PPI/PDI/function (TFIso atlas) and build structure-keyed interaction networks"
         )
         iso2func_parser.set_defaults(func=run_iso2function)
-        iso2func_parser.add_argument("action", choices=["ingest", "crosswalk", "associate", "network", "enrich", "all"],
-                                     help="pipeline stage to run")
-        iso2func_parser.add_argument("--out-dir", default=None, type=str, help="Output dir for parsed/crosswalk/product tables (default: component data/ dir)")
-        iso2func_parser.add_argument("--artifacts-dir", default=None, type=str, help="Output dir for network/figure artifacts (default: component artifacts/)")
-        iso2func_parser.add_argument("--clone", action="append", default=None, help="Restrict the network to these atlas clone_ids (repeatable)")
-        iso2func_parser.add_argument("--detected-only", action="store_true", help="Drop assayed-negative edges from the exported network")
+        add_iso2function_arguments(iso2func_parser, include_loglevel=False)
         self.add_common_arguments(iso2func_parser)
 
         # SNAF: tumor-specificity-only (DB-free, offline, cross-platform)
@@ -737,6 +734,7 @@ class ArgsParser():
         snaf_ts_parser.add_argument("--min_samples", default=1, type=int, help="Keep only neojunctions expressed in >= this many tumor samples (recurrence filter). Default: 1 (no filtering)")
         snaf_ts_parser.add_argument("--t_min", default=20, type=int, help="maxmin: min (tumor - normal-mean) count. Default: 20")
         snaf_ts_parser.add_argument("--n_max", default=3, type=int, help="maxmin: max normal-mean count. Default: 3")
+        snaf_ts_parser.add_argument("--control_n_max", default=None, type=str, help="Per-control ceiling on the normal MEAN: 'Name=value[,Name2=value2]', naming an --add_control. Unset (default) means --n_max governs every control. Use it when one control legitimately expresses a junction at a higher level than the others, so the global ceiling does not have to be raised for all of them.")
         snaf_ts_parser.add_argument("--normal_cutoff", default=5, type=int, help="prevalance: normal count cutoff. Default: 5")
         snaf_ts_parser.add_argument("--tumor_cutoff", default=20, type=int, help="prevalance: tumor count cutoff. Default: 20")
         snaf_ts_parser.add_argument("--normal_prevalance_cutoff", default=0.01, type=float, help="prevalance: max normal fraction. Default: 0.01")
@@ -770,6 +768,7 @@ class ArgsParser():
         snaf_parser.add_argument("--min_samples", default=1, type=int, help="Keep only neojunctions expressed in >= this many tumor samples (recurrence filter). Default: 1 (no filtering)")
         snaf_parser.add_argument("--t_min", default=20, type=int, help="maxmin: min (tumor - normal-mean) count. Default: 20")
         snaf_parser.add_argument("--n_max", default=3, type=int, help="maxmin: max normal-mean count. Default: 3")
+        snaf_parser.add_argument("--control_n_max", default=None, type=str, help="Per-control ceiling on the normal MEAN: 'Name=value[,Name2=value2]', naming an --add_control. Unset (default) means --n_max governs every control. Use it when one control legitimately expresses a junction at a higher level than the others, so the global ceiling does not have to be raised for all of them.")
         snaf_parser.add_argument("--normal_cutoff", default=5, type=int, help="prevalance: normal count cutoff. Default: 5")
         snaf_parser.add_argument("--tumor_cutoff", default=20, type=int, help="prevalance: tumor count cutoff. Default: 20")
         snaf_parser.add_argument("--normal_prevalance_cutoff", default=0.01, type=float, help="prevalance: max normal fraction. Default: 0.01")
@@ -847,6 +846,7 @@ class ArgsParser():
         snaf_b_parser.add_argument("--min_samples", default=1, type=int, help="Keep only neojunctions expressed in >= this many tumor samples (recurrence filter). Default: 1 (no filtering)")
         snaf_b_parser.add_argument("--t_min", default=20, type=int, help="maxmin: min (tumor - normal-mean) count. Default: 20")
         snaf_b_parser.add_argument("--n_max", default=3, type=int, help="maxmin: max normal-mean count. Default: 3")
+        snaf_b_parser.add_argument("--control_n_max", default=None, type=str, help="Per-control ceiling on the normal MEAN: 'Name=value[,Name2=value2]', naming an --add_control. Unset (default) means --n_max governs every control. Use it when one control legitimately expresses a junction at a higher level than the others, so the global ceiling does not have to be raised for all of them.")
         snaf_b_parser.add_argument("--normal_cutoff", default=5, type=int, help="prevalance: normal count cutoff. Default: 5")
         snaf_b_parser.add_argument("--tumor_cutoff", default=20, type=int, help="prevalance: tumor count cutoff. Default: 20")
         snaf_b_parser.add_argument("--normal_prevalance_cutoff", default=0.01, type=float, help="prevalance: max normal fraction. Default: 0.01")

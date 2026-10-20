@@ -211,6 +211,29 @@ def _load_add_control(spec):
     return out
 
 
+def _load_control_n_max(spec):
+    """--control_n_max 'Name=12[,Name2=5]' -> {name: float}, the per-control normal-mean ceiling.
+
+    None or '' returns {}, so --n_max alone governs every control exactly as before. The name
+    must match an --add_control name; a name that matches none is an error, because silently
+    ignoring it would run the whole cohort at the wrong ceiling and report success."""
+    if not spec:
+        return {}
+    out = {}
+    for item in spec.split(','):
+        item = item.strip()
+        if not item:
+            continue
+        if '=' not in item:
+            raise ValueError("--control_n_max entry has no '=': {!r}".format(item))
+        name, val = item.split('=', 1)
+        try:
+            out[name.strip()] = float(val)
+        except ValueError:
+            raise ValueError("--control_n_max {!r}: {!r} is not a number".format(name, val))
+    return out
+
+
 # --------------------------------------------------------------------------- snaf-ts
 def run_snaf_ts(args):
     """Tumor-specificity-only entry (DB-free, offline)."""
@@ -235,6 +258,7 @@ def run_snaf_ts(args):
     logger.info("junction matrix: %s", df.shape)
 
     add_control = _load_add_control(getattr(args, 'add_control', None))
+    control_n_max = _load_control_n_max(getattr(args, 'control_n_max', None))
 
     # configure controls (sets the gtex globals used by sifting + tumor_specificity). When a
     # precomputed stats table exists (auto-detected or --control_stats), the full control
@@ -242,7 +266,8 @@ def run_snaf_ts(args):
     snaf.gtex_configuration(
         df, control_h5ad, args.t_min, args.n_max, args.normal_cutoff, args.tumor_cutoff,
         args.normal_prevalance_cutoff, args.tumor_prevalance_cutoff, add_control=add_control,
-        control_stats_path=(str(args.control_stats) if getattr(args, 'control_stats', None) else None))
+        control_stats_path=(str(args.control_stats) if getattr(args, 'control_stats', None) else None),
+        control_n_max_arg=control_n_max)
 
     jcmq = snaf.JunctionCountMatrixQuery(
         junction_count_matrix=df, cores=args.cpus, add_control=add_control,
@@ -340,7 +365,8 @@ def run_snaf(args):
         tumor_prevalance_cutoff=args.tumor_prevalance_cutoff, add_control=add_control,
         genome_fasta=genome_fasta, gtex_db=gtex_db,
         download_ref=getattr(args, 'download_ref', False),
-        control_stats_path=(str(args.control_stats) if getattr(args, 'control_stats', None) else None))
+        control_stats_path=(str(args.control_stats) if getattr(args, 'control_stats', None) else None),
+        control_n_max=_load_control_n_max(getattr(args, 'control_n_max', None)))
 
     jcmq = snaf.JunctionCountMatrixQuery(
         junction_count_matrix=df, cores=args.cpus, add_control=add_control,
@@ -565,7 +591,8 @@ def run_snaf_b(args):
         tumor_cutoff=args.tumor_cutoff, normal_prevalance_cutoff=args.normal_prevalance_cutoff,
         tumor_prevalance_cutoff=args.tumor_prevalance_cutoff, add_control=add_control,
         genome_fasta=genome_fasta, gtex_db=gtex_db, download_ref=getattr(args, 'download_ref', False),
-        control_stats_path=(str(args.control_stats) if getattr(args, 'control_stats', None) else None))
+        control_stats_path=(str(args.control_stats) if getattr(args, 'control_stats', None) else None),
+        control_n_max=_load_control_n_max(getattr(args, 'control_n_max', None)))
     # initialize() resolves its argument again, and there None means the default union, so the
     # Alt91_db choice must travel as its keyword.
     surface.initialize(db_dir=root, surface_db=(surface_db if surface_db is not None else 'alt91'))

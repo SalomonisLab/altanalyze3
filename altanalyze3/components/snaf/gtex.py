@@ -34,15 +34,25 @@ logger = logging.getLogger(__name__)
 # '''
 
 
-def gtex_configuration(df,gtex_db,t_min_arg,n_max_arg,normal_cutoff_arg,tumor_cutoff_arg,normal_prevalance_cutoff_arg,tumor_prevalance_cutoff_arg,add_control=None,control_stats_path=None,use_summary='auto'):
+def gtex_configuration(df,gtex_db,t_min_arg,n_max_arg,normal_cutoff_arg,tumor_cutoff_arg,normal_prevalance_cutoff_arg,tumor_prevalance_cutoff_arg,add_control=None,control_stats_path=None,use_summary='auto',control_n_max_arg=None):
     global adata_gtex
     global adata
     global t_min
     global n_max
+    global control_n_max
     global normal_cutoff
     global tumor_cutoff
     global normal_prevalance_cutoff
     global tumor_prevalance_cutoff
+    # A per-control ceiling naming a control that was never added would run the whole cohort at
+    # the wrong ceiling and still report success, so it is an error, not a warning.
+    if control_n_max_arg:
+        _known = set((add_control or {}).keys())
+        _unknown = [k for k in control_n_max_arg if k not in _known]
+        if _unknown:
+            raise ValueError(
+                'control_n_max names {} but add_control provides {}. Every per-control ceiling '
+                'must name an added control.'.format(sorted(_unknown), sorted(_known) or 'none'))
     tested_junctions = set(df.index)
 
     # ---- Summary-backed control path (the precompute architecture) ----------------------
@@ -68,6 +78,7 @@ def gtex_configuration(df,gtex_db,t_min_arg,n_max_arg,normal_cutoff_arg,tumor_cu
             adata_gtex.uns['snaf_summary_cutoff'] = float(normal_cutoff_arg)
             adata = adata_gtex
             t_min = t_min_arg; n_max = n_max_arg
+            control_n_max = dict(control_n_max_arg or {})
             normal_cutoff = normal_cutoff_arg; tumor_cutoff = tumor_cutoff_arg
             normal_prevalance_cutoff = normal_prevalance_cutoff_arg; tumor_prevalance_cutoff = tumor_prevalance_cutoff_arg
             print('Loaded control SUMMARY ({}/{} tested junctions) from {} -- full count matrix NOT loaded'.format(
@@ -160,6 +171,15 @@ def gtex_configuration(df,gtex_db,t_min_arg,n_max_arg,normal_cutoff_arg,tumor_cu
 
     t_min = t_min_arg
     n_max = n_max_arg
+    # Per-control ceiling on the normal MEAN. Empty by default, so n_max alone governs every
+    # control exactly as before. It exists because n_max is one global over GTEx and every
+    # --add_control at once, while the right ceiling is a property of the control: on
+    # 2026-10-16 TFRC ENSG00000072274:E15.5-I15.1_196061434 had a GTEx mean of 0.574 (2,629
+    # samples) and a marrow mean of 10.257 (444 samples), so keeping it needed n_max > 10.26.
+    # Raising the GLOBAL to 12 to reach it also admitted 112,177 of 2,476,734 GTEx junctions
+    # (4.53%) whose own mean is 3 to 12 reads, median 5.686 -- a loosening of the normal-tissue
+    # standard that nothing in the question asked for.
+    control_n_max = dict(control_n_max_arg or {})
     normal_cutoff = normal_cutoff_arg
     tumor_cutoff = tumor_cutoff_arg
     normal_prevalance_cutoff = normal_prevalance_cutoff_arg
@@ -511,16 +531,18 @@ def multiple_crude_sifting_maxmin_fast(junction_count_matrix, add_control=None, 
         for id_, control in add_control.items():
             n_previous_valid = len(valid)
             mean_add = _mean_vector_from_control(control, jc_index)
+            # This control's own ceiling, falling back to the global n_max when none is set.
+            n_max_add = float(globals().get('control_n_max', {}).get(id_, n_max))
             diff_add = max_vec - mean_add
-            cond_add = (mean_add < n_max) & (diff_add > t_min)
+            cond_add = (mean_add < n_max_add) & (diff_add > t_min)
             valid_add = jc_index[cond_add].tolist()
             valid = list(set(valid).intersection(set(valid_add)))
             tmp = df.copy(); tmp.drop(columns=['mean', 'diff', 'cond'], inplace=True)
             tmp['mean_add'] = mean_add; tmp['diff_add'] = diff_add; tmp['cond_add'] = cond_add
             tmp.rename(columns=lambda x: x + '_{}'.format(id_), inplace=True)
             df_to_write.append(tmp)
-            cond_arr &= (mean_add[:, None] < n_max) & ((jc_vals - mean_add[:, None]) > t_min)
-            print('reduce valid Neojunction from {} to {} because they are present in added control {}'.format(n_previous_valid, len(valid), id_))
+            cond_arr &= (mean_add[:, None] < n_max_add) & ((jc_vals - mean_add[:, None]) > t_min)
+            print('reduce valid Neojunction from {} to {} because they are present in added control {} (n_max={}, t_min={})'.format(n_previous_valid, len(valid), id_, n_max_add, t_min))
 
     invalid = list(set(jc_index).difference(set(valid)))
     cond_df = pd.DataFrame(cond_arr, index=jc_index, columns=jc_cols)

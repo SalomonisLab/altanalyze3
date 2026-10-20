@@ -24,6 +24,8 @@ def main(argv=None):
     ap.add_argument("--gff_output", default=None, help="gff-output dir (default: <run_dir>/gff-output)")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8050)
+    ap.add_argument('--protein-features', default=None,
+                    help='Completed compact iso2function figure directory with a coding-exon map; enables optional protein tracks')
     ap.add_argument("--build_reads_index", action="store_true",
                     help="build/refresh the per-gene molecule retrieval index at startup, then serve "
                          "(makes the read-level view retrieve in ~ms; idempotent)")
@@ -39,6 +41,9 @@ def main(argv=None):
     print(f"[isv_web] loading run context from {run_dir} ...", flush=True)
     ctx = da.RunContext(run_dir, a.metadata, a.gene_model, a.gene_symbol,
                         gff_output_dir=a.gff_output).load_all()
+    if a.protein_features:
+        from ...iso2function.plotting.isv_architecture import load_architectures
+        ctx.protein_architectures = load_architectures(a.protein_features)
 
     if a.build_reads_index:
         from . import precompute_reads_index as pri

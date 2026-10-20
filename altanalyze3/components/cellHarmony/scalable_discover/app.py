@@ -264,7 +264,7 @@ def _validate_species(species: str, reference: str) -> str:
 
 
 def _install_job_cleanup(app: FastAPI) -> None:
-    """Use web's eight-hour terminal-job policy even when no uploads arrive."""
+    """Use web's configurable terminal-job retention policy even when no uploads arrive."""
     previous_lifespan = app.router.lifespan_context
 
     async def purge():

@@ -1,0 +1,28 @@
+{
+  "CITED2": {
+    "accession": "Q99967",
+    "citation_correction": "PMID35012986 is Berlow et al., not Appling et al.",
+    "region_1_based_inclusive": [
+      216,
+      269
+    ],
+    "sources": [
+      {
+        "authors": "H\u00f3bor et al.",
+        "doi": "10.1039/D2CB00026A",
+        "role": "Binding and sequence variation study using CITED2 216-269",
+        "url": "https://pubs.rsc.org/en/content/articlehtml/2022/cb/d2cb00026a",
+        "year": 2022
+      },
+      {
+        "authors": "Berlow, Dyson and Wright",
+        "doi": "10.1073/pnas.2117338119",
+        "role": "Mutagenesis/truncation of CITED2 activation motifs affects competition for CBP TAZ1",
+        "url": "https://pubmed.ncbi.nlm.nih.gov/35012986/",
+        "year": 2022
+      }
+    ]
+  },
+  "scope": "Pinned literature-construct coordinates, separately labeled from Ensembl/InterPro and UniProt features. Presence/absence is computed by the protein-impact CLI. No native-isoform assay is implied.",
+  "source_annotation_sha256": "f17217e4efb978c50f184a15647648146c628c587b198407c1e6951e29c1a6bd"
+}

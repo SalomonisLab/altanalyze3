@@ -18,12 +18,12 @@ import sys
 logger = logging.getLogger(__name__)
 
 
-def add_arguments(parser):
+def add_arguments(parser, include_loglevel=True):
     """Attach iso2function arguments to an existing argparse parser/subparser. Returns the parser so a
     caller in ``utilities/parser.py`` can do ``add_arguments(sub.add_parser('sclr-iso2func'))``."""
     parser.add_argument("action",
                         choices=["ingest", "crosswalk", "associate", "uniprot", "network", "enrich",
-                                 "export", "switch-plots", "stacked-bar", "all"],
+                                 "export", "switch-plots", "stacked-bar", "query", "protein-impact", "protein-impact-plots", "protein-exon-map", "assay-match", "report", "all"],
                         help="pipeline stage to run")
     parser.add_argument("--out-dir", default=None,
                         help="output dir for parsed/crosswalk tables (default: component data/ dir)")
@@ -35,19 +35,19 @@ def add_arguments(parser):
                         help="drop assayed-negative edges from the exported network")
     # ---- switch-plots action ----
     parser.add_argument("--pairs", default=None,
-                        help="switch-plots: TSV of isoform-switch pairs "
+                        help="switch-plots/query: TSV of isoform-switch pairs "
                              "(cols gene,ensg,isoA,isoB,A_clone,B_clone[,A_m1h_call,B_m1h_call])")
     parser.add_argument("--pseudobulk", default=None,
-                        help="switch-plots: isoform pseudobulk h5ad "
+                        help="switch-plots/query: isoform pseudobulk h5ad (query requires counts) "
                              "(obs '<cellstate>.<sample>-isoform', var '<ENSG>:<isoform>')")
     parser.add_argument("--donor", action="append", default=None,
-                        help="switch-plots: restrict to these sample tokens (repeatable); default all")
+                        help="switch-plots/query: restrict samples (query: original_library; repeatable); default all")
     parser.add_argument("--lineage-map", default=None,
                         help="switch-plots: optional 2-col TSV (cell_state<TAB>lineage) to add lineage plots")
     parser.add_argument("--top-states", type=int, default=6,
                         help="switch-plots: number of largest-ratio-shift cell states in the network (default 6)")
     # ---- stacked-bar action (plot_stacked_isoform_bar) ----
-    parser.add_argument("--gene", default=None, help="stacked-bar: gene symbol")
+    parser.add_argument("--gene", default=None, help="stacked-bar/query: gene symbol")
     parser.add_argument("--ensg", default=None, help="stacked-bar: ENSG id")
     parser.add_argument("--isoforms", default=None,
                         help="stacked-bar: '|'- or ','-separated ordered isoform ids to show")
@@ -62,9 +62,57 @@ def add_arguments(parser):
                         help="stacked-bar: file with one cell-state/lineage per line (x-axis order)")
     parser.add_argument("--clone-map", default=None,
                         help="stacked-bar/switch-plots: 2-col TSV (isoform<TAB>clone_label) for legend labels")
-    parser.add_argument("--out", default=None, help="stacked-bar: output base path (.pdf/.png appended)")
-    parser.add_argument("--loglevel", default="INFO",
-                        help="logging level (DEBUG/INFO/WARNING/ERROR)")
+    parser.add_argument("--out", default=None, help="stacked-bar: output base path; export --query-results: text file")
+    parser.add_argument("--query-results", help="export/report: completed query directory")
+    # Shared by the top-level and standalone CLI; no dataset-specific query wrappers.
+    parser.add_argument("--interaction-type", choices=["all", "ppi", "pdi"], default="all")
+    parser.add_argument("--metadata", help="query: library metadata TSV (library, groups, original_library)")
+    parser.add_argument("--state", action="append", help="query: cell state to retain (repeatable)")
+    parser.add_argument("--condition", action="append", help="query: metadata groups to retain (repeatable)")
+    parser.add_argument("--protein-fasta", help="query: native protein FASTA, optionally gzip compressed")
+    parser.add_argument("--min-isoform-reads", type=float, default=30,
+                        help="query: minimum assigned reads for each native isoform (inclusive; default 30)")
+    parser.add_argument("--max-aa-substitutions", type=int, default=0,
+                        help="query: permit this many AA substitutions for same-gene, same-length proteins "
+                             "without an exact assay match (default 0); report transferred assay evidence as putative")
+    parser.add_argument("--gene-cpm", help="query: native gene-level CPM h5ad")
+    parser.add_argument("--gene-counts", help="query: gene counts h5ad to verify native CPM against")
+    parser.add_argument("--min-partner-cpm", type=float,
+                        help="query: strict threshold on mean donor gene CPM in at least one selected state")
+    parser.add_argument("--min-differential-partners", type=int, default=1,
+                        help="query: minimum qualifying explicit True/False differences (default 1)")
+    parser.add_argument("--clonelist", help="query: assayed clone catalogue TSV (default: configured CloneList)")
+    parser.add_argument("--gene-annotation", help="query: gene ID/symbol TSV (default: configured Ensembl91)")
+    parser.add_argument("--mane-summary", help="query: MANE summary TSV, optionally gzip compressed")
+    parser.add_argument("--symbol-map", help="query: additive identifier TSV (symbol, ensg, source)")
+    parser.add_argument("--combined-network", action="store_true",
+                        help="query: export combined divergent-interaction network using ISV layout")
+    parser.add_argument("--native-models", help="protein-impact: native model TSV with protein/CDS/cDNA sequences")
+    parser.add_argument("--required-roster", help="protein-impact: independent ordered roster JSON with source hash")
+    parser.add_argument("--reference-bundle", help="protein-impact: pinned AltAnalyze protein reference bundle JSON")
+    parser.add_argument("--coding-regions", help="protein-impact: native coding_regions.txt (optionally gzipped)")
+    parser.add_argument("--prior-feature-audit", help="protein-impact: earlier reference_mapped_features.tsv for regression")
+    parser.add_argument("--impact-results", help="report/protein-impact-plots: completed protein-impact result directory")
+    parser.add_argument("--genes", help="protein-impact-plots: comma-separated genes; default all genes with audited pairs")
+    parser.add_argument("--protein-plot-style", choices=["compact", "detailed"], default="compact",
+                        help="protein-impact-plots: compact domain architecture (default), or detailed audit figure")
+    parser.add_argument("--protein-figure-layout", choices=["pages", "stacked"], default="pages",
+                        help="protein-impact-plots: separate PDF pages (default), or stack all compact panels on one vector PDF page")
+    parser.add_argument("--protein-figure-width", type=float, default=12,
+                        help="protein-impact-plots: compact figure width in inches (default 12); increase for narrow exon labels")
+    parser.add_argument("--isv-structure-index", help="protein-exon-map: existing registered ISV final_structures.db")
+    parser.add_argument("--gene-model-index", help="protein-exon-map: existing ISV gene_model.db for AltAnalyze exon IDs")
+    parser.add_argument("--coding-exon-map", help="completed protein-exon-map directory; plots read it, protein-exon-map reuses it without rescanning GFF/CDS")
+    parser.add_argument("--feature-type", action="append", default=None,
+                        help="protein-impact-plots: annotation type to display (repeatable); default functional domains, motifs and regions")
+    parser.add_argument("--annotation-source", action="append", default=None,
+                        help="protein-impact-plots: source provider to display (repeatable); default reviewed UniProt and literature annotations")
+    parser.add_argument("--feature-reference", action="append", default=None,
+                        help="protein-impact-plots: display a specified gene's reference protein as GENE=REFERENCE_PROTEIN (repeatable); all other source rows stay in the audit")
+    parser.add_argument("--assay-results", help="report: completed assay-match result directory")
+    if include_loglevel:
+        parser.add_argument("--loglevel", default="INFO",
+                            help="logging level (DEBUG/INFO/WARNING/ERROR)")
     return parser
 
 
@@ -75,6 +123,28 @@ def run_iso2function(args):
     from . import config
     config.ensure_dirs()
     action = args.action
+
+    if action == "protein-impact":
+        from .protein_impact import run_protein_impact
+        return run_protein_impact(args)
+    if action == "protein-impact-plots":
+        from .plotting.protein_features import run_protein_impact_plots
+        return run_protein_impact_plots(args)
+    if action == "protein-exon-map":
+        from .coding_exons import run_protein_exon_map
+        return run_protein_exon_map(args)
+    if action == "assay-match":
+        from .assay_match import run_assay_match
+        return run_assay_match(args)
+    if action == "report":
+        from .evidence_report import run_report
+        return run_report(args)
+    if action == "query":
+        from .query import run_query
+        return run_query(args)
+    if action == "export" and getattr(args, "query_results", None):
+        from .export_interactions import export_query_results
+        return export_query_results(args.query_results, args.out, args.interaction_type)
 
     if action in ("ingest", "all"):
         from .ingest import paper2, paper1

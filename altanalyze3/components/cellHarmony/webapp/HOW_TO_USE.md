@@ -299,7 +299,9 @@ browser reload.
 Each job lives in one folder under
 `/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/jobs/<job id>/`
 with `uploads/`, `outputs/` and `logs/pipeline.log`. The README lists every output file. The
-server deletes finished jobs older than 8 hours when a new upload arrives.
+server deletes finished jobs after 72 hours without an update or results-page visit
+by default. Returning to the results page renews that window; administrators can
+configure a different retention period.
 
 ### AI summary
 

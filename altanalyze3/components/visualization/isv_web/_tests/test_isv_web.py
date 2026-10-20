@@ -44,7 +44,7 @@ def run():
 
     res = da.query_isoforms(ctx, GENE, None, None, None, combine_by="group")
     check("query returns isoforms", len(res["isoforms"]) > 0, f"n={len(res['isoforms'])}")
-    check("query columns are the groups", set(res["columns"]) == {"young", "AML-NPM1"}, str(res["columns"]))
+    check("query columns are the groups", {c["key"] for c in res["columns"]} == {"young", "AML-NPM1"}, str(res["columns"]))
     check("clusters assigned", res["cluster_count"] > 0, f"clusters={res['cluster_count']}")
 
     # 2. exon coords parity with build_isoform_segments (recompute for one isoform)
@@ -86,7 +86,7 @@ def run():
     # cell-type combine
     cts = ctx.cell_types[:2]
     rc = da.query_isoforms(ctx, GENE, None, None, cts, combine_by="cell_type")
-    check("cell_type combine columns", set(rc["columns"]) == set(cts), str(rc["columns"]))
+    check("cell_type combine columns", {c["key"] for c in rc["columns"]} == set(cts), str(rc["columns"]))
 
     n_fail = sum(1 for _, ok, _ in results if not ok)
     print(f"\n{len(results) - n_fail}/{len(results)} passed")

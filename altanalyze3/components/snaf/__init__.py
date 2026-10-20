@@ -20,7 +20,8 @@ import os,sys
 
 def initialize(df,db_dir,gtex_mode='count',software_path=None,binding_method=None,t_min=20,n_max=3,
                normal_cutoff=5, tumor_cutoff=20, normal_prevalance_cutoff=0.01, tumor_prevalance_cutoff=0.1, add_control=None,
-               genome_fasta=None, gtex_db=None, download_ref=False, control_stats_path=None):
+               genome_fasta=None, gtex_db=None, download_ref=False, control_stats_path=None,
+               control_n_max=None):
     '''
     Setting up global variable for running the program
 
@@ -74,7 +75,7 @@ def initialize(df,db_dir,gtex_mode='count',software_path=None,binding_method=Non
         if not os.path.exists(p):
             raise FileNotFoundError('SNAF {}: required reference file not found: {}'.format(label,p))
     snaf_configuration(exon_table,transcript_db,root,fasta,software_path,binding_method,genome_fasta=genome_fasta)
-    adata = gtex_configuration(df,gtex_db,t_min,n_max,normal_cutoff, tumor_cutoff, normal_prevalance_cutoff, tumor_prevalance_cutoff, add_control, control_stats_path=control_stats_path)
+    adata = gtex_configuration(df,gtex_db,t_min,n_max,normal_cutoff, tumor_cutoff, normal_prevalance_cutoff, tumor_prevalance_cutoff, add_control, control_stats_path=control_stats_path, control_n_max_arg=control_n_max)
     gtex_viewer_configuration(adata)
     print('{} {} finishing initialization'.format(date.today(),datetime.now().strftime('%H:%M:%S')))
 

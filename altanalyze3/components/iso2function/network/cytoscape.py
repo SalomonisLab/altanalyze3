@@ -10,8 +10,10 @@ is emitted alongside the elements so the graph renders consistently.
 import os
 import json
 import logging
+import math
 
 from .. import config
+from .build import assay_call
 
 logger = logging.getLogger(__name__)
 
@@ -28,21 +30,29 @@ EDGE_COLORS = {
 EDGE_UNDETECTED_COLOR = "#D9D9D9"  # light grey for assayed-negative edges
 
 
+def _json_scalar(value):
+    # DataFrame numeric columns coerce missing attributes to NaN. JSON NaN is not
+    # valid Cytoscape/browser JSON and must not masquerade as measured expression.
+    if value is None or (isinstance(value, float) and not math.isfinite(value)):
+        return ""
+    return value
+
+
 def to_cytoscape_elements(nodes_df, edges_df, include_undetected=False):
     """Return a Cytoscape.js elements dict: {'nodes': [...], 'edges': [...]}. Each element is
     {'data': {...}} with all DataFrame columns carried as data attributes. Assayed-negative edges are
     excluded unless ``include_undetected`` (they remain available in the edge table either way)."""
     nodes = []
     for _, r in nodes_df.iterrows():
-        data = {k: ("" if v is None else v) for k, v in r.to_dict().items()}
+        data = {k: _json_scalar(v) for k, v in r.to_dict().items()}
         data.setdefault("id", data.get("id"))
         nodes.append({"data": data})
     edges = []
     for i, r in edges_df.iterrows():
-        detected = bool(r.get("detected", True))
+        detected = assay_call(r.get("detected")) is True
         if not detected and not include_undetected:
             continue
-        data = {k: ("" if v is None else v) for k, v in r.to_dict().items()}
+        data = {k: _json_scalar(v) for k, v in r.to_dict().items()}
         data["id"] = f"e{i}"
         edges.append({"data": data})
     return {"nodes": nodes, "edges": edges}
@@ -74,7 +84,7 @@ def write_cytoscape_json(nodes_df, edges_df, out_path=None, include_undetected=F
                "elements": to_cytoscape_elements(nodes_df, edges_df, include_undetected),
                "style": default_style()}
     with open(out_path, "w") as fh:
-        json.dump(payload, fh, indent=2, default=str)
+        json.dump(payload, fh, indent=2, default=str, allow_nan=False)
     logger.info("[iso2function.network] wrote Cytoscape JSON: %s", out_path)
     return out_path
 
@@ -85,7 +95,7 @@ def write_sif(edges_df, out_path=None, detected_only=True):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "w") as fh:
         for _, r in edges_df.iterrows():
-            if detected_only and not bool(r.get("detected", True)):
+            if detected_only and assay_call(r.get("detected")) is not True:
                 continue
             fh.write(f"{r['source']}\t{r.get('assay', r['edge_type'])}\t{r['target']}\n")
     return out_path

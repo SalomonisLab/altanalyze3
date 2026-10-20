@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Dict
 
 from .job_manager import JobStore
-from .worker_memory import process_memory, tree_rss, container_memory, host_memory
+from .worker_memory import process_memory, tree_rss, container_memory, container_memory_details, host_memory
 from .worker_runtime import worker_environment
 from .pipeline import run_cellharmony_differential, run_cellharmony_pipeline
 
@@ -113,6 +113,7 @@ class JobRunner:
                 return "A running analysis has reached the per-worker memory threshold."
             container = container_memory()
             used, limit = container if container else (tree_rss(processes, os.getpid()), self.total_memory_limit)
+            used = max(used, tree_rss(processes, os.getpid()))
             ceiling = min(self.total_memory_limit, int(limit * 0.9)) if container else limit
             if used >= ceiling:
                 return "The server is currently using its available analysis memory."
@@ -187,6 +188,9 @@ class JobRunner:
                                 self._update_differential(job_id, message=message)
                             last_reason = reason
                         self._admission.wait(timeout=1)
+                    memory = container_memory_details()
+                    if memory:
+                        self.store.append_log(job_id, f"[memory] admission accounting bytes={memory}")
                     process = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env,
                                                start_new_session=True)
                     self._active_workers[process.pid] = process
@@ -221,6 +225,7 @@ class JobRunner:
         This is a polled safeguard, not a guarantee against instantaneous spikes.
         The 15-GiB threshold still controls admission, not termination.
         """
+        host_low_samples = 0
         while True:
             try:
                 return process.wait(timeout=0.5)
@@ -229,6 +234,7 @@ class JobRunner:
             try:
                 usage = container_memory()
                 processes = process_memory()
+                host = host_memory()
             except (OSError, ValueError, subprocess.SubprocessError):
                 continue
             if usage is None:
@@ -236,9 +242,15 @@ class JobRunner:
             else:
                 used, limit = usage
                 ceiling = min(self.total_memory_limit, int(limit * 0.9))
+            rss = tree_rss(processes, os.getpid())
+            used = max(used, rss)
+            # Host MemAvailable already includes reclaimable pages. Require
+            # sustained critical pressure, including pressure from other services.
+            host_low_samples = (host_low_samples + 1 if host is not None
+                                and host[0] <= min(1024**3, int(host[1] * 0.05)) else 0)
             with self._admission:
                 largest = max(self._active_workers, key=lambda pid: tree_rss(processes, pid), default=None)
-            if used < ceiling or largest != process.pid:
+            if (used < ceiling and host_low_samples < 4) or largest != process.pid:
                 continue
             if process.poll() is not None:
                 return process.returncode
@@ -254,8 +266,16 @@ class JobRunner:
                 except ProcessLookupError:
                     pass
                 process.wait()
-            raise MemoryError(f'Analysis stopped because server memory reached its safety limit '
-                              f'({used / 1024**3:.1f} of {ceiling / 1024**3:.1f} GiB). '
+            pressure = (f'host available memory remained critically low ({host[0] / 1024**3:.2f} GiB)'
+                        if host_low_samples >= 4 else
+                        f'server allocation memory reached its safety limit '
+                        f'({used / 1024**3:.1f} of {ceiling / 1024**3:.1f} GiB; '
+                        f'process-tree RSS {rss / 1024**3:.1f} GiB; clean file cache excluded)')
+            try:
+                pressure += f'; cgroup accounting bytes={container_memory_details()}'
+            except (OSError, ValueError):
+                pass
+            raise MemoryError(f'Analysis stopped because {pressure}. '
                               'Uploaded data are retained. Reduce simultaneous analyses or selected '
                               'modalities, or run this job on a server with more memory.')
 

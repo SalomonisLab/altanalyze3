@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import data_api as da
 
@@ -55,6 +55,10 @@ class ReadsQuery(BaseModel):
     conditions: Optional[List[str]] = None   # covariates; None == all groups
     max_isoforms: int = 300                  # per-panel molecule cap (engine default)
     panel_by: str = "covariate"              # 'covariate' (panel per covariate) | 'cell_type' (panel per cell type)
+    hide_bleeding_reads: bool = False
+    bleed_tolerance: int = Field(default=0, ge=0)
+    max_reads_per_isoform: int = Field(default=200, ge=1)
+    protein_features: bool = False
 
 
 class ExportPdfRequest(BaseModel):
@@ -193,6 +197,47 @@ def create_app(ctx: da.RunContext) -> FastAPI:
             return cache[sig]
         res = da.query_reads(ctx, g, cell_types=q.cell_types, conditions=q.conditions,
                              max_isoforms=q.max_isoforms, panel_by=q.panel_by)
+        if q.hide_bleeding_reads and res.get('panels'):
+            # Preserve the originally selected isoforms, but search their FULL
+            # read pools before filtering and per-isoform sampling.
+            from copy import deepcopy
+            from .read_filters import cap_reads_per_isoform
+            wanted = {p['condition']: {m['final_isoform_id'] for m in p['molecules']} for p in res['panels']}
+            full = deepcopy(da.query_reads(ctx, g, cell_types=q.cell_types, conditions=q.conditions,
+                                          max_isoforms=10**9, panel_by=q.panel_by))
+            for p in full.get('panels', []):
+                p['molecules'] = [m for m in p['molecules'] if m['final_isoform_id'] in wanted.get(p['condition'], set())]
+                p['n_molecules'] = sum(m['count'] for m in p['molecules'])
+            res = cap_reads_per_isoform(da.prepare_bleeding_read_filter(ctx, full, q.bleed_tolerance),
+                                       q.max_reads_per_isoform, seed=0)
+        if q.protein_features:
+            from copy import deepcopy
+            from ...iso2function.plotting.isv_architecture import select_tracks, layout_tracks
+            bundle = getattr(ctx, 'protein_architectures', None)
+            if bundle is None:
+                raise HTTPException(422, 'Start ISV with --protein-features pointing to completed iso2function architecture output')
+            res = deepcopy(res)
+            ids = list(dict.fromkeys(m.get('final_isoform_id') or m['isoform_id']
+                                    for p in res.get('panels', []) for m in p['molecules']))
+            if ids:
+                try:
+                    tracks = select_tracks(bundle, ids, res.get('symbol'))
+                    from .isv_web_remote import TWO_ISOFORM_COLORS, color_for
+                    records = {m.get('final_isoform_id') or m['isoform_id']: m
+                               for p in res['panels'] for m in p['molecules']}
+                    colors = {iid: TWO_ISOFORM_COLORS[i] if len(ids) == 2 else color_for(records[iid])
+                              for i, iid in enumerate(ids)}
+                    for track in tracks:
+                        track['display_color'] = colors[track['isoform_id']]
+                        observed = records[track['isoform_id']].get('protein_length')
+                        if observed not in (None, '') and int(observed) not in (track['protein_aa'], int(track['reported_aa'] or track['protein_aa'])):
+                            raise ValueError('ISV protein length differs from audited architecture: ' + track['isoform_id'])
+                    for panel in res['panels']:
+                        for row in panel['molecules']:
+                            row['display_color'] = colors[row.get('final_isoform_id') or row['isoform_id']]
+                    res['protein_architecture'] = layout_tracks(tracks, 1000, 1.5)
+                except ValueError as exc:
+                    raise HTTPException(422, str(exc)) from exc
         if len(cache) > 256:
             cache.clear()
         cache[sig] = res

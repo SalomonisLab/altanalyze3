@@ -214,3 +214,64 @@ def test_netmhcpan_failure_is_not_an_empty_success(monkeypatch):
     monkeypatch.setattr(BD.subprocess, 'run', failing)
     with pytest.raises(subprocess.CalledProcessError):
         BD._run_netMHCpan_once('netMHCpan', 'peptides.txt', 'HLA-A02:01', 9, {'PEPTIDEAA'})
+
+
+# --------------------------------------------------------------------- per-control n_max
+# `n_max` is ONE ceiling over GTEx and every --add_control at once (gtex.py:497 and :515), so
+# reaching a junction a single control expresses means loosening the ceiling for all of them.
+# Measured 2026-10-16 on the shipped references: TFRC ENSG00000072274:E15.5-I15.1_196061434 has
+# a GTEx mean of 0.574 over 2,629 samples and a marrow mean of 10.257 over 444, and raising the
+# GLOBAL ceiling from 3 to 12 to keep it also admits 112,177 of 2,476,734 GTEx junctions (4.53%)
+# whose own mean is 3 to 12 reads. `control_n_max` raises the ceiling for the named control only.
+def test_control_n_max_default_is_unchanged_behaviour(synthetic):
+    """Unset, the per-control ceiling must reproduce the global n_max exactly."""
+    jcm = synthetic['jcm']
+    rng = np.random.default_rng(11)
+    ctrl = pd.DataFrame(rng.poisson(6, size=(400, 8)).astype(float),
+                        index=list(rng.choice(jcm.index, 400, replace=False)),
+                        columns=['m{}'.format(i) for i in range(8)])
+    out = synthetic['dir']
+    G.gtex_configuration(jcm, synthetic['gtex'], 20, 3, 5, 20, 0.01, 0.1, add_control={'M': ctrl})
+    v_none, _, _ = G.multiple_crude_sifting_maxmin_fast(jcm, add_control={'M': ctrl}, outdir=out)
+    G.gtex_configuration(jcm, synthetic['gtex'], 20, 3, 5, 20, 0.01, 0.1, add_control={'M': ctrl},
+                         control_n_max_arg=None)
+    v_empty, _, _ = G.multiple_crude_sifting_maxmin_fast(jcm, add_control={'M': ctrl}, outdir=out)
+    G.gtex_configuration(jcm, synthetic['gtex'], 20, 3, 5, 20, 0.01, 0.1, add_control={'M': ctrl},
+                         control_n_max_arg={'M': 3})
+    v_explicit, _, _ = G.multiple_crude_sifting_maxmin_fast(jcm, add_control={'M': ctrl}, outdir=out)
+    assert set(v_none) == set(v_empty), 'control_n_max=None changed the result'
+    assert set(v_none) == set(v_explicit), 'naming the global value explicitly changed the result'
+
+
+def test_control_n_max_raises_the_named_control_only(synthetic):
+    """A control whose mean exceeds the global ceiling is reachable by naming it, and the GTEx
+    ceiling is untouched: the kept set grows, and it grows only by junctions the control drove."""
+    jcm = synthetic['jcm']
+    rng = np.random.default_rng(12)
+    # a control expressed well above the global n_max of 3, as marrow is for TFRC
+    ctrl = pd.DataFrame(rng.poisson(8, size=(len(jcm), 8)).astype(float),
+                        index=jcm.index, columns=['m{}'.format(i) for i in range(8)])
+    out = synthetic['dir']
+    G.gtex_configuration(jcm, synthetic['gtex'], 20, 3, 5, 20, 0.01, 0.1, add_control={'M': ctrl})
+    tight, _, _ = G.multiple_crude_sifting_maxmin_fast(jcm, add_control={'M': ctrl}, outdir=out)
+    G.gtex_configuration(jcm, synthetic['gtex'], 20, 3, 5, 20, 0.01, 0.1, add_control={'M': ctrl},
+                         control_n_max_arg={'M': 20})
+    loose, _, _ = G.multiple_crude_sifting_maxmin_fast(jcm, add_control={'M': ctrl}, outdir=out)
+    assert len(loose) > len(tight), 'raising the control ceiling kept nothing extra'
+    assert set(tight).issubset(set(loose)), 'raising a ceiling must never DROP a junction'
+    # the GTEx side is unchanged: every newly kept junction still passes GTEx at n_max=3
+    gained = set(loose) - set(tight)
+    gmean = G.adata_gtex.obs['mean'].reindex(sorted(gained)).fillna(0.0)
+    assert (gmean < 3).all(), 'a junction entered with a GTEx mean at or above the global n_max'
+
+
+def test_control_n_max_rejects_an_unknown_control_name(synthetic):
+    """Naming a control that was never added would run the cohort at the wrong ceiling."""
+    jcm = synthetic['jcm']
+    rng = np.random.default_rng(13)
+    ctrl = pd.DataFrame(rng.poisson(2, size=(300, 5)).astype(float),
+                        index=list(rng.choice(jcm.index, 300, replace=False)),
+                        columns=['m{}'.format(i) for i in range(5)])
+    with pytest.raises(ValueError, match='Marrow'):
+        G.gtex_configuration(jcm, synthetic['gtex'], 20, 3, 5, 20, 0.01, 0.1,
+                             add_control={'M': ctrl}, control_n_max_arg={'Marrow': 12})

@@ -60,23 +60,38 @@ def tree_rss(processes, root):
 
 
 def _working_set(base, used):
-    """Usage minus inactive file cache, as docker stats and the kubelet count it.
+    """Charge allocations and protected cache, not clean reclaimable file pages.
 
-    memory.current includes page cache from reading and writing h5ad files. The
-    kernel frees it only under pressure, so after a few large jobs an idle
-    container could sit above the admission ceiling and hold every new job
-    (2026-10-03: 0.17 GiB anon + 3.4 GiB cache held admission indefinitely).
+    Repeated h5ad reads promote cache onto the active LRU. Subtracting only
+    inactive_file makes identical jobs fail depending on earlier disk traffic.
+    Keep dirty/writeback, mapped, shared-memory and unevictable pages charged.
+    Bound the deduction by both file type and LRU counters, which can differ.
+    The kernel cgroup cap remains in force; this only changes our early guard.
+    See docs.kernel.org/admin-guide/cgroup-v2.html#memory-interface-files.
     """
     try:
         stat = dict(line.split() for line in (base / 'memory.stat').read_text().splitlines())
-        inactive = int(stat.get('inactive_file', stat.get('total_inactive_file', 0)))
+        # v1 total_* counters include descendants, matching usage_in_bytes.
+        def count(v2, v1=None):
+            return max(0, int(stat.get('total_' + (v1 or v2), stat.get(v2, stat.get(v1 or v2, 0)))))
+        inactive = count('inactive_file')
+        active = count('active_file')
+        protected = (count('shmem') + count('file_dirty', 'dirty')
+                     + count('file_writeback', 'writeback')
+                     + count('file_mapped', 'mapped_file') + count('unevictable'))
+        if 'file' in stat or 'cache' in stat or 'total_cache' in stat:
+            clean = max(0, count('file', 'cache') - protected)
+            reclaimable = min(active + inactive, clean)
+        else:
+            # Older/partial telemetry cannot establish that active pages are safe.
+            reclaimable = max(0, inactive - protected)
     except (OSError, ValueError):
         return used
-    return max(used - inactive, 0)
+    return max(used - reclaimable, 0)
 
 
-def container_memory():
-    """Read our cgroup v2/v1 usage and limit; return None outside a cgroup."""
+def container_memory_details():
+    """Read raw and guard usage plus cache counters for diagnostic job logs."""
     try:
         memberships = Path('/proc/self/cgroup').read_text().splitlines()
     except OSError:
@@ -95,7 +110,22 @@ def container_memory():
             try:
                 used, limit = ((base / name).read_text().strip() for name in names)
                 if limit != 'max':
-                    return _working_set(base, int(used)), int(limit)
+                    result = {'raw_bytes': int(used), 'guard_bytes': _working_set(base, int(used)),
+                              'limit_bytes': int(limit)}
+                    try:
+                        stat = dict(line.split() for line in (base / 'memory.stat').read_text().splitlines())
+                        for key in ('active_file', 'inactive_file', 'file', 'cache', 'shmem',
+                                    'file_dirty', 'dirty', 'file_writeback', 'writeback', 'anon', 'rss'):
+                            result[key] = int(stat.get('total_' + key, stat.get(key, 0)))
+                    except (OSError, ValueError):
+                        pass
+                    return result
             except (OSError, ValueError):
                 continue
     return None
+
+
+def container_memory():
+    """Cgroup guard usage and hard limit; None outside a limited cgroup."""
+    details = container_memory_details()
+    return (details['guard_bytes'], details['limit_bytes']) if details else None

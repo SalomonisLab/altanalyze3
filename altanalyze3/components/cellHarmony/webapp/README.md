@@ -549,11 +549,12 @@ route answers HTTP 503. See Chat below.
 | --- | --- | --- |
 | `CELLHARMONY_ROOT_PATH` | empty | FastAPI `root_path` for a reverse proxy |
 | `CELLHARMONY_JOB_STORAGE` | `<webapp>/jobs` | where job folders live |
+| `CELLHARMONY_JOB_RETENTION_HOURS` | `72` | terminal jobs expire after this many hours without updates or a results-page visit; shared with Discover |
 | `CELLHARMONY_REFERENCE_REGISTRY` | `<webapp>/../flask/reference_config.json` | the reference registry |
 | `CELLHARMONY_MAX_FILES` | `7` | files per job |
 | `CELLHARMONY_JOB_WORKERS` | `2` | shared pipeline/differential worker slots |
 | `CELLHARMONY_WORKER_MEMORY_LIMIT_GIB` | `15` | hold new starts when any active worker tree reaches this RSS |
-| `CELLHARMONY_TOTAL_MEMORY_LIMIT_GIB` | `27` | hold new starts and stop the largest worker at this usage; also respect 90% of cgroup limit |
+| `CELLHARMONY_TOTAL_MEMORY_LIMIT_GIB` | `27` | hold new starts and stop the largest worker at this allocation usage (clean reclaimable file cache excluded, process-tree RSS remains charged); also respect 90% of cgroup limit |
 | `CELLHARMONY_ISOLATE_JOBS` | `true` | disposable child interpreter for each heavy analysis |
 | `CELLHARMONY_CACHE_MAX_GIB` | `2` | shared estimated retained-buffer budget for serving caches |
 | `CELLHARMONY_CACHE_MAX_ENTRIES` | `64` | maximum total entries across serving caches |
@@ -1345,3 +1346,25 @@ Provide fast writable scratch storage for uncompressed work arrays and canonical
 outputs. Benchmark details and validation scope are recorded in
 `dev/natri_memory_benchmark_20261006.json`. The full real-data benchmark is
 complete, including communication, serving bundle and scientific output checks.
+
+### Production cache accounting and returning users
+
+The memory guard excludes clean active and inactive file cache, while retaining
+charges for dirty/writeback, mapped, shared-memory and unevictable pages. The
+30-GiB container limit and 27-GiB allocation threshold remain unchanged. Admission
+also checks host available memory; running workers are protected by a sustained
+critical-host-memory check. Admission and guard failures record raw cgroup usage,
+guard usage and file-cache counters in the existing job log. Scientific methods,
+features, cells, references and imputation models are unchanged.
+
+Completed/failed/cancelled jobs are retained for 72 hours by default. Loading the
+results page renews retention without altering the analysis metadata. Active
+pipelines and queued/running differentials remain protected. Set
+`CELLHARMONY_JOB_RETENTION_HOURS` to override this policy for web and Discover.
+Rebuild/restart both services to apply these code changes.
+
+A multipart upload rejected by Apache while reading the request body may never
+reach the application handler. The reported 307-second failure does not establish
+its cause. Check Apache `RequestReadTimeout`, proxy timeouts and the load balancer
+idle timeout together before changing them; backend code cannot extend an
+upstream request-body deadline. Resumable uploads are not implemented by this fix.

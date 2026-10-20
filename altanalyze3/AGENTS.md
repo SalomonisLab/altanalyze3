@@ -2,11 +2,13 @@
 
 These requirements are explicit user instructions.
 
-- Never exclude model features or dataset samples because an initial name, identifier, annotation, or upstream mapping does not match. Treat the mismatch as an unresolved failure. Immediately ask the user for the source or mapping and wait before further dependent investigation or reconstruction. Do not assume the records are unavailable.
+- Never exclude model features or dataset samples because an initial name, identifier, annotation, or upstream mapping does not match. Treat the mismatch as unresolved and diagnose it without requesting approval. Trace sources, mappings and code while preserving all required identities; do not assume the records are unavailable. Ask for missing information only when investigation cannot resolve it, and hold scientific work that depends on the unresolved prerequisite.
 - Preserve the full instructed baseline feature panel and sample roster. Reconcile every feature and sample against the baseline before training or reporting a replacement or comparison candidate.
 - Always verify the proposed training and inference algorithms against the instructed baseline model, including preprocessing, feature selection, hyperparameters, training samples, target panel, transformations, and missing-input handling. Report any differences explicitly.
 - Do not proceed with a major algorithm change, exclusion of features or samples, or a reduced-coverage substitute until the discrepancy, evidence, and proposed change have been fully discussed with the user and the user explicitly authorizes it. General authorization to complete an analysis does not authorize these changes.
-- If baseline coverage cannot yet be reconciled, mark the requested comparison as incomplete. Do not present a reduced-panel or reduced-sample run as satisfying it. Diagnostic investigation requires explicit user authorization when the missing-source question is pending. Safeguard implementation does not authorize resuming the scientific analysis.
+- If baseline coverage cannot yet be reconciled, mark the requested comparison as incomplete. Do not present a reduced-panel or reduced-sample run as satisfying it. Diagnostic investigation does not require approval, including while a source question is pending. Safeguard implementation does not authorize resuming scientific analysis that still has an unresolved prerequisite or a separate required approval.
+
+User clarification, 2026-10-19: "You need approval for other things, but not diagnosis." Approval requirements for data exclusions, substitutions, material method changes and other otherwise restricted actions remain in force.
 - For the current rna2lipid comparison, the required baseline is the deployed lipid-wise ElasticNetCV procedure, all 202 production lipid outputs, all 50 original training profiles, and all 1,303 production RNA input genes. The 47-lipid/45-profile candidate does not satisfy this requirement.
 
 ## Required integrity skill and execution gate

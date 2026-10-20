@@ -359,11 +359,158 @@ def read_label_positions(centers, body_height, gap):
     return positions
 
 
+def merge_locus_segments(segments):
+    """Use the established exon merging separately within each annotated gene."""
+    groups = OrderedDict()
+    for segment in segments or []:
+        groups.setdefault(segment["gene"], []).append(segment)
+    merged = {"exons": [], "introns": []}
+    for gene, parts in groups.items():
+        for kind, values in merge_segments(parts).items():
+            merged[kind].extend(dict(s, gene=gene) for s in values)
+    return merged
+
+
+def prepare_locus_coordinates(response, intron_scale, trim_to_reads, isoform_track):
+    """Project gene-qualified geometry onto independent sections of the native ISV axis.
+
+    Only a drawing copy is changed. Every real read, count and final assignment is
+    retained. Intron compression is the native build_xz calculation, per locus.
+    Registered structures must identify their genes; untagged genomic pairs are
+    ambiguous across chromosomes and cannot substitute for the registered model.
+    """
+    from copy import deepcopy
+    from .locus_view import coding_segments_for_loci, locus_axis_groups
+    res = deepcopy(response)
+    records = list({id(m): m for m in
+                    [r for p in res.get("panels", []) for r in p.get("molecules", [])]
+                    + res.get("reference_isoforms", [])}.values())
+    if not records:
+        return res, []
+    primary = res["gene"]
+    models = {m["gene"]: m for m in res["gene_models"]}
+    parts = OrderedDict()
+    for m in records:
+        if m.get("unplaced_genes"):
+            raise ValueError("Cannot place annotated partner loci: " + str(m["unplaced_genes"]))
+        if isoform_track and not m.get("registered_exon_segments"):
+            raise ValueError("Gene-qualified registered structure required for multi-locus ISV: "
+                             + str(m.get("final_isoform_id")))
+        for s in list(m.get("exon_segments", [])) + list(m.get("registered_exon_segments", [])):
+            gene = s.get("gene") or primary
+            s["gene"] = gene
+            parts.setdefault(gene, []).append(s)
+    frames, transforms, by_gene_frame = [], {}, {}
+    # Equal-width sections are explicitly separate loci, never genomic distance.
+    slot, gap = 1_000_000.0, 120_000.0
+    for i, genes in enumerate(locus_axis_groups([models[g] for g in parts])):
+        segments = [s for g in genes for s in parts[g]]
+        bounds = [(min(s["start"], s["end"]), max(s["start"], s["end"])) for s in segments]
+        lo, hi = min(a for a, b in bounds), max(b for a, b in bounds)
+        if not trim_to_reads:
+            lo = min(lo, *(models[g]["extent"][0] for g in genes))
+            hi = max(hi, *(models[g]["extent"][1] for g in genes))
+        reference = [(min(b["start"], b["end"]), max(b["start"], b["end"]))
+                     for g in genes for b in models[g].get("blocks", [])]
+        start = i * (slot + gap)
+        project = build_xz(_merge_ivs(bounds + reference), lo, hi, max(0.01, float(intron_scale)), start, start + slot)
+        for gene in genes:
+            model = models[gene]
+            transforms[gene] = project
+            projected = dict(model, blocks=[dict(b, start=project(b["start"]), end=project(b["end"]))
+                                           for b in model.get("blocks", [])
+                                           if b["end"] >= lo and b["start"] <= hi], extent=[start, start + slot])
+            by_gene_frame[gene] = dict(model=projected, start=start, end=start + slot,
+                                      genomic_extent=[lo, hi], ticks=np.linspace(lo, hi, 3), project=project)
+    frames = [by_gene_frame[g] for g in parts]
+    def chrom_key(value):
+        key = str(value).upper().removeprefix("CHR")
+        return "M" if key == "MT" else key
+    # A reference row describes the surrounding chromosome, not only the span
+    # of this gene. Carry it through every displayed window on that chromosome,
+    # showing only real annotated exon intersections within each window.
+    for frame in frames:
+        model = models[frame["model"]["gene"]]
+        windows = []
+        seen_windows = set()
+        for axis in frames:
+            if chrom_key(model["chrom"]) != chrom_key(axis["model"]["chrom"]):
+                continue
+            window_key = axis["start"], axis["end"]
+            if window_key in seen_windows:
+                continue
+            seen_windows.add(window_key)
+            lo, hi = axis["genomic_extent"]
+            project = axis["project"]
+            blocks = [dict(b, start=project(max(lo, b["start"])),
+                           end=project(min(hi, b["end"]))) for b in model.get("blocks", [])
+                      if b["end"] >= lo and b["start"] <= hi]
+            windows.append(dict(model=dict(model, blocks=blocks), start=axis["start"], end=axis["end"],
+                                genomic_extent=axis["genomic_extent"], ticks=axis["ticks"],
+                                project=axis["project"]))
+        frame["reference_windows"] = windows
+    for m in records:
+        reg = m.get("registered_exon_segments") or m.get("exon_segments", [])
+        if len({s["gene"] for s in reg}) > 1:
+            coding = coding_segments_for_loci(reg, models, m.get("cds_min"),
+                                              m.get("cds_max"), m.get("cds_chrom"))
+            if coding is not None:
+                m["_locus_cds_intervals"] = [dict(gene=s["gene"],
+                    a=transforms[s["gene"]](s["start"]),
+                    b=transforms[s["gene"]](s["end"])) for s in coding]
+        for field in ("exon_segments", "registered_exon_segments"):
+            runs = []
+            for s in m.get(field, []):
+                if not runs or runs[-1][0]["gene"] != s["gene"]:
+                    runs.append([])
+                runs[-1].append(s)
+            joins = []
+            for left, right in zip(runs, runs[1:]):
+                lg, rg = left[0]["gene"], right[0]["gene"]
+                if m.get("alignment_coordinates_verified"):
+                    # Original alignment blocks are supplied in genomic order.
+                    a, b = max(s["end"] for s in left), min(s["start"] for s in right)
+                else:
+                    a = min(s["start"] for s in left) if models[lg]["strand"] == "-" else max(s["end"] for s in left)
+                    b = max(s["end"] for s in right) if models[rg]["strand"] == "-" else min(s["start"] for s in right)
+                joins.append((transforms[lg](a), transforms[rg](b)))
+            m["_" + field + "_joins"] = joins
+    # Many reads share one registered list. Transform each segment once, after
+    # recording every join in the original coordinates (deepcopy preserves aliases).
+    segments = {id(s): s for m in records for field in ("exon_segments", "registered_exon_segments")
+                for s in m.get(field, [])}
+    for s in segments.values():
+        s["genomic_start"], s["genomic_end"] = s["start"], s["end"]
+        s["start"], s["end"] = transforms[s["gene"]](s["start"]), transforms[s["gene"]](s["end"])
+    for m in records:
+        reg = m.get("registered_exon_segments")
+        if reg:
+            m["_registered_locus_merged"] = merge_locus_segments(reg)
+            # Retained intron sequence belongs to the registered RNA too. The
+            # native structure track draws carried sequence as solid blocks.
+            m["_registered_locus_merged"]["exons"].extend(m["_registered_locus_merged"]["introns"])
+            m["_registered_locus_merged"]["introns"] = []
+            m["registered_exons"] = [(s["start"], s["end"]) for s in reg]
+        genes = {s["gene"] for s in reg or m.get("exon_segments", [])}
+        # A single genomic CDS span cannot specify coding sequence across loci.
+        if len(genes) == 1:
+            project = transforms[next(iter(genes))]
+            for key in ("cds_min", "cds_max"):
+                if m.get(key) is not None:
+                    m[key] = project(m[key])
+        else:
+            m["cds_min"] = m["cds_max"] = None
+    res["gene_model"] = dict(blocks=[b for f in frames for b in f["model"]["blocks"]],
+                             extent=[min(f["start"] for f in frames), max(f["end"] for f in frames)])
+    return res, frames
+
+
 def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
            font_scale=1.0, show_ruler=True, show_read_labels=True, trim_to_reads=False,
            title_gene=None, title_event=None, show_read_counts=True, show_structure_header=True,
            label_protein_length=True, dense_exon_labels=False, structure_labels_above=False,
-           region=None, iso_order="length"):
+           region=None, iso_order="length", caption=None, hide_bleeding_reads=False, bleed_tolerance=0,
+           protein_features=None):
     """Render query_reads() panels as the drawReads molecule pileup to a single-page vector PDF.
     intron_scale<1.0 shrinks intron display spans (enlarging exons); 1.0 = true genomic scale.
     font_scale multiplies EVERY font size and the label margins and header heights that depend on them,
@@ -385,6 +532,33 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
     region=(lo, hi) draws ONLY that genomic window: the x-axis is the window, reads that do not overlap it
     are dropped, and segments outside it are not drawn. It overrides trim_to_reads, whose axis is the union
     of every plotted molecule and therefore hides an event that sits in a small part of a long gene."""
+    from .locus_view import is_trans_splicing_view
+    if protein_features and not isoform_track:
+        raise ValueError('Protein architecture requires the registered isoform structure track')
+    if protein_features:
+        from copy import deepcopy
+        res = deepcopy(res)
+        if any(len(p.get('molecules', [])) > MAX_ROWS for p in res.get('panels', [])):
+            raise ValueError('Protein architecture would exceed the ISV row limit; explicitly select the display read cap first')
+    if hide_bleeding_reads and not res.get('read_filter', {}).get('enabled'):
+        from .read_filters import filter_bleeding_reads
+        res = filter_bleeding_reads(res, tolerance=bleed_tolerance)
+    if res.get('read_filter', {}).get('enabled'):
+        f = res['read_filter']
+        note = (f"Display filter: hide reads extending into assigned-model introns; {f['tolerance_nt']} nt tolerance. "
+                f"{f['eligible_RNA']:g} eligible of {f['input_RNA']:g} examined RNA records before sampling; "
+                f"{f['hidden_RNA']:g} hidden. Original assignments/count matrices unchanged.")
+        if res.get('display_read_cap_per_isoform'):
+            note += f" Up to {res['display_read_cap_per_isoform']} eligible RNA per isoform are sampled after filtering."
+        if not protein_features:
+            caption = (str(caption) + ' ' if caption else '') + note
+    stack_reference_loci = is_trans_splicing_view(res)
+    locus_frames = []
+    if res.get("has_multiple_loci"):
+        if region:
+            raise ValueError("Multi-locus ISV requires separate locus windows; a single --region is ambiguous")
+        res, locus_frames = prepare_locus_coordinates(res, intron_scale, trim_to_reads, isoform_track)
+        intron_scale = 1.0  # each locus was compressed independently, once
     panels = [p for p in res.get("panels", []) if p.get("n_molecules", 0) > 0]
     gm = res.get("gene_model") or {}
     if not panels:
@@ -394,7 +568,7 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
     _region = parse_region(region) if isinstance(region, str) else region
     for p in panels:
         for m in p["molecules"]:
-            m["merged"] = merge_segments(m.get("exon_segments"))
+            m["merged"] = merge_locus_segments(m.get("exon_segments")) if locus_frames else merge_segments(m.get("exon_segments"))
         if _region:
             _kept = [m for m in p["molecules"] if mol_in_window(m["merged"], _region[0], _region[1])]
             print("[isv_web_remote] region {:,}-{:,}: {} keeps {} of {} molecules".format(
@@ -403,6 +577,9 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
             p["n_molecules"] = len(_kept)
         for m in p["molecules"]:
             m["_span"] = mol_extent(m["merged"])
+    extra_models = res.get("reference_isoforms", [])
+    for m in extra_models:
+        m["merged"] = merge_locus_segments(m.get("exon_segments")) if locus_frames else merge_segments(m.get("exon_segments"))
     # Isoform groups run LONGEST ISOFORM FIRST by default. One rank over the molecules of every panel,
     # so each panel groups in the same order and the structure track below them matches.
     # iso_order="given" keeps the caller's own order, which main() passes for --isoforms.
@@ -448,7 +625,7 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
     LEFT_ = (min(max(LEFT * FS, _lbl_w + 12.0), width * 0.45) if _need_left
              else max(28.0, 15.0 * FS, _chrom_w))
     HDR_ = HDR * FS                                   # panel header band grows with its text
-    RULER_H_ = (RULER_H * FS) if show_ruler else 0.0
+    RULER_H_ = (RULER_H * FS) if show_ruler else (20 * FS if locus_frames else 0.0)
     EXON_LBL_H = 22 * FS                              # row under the gene model holding the exon labels
     # title block above the first panel: italic gene symbol, then the splicing event. Defined here because
     # the auto-fit budget below subtracts it before any panel geometry is laid out.
@@ -458,15 +635,17 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
     # trim_to_reads: ignore the gene model extent so the axis spans only what the reads cover.
     # region: the caller fixed the window, so neither the reads nor the gene model may widen it.
     lo, hi = _region if _region else extent_of(all_mol, {} if trim_to_reads else gm)
+    if locus_frames:
+        lo, hi = min(f["start"] for f in locus_frames), max(f["end"] for f in locus_frames)
     track_x0, track_x1 = LEFT_, width - RIGHT - RMARGIN
 
     # default two-isoform palette (gold / blue): applied ONLY when the gene shows exactly two isoforms,
     # consistently across the molecule pileup and the structure track.
-    _ckeys = sorted({color_key(m) for m in all_mol})
+    _ckeys = sorted({color_key(m) for m in all_mol + extra_models})
     _two = {k: TWO_ISOFORM_COLORS[i] for i, k in enumerate(_ckeys)} if len(_ckeys) == 2 else {}
 
     def colof(m):
-        return _two.get(color_key(m)) or color_for(m)
+        return m.get("display_color") or _two.get(color_key(m)) or color_for(m)
 
     # unique plotted isoforms (one structure row each) for the optional bottom structure track.
     #
@@ -482,14 +661,18 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
     n_registered = n_fallback = 0
     if isoform_track:
         seen = set()
-        for m in sorted(all_mol, key=lambda mm: (group_key(mm),
+        for m in sorted(all_mol + extra_models, key=lambda mm: (group_key(mm),
                                                  str(mm.get("final_isoform_id") or mm.get("isoform_id")))):
             key = m.get("final_isoform_id") or m.get("isoform_id")
             if key in seen or not (m.get("merged") or {}).get("exons"):
                 continue
             seen.add(key)
             reg = m.get("registered_exons")
-            if reg:
+            if m.get("_registered_locus_merged"):
+                m["struct_merged"] = m["_registered_locus_merged"]
+                m["struct_source"] = "registered"
+                n_registered += 1
+            elif reg:
                 m["struct_merged"] = {"exons": [{"a": int(a), "b": int(b), "label": ""} for a, b in reg],
                                       "introns": []}
                 m["struct_source"] = "registered"
@@ -563,7 +746,8 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
     # + their rows uniformly so the whole thing fits, keeping the shared genomic x-axis. Only shrinks;
     # figures that already fit are untouched.
     _FIT_H = 900.0
-    _ov = 10 + TITLE_H + 2 + RULER_H_ + REF_H + EXON_LBL_H + len(panels) * (HDR_ + PAD + PANEL_GAP)
+    reference_height = (RULER_H_ + REF_H + EXON_LBL_H) * (max(1, len(locus_frames)) if stack_reference_loci else 1)
+    _ov = 10 + TITLE_H + 2 + reference_height + len(panels) * (HDR_ + PAD + PANEL_GAP)
     _budget = _FIT_H - _ov
     _body_total = sum(p["_bodyH"] for p in panels)
     # Do not compress a dense panel below the height needed by all labels.
@@ -582,7 +766,7 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
         p["_y"] = y + HDR_
         y += HDR_ + p["_bodyH"] + PAD + PANEL_GAP
     axis_top = y + 2
-    height = axis_top + RULER_H_ + REF_H + EXON_LBL_H
+    height = axis_top + reference_height
     ruler_base = axis_top + RULER_H_ - 4
     ref_top = axis_top + RULER_H_
     struct_top = height + 6                              # bottom isoform-structure track starts here
@@ -590,6 +774,34 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
         _, _struct_h = struct_rows_geometry(len(iso_rows), FS, structure_labels_above)
         height = struct_top + 16 * FS + _struct_h + 8
 
+    protein_layout = None
+    if protein_features:
+        from ...iso2function.plotting.isv_architecture import load_architectures, select_tracks, layout_tracks
+        bundle = load_architectures(protein_features)
+        ids = [str(m.get('final_isoform_id') or m.get('isoform_id')) for m in iso_rows]
+        tracks = select_tracks(bundle, ids, res.get('symbol'))
+        for m, track in zip(iso_rows, tracks):
+            if m.get('struct_source') != 'registered':
+                raise ValueError('Protein architecture requires the registered native transcript model: ' + track['isoform_id'])
+            observed = m.get('protein_length')
+            if observed not in (None, '') and int(observed) not in (track['protein_aa'], int(track['reported_aa'] or track['protein_aa'])):
+                raise ValueError('ISV protein length differs from audited architecture: ' + track['isoform_id'])
+            track['display_color'] = colof(m)
+        protein_top = height + 8 * FS
+        protein_layout = layout_tracks(tracks, track_x1 - track_x0, FS)
+        protein_layout['source'] = {k: bundle[k] for k in ('root', 'manifest_sha256', 'source_manifest_sha256', 'selection')}
+        protein_layout['RNA'] = dict(panels=[dict(condition=p['condition'],
+            records=len(p['mol']), reads=sum(float(m.get('count', 0)) for m in p['mol'])) for p in panels],
+            isoform_order=ids, read_filter=res.get('read_filter'),
+            display_read_cap_per_isoform=res.get('display_read_cap_per_isoform'))
+        height = protein_top + protein_layout['height']
+
+    caption_top = height
+    caption_text = None
+    if caption:
+        import textwrap
+        caption_text = textwrap.fill(str(caption), width=max(40, int((width - 40) / (3.8 * FS))))
+        height += (len(caption_text.splitlines()) * 9.1 + 20) * FS
     fig = plt.figure(figsize=(width / 72.0, height / 72.0))
     ax = fig.add_axes([0, 0, 1, 1])
     ax.set_xlim(0, width)
@@ -601,6 +813,25 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
 
     def hline(x0, x1, yy, color, lw=1.0, alpha=1.0):
         ax.plot([x0, x1], [yy, yy], color=color, linewidth=lw, alpha=alpha, solid_capstyle="butt")
+
+    def backbone(segments, yy, color, joins=None, dashed_joins=False, read_height=None):
+        if not locus_frames:
+            hline(xz(min(e["a"] for e in segments)), xz(max(e["b"] for e in segments)), yy, color, lw=0.7, alpha=0.55)
+            return
+        groups = OrderedDict()
+        # Thin connectors must stay thinner than densely packed read rows;
+        # otherwise neighboring hairlines overlap into apparently solid RNA.
+        line_width = min(0.7, max(0.02, read_height * 0.35)) if read_height is not None else 0.7
+        for e in segments:
+            groups.setdefault(e["gene"], []).append(e)
+        for parts in groups.values():
+            hline(xz(min(e["a"] for e in parts)), xz(max(e["b"] for e in parts)), yy, color, lw=line_width, alpha=0.55)
+        # Stacked, phase-aligned dashes resemble vertical exon bars. Use native
+        # solid hairlines in read pileups; reserve dashes for the model row.
+        for a, b in joins or []:
+            ax.plot([xz(a), xz(b)], [yy, yy],
+                    color=color, linewidth=line_width, alpha=0.55,
+                    linestyle=(0, (3, 3)) if dashed_joins else "-", solid_capstyle="butt")
 
     _tx = (track_x0 + track_x1) / 2.0
     if title_gene:
@@ -617,7 +848,8 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
         rect(6, top, width - 12, HDR_, "#eef1f5")
         if structure_labels_above:        # figure preset: italic, centred in the header band
             ax.text((track_x0 + track_x1) / 2.0, top + 15 * FS, f"{p['condition']}", fontsize=11 * FS,
-                    weight="bold", style="italic", fontfamily=ITALIC_FAMILY, ha="center", va="center",
+                    weight="normal" if protein_layout else "bold", style="normal" if protein_layout else "italic",
+                    fontfamily=ITALIC_FAMILY, ha="center", va="center",
                     color="#1a2230")
         else:
             ax.text(16, top + 15 * FS, f"{p['condition']}", fontsize=11 * FS, weight="bold", va="center", color="#1a2230")
@@ -660,9 +892,7 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
             # disconnected. A read is one molecule and must read as one row.
             _span = exs + ins
             if _span:
-                a = xz(min(s["a"] for s in _span))
-                b = xz(max(s["b"] for s in _span))
-                hline(a, b, y_top + r["h"] / 2, color, lw=0.7, alpha=0.55)
+                backbone(_span, y_top + r["h"] / 2, color, m.get("_exon_segments_joins"), read_height=r["h"])
             # A RETAINED intron is sequence the molecule carries, so it is drawn as a solid block at
             # full height, exactly like an exon. It was previously drawn at 60% height and alpha 0.45,
             # which reads as "absent" and hid intron retention: on RUNX1 the gold bin IS intron-42
@@ -672,59 +902,75 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
                 xa, xb = xz(s["a"]), xz(s["b"])
                 rect(xa, ey, max(1.0, xb - xa), eh, color)
 
-    # ---- gene-model reference track (static/app.js drawAxis) ----
-    if show_ruler:
-        hline(track_x0, track_x1, ruler_base, "#7a8696", lw=0.9)
-        for tk in np.linspace(lo, hi, max(4, round((track_x1 - track_x0) / (120 * FS)))):
-            px = xz(tk)
-            ax.plot([px, px], [ruler_base - 5, ruler_base], color="#7a8696", linewidth=0.8, solid_capstyle="butt")
-            ax.text(px, ruler_base - 8, fmt(tk), fontsize=8 * FS, ha="center", va="bottom", color="#5a6675")
-    cy = ref_top + REF_H / 2
-    ref_lo, ref_hi = max(track_x0, xz(lo)), min(track_x1, xz(hi))
-    hline(ref_lo, ref_hi, cy, "#9aa4b2", lw=1.0)
-    strand = gm.get("strand")
-    if strand and ref_hi - ref_lo >= 40:
-        d = -1 if strand == "-" else 1
-        px = ref_lo + 24
-        while px < ref_hi - 6:
-            ax.plot([px - 3 * d, px, px - 3 * d], [cy - 3, cy, cy + 3], color="#9aa4b2", linewidth=0.7, solid_capstyle="round")
-            px += 46
-    last_lbl = None
-    _lbl_right = -1e9                                  # right edge of the last exon label, in points
-    # The default keeps the historical width threshold. dense_exon_labels instead draws one row and skips a
-    # label only when its text would touch the previous one, so the exons inside the plotted region are the
-    # ones named and nothing overlaps.
-    _min_w = 1.0 if dense_exon_labels else 7 * FS
-    _efs = (8 * FS) if dense_exon_labels else (7 * FS)
-    for b in gm.get("blocks", []):
-        # Only under --region. The pixel test below cannot catch a block outside the axis, because xz clamps
-        # it INTO the axis, so it lands exactly on track_x0/track_x1 and is drawn as a minimum-width tick.
-        # That artifact also exists under trim_to_reads (3 blocks on the ATP5J and LSP1 panels), but removing
-        # it there would change every panel already rendered, so it is reported and left alone, not fixed here.
-        if _region:
-            _ba, _bb = min(b["start"], b["end"]), max(b["start"], b["end"])
-            if _bb < lo or _ba > hi:
-                continue
-        xa, xb = xz(b["start"]), xz(b["end"])
-        if xb < track_x0 or xa > track_x1:
-            continue
-        rect(xa, ref_top + 3, max(1.6, xb - xa), REF_H - 6, REF_FILL)
-        lbl = str(b.get("exon_id") or "").split(".")[0]
-        if lbl and lbl != last_lbl and (xb - xa) > _min_w:
-            if dense_exon_labels:
-                _half = 0.30 * _efs * len(lbl)          # half the rendered text width
-                _cx = (xa + xb) / 2
-                if _cx - _half < _lbl_right + 0.25 * _efs:
-                    continue                            # would touch the previous label -> skip this one
-                _lbl_right = _cx + _half
-            ax.text((xa + xb) / 2, ref_top + REF_H + 10, lbl, fontsize=_efs, ha="center", va="top", color="#5a6675")
-            last_lbl = lbl
-    if show_ruler:
-        ax.text(track_x0, ref_top + REF_H + 11, gm.get("chrom") or "", fontsize=8 * FS, ha="left", va="top", color="#5a6675")
-    elif structure_labels_above:
-        ax.text(track_x0 - 6, ref_top + REF_H / 2.0, gm.get("chrom") or "", fontsize=9 * FS,
-                ha="right", va="center", color="#1a2230")
+    # ---- Native reference track, repeated for each partner locus on the SAME pileup axis. ----
+    _full_lo, _full_hi, _full_gm = lo, hi, gm
+    _axis_base, _ref_base, _ruler_base = axis_top, ref_top, ruler_base
+    for _frame_index, _frame in enumerate(locus_frames or [dict(model=gm, start=lo, end=hi)]):
+        _offset = _frame_index * (RULER_H_ + REF_H + EXON_LBL_H) if stack_reference_loci else 0
+        axis_top, ref_top, ruler_base = _axis_base + _offset, _ref_base + _offset, _ruler_base + _offset
+        gm, lo, hi = _frame["model"], _frame["start"], _frame["end"]
+        _row_model, _row_lo, _row_hi = gm, lo, hi
+        _windows = _frame.get("reference_windows", [_frame]) if stack_reference_loci else [_frame]
+        for _window in _windows:
+            gm, lo, hi = _window["model"], _window["start"], _window["end"]
+            if show_ruler:
+                hline(xz(lo) if locus_frames else track_x0, xz(hi) if locus_frames else track_x1, ruler_base, "#7a8696", lw=0.9)
+                for tk in (_window["ticks"] if locus_frames else np.linspace(lo, hi, max(4, round((track_x1 - track_x0) / (120 * FS))))):
+                    px = xz(_window["project"](tk)) if locus_frames else xz(tk)
+                    ax.plot([px, px], [ruler_base - 5, ruler_base], color="#7a8696", linewidth=0.8, solid_capstyle="butt")
+                    ax.text(px, ruler_base - 8, fmt(tk), fontsize=8 * FS, ha="center", va="bottom", color="#5a6675")
+            cy = ref_top + REF_H / 2
+            ref_lo, ref_hi = max(track_x0, xz(lo)), min(track_x1, xz(hi))
+            hline(ref_lo, ref_hi, cy, "#9aa4b2", lw=1.0)
+            strand = gm.get("strand")
+            if strand and ref_hi - ref_lo >= 40:
+                d = -1 if strand == "-" else 1
+                px = ref_lo + 24
+                while px < ref_hi - 6:
+                    ax.plot([px - 3 * d, px, px - 3 * d], [cy - 3, cy, cy + 3], color="#9aa4b2", linewidth=0.7, solid_capstyle="round")
+                    px += 46
+            last_lbl = None
+            _lbl_right = -1e9                                  # right edge of the last exon label, in points
+            # The default keeps the historical width threshold. dense_exon_labels instead draws one row and skips a
+            # label only when its text would touch the previous one, so the exons inside the plotted region are the
+            # ones named and nothing overlaps.
+            _min_w = 1.0 if dense_exon_labels else 7 * FS
+            _efs = (8 * FS) if dense_exon_labels else (7 * FS)
+            for b in gm.get("blocks", []):
+                # Only under --region. The pixel test below cannot catch a block outside the axis, because xz clamps
+                # it INTO the axis, so it lands exactly on track_x0/track_x1 and is drawn as a minimum-width tick.
+                # That artifact also exists under trim_to_reads (3 blocks on the ATP5J and LSP1 panels), but removing
+                # it there would change every panel already rendered, so it is reported and left alone, not fixed here.
+                if _region:
+                    _ba, _bb = min(b["start"], b["end"]), max(b["start"], b["end"])
+                    if _bb < lo or _ba > hi:
+                        continue
+                xa, xb = xz(b["start"]), xz(b["end"])
+                if xb < track_x0 or xa > track_x1:
+                    continue
+                rect(xa, ref_top + 3, max(1.6, xb - xa), REF_H - 6, REF_FILL)
+                lbl = str(b.get("exon_id") or "").split(".")[0]
+                if lbl and lbl != last_lbl and (xb - xa) > _min_w:
+                    if dense_exon_labels:
+                        _half = 0.30 * _efs * len(lbl)          # half the rendered text width
+                        _cx = (xa + xb) / 2
+                        if _cx - _half < _lbl_right + 0.25 * _efs:
+                            continue                            # would touch the previous label -> skip this one
+                        _lbl_right = _cx + _half
+                    ax.text((xa + xb) / 2, ref_top + REF_H + 10, lbl, fontsize=_efs, ha="center", va="top", color="#5a6675")
+                    last_lbl = lbl
+            if show_ruler and not locus_frames:
+                ax.text(track_x0, ref_top + REF_H + 11, gm.get("chrom") or "", fontsize=8 * FS, ha="left", va="top", color="#5a6675")
+            elif structure_labels_above and not locus_frames:
+                ax.text(track_x0 - 6, ref_top + REF_H / 2.0, gm.get("chrom") or "", fontsize=9 * FS,
+                        ha="right", va="center", color="#1a2230")
+        gm, lo, hi = _row_model, _row_lo, _row_hi
 
+        if locus_frames:
+            ax.text((xz(lo) + xz(hi)) / 2, axis_top + 9 * FS,
+                    "{} · {} ({})".format(gm.get("symbol") or gm.get("gene"), gm.get("chrom"), gm.get("strand")),
+                    fontsize=8 * FS, ha="center", va="center", color="#1a2230")
+    lo, hi, gm = _full_lo, _full_hi, _full_gm
     # ---- PDF-only bottom isoform-structure track (one row per plotted isoform; UCSC CDS-tall / UTR-thin,
     #      introns as connecting lines), aligned to the same x-axis as the molecule pileup above. ----
     if iso_rows:
@@ -744,12 +990,21 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
             utr_y = ex_y + (ISO_EXH_ - utr_h) / 2.0               # thin (UTR) exon top
             exs = [e for e in exs if not (e["b"] < lo or e["a"] > hi)]   # drop segments off a trimmed axis
             if exs:                                              # backbone line across the isoform span (introns)
-                hline(xz(min(e["a"] for e in exs)), xz(max(e["b"] for e in exs)), rc, color, lw=0.7, alpha=0.55)
+                backbone(exs, rc, color, m.get("_registered_exon_segments_joins"), dashed_joins=True)
             edge = darken(color)                                  # exon outline = same-hue darker shade of fill
             cds_lo, cds_hi = m.get("cds_min"), m.get("cds_max")
+            locus_cds = m.get("_locus_cds_intervals")
             for s in exs:
                 xa, xb = xz(s["a"]), xz(s["b"])
-                if cds_lo is not None and cds_hi is not None:
+                if locus_cds is not None:
+                    rect(xa, utr_y, max(0.8, xb - xa), utr_h, color, ec=edge, lw=0.5)
+                    for cds in locus_cds:
+                        if cds["gene"] != s["gene"]:
+                            continue
+                        ca, cb = max(s["a"], cds["a"]), min(s["b"], cds["b"])
+                        if cb > ca:
+                            rect(xz(ca), ex_y, max(1.0, xz(cb) - xz(ca)), ISO_EXH_, color, ec=edge, lw=0.5)
+                elif cds_lo is not None and cds_hi is not None:
                     rect(xa, utr_y, max(0.8, xb - xa), utr_h, color, ec=edge, lw=0.5)     # UTR (thin) full exon
                     ca, cb = max(s["a"], cds_lo), min(s["b"], cds_hi)
                     if cb > ca:
@@ -757,14 +1012,15 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
                         rect(cxa, ex_y, max(1.0, cxb - cxa), ISO_EXH_, color, ec=edge, lw=0.5)  # CDS (tall) coding overlap
                 else:
                     rect(xa, ex_y, max(1.0, xb - xa), ISO_EXH_, color, ec=edge, lw=0.5)   # no CDS info -> full height
-            _iid = str(m.get("final_isoform_id") or m.get("isoform_id"))
+            _iid = str(m.get("structure_label") or m.get("final_isoform_id") or m.get("isoform_id"))
             _aa = m.get("protein_length")
             _nmd = str(m.get("nmd_status") or "").strip() in ("NMD", "Potential-NMD")
             if structure_labels_above:
                 # "<id>  >  <n>aa" on its own line, in this structure's colour. The last row carries its
                 # label UNDER the structure so the two structures of an event sit next to each other.
                 _lfs = 9.5 * FS
-                ax.text(track_x0, _ly, _iid, fontsize=_lfs, ha="left", va=_va, color=color, weight="bold")
+                ax.text(track_x0, _ly, _iid, fontsize=_lfs, ha="left", va=_va, color=color,
+                        weight="normal" if protein_layout else "bold")
                 if _aa not in (None, ""):
                     _w = 0.60 * _lfs * len(_iid)                      # rendered width of the id
                     _tx, _ty = track_x0 + _w + 0.45 * _lfs, _ly + (0.38 * _lfs if _va == "top" else -0.38 * _lfs)
@@ -772,14 +1028,41 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
                     ax.add_patch(Polygon([[_tx, _ty - _h], [_tx, _ty + _h], [_tx + 1.5 * _h, _ty]],
                                          closed=True, facecolor=color, edgecolor="none", zorder=45))
                     ax.text(_tx + 2.3 * _h, _ly, f"{int(_aa)}aa" + (" NMD" if _nmd else ""),
-                            fontsize=_lfs, ha="left", va=_va, color=color, weight="bold")
+                            fontsize=_lfs, ha="left", va=_va, color=color, weight="normal" if protein_layout else "bold")
             else:
                 _lab = isoform_label(m, label_protein_length, style="bar",
                                      id_max=32 if label_protein_length else 22)
                 ax.text(LEFT_ - 8, rc, _lab,
                         fontsize=7 * FS, ha="right", va="center", color=(KNOWN if m.get("known") else NOVEL))
 
-    fig.savefig(out_path, format="pdf")
+    if protein_layout:
+        from ...iso2function.plotting.isv_architecture import draw_matplotlib
+        protein_artists = draw_matplotlib(ax, protein_layout, track_x0, protein_top)
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        labels = [artist for artist in protein_artists if hasattr(artist, 'get_text')]
+        for artist in labels:
+            box = artist.get_window_extent(renderer)
+            if box.x0 < -1 or box.y0 < -1 or box.x1 > fig.bbox.x1+1 or box.y1 > fig.bbox.y1+1:
+                raise ValueError('Protein architecture label outside page: ' + artist.get_text())
+        from itertools import combinations
+        for first, second in combinations(labels, 2):
+            if first.get_window_extent(renderer).overlaps(second.get_window_extent(renderer)):
+                raise ValueError('Protein architecture labels overlap: ' + first.get_text() + ' / ' + second.get_text())
+    if caption_text:
+        ax.text(20, caption_top + 8 * FS, caption_text, fontsize=7 * FS,
+                ha="left", va="top", color="#39434f", linespacing=1.3)
+    if protein_layout:
+        from datetime import datetime, timezone
+        epoch = datetime(2000, 1, 1, tzinfo=timezone.utc)
+        fig.savefig(out_path, format="pdf", metadata=dict(CreationDate=epoch, ModDate=epoch,
+                    Creator='AltAnalyze3 ISV protein architecture'))
+        import json, hashlib
+        from pathlib import Path
+        protein_layout['pdf_sha256'] = hashlib.sha256(Path(out_path).read_bytes()).hexdigest()
+        Path(out_path).with_suffix('.protein_tracks.json').write_text(json.dumps(protein_layout, indent=2, allow_nan=False)+'\n')
+    else:
+        fig.savefig(out_path, format="pdf")
     plt.close(fig)
     print(f"WROTE {out_path}")
     return True
@@ -802,7 +1085,9 @@ def parse_group_spec(spec):
 
 
 _REC_FIELDS = ("isoform_id", "final_isoform_id", "known", "cluster_index", "color_index",
-               "exon_segments", "protein_length", "nmd_status")
+               "exon_segments", "protein_length", "nmd_status", "annotation_tokens",
+               "cds_min", "cds_max", "cds_chrom",
+               "gene_path", "locus_genes", "locus_status", "locus_joins", "trans_splicing_candidate")
 
 
 def compose_panels(ctx, res, cell_groups, cond_groups, max_isoforms):
@@ -849,7 +1134,8 @@ def compose_panels(ctx, res, cell_groups, cond_groups, max_isoforms):
                            "n_molecules": int(round(sum(m["count"] for m in mols))),
                            "molecules": mols})
     return {"gene": res.get("gene"), "symbol": res.get("symbol"),
-            "gene_model": res.get("gene_model"), "panels": panels}
+            "gene_model": res.get("gene_model"), "panels": panels,
+            "gene_models": res.get("gene_models"), "has_multiple_loci": res.get("has_multiple_loci", False)}
 
 
 def keep_top_isoforms(res, n):
@@ -945,6 +1231,12 @@ def build_arg_parser():
                          "inside one exon of a 261 kb gene is drawn under a point wide. Overrides the "
                          "read-set axis of --figure_mode.")
     ap.add_argument("--out", default=None, help="output PDF (default: <run_dir>/ISV_<gene>_<states>_reads.pdf)")
+    ap.add_argument('--protein-features', default=None,
+                    help='Append exon-colored protein/domain tracks from completed iso2function protein-impact-plots output with a coding-exon map')
+    ap.add_argument('--render-input', default=None,
+                    help='Render a saved ISV response JSON(.gz) without loading native matrices or sequence files; query/filter options cannot be combined')
+    ap.add_argument('--save-render-input', default=None,
+                    help='Save the exact selected response as JSON(.gz) for indexed, reproducible rerendering')
     ap.add_argument("--conditions", default=None, help="restrict to these sample groups (comma-separated; default: ALL groups)")
     ap.add_argument("--metadata", default=None, help="metadata TSV (default: <run_dir>/mds_metadata_bam.txt)")
     ap.add_argument("--gene_model", default=None, help="exon coords TSV (default: <run_dir>/Hs_Ensembl_exon.txt)")
@@ -971,6 +1263,12 @@ def build_arg_parser():
                          "replacement (seeded), so each isoform keeps its expected share; 'auto' = the smallest "
                          "panel's total, so all panels show the same number of reads")
     ap.add_argument("--seed", type=int, default=0, help="seed for --max_reads sampling (default 0)")
+    ap.add_argument("--hide-bleeding-reads", "--hide_bleeding_reads", action="store_true",
+                    help="Display only: exclude reads extending across a model splice edge into its intron; filter the full pool before sampling")
+    ap.add_argument("--bleed-tolerance", "--bleed_tolerance", type=int, default=0,
+                    help="Allowed extension into model introns in nt (default 0: strict)")
+    ap.add_argument("--max-reads-per-isoform", "--max_reads_per_isoform", type=int, default=None,
+                    help="Sample this many eligible reads per isoform after filtering (default 200 with --hide-bleeding-reads)")
     ap.add_argument("--top_isoforms", type=int, default=None,
                     help="keep only the N final isoforms with the most reads across all panels (applied after "
                          "--isoform_filter, before --max_reads); N=2 draws them in the gold/blue two-isoform palette")
@@ -1057,12 +1355,56 @@ def _export_molecule_tsv(res, path):
     print(f"[isv_web_remote] exported {n} molecule rows -> {path}", flush=True)
 
 
+def _render_selected(a, res, out, region):
+    """One rendering path for indexed queries and saved native responses."""
+    if a.save_render_input:
+        import gzip, json
+        opener = gzip.open if a.save_render_input.endswith('.gz') else open
+        with opener(a.save_render_input, 'wt') as fh:
+            json.dump(res, fh, allow_nan=False)
+    fs = a.font_scale if a.font_scale is not None else (2.6 if a.figure_mode else 1.0)
+    title = a.title if a.title is not None else ((res.get('symbol') or a.gene) if a.figure_mode else None)
+    event = a.title_event
+    if event is None and a.figure_mode and a.isoform_filter:
+        event = str(res.get('gene') or a.gene) + ':' + '|'.join(str(x).replace('|', '-', 1) for x in a.isoform_filter)
+    return render(res, out, width=a.width, intron_scale=a.intron_scale,
+                  isoform_track=a.isoform_track, font_scale=fs,
+                  show_ruler=not a.figure_mode, show_read_labels=not a.figure_mode,
+                  trim_to_reads=a.figure_mode, title_gene=title or None, title_event=event or None,
+                  show_read_counts=not a.figure_mode, show_structure_header=not a.figure_mode,
+                  label_protein_length=not a.no_protein_length, dense_exon_labels=a.figure_mode,
+                  structure_labels_above=a.figure_mode, region=region,
+                  iso_order='given' if a.isoforms or a.render_input else 'length',
+                  protein_features=a.protein_features)
+
+
 def main(argv=None):
     a = build_arg_parser().parse_args(argv)
+    if a.hide_bleeding_reads:
+        if a.bleed_tolerance < 0:
+            sys.exit('bleed_tolerance must be nonnegative')
+        a.max_isoforms = 10**9  # refill from the full eligible pool, never the old display cap
     try:                                  # fail on a malformed window before the read query runs
         _region = parse_region(a.region)
     except ValueError as exc:
         sys.exit("[isv_web_remote] {}".format(exc))
+    if a.render_input:
+        import gzip, json
+        conflicting = [name for name in ('cell_states', 'cell_groups', 'condition_groups', 'conditions',
+                       'isoforms', 'isoform_filter', 'top_isoforms', 'top_per_filter', 'max_reads',
+                       'max_reads_per_isoform', 'hide_bleeding_reads', 'min_isoform_pct', 'export_molecules')
+                       if getattr(a, name)]
+        if conflicting:
+            sys.exit('--render-input is already selected; query/filter options cannot be applied: ' + ', '.join(conflicting))
+        if a.max_isoforms != 1_000_000:
+            sys.exit('--render-input is already selected; --max_isoforms cannot be applied')
+        opener = gzip.open if a.render_input.endswith('.gz') else open
+        with opener(a.render_input, 'rt') as fh:
+            res = json.load(fh)
+        if a.gene not in (res.get('gene'), res.get('symbol')):
+            sys.exit('--render-input gene does not match --gene')
+        out = a.out or os.path.join(a.run_dir, 'ISV_' + a.gene + '_protein_architecture.pdf')
+        sys.exit(0 if _render_selected(a, res, out, _region) else 2)
     from . import data_api as da
     # data_api imports isoform_structure_view, whose module level sets font.sans-serif to ['DejaVu Sans']
     # (isoform_structure_view.py line 25). That import runs AFTER the settings at the top of this file, so
@@ -1138,7 +1480,7 @@ def main(argv=None):
         # gene while the log still printed an "isoform_filter=..." line, so the flag was silently ignored in
         # --cell_groups mode (RUNX1 HSPC panel read 2,930 filtered-looking reads vs 1,139 actually filtered).
         base = da.query_reads(ctx, gene, all_states, conditions=None,
-                              max_isoforms=1_000_000, panel_by="cell_type", isoform_filter=a.isoform_filter)
+                              max_isoforms=(10**9 if a.hide_bleeding_reads else 1_000_000), panel_by="cell_type", isoform_filter=a.isoform_filter)
         res = compose_panels(ctx, base, cell_groups, cond_groups, a.max_isoforms)
     else:
         # ---- ONE panel per cell state (original behaviour) ----
@@ -1221,7 +1563,7 @@ def main(argv=None):
               + ", ".join(f"{k} ({present[k]:.0f} reads)" for k in want)
               + f" of {len(present)} isoforms with reads; panel reads "
               + ", ".join(f"{p['condition']}:{p['n_molecules']}" for p in res.get("panels", [])), flush=True)
-    if a.max_reads:
+    if a.max_reads and not a.hide_bleeding_reads:
         res, cap = cap_panel_reads(res, a.max_reads, a.seed)
         print(f"[isv_web_remote] max_reads={a.max_reads} -> cap {cap}: panel reads "
               + ", ".join(f"{p['condition']}:{int(round(sum(m['count'] for m in p['molecules'])))}"
@@ -1236,16 +1578,27 @@ def main(argv=None):
                     _pm = ctx.protein_meta(m.get("final_isoform_id") or m.get("isoform_id")) or {}
                     m["protein_length"] = _pm.get("protein_length")
                     m["nmd_status"] = m.get("nmd_status") or _pm.get("nmd_status")
-    if a.isoform_track:
+    if a.isoform_track or a.hide_bleeding_reads:
         # attach CDS genomic span to each plotted molecule for the bottom structure track (UCSC CDS/UTR)
         for p in res.get("panels", []):
             for m in p.get("molecules", []):
                 _fin = m.get("final_isoform_id") or m.get("isoform_id")
                 cds = ctx.coding_region(_fin)
                 m["cds_min"], m["cds_max"] = (cds[0], cds[1]) if cds else (None, None)
+                m["cds_chrom"] = ctx.coding_chromosome(_fin)
         # attach each final isoform's REGISTERED exon structure from gff-output/combined.gff.gz, so the
         # bottom structure track draws the registered isoform rather than one representative read.
         # Absent index -> registered_exons stays None and render() falls back, with a printed count.
+        if res.get("has_multiple_loci"):
+            final_tokens = da._load_structures(ctx, gene)
+            for panel in res.get("panels", []):
+                for m in panel.get("molecules", []):
+                    fin = m.get("final_isoform_id") or m.get("isoform_id")
+                    tokens = final_tokens.get(fin)
+                    if not tokens:
+                        raise ValueError("Registered transcript annotation required for multi-locus ISV: " + str(fin))
+                    m["registered_exon_segments"] = [da._seg_json(s) for s in
+                        da.isv.build_isoform_segments(tokens, ctx.exon_lookup, gene)]
         from .precompute_gff_structures import StructureIndex
         sidx = StructureIndex.open(a.run_dir)
         if sidx is not None:
@@ -1258,6 +1611,12 @@ def main(argv=None):
                     fin = m.get("final_isoform_id") or m.get("isoform_id")
                     ex = sidx.exons(gene, fin, locus=locus)
                     m["registered_exons"] = ex
+                    if ex and res.get("has_multiple_loci"):
+                        segs = m["registered_exon_segments"]
+                        if len({s.get("gene") for s in segs}) == 1:
+                            model_gene = segs[0]["gene"]
+                            m["registered_exon_segments"] = [dict(gene=model_gene, start=a, end=b, type="E")
+                                                             for a, b in ex]
                     (resolved if ex else unresolved).add(fin)
             print("[isv_web_remote] registered structures: {} of {} final isoform(s) resolved from "
                   "{}".format(len(resolved), len(resolved) + len(unresolved), sidx.path), flush=True)
@@ -1268,6 +1627,15 @@ def main(argv=None):
             if unresolved:
                 print("[isv_web_remote]   NOT registered (representative read will be drawn): {}".format(
                     ", ".join(sorted(unresolved)[:10]) + (" ..." if len(unresolved) > 10 else "")), flush=True)
+    if a.hide_bleeding_reads:
+        from .read_filters import cap_reads_per_isoform
+        res = da.prepare_bleeding_read_filter(ctx, res, a.bleed_tolerance)
+        res = cap_reads_per_isoform(res, a.max_reads_per_isoform or 200, a.seed)
+        if a.max_reads:
+            res, _ = cap_panel_reads(res, a.max_reads, a.seed)
+    elif a.max_reads_per_isoform:
+        from .read_filters import cap_reads_per_isoform
+        res = cap_reads_per_isoform(res, a.max_reads_per_isoform, a.seed)
     print("[isv_web_remote] source={} min_isoform_pct={} panels={}".format(
         res.get("source", "index"), a.min_isoform_pct,
         ", ".join(f"{p['condition']}:{p['n_molecules']}" for p in res.get("panels", []))), flush=True)
@@ -1283,14 +1651,7 @@ def main(argv=None):
     if a.figure_mode or a.font_scale is not None:
         print(f"[isv_web_remote] figure_mode={a.figure_mode} font_scale={fs} ruler={not a.figure_mode} "
               f"read_labels={not a.figure_mode} trim_to_reads={a.figure_mode} region={_region}", flush=True)
-    sys.exit(0 if render(res, out, width=a.width, intron_scale=a.intron_scale,
-                         isoform_track=a.isoform_track, font_scale=fs,
-                         show_ruler=not a.figure_mode, show_read_labels=not a.figure_mode,
-                         trim_to_reads=a.figure_mode, title_gene=t_gene, title_event=t_event,
-                         show_read_counts=not a.figure_mode, show_structure_header=not a.figure_mode,
-                         label_protein_length=not a.no_protein_length, dense_exon_labels=a.figure_mode,
-                         structure_labels_above=a.figure_mode, region=_region,
-                         iso_order=("given" if a.isoforms else "length")) else 2)
+    sys.exit(0 if _render_selected(a, res, out, _region) else 2)
 
 
 if __name__ == "__main__":
