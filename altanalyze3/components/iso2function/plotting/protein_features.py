@@ -20,9 +20,225 @@ from .. import config
 from ..protein_impact import dump, sha, table, write
 from ..protein_isoform_audit import align_mapping, project_feature
 
-SCHEMA = 'iso2function-protein-feature-figures-v2'
+SCHEMA = 'iso2function-protein-feature-figures-v3'
 DEFAULT_TYPES = ('Domain', 'DNA binding', 'Zinc finger', 'Motif', 'Coiled coil', 'Region')
 PRIMARY_SOURCES = ('reviewed_uniprot_snapshot', 'literature_construct_snapshot')
+# Essential feature classes (transmembrane helices, signal peptides, kinase and phosphatase
+# domains, transcription-factor DNA-binding domains, and the other families listed in the
+# whitelist) are ALWAYS displayed, whatever --annotation-source and --feature-type select,
+# are labelled by their class (TM1, TM2, Kinase, DNA-binding), take the lane nearest the
+# protein backbone and are drawn above any annotation they overlap. Rule of record set by
+# Nathan Salomonis on 2026-10-23 after a CLDND1 panel showed Pfam family hits and none of the
+# four UniProt transmembrane helices. The rules live in a data file beside this module so
+# they can be reviewed and extended without touching code.
+ESSENTIAL_WHITELIST_PATH = Path(__file__).with_name('essential_feature_whitelist.tsv')
+ESSENTIAL_RULE_COLUMNS = ('class', 'label', 'priority', 'color', 'provider', 'name_pattern', 'accession_pattern', 'description_pattern', 'note')
+
+
+def load_essential_whitelist(path=None):
+    """Read the essential-feature rules; every regex must compile and every row must be complete."""
+    path = Path(path) if path else ESSENTIAL_WHITELIST_PATH
+    rows = table(path)
+    if not rows:
+        raise ValueError('Essential feature whitelist is empty: ' + str(path))
+    rules = []
+    for i, r in enumerate(rows, 2):
+        if set(ESSENTIAL_RULE_COLUMNS) - set(r):
+            raise ValueError('Essential whitelist row ' + str(i) + ' lacks columns: ' + repr(sorted(set(ESSENTIAL_RULE_COLUMNS) - set(r))))
+        if not (r['class'] and r['label'] and r['provider'] and re.fullmatch(r'#[0-9A-Fa-f]{6}', r['color'] or '')):
+            raise ValueError('Essential whitelist row ' + str(i) + ' needs class, label, provider and a hex colour')
+        patterns = {}
+        for field in ('name', 'accession', 'description'):
+            value = (r.get(field + '_pattern') or '').strip()
+            if value:
+                try:
+                    patterns[field] = re.compile(value, re.IGNORECASE)
+                except re.error as exc:
+                    raise ValueError('Essential whitelist row ' + str(i) + ' has an invalid ' + field + ' regex: ' + str(exc))
+        if not patterns:
+            raise ValueError('Essential whitelist row ' + str(i) + ' has no pattern')
+        rules.append(dict(cls=r['class'], label=r['label'], priority=int(r['priority']), color=r['color'],
+                          provider=r['provider'], patterns=patterns, note=r.get('note', ''), row=i))
+    return dict(path=str(path), sha256=sha(path), rules=rules)
+
+
+def essential_rule(row, whitelist):
+    """The highest-priority rule a source feature row satisfies, or None."""
+    if not whitelist:
+        return None
+    best = None
+    for rule in whitelist['rules']:
+        if rule['provider'] != row.get('provider'):
+            continue
+        if all(p.search(str(row.get(field) or '')) for field, p in rule['patterns'].items()):
+            if best is None or rule['priority'] < best['priority']:
+                best = rule
+    if best is not None:
+        return best
+    # A view may select a few Pfam identifiers, but that must not hide a named
+    # UniProt domain (e.g. FES F-BAR or RHOT2 EF hands). Keep the literal source
+    # name: historical snapshots can contain truncated descriptions. Different
+    # names need different classes so coalescing never merges unrelated domains.
+    provider = row.get('provider')
+    description = str(row.get('description') or '')
+    label = (description[len('DOMAIN-'):] if provider == 'uniprot_features'
+             and description.startswith('DOMAIN-') else description
+             if provider == 'reviewed_uniprot_snapshot' and row.get('name') == 'Domain' else '')
+    if label:
+        return dict(cls='NAMED_DOMAIN:' + label.casefold(), label=label,
+                    priority=100, color='#4477AA', provider=provider,
+                    note='Mandatory named UniProt domain; literal source label, no new prediction')
+    motif = (description[len('MOTIF-'):] if provider == 'uniprot_features'
+             and description.startswith('MOTIF-') else description
+             if provider == 'reviewed_uniprot_snapshot' and row.get('name') == 'Motif' else '')
+    if motif:
+        return dict(cls='NAMED_MOTIF:' + motif.casefold(), label=motif,
+                    priority=101, color='#AA4499', provider=provider,
+                    note='Mandatory named UniProt motif; literal source label, no sequence inference')
+    return None
+
+
+def _coalesce_overlapping_same_annotation(display, audit_by_id):
+    """One display bar per annotation when the same provider/type/description overlaps itself.
+
+    The EnsMart100 Ensembl table repeats a family domain once per reference protein, with
+    coordinates that differ by a few residues (CLDND1: PMP22/EMP/MP20/Claudin on 7 proteins).
+    The longest placed interval represents the group; the others stay in the display audit
+    as coalesced_overlapping_same_annotation with their reference proteins recorded.
+    No coordinate is invented: the representative keeps its own source interval.
+    """
+    groups = defaultdict(list)
+    for f in display:
+        if f['A_start'] == '':
+            # Unplaced copies of one annotation at the same reference coordinates collapse to one.
+            groups[('__unplaced__', f['provider'], f['feature_type'], f['description'], str(f['reference_start']), str(f['reference_end']))].append(f)
+        else:
+            groups[(f['provider'], f['feature_type'], f['description'])].append(f)
+    kept = []
+    for key, items in groups.items():
+        if len(items) == 1:
+            kept.extend(items)
+            continue
+        if key[0] == '__unplaced__':
+            rep = items[0]
+            for f in items[1:]:
+                rep['source_feature_ids'].extend(f['source_feature_ids'])
+                rep.setdefault('coalesced_reference_proteins', []).append(f['reference_protein'])
+                for fid in f['source_feature_ids']:
+                    audit_by_id[fid]['display_role'] = 'coalesced_identical_display_annotation'
+            kept.append(rep)
+            continue
+        items.sort(key=lambda f: (int(f['A_start']), -int(f['A_end'])))
+        chains = []
+        for f in items:
+            if chains and int(f['A_start']) <= int(chains[-1][-1]['A_end']) + 1:
+                chains[-1].append(f)
+            else:
+                chains.append([f])
+        for chain in chains:
+            rep = max(chain, key=lambda f: (int(f['A_end']) - int(f['A_start']), -int(f['A_start'])))
+            for f in chain:
+                if f is rep:
+                    continue
+                rep['source_feature_ids'].extend(f['source_feature_ids'])
+                rep.setdefault('coalesced_reference_proteins', []).append(f['reference_protein'])
+                for fid in f['source_feature_ids']:
+                    audit_by_id[fid]['display_role'] = 'coalesced_overlapping_same_annotation'
+            kept.append(rep)
+    return _coalesce_same_essential_class(kept, audit_by_id)
+
+
+def _coalesce_same_essential_class(display, audit_by_id):
+    """One bar per essential class where its rows overlap, across providers.
+
+    A kinase domain is reported by Pfam, InterPro and UniProt on nearly the same interval, and a
+    zinc finger by UniProt and Pfam. The figure shows the class once, on the longest interval;
+    the other rows stay in the audit as coalesced_same_essential_class with their providers.
+    Non-overlapping members of a class (the four TM helices) stay separate.
+    """
+    groups = defaultdict(list)
+    kept = []
+    for f in display:
+        if f.get('essential_class') and f['A_start'] != '':
+            groups[f['essential_class']].append(f)
+        else:
+            kept.append(f)
+    for cls, items in groups.items():
+        items.sort(key=lambda f: (int(f['A_start']), -int(f['A_end'])))
+        chains, chain_end = [], None
+        for f in items:
+            if chains and int(f['A_start']) <= chain_end:
+                chains[-1].append(f); chain_end = max(chain_end, int(f['A_end']))
+            else:
+                chains.append([f]); chain_end = int(f['A_end'])
+        for chain in chains:
+            # The provider that resolves the chain into the most separate intervals keeps its
+            # bars (two GATA zinc fingers from UniProt beat one InterPro row spanning both);
+            # ties go to curated UniProt coordinates, then to the longest interval.
+            by_provider = defaultdict(list)
+            for f in chain:
+                by_provider[f['provider']].append(f)
+            rank = {'reviewed_uniprot_snapshot': 0, 'uniprot_features': 1, 'literature_construct_snapshot': 2, 'protein_features': 3}
+            best = max(by_provider, key=lambda prov: (len(_disjoint(by_provider[prov])), -rank.get(prov, 9)))
+            reps = _disjoint(by_provider[best])
+            for f in chain:
+                if f in reps:
+                    continue
+                target = max(reps, key=lambda r: min(int(r['A_end']), int(f['A_end'])) - max(int(r['A_start']), int(f['A_start'])))
+                target['source_feature_ids'].extend(f['source_feature_ids'])
+                target.setdefault('coalesced_reference_proteins', []).append(f['reference_protein'])
+                target.setdefault('coalesced_providers', []).append(f['provider'] + ':' + f['description'])
+                for fid in f['source_feature_ids']:
+                    audit_by_id[fid]['display_role'] = 'coalesced_same_essential_class'
+            kept.extend(reps)
+    # Second pass on the B side: an essential row that has no A coordinate but sits on B inside a kept row
+    # of the same class (a PROSITE C2H2 profile next to the curated UniProt zinc finger of the other isoform,
+    # GFI1B 2026-10-24) is the same feature and is folded into it; otherwise it would be drawn as an extra
+    # unnumbered bar on B and listed as "not in this protein" on A.
+    placed_by_class = defaultdict(list)
+    for f in kept:
+        if f.get('essential_class') and f['A_start'] != '' and f.get('B_native_start') not in ('', None):
+            placed_by_class[f['essential_class']].append(f)
+    final = []
+    for f in kept:
+        if f.get('essential_class') and f['A_start'] == '' and f.get('B_native_start') not in ('', None):
+            lo, hi = int(f['B_native_start']), int(f['B_native_end'])
+            hosts = [g for g in placed_by_class[f['essential_class']]
+                     if int(g['B_native_start']) <= hi and lo <= int(g['B_native_end'])]
+            if hosts:
+                target = max(hosts, key=lambda g: min(int(g['B_native_end']), hi) - max(int(g['B_native_start']), lo))
+                target['source_feature_ids'].extend(f['source_feature_ids'])
+                target.setdefault('coalesced_reference_proteins', []).append(f['reference_protein'])
+                target.setdefault('coalesced_providers', []).append(f['provider'] + ':' + f['description'])
+                for fid in f['source_feature_ids']:
+                    audit_by_id[fid]['display_role'] = 'coalesced_same_essential_class'
+                continue
+        final.append(f)
+    return final
+
+
+def _disjoint(items):
+    """Greedy set of non-overlapping members, longest first, in A order."""
+    chosen = []
+    for f in sorted(items, key=lambda f: (-(int(f['A_end']) - int(f['A_start'])), int(f['A_start']))):
+        if all(int(f['A_end']) < int(g['A_start']) or int(f['A_start']) > int(g['A_end']) for g in chosen):
+            chosen.append(f)
+    return sorted(chosen, key=lambda f: int(f['A_start']))
+
+
+def _number_essential(display):
+    """TM1..TMn in N-to-C order on A; a single member keeps the bare class label."""
+    by_class = defaultdict(list)
+    for f in display:
+        if f.get('essential_class'):
+            by_class[f['essential_class']].append(f)
+    for cls, items in by_class.items():
+        placed = sorted((f for f in items if f['A_start'] != ''), key=lambda f: (int(f['A_start']), int(f['A_end'])))
+        for i, f in enumerate(placed, 1):
+            f['class_display'] = f['class_label'] + (str(i) if len(placed) > 1 else '')
+        for f in items:
+            if f['A_start'] == '':
+                f['class_display'] = f['class_label']
 COLORS = dict(reference='#4477AA', identical='#228833', missing='#BCC3CA',
               altered='#EE7733', unresolved='#AA3377', text='#192B3B')
 
@@ -132,27 +348,38 @@ def feature_reference_selection(values,pairs,feature_rows):
     return selected
 
 
-def feature_plan(pair, feature_rows, sequences, feature_types=DEFAULT_TYPES, sources=PRIMARY_SOURCES, reference_proteins=None):
+def feature_plan(pair, feature_rows, sequences, feature_types=DEFAULT_TYPES, sources=PRIMARY_SOURCES, reference_proteins=None,
+                 essential=None):
     """One explicit display policy; source rows are never silently discarded.
 
     Functional reviewed UniProt and literature annotations are the default view.
     Other sources, types and unresolved placements remain in the display audit.
-    Identical displayed intervals/annotations are coalesced only for presentation.
+    Essential classes (``essential``: the loaded whitelist; None loads the packaged file)
+    are displayed whatever the source and type selection says.
+    Identical displayed intervals/annotations are coalesced only for presentation, and so
+    is the same annotation repeated on overlapping intervals from several reference proteins.
     """
+    if essential is None:essential=load_essential_whitelist()
     a,b=pair['isoform_A'],pair['isoform_B'];seq_a,seq_b=sequences[a],sequences[b]
     mapping=align_mapping(seq_a,seq_b)
     relevant=[r for r in feature_rows if r['gene_symbol']==pair['gene_symbol'] and r['isoform_id'] in (a,b)]
     by_key={(r['isoform_id'],r['provider'],r['feature_id']):r for r in relevant}
     if len(by_key)!=len(relevant):raise ValueError('Duplicate native feature instance in impact audit')
-    audit=[];display=[];seen={}
+    audit=[];display=[];seen={};audit_by_id={}
     for r in relevant:
-        reason=('paired_B_record' if r['isoform_id']==b else 'source_not_in_view' if r['provider'] not in sources
+        rule=essential_rule(r,essential)
+        reason=('paired_B_record' if r['isoform_id']==b else 'displayed' if rule else 'source_not_in_view' if r['provider'] not in sources
                 else 'type_not_in_view' if r['name'] not in feature_types else 'reference_not_in_view'
                 if reference_proteins is not None and r['reference_protein'] not in reference_proteins else 'displayed')
         entry=dict(gene_symbol=pair['gene_symbol'],isoform_A=a,isoform_B=b,source_isoform=r['isoform_id'],provider=r['provider'],
-                   feature_id=r['feature_id'],feature_type=r['name'],description=r['description'],source_status=r['status'],display_role=reason)
+                   feature_id=r['feature_id'],feature_type=r['name'],description=r['description'],source_status=r['status'],display_role=reason,
+                   essential_class=rule['cls'] if rule else '')
         audit.append(entry)
+        if r['isoform_id']!=b:audit_by_id[r['feature_id']]=entry
         if reason!='displayed':continue
+        essential_fields=dict(essential_class=rule['cls'],class_label=rule['label'],class_priority=rule['priority'],
+                              class_color=rule['color'],class_display=rule['label']) if rule else dict(
+                              essential_class='',class_label='',class_priority='',class_color='',class_display='')
         rb=by_key.get((b,r['provider'],r['feature_id']))
         if rb is None:raise ValueError('Missing required paired feature projection: '+r['feature_id'])
         if r['status']!='intact_sequence':
@@ -167,7 +394,7 @@ def feature_plan(pair, feature_rows, sequences, feature_types=DEFAULT_TYPES, sou
                       inserted_residues='',insertion_anchors=[],identical_segments=[],altered_segments=[],absent_segments=[],B_native_segments=[],
                       status='intact_only_in_B_unplaced' if rb['status']=='intact_sequence' and r.get('sequence_present') in ('False',False) else 'unplaced_annotation',
                       source_A_status=r['status'],source_B_status=rb['status'],pair_projection_status='not_computed_without_A_coordinate',
-                      projection_disagreement=False,evidence=r.get('evidence',''),source_feature_ids=[r['feature_id']])
+                      projection_disagreement=False,evidence=r.get('evidence',''),source_feature_ids=[r['feature_id']],**essential_fields)
             display.append(item)
             continue
         start,end=int(r['query_start']),int(r['query_end'])
@@ -197,11 +424,13 @@ def feature_plan(pair, feature_rows, sequences, feature_types=DEFAULT_TYPES, sou
                   inserted_residues=n_inserted,insertion_anchors=[(e['A_anchor'],e['B_end']-e['B_start']+1) for e in insertions],
                   identical_segments=runs(identical),altered_segments=runs(altered),absent_segments=runs(absent),
                   B_native_segments=runs(mapped_q),status=status,source_B_status=rb['status'],pair_projection_status=projection['status'],
-                  projection_disagreement=disagreement,evidence=r.get('evidence',''),source_feature_ids=[r['feature_id']])
+                  projection_disagreement=disagreement,evidence=r.get('evidence',''),source_feature_ids=[r['feature_id']],**essential_fields)
         key=(start,end,r['name'],r['description'],r['provider'])
         if key in seen:
             seen[key]['source_feature_ids'].append(r['feature_id']);entry['display_role']='coalesced_identical_display_annotation'
         else:seen[key]=item;display.append(item)
+    display=_coalesce_overlapping_same_annotation(display,audit_by_id)
+    _number_essential(display)
     display.sort(key=lambda f:(f['A_start'] if f['A_start']!='' else math.inf,f['A_end'] if f['A_end']!='' else math.inf,f['feature_type'],f['description'],f['provider']))
     for i,f in enumerate(display,1):f['display_id']='F'+str(i)
     return display,audit,alignment_segments(seq_a,seq_b,mapping)
@@ -390,9 +619,71 @@ def architecture_features(features, side):
     return placed,unplaced
 
 
+def reference_architecture(features):
+    """Essential classes that NO drawn isoform can place, returned on their own reference protein.
+
+    Nathan, 2026-10-25 (IKZF1 Pro-B-1): a panel whose DNA-binding or TM annotations are unplaceable on
+    both isoforms drew no domain at all and stated the loss only in a text line. The essential-class rule
+    is that such a class is always SHOWN, so it is drawn here on a reference row carrying the reference
+    protein's own coordinates. The row is never a measured isoform: its extent is the furthest annotated
+    reference residue in the panel, which is the only reference length pinned in the impact results.
+
+    A class that is placed on A or B is left alone, so panels that already draw their essential bars are
+    unchanged. One bar per distinct reference interval per class, with the providers kept in the audit.
+    """
+    placed_classes=set()
+    for side in ('A','B'):
+        for item in architecture_features(features,side)[0]:
+            if item['feature'].get('essential_class'):placed_classes.add(item['feature']['essential_class'])
+    by_reference=defaultdict(dict)
+    for f in features:
+        cls=f.get('essential_class')
+        if not cls or cls in placed_classes or f['A_start']!='':continue
+        if f.get('reference_start') in ('',None) or f.get('reference_end') in ('',None):continue
+        start,end=int(f['reference_start']),int(f['reference_end'])
+        if end<start:raise ValueError('Reference annotation ends before it starts: '+str(f.get('feature_id')))
+        by_reference[f['reference_protein']].setdefault((cls,start,end),f)
+    # One row per essential class, on the MOST COMPLETE reference protein that carries it (furthest
+    # annotated residue, then bar count): the row exists to show the architecture the isoforms lack, so a
+    # partial reference must not replace the full-length one. The same zinc fingers repeated over ten
+    # reference proteins is noise; every row stays in the display audit.
+    chosen={}
+    for cls in {c for bars in by_reference.values() for c,_,_ in bars}:
+        counts=[(max(e for _,_,e in bars),sum(1 for c,_,_ in bars if c==cls),reference)
+                for reference,bars in by_reference.items() if any(c==cls for c,_,_ in bars)]
+        chosen[cls]=max(counts)[2]
+    rows=[]
+    for reference,bars in sorted(by_reference.items()):
+        kept={k:f for k,f in bars.items() if chosen[k[0]]==reference}
+        if not kept:continue
+        items=[dict(feature=f,segments=[(start,end)],partial=False) for (cls,start,end),f in sorted(kept.items())]
+        rows.append(dict(reference_protein=reference,extent=max(e for _,_,e in kept),features=items))
+    return rows
+
+
+def unplaced_summary(features, unplaced_ids):
+    """Readable text for annotations that cannot be placed on a native protein: names with counts,
+    never bare running ids (``Kinase x3, TM x2, Ig_I-set``)."""
+    by_id={f['display_id']:f for f in features}
+    counts=defaultdict(int);order=[]
+    for fid in unplaced_ids:
+        f=by_id.get(fid)
+        name=(f['class_label'] if f and f.get('essential_class') else architecture_label(f) if f else fid)
+        if name not in counts:order.append(name)
+        counts[name]+=1
+    return ', '.join(n+(' x'+str(counts[n]) if counts[n]>1 else '') for n in order)
+
+
 def architecture_label(feature):
-    """Conventional feature abbreviations; never a gene-specific label rule."""
+    """Conventional feature abbreviations; never a gene-specific label rule.
+
+    An essential-class feature is labelled by its class (TM1, Kinase, DNA-binding).
+    """
+    if feature.get('essential_class'):return feature.get('class_display') or feature['class_label']
     desc=_clean_label(feature['description'])
+    # EnsMart100 UniProt rows read "DOMAIN-Ig-like C2-type": the key is the feature type, the rest the name.
+    if feature.get('provider')=='uniprot_features' and re.match(r'^[A-Z_]{3,}-',desc):
+        desc=desc.split('-',1)[1].strip() or desc
     signal=re.search(r'\((NLS\d*|NES\d*)\)',desc)
     if signal:return signal[1]
     common={'Disordered':'IDR','HMG box':'HMG','NR LBD':'LBD','NR C4-type':'C4',
@@ -406,7 +697,9 @@ def architecture_label(feature):
     if desc in common:return common[desc]
     if feature['feature_type']=='DNA binding' and desc=='Nuclear receptor':return 'DBD'
     if desc.startswith('CBP/p300-binding'):return 'CBP/p300'
-    return desc if len(desc)<=18 else feature['display_id']
+    # Always the source name, never a bare running id: a bar must be readable without the key.
+    # Past 40 characters the name is cut with an explicit ellipsis; the full text stays in the key and tooltip.
+    return desc if len(desc)<=40 else desc[:39].rstrip()+'\u2026'
 
 
 def render_compact_pair(pair, features, events, sequences, models, context, page_index=1, page_count=1, figure=None, figure_width=12):
@@ -431,25 +724,42 @@ def render_compact_pair(pair, features, events, sequences, models, context, page
     from matplotlib.font_manager import FontProperties
     dpi=plt.rcParams['figure.dpi']
     key_renderer=RendererAgg(1,1,dpi)
+    # A key name that is wider than its column is wrapped onto more lines, never replaced by the running
+    # id (F1, F2 ...), which Nathan rejected on 2026-10-23/24 as meaningless.
+    key_font=FontProperties(family='DejaVu Sans',weight='bold',size=8.5)
+    key_width_px=.085*figure_width*dpi-4
     for f in unique:
         key=feature_key(f)
-        width=key_renderer.get_text_width_height_descent(
-            labels_by_key[key],
-            FontProperties(family='DejaVu Sans',weight='bold',size=8.5),False)[0]
-        if width > .085*figure_width*dpi-4:
-            labels_by_key[key]=f['display_id']
+        text=labels_by_key[key]
+        if key_renderer.get_text_width_height_descent(text,key_font,False)[0] > key_width_px:
+            for chars in range(max(len(text)-1,4),3,-1):
+                lines=textwrap.wrap(text,width=chars,break_long_words=True,break_on_hyphens=True)
+                if all(key_renderer.get_text_width_height_descent(l,key_font,False)[0] <= key_width_px for l in lines):
+                    labels_by_key[key]='\n'.join(lines);break
+            else:
+                labels_by_key[key]='\n'.join(textwrap.wrap(text,width=4,break_long_words=True))
     color_by_key={feature_key(f):palette[i % len(palette)] for i,f in enumerate(unique)}
+    for f in unique:
+        if f.get('essential_class'):color_by_key[feature_key(f)]=f['class_color']
     colors={f['display_id']:color_by_key[feature_key(f)] for f in features}
-    a,b=pair['isoform_A'],pair['isoform_B'];length=max(len(sequences[a]),len(sequences[b]))
+    is_essential=lambda f:bool(f.get('essential_class'))
+    bar_label=lambda f:(f.get('class_display') or f['class_label']) if is_essential(f) else architecture_label(f)
+    a,b=pair['isoform_A'],pair['isoform_B']
+    # An essential class that NEITHER isoform can place is drawn on its reference protein instead of
+    # being reduced to a text line (Nathan, 2026-10-25: the IKZF1 Pro-B-1 panel drew no DNA-binding bar).
+    references=reference_architecture(features)
+    length=max([len(sequences[a]),len(sequences[b])]+[r['extent'] for r in references])
     # Pack annotation bars using both their true interval and the width of the
     # conventional label, including partial-domain qualifiers.
     rows=[]
-    for side,iso in [('A',a),('B',b)]:
-        placed,unplaced=architecture_features(features,side)
+    for side,iso,reference in [('A',a,None),('B',b,None)]+[('REF'+str(i+1),None,r) for i,r in enumerate(references)]:
+        placed,unplaced=(architecture_features(features,side) if reference is None
+                         else ([dict(item) for item in reference['features']],[]))
         lanes=[]
-        for item in sorted(placed,key=lambda x:(x['segments'][0][0],x['segments'][-1][1],x['feature']['display_id'])):
+        # Essential classes pack first, so they take the lanes nearest the backbone.
+        for item in sorted(placed,key=lambda x:(0 if is_essential(x['feature']) else 1,x['segments'][0][0],x['segments'][-1][1],x['feature']['display_id'])):
             start,end=item['segments'][0][0],item['segments'][-1][1]
-            label=labels_by_key[feature_key(item['feature'])]+(' (partial)' if item['partial'] else '')
+            label=bar_label(item['feature'])+(' (partial)' if item['partial'] else '')
             center=(start+end)/2
             half_label=len(label)*.055/(.56*figure_width)*length/2
             left=min(start,center-half_label);right=max(end,center+half_label)
@@ -457,16 +767,33 @@ def render_compact_pair(pair, features, events, sequences, models, context, page
             if lane==len(lanes):lanes.append(right)
             else:lanes[lane]=right
             item['lane']=lane
-        rows.append(dict(side=side,iso=iso,features=placed,unplaced=unplaced,lanes=max(len(lanes),1)))
-    heights=[.80+.20*r['lanes'] for r in rows]
+        rows.append(dict(side=side,iso=iso,reference=reference,features=placed,unplaced=unplaced,lanes=max(len(lanes),1)))
+    # A row that lists unplaced annotations needs the extra text lines below its backbone.
+    unplaced_lines={r['side']:(textwrap.wrap('Unplaced annotations: '+unplaced_summary(features,r['unplaced']),width=max(40,int(figure_width*7.5))) if r['unplaced'] else []) for r in rows}
+    # Reserve a key only for coding fragments whose labels may not fit. Their
+    # scientific widths stay exact; the full literal IDs and AA offsets remain.
+    key_width=max(40,int(figure_width*7.5))
+    small_key_reserve={}
+    for r in rows:
+        entries=[e['exon_label']+' ['+format(e['aa_start0'],'g')+','+format(e['aa_end0'],'g')+')'
+                 for e in (models[r['iso']].get('coding_exons',[]) if r['iso'] else [])
+                 if e.get('exon_label') and (e['aa_end0']-e['aa_start0'])/max(length,1)*.56*figure_width*72<36]
+        small_key_reserve[r['side']]=(textwrap.wrap('Small coding segments (AA offsets): '+'; '.join(entries),
+                                                  width=key_width) if entries else [])
+    heights=[.80+.20*r['lanes']+.15*(len(unplaced_lines[r['side']])+len(small_key_reserve[r['side']])) for r in rows]
     key_lines=[]
     for f in unique:
         label=_clean_label(f['description'])
         if f['provider']=='literature_construct_snapshot':label+=' [literature]'
+        if is_essential(f):
+            if not f['essential_class'].startswith('NAMED_DOMAIN:'):
+                label=f['class_label']+' (essential class): '+label
+            label+=' ['+f['provider']+']'
         lines=textwrap.wrap(label,width=27) or [label]
         key_lines.append((f,lines))
     partial_key=any(item['partial'] for row in rows for item in row['features'])
-    key_height=sum(.16*len(lines)+.08 for _,lines in key_lines)+.35+(.16 if partial_key else 0)
+    key_height=sum(.16*max(len(lines),labels_by_key[feature_key(f)].count('\n')+1)+.08
+                   for f,lines in key_lines)+.35+(.16 if partial_key else 0)
     height=max(2.85,.65+sum(heights),.85+key_height)
     fig=figure if figure is not None else plt.figure(figsize=(figure_width,height),facecolor='white')
     fig.text(.025,1-.13/height,pair['gene_symbol'],fontsize=14,fontweight='bold',va='top')
@@ -481,15 +808,19 @@ def render_compact_pair(pair, features, events, sequences, models, context, page
     ax.set_xlim(-length*.015,length*1.025);ax.set_ylim(0,height-.65);ax.axis('off')
     top=height-.78
     for row,row_height in zip(rows,heights):
-        iso=row['iso'];n=len(sequences[iso]);base=top-.20*row['lanes']-.13
+        iso=row['iso'];reference=row['reference']
+        n=reference['extent'] if reference else len(sequences[iso])
+        base=top-.20*row['lanes']-.13
         y_fig=(base+.25)/height
-        fig.text(.025,y_fig,pair['gene_symbol']+'-'+('1' if row['side']=='A' else '2'),fontsize=11,va='center')
-        m=models[iso]
-        length_text=str(n)+' aa'
+        fig.text(.025,y_fig,'reference' if reference else pair['gene_symbol']+'-'+('1' if row['side']=='A' else '2'),
+                 fontsize=11,va='center')
+        m={} if reference else models[iso]
+        length_text=str(n)+(' aa annotated' if reference else ' aa')
         if m.get('reported_aa') not in (None,'') and int(m['reported_aa'])!=n:
             length_text+=' (table: '+str(m['reported_aa'])+')'
         fig.text(.025,y_fig-.23/height,length_text,fontsize=9,va='center')
         body_height=.23 if m.get('coding_exons') else .14
+        small_exon_labels=[]
         ax.add_patch(Rectangle((.5,base-body_height/2),n,body_height,facecolor='#D6D6D6',edgecolor='#777777',linewidth=.65))
         if m.get('coding_exons'):
             for exon_index,exon in enumerate(m['coding_exons'],1):
@@ -515,22 +846,31 @@ def render_compact_pair(pair, features, events, sequences, models, context, page
                         text_box=label.get_window_extent(renderer);block_box=patch.get_window_extent(renderer)
                         if text_box.width<=block_box.width-.3 and text_box.height<=block_box.height-1:
                             fitted=True;break
-                    if not fitted:raise ValueError('AltAnalyze exon ID cannot fit legibly inside coding block: '+iso+' '+exon['exon_label'])
-        for item in row['features']:
+                    if not fitted:
+                        label.remove()
+                        small_exon_labels.append(exon['exon_label']+' ['+format(exon['aa_start0'],'g')+','+
+                                                 format(exon['aa_end0'],'g')+')')
+        # Essential classes are drawn last, so they lie above any annotation they overlap.
+        for item in sorted(row['features'],key=lambda x:(1 if is_essential(x['feature']) else 0)):
             f=item['feature'];y=base+.17+.20*item['lane'];color=colors[f['display_id']]
             for lo,hi in item['segments']:
                 ax.add_patch(Rectangle((lo-.5,y),hi-lo+1,.065,facecolor=color,edgecolor=color,linewidth=.65,
-                                       gid='feature_'+row['side']+'_'+f['display_id']))
+                                       zorder=3 if is_essential(f) else 2,gid='feature_'+row['side']+'_'+f['display_id']))
             center=(item['segments'][0][0]+item['segments'][-1][1])/2
-            label=labels_by_key[feature_key(f)]+(' (partial)' if item['partial'] else '')
+            label=bar_label(f)+(' (partial)' if item['partial'] else '')
             ax.text(center,y+.085,label,ha='center',va='bottom',fontsize=8,color='#222222',
+                    fontweight='bold' if is_essential(f) else 'normal',zorder=4 if is_essential(f) else 3,
                     gid='feature_label_'+row['side']+'_'+f['display_id'])
         for x,text in [(1,'1'),(n,str(n))]:
             ax.plot([x,x],[base-body_height/2,base-body_height/2-.05],color='black',linewidth=.65)
             ax.text(x,base-body_height/2-.08,text,ha='center',va='top',fontsize=8)
-        ax.text(0,base-.42,iso,fontsize=7.5,ha='left',va='top',gid='native_id_'+row['side'])
-        if row['unplaced']:
-            ax.text(0,base-.57,'Unplaced: '+', '.join(row['unplaced']),fontsize=8,color='#555555',va='top',gid='unplaced_'+row['side'])
+        ax.text(0,base-.42,reference['reference_protein'] if reference else iso,fontsize=7.5,ha='left',va='top',gid='native_id_'+row['side'])
+        small_lines=(textwrap.wrap('Small coding segments (AA offsets): '+'; '.join(small_exon_labels),width=key_width)
+                     if small_exon_labels else [])
+        if len(small_lines)>len(small_key_reserve[row['side']]):
+            raise ValueError('Small coding exon key exceeds reserved native layout space: '+str(iso))
+        for k,line in enumerate(small_lines+unplaced_lines[row['side']]):
+            ax.text(0,base-.57-.15*k,line,fontsize=8,color='#555555',va='top',gid='unplaced_'+row['side']+('' if k==0 else '_'+str(k+1)))
         if m.get('nmd') not in ('','Not-NMD',None):
             ax.text(length*1.02,base,m['nmd'],fontsize=8,ha='right',va='center',gid='nmd_'+row['side'])
         top-=row_height
@@ -540,9 +880,10 @@ def render_compact_pair(pair, features, events, sequences, models, context, page
         color=colors[f['display_id']]
         fig.add_artist(Rectangle((.70,(key_y-.07)/height),.013,.055/height,
                                  transform=fig.transSubfigure,facecolor=color,edgecolor=color))
-        fig.text(.725,key_y/height,labels_by_key[feature_key(f)],fontsize=8.5,fontweight='bold',va='top',color='#222222')
+        key_label=labels_by_key[feature_key(f)]
+        fig.text(.725,key_y/height,key_label,fontsize=8.5,fontweight='bold',va='top',color='#222222',linespacing=1.1)
         fig.text(.81,key_y/height,'\n'.join(lines),fontsize=8.5,va='top',linespacing=1.1)
-        key_y-=.16*len(lines)+.08
+        key_y-=.16*max(len(lines),key_label.count('\n')+1)+.08
     # Check all labels, including native identifiers, rather than clipping them.
     fig.canvas.draw();renderer=fig.canvas.get_renderer();panel_box=fig.bbox
     labels=[*fig.texts,*ax.texts];layout=[]
@@ -600,6 +941,7 @@ def run_protein_impact_plots(args):
     available_sources={r['provider'] for r in feature_rows}
     if set(sources)-available_sources:raise ValueError('Requested annotation source not present in the pinned audit')
     feature_references=feature_reference_selection(getattr(args,'feature_reference',None),pairs,feature_rows)
+    essential=load_essential_whitelist(getattr(args,'essential_whitelist',None))
     context,units=donor_context(base,impact)
     model_index={r['isoform_id']:r for r in models}
     style=getattr(args,'protein_plot_style','compact')
@@ -616,7 +958,7 @@ def run_protein_impact_plots(args):
         model_index={k:dict(v,coding_exons=exon_models[k]['segments']) for k,v in model_index.items()}
     plans=[];all_audit=[];all_events=[];flat=[];names=defaultdict(int)
     for pair in pairs:
-        feats,audit,events=feature_plan(pair,feature_rows,sequences,types,sources,feature_references.get(pair['gene_symbol']))
+        feats,audit,events=feature_plan(pair,feature_rows,sequences,types,sources,feature_references.get(pair['gene_symbol']),essential)
         names[pair['gene_symbol']]+=1
         stem=re.sub(r'[^A-Za-z0-9_.-]','_',pair['gene_symbol'])+'_pair'+str(names[pair['gene_symbol']]).zfill(2)+'_protein_features'
         plans.append(dict(pair=pair,features=feats,events=events,stem=stem))
@@ -689,7 +1031,17 @@ def run_protein_impact_plots(args):
                     code_sha256={str(Path(__file__)):sha(__file__),str(Path(__file__).parents[1]/'protein_isoform_audit.py'):sha(Path(__file__).parents[1]/'protein_isoform_audit.py')},
                     selection=dict(feature_types=list(types),sources=list(sources),functional_annotation_rows=len(flat),
                                    feature_references=feature_references,
-                                   selected_source_rows=len(all_audit),all_other_annotations_preserved_in_display_audit=True),
+                                   selected_source_rows=len(all_audit),all_other_annotations_preserved_in_display_audit=True,
+                                   essential_whitelist=dict(path=essential['path'],sha256=essential['sha256'],rules=len(essential['rules'])),
+                                   named_UniProt_domains_always_displayed=True,
+                                   named_domain_labels='Literal source labels unless a pinned specific whitelist rule supplies the class name',
+                                   essential_rows_A=sum(1 for e in all_audit if e['essential_class'] and e['source_isoform']==e['isoform_A']),
+                                   essential_rows_A_shown=sum(1 for e in all_audit if e['essential_class'] and e['source_isoform']==e['isoform_A']
+                                                              and (e['display_role'].startswith('displayed') or e['display_role'].startswith('coalesced'))),
+                                   essential_rows_A_hidden_placeable=sum(1 for e in all_audit if e['essential_class'] and e['source_isoform']==e['isoform_A']
+                                                              and e['source_status']=='intact_sequence'
+                                                              and not (e['display_role'].startswith('displayed') or e['display_role'].startswith('coalesced'))),
+                                   essential_classes_displayed=sorted({f['essential_class'] for p in plans for f in p['features'] if f.get('essential_class')})),
                     coordinate_convention=('1-based inclusive native protein coordinates on each compact track; alignment coordinates in audit tables'
                                            if style=='compact' else '1-based inclusive, native A aligned coordinates; native B positions explicitly tabulated'),
                     RNA_support=units,projection_disagreements=sum(f['projection_disagreement'] for p in plans for f in p['features']),

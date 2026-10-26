@@ -48,6 +48,7 @@ cromwell-workflow-logs
 _codex_archive/
 .codex_archive/
 .claude/
+.rigor/
 
 # IDE
 .vscode

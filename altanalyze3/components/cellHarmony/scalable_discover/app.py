@@ -375,63 +375,68 @@ def create_discover_app(overrides: Optional[Dict] = None) -> FastAPI:
         reference: str = Form(DISCOVER_REFERENCE_ID),
         ambient_option: str | None = Form(None),
         soupx_option: str | None = Form(None),
+        previous_job_id: str | None = Form(None),
         sample_names: List[str] = Form(...),
         files: List[UploadFile] = File(...),
     ):
         species = _validate_species(species, reference)
         return await original_create_job(species=species, reference=DISCOVER_REFERENCE_ID, analysis_mode="unsupervised",
                                          ambient_option=ambient_option, soupx_option=soupx_option,
-                                         sample_names=sample_names, files=files)
+                                         previous_job_id=previous_job_id, sample_names=sample_names, files=files)
 
     @app.post("/api/jobs/{job_id}/qc")
     async def update_qc(job_id: str, qc: DiscoverQCSettings):
-        store, _ = W._job_resources(app)
+        store, runner = W._job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
-        requested = [str(v) for v in (qc.impute_modalities or []) if str(v).strip().lower() not in {"", "none"}]
-        if requested or str(qc.impute_modality or "none").strip().lower() not in {"", "none"}:
-            raise HTTPException(status_code=400, detail="scALABLE-discover runs no modality imputation.")
-        values = qc.model_dump()
-        values.pop("align_cutoff", None)       # no alignment, so no alignment cutoff is stored
-        values.update(impute_modality="none", impute_modalities=[])
-        meta = store.update_job(job_id, qc=values, message="QC parameters saved.")
-        return JSONResponse({"job_id": job_id, "qc": meta["qc"]})
+        with W.control_job(store, job_id):
+            runner.assert_idle(job_id)
+            requested = [str(v) for v in (qc.impute_modalities or []) if str(v).strip().lower() not in {"", "none"}]
+            if requested or str(qc.impute_modality or "none").strip().lower() not in {"", "none"}:
+                raise HTTPException(status_code=400, detail="scALABLE-discover runs no modality imputation.")
+            values = qc.model_dump()
+            values.pop("align_cutoff", None)       # no alignment, so no alignment cutoff is stored
+            values.update(impute_modality="none", impute_modalities=[])
+            meta = store.update_job(job_id, qc=values, message="QC parameters saved.")
+            return JSONResponse({"job_id": job_id, "qc": meta["qc"]})
 
     @app.post("/api/jobs/{job_id}/configure")
     async def configure_job(job_id: str, settings: W.JobConfigSettings):
-        store, _ = W._job_resources(app)
+        store, runner = W._job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
-        species = _validate_species(settings.species, settings.reference)
-        meta = store.get_job(job_id)
-        requested_ambient = (settings.ambient_option if settings.ambient_option is not None
-                             else meta.get("ambient_option", meta.get("soupx_option")))
-        changed = (str(meta.get("species") or "") != species
-                   or str(meta.get("ambient_option", meta.get("soupx_option")) or "") != str(requested_ambient or ""))
-        if changed:
-            W._invalidate_expression_cache(app, job_id)
-            W._invalidate_marker_heatmap_cache(app, job_id)
-            W._invalidate_fastcomm_cache(app, job_id)
-            W._clear_directory_contents(store.outputs_dir(job_id))
-            W._clear_directory_contents(store.logs_dir(job_id))
-            meta = store.update_job(
-                job_id, species=species, reference=DISCOVER_REFERENCE_ID, ambient_option=requested_ambient,
-                status="uploaded", progress=0, message="Species updated. Configure QC and rerun ICGS3.",
-                artifacts={}, marker_analysis={}, marker_analysis_by_modality={}, fastcomm_analysis={},
-                icgs3_analysis={}, cell_state_layers={}, modality_artifacts={},
-                modalities={"default": "rna", "available": [dict(W._DEFAULT_MODALITY_DEFINITIONS["rna"])]},
-                differential={},
-            )
-        return JSONResponse({"job_id": job_id, "status": meta.get("status"), "species": meta.get("species"),
-                             "reference": meta.get("reference"),
-                             "ambient_option": meta.get("ambient_option", meta.get("soupx_option")),
-                             "changed": changed})
+        with W.control_job(store, job_id):
+            runner.assert_idle(job_id)
+            species = _validate_species(settings.species, settings.reference)
+            meta = store.get_job(job_id)
+            requested_ambient = (settings.ambient_option if settings.ambient_option is not None
+                                 else meta.get("ambient_option", meta.get("soupx_option")))
+            changed = (str(meta.get("species") or "") != species
+                       or str(meta.get("ambient_option", meta.get("soupx_option")) or "") != str(requested_ambient or ""))
+            if changed:
+                W._invalidate_expression_cache(app, job_id)
+                W._invalidate_marker_heatmap_cache(app, job_id)
+                W._invalidate_fastcomm_cache(app, job_id)
+                W._clear_directory_contents(store.outputs_dir(job_id))
+                W._clear_directory_contents(store.logs_dir(job_id))
+                meta = store.update_job(
+                    job_id, species=species, reference=DISCOVER_REFERENCE_ID, ambient_option=requested_ambient,
+                    status="uploaded", progress=0, message="Species updated. Configure QC and rerun ICGS3.",
+                    artifacts={}, marker_analysis={}, marker_analysis_by_modality={}, fastcomm_analysis={},
+                    icgs3_analysis={}, cell_state_layers={}, modality_artifacts={},
+                    modalities={"default": "rna", "available": [dict(W._DEFAULT_MODALITY_DEFINITIONS["rna"])]},
+                    differential={},
+                )
+            return JSONResponse({"job_id": job_id, "status": meta.get("status"), "species": meta.get("species"),
+                                 "reference": meta.get("reference"),
+                                 "ambient_option": meta.get("ambient_option", meta.get("soupx_option")),
+                                 "changed": changed})
 
-    def _job_meta(job_id: str) -> Dict:
-        store, _ = W._job_resources(app)
-        if not store.job_exists(job_id):
-            raise HTTPException(status_code=404, detail="Job not found.")
-        return store.get_job(job_id)
+        def _job_meta(job_id: str) -> Dict:
+            store, _ = W._job_resources(app)
+            if not store.job_exists(job_id):
+                raise HTTPException(status_code=404, detail="Job not found.")
+            return store.get_job(job_id)
 
     @app.get("/api/jobs/{job_id}/biomarkers/goelite/states")
     def goelite_state_list(job_id: str):

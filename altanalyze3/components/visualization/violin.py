@@ -89,7 +89,8 @@ def _parse_list_arg(values: Optional[Sequence[str]]) -> List[str]:
     return resolved
 
 
-def _pairwise_group_tests(group_payload: List[dict], *, test: str, correction: str) -> List[dict]:
+def _pairwise_group_tests(group_payload: List[dict], *, test: str, correction: str,
+                          reference: Optional[str] = None) -> List[dict]:
     """Two-sided tests between every pair of groups; p-values adjusted across the pairs of one panel."""
     from itertools import combinations
 
@@ -98,8 +99,14 @@ def _pairwise_group_tests(group_payload: List[dict], *, test: str, correction: s
 
     if test != "mannwhitney":
         raise ValueError(f"Unsupported pairwise test '{test}'.")
+    if reference is not None and sum(a['label'] == reference for a in group_payload) != 1:
+        raise ValueError('The reference must identify exactly one group.')
     rows = []
     for (i, a), (j, b) in combinations(enumerate(group_payload), 2):
+        if reference is not None and reference not in (a['label'], b['label']):
+            continue
+        if not len(a['values']) or not len(b['values']):
+            raise ValueError('Statistical comparison has no defined measurements.')
         stat, p = mannwhitneyu(np.asarray(a["values"], float), np.asarray(b["values"], float),
                                alternative="two-sided")
         rows.append({"i": i, "j": j, "group_1": a["label"], "group_2": b["label"], "n_1": len(a["values"]),
@@ -153,6 +160,7 @@ def _plot_gene_groups(
     pairwise_correction: str = "holm",
     pairwise_alpha: float = 0.05,
     hide_center_line: bool = False,
+    ylabel: str = "Expression",
 ) -> List[dict]:
     positions = np.arange(1, len(group_payload) + 1)
     labels = [entry["label"] for entry in group_payload]
@@ -191,7 +199,7 @@ def _plot_gene_groups(
     ax.set_xticks(positions)
     ax.set_xticklabels([entry["label"] for entry in group_payload], rotation=45, ha="right")
     ax.set_title(title)
-    ax.set_ylabel("Expression")
+    ax.set_ylabel(ylabel)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     if pairwise_test == "none":
@@ -302,6 +310,7 @@ def write_lineage_violin_pdf(
     pairwise_alpha: float = 0.05,
     hide_center_line: bool = False,
     also_png: bool = False,
+    ylabel: str = "Expression",
 ) -> str:
     step_started_at = time.perf_counter()
     adata = _load_adata(h5ad)
@@ -382,6 +391,7 @@ def write_lineage_violin_pdf(
                 pairwise_test=pairwise_test,
                 pairwise_correction=pairwise_correction,
                 pairwise_alpha=pairwise_alpha,
+                ylabel=ylabel,
             )
             stats_rows += [{"gene": payload["gene"], **{k: v for k, v in r.items() if k not in ("i", "j")}} for r in rows]
         fig.tight_layout()
@@ -458,6 +468,8 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Omit the median line inside each violin (default: the median line is drawn).",
     )
+    parser.add_argument("--ylabel", default="Expression",
+                        help="y-axis label naming the plotted quantity (default 'Expression').")
     parser.add_argument("--png", action="store_true", help="Also write a 300 dpi PNG beside the PDF.")
     parser.add_argument("--verbose", action="store_true", help="Enable INFO logging.")
     return parser.parse_args(argv)
@@ -497,6 +509,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         pairwise_alpha=args.pairwise_alpha,
         hide_center_line=args.hide_center_line,
         also_png=args.png,
+        ylabel=args.ylabel,
     )
     _log_timing("lineage_violin.total", main_started_at)
     print(f"[info] Wrote violin PDF to {output_pdf}")

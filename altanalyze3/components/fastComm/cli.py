@@ -98,6 +98,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     benchmark.add_argument("--include-self-edges", action="store_true", help="Include sender=receiver state edges.")
     benchmark.add_argument("--top-n-stability", type=int, default=100, help="Top edge count for split-vs-full Jaccard.")
+    benchmark.add_argument("--candidate-edges", type=Path, default=None,
+                           help="TSV of sender_state, receiver_state, ligand, receptor: score exactly these edges in every "
+                                "split with the expression thresholds and LR cap off (see candidate-edges).")
 
     build_response = subparsers.add_parser(
         "build-response-matrix",
@@ -135,12 +138,70 @@ def build_parser() -> argparse.ArgumentParser:
     exemplar.add_argument("--min-score", type=float, default=0.0, help="Minimum fastComm score.")
     exemplar.add_argument("--allow-multiple-per-state-pair", action="store_true", help="Do not collapse to the best LR per state pair.")
     exemplar.add_argument("--title", default="fastComm Exemplar Interactions", help="Markdown report title.")
+
+    pb = subparsers.add_parser(
+        "sample-pseudobulk",
+        help="Per-sample scores (benchmark-h5ad split_scores_long.tsv) as a sample x receiver-state h5ad for cellHarmony_differential.",
+    )
+    pb.add_argument("--split-scores", type=Path, required=True, help="split_scores_long.tsv from benchmark-h5ad.")
+    pb.add_argument("--output", type=Path, required=True, help="Output h5ad.")
+    pb.add_argument("--score", default="fastcomm_score", help="Score column used as the value.")
+    pb.add_argument("--sample-col", default="Sample", help="obs column for the sample (split) id.")
+    pb.add_argument("--population-col", default="cell_type", help="obs column for the receiver state.")
+    pb.add_argument("--covariates", type=Path, help="Optional TSV with --sample-col and --covariate-col columns.")
+    pb.add_argument("--covariate-col", default="Condition", help="Covariate column in --covariates.")
+    pb.add_argument("--covariates-output", type=Path, help="Covariates file for cellHarmony_differential (default beside --output).")
+    pb.add_argument("--summary-json", type=Path, help="Summary JSON (default beside --output).")
+
+    ce = subparsers.add_parser(
+        "candidate-edges",
+        help="Union of per-split edges from a thresholded benchmark-h5ad run, senders present in every split, for rescoring.",
+    )
+    ce.add_argument("--split-scores", type=Path, required=True, help="split_scores_long.tsv from benchmark-h5ad.")
+    ce.add_argument("--h5ad", type=Path, required=True, help="The h5ad the split scores came from.")
+    ce.add_argument("--state-key", required=True, help="obs state column used for scoring.")
+    ce.add_argument("--split-key", required=True, help="obs split (sample) column used for scoring.")
+    ce.add_argument("--min-cells", type=int, required=True, help="min cells per state used for scoring.")
+    ce.add_argument("--output", type=Path, required=True, help="Output candidate edge TSV.")
+
+    ov = subparsers.add_parser(
+        "isoform-overlay",
+        help="Long-read splicing and isoform changes of the ligand, receptor and downstream genes of differential edges.",
+    )
+    ov.add_argument("--deg-detailed", type=Path, required=True, help="cellHarmony_differential DEG_detailed TSV of the fastComm differential.")
+    ov.add_argument("--candidate-edges", type=Path, required=True, help="candidate_edges.tsv of the rescored run (background).")
+    ov.add_argument("--event-dir", type=Path, required=True, help="long-read dPSI-covariate-events folder.")
+    ov.add_argument("--isoform-dir", type=Path, required=True, help="long-read diff-covariate-isoform folder.")
+    ov.add_argument("--case", required=True); ov.add_argument("--control", required=True)
+    ov.add_argument("--lr-table", type=Path, default=Path(__file__).parent / "resources" / "cellchat_nichenet_human" / "ligand_receptor.tsv")
+    ov.add_argument("--response-matrix", type=Path,
+                    default=Path(__file__).parent / "training_data" / "processed" / "upstream" / "cellchat_nichenet_human" / "response_signatures.tsv",
+                    help="NicheNet response signatures; downstream genes are the top --top-downstream targets.")
+    ov.add_argument("--switches", type=Path, default=None, help="isoform_state_switches.tsv (optional).")
+    ov.add_argument("--alpha", type=float, default=0.1, help="edge significance: FDR (or raw P with --use-rawp) < alpha.")
+    ov.add_argument("--use-rawp", action="store_true")
+    ov.add_argument("--rawp", type=float, default=0.05, help="long-read evidence: ebayesPval < this.")
+    ov.add_argument("--dpsi", type=float, default=0.1, help="splicing events: |dPSI| > this.")
+    ov.add_argument("--fold", type=float, default=1.5, help="isoforms: |log2 fold| > log2(fold).")
+    ov.add_argument("--min-n", type=int, default=3, help="donors with a value in each group.")
+    ov.add_argument("--top-downstream", type=int, default=50, help="response genes per ligand or pathway signature.")
+    ov.add_argument("--output-dir", type=Path, required=True)
     return parser
 
 
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+
+    if args.command == "isoform-overlay":
+        from .isoform_overlay import overlay
+
+        overlay(str(args.deg_detailed), str(args.candidate_edges), str(args.lr_table), str(args.response_matrix),
+                str(args.event_dir), str(args.isoform_dir), args.case, args.control, str(args.output_dir),
+                alpha=args.alpha, use_rawp=args.use_rawp, rawp=args.rawp, dpsi=args.dpsi, fold=args.fold,
+                min_n=args.min_n, top_downstream=args.top_downstream,
+                switches=str(args.switches) if args.switches else None)
+        return 0
 
     if args.command == "source-registry":
         print(args.path.read_text(encoding="utf-8"))
@@ -202,6 +263,7 @@ def main() -> int:
                 max_lr_candidates_per_state_pair=args.max_lr_candidates_per_state_pair,
                 include_self_edges=args.include_self_edges,
                 top_n_stability=args.top_n_stability,
+                candidate_edges=args.candidate_edges,
             )
         )
         print(json.dumps(summary, indent=2, sort_keys=True))
@@ -260,6 +322,20 @@ def main() -> int:
             )
         )
         print(json.dumps(manifest, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "sample-pseudobulk":
+        from .sample_pseudobulk import main_from_args
+
+        return main_from_args(args)
+
+    if args.command == "candidate-edges":
+        from .sample_pseudobulk import build_candidate_edges
+
+        _, summary = build_candidate_edges(args.split_scores, args.h5ad, args.output, args.state_key, args.split_key,
+                                           args.min_cells)
+        Path(args.output).with_suffix(".summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+        print(json.dumps(summary, indent=2))
         return 0
 
     parser.error(f"Unknown command: {args.command}")

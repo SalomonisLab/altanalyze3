@@ -18,6 +18,9 @@ from typing import Dict
 from .job_manager import JobStore
 from .worker_memory import process_memory, tree_rss, container_memory, container_memory_details, host_memory
 from .worker_runtime import worker_environment
+from .job_control import (JobBusyError, JobCancelled, control_job, execution_lease,
+                          execution_busy, worker_activity, WorkerWatchdog)
+from .browser_presence import browser_disconnected
 from .pipeline import run_cellharmony_differential, run_cellharmony_pipeline
 
 
@@ -103,6 +106,127 @@ class JobRunner:
             raise ValueError("Memory admission limits must be positive.")
         self._admission = threading.Condition()
         self._active_workers = {}
+        self._worker_jobs = {}
+        self._leases = {}
+
+    def assert_idle(self, job_id):
+        meta = self.store.get_job(job_id)
+        if (meta.get('status') in {'queued', 'processing'}
+                or (meta.get('differential') or {}).get('status') in {'queued', 'processing'}
+                or execution_busy(self.store, job_id)):
+            raise JobBusyError('This session already has an active analysis. Stop it or wait for it to finish.')
+
+    def _cancel_requested(self, job_id):
+        return ((self.store.logs_dir(job_id).parent / '.cancel_requested').exists()
+                or bool(self.store.get_job(job_id).get('cancel_requested')))
+
+    def _mark_cancelled(self, job_id, task_name):
+        message = 'Analysis stopped by user. Uploaded files and existing results are retained.'
+        if self.store.get_job(job_id).get('cancel_reason') == 'browser_disconnected':
+            message = 'Analysis stopped after the browser session disconnected. Uploaded files and existing results are retained.'
+        if task_name == 'pipeline':
+            self.store.update_job(job_id, status='cancelled', message=message, worker_pid=None)
+        else:
+            self._update_differential(job_id, status='cancelled', message=message, worker_pid=None)
+        self.store.append_log(job_id, message)
+
+    def cancel_job(self, job_id, *, only_if_disconnected=False):
+        with control_job(self.store, job_id):
+            meta = self.store.get_job(job_id)
+            if only_if_disconnected and not browser_disconnected(self.store, job_id):
+                return meta
+            # Completion can be persisted just before the worker releases its
+            # execution lease. Closing that browser must preserve the finished
+            # session, even during this brief worker-shutdown interval.
+            if only_if_disconnected and not (
+                    meta.get('status') in {'queued', 'processing'} or
+                    (meta.get('differential') or {}).get('status') in {'queued', 'processing'}):
+                return meta
+            task = ('pipeline' if meta.get('status') in {'queued', 'processing'}
+                    else meta.get('execution_task', 'differential'))
+            active = (meta.get('status') in {'queued', 'processing'} or
+                      (meta.get('differential') or {}).get('status') in {'queued', 'processing'}
+                      or execution_busy(self.store, job_id))
+            if not active:
+                return meta
+            future = self._futures.get(f'{task}:{job_id}')
+            if future is not None and future.running() and not self.isolate_jobs:
+                raise JobBusyError('Stopping a running analysis requires isolated workers on this server.')
+            (self.store.logs_dir(job_id).parent / '.cancel_requested').touch()
+            self.store.update_job(job_id, cancel_requested=True, message='Stopping analysis…',
+                                  cancel_reason='browser_disconnected' if only_if_disconnected else 'user')
+            if future is not None and future.cancel():
+                self._mark_cancelled(job_id, task)
+            with self._admission:
+                self._admission.notify_all()
+            # A new web process may be handling Stop after the old supervisor
+            # exited. Only signal a verified, session-leading worker for this
+            # exact job; never trust a persisted PID alone or signal the web app.
+            state = meta if task == 'pipeline' else meta.get('differential') or {}
+            owner = state.get('worker_pid')
+            if future is None and owner:
+                self._stop_recorded_worker(int(owner), job_id)
+        # Wait outside the control lock; another supervisor may own this job.
+        deadline = time.monotonic() + 10
+        while execution_busy(self.store, job_id) and time.monotonic() < deadline:
+            time.sleep(.1)
+        if not execution_busy(self.store, job_id):
+            with control_job(self.store, job_id):
+                meta = self.store.get_job(job_id)
+                state = meta if task == 'pipeline' else meta.get('differential') or {}
+                if state.get('status') in {'queued', 'processing'}:
+                    self._mark_cancelled(job_id, task)
+        return self.store.get_job(job_id)
+
+    def cancel_disconnected_jobs(self):
+        # Inspect job-specific browser leases, independently of incoming visits.
+        # Include persisted leases so a web-process restart cannot orphan jobs.
+        with self._lock:
+            jobs = {key.split(':', 1)[1] for key, future in self._futures.items() if not future.done()}
+        for directory in self.store.root.glob('*/.browser_clients'):
+            job_id = directory.parent.name
+            try:
+                meta = self.store.get_job(job_id)
+                if (meta.get('status') in {'queued', 'processing'} or
+                        (meta.get('differential') or {}).get('status') in {'queued', 'processing'}):
+                    jobs.add(job_id)
+            except (OSError, ValueError):
+                continue
+        for job_id in jobs:
+            try:
+                if browser_disconnected(self.store, job_id):
+                    self.cancel_job(job_id, only_if_disconnected=True)
+            except (JobBusyError, FileNotFoundError):
+                continue
+
+    def _stop_recorded_worker(self, pid, job_id):
+        def matches():
+            if pid == os.getpid():
+                return False
+            try:
+                if os.getpgid(pid) != pid:
+                    return False
+                path = Path(f'/proc/{pid}/cmdline')
+                command = (path.read_bytes().decode().replace('\0', ' ') if path.exists() else
+                           subprocess.check_output(['ps', '-p', str(pid), '-o', 'command='], text=True))
+                parts = command.split()
+                return self.WORKER_MODULE in parts and job_id in parts
+            except (OSError, ValueError, subprocess.SubprocessError):
+                return False
+        if not matches():
+            return
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        deadline = time.monotonic() + 3
+        while matches() and time.monotonic() < deadline:
+            time.sleep(.1)
+        if matches():
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
     def _memory_wait_reason(self):
         try:
@@ -139,33 +263,56 @@ class JobRunner:
             existing = self._futures.get(key)
             if existing and not existing.done():
                 return
-            busy = sum(not future.done() for future in self._futures.values()) >= self.max_workers
-            queue_message = (
-                "Your analysis is queued. Other analyses are currently running or waiting; "
-                "yours will start automatically when a worker becomes available."
-                if busy else
-                "Your analysis is queued and will start automatically when a worker becomes available."
-            )
-            if task_name == "pipeline":
-                # Persist before starting: a fast worker must not have its completed
-                # or processing state overwritten by the request handler.
-                self.store.update_job(
-                    job_id, status="queued", progress=15,
-                    message=queue_message, worker_pid=os.getpid(),
+            lease = execution_lease(self.store, job_id)
+            self._leases[key] = lease
+            try:
+                (self.store.logs_dir(job_id).parent / '.cancel_requested').unlink(missing_ok=True)
+                self.store.update_job(job_id, execution_task=task_name, cancel_requested=False, cancel_reason=None)
+                if task_name == 'pipeline':
+                    self.store.start_run(job_id)
+                busy = sum(not future.done() for future in self._futures.values()) >= self.max_workers
+                queue_message = (
+                    "Your analysis is queued. Other analyses are currently running or waiting; "
+                    "yours will start automatically when a worker becomes available."
+                    if busy else
+                    "Your analysis is queued and will start automatically when a worker becomes available."
                 )
-                self.store.append_log(job_id, "Job queued by user request.")
-            else:
-                differential = dict(self.store.get_job(job_id).get("differential") or {})
-                differential.update(status="queued", message=queue_message, worker_pid=os.getpid())
-                self.store.update_job(job_id, differential=differential)
-            future = (self.executor.submit(self._run_isolated, job_id, task_name)
-                      if self.isolate_jobs else self.executor.submit(target, job_id))
-            self._futures[key] = future
+                if task_name == "pipeline":
+                    # Persist before starting: a fast worker must not have its completed
+                    # or processing state overwritten by the request handler.
+                    self.store.update_job(
+                        job_id, status="queued", progress=15,
+                        message=queue_message, worker_pid=os.getpid(), cancel_requested=False,
+                    )
+                    self.store.append_log(job_id, "Job queued by user request.")
+                else:
+                    differential = dict(self.store.get_job(job_id).get("differential") or {})
+                    differential.update(status="queued", message=queue_message, worker_pid=os.getpid())
+                    self.store.update_job(job_id, differential=differential)
+                future = (self.executor.submit(self._run_isolated, job_id, task_name)
+                          if self.isolate_jobs else self.executor.submit(target, job_id))
+                self._futures[key] = future
+                future.add_done_callback(lambda _: self._release_lease(key, lease))
+            except BaseException:
+                self._release_lease(key, lease)
+                raise
+
+    def _release_lease(self, key, lease):
+        if self._leases.get(key) is lease:
+            self._leases.pop(key, None)
+        lease.close()
 
     def _run_isolated(self, job_id: str, task_name: str) -> None:
         """One fresh interpreter per analysis; only the supervisor stays in the web app."""
         log_path = self.store.logs_dir(job_id) / f"{task_name}_worker.log"
+        own_lease = None
         try:
+            key = f'{task_name}:{job_id}'
+            if key not in self._leases:
+                own_lease = execution_lease(self.store, job_id)
+                self._leases[key] = own_lease
+            if self._cancel_requested(job_id):
+                raise JobCancelled()
             env = worker_environment(os.environ)
             root = str(Path(__file__).resolve().parents[4])
             env["PYTHONPATH"] = root + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
@@ -177,6 +324,8 @@ class JobRunner:
                 with self._admission:
                     last_reason = None
                     while True:
+                        if self._cancel_requested(job_id):
+                            raise JobCancelled()
                         reason = self._memory_wait_reason()
                         if reason is None:
                             break
@@ -191,14 +340,19 @@ class JobRunner:
                     memory = container_memory_details()
                     if memory:
                         self.store.append_log(job_id, f"[memory] admission accounting bytes={memory}")
+                    lease = self._leases[f'{task_name}:{job_id}']
                     process = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env,
-                                               start_new_session=True)
+                                               start_new_session=True, pass_fds=(lease.handle.fileno(),))
                     self._active_workers[process.pid] = process
+                    self._worker_jobs[process.pid] = (job_id, task_name)
                 try:
                     returncode = self._wait_for_worker(process)
                 finally:
+                    if getattr(process, 'poll', lambda: 0)() is None:
+                        self._terminate_worker(process)
                     with self._admission:
                         self._active_workers.pop(process.pid, None)
+                        self._worker_jobs.pop(process.pid, None)
                         self._admission.notify_all()
             meta = self.store.get_job(job_id)
             state = meta if task_name == "pipeline" else meta.get("differential", {})
@@ -209,6 +363,8 @@ class JobRunner:
                                        'available. Try fewer modalities or contact the server administrator '
                                        f'with this job ID; see {log_path.name}.')
                 raise RuntimeError(f"Analysis worker exited with code {returncode}; see {log_path.name}.")
+        except JobCancelled:
+            self._mark_cancelled(job_id, task_name)
         except Exception as exc:
             summary = self._log_failure(job_id, "Analysis worker failed", exc)
             if task_name == "pipeline":
@@ -218,6 +374,8 @@ class JobRunner:
         finally:
             if task_name == 'pipeline':
                 shutil.rmtree(self.store.outputs_dir(job_id) / '.h5ad_work', ignore_errors=True)
+            if own_lease is not None:
+                self._release_lease(f'{task_name}:{job_id}', own_lease)
 
     def _wait_for_worker(self, process):
         """Stop the largest worker at the safety ceiling, before a container OOM.
@@ -226,11 +384,32 @@ class JobRunner:
         The 15-GiB threshold still controls admission, not termination.
         """
         host_low_samples = 0
+        context = self._worker_jobs.get(process.pid)
+        watchdog = WorkerWatchdog(
+            os.environ.get('CELLHARMONY_WORKER_IDLE_SECONDS', '1800'),
+            os.environ.get('CELLHARMONY_WORKER_MAX_SECONDS', '21600'))
         while True:
             try:
                 return process.wait(timeout=0.5)
             except subprocess.TimeoutExpired:
                 pass
+            stop_reason = None
+            if context:
+                job_id, task_name = context
+                if self._cancel_requested(job_id):
+                    self._terminate_worker(process)
+                    raise JobCancelled()
+                files = [self.store.logs_dir(job_id) / name for name in
+                         ('pipeline.log', f'{task_name}_worker.log')]
+                try:
+                    signature = tuple((p.stat().st_mtime_ns, p.stat().st_size) if p.exists() else None for p in files)
+                    activity = worker_activity(process_memory(), process.pid)
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    signature, activity = (), None
+                stop_reason = watchdog.check(activity, signature)
+                if stop_reason:
+                    self._terminate_worker(process)
+                    raise TimeoutError(stop_reason)
             try:
                 usage = container_memory()
                 processes = process_memory()
@@ -278,6 +457,43 @@ class JobRunner:
             raise MemoryError(f'Analysis stopped because {pressure}. '
                               'Uploaded data are retained. Reduce simultaneous analyses or selected '
                               'modalities, or run this job on a server with more memory.')
+
+    @staticmethod
+    def _terminate_worker(process):
+        if process.poll() is not None:
+            return
+        descendants = []
+        try:
+            processes = process_memory()
+            pending = [process.pid]
+            while pending:
+                parent = pending.pop()
+                children = [pid for pid, (ppid, _) in processes.items() if ppid == parent]
+                descendants.extend(children)
+                pending.extend(children)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+        # A child can ignore TERM even when its parent exits promptly. Its old
+        # process group must still match before signalling the remaining group.
+        for pid in descendants:
+            try:
+                if os.getpgid(pid) == process.pid:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    break
+            except ProcessLookupError:
+                continue
 
     def recover_interrupted_pipeline(self, job_id: str) -> Dict:
         """Turn an orphaned pipeline into a terminal failure when status is polled."""

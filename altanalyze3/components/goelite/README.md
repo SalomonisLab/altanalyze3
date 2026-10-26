@@ -60,15 +60,52 @@ Use these when you already have ontology files locally and do not need caching.
 The `resources.py` module adds a caching layer around GO downloads so that
 pipelines no longer need to ship ontology files manually.
 
-### Supported Species
+### Annotation protocol (default for every species, set 2026-10-24, revised the same day)
 
-Current built-in species (extensible):
-* `human` — downloads `goa_human.gaf.gz`
-* `mouse` — downloads `goa_mouse.gaf.gz`
+A species cache is built from the UNION of three annotation sources:
 
-The URL targets point to the “current” release distributed by the GO
-Consortium. Cached entries include the exact `data-version` (from the OBO) and
-`!date` or `!Generated` metadata (from the GAF).
+* the UniProt-GOA GAF (`goa_<species>.gaf.gz`);
+* NCBI `gene2go.gz` rows of the species taxon, with GeneIDs mapped to symbols through the species
+  `gene_info.gz` (gene2go covers every taxon, about 1.4 GB; it is downloaded once to
+  `<cache root>/downloads/gene2go.gz` and reused);
+* the same GAF + gene2go union of the ortholog species (`ortholog_species` in `SPECIES_CONFIG`: human
+  gets mouse, mouse gets human), carried over through NCBI `gene_orthologs.gz` (about 130 MB, downloaded
+  once to `<cache root>/downloads/gene_orthologs.gz`). ToppFun does this: IKZF1, IGHM and LYST reach
+  "regulation of leukocyte activation" only through their mouse orthologs (2026-10-24 comparison).
+
+NOT-qualified rows are excluded from every source, and every gene is propagated to the parent terms of
+its annotations over is_a and part_of (the GO true-path rule) AND over regulates, positively_regulates
+and negatively_regulates (as ToppFun does; "leukocyte activation" holds 512 human genes with is_a/part_of
+alone and 1,157 with the full protocol). When a source cannot be obtained (download failure, missing
+configuration) the build proceeds without it and records it: `metadata.json` carries
+`annotation_protocol` (`union(goa_gaf,ncbi_gene2go)+ortholog(mouse:union(goa_gaf,ncbi_gene2go))`,
+`union(...)`, or `single(<source>)`), `propagation` (`is_a,part_of,regulates` or `is_a,part_of`),
+`ortholog_transfer` (pairs, transferred rows and genes), the per-source and union row counts
+(`annotation_rows`) and `build_problems`. The version name ends in `_union` or the single source used,
+then `_orth` when orthologs were transferred and `_reg` when regulates propagation was used.
+`data/synonyms.tsv.gz` (GAF synonyms plus gene_info synonyms) lets the CLI map outdated query symbols to
+current ones; every mapping is written to `<name>_gene_mapping.tsv`.
+A cache built before this protocol is still readable: propagation is applied at load with the relations
+recorded at build time, and the richest cache (ortholog transfer, then union, then single source) is
+preferred across every version and cache root. A rebuild never removes an existing cache version; it is
+moved under `<species>/delete/`.
+
+Current built-in species (extensible through `SPECIES_CONFIG`: GAF URL, taxon id, gene_info URL,
+ortholog species):
+* `human` — `goa_human.gaf.gz`, taxon 9606, `Homo_sapiens.gene_info.gz`, orthologs from `mouse`
+* `mouse` — `goa_mouse.gaf.gz`, taxon 10090, `Mus_musculus.gene_info.gz`, orthologs from `human`
+
+The URL targets point to the current releases of the GO Consortium and NCBI. Cached entries
+record the OBO `data-version` and the GAF `!date-generated` (or `!date` / `!Generated`) release.
+Rebuild with `--force-refresh` (optionally `--obo`, `--gaf`, `--gene-info-path`, `--gene2go-path`,
+`--gene-orthologs-path`, `--ortholog-gaf-path`, `--ortholog-gene-info-path` to reuse downloaded files;
+`--no-gene2go` for a GAF-only build, `--no-ortholog-transfer` and `--no-regulates-propagation` to switch
+the two ToppFun-matching steps off).
+
+### Denominator
+
+The enrichment denominator is every annotated gene of the resource. `--background` is refused
+unless `--allow-custom-background` is also given (rule of record, 2026-10-24).
 
 ### Cache Location
 

@@ -1483,6 +1483,16 @@ def _write_selected_zip(source_dir: Path, archive_path: Path, *, suffixes: tuple
     return archive_path
 
 
+CELL_COMMUNICATION_DIFF_FDR = 0.10
+CELL_COMMUNICATION_DIFF_MIN_DELTA = 0.05
+
+
+def cell_communication_significant(detailed: pd.DataFrame) -> pd.Series:
+    """The rule the cell-communication DEG summary counts as num_DEG."""
+    return ((pd.to_numeric(detailed["fdr"], errors="coerce") <= CELL_COMMUNICATION_DIFF_FDR)
+            & (pd.to_numeric(detailed["abs_delta_score"], errors="coerce") >= CELL_COMMUNICATION_DIFF_MIN_DELTA))
+
+
 def _run_cell_communication_differential(
     *,
     job_id: str,
@@ -1539,7 +1549,10 @@ def _run_cell_communication_differential(
     _update_differential_state(store, job_id, message="Comparing per-sample ligand-receptor communication scores.", progress=35)
     split_path = _fastcomm_split_scores_long_path(meta)
     scores = pd.read_csv(split_path, sep="\t")
-    required = {"split", "sender_state", "receiver_state", "ligand", "receptor", "fastcomm_score"}
+    # fastcomm_score is scaled by each sample's own top edge; a job can test lr_expression_score
+    # (one log1p CP10k scale in every sample) by setting fastcomm_analysis.plot_score_column.
+    score_column = str(analysis.get("plot_score_column") or "fastcomm_score").strip() or "fastcomm_score"
+    required = {"split", "sender_state", "receiver_state", "ligand", "receptor", "fastcomm_score", score_column}
     missing = required.difference(scores.columns)
     if missing:
         raise ValueError(f"Per-sample fastComm scores missing required columns: {', '.join(sorted(missing))}")
@@ -1556,14 +1569,14 @@ def _run_cell_communication_differential(
     key_cols = ["sender_state", "receiver_state", "ligand", "receptor"]
     for column in key_cols:
         scores[column] = scores[column].astype(str)
-    scores["fastcomm_score"] = pd.to_numeric(scores["fastcomm_score"], errors="coerce").fillna(0.0)
+    scores[score_column] = pd.to_numeric(scores[score_column], errors="coerce").fillna(0.0)
     scores["interaction_id"] = scores[key_cols].agg("|".join, axis=1)
-    score_matrix = scores.pivot_table(index="interaction_id", columns="split", values="fastcomm_score", aggfunc="max", fill_value=0.0)
+    score_matrix = scores.pivot_table(index="interaction_id", columns="split", values=score_column, aggfunc="max", fill_value=0.0)
     for split in wanted_splits:
         if split not in score_matrix.columns:
             score_matrix[split] = 0.0
 
-    annotation = scores.sort_values("fastcomm_score", ascending=False).drop_duplicates("interaction_id", keep="first").set_index("interaction_id")
+    annotation = scores.sort_values(score_column, ascending=False).drop_duplicates("interaction_id", keep="first").set_index("interaction_id")
     rows: List[Dict[str, object]] = []
     pvalues: List[float] = []
     for interaction_id, values in score_matrix.iterrows():
@@ -1650,8 +1663,7 @@ def _run_cell_communication_differential(
     detailed.to_csv(comparison_path, sep="\t", index=False)
     detailed.to_csv(detail_path, sep="\t", index=False)
     summary = (
-        detailed.assign(significant=(pd.to_numeric(detailed["fdr"], errors="coerce") <= 0.10)
-                        & (detailed["abs_delta_score"] >= 0.05))
+        detailed.assign(significant=cell_communication_significant(detailed))
         .groupby("population", as_index=False)
         .agg(num_DEG=("significant", "sum"), tested_genes=("gene", "count"), max_abs_delta_score=("abs_delta_score", "max"))
     )
@@ -1677,6 +1689,7 @@ def _run_cell_communication_differential(
             if comparison_mode == "single_sample_direct_contrast"
             else "delta of per-sample fastComm score; positive values are higher in the numerator group"
         ),
+        "score_column": score_column,
         "n_interactions": int(detailed.shape[0]),
     }
     write_run_provenance(run_root, meta.get("model_versions", {}), application="scALABLE-differential")

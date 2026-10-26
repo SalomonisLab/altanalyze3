@@ -58,9 +58,13 @@ def test_modified_cache_or_unresolved_coding_exon_is_rejected(tmp_path):
     with pytest.raises(ValueError,match='unpinned'):load_architectures(tmp_path)
 
 
-def test_tiny_exon_labels_fail_legibly_instead_of_disappearing(tmp_path):
+def test_tiny_exon_keeps_true_width_and_literal_label_in_a_legible_key(tmp_path):
     tracks=select_tracks(bundle(tmp_path),['A','B']);tracks[0]['coding_exons'][0]['end']=.01
-    with pytest.raises(ValueError,match='cannot fit'):layout_tracks(tracks,1000)
+    layout=layout_tracks(tracks,1000)
+    block=next(p for p in layout['primitives'] if p.get('role')=='coding_exon' and p['isoform_id']=='A')
+    assert block['width']==pytest.approx(.01*1000/max(t['protein_aa'] for t in tracks))
+    assert any(p.get('role')=='small_exon_key' and tracks[0]['coding_exons'][0]['label'] in p['text']
+               for p in layout['primitives'])
 
 
 def test_unplaced_annotations_are_explicit_and_never_called_absent(tmp_path):
@@ -68,3 +72,53 @@ def test_unplaced_annotations_are_explicit_and_never_called_absent(tmp_path):
     tracks=select_tracks(b,['A','B']);layout=layout_tracks(tracks,1000)
     assert all(t['unplaced']==['F1'] and not t['features'] for t in tracks)
     assert len([p for p in layout['primitives'] if p.get('text','').startswith('Unplaced annotations:')])==2
+    assert not any('Not in this protein' in p.get('text','') for p in layout['primitives'])
+
+
+def essential_bundle(tmp_path, placeable):
+    """A panel whose only annotation is an essential DNA-binding class, placed on A or not placeable at all."""
+    b=bundle(tmp_path)
+    f=b['plans'][0]['features'][0]
+    f.update(essential_class='DNA_BINDING',class_label='DNA-binding',class_display='DNA-binding',
+             class_color='#1F78B4',class_priority='1',reference_start=117,reference_end=139)
+    if not placeable:
+        f.update(A_start='',A_end='',B_native_segments=[],status='unplaced_annotation')
+    return b
+
+
+def test_unplaceable_essential_class_is_drawn_on_a_reference_row(tmp_path):
+    """Nathan, 2026-10-25: IKZF1 Pro-B-1 showed no DNA-binding bar because no isoform could place it."""
+    tracks=select_tracks(essential_bundle(tmp_path,placeable=False),['A','B'],'G')
+    assert [t['isoform_id'] for t in tracks]==['A','B','P']
+    reference=tracks[-1]
+    assert reference['reference'] and reference['coding_exons']==[] and reference['protein_aa']==139
+    assert [f['segments'] for f in reference['features']]==[[(117,139)]]
+    assert reference['features'][0]['essential_class']=='DNA_BINDING'
+    layout=layout_tracks(tracks,1000)
+    bars=[p for p in layout['primitives'] if p.get('role')=='protein_feature' and p.get('essential')]
+    assert len(bars)==1 and bars[0]['isoform_id']=='P'
+    assert any(p.get('role')=='reference_backbone' for p in layout['primitives'])
+    assert any(p.get('text')=='DNA-binding' for p in layout['primitives'])
+    assert any(p.get('text','').startswith('P (reference)') for p in layout['primitives'])
+
+
+def test_placed_essential_class_adds_no_reference_row(tmp_path):
+    """Panels that already draw their essential bars keep exactly the tracks they had."""
+    tracks=select_tracks(essential_bundle(tmp_path,placeable=True),['A','B'],'G')
+    assert [t['isoform_id'] for t in tracks]==['A','B']
+    assert not any(t.get('reference') for t in tracks)
+
+
+def test_one_reference_row_per_essential_class(tmp_path):
+    """IKZF1 carried the same zinc fingers on ten reference proteins; one row per class is drawn."""
+    from copy import deepcopy as _dc
+    b=essential_bundle(tmp_path,placeable=False)
+    first=b['plans'][0]['features'][0]
+    second=_dc(first);second.update(feature_id='Q:1',display_id='F2',reference_protein='Q',
+                                    reference_start=117,reference_end=139)
+    third=_dc(first);third.update(feature_id='P:2',display_id='F3',reference_start=145,reference_end=167)
+    b['plans'][0]['features']=[first,second,third]
+    tracks=select_tracks(b,['A','B'],'G')
+    references=[t for t in tracks if t.get('reference')]
+    assert [t['isoform_id'] for t in references]==['P']
+    assert sorted(f['segments'][0] for f in references[0]['features'])==[(117,139),(145,167)]

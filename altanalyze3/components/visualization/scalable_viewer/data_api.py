@@ -22,6 +22,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from . import bundle as B
+from altanalyze3.components.annotation.gene_aliases import RNA_GENE_ALIASES, rna_alias_key
 
 
 class ModalityStore:
@@ -331,6 +332,11 @@ class Dataset:
                 idx.setdefault(s.upper(), i)
             for i, g in enumerate(gids):
                 idx.setdefault(g.upper(), i)
+            for alias, canonical in RNA_GENE_ALIASES.items():
+                matches = {i for i, (symbol, gene_id) in enumerate(zip(syms, gids))
+                           if symbol.upper() == canonical or gene_id.upper() == canonical}
+                if len(matches) == 1:
+                    idx.setdefault(alias, matches.pop())
             self._symbols, self._gene_ids, self._sym_index = syms, gids, idx
 
     @property
@@ -342,7 +348,10 @@ class Dataset:
 
     def resolve_gene(self, name: str) -> Optional[int]:
         self._load_genes()
-        return self._sym_index.get((name or "").strip().upper())  # type: ignore[union-attr]
+        query = (name or "").strip().upper()
+        if query in self._sym_index:
+            return self._sym_index[query]
+        return self._sym_index.get(rna_alias_key(query)) if rna_alias_key(query) in RNA_GENE_ALIASES else None
 
     def search_genes(self, q: str, limit: int = 25) -> List[str]:
         self._load_genes()
@@ -354,7 +363,12 @@ class Dataset:
         if len(pre) >= limit:
             return sorted(set(pre))[:limit]
         sub = [s for s in syms if q in s.upper() and not s.upper().startswith(q)]
-        return sorted(set(pre))[:limit] + sorted(set(sub))[: max(0, limit - len(set(pre)))]
+        matches = sorted(set(pre))[:limit] + sorted(set(sub))[: max(0, limit - len(set(pre)))]
+        if rna_alias_key(q) in RNA_GENE_ALIASES:
+            row = self.resolve_gene(q)
+            if row is not None:
+                matches = list(dict.fromkeys([syms[row]] + matches))[:limit]
+        return matches
 
     def gene_column(self, row: int) -> Tuple[np.ndarray, np.ndarray]:
         """Return (cell indices, values) for one gene. One memmap slice, no scan."""

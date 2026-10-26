@@ -72,7 +72,10 @@ class ArgsParser():
 
     def __init__(self, args):
         args = args + [""] if len(args) == 0 else args
-        self.args, _ = self.get_parser().parse_known_args(args)
+        parser = self.get_parser()
+        self.args, unknown = parser.parse_known_args(args)
+        if getattr(self.args, 'visualization_action', None) and unknown:
+            parser.error('unrecognized visualization arguments: ' + ' '.join(unknown))
         self.resolve_path(["bam", "ref", "tmp", "output", "juncounts", "intcounts", "index", "h5ad", "gene_coordinates",
                            "metadata", "ref_gff", "exon_annot", "gene_symbol", "cell_annot", "genome_fasta"])
         self.assert_args()
@@ -891,6 +894,12 @@ class ArgsParser():
         snaf_pc_parser.add_argument("--no_bayes", action="store_true", help="Skip BayesTS (write only mean/std/mle/normal_prevalence)")
         snaf_pc_parser.add_argument("--bayes_juncounts", default=None, type=str, help="Restrict BayesTS to the junctions in this cohort count matrix (intersected with the control). ~50x faster than all-GTEx; percentile ranks tumor-specificity among the tested cohort. Basic stats (mean/mle/prevalence) are still written for ALL control junctions.")
         self.add_common_arguments(snaf_pc_parser)
+
+        # Visualization-only entry points reuse saved native selections and complete donor rosters.
+        from altanalyze3.components.visualization.cli import add_arguments as add_visualization_arguments
+        viz_parser = subparsers.add_parser("visualize", help="Native ISV/domain and donor PSI figures")
+        self.add_common_arguments(viz_parser)
+        add_visualization_arguments(viz_parser)
 
         return general_parser
 

@@ -172,6 +172,20 @@ class JobStore:
                 pass
             path.touch()
 
+    def start_run(self, job_id: str) -> str:
+        """Separate rerun logs while preserving the previous execution's record."""
+        run_id = uuid4().hex
+        logs = self.logs_dir(job_id)
+        previous = [path for path in logs.glob('*.log') if path.is_file()]
+        if previous:
+            archive = logs / 'history' / run_id
+            archive.mkdir(parents=True, exist_ok=True)
+            for path in previous:
+                path.rename(archive / path.name)
+        self.update_job(job_id, execution_id=run_id, analysis_started_at=None,
+                        analysis_completed_at=None, analysis_duration_seconds=None)
+        return run_id
+
     def get_job(self, job_id: str) -> Dict:
         return self._read_metadata(job_id)
 

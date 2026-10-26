@@ -189,7 +189,7 @@ def test_end_to_end_switch_calls(tmp_path):
     out = tmp_path / "out"
     iss.main(["--counts", str(c["counts"]), "--groups", str(c["groups"]), "--group", "healthy",
               "--diff_dir", str(c["diff"]), "--protein_classes", str(c["protein"]), "--outdir", str(out),
-              "--cluster_order", str(c["order"])])
+              "--cluster_order", str(c["order"]), "--min_reads", "200"])
     for f in ["isoform_state_switches.tsv", "isoform_state_usage_tests.tsv.gz", "isoform_state_switch_priors.tsv",
               "isoform_state_switch_whitelist.tsv",
               "isoform_state_switch_candidates.tsv", "isoform_state_switch_summary.tsv", "logs/parameters.json",
@@ -254,7 +254,7 @@ def test_gene_read_rule_keeps_low_read_partner(tmp_path):
         out = tmp_path / rule
         iss.main(["--counts", str(c["counts"]), "--groups", str(c["groups"]), "--group", "healthy",
                   "--diff_dir", str(c["diff"]), "--protein_classes", str(c["protein"]), "--outdir", str(out),
-                  "--cluster_order", str(c["order"]), "--read_rule", rule])
+                  "--cluster_order", str(c["order"]), "--min_reads", "200", "--read_rule", rule])
         sw = pd.read_csv(out / "isoform_state_switches.tsv", sep="\t")
         calls[rule] = {(r.state_A, r.state_B, r.isoform_higher_in_A, r.isoform_higher_in_B) for r in sw.itertuples()}
         rows = pd.read_csv(out / "isoform_state_usage_tests.tsv.gz", sep="\t")
@@ -267,3 +267,67 @@ def test_gene_read_rule_keeps_low_read_partner(tmp_path):
     gsw = {("S1", "S2", "GSW:a", "GSW:b"), ("S2", "S3", "GSW:b", "GSW:a")}
     assert calls["isoform"] == gsw, calls["isoform"]
     assert calls["gene"] == gsw | minor, calls["gene"]
+
+
+def test_all_isoforms_keeps_noncoding_partners(tmp_path):
+    c = _cohort(tmp_path)
+    pc = pd.read_csv(c["protein"], sep="\t", dtype=str)
+    pc = pc[~(pc.gene.eq("GSW") & pc.isoform.eq("a"))]
+    pc.loc[pc.gene.eq("GSW") & pc.isoform.eq("b"), ["class", "nmd_status"]] = ["likely_NMD", "NMD"]
+    protein = tmp_path / "protein_noncoding.tsv"
+    pc.to_csv(protein, sep="\t", index=False)
+    calls, cands, wls = {}, {}, {}
+    for mode, extra in (("coding", []), ("all", ["--all_isoforms"])):
+        out = tmp_path / mode
+        iss.main(["--counts", str(c["counts"]), "--groups", str(c["groups"]), "--group", "healthy",
+                  "--diff_dir", str(c["diff"]), "--protein_classes", str(protein), "--outdir", str(out),
+                  "--cluster_order", str(c["order"]), "--min_reads", "200"] + extra)
+        sw = pd.read_csv(out / "isoform_state_switches.tsv", sep="\t")
+        calls[mode] = {(r.state_A, r.state_B, r.isoform_higher_in_A, r.isoform_higher_in_B) for r in sw.itertuples()}
+        cands[mode] = pd.read_csv(out / "isoform_state_switch_candidates.tsv", sep="\t")
+        wls[mode] = pd.read_csv(out / "isoform_state_switch_whitelist.tsv", sep="\t").set_index("feature")
+        assert json.load(open(out / "logs" / "parameters.json"))["coding_only"] == (mode == "coding")
+    assert calls["coding"] == set(), calls["coding"]
+    assert calls["all"] == {("S1", "S2", "GSW:a", "GSW:b"), ("S2", "S3", "GSW:b", "GSW:a")}, calls["all"]
+    assert not cands["coding"].gene_id.eq("GSW").any()
+    assert {"GSW:a", "GSW:b", "GSW:c"} <= set(cands["all"].feature)
+    assert cands["all"].set_index("feature").protein_length.isna()["GSW:a"]
+    wl_all = set(wls["all"].index)
+    multi = {f for f in wl_all if sum(g.split(":")[0] == f.split(":")[0] for g in wl_all) >= 2}
+    assert set(cands["all"].feature) == multi
+    assert wls["all"].loc["GONE:a", "excluded_by"] == "only whitelisted isoform of its gene"
+    assert wls["coding"].loc["GSW:b", "excluded_by"].startswith("not protein coding")
+    assert (wls["all"].excluded_by.fillna("") != "not protein coding (length 0 or NMD)").all()
+
+
+def test_read_scope_cohort_pools_every_group(tmp_path):
+    c = _cohort(tmp_path)
+    a = ad.read_h5ad(c["counts"])
+    X = a.X.toarray()
+    other = np.array([n.split(".", 1)[1].replace("-isoform", "") in OTHER for n in a.obs_names])
+    cols = [c["fi"]["GMINOR:m1"], c["fi"]["GMINOR:m2"]]
+    X[np.ix_(other, cols)] *= 10
+    a.X = sparse.csr_matrix(X.astype(np.float32))
+    counts = tmp_path / "counts_deep_other.h5ad"
+    a.write_h5ad(counts)
+    calls = {}
+    for scope in ("group", "cohort"):
+        out = tmp_path / scope
+        iss.main(["--counts", str(counts), "--groups", str(c["groups"]), "--group", "healthy",
+                  "--diff_dir", str(c["diff"]), "--protein_classes", str(c["protein"]), "--outdir", str(out),
+                  "--cluster_order", str(c["order"]), "--min_reads", "200", "--read_scope", scope])
+        sw = pd.read_csv(out / "isoform_state_switches.tsv", sep="\t")
+        calls[scope] = {(r.state_A, r.state_B, r.isoform_higher_in_A, r.isoform_higher_in_B) for r in sw.itertuples()}
+        rows = pd.read_csv(out / "isoform_state_usage_tests.tsv.gz", sep="\t")
+        r = rows[(rows.feature == "GMINOR:m2") & (rows.state_A == "S1") & (rows.state_B == "S2")]
+        if scope == "cohort":
+            st = np.array([n.split(".", 1)[0] for n in a.obs_names])
+            assert len(r) == 1 and r.reads_B.iloc[0] <= 200 < r.cohort_reads_B.iloc[0]
+            assert r.cohort_reads_B.iloc[0] == X[st == "S2", c["fi"]["GMINOR:m2"]].sum()
+            assert r.reads_B.iloc[0] == X[(st == "S2") & ~other, c["fi"]["GMINOR:m2"]].sum()
+            assert (rows.cohort_reads_A >= rows.reads_A).all() and (rows.cohort_gene_reads_B >= rows.gene_reads_B).all()
+        assert json.load(open(out / "logs" / "parameters.json"))["read_scope"] == scope
+    gsw = {("S1", "S2", "GSW:a", "GSW:b"), ("S2", "S3", "GSW:b", "GSW:a")}
+    minor = {("S1", "S2", "GMINOR:m1", "GMINOR:m2"), ("S2", "S3", "GMINOR:m2", "GMINOR:m1")}
+    assert calls["group"] == gsw, calls["group"]
+    assert calls["cohort"] == gsw | minor, calls["cohort"]

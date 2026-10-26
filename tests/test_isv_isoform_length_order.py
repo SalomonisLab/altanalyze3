@@ -135,12 +135,18 @@ def test_render_refuses_an_unknown_iso_order(tmp_path):
         render(_res(), str(tmp_path / "bad.pdf"), isoform_track=True, iso_order="count")
 
 
-def test_main_passes_given_only_with_isoforms():
-    """The one line in main() that chooses the order, read off the source rather than guessed."""
-    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                            "altanalyze3", "components", "visualization", "isv_web",
-                            "isv_web_remote.py")).read()
-    assert 'iso_order=("given" if a.isoforms else "length")' in src
+def test_main_preserves_explicit_order_in_shared_render_route(monkeypatch,tmp_path):
+    """Check the actual shared CLI render route, including cached render inputs."""
+    from altanalyze3.components.visualization.isv_web import isv_web_remote as module
+    calls=[]
+    monkeypatch.setattr(module,'render',lambda res,out,**kw:calls.append(kw) or True)
+    parser=module.build_arg_parser()
+    base=['--run_dir',str(tmp_path),'--gene','G']
+    for extra,expected in [([], 'length'),(['--isoforms','SHORT','MID'], 'given'),
+                           (['--render-input','cached.json'], 'given')]:
+        args=parser.parse_args(base+extra)
+        assert module._render_selected(args,_res(),str(tmp_path/'out.pdf'),None)
+        assert calls[-1]['iso_order']==expected
 
 
 def test_sparse_panel_rows_are_visible(tmp_path):

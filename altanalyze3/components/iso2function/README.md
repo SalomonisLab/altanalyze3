@@ -357,6 +357,43 @@ The default view displays `Domain`, `DNA binding`, `Zinc finger`, `Motif`, `Coil
 `protein_features`, subject to availability in the pinned audit. Every source feature row for
 the selected pairs remains in `annotation_display_audit.tsv` with its display decision.
 Identical displayed annotations may share one row; all original feature IDs are retained.
+One annotation repeated on overlapping intervals from several reference proteins (the
+EnsMart100 Ensembl table lists a family domain once per reference protein) is drawn once, on its
+longest source interval; the other rows stay in the audit as
+`coalesced_overlapping_same_annotation`.
+
+**Essential feature classes are always drawn**, whatever `--feature-type` and
+`--annotation-source` select: transmembrane helices (labelled `TM1`, `TM2`, ...), signal peptides,
+kinase and phosphatase domains, transcription-factor DNA-binding domains, nuclear-receptor
+ligand-binding domains, RNA-binding, helicase, GTPase, E3-ligase, protease, death-fold and
+chromatin reader/writer domains. They take the lane nearest the protein backbone, are drawn above
+any annotation they overlap, and carry their class as the label and key entry. Overlapping
+rows of one class from several providers become the bars of the provider that resolves the most
+separate intervals (ties to curated UniProt coordinates), so two zinc fingers stay two bars under
+a family row that spans both; the other rows are `coalesced_same_essential_class` in the audit.
+Every bar is labelled with its source name (UniProt rows without the `DOMAIN-` style key prefix;
+an explicit ellipsis past 40 characters); the running id `F<n>` identifies a row only in the key
+and the audit. Annotations absent from a native protein are listed by name with counts
+("Not in this protein: Kinase x3, TM x2"). The rules are the
+data file `plotting/essential_feature_whitelist.tsv` (class, label, priority, colour, provider and
+regexes on the source name, accession and description), matched against the pinned vocabulary:
+EnsMart100 UniProt feature keys (`TRANSMEM-`, `SIGNAL-`, `DNA_BIND-`, `ZN_FING-C2H2`,
+`DOMAIN-Protein kinas`, ...), Pfam and InterPro accessions, and UniProt REST feature types.
+`--essential-whitelist FILE` substitutes a reviewed copy. The figure manifest records the
+whitelist path and SHA-256 and the counts `essential_rows_A`, `essential_rows_A_shown` and
+`essential_rows_A_hidden_placeable`; the last must be 0. Rule set 2026-10-23 after a CLDND1 panel
+drew a Pfam family hit eleven times and none of its four UniProt transmembrane helices.
+
+Named UniProt `MOTIF` annotations are also retained by essential selection, including when
+the requested feature types are Pfam accessions. The label preserves the literal source
+description; the renderer does not infer a signaling motif from sequence or repair a
+truncated source name. Distinct named motifs remain separate essential classes.
+
+In compact and integrated ISV/domain plots, a coding segment too narrow for its exon label
+keeps its true amino-acid width. Its literal label and amino-acid offsets appear in the
+`Small coding segments` key instead. The layout gate still rejects a key that cannot fit;
+the renderer neither stretches the segment nor silently removes its label.
+
 Literature annotations are explicitly labeled. CITED2's CBP/p300-binding region is such an
 annotation, not a built-in EnsMart100 domain.
 

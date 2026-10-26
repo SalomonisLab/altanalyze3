@@ -25,6 +25,9 @@ def assign_exon_labels(model, reference):
     E4.1/E4.2 are regions of exon group E4, not different physical exons.
     A block spanning retained intronic sequence keeps both E and I identifiers.
     Never invent a sequential number for a novel or unresolved interval.
+    A reference row carrying label_prefix belongs to a partner gene of a multi-gene
+    model; its IDs stay gene-qualified (CLK1:E4, ENSG...:E4.1) so they are never
+    confused with the registered gene's own exon numbers.
     """
     reference=[r for r in reference if _norm_chrom(r['chrom'])==_norm_chrom(model['chrom'])
                and r['strand']==model['strand']]
@@ -40,12 +43,21 @@ def assign_exon_labels(model, reference):
         for r in hits:
             match=re.fullmatch(r'([EIU]\d+)\.\d+',r['exon_id'])
             if not match:raise ValueError('Unrecognized AltAnalyze exon-region ID: '+r['exon_id'])
-            if match[1] not in parents:parents.append(match[1])
-        block.update(altanalyze_region_ids=[r['exon_id'] for r in hits],
+            parent=r['label_prefix']+':'+match[1] if r.get('label_prefix') else match[1]
+            if parent not in parents:parents.append(parent)
+        block.update(altanalyze_region_ids=[r['gene']+':'+r['exon_id'] if r.get('label_prefix') else r['exon_id'] for r in hits],
                      altanalyze_exon_ids=parents,
                      exon_label='/'.join(parents) if covered>hi else '',
                      exon_label_status='assigned' if covered>hi else 'unresolved_reference_coverage')
     return model
+
+
+def _partners(model):
+    """(partner ENSG, display symbol) pairs of a multi-gene model; empty for single-gene models."""
+    genes=[g for g in str(model.get('partner_ensg') or '').split(';') if g]
+    symbols=[s for s in str(model.get('partner_gene_symbol') or '').split(';') if s]
+    if symbols and len(symbols)!=len(genes):raise ValueError('partner_gene_symbol must align with partner_ensg: '+model['isoform_id'])
+    return list(zip(genes,symbols or genes))
 
 
 def annotate_exon_map(mapped,index_path):
@@ -54,7 +66,7 @@ def annotate_exon_map(mapped,index_path):
     references={}
     connection=sqlite3.connect(index_path.resolve().as_uri()+'?mode=ro',uri=True)
     try:
-        for gene in sorted({r['ensg'] for r in mapped}):
+        for gene in sorted({r['ensg'] for r in mapped}|{g for r in mapped for g,_ in _partners(r)}):
             # Same per-gene query and normalized intervals as ISV's
             # read_gene_model_from_sqlite; no full database or matrix read.
             rows=connection.execute('SELECT exon_id,chrom,strand,start,end FROM gene_model WHERE gene=?',(gene,)).fetchall()
@@ -62,7 +74,9 @@ def annotate_exon_map(mapped,index_path):
                            end=max(int(a),int(b)),type=e[0].upper()) for e,c,s,a,b in rows]
             references[gene]=sorted(segments,key=lambda r:(r['exon_id'],r['start'],r['end']))
     finally:connection.close()
-    for model in mapped:assign_exon_labels(model,references[model['ensg']])
+    for model in mapped:
+        assign_exon_labels(model,references[model['ensg']]+[dict(r,label_prefix=symbol)
+                                                            for gene,symbol in _partners(model) for r in references[gene]])
     digest=__import__('hashlib').sha256(json.dumps(references,sort_keys=True,separators=(',',':')).encode()).hexdigest()
     return dict(index_path=str(index_path),queried_gene_rows_sha256=digest,
                 reference_rows=sum(map(len,references.values())),
@@ -182,6 +196,8 @@ def build_coding_exon_map(base,impact,models,sequences,index_path):
                         protein_aa=aa,reported_aa=m['reported_aa'],coding_regions_aa=c['Protein Length'],
                         source_nmd=m['nmd'],coding_regions_nmd=c['NMD Status'],
                         protein_sha256=m['protein_sha256'],terminal_stop_nt=stop,segments=segments))
+        if m.get('partner_ensg'):
+            out[-1].update(partner_ensg=m['partner_ensg'],partner_gene_symbol=m.get('partner_gene_symbol',''))
     return color_exons(out),dict(gff_sha256=gff_hash,coding_sha256=coding_hash,index_path=str(index_path),
         indexed_rows_attested=len(out),index_row_sha256=__import__('hashlib').sha256(
             json.dumps(indexed,sort_keys=True,separators=(',',':')).encode()).hexdigest(),

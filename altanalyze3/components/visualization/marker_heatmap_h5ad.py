@@ -234,7 +234,10 @@ def _covariates_for_cache(h5ad_path, ordered_cells, covariate_columns):
     import anndata as ad_mod
 
     adata = ad_mod.read_h5ad(h5ad_path, backed="r")
-    obs = adata.obs
+    try:
+        obs = adata.obs.copy()
+    finally:
+        adata.file.close()
     wanted = [str(c).strip() for c in covariate_columns if str(c).strip()]
     wanted = [c for c in dict.fromkeys(wanted) if c in obs]
     if not wanted:
@@ -260,7 +263,8 @@ def render_heatmap_from_cache(cache_path, output_path, covariate_df=None, go_ter
                               go_terms_max=30, run_dir=None, covariate_h5ad=None,
                               covariate_columns=None, load_go_terms=True,
                               dpi=None, write_svg=True, label_events=None, species=None,
-                              label_shared_exons=True):
+                              label_shared_exons=True, colorbar_label="Norm Exp (z-score)",
+                              label_replacements=None):
     """Redraw a saved heatmap cache with the current plotting code.
 
     Use this to change how a finished result is drawn -- resolution, colour range, labels --
@@ -271,6 +275,7 @@ def render_heatmap_from_cache(cache_path, output_path, covariate_df=None, go_ter
         raise FileNotFoundError(f"Heatmap cache not found: {cache_path}")
     (heatmap_df, row_clusters, column_clusters,
      cluster_order, cluster_counts) = _read_heatmap_cache(cache_path)
+    cluster_order = list(dict.fromkeys([*cluster_order, *row_clusters]))
     print(f"Loaded heatmap cache: {heatmap_df.shape[0]} markers x {heatmap_df.shape[1]} cells, "
           f"{len(cluster_order)} clusters")
 
@@ -301,6 +306,8 @@ def render_heatmap_from_cache(cache_path, output_path, covariate_df=None, go_ter
         label_events=label_events,
         species=species,
         label_shared_exons=label_shared_exons,
+        colorbar_label=colorbar_label,
+        label_replacements=label_replacements,
     )
     return output_path
 
@@ -385,6 +392,8 @@ def _draw_row_callouts(ax, labels, rows, n_rows, fontsize=6.0):
     fig = ax.figure
     fig.canvas.draw()
     height_pt = ax.get_window_extent().height * 72.0 / fig.dpi
+    fontsize = min(fontsize, height_pt / (1.2 * max(1, len(rows))))
+    original_ylim = ax.get_ylim()
     sep = 1.2 * fontsize * n_rows / max(height_pt, 1.0)
     order = sorted(range(len(rows)), key=lambda i: rows[i])
     target = [float(rows[i]) for i in order]
@@ -402,6 +411,7 @@ def _draw_row_callouts(ax, labels, rows, n_rows, fontsize=6.0):
                            clip_on=False)
         artists.append(ax.text(1.035, y, labels[i], transform=transform, ha="left", va="center",
                                fontsize=fontsize, color="#000000", clip_on=False))
+    ax.set_ylim(original_ylim)
     # The page and the heatmap keep their size; a label that would run off the page shrinks the font instead.
     fig.canvas.draw()
     renderer = fig.canvas.get_renderer()
@@ -1398,10 +1408,9 @@ def _draw_covariate_legends(fig, covariate_legends, rect=(0.255, 0.078, 0.690, 0
     sw = 0.022
     sh = 0.115
     row_h = 0.190
-    for row_idx, (covariate, info) in enumerate(covariate_legends.items()):
+    row_idx = 0
+    for covariate, info in covariate_legends.items():
         y_center = 0.82 - row_idx * row_h
-        if y_center < 0.02:
-            break
         ax_leg.text(
             title_x,
             y_center,
@@ -1419,13 +1428,16 @@ def _draw_covariate_legends(fig, covariate_legends, rect=(0.255, 0.078, 0.690, 0
         for cat in categories:
             label = str(cat)
             raw_widths.append(sw + 0.010 + text_width_axes(label) + 0.030)
-        width_scale = min(1.0, remaining_width / max(remaining_width, sum(raw_widths)))
         min_gap = 0.010
         for cat, raw_item_w in zip(categories, raw_widths):
             label = str(cat)
-            item_w = raw_item_w * width_scale
-            if x + sw + min_gap > max_x:
-                break
+            # Shrinking spacing without shrinking the text made long legends overlap.
+            # Wrap complete entries instead; no category is silently omitted.
+            item_w = raw_item_w
+            if x > item_start_x and x + item_w > max_x:
+                row_idx += 1
+                y_center = 0.82 - row_idx * row_h
+                x = item_start_x
             patch = mpatches.Rectangle(
                 (x, y_center - sh / 2.0),
                 sw,
@@ -1438,6 +1450,7 @@ def _draw_covariate_legends(fig, covariate_legends, rect=(0.255, 0.078, 0.690, 0
             ax_leg.add_patch(patch)
             ax_leg.text(x + sw + min_gap, y_center, label, fontsize=8, ha="left", va="center", transform=ax_leg.transAxes)
             x += item_w
+        row_idx += 1
 
 
 def _plot_heatmap(
@@ -1455,9 +1468,28 @@ def _plot_heatmap(
     label_events=None,
     species=None,
     label_shared_exons=True,
+    colorbar_label="Norm Exp (z-score)",
+    label_replacements=None,
 ):
     if heatmap_df.empty:
         raise ValueError("Heatmap dataframe is empty.")
+    if label_replacements:
+        def display_label(value):
+            value=str(value)
+            for before,after in label_replacements.items(): value=value.replace(str(before),str(after))
+            return value
+        cluster_counts=[(display_label(c),n) for c,n in cluster_counts]
+        cluster_order=[display_label(c) for c in cluster_order]
+        if len(set(cluster_order)) != len(cluster_order):
+            raise ValueError('Display label replacements may not merge distinct source groups')
+        column_clusters=[display_label(c) for c in column_clusters]
+        row_clusters=[display_label(c) for c in row_clusters]
+        if covariate_df is not None:
+            covariate_df=covariate_df.copy()
+            for col in covariate_df:
+                if isinstance(covariate_df[col].dtype,pd.CategoricalDtype):
+                    covariate_df[col]=covariate_df[col].cat.rename_categories(display_label)
+                else: covariate_df[col]=covariate_df[col].map(display_label)
 
     from mpl_toolkits.axes_grid1 import make_axes_locatable
 
@@ -1678,20 +1710,25 @@ def _plot_heatmap(
         row_height_px = ax_labels.get_window_extent().height / max(1, heatmap_df.shape[0])
         row_height_pt = row_height_px * 72.0 / fig.dpi
         fitted_gene_fontsize = max(2.5, min(gene_fontsize, row_height_pt * 0.80))
-        for pos, gene in enumerate(y_labels):
-            if callout_rows is not None and pos not in set(callout_rows):
-                continue
-            ax_labels.text(
-                0.02,
-                pos,
-                gene,
-                transform=ax_labels.get_yaxis_transform(),
-                ha="left",
-                va="center",
-                fontsize=fitted_gene_fontsize,
-                fontstyle="italic",
-                clip_on=False,
-            )
+        if callout_rows is not None:
+            # The whitelist uses the same spaced leader-line callouts with or without
+            # GO terms. Fitting them to every matrix row made sparse labels overlap
+            # and shrink on large heatmaps despite the empty rows between callouts.
+            _draw_row_callouts(ax, [y_labels[i] for i in callout_rows],
+                               callout_rows, heatmap_df.shape[0])
+        else:
+            for pos, gene in enumerate(y_labels):
+                ax_labels.text(
+                    0.02,
+                    pos,
+                    gene,
+                    transform=ax_labels.get_yaxis_transform(),
+                    ha="left",
+                    va="center",
+                    fontsize=fitted_gene_fontsize,
+                    fontstyle="italic",
+                    clip_on=False,
+                )
         _draw_go_term_labels(fig, ax_terms, ax, row_clusters, go_terms, cluster_colors, go_terms_max)
 
     fig.canvas.draw()
@@ -1704,7 +1741,7 @@ def _plot_heatmap(
     cax = fig.add_axes([cbar_x, cbar_y, cbar_width, cbar_height])
     cbar = fig.colorbar(im, cax=cax, orientation="horizontal")
     cbar.ax.set_xlim(vmin, vmax)
-    cbar.set_label("Norm Exp (z-score)", fontsize=8, labelpad=2)
+    cbar.set_label(colorbar_label, fontsize=8, labelpad=2)
     cbar.set_ticks([])
     # :g not :.0f -- the default half-range is 1.5, which :.0f would print as "-2"/"2"
     cbar.ax.text(-0.08, 0.5, f"{vmin:g}", ha="right", va="center", transform=cbar.ax.transAxes)
@@ -1956,6 +1993,7 @@ def generate_marker_heatmap_from_adata(
     covariate_columns=None,
     go_terms=None,
     go_terms_max=30,
+    return_statistics=False,
 ):
     """Find markers using all input cells; output controls do not change scoring.
 
@@ -2101,6 +2139,10 @@ def generate_marker_heatmap_from_adata(
         key="select_unique_markers",
     )
     if selected_all.empty:
+        if return_statistics and marker_method == "markerfinder":
+            return {"pdf": None, "rho": effect_df.reindex(adata.var_names),
+                    "pval": pvals.reindex(adata.var_names), "fdr": fdr_df.reindex(adata.var_names),
+                    "sample_ids": adata.obs_names.tolist(), "status": "NO_MARKERS_SELECTED"}
         raise NoMarkersSelectedError("No markers were selected. Check inputs and parameters.")
 
     redundant_select_started = time.perf_counter()
@@ -2385,7 +2427,7 @@ def generate_marker_heatmap_from_adata(
         key="total",
     )
 
-    return {
+    result = {
         "pdf": out if render_heatmap else None,
         "markers_tsv": markers_tsv,
         "redundant_markers_tsv": redundant_markers_tsv,
@@ -2396,6 +2438,61 @@ def generate_marker_heatmap_from_adata(
         "networks": networks,
         "timings": timings,
     }
+    if return_statistics:
+        result.update(rho=effect_df.reindex(adata.var_names), pval=pvals.reindex(adata.var_names),
+                      fdr=fdr_df.reindex(adata.var_names), sample_ids=adata.obs_names.tolist())
+    return result
+
+
+def render_consolidated_marker_heatmap(adata, assignments, *, cluster_key, out,
+                                       top_n=100, species=None, half_range=0.2,
+                                       covariate_columns=None, dpi=600, label_events=None,
+                                       label_replacements=None):
+    """Render native iterative assignments, preserving PSI and centring each row by its median.
+
+    Assignment order is supplied by iterative MarkerFinder, not re-ranked by a renderer.
+    Missing measurements remain missing in the matrix/cache and are never converted to PSI zero.
+    ``top_n=None`` displays all assignments; the full assignment table is always retained.
+    """
+    from pathlib import Path
+    out = str(out); root = Path(out).parent; root.mkdir(parents=True, exist_ok=True)
+    if not adata.var_names.is_unique or not adata.obs_names.is_unique:
+        raise ValueError("Consolidation requires unique feature and pseudobulk identities.")
+    if not assignments.index.is_unique or not assignments.index.isin(adata.var_names).all():
+        raise ValueError("Every assigned event must have exactly one source row.")
+    assignments.to_csv(Path(out).with_suffix('.assignments.tsv'), sep='\t')
+    selected = assignments if top_n is None else assignments.groupby('pattern', sort=False).head(top_n)
+    if selected.empty:
+        return {'pdf': None, 'status': 'NO_MARKERS_SELECTED', 'assigned': 0}
+    order = _resolve_cluster_order(adata.obs[cluster_key], _coerce_lineage_order(adata.uns.get('lineage_order')))
+    cells, counts = _order_cells_by_cluster(adata, cluster_key, order)
+    block = adata[cells, selected.index].X
+    block = block.toarray() if sparse.issparse(block) else np.asarray(block)
+    matrix = pd.DataFrame(block.T, index=selected.index, columns=cells)
+    matrix = matrix.sub(matrix.median(axis=1), axis=0)
+    row_groups = selected['pattern'].astype(str).tolist()
+    column_groups = adata.obs.loc[cells, cluster_key].astype(str).tolist()
+    color_order = list(dict.fromkeys([*order, *row_groups]))
+    cov = adata.obs.loc[cells, covariate_columns] if covariate_columns else None
+    old_range = os.environ.get('MARKER_HEATMAP_RANGE')
+    old_contrast = os.environ.get('MARKER_HEATMAP_CONTRAST')
+    try:
+        os.environ['MARKER_HEATMAP_RANGE'] = str(half_range)
+        os.environ['MARKER_HEATMAP_CONTRAST'] = '1'
+        _plot_heatmap(matrix, out, counts, color_order, column_groups, row_groups,
+                      covariate_df=cov, species=species, dpi=dpi,
+                      colorbar_label="ΔPSI from row median",
+                      label_replacements=label_replacements,
+                      label_events=[] if label_events is None else label_events)
+    finally:
+        for key, value in [('MARKER_HEATMAP_RANGE', old_range), ('MARKER_HEATMAP_CONTRAST', old_contrast)]:
+            if value is None: os.environ.pop(key, None)
+            else: os.environ[key] = value
+    cache = str(Path(out).with_suffix('.fold_matrix.h5ad'))
+    _write_heatmap_cache(cache, matrix, row_groups, column_groups, cells)
+    matrix.to_csv(Path(out).with_suffix('.fold_matrix.tsv'), sep='\t')
+    return dict(pdf=out, heatmap_cache=cache, assigned=len(assignments), plotted=len(selected),
+                normalization='row median subtraction; original missing values retained')
 
 
 def _load_text_expression_inputs(matrix_tsv, groups_tsv, cluster_key):

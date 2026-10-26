@@ -1533,6 +1533,110 @@ def subset_to_reference_genes(adata, reference_genes, *, copy_layers=True):
 
     return filtered, matched_symbols, missing_symbols
 
+
+def read_bulk_counts(counts_file):
+    """Read a bulk RNA-seq counts table as a samples x genes AnnData.
+
+    A text table holds genes as rows and samples as columns, gene IDs in the first column (the
+    AltAnalyze layout; comma-delimited when the name ends in .csv, tab-delimited otherwise). An
+    h5ad holds samples x genes with the counts in X.
+    """
+    if counts_file.endswith(".h5ad"):
+        bulk = sc.read_h5ad(counts_file)
+        bulk = ad.AnnData(X=bulk.X.toarray() if sp.issparse(bulk.X) else np.asarray(bulk.X),
+                          obs=pd.DataFrame(index=bulk.obs_names.astype(str)),
+                          var=pd.DataFrame(index=bulk.var_names.astype(str)))
+    else:
+        table = pd.read_csv(counts_file, sep="," if counts_file.endswith(".csv") else "\t", index_col=0)
+        non_numeric = [c for c in table.columns if not pd.api.types.is_numeric_dtype(table[c])]
+        if non_numeric:
+            raise ValueError(f"{counts_file}: every column after the gene IDs must hold sample counts; "
+                             f"{len(non_numeric)} column(s) are not numeric, e.g. {non_numeric[:5]}")
+        bulk = ad.AnnData(X=table.to_numpy(dtype=np.float64).T,
+                          obs=pd.DataFrame(index=table.columns.astype(str)),
+                          var=pd.DataFrame(index=table.index.astype(str)))
+    bulk.X = np.asarray(bulk.X, dtype=np.float64)
+    if np.isnan(bulk.X).any():
+        raise ValueError(f"{counts_file}: {int(np.isnan(bulk.X).sum())} count values are missing (NaN)")
+    return bulk
+
+
+def deconvolve_bulk(counts_file, cellharmony_ref, output_dir="output", alignment_mode="cosine",
+                    gene_translation_file=None):
+    """Score every bulk RNA-seq sample against every reference cell state.
+
+    The bulk counts take the single-cell path: gene translation, unique names, the shared scale
+    classifier, then normalize_total to 10,000 and log1p. The score is the alignment metric over the
+    genes the reference and the bulk table share: cosine similarity in "cosine" mode, Pearson
+    correlation in "classic" mode. A score is a similarity, not a cell-state proportion. Cell QC
+    does not apply, because a sample is not a cell.
+
+    Writes cellHarmony_deconvolution_scores.txt: one row per cell state in reference order, one
+    column per sample. A sample or state with no signal over the shared genes has an undefined
+    score, written as NaN. Returns the scores as a DataFrame.
+    """
+    if alignment_mode not in ("cosine", "classic"):
+        raise ValueError(f"deconvolution scores with alignment_mode 'cosine' or 'classic', not '{alignment_mode}'")
+    output_dir = os.path.abspath(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+    reference_df = pd.read_csv(cellharmony_ref, sep='\t', index_col=0)
+
+    bulk = read_bulk_counts(counts_file)
+    print(f"[deconvolution] read {bulk.n_obs} samples x {bulk.n_vars} genes from {counts_file}")
+    translation_map = None
+    if gene_translation_file is not None:
+        if not os.path.exists(gene_translation_file):
+            raise FileNotFoundError(f"gene translation file not found: {gene_translation_file}")
+        translation_map = load_gene_translation(gene_translation_file)
+    apply_gene_translation(bulk, translation_map, os.path.basename(counts_file))
+    bulk.var_names_make_unique()
+
+    scale = assess_expression_scale(bulk)
+    if scale["x_verdict"] != "counts":
+        raise ValueError(f"--deconvolution needs bulk counts; the table looks {scale['x_verdict'].upper()} "
+                         f"({scale['reports']['X'].get('reason', '')})")
+    normalize_adata(bulk)
+
+    filtered, genes_present, missing_genes = subset_to_reference_genes(bulk, reference_df.index)
+    print(f"[deconvolution] {len(genes_present)} of {reference_df.shape[0]} reference genes are in the "
+          f"bulk table; {len(missing_genes)} are missing and excluded")
+    query = np.asarray(filtered.X, dtype=np.float64)
+    reference = reference_df.loc[genes_present].to_numpy(dtype=np.float64).T
+
+    if alignment_mode == "cosine":
+        query_scale = np.linalg.norm(query, axis=1)
+        reference_scale = np.linalg.norm(reference, axis=1)
+        products = query @ reference.T
+    else:
+        query = query - query.mean(axis=1, keepdims=True)
+        reference = reference - reference.mean(axis=1, keepdims=True)
+        query_scale = query.std(axis=1)
+        reference_scale = reference.std(axis=1)
+        products = (query @ reference.T) / query.shape[1]
+    undefined_samples = query_scale == 0
+    undefined_states = reference_scale == 0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        scores = products / np.outer(query_scale, reference_scale)
+    scores[undefined_samples, :] = np.nan
+    scores[:, undefined_states] = np.nan
+    if undefined_samples.any() or undefined_states.any():
+        print(f"[deconvolution] WARNING undefined scores written as NaN: {int(undefined_samples.sum())} of "
+              f"{bulk.n_obs} samples and {int(undefined_states.sum())} of {reference.shape[0]} states "
+              "carry no signal over the shared genes")
+
+    score_df = pd.DataFrame(scores.T, index=reference_df.columns, columns=bulk.obs_names)
+    score_df.index.name = "UID"
+    output_file = os.path.join(output_dir, "cellHarmony_deconvolution_scores.txt")
+    score_df.to_csv(output_file, sep="\t")
+    print(f"[deconvolution] wrote {score_df.shape[0]} cell states x {score_df.shape[1]} samples "
+          f"({alignment_mode} scores) to {output_file}")
+    for sample in score_df.columns:
+        column = score_df[sample]
+        if column.notna().any():
+            print(f"[deconvolution] {sample}: top state {column.idxmax()} ({column.max():.4f})")
+    return score_df
+
+
 def get_h5_and_mtx_files(folder_path):
     """
     Recursively scans a directory for:
@@ -1821,6 +1925,14 @@ if __name__ == '__main__':
     parser.add_argument('--pseudobulk_layers', type=str, default="",
                         help="Comma-separated extra layers to sum, e.g. soupx_raw for the "
                              "uncorrected counts after ambient correction.")
+    parser.add_argument('--deconvolution', type=str, default=None,
+                        help="Bulk RNA-seq counts table: genes as rows, samples as columns, gene IDs "
+                             "in the first column (tab-delimited; .csv comma-delimited), or an h5ad "
+                             "of samples x genes. Instead of aligning cells, scores each sample "
+                             "against every --refdir cell state with the --alignment_mode metric "
+                             "(cosine similarity, or Pearson for classic) and writes "
+                             "cellHarmony_deconvolution_scores.txt (cell states x samples). "
+                             "Honours --gene_translation; cell QC options do not apply.")
 
     args = parser.parse_args()
 
@@ -1866,17 +1978,24 @@ if __name__ == '__main__':
     if sparse_stream and (h5ad_file or h5_directory):
         print("--sparse_stream replaces --h5dir and --h5ad; pass it alone.")
         sys.exit(1)
+    deconvolution = args.deconvolution
+    if deconvolution and (h5ad_file or h5_directory or sparse_stream):
+        print("--deconvolution replaces --h5dir, --h5ad and --sparse_stream; pass it alone.")
+        sys.exit(1)
+    if deconvolution and not cellharmony_ref:
+        print("--deconvolution needs a --refdir reference.")
+        sys.exit(1)
 
-    if h5ad_file or sparse_stream:
+    if h5ad_file or sparse_stream or deconvolution:
         h5_files = []
     else:
         if not h5_directory:
-            print("No --h5dir, --h5ad or --sparse_stream provided.")
+            print("No --h5dir, --h5ad, --sparse_stream or --deconvolution provided.")
             sys.exit()
         h5_files = get_h5_and_mtx_files(h5_directory)
 
     if len(h5_files) == 0:
-        if not (h5ad_file or sparse_stream):
+        if not (h5ad_file or sparse_stream or deconvolution):
             print("No compatible h5, h5ad or .mtx files identified")
             sys.exit()
 
@@ -1897,73 +2016,77 @@ if __name__ == '__main__':
     sys.stderr = Tee(stderr_orig, log_file)
 
     try:
-        stream_adata = None
-        if sparse_stream:
-            from altanalyze3.components.cellHarmony.sparse_stream import read_sparse_stream
-            stream_start = time.time()
-            stream_adata = read_sparse_stream(sparse_stream)
-            print(f"[stream] read {stream_adata.n_obs:,} cells x {stream_adata.n_vars:,} genes "
-                  f"in {time.time() - stream_start:.1f}s")
-        pseudobulk_sample_col = args.pseudobulk_sample_col
-        result = combine_and_align_h5(
-            adata=stream_adata,
-            return_adata=bool(pseudobulk_sample_col),
-            h5_files=h5_files,
-            h5ad_file=h5ad_file,
-            reference_genes_only=args.reference_genes_only,
-            cellharmony_ref=cellharmony_ref,
-            output_dir=output_dir,
-            export_cptt=export_cptt,
-            export_h5ad=export_h5ad,
-            min_genes=min_genes,
-            min_cells=min_cells,
-            min_counts=min_counts,
-            mit_percent=mit_percent,
-            generate_umap=generate_umap,
-            umap_features=umap_features,
-            umap_init=umap_init,
-            export_umap=export_umap,
-            save_adata=save_adata,
-            unsupervised_cluster=unsupervised_cluster,
-            leiden_resolution=leiden_resolution,
-            append_obs_field=append_obs_field,
-            alignment_mode=alignment_mode,
-            min_alignment_score=align_cutoff,
-            gene_translation_file=gene_translation,
-            metacell_align=metacell_align,
-            metacell_target_size=metacell_target,
-            metacell_min_size=metacell_min,
-            metacell_max_size=metacell_max,
-            metacell_algorithm=metacell_algorithm,
-            metacell_neighbors=metacell_neighbors,
-            metacell_hvg=metacell_hvg,
-            metacell_pcs=metacell_pcs,
-            metacell_random_count=metacell_random_count,
-            metacell_random_cells=metacell_random_cells,
-            metacell_random_replacement=metacell_random_replacement,
-            metacell_random_state=metacell_random_state,
-            ambient_correct_cutoff=ambient_correct_cutoff,
-            concat_on_disk=concat_on_disk,
-            concat_batch_size=concat_batch_size,
-            verbose_import=verbose_import
-        )
-        if pseudobulk_sample_col:
-            from altanalyze3.components.aggregate.pseudobulk_h5ad import build_pseudobulk_from_adata
-            del stream_adata
-            _, aligned = result
-            ref_name = os.path.basename(cellharmony_ref)[:-4]
-            if pseudobulk_sample_col not in aligned.obs.columns:
-                raise KeyError(f"--pseudobulk_sample_col '{pseudobulk_sample_col}' is not an obs column; "
-                               f"obs holds {list(aligned.obs.columns)}")
-            build_pseudobulk_from_adata(
-                aligned,
-                cluster_col=ref_name,
-                sample_col=pseudobulk_sample_col,
-                output_h5ad=Path(output_dir) / "pseudobulk_counts.h5ad",
-                min_cells=args.pseudobulk_min_cells,
-                count_layer="counts",
-                extra_layers=[n.strip() for n in args.pseudobulk_layers.split(",") if n.strip()],
+        if deconvolution:
+            deconvolve_bulk(deconvolution, cellharmony_ref, output_dir=output_dir,
+                            alignment_mode=alignment_mode, gene_translation_file=gene_translation)
+        else:
+            stream_adata = None
+            if sparse_stream:
+                from altanalyze3.components.cellHarmony.sparse_stream import read_sparse_stream
+                stream_start = time.time()
+                stream_adata = read_sparse_stream(sparse_stream)
+                print(f"[stream] read {stream_adata.n_obs:,} cells x {stream_adata.n_vars:,} genes "
+                      f"in {time.time() - stream_start:.1f}s")
+            pseudobulk_sample_col = args.pseudobulk_sample_col
+            result = combine_and_align_h5(
+                adata=stream_adata,
+                return_adata=bool(pseudobulk_sample_col),
+                h5_files=h5_files,
+                h5ad_file=h5ad_file,
+                reference_genes_only=args.reference_genes_only,
+                cellharmony_ref=cellharmony_ref,
+                output_dir=output_dir,
+                export_cptt=export_cptt,
+                export_h5ad=export_h5ad,
+                min_genes=min_genes,
+                min_cells=min_cells,
+                min_counts=min_counts,
+                mit_percent=mit_percent,
+                generate_umap=generate_umap,
+                umap_features=umap_features,
+                umap_init=umap_init,
+                export_umap=export_umap,
+                save_adata=save_adata,
+                unsupervised_cluster=unsupervised_cluster,
+                leiden_resolution=leiden_resolution,
+                append_obs_field=append_obs_field,
+                alignment_mode=alignment_mode,
+                min_alignment_score=align_cutoff,
+                gene_translation_file=gene_translation,
+                metacell_align=metacell_align,
+                metacell_target_size=metacell_target,
+                metacell_min_size=metacell_min,
+                metacell_max_size=metacell_max,
+                metacell_algorithm=metacell_algorithm,
+                metacell_neighbors=metacell_neighbors,
+                metacell_hvg=metacell_hvg,
+                metacell_pcs=metacell_pcs,
+                metacell_random_count=metacell_random_count,
+                metacell_random_cells=metacell_random_cells,
+                metacell_random_replacement=metacell_random_replacement,
+                metacell_random_state=metacell_random_state,
+                ambient_correct_cutoff=ambient_correct_cutoff,
+                concat_on_disk=concat_on_disk,
+                concat_batch_size=concat_batch_size,
+                verbose_import=verbose_import
             )
+            if pseudobulk_sample_col:
+                from altanalyze3.components.aggregate.pseudobulk_h5ad import build_pseudobulk_from_adata
+                del stream_adata
+                _, aligned = result
+                ref_name = os.path.basename(cellharmony_ref)[:-4]
+                if pseudobulk_sample_col not in aligned.obs.columns:
+                    raise KeyError(f"--pseudobulk_sample_col '{pseudobulk_sample_col}' is not an obs column; "
+                                   f"obs holds {list(aligned.obs.columns)}")
+                build_pseudobulk_from_adata(
+                    aligned,
+                    cluster_col=ref_name,
+                    sample_col=pseudobulk_sample_col,
+                    output_h5ad=Path(output_dir) / "pseudobulk_counts.h5ad",
+                    min_cells=args.pseudobulk_min_cells,
+                    count_layer="counts",
+                    extra_layers=[n.strip() for n in args.pseudobulk_layers.split(",") if n.strip()],
+                )
     finally:
         sys.stdout.flush()
         sys.stderr.flush()

@@ -163,3 +163,75 @@ def test_complete_cli_handler_repeats_byte_for_byte_and_fills_same_release_seque
     assert pair['builtin_lost_in_B']=='2'
     with pytest.raises(ValueError,match='empty output'):
         run_protein_impact(args)
+
+
+def _two_gene_fixture(tmp_path, partner_column):
+    """Gene A protein MAL (feature 2-3); partner gene B protein WYKV (feature 2-4); fusion MALWYKV."""
+    ga, gb = 'ENSG00000000001', 'ENSG00000000002'
+    texts = {
+        'protein_relationships': 'Gene\tTrans\tProtein\n'+ga+'\tENST1\tENSP1\n'+gb+'\tENST2\tENSP2\n',
+        'protein_features': 'ID\tAA_Start\tAA_Stop\tStart\tStop\tName\tInterpro\tDescription\n'
+                            'ENSP1\t2\t3\t4\t9\tDA\tIPR1\tDomainA\nENSP2\t2\t4\t104\t112\tDB\tIPR2\tDomainB\n',
+        'uniprot_features': 'ensembl_prot\taa_start\taa_stop\tgenomic_start\tgenomic_stop\tname\tinterpro_id\tdescription\n',
+        'protein_coordinates': 'protienID\texonID\tAA_NT_Start\tAA_NT_Stop\tGenomic_Start\tGenomic_Stop\n'
+                               'ENSP1\tE1\t1\t9\t1\t9\nENSP2\tE1\t1\t12\t101\t112\n',
+        'protein_sequences': 'ENSP1\tMAL\nENSP2\tWYKV\n',
+        'ensembl_peptides': '>ENSP1.1 gene:'+ga+' transcript:ENST1\nMAL\n>ENSP2.1 gene:'+gb+' transcript:ENST2\nWYKV\n',
+    }
+    resources = {}
+    for key, text in texts.items():
+        p = tmp_path / (key+'.txt'); p.write_text(text)
+        resources[key] = dict(path=p.name, sha256=sha(p), source='synthetic test fixture', release='same-release-test')
+    bundle = tmp_path / 'bundle.json'
+    bundle.write_text(json.dumps(dict(schema='altanalyze-native-protein-impact-v1', release_decision='test fixture', resources=resources)))
+    header = 'gene_symbol\tisoform_id\tensg\tprotein_sequence\tcds_sequence\tcdna_sequence\tprotein_length\tannotated\tnmd_status'
+    fusion = 'GA\tf.source\t'+ga+'\tMALWYKV\tATGGCTCTGTGGTATAAAGTT\tATGGCTCTGTGGTATAAAGTT\t7\tno\tNot-NMD'
+    single = 'GA\ta\t'+ga+'\tMAL\tATGGCTCTG\tATGGCTCTG\t3\tyes\tNot-NMD'
+    if partner_column is not None:
+        header += '\tpartner_ensg\tpartner_gene_symbol'
+        fusion += '\t'+partner_column+'\tGB'
+        single += '\t\t'
+    source = tmp_path/'source.tsv'
+    source.write_text('\n'.join([header, single, fusion])+'\n')
+    roster = tmp_path/'roster.json'
+    roster.write_text(json.dumps(dict(source_table_sha256=sha(source), required_roster=[dict(gene_symbol='GA', isoform_id=i) for i in ['a', 'f.source']])))
+    return SimpleNamespace(native_models=str(source), required_roster=str(roster), reference_bundle=str(bundle),
+                           artifacts_dir=str(tmp_path/'out'), pseudobulk=None, metadata=None, state=None,
+                           condition=None, donor=None, gff=None, coding_regions=None, min_isoform_reads=30, prior_feature_audit=None)
+
+
+def test_partner_gene_features_are_projected_and_compared_for_a_multi_gene_model(tmp_path):
+    import csv
+    from altanalyze3.components.iso2function.protein_impact import run_protein_impact
+    args = _two_gene_fixture(tmp_path, 'ENSG00000000002')
+    assert run_protein_impact(args) == 0
+    out = tmp_path/'out'
+    proj = list(csv.DictReader((out/'feature_projections.tsv').open(), delimiter='\t'))
+    partner = {r['isoform_id']: r for r in proj if r['reference_protein'] == 'ENSP2'}
+    assert set(partner) == {'a', 'f.source'}
+    assert partner['f.source']['sequence_present'] == 'True' and partner['a']['sequence_present'] == 'False'
+    pair = list(csv.DictReader((out/'pair_summary.tsv').open(), delimiter='\t'))[0]
+    assert (pair['isoform_A'], pair['isoform_B']) == ('f.source', 'a') and pair['builtin_lost_in_B'] == '1'
+    audit = {r['isoform_id']: r for r in csv.DictReader((out/'native_model_audit.tsv').open(), delimiter='\t')}
+    assert audit['f.source']['partner_ensg'] == 'ENSG00000000002' and audit['f.source']['partner_gene_symbol'] == 'GB'
+    manifest = json.loads((out/'impact_manifest.json').read_text())
+    assert manifest['multi_gene_partner_features']['partners'] == {'GA': ['ENSG00000000002']}
+
+
+def test_single_gene_models_ignore_partner_gene_reference_rows(tmp_path):
+    import csv
+    from altanalyze3.components.iso2function.protein_impact import run_protein_impact
+    args = _two_gene_fixture(tmp_path, None)
+    assert run_protein_impact(args) == 0
+    out = tmp_path/'out'
+    proj = list(csv.DictReader((out/'feature_projections.tsv').open(), delimiter='\t'))
+    assert {r['reference_protein'] for r in proj} == {'ENSP1'}
+    assert 'partner_ensg' not in next(csv.DictReader((out/'native_model_audit.tsv').open(), delimiter='\t'))
+    assert 'multi_gene_partner_features' not in json.loads((out/'impact_manifest.json').read_text())
+
+
+def test_invalid_partner_gene_is_rejected(tmp_path):
+    from altanalyze3.components.iso2function.protein_impact import run_protein_impact
+    args = _two_gene_fixture(tmp_path, 'ENSG00000000001')
+    with pytest.raises(ValueError, match='Invalid partner_ensg'):
+        run_protein_impact(args)

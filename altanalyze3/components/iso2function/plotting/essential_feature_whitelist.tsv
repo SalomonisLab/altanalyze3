@@ -1,0 +1,50 @@
+class	label	priority	color	provider	name_pattern	accession_pattern	description_pattern	note
+F_BAR	F-BAR	16	#882255	protein_features		^IPR031160$		Native InterPro F_BAR annotation; distinct from the shorter FCH domain
+F_BAR	F-BAR	16	#882255	uniprot_features			^DOMAIN-F-BA(R)?$	Native UniProt F-BAR annotation including the historically truncated F-BA source label
+EF_HAND	EF-hand	17	#CCBB44	uniprot_features			^DOMAIN-EF-hand	Native UniProt EF-hand domains; separate non-overlapping repeats are retained
+WH2	WH2	18	#228833	protein_features		^IPR003124$		Native WH2 domain annotation
+WH2	WH2	18	#228833	uniprot_features			^DOMAIN-WH2$	Full native UniProt WH2 label only; truncated WH does not distinguish WH1 from WH2
+TM	TM	1	#D55E00	uniprot_features			^(TRANSMEM|INTRAMEM)-	EnsMart100 UniProt feature keys TRANSMEM and INTRAMEM (description = KEY-text, last character truncated in the pinned table)
+TM	TM	1	#D55E00	reviewed_uniprot_snapshot	^(Transmembrane|Intramembrane)$			UniProt REST feature types
+SIGNAL	Signal peptide	2	#CC79A7	uniprot_features			^SIGNAL-	UniProt SIGNAL
+SIGNAL	Signal peptide	2	#CC79A7	reviewed_uniprot_snapshot	^Signal$			UniProt REST feature type
+GPI	GPI attachment	14	#CC6677	uniprot_features			^LIPID-GPI-anchor	Existing UniProt GPI-attachment annotation; sequence projection alone does not establish lipidation or surface localization
+GPI	GPI attachment	14	#CC6677	reviewed_uniprot_snapshot	^Lipidation$		GPI-anchor	Reviewed UniProt GPI-attachment annotation; unresolved placements remain explicit
+KINASE	Kinase	3	#009E73	uniprot_features			^DOMAIN-(Protein kinas|Histidine kinas|PI3K/PI4K|Guanylate kinase-lik|Alpha-type protein kinas)	UniProt DOMAIN descriptions
+KINASE	Kinase	3	#009E73	reviewed_uniprot_snapshot	^Domain$		(protein kinase|PI3K/PI4K|histidine kinase)	UniProt REST domain
+KINASE	Kinase	3	#009E73	protein_features	^(PF00069|PF07714|PF00454|PF01163|PF00781|PF14531|PF01636)$			Pfam Prot_kinase_dom, Ser-Thr/Tyr_kinase_cat_dom, PI3/4_kinase_cat_dom, RIO1, DAG kinase cat, Kinase-like, APH
+KINASE	Kinase	3	#009E73	protein_features		^(IPR000719|IPR001245|IPR000403|IPR011009)$		InterPro kinase domain and kinase-like fold
+PHOSPHATASE	Phosphatase	4	#0072B2	uniprot_features			^DOMAIN-(Tyrosine-protein phosphatas|Phosphatas|Protein-tyrosine phosphatas)	UniProt DOMAIN descriptions
+PHOSPHATASE	Phosphatase	4	#0072B2	protein_features	^(PF00102|PF00782|PF00149|PF03031|PF12122)$			Pfam Y_phosphatase, DSPc, Metallophos, NIF, Phosphatase
+PHOSPHATASE	Phosphatase	4	#0072B2	protein_features		^(IPR000242|IPR000387|IPR029021|IPR004843)$		InterPro phosphatase domains
+DNA_BINDING	DNA-binding	5	#332288	uniprot_features			^DNA_BIND-	UniProt DNA_BIND (homeobox, ETS, bZIP basic motif, nuclear receptor, T-box, Fork-head, HMG and others)
+DNA_BINDING	DNA-binding	5	#332288	uniprot_features			^ZN_FING-(C2H2|NR C4|C4-typ|GATA)	UniProt zinc fingers that bind DNA
+DNA_BINDING	DNA-binding	5	#332288	uniprot_features			^DOMAIN-(bHL|bZIP|HMG bo|Fork-hea|ETS|Runt|T-bo|Paired|POU|ARID|SAND|MADS-bo|IRF tryptophan penta|TEA|Myb-lik|p53|Rel|STAT DNA-bindin|E2F|HSF)	UniProt DOMAIN descriptions of transcription-factor DNA-binding domains
+DNA_BINDING	DNA-binding	5	#332288	reviewed_uniprot_snapshot	^DNA binding$			UniProt REST feature type
+DNA_BINDING	DNA-binding	5	#332288	reviewed_uniprot_snapshot	^Zinc finger$		(C2H2|NR C4|C4-type|GATA)	UniProt REST zinc finger that binds DNA
+DNA_BINDING	DNA-binding	5	#332288	protein_features	^(PF00046|PF05920|PF00096|PF01530|PF00010|PF00170|PF07716|PF03131|PF00250|PF00505|PF09011|PF00178|PF04621|PF00853|PF00907|PF00292|PF00157|PF00319|PF01388|PF01342|PF00320|PF00870|PF13873|PF00249|PF02178|PF00105|PF03299|PF02319|PF00447|PF00172|PF01422|PF00356|PF02376|PF00554|PF02864|PF01167)$			Pfam DNA-binding domains, every accession checked at InterPro 2026-10-24: homeobox, C2H2, C2HC, bHLH, bZIP, forkhead, HMG, ETS, Runt, T-box, paired, POU, MADS, ARID, SAND, GATA, p53, Myb, AT-hook, nuclear-receptor C4, AP-2, E2F, HSF, Zn_clus, zf-NF-X1, LacI, CUT, RHD, STAT, Tub. Removed 2026-10-24: PF00412 LIM (protein interaction; LIMS1 had been drawn as DNA-binding), PF07720 TPR_3 (protein interaction), PF12171 zf-C2H2_jaz (dsRNA binding, moved to RNA_BINDING)
+DNA_BINDING	DNA-binding	5	#332288	protein_features		^(IPR001356|IPR013087|IPR011598|IPR004827|IPR001766|IPR009071|IPR000418|IPR001699|IPR001523|IPR000327|IPR002100|IPR001606|IPR000770|IPR000679|IPR011615|IPR017956|IPR001628|IPR000814|IPR001275|IPR001005|IPR000232|IPR003316|IPR013854)$		InterPro DNA-binding domains (homeobox, C2H2, bHLH, bZIP, forkhead, HMG, ETS, T-box, paired, POU, MADS, ARID, SAND, GATA, p53, AT-hook, NR C4, TBP, DM, Myb/SANT, HSF, E2F, Rel)
+NR_LBD	NR ligand-binding	6	#882255	uniprot_features			^DOMAIN-NR LB	UniProt nuclear receptor ligand-binding domain
+NR_LBD	NR ligand-binding	6	#882255	protein_features	^PF00104$			Pfam Hormone_recep
+NR_LBD	NR ligand-binding	6	#882255	protein_features		^IPR000536$		InterPro Nucl_hrmn_rcpt_lig-bd
+RNA_BINDING	RNA-binding	7	#117733	uniprot_features			^DOMAIN-(RRM|KH|DRBM|S1 motif|PUM|Piwi|PAZ|CSD|La-typ|Zn-finger CCCH)	UniProt RNA-binding domain descriptions
+RNA_BINDING	RNA-binding	7	#117733	uniprot_features			^ZN_FING-C3H1	UniProt CCCH zinc finger
+RNA_BINDING	RNA-binding	7	#117733	protein_features	^(PF00076|PF16367|PF11835|PF00013|PF07650|PF00035|PF00575|PF00642|PF00098|PF01424|PF02170|PF02171|PF00313|PF05172|PF14259|PF12171)$			Pfam RRM, KH, dsrm, S1, zf-CCCH, zf-CCHC, R3H, PAZ, Piwi, CSD, Nup35_RRM, RRM_6, zf-C2H2_jaz (dsRNA binding; moved from DNA_BINDING 2026-10-24)
+RNA_BINDING	RNA-binding	7	#117733	protein_features		^(IPR000504|IPR004088|IPR004087|IPR014720|IPR003029|IPR000571|IPR001878|IPR003100|IPR003165|IPR002059)$		InterPro RNA-binding domains
+HELICASE	Helicase	8	#44AA99	uniprot_features			^DOMAIN-Helicase	UniProt helicase ATP-binding and C-terminal domains
+HELICASE	Helicase	8	#44AA99	protein_features	^(PF00270|PF00271|PF04851|PF00176|PF00580|PF13086|PF13087)$			Pfam DEAD, Helicase_C, ResIII, SNF2_N, UvrD-helicase, AAA_11, AAA_12
+HELICASE	Helicase	8	#44AA99	protein_features		^(IPR011545|IPR001650|IPR000330|IPR014001)$		InterPro helicase-specific domains; broad P-loop NTPase superfamily is a separate class
+NTPASE	P-loop NTPase	15	#44AA99	protein_features		^IPR027417$		InterPro P-loop containing nucleoside triphosphate hydrolase superfamily; includes non-helicase GTPases and does not establish helicase activity
+GTPASE	GTPase	9	#999933	uniprot_features			^DOMAIN-(Small GTPas|GTPas|G-alpha|Dynamin-type G)	UniProt GTPase domain descriptions
+GTPASE	GTPase	9	#999933	protein_features	^(PF00071|PF00025|PF00009|PF01926|PF00350|PF08477|PF00503)$			Pfam Ras, Arf, GTP_EFTU, MMR_HSR1, Dynamin_N, Roc, G-alpha
+GTPASE	GTPase	9	#999933	protein_features		^(IPR001806|IPR006689|IPR000795|IPR006073|IPR001401|IPR020850|IPR001019)$		InterPro GTPase domains
+E3_LIGASE	E3 ligase	10	#AA4499	uniprot_features			^(ZN_FING-RING-typ|DOMAIN-HECT|DOMAIN-U-bo|DOMAIN-RING-typ|ZN_FING-RING)	UniProt RING, HECT and U-box
+E3_LIGASE	E3 ligase	10	#AA4499	reviewed_uniprot_snapshot	^(Zinc finger|Domain)$		^(RING-type|HECT|U-box)	UniProt REST RING, HECT, U-box
+E3_LIGASE	E3 ligase	10	#AA4499	protein_features	^(PF00632|PF00097|PF13639|PF13445|PF04564|PF12861|PF14634|PF13920|PF15227|PF13923)$			Pfam HECT_dom, zf-C3HC4, zf-RING_2, zf-RING_UBOX, U-box, zf-RING_6, zf-RING_5, zf-C3HC4_3, zf-C3HC4_4, zf-C3HC4_2
+E3_LIGASE	E3 ligase	10	#AA4499	protein_features		^(IPR000569|IPR001841|IPR003613|IPR018957|IPR017907)$		InterPro HECT, Znf_RING, U-box, Znf_C3HC4_RING-type, Znf_RING_CS
+PROTEASE	Protease	11	#661100	uniprot_features			^DOMAIN-(Peptidase|Caspase|Calpain catalyti)	UniProt peptidase and caspase catalytic domains
+PROTEASE	Protease	11	#661100	protein_features			^(Peptidase_|Pept_|PEPTIDASE_|Caspase|Calpain_cat|Proteasome_su|Asp_protease|Peptidase_C14)	InterPro short names of peptidase, caspase and proteasome catalytic families (Ensembl protein_features description column)
+DEATH_FOLD	Death fold	12	#6699CC	uniprot_features			^DOMAIN-(Death|CARD|DED|Pyrin)	UniProt death-fold domains
+DEATH_FOLD	Death fold	12	#6699CC	protein_features	^(PF00531|PF00619|PF01335|PF02758)$			Pfam Death, CARD, DED, PYRIN
+CHROMATIN	Chromatin reader/writer	13	#888888	uniprot_features			^(DOMAIN-(Bromo|Chromo|SET|Tudor|PWWP|MBT|JmjC|SAN)|ZN_FING-PHD-typ)	UniProt chromatin reader and writer domains
+CHROMATIN	Chromatin reader/writer	13	#888888	protein_features	^(PF00439|PF00385|PF00628|PF00856|PF00567|PF00855|PF02820|PF02373|PF13832|PF00850)$			Pfam Bromodomain, Chromo, PHD, SET, TUDOR, PWWP, MBT, JmjC, zf-HC5HC2H, Hist_deacetyl

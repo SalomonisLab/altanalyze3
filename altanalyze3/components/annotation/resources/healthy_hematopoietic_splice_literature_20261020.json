@@ -1,0 +1,807 @@
+{
+  "schema": "healthy-splice-literature-catalog-v1",
+  "curated_date": "2026-10-20",
+  "purpose": "Primary-study mechanism catalog plus explicit unverified leads. Gene overlap alone never establishes native isoform correspondence.",
+  "genes": [
+    {
+      "gene_symbol": "PTPRC",
+      "published_mechanism": "CD45 variable extracellular cassette (published exons 4/5/6)",
+      "context_and_limit": "Naive versus memory/activated lymphocytes; RA/RB/RC/RO differ by cassette inclusion",
+      "primary_sources": [
+        "https://pubmed.ncbi.nlm.nih.gov/18669861/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "EPB41",
+      "published_mechanism": "Protein 4.1R spectrin-actin-binding cassette exon 16 (21 aa)",
+      "context_and_limit": "Late erythroid exon inclusion stabilizes the red-cell membrane skeleton; alternative first exons/translation are separate mechanisms",
+      "primary_sources": [
+        "https://pubmed.ncbi.nlm.nih.gov/17715393/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "RBFOX2",
+      "published_mechanism": "Fox2A versus Fox2F alternative amino termini",
+      "context_and_limit": "Erythroid differentiation changes Fox2 isoform balance and regulation of EPB41 splicing",
+      "primary_sources": [
+        "https://pubmed.ncbi.nlm.nih.gov/17715393/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "NFYA",
+      "published_mechanism": "NF-YA long versus short; 29-aa exon-3 cassette",
+      "context_and_limit": "Short form enriched in immature hematopoietic cells; HSC self-renewal and AML isoform-dependent activity",
+      "primary_sources": [
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC1187979/",
+        "https://pubmed.ncbi.nlm.nih.gov/39192759/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "GFI1B",
+      "published_mechanism": "p37 versus p32; loss of first two zinc fingers by cassette skipping",
+      "context_and_limit": "Isoform-specific erythroid/megakaryocyte requirements and platelet disease",
+      "primary_sources": [
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC5685231/",
+        "https://pubmed.ncbi.nlm.nih.gov/33472357/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "HMGA2",
+      "published_mechanism": "HMGA2-L versus HMGA2-S alternative terminal exon and 3-prime UTR",
+      "context_and_limit": "Developmental human HSC switch alters let-7 regulation; coding and UTR changes require separate verification",
+      "primary_sources": [
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC5957284/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "BMP2K",
+      "published_mechanism": "BMP2K-L versus BMP2K-S alternative C-terminal region",
+      "context_and_limit": "Antagonistic effects on COPII and autophagic degradation in erythroid cells",
+      "primary_sources": [
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC7473771/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "RUNX1",
+      "published_mechanism": "RUNX1b/c alternative P2/P1 promoters; RUNX1a alternative termination; exon-6 cassette",
+      "context_and_limit": "Different mechanisms have hematopoietic precedents; a tiny ORF is not RUNX1a",
+      "primary_sources": [
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC2854264/",
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC4055923/",
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC11608153/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "TCF12",
+      "published_mechanism": "HEBAlt/HEBCan alternative first exon; distinct human 24-aa insertion also described",
+      "context_and_limit": "HEBAlt has a unique 23-aa N-terminus and T-lineage roles; do not conflate it with the human 72-nt cassette",
+      "primary_sources": [
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC9385190/",
+        "https://haematologica.org/article/view/13089"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "TCF7",
+      "published_mechanism": "TCF1 long/short alternative promoters",
+      "context_and_limit": "Long isoforms retain N-terminal beta-catenin-binding region; distinct mature-T-cell responses",
+      "primary_sources": [
+        "https://www.jimmunol.org/content/jimmunol/199/3/911.full.pdf"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "PBX1",
+      "published_mechanism": "PBX1a/b alternative C-terminal splice products",
+      "context_and_limit": "PBX1b enriched in early progenitors; the cited developmental study does not establish a unique function for each native pair",
+      "primary_sources": [
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC1885499/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "LYN",
+      "published_mechanism": "LynA/LynB internal 21-aa N-terminal insert",
+      "context_and_limit": "Distinct contributions to immune homeostasis; LynB protects against autoimmunity",
+      "primary_sources": [
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC9032976/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "MYD88",
+      "published_mechanism": "MyD88-L/S exon-2 cassette; short lacks residues 110-154 (45 aa)",
+      "context_and_limit": "Inducible negative regulator of inflammatory NF-kappaB signaling in monocytes/macrophages",
+      "primary_sources": [
+        "https://www.sciencedirect.com/science/article/pii/S0960982202007121",
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC7196638/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "MCL1",
+      "published_mechanism": "MCL1-L/S exon-2 skipping and altered C terminus",
+      "context_and_limit": "Long anti-apoptotic versus short pro-apoptotic; literal sequence and frameshift must match",
+      "primary_sources": [
+        "https://www.sciencedirect.com/science/article/pii/S0021925819796471"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "IL7R",
+      "published_mechanism": "Exon-6 skipping removes transmembrane region",
+      "context_and_limit": "Soluble IL7R modifies IL7 activity and lymphoid/immune phenotypes",
+      "primary_sources": [
+        "https://pubmed.ncbi.nlm.nih.gov/23151878/",
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC3651437/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "DNMT3A",
+      "published_mechanism": "Alternative promoters/starts DNMT3A1/2; DNMT3A4 C-terminal truncation",
+      "context_and_limit": "Variant-specific methylation and proliferation/differentiation effects in human HSPCs",
+      "primary_sources": [
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC6293073/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "MECOM",
+      "published_mechanism": "MDS1-EVI1 versus EVI1 alternative promoter; EVI1 delta324 separate event",
+      "context_and_limit": "PR-domain-containing MDS1-EVI1 regulates LT-HSC quiescence; not every MECOM splice pair is this promoter pair",
+      "primary_sources": [
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC3193263/",
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC3799001/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "PTPN6",
+      "published_mechanism": "Alternative P1/P2 promoters and first exons",
+      "context_and_limit": "Hematopoietic promoter identity; expression specificity does not prove pair-specific protein function",
+      "primary_sources": [
+        "https://pubmed.ncbi.nlm.nih.gov/7665165/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "CD164",
+      "published_mechanism": "Alternative splice products of the sialomucin",
+      "context_and_limit": "CD34-positive cell adhesion and isoform-specific epitopes; exact splice correspondence required",
+      "primary_sources": [
+        "https://pubmed.ncbi.nlm.nih.gov/10878358/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "FOXP1",
+      "published_mechanism": "FOXP1 long versus short internal promoters/first exons",
+      "context_and_limit": "Short isoforms in normal germinal-center B cells and ABC-DLBCL; exon-9 skipping alone is not FOXP1S",
+      "primary_sources": [
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC5004466/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "KIT",
+      "published_mechanism": "GNNK-positive/negative 4-aa extracellular insert",
+      "context_and_limit": "Different SCF responses in early myeloid progenitors and mast cells; large truncations are not GNNK switches",
+      "primary_sources": [
+        "https://www.sciencedirect.com/science/article/pii/S0898656807002574",
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC3816383/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "CD33",
+      "published_mechanism": "CD33 full length versus delta-exon-2 (IgV loss)",
+      "context_and_limit": "AML-relevant antigen and immune-regulatory differences",
+      "primary_sources": [
+        "https://www.nature.com/articles/s41375-020-0755-7",
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC4498153/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "FYN",
+      "published_mechanism": "Mutually exclusive FynT/FynB exon-7 sequence; delta7 separate",
+      "context_and_limit": "Different T-cell antigen responses; each event must be distinguished",
+      "primary_sources": [
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC2119231/",
+        "https://pubmed.ncbi.nlm.nih.gov/12408980/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "PTPN2",
+      "published_mechanism": "TC45/TC48 alternative C-terminal splice products",
+      "context_and_limit": "Different nuclear/ER localization; cited rescue result tested lymphoma/other cells, not normal lineage switching",
+      "primary_sources": [
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC9827090/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "FCGR2B",
+      "published_mechanism": "FcgammaRIIb1/b2 47-aa cytoplasmic insertion",
+      "context_and_limit": "B-cell versus myeloid expression and receptor endocytosis",
+      "primary_sources": [
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC26659/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "NUMB",
+      "published_mechanism": "Exon-9 PRR cassette (48 aa); exon-3 PTB cassette is separate",
+      "context_and_limit": "NUMB-S supports hemogenic endothelial specification through NOTCH",
+      "primary_sources": [
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC7788460/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "BCL2L1",
+      "published_mechanism": "Bcl-xL/Bcl-xS alternative splice site; internal 63-aa segment",
+      "context_and_limit": "Opposing survival effects; lineage context and exact splice mechanism required",
+      "primary_sources": [
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC10074800/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "MBNL1",
+      "published_mechanism": "Nuclear-localization cassette exon 5",
+      "context_and_limit": "Exon inclusion during terminal erythropoiesis promotes nuclear splicing; tiny truncated ORFs do not establish this mechanism",
+      "primary_sources": [
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC4110662/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "CEBPE",
+      "published_mechanism": "32/30 versus 27/14-kDa isoforms; alternative starts/splicing",
+      "context_and_limit": "Isoforms alter eosinophil/neutrophil/erythroid outcomes in human CD34-positive progenitors",
+      "primary_sources": [
+        "https://pubmed.ncbi.nlm.nih.gov/18832658/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "SYK",
+      "published_mechanism": "Syk-L/S internal 23-aa linker deletion",
+      "context_and_limit": "Differential hematopoietic contexts; some phagocytosis assays find similar activity",
+      "primary_sources": [
+        "https://pubmed.ncbi.nlm.nih.gov/37661351/",
+        "https://www.sciencedirect.com/science/article/pii/S0301472X99000259"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "TAL1",
+      "published_mechanism": "Long/short N-terminal products from multiple RNA and translation routes",
+      "context_and_limit": "Distinct hematopoietic effects and E-protein interactions; RNA start/splice route must be demonstrated",
+      "primary_sources": [
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC10335695/",
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC5436638/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "PKM",
+      "published_mechanism": "PKM1/PKM2 mutually exclusive coding exons 9/10; both 531 aa",
+      "context_and_limit": "Metabolic dependencies during hematopoietic activation/differentiation",
+      "primary_sources": [
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC4197056/",
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC10902291/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "BCL11A",
+      "published_mechanism": "XL/L/S/XS alternative terminal coding structures",
+      "context_and_limit": "Different zinc-finger complements; erythroid isoform expression and function require precise matching",
+      "primary_sources": [
+        "https://www.nature.com/articles/s41467-025-58998-7",
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC12104155/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "GATA1",
+      "published_mechanism": "Full length/short lacks N-terminal 83 aa",
+      "context_and_limit": "Splicing out exon 2 can produce GATA1s, but alternative translation also does; a protein-length difference is insufficient",
+      "primary_sources": [
+        "https://www.nature.com/articles/s41467-019-12726-0",
+        "https://pubmed.ncbi.nlm.nih.gov/25682601/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "MYB",
+      "published_mechanism": "Alternative exons 8A/9A/9B/10A/13A/14A",
+      "context_and_limit": "Lineage-specific splice usage and distinct transcriptional activity; historical 9A/9B naming differs",
+      "primary_sources": [
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC2268396/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "ETS1",
+      "published_mechanism": "p51/p42 exon-VII cassette",
+      "context_and_limit": "Distinct DNA binding and lymphocyte maturation/homeostasis effects",
+      "primary_sources": [
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC1899970/",
+        "https://pubmed.ncbi.nlm.nih.gov/2189104/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "IRAK4",
+      "published_mechanism": "IRAK4-L/S exon-4 inclusion/skipping",
+      "context_and_limit": "U2AF1-associated myeloid cancer splice switch changes innate immune signaling",
+      "primary_sources": [
+        "https://www.nature.com/articles/s41556-019-0314-5"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "CSF3R",
+      "published_mechanism": "Class-I/IV alternative distal exon; intron-3 cryptic exon is separate",
+      "context_and_limit": "Granulopoietic and leukemic receptor processing; exact distal versus cryptic event distinction required",
+      "primary_sources": [
+        "https://www.sciencedirect.com/science/article/pii/S000649711860391X"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "CD99",
+      "published_mechanism": "185-aa long versus 161-aa short cytoplasmic tail",
+      "context_and_limit": "Isoform-specific adhesion and T-cell developmental expression; nonhematopoietic functional assays are a separate context",
+      "primary_sources": [
+        "https://www.nature.com/articles/1210481"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "XBP1",
+      "published_mechanism": "IRE1-mediated 26-nt unconventional intron excision",
+      "context_and_limit": "Plasma-cell immunoglobulin production; nonspliceosomal event may be absent from conventional junction catalogs",
+      "primary_sources": [
+        "https://www.nature.com/articles/ni907"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "TCF3",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "TCF4",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "LEF1",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "MPL",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "IL6R",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "PTPN22",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "STAT3",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "STAT1",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "FOXP3",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "IRF5",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "CFLAR",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "CASP8",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "FAS",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "HNRNPD",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "SRSF3",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "CD44",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "CD34",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "IGHM",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "IGHD",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "ANK1",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "ADD3",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "SPTA1",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "SLC4A1",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "NDEL1",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "MAP3K7",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "IRAK1",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "DMTF1",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "IKZF1",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "IKZF2",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "IKZF3",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "IKZF4",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "IKZF5",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "IRF8",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "GATA2",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "MEIS1",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "DNMT1",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "NFE2",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "NFE2L2",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "BACH1",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "BACH2",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Included for explicit screen accounting; requires a primary study and event correspondence",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "H2AFY",
+      "published_mechanism": "macroH2A1.1/1.2 mutually exclusive coding exons",
+      "context_and_limit": "U2AF1-mutant human HSPC lineage defects and isoform-specific rescue; normal differentiation and disease contexts must be distinguished",
+      "primary_sources": [
+        "https://www.jci.org/articles/view/91363"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "CD46",
+      "published_mechanism": "CYT1/CYT2 alternative cytoplasmic tails; BC/C extracellular cassette is separate",
+      "context_and_limit": "Different T-cell activation and metabolic functions; distinguish the actual alternative exon",
+      "primary_sources": [
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC3023775/",
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC4518498/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "CD47",
+      "published_mechanism": "Alternative cytoplasmic-tail exons; alternative 3-prime UTR length is separate",
+      "context_and_limit": "Bone-marrow versus neural expression of coding isoforms; no established native pair-specific hematopoietic switch inferred from gene alone",
+      "primary_sources": [
+        "https://pubmed.ncbi.nlm.nih.gov/8586654/",
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC4697748/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "MALT1",
+      "published_mechanism": "MALT1A/B exon-7 33-nt cassette (11 aa)",
+      "context_and_limit": "T-cell activation increases MALT1A, adds TRAF6-binding motif and enhances NF-kappaB signaling",
+      "primary_sources": [
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC4832065/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "IL2RA",
+      "published_mechanism": "Exon-4 cassette affecting second Sushi domain",
+      "context_and_limit": "Activation-associated inclusion in human T cells; functional mechanism requires direct event correspondence",
+      "primary_sources": [
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC12135390/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "CTLA4",
+      "published_mechanism": "Exon-3 skipping removes transmembrane domain",
+      "context_and_limit": "Resting versus activated T-cell soluble/membrane transcript balance",
+      "primary_sources": [
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC12135390/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "CD6",
+      "published_mechanism": "Exon-5 skipping removes SRCR domain 3",
+      "context_and_limit": "Changes immunological synapse targeting during antigen presentation",
+      "primary_sources": [
+        "https://pubmed.ncbi.nlm.nih.gov/17371992/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "U2AF1",
+      "published_mechanism": "Mutually exclusive 67-nt exons 3/Ab generating U2AF35a/b",
+      "context_and_limit": "Different RNA/protein interactions demonstrated; normal hematopoietic developmental switch not established by these experiments",
+      "primary_sources": [
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC5224494/",
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC6821156/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "CD79A",
+      "published_mechanism": "Alternative coding transcripts of Ig-alpha",
+      "context_and_limit": "Splice variants reported in human B cells; not all variant functions established",
+      "primary_sources": [
+        "https://pubmed.ncbi.nlm.nih.gov/7643857/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "CD79B",
+      "published_mechanism": "Delta-exon-3 removes extracellular Ig-like domain",
+      "context_and_limit": "B-cell/CLL splice variants differ in membrane receptor assembly",
+      "primary_sources": [
+        "https://www.sciencedirect.com/science/article/pii/S0006497120489918",
+        "https://pubmed.ncbi.nlm.nih.gov/7643857/"
+      ],
+      "native_match_status": "Requires event-level verification"
+    },
+    {
+      "gene_symbol": "TYROBP",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Screen accounting only",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "ITGA2B",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Screen accounting only",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "F2R",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Screen accounting only",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "RHOH",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Screen accounting only",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "HIF1A",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Screen accounting only",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "SRSF2",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Screen accounting only",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    },
+    {
+      "gene_symbol": "SF3B1",
+      "published_mechanism": "Literature-search lead; not a verified switch claim",
+      "context_and_limit": "Screen accounting only",
+      "primary_sources": [],
+      "native_match_status": "Not established"
+    }
+  ]
+}

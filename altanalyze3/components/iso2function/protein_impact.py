@@ -74,6 +74,15 @@ def pinned_bundle(path):
     return b, resources
 
 
+def partner_genes(row):
+    """Other genes a multi-gene (trans-spliced or read-through) native model joins.
+
+    Optional ';'-separated partner_ensg column. Empty for ordinary single-gene models, whose
+    feature selection and outputs are unchanged.
+    """
+    return [g.strip() for g in str(row.get("partner_ensg") or "").split(";") if g.strip()]
+
+
 def native_models(source, roster_path):
     contract = json.loads(Path(roster_path).read_text())
     if sha(source) != contract["source_table_sha256"]:
@@ -97,6 +106,13 @@ def native_models(source, roster_path):
             raise ValueError("Native CDS/protein mismatch: " + r["isoform_id"])
         if cds not in r["cdna_sequence"]:
             raise ValueError("Native CDS not in cDNA: " + r["isoform_id"])
+        partners = partner_genes(r)
+        if (any(not re.fullmatch(r"ENSG\d+", g) for g in partners) or r["ensg"] in partners
+                or len(partners) != len(set(partners))):
+            raise ValueError("Invalid partner_ensg for multi-gene native model: " + r["isoform_id"])
+        symbols = [s.strip() for s in str(r.get("partner_gene_symbol") or "").split(";") if s.strip()]
+        if symbols and len(symbols) != len(partners):
+            raise ValueError("partner_gene_symbol must align with partner_ensg: " + r["isoform_id"])
     audit = [dict(gene_symbol=k[0], isoform_id=k[1],
                   scope="required" if k in set(required) else "outside_independently_defined_roster") for k in keys]
     return rows, audit
@@ -186,7 +202,7 @@ def native_genomic_models(directory, coding_file, models):
 
 def builtin_features(resources, models):
     """Retain every selected-gene source row, including malformed feature coordinates."""
-    genes = {r["ensg"] for r in models}
+    genes = {r["ensg"] for r in models} | {g for r in models for g in partner_genes(r)}
     relations = defaultdict(set)
     with open(resources["protein_relationships"]) as f:
         next(f)
@@ -408,10 +424,24 @@ def run_protein_impact(args):
     features, source_counts = builtin_features(resources, models)
     supplemental, reviewed_sequences = supplemental_features(resources, models)
     manifest["feature_source_counts"] = source_counts
+    # A multi-gene model's partner-gene features are projected onto every model of the same gene symbol,
+    # so that each pair is compared over the same feature rows. Without partner_ensg this is {own gene}.
+    group_partners = defaultdict(set)
+    for m in models:
+        group_partners[m["gene_symbol"]].update(partner_genes(m))
+
+    def feature_genes(m):
+        return {m["ensg"]} | group_partners[m["gene_symbol"]]
+
+    if any(group_partners.values()):
+        manifest["multi_gene_partner_features"] = dict(
+            partners={g: sorted(p) for g, p in sorted(group_partners.items()) if p},
+            rule="partner_ensg reference features are projected by the same AA alignment and native genomic coverage "
+                 "onto every native model of the gene symbol; the join is not assumed to be in frame")
     cache, projected, index = {}, [], {}
     for m in models:
         for f in features + supplemental:
-            if f["ensg"] != m["ensg"]:
+            if f["ensg"] not in feature_genes(m):
                 continue
             key = f["reference_sequence"], m["protein_sequence"]
             if key[0] and key not in cache:
@@ -435,7 +465,7 @@ def run_protein_impact(args):
         for a, b in itertools.combinations(members, 2):
             calls = Counter()
             for f in features + supplemental:
-                if f["ensg"] != a["ensg"]:
+                if f["ensg"] not in feature_genes(a):
                     continue
                 pa = index[a["isoform_id"], f["feature_id"], f["provider"]]
                 pb = index[b["isoform_id"], f["feature_id"], f["provider"]]
@@ -470,9 +500,12 @@ def run_protein_impact(args):
                           cds_translation_exact=True, cds_in_cdna=True,
                           metadata_length_agrees=int(r["protein_length"]) == len(r["protein_sequence"]),
                           assigned_reads=counts.get(r["ensg"] + ":" + r["isoform_id"], ""), nmd=r["nmd_status"],
-                          builtin_feature_rows=sum(f["ensg"] == r["ensg"] for f in features),
+                          builtin_feature_rows=sum(f["ensg"] in feature_genes(r) for f in features),
                           unresolved_feature_rows=sum(p["isoform_id"] == r["isoform_id"] and p["status"] in
                                                       {"unresolved_coordinates", "invalid_reference_interval", "unresolved_reference_sequence", "uncertain_reference_interval"} for p in projected)))
+        if any(group_partners.values()):
+            # Carried to protein-exon-map, which labels partner-gene coding exons. Absent for single-gene runs.
+            audit[-1].update(partner_ensg=";".join(partner_genes(r)), partner_gene_symbol=r.get("partner_gene_symbol") or "")
     regression = []
     if args.prior_feature_audit:
         inputs.append(Path(args.prior_feature_audit))

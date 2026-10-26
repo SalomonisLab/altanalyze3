@@ -887,6 +887,13 @@ class BundleJobStore:
             raise KeyError(job_id)
         return copy.deepcopy(meta)
 
+    def touch_job(self, job_id: str) -> None:
+        """Published bundles do not expire; satisfy the shared status-read hook.
+
+        Never write upload-session retention markers into a served dataset.
+        """
+        return None
+
     # The keys the viewer itself writes. `differential` and `feature_display` follow a
     # contrast switch (scalable_app.py `_install_differential_select`); the rest are the
     # status fields a read path may refresh.

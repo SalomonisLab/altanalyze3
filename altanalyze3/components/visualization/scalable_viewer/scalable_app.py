@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import contextvars
 import io
+import inspect
 import json
 import os
 import re
@@ -38,6 +39,7 @@ import pandas as pd
 from fastapi import Body, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 
 from importlib import import_module
 
@@ -700,7 +702,7 @@ def _install_violin_covariate(app) -> None:
                 display_filters=display_filters, **extra
             )
             covariate = str(_VIOLIN_COVARIATE.get("") or "").strip()
-            if not covariate or extra.get("view") == "umap":
+            if not covariate or extra.get("view") == "umap" or payload.get("source") == "missing":
                 return payload
             return _regroup_violin(app_, meta, payload, covariate, modality, display_filters)
 
@@ -724,6 +726,13 @@ def _install_violin_covariate(app) -> None:
         W._scalable_viewer_violin_covariate_installed = True
 
     _install_expression_covariate_routes(app)
+
+
+async def _invoke_expression_endpoint(endpoint, *args, **kwargs):
+    """Shared expression JSON is async; its PDF renderer is synchronous."""
+    if inspect.iscoroutinefunction(endpoint):
+        return await endpoint(*args, **kwargs)
+    return await run_in_threadpool(endpoint, *args, **kwargs)
 
 
 def _install_expression_covariate_routes(app) -> None:
@@ -762,7 +771,7 @@ def _install_expression_covariate_routes(app) -> None:
     ):
         token = _VIOLIN_COVARIATE.set(str(covariate or "").strip())
         try:
-            response = await json_endpoint(
+            response = await _invoke_expression_endpoint(json_endpoint,
                 job_id,
                 gene=_to_feature_key(app, job_id, modality, gene),
                 modality=modality,
@@ -810,7 +819,7 @@ def _install_expression_covariate_routes(app) -> None:
     ):
         token = _VIOLIN_COVARIATE.set(str(covariate or "").strip())
         try:
-            return await pdf_endpoint(
+            return await _invoke_expression_endpoint(pdf_endpoint,
                 job_id,
                 gene=_to_feature_key(app, job_id, modality, gene),
                 mode=mode,

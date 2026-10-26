@@ -107,6 +107,8 @@ def add_arguments(parser, include_loglevel=True):
                         help="protein-impact-plots: annotation type to display (repeatable); default functional domains, motifs and regions")
     parser.add_argument("--annotation-source", action="append", default=None,
                         help="protein-impact-plots: source provider to display (repeatable); default reviewed UniProt and literature annotations")
+    parser.add_argument("--essential-whitelist", default=None,
+                        help="protein-impact-plots: TSV of essential feature classes that are always drawn (TM, signal, kinase, DNA-binding, ...); default: the packaged essential_feature_whitelist.tsv")
     parser.add_argument("--feature-reference", action="append", default=None,
                         help="protein-impact-plots: display a specified gene's reference protein as GENE=REFERENCE_PROTEIN (repeatable); all other source rows stay in the audit")
     parser.add_argument("--assay-results", help="report: completed assay-match result directory")

@@ -23,6 +23,8 @@ Notes:
 
 import os
 import sys
+import glob
+import json
 import textwrap
 import math
 import logging
@@ -1087,6 +1089,210 @@ def _moderated_t_test(adata, covariate_col, case_label, control_label, pop, *, s
 
     return df_out, tested_genes
 
+def _top_coreg_patterns(per_pop_de, pop_order, alpha, use_rawp, stage_callback=None):
+    """Top 4 multi-population sign patterns of per-population DE hits (moved verbatim from
+    run_de_for_comparisons so the splicing heatmap reuses it). Sets sig_metric on each per_pop_de frame."""
+    # Assemble per-gene vector over populations (for co-reg patterning)
+    # vector entries: 1 if (p<0.10 & log2fc>0), -1 if (p<0.10 & log2fc<0), else 0
+    pattern_mat = {}
+    if stage_callback is not None:
+        stage_callback(phase="patterns", label="", completed=0, total=1)
+    for pop in pop_order:
+        dfp = per_pop_de.get(str(pop), None)
+        if dfp is None:
+            continue
+        # For *all* genes tested, we need p-values; reconstruct: if absent, set to 1, log2fc=0
+        # Here we have only DEGs stored per_pop_de; build light dict from Scanpy per population
+        # For robustness, mark only genes we kept; others as 0
+        for g in dfp.index:
+            if g not in pattern_mat:
+                pattern_mat[g] = [0] * len(pop_order)
+    # If no DEGs at all, pattern_mat remains empty
+    # We will rebuild pattern_mat from Scanpy outputs if needed
+    # Extract p<0.10 using available per_pop_de frames (their fdr is BH<alpha; we need raw p<0.10).
+    # As raw p are not available from stored df, approximate: use fdr as a proxy upper bound.
+    # To improve sensitivity for pattern coding, fall back to fdr<0.10 here.
+    for j, pop in enumerate(pop_order):
+        dfp = per_pop_de.get(str(pop), None)
+        if dfp is None or dfp.empty:
+            continue
+
+        # --- define the significance metric consistent with --use_rawp ---
+        if use_rawp and "pval" in dfp.columns:
+            dfp["sig_metric"] = dfp["pval"]
+        else:
+            dfp["sig_metric"] = dfp["fdr"]
+
+        sel = dfp.index[(dfp["sig_metric"].values < alpha)]
+
+        sgn = np.sign(dfp.loc[sel, "log2fc"].values)
+        for k, g in enumerate(sel):
+            if g not in pattern_mat:
+                pattern_mat[g] = [0] * len(pop_order)
+            pattern_mat[g][j] = int(1 if sgn[k] > 0 else (-1 if sgn[k] < 0 else 0))
+
+    # Patterns
+    pattern_series = pd.Series({g: tuple(v) for g, v in pattern_mat.items()})
+    # Compute counts excluding pure global (all 1 or all -1) and local (only one non-zero)
+    def _is_global(t):
+        if len(t) == 0:
+            return False
+        all_pos = all([x == 1 for x in t if True])
+        all_neg = all([x == -1 for x in t if True])
+        return all_pos or all_neg
+
+    def _is_local(t):
+        return sum([1 for x in t if x != 0]) == 1
+
+    subset_for_freq = pattern_series[~pattern_series.apply(_is_global) & ~pattern_series.apply(_is_local)]
+    pattern_freq = subset_for_freq.value_counts().sort_values(ascending=False)
+    top_patterns = [list(pat) for pat in pattern_freq.index[:4]]
+    return top_patterns
+
+
+def _assign_de_groups(detailed, per_pop_de, pop_order, pooled_overall, coreg_df, alpha, fc_thresh, use_rawp,
+                      stage_callback=None):
+    """Assign each gene significant in >= 1 population to global, local or co-regulated (moved verbatim from
+    run_de_for_comparisons so the splicing heatmap reuses it)."""
+    # Final gene assignment to group (global/local/co-regulated)
+    # Start from genes significant in at least one population (original DE step)
+    if detailed.empty:
+        assigned = pd.DataFrame(columns=["gene", "group", "key_p", "key_log2fc", "population_or_pattern"])
+    else:
+        deg_genes = sorted(detailed["gene"].unique().tolist())
+        # Compute global criterion: pO<0.05 and pi<0.05 for at least 2 populations with consistent sign
+        # Use pooled_overall.fdr as pO; for pi, we approximate using fdr per population
+        global_hits = []
+        local_hits = []
+        coreg_hits = []
+
+        # Build per-pop lookup
+        perpop_lookup = {}
+        for pop in pop_order:
+            dfp = per_pop_de.get(str(pop), None)
+            if dfp is None or dfp.empty:
+                continue
+            perpop_lookup[pop] = dfp
+
+        # Reuse exact row positions rather than rescan every pooled feature
+        # for every DEG. Preserve original row order and duplicate index labels.
+        coreg_rows = coreg_df.groupby("gene", sort=False).indices if not coreg_df.empty else {}
+        for gene_number, g in enumerate(deg_genes):
+            if stage_callback is not None and gene_number % 1000 == 0:
+                stage_callback(phase="assignment", label="", completed=gene_number, total=len(deg_genes))
+            # collect per-pop signs where significance metric < alpha
+            s = []
+            for pop in pop_order:
+                dfp = perpop_lookup.get(pop, None)
+                if dfp is None or (g not in dfp.index):
+                    continue
+
+                sig_val = (
+                    float(dfp.loc[g, "pval"])
+                    if use_rawp and "pval" in dfp.columns
+                    else float(dfp.loc[g, "fdr"])
+                )
+
+                if sig_val < alpha:
+                    s.append(np.sign(float(dfp.loc[g, "log2fc"])))
+
+            consistent = (len(s) >= 2) and (all([x > 0 for x in s]) or all([x < 0 for x in s]))
+
+            is_global = False
+            key_log2fc = np.nan
+            key_p = np.nan
+            key_label = ""
+
+            if (not pooled_overall.empty) and (g in pooled_overall.index):
+                sig_val = (
+                    float(pooled_overall.loc[g, "pval"])
+                    if use_rawp and "pval" in pooled_overall.columns
+                    else float(pooled_overall.loc[g, "fdr"])
+                )
+                if sig_val < alpha and consistent:
+                    is_global = True
+                    key_p = float(pooled_overall.loc[g, "fdr"])
+                    key_log2fc = float(pooled_overall.loc[g, "log2fc"])
+                    key_label = "overall"
+
+            if is_global:
+                global_hits.append([g, "global", key_p, key_log2fc, key_label])
+                continue
+
+            # local: only one population with DE (fdr<0.05 & |log2fc|>log2(fc_thresh))
+            de_pops = []
+            min_p = 1.0
+            best_fc = 0.0
+            best_pop = ""
+            for pop in pop_order:
+                dfp = perpop_lookup.get(pop, None)
+                if dfp is None or (g not in dfp.index):
+                    continue
+                sig_val = (
+                    float(dfp.loc[g, "pval"])
+                    if use_rawp and "pval" in dfp.columns
+                    else float(dfp.loc[g, "fdr"])
+                )
+                if sig_val < alpha and np.abs(float(dfp.loc[g, "log2fc"])) > np.log2(fc_thresh):
+                    de_pops.append(pop)
+                    pval = float(dfp.loc[g, "fdr"])
+                    if pval < min_p:
+                        min_p = pval
+                        best_fc = float(dfp.loc[g, "log2fc"])
+                        best_pop = pop
+
+            if len(de_pops) == 1:
+                local_hits.append([g, "local", min_p, best_fc, best_pop])
+                continue
+
+            # co-reg: among top patterns, if pooled comparison has smallest p
+            if g in coreg_rows:
+                rows = coreg_df.iloc[coreg_rows[g]]
+                if not rows.empty:
+                    valid_rows = rows.loc[np.isfinite(rows["fdr"].astype(float))]
+                    if valid_rows.empty:
+                        continue  # skip if all FDRs are NaN
+
+                    idx_min = valid_rows["fdr"].astype(float).idxmin()
+                    r = valid_rows.loc[idx_min]
+
+                    # r might be a Series (single row) or a DataFrame row
+                    if isinstance(r, pd.Series):
+                        fdr_val = float(r["fdr"])
+                        log2fc_val = float(r["log2fc"])
+                        pattern_str = str(r["pattern"])
+                    else:
+                        fdr_val = float(r["fdr"].iloc[0])
+                        log2fc_val = float(r["log2fc"].iloc[0])
+                        pattern_str = str(r["pattern"].iloc[0])
+
+                    coreg_hits.append([g, "co-regulated", fdr_val, log2fc_val, pattern_str])
+
+                    continue
+
+            # If ambiguous, assign to local with smallest per-pop p (if any) else skip
+            if len(de_pops) >= 2:
+                # choose the pop with smallest fdr
+                min_p = 1.0
+                best_fc = 0.0
+                best_pop = ""
+                for pop in de_pops:
+                    pval = (
+                        float(perpop_lookup[pop].loc[g, "pval"])
+                        if use_rawp and "pval" in perpop_lookup[pop].columns
+                        else float(perpop_lookup[pop].loc[g, "fdr"])
+                    )
+                    if pval < min_p:
+                        min_p = pval
+                        best_fc = float(perpop_lookup[pop].loc[g, "log2fc"])
+                        best_pop = pop
+                local_hits.append([g, "local", min_p, best_fc, best_pop])
+
+        assigned = pd.DataFrame(global_hits + local_hits + coreg_hits,
+                                columns=["gene", "group", "key_p", "key_log2fc", "population_or_pattern"])
+    return assigned
+
+
 def run_de_for_comparisons(adata,
                            population_col,
                            covariate_col,
@@ -1397,62 +1603,8 @@ def run_de_for_comparisons(adata,
         pooled_overall = pd.DataFrame(index=pd.Index([], dtype=str), columns=["log2fc", "fdr"])
 
 
-    # Assemble per-gene vector over populations (for co-reg patterning)
-    # vector entries: 1 if (p<0.10 & log2fc>0), -1 if (p<0.10 & log2fc<0), else 0
-    pattern_mat = {}
-    if stage_callback is not None:
-        stage_callback(phase="patterns", label="", completed=0, total=1)
     pop_order = populations
-    for pop in pop_order:
-        dfp = per_pop_de.get(str(pop), None)
-        if dfp is None:
-            continue
-        # For *all* genes tested, we need p-values; reconstruct: if absent, set to 1, log2fc=0
-        # Here we have only DEGs stored per_pop_de; build light dict from Scanpy per population
-        # For robustness, mark only genes we kept; others as 0
-        for g in dfp.index:
-            if g not in pattern_mat:
-                pattern_mat[g] = [0] * len(pop_order)
-    # If no DEGs at all, pattern_mat remains empty
-    # We will rebuild pattern_mat from Scanpy outputs if needed
-    # Extract p<0.10 using available per_pop_de frames (their fdr is BH<alpha; we need raw p<0.10).
-    # As raw p are not available from stored df, approximate: use fdr as a proxy upper bound.
-    # To improve sensitivity for pattern coding, fall back to fdr<0.10 here.
-    for j, pop in enumerate(pop_order):
-        dfp = per_pop_de.get(str(pop), None)
-        if dfp is None or dfp.empty:
-            continue
-
-        # --- define the significance metric consistent with --use_rawp ---
-        if use_rawp and "pval" in dfp.columns:
-            dfp["sig_metric"] = dfp["pval"]
-        else:
-            dfp["sig_metric"] = dfp["fdr"]
-
-        sel = dfp.index[(dfp["sig_metric"].values < alpha)]
-
-        sgn = np.sign(dfp.loc[sel, "log2fc"].values)
-        for k, g in enumerate(sel):
-            if g not in pattern_mat:
-                pattern_mat[g] = [0] * len(pop_order)
-            pattern_mat[g][j] = int(1 if sgn[k] > 0 else (-1 if sgn[k] < 0 else 0))
-
-    # Patterns
-    pattern_series = pd.Series({g: tuple(v) for g, v in pattern_mat.items()})
-    # Compute counts excluding pure global (all 1 or all -1) and local (only one non-zero)
-    def _is_global(t):
-        if len(t) == 0:
-            return False
-        all_pos = all([x == 1 for x in t if True])
-        all_neg = all([x == -1 for x in t if True])
-        return all_pos or all_neg
-
-    def _is_local(t):
-        return sum([1 for x in t if x != 0]) == 1
-
-    subset_for_freq = pattern_series[~pattern_series.apply(_is_global) & ~pattern_series.apply(_is_local)]
-    pattern_freq = subset_for_freq.value_counts().sort_values(ascending=False)
-    top_patterns = [list(pat) for pat in pattern_freq.index[:4]]
+    top_patterns = _top_coreg_patterns(per_pop_de, pop_order, alpha, use_rawp, stage_callback=stage_callback)
 
     # For each top pattern, pool those populations and compute pooled DE -> p(co-reg)
     coreg_tables = []
@@ -1500,142 +1652,8 @@ def run_de_for_comparisons(adata,
         columns=["gene", "log2fc", "fdr", "pattern"]
     )
 
-    # Final gene assignment to group (global/local/co-regulated)
-    # Start from genes significant in at least one population (original DE step)
-    if detailed.empty:
-        assigned = pd.DataFrame(columns=["gene", "group", "key_p", "key_log2fc", "population_or_pattern"])
-    else:
-        deg_genes = sorted(detailed["gene"].unique().tolist())
-        # Compute global criterion: pO<0.05 and pi<0.05 for at least 2 populations with consistent sign
-        # Use pooled_overall.fdr as pO; for pi, we approximate using fdr per population
-        global_hits = []
-        local_hits = []
-        coreg_hits = []
-
-        # Build per-pop lookup
-        perpop_lookup = {}
-        for pop in pop_order:
-            dfp = per_pop_de.get(str(pop), None)
-            if dfp is None or dfp.empty:
-                continue
-            perpop_lookup[pop] = dfp
-
-        # Reuse exact row positions rather than rescan every pooled feature
-        # for every DEG. Preserve original row order and duplicate index labels.
-        coreg_rows = coreg_df.groupby("gene", sort=False).indices if not coreg_df.empty else {}
-        for gene_number, g in enumerate(deg_genes):
-            if stage_callback is not None and gene_number % 1000 == 0:
-                stage_callback(phase="assignment", label="", completed=gene_number, total=len(deg_genes))
-            # collect per-pop signs where significance metric < alpha
-            s = []
-            for pop in pop_order:
-                dfp = perpop_lookup.get(pop, None)
-                if dfp is None or (g not in dfp.index):
-                    continue
-
-                sig_val = (
-                    float(dfp.loc[g, "pval"])
-                    if use_rawp and "pval" in dfp.columns
-                    else float(dfp.loc[g, "fdr"])
-                )
-
-                if sig_val < alpha:
-                    s.append(np.sign(float(dfp.loc[g, "log2fc"])))
-
-            consistent = (len(s) >= 2) and (all([x > 0 for x in s]) or all([x < 0 for x in s]))
-
-            is_global = False
-            key_log2fc = np.nan
-            key_p = np.nan
-            key_label = ""
-
-            if (not pooled_overall.empty) and (g in pooled_overall.index):
-                sig_val = (
-                    float(pooled_overall.loc[g, "pval"])
-                    if use_rawp and "pval" in pooled_overall.columns
-                    else float(pooled_overall.loc[g, "fdr"])
-                )
-                if sig_val < alpha and consistent:
-                    is_global = True
-                    key_p = float(pooled_overall.loc[g, "fdr"])
-                    key_log2fc = float(pooled_overall.loc[g, "log2fc"])
-                    key_label = "overall"
-
-            if is_global:
-                global_hits.append([g, "global", key_p, key_log2fc, key_label])
-                continue
-
-            # local: only one population with DE (fdr<0.05 & |log2fc|>log2(fc_thresh))
-            de_pops = []
-            min_p = 1.0
-            best_fc = 0.0
-            best_pop = ""
-            for pop in pop_order:
-                dfp = perpop_lookup.get(pop, None)
-                if dfp is None or (g not in dfp.index):
-                    continue
-                sig_val = (
-                    float(dfp.loc[g, "pval"])
-                    if use_rawp and "pval" in dfp.columns
-                    else float(dfp.loc[g, "fdr"])
-                )
-                if sig_val < alpha and np.abs(float(dfp.loc[g, "log2fc"])) > np.log2(fc_thresh):
-                    de_pops.append(pop)
-                    pval = float(dfp.loc[g, "fdr"])
-                    if pval < min_p:
-                        min_p = pval
-                        best_fc = float(dfp.loc[g, "log2fc"])
-                        best_pop = pop
-
-            if len(de_pops) == 1:
-                local_hits.append([g, "local", min_p, best_fc, best_pop])
-                continue
-
-            # co-reg: among top patterns, if pooled comparison has smallest p
-            if g in coreg_rows:
-                rows = coreg_df.iloc[coreg_rows[g]]
-                if not rows.empty:
-                    valid_rows = rows.loc[np.isfinite(rows["fdr"].astype(float))]
-                    if valid_rows.empty:
-                        continue  # skip if all FDRs are NaN
-
-                    idx_min = valid_rows["fdr"].astype(float).idxmin()
-                    r = valid_rows.loc[idx_min]
-
-                    # r might be a Series (single row) or a DataFrame row
-                    if isinstance(r, pd.Series):
-                        fdr_val = float(r["fdr"])
-                        log2fc_val = float(r["log2fc"])
-                        pattern_str = str(r["pattern"])
-                    else:
-                        fdr_val = float(r["fdr"].iloc[0])
-                        log2fc_val = float(r["log2fc"].iloc[0])
-                        pattern_str = str(r["pattern"].iloc[0])
-
-                    coreg_hits.append([g, "co-regulated", fdr_val, log2fc_val, pattern_str])
-
-                    continue
-
-            # If ambiguous, assign to local with smallest per-pop p (if any) else skip
-            if len(de_pops) >= 2:
-                # choose the pop with smallest fdr
-                min_p = 1.0
-                best_fc = 0.0
-                best_pop = ""
-                for pop in de_pops:
-                    pval = (
-                        float(perpop_lookup[pop].loc[g, "pval"])
-                        if use_rawp and "pval" in perpop_lookup[pop].columns
-                        else float(perpop_lookup[pop].loc[g, "fdr"])
-                    )
-                    if pval < min_p:
-                        min_p = pval
-                        best_fc = float(perpop_lookup[pop].loc[g, "log2fc"])
-                        best_pop = pop
-                local_hits.append([g, "local", min_p, best_fc, best_pop])
-
-        assigned = pd.DataFrame(global_hits + local_hits + coreg_hits,
-                                columns=["gene", "group", "key_p", "key_log2fc", "population_or_pattern"])
+    assigned = _assign_de_groups(detailed, per_pop_de, pop_order, pooled_overall, coreg_df, alpha, fc_thresh,
+                                 use_rawp, stage_callback=stage_callback)
 
     # Aggregate outputs
     if stage_callback is not None:
@@ -1806,8 +1824,18 @@ def build_fixed_order_heatmap(
     # (2) Co-regulated: order patterns by number of local pops represented
     if not coreg_hits.empty:
         coreg_hits["pattern_size"] = coreg_hits["population_or_pattern"].str.count("__") + 1
-        coreg_hits = coreg_hits.sort_values(["pattern_size", "key_p"], ascending=[False, True])
+        # group_coreg_by_pattern keeps each pattern's rows together (one white separator per pattern); the default
+        # order interleaves patterns of equal size and draws a separator between most rows when patterns are many
+        if de_store.get("group_coreg_by_pattern"):
+            coreg_hits = coreg_hits.sort_values(["pattern_size", "population_or_pattern", "key_p"],
+                                                ascending=[False, True, True])
+        else:
+            coreg_hits = coreg_hits.sort_values(["pattern_size", "key_p"], ascending=[False, True])
     c_up, c_down = split_up_down(coreg_hits)
+    if de_store.get("group_coreg_by_pattern") and not coreg_hits.empty:
+        # split_up_down orders by P only; keep each pattern's rows together instead
+        keys, asc = ["pattern_size", "population_or_pattern", "key_p"], [False, True, True]
+        c_up, c_down = c_up.sort_values(keys, ascending=asc), c_down.sort_values(keys, ascending=asc)
 
     # (3) Local: for each population in order, up then down by p-value
     # Build filtered lists now so block sizes reflect rows actually present in fold_df
@@ -2101,7 +2129,8 @@ def build_fixed_order_heatmap(
         return LinearSegmentedColormap('YellowBlackSky', cdict)
 
     cmap = YellowBlackSky()
-    vmax = max(1.0, np.log2(float(fc_thresh)) * 1.5)
+    # value_limit / value_label / title_prefix let a non-log2FC store (e.g. splicing dPSI) reuse this heatmap
+    vmax = float(de_store["value_limit"]) if de_store.get("value_limit") else max(1.0, np.log2(float(fc_thresh)) * 1.5)
     vmin = -vmax
 
     fixed_height = 4.2  # preserve the original working height
@@ -2167,11 +2196,12 @@ def build_fixed_order_heatmap(
     ax.xaxis.tick_top()
     ax.tick_params(axis="x", bottom=False, top=True, labelbottom=False, labeltop=True, length=0, pad=7.5)
     comparison_label = de_store.get("comparison_label")
+    title_prefix = de_store.get("title_prefix", "cellHarmony DE log2FC")
     if comparison_label:
-        title_text = "cellHarmony DE log2FC ({}) by {}".format(comparison_label, population_col)
+        title_text = "{} ({}) by {}".format(title_prefix, comparison_label, population_col)
     else:
-        title_text = "cellHarmony DE log2FC ({} vs {}) by {}".format(
-            de_store["case_label"], de_store["control_label"], population_col
+        title_text = "{} ({} vs {}) by {}".format(
+            title_prefix, de_store["case_label"], de_store["control_label"], population_col
         )
 
     if show_go_terms:
@@ -2328,7 +2358,7 @@ def build_fixed_order_heatmap(
     )
     cbar = plt.colorbar(im, cax=cax, orientation="horizontal")
     cbar.ax.set_xlim(vmin, vmax)
-    cbar.set_label("log2 fold change", fontsize=6)
+    cbar.set_label(de_store.get("value_label", "log2 fold change"), fontsize=6)
     cbar.set_ticks([])
     cbar.ax.text(-0.08, 0.5, f"{vmin:.1f}", ha="right", va="center", transform=cbar.ax.transAxes, fontsize=6)
     cbar.ax.text(1.08, 0.5, f"{vmax:.1f}", ha="left", va="center", transform=cbar.ax.transAxes, fontsize=6)
@@ -4294,7 +4324,256 @@ def load_cell_state_override(path):
     return keep
 
 
+# -------------------- Splicing heatmap from long-read dPSI differentials ------------------- #
+def _splicing_event_label(symbol, feature):
+    """Display label for one splicing event: '<symbol> <junction pair>' with the gene ID prefixes removed."""
+    sides = [s.split(":", 1)[1] if ":" in s else s for s in str(feature).split("|")]
+    sym = symbol if isinstance(symbol, str) and symbol and symbol != "nan" else str(feature).split(":", 1)[0]
+    return f"{sym} {'|'.join(sides)}"
+
+
+def _splicing_state_tables(splicing_dir, case_label, control_label, pattern="*_stats-annotated.txt"):
+    """(state, path) for <case>-<control>-<state> or <control>-<case>-<state> stats files."""
+    out = []
+    for path in sorted(glob.glob(os.path.join(splicing_dir, pattern))):
+        stem = os.path.basename(path)[:-len("_stats-annotated.txt")]
+        for x, y in ((case_label, control_label), (control_label, case_label)):
+            if stem.startswith(f"{x}-{y}-"):
+                out.append((stem[len(f"{x}-{y}-"):], path))
+                break
+    if not out:
+        raise FileNotFoundError(f"no {case_label}-{control_label}-<state>_stats-annotated.txt files in {splicing_dir}")
+    return out
+
+
+def _pooled_psi_test(psi, grp, columns, case_label, control_label, labels):
+    """limmaCompute (the test that wrote the per-state dPSI tables) on the pooled pseudobulk columns; returns
+    log2fc (= dPSI case - control), pval, fdr indexed by event label."""
+    from ..oncosplice import metadataAnalysis as ma
+    sub = psi[columns]
+    g = pd.DataFrame({"grp": [grp[c] for c in columns]}, index=columns)
+    res = ma.limmaCompute(sub, g, grpvar="grp", min_group_size=2)
+    diff = res[f"Mean_{case_label}"].astype(float) - res[f"Mean_{control_label}"].astype(float)
+    out = pd.DataFrame({"log2fc": diff.to_numpy(), "pval": res["mwuPval"].astype(float).to_numpy(),
+                        "fdr": res["mwuAdjPval"].astype(float).to_numpy()}, index=[labels[f] for f in res.index])
+    return out
+
+
+def build_splicing_de_store(splicing_dir, case_label, control_label, psi_h5ad, groups_file, alpha=0.05, dpsi=0.1,
+                            use_rawp=True, min_n=3, lineage_order=None, value_limit=0.5, log=print):
+    """A cellHarmony de_store from long-read dPSI covariate tables, so build_fixed_order_heatmap draws them.
+
+    Per state (population): every event with >= min_n donors per group; dPSI = Mean_case - Mean_control is stored as
+    'log2fc' and the hit rule is P < alpha (raw P with use_rawp, else BH FDR) and |dPSI| > dpsi, i.e. fc_thresh =
+    2**dpsi in the cellHarmony rule |log2fc| > log2(fc_thresh). The pooled tests that decide global and co-regulated
+    events run limmaCompute (the test behind the per-state tables) on the PSI pseudobulks of all states, or of the
+    states in each top co-regulation pattern; groups come from groups_file (uid, groups). Grouping is
+    _top_coreg_patterns and _assign_de_groups, shared with run_de_for_comparisons."""
+    import anndata as ad
+    from ..long_read.comparisons import _resolve_uid
+    from ..long_read import isoform_automate as isoa
+    fc_thresh = float(2 ** dpsi)
+    per_pop, detailed_parts, summary, labels = {}, [], [], {}
+    for state, path in _splicing_state_tables(splicing_dir, case_label, control_label):
+        d = pd.read_csv(path, sep="\t", dtype={"Feature": str, "Gene_Symbol": str}, low_memory=False)
+        if not d.Feature.is_unique:
+            raise ValueError(f"{path}: duplicate Feature rows")
+        mc = pd.to_numeric(d[f"Mean_{case_label}"], errors="coerce")
+        mk = pd.to_numeric(d[f"Mean_{control_label}"], errors="coerce")
+        fcol = [c for c in d.columns if c.startswith("DiffMeans_")][0]
+        diff = mc - mk
+        stored = pd.to_numeric(d[fcol], errors="coerce")
+        sign = 1.0 if fcol == f"DiffMeans_{case_label}_m_{control_label}" else -1.0
+        ok = diff.notna() & stored.notna()
+        if not np.allclose(diff[ok], sign * stored[ok], atol=1e-5):
+            raise ValueError(f"{path}: {fcol} does not equal the difference of its Mean columns")
+        nc = pd.to_numeric(d[f"N_{case_label}"], errors="coerce")
+        nk = pd.to_numeric(d[f"N_{control_label}"], errors="coerce")
+        pv = pd.to_numeric(d["ebayesPval"], errors="coerce")
+        fd = pd.to_numeric(d["ebayesAdjPval"], errors="coerce")
+        keep = (nc >= min_n) & (nk >= min_n) & pv.notna() & diff.notna()
+        d = d[keep]
+        lab = [_splicing_event_label(s, f) for s, f in zip(d.Gene_Symbol, d.Feature)]
+        for f, l in zip(d.Feature, lab):
+            if labels.setdefault(f, l) != l:
+                raise ValueError(f"event {f} has two labels ({labels[f]}, {l})")
+        df = pd.DataFrame({"gene": lab, "feature": d.Feature.to_numpy(), "log2fc": diff[keep].to_numpy(),
+                           "pval": pv[keep].to_numpy(), "fdr": fd[keep].to_numpy(),
+                           "n_case": nc[keep].to_numpy(), "n_control": nk[keep].to_numpy(),
+                           "case_mean_expr": mc[keep].to_numpy(), "control_mean_expr": mk[keep].to_numpy()})
+        if not df.gene.is_unique:
+            raise ValueError(f"{path}: event labels are not unique")
+        per_pop[state] = df.set_index("gene")
+        base = df.pval if use_rawp else df.fdr
+        sig = (base < alpha) & (df.log2fc.abs() > dpsi)
+        det = df[sig].copy()
+        det["population"] = state; det["case_label"] = case_label; det["control_label"] = control_label
+        detailed_parts.append(det)
+        summary.append(dict(population=state, tested_events=int(len(df)), significant_events=int(sig.sum())))
+        log(f"[splicing-heatmap] {state}: {int(sig.sum()):,} of {len(df):,} events")
+    states = list(per_pop)
+    if lineage_order:
+        pop_order = [s for s in lineage_order if s in per_pop] + [s for s in states if s not in lineage_order]
+    else:
+        pop_order = states
+    detailed = pd.concat(detailed_parts, ignore_index=True)
+    detailed["sig_metric"] = detailed.pval if use_rawp else detailed.fdr
+    fold_matrix = pd.DataFrame({s: per_pop[s].log2fc for s in pop_order})
+
+    # the column -> group map of the run that wrote the dPSI tables (comparisons.compute_differentials): uid, library
+    # and gff name of every sample, from the same metadata file
+    uid_to_group = isoa.get_sample_to_group(isoa.import_metadata(groups_file), "junction")
+    a = ad.read_h5ad(psi_h5ad)
+    X = a.X.toarray() if hasattr(a.X, "toarray") else np.asarray(a.X)
+    psi = pd.DataFrame(X.T, index=list(a.var_names), columns=list(a.obs_names))
+    psi = psi.loc[psi.index.isin(set(labels))]
+    col_state = {c: c.split(".", 1)[0] for c in psi.columns}
+    grp = {c: uid_to_group.get(_resolve_uid(c.split(".", 1)[1], uid_to_group, "junction")) for c in psi.columns}
+    cc = [c for c in psi.columns if grp[c] in (case_label, control_label) and col_state[c] in per_pop]
+    n_case = sum(grp[c] == case_label for c in cc); n_ctrl = sum(grp[c] == control_label for c in cc)
+    log(f"[splicing-heatmap] pooled tests on {len(psi):,} events x {n_case} {case_label} + {n_ctrl} {control_label} "
+        f"pseudobulks")
+    if min(n_case, n_ctrl) < 2:
+        raise ValueError(f"pooled test needs >= 2 {case_label} and {control_label} pseudobulks; got {n_case} and {n_ctrl} "
+                         f"(check that {groups_file} names the PSI columns)")
+    pooled_overall = _pooled_psi_test(psi, grp, cc, case_label, control_label, labels)
+    top_patterns = _top_coreg_patterns(per_pop, pop_order, alpha, use_rawp)
+    coreg_tables = []
+    for pat in top_patterns:
+        pops_sel = [pop_order[i] for i, v in enumerate(pat) if v != 0]
+        cols = [c for c in cc if col_state[c] in pops_sel]
+        if min(sum(grp[c] == case_label for c in cols), sum(grp[c] == control_label for c in cols)) < 2:
+            continue
+        dfc = _pooled_psi_test(psi, grp, cols, case_label, control_label, labels).reset_index(names="gene")
+        dfc["pattern"] = _pattern_to_label(pat, pop_order)
+        coreg_tables.append(dfc)
+    coreg_df = (pd.concat(coreg_tables, ignore_index=True) if coreg_tables
+                else pd.DataFrame(columns=["gene", "log2fc", "fdr", "pval", "pattern"]))
+    assigned = _assign_de_groups(detailed, per_pop, pop_order, pooled_overall, coreg_df, alpha, fc_thresh, use_rawp)
+    return {"summary_per_population": pd.DataFrame(summary), "detailed_deg": detailed, "pooled_overall": pooled_overall,
+            "coreg_pooled": coreg_df, "assigned_groups": assigned, "population_order": pop_order,
+            "case_label": str(case_label), "control_label": str(control_label),
+            "method": "limmaCompute on long-read PSI pseudobulks", "alpha": float(alpha), "fc_thresh": fc_thresh,
+            "per_population_deg": per_pop, "fold_matrix": fold_matrix, "lineage_order": pop_order,
+            "use_rawp": bool(use_rawp), "comparison_label": f"{case_label} vs {control_label}",
+            "title_prefix": "Long-read splicing dPSI", "value_label": f"dPSI ({case_label} - {control_label})",
+            "value_limit": float(value_limit), "event_features": labels, "group_coreg_by_pattern": True}
+
+
+def main_splicing_heatmap(argv):
+    """splicing-heatmap: the ordered cellHarmony differential heatmap from a folder of long-read dPSI covariate tables."""
+    ap = argparse.ArgumentParser(
+        prog="cellHarmony_differential splicing-heatmap",
+        description="Draw the cellHarmony fixed-order differential heatmap (global, co-regulated, then local events "
+                    "per population) from long-read splicing differentials (<case>-<control>-<state>_stats-annotated.txt, "
+                    "e.g. dPSI-covariate-events).")
+    ap.add_argument("--splicing_dir", required=True, help="folder of <case>-<control>-<state>_stats-annotated.txt tables")
+    ap.add_argument("--case", required=True, help="case group label (e.g. aged)")
+    ap.add_argument("--control", required=True, help="control group label (e.g. young)")
+    ap.add_argument("--groups", required=True, help="metadata with uid and groups columns (pseudobulk -> group)")
+    ap.add_argument("--psi_h5ad", default=None,
+                    help="PSI pseudobulk matrix for the pooled tests (default: psi_combined_pseudo_cluster.h5ad beside "
+                         "--splicing_dir)")
+    ap.add_argument("--alpha", type=float, default=0.05)
+    ap.add_argument("--use_rawp", action="store_true", help="hit rule on raw P instead of BH FDR")
+    ap.add_argument("--dpsi", type=float, default=0.1, help="hit rule |dPSI| > this")
+    ap.add_argument("--min_n", type=int, default=3, help="donors with a value in each group")
+    ap.add_argument("--lineage_order", default=None, help="one population per line; column order")
+    ap.add_argument("--population_label", default="cell state", help="label of the population axis")
+    ap.add_argument("--value_limit", type=float, default=0.5, help="colour scale limit, +/- dPSI")
+    ap.add_argument("--outdir", required=True)
+    a = ap.parse_args(argv)
+    psi_h5ad = a.psi_h5ad or os.path.join(os.path.dirname(os.path.normpath(a.splicing_dir)), "psi_combined_pseudo_cluster.h5ad")
+    order = [s.strip() for s in open(a.lineage_order) if s.strip()] if a.lineage_order else None
+    store = build_splicing_de_store(a.splicing_dir, a.case, a.control, psi_h5ad, a.groups, alpha=a.alpha, dpsi=a.dpsi,
+                                    use_rawp=a.use_rawp, min_n=a.min_n, lineage_order=order, value_limit=a.value_limit)
+    tag = f"{a.case}_vs_{a.control}_splicing"
+    heat_dir = os.path.join(a.outdir, "heatmaps"); deg_dir = os.path.join(a.outdir, "DEGs")
+    os.makedirs(heat_dir, exist_ok=True); os.makedirs(deg_dir, exist_ok=True)
+    label = NetPerspective.safe_component(a.population_label)
+    build_fixed_order_heatmap(store, heat_dir, a.population_label, store["fc_thresh"],
+                              heatmap_png=f"heatmap_{tag}_by_{label}.pdf", heatmap_tsv=f"heatmap_{tag}_by_{label}.tsv")
+    store["detailed_deg"].to_csv(os.path.join(deg_dir, f"DEG_detailed_{tag}.tsv"), sep="\t", index=False)
+    store["assigned_groups"].to_csv(os.path.join(deg_dir, f"DEG_assigned_groups_{tag}.tsv"), sep="\t", index=False)
+    store["summary_per_population"].to_csv(os.path.join(deg_dir, f"DEG_summary_{tag}.tsv"), sep="\t", index=False)
+    store["pooled_overall"].reset_index(names="gene").to_csv(os.path.join(deg_dir, f"DEG_pooled_overall_{tag}.tsv"),
+                                                              sep="\t", index=False)
+    store["coreg_pooled"].to_csv(os.path.join(deg_dir, f"DEG_coreg_pooled_{tag}.tsv"), sep="\t", index=False)
+    pd.Series(store["event_features"]).rename_axis("feature").rename("label").to_csv(
+        os.path.join(deg_dir, f"event_labels_{tag}.tsv"), sep="\t")
+    g = store["assigned_groups"].group.value_counts().to_dict()
+    with open(os.path.join(a.outdir, f"parameters_{tag}.json"), "w") as fh:
+        json.dump(dict(tool="altanalyze3.components.cellHarmony.cellHarmony_differential splicing-heatmap",
+                       argv=sys.argv, args=vars(a), psi_h5ad=psi_h5ad, assigned_groups=g,
+                       populations=store["population_order"],
+                       events_significant=int(len(store["detailed_deg"]))), fh, indent=2)
+    print(f"[splicing-heatmap] assigned groups: {g}")
+    return store
+
+
+def load_splicing_store_from_run(run_dir, features=None):
+    """Rebuild the heatmap store of a finished splicing-heatmap run from its saved tables (DEGs/*.tsv, the heatmap TSV,
+    parameters JSON), optionally keeping only events of the named genes (first token of the event label) or exact
+    labels. Group assignment, ranking and populations are the run's own; nothing is retested."""
+    import glob as _glob
+    par = json.load(open(_glob.glob(os.path.join(run_dir, "parameters_*_splicing.json"))[0]))
+    case, control = par["args"]["case"], par["args"]["control"]
+    tag = f"{case}_vs_{control}_splicing"
+    deg = os.path.join(run_dir, "DEGs")
+    assigned = pd.read_csv(os.path.join(deg, f"DEG_assigned_groups_{tag}.tsv"), sep="\t")
+    detailed = pd.read_csv(os.path.join(deg, f"DEG_detailed_{tag}.tsv"), sep="\t")
+    heat = pd.read_csv(_glob.glob(os.path.join(run_dir, "heatmaps", f"heatmap_{tag}_by_*.tsv"))[0], sep="\t", index_col=0)
+    heat.index = [str(i).split(":", 1)[1] if ":" in str(i) else str(i) for i in heat.index]
+    heat.columns = [str(c).split(":", 1)[0] for c in heat.columns]
+    if features:
+        want = set(features)
+        keep = lambda labels: [l for l in labels if l in want or str(l).split(" ", 1)[0] in want]
+        k = set(keep(assigned.gene))
+        missing = sorted(want - {str(l).split(" ", 1)[0] for l in k} - k)
+        if missing:
+            print(f"[splicing-heatmap-subset] no assigned aging event for: {', '.join(missing)}")
+        assigned = assigned[assigned.gene.isin(k)]
+        detailed = detailed[detailed.gene.isin(k)]
+        heat = heat.loc[[i for i in heat.index if i in k]]
+    pops = list(heat.columns)
+    return {"detailed_deg": detailed, "assigned_groups": assigned, "fold_matrix": heat, "population_order": pops,
+            "lineage_order": pops, "case_label": case, "control_label": control, "alpha": float(par["args"]["alpha"]),
+            "use_rawp": bool(par["args"]["use_rawp"]), "comparison_label": f"{case} vs {control}",
+            "title_prefix": "Long-read splicing dPSI", "value_label": f"dPSI ({case} - {control})",
+            "value_limit": float(par["args"]["value_limit"]), "group_coreg_by_pattern": True,
+            "pooled_overall": pd.DataFrame(), "coreg_pooled": pd.DataFrame(),
+            "fc_thresh": float(2 ** float(par["args"]["dpsi"])), "population_label": par["args"]["population_label"]}
+
+
+def main_splicing_heatmap_subset(argv):
+    """splicing-heatmap-subset: the same fixed-order heatmap for a named set of genes, from a finished run."""
+    ap = argparse.ArgumentParser(prog="cellHarmony_differential splicing-heatmap-subset",
+                                 description="Redraw a finished splicing-heatmap run for a named set of genes or event "
+                                             "labels with build_fixed_order_heatmap (the run's own grouping and order).")
+    ap.add_argument("--run_dir", required=True, help="outdir of a splicing-heatmap run")
+    ap.add_argument("--features", required=True,
+                    help="comma-separated gene symbols or event labels, or a file with one per line")
+    ap.add_argument("--name", required=True, help="tag for the output file names")
+    ap.add_argument("--outdir", required=True)
+    a = ap.parse_args(argv)
+    feats = ([l.strip() for l in open(a.features) if l.strip()] if os.path.exists(a.features)
+             else [f.strip() for f in a.features.split(",") if f.strip()])
+    store = load_splicing_store_from_run(a.run_dir, feats)
+    os.makedirs(a.outdir, exist_ok=True)
+    label = NetPerspective.safe_component(store["population_label"])
+    base = f"heatmap_{store['case_label']}_vs_{store['control_label']}_splicing_{NetPerspective.safe_component(a.name)}_by_{label}"
+    build_fixed_order_heatmap(store, a.outdir, store["population_label"], store["fc_thresh"],
+                              heatmap_png=base + ".pdf", heatmap_tsv=base + ".tsv")
+    print(f"[splicing-heatmap-subset] {a.name}: {len(store['assigned_groups'])} events of {len(feats)} requested features; "
+          f"groups {store['assigned_groups'].group.value_counts().to_dict()}")
+    return store
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "splicing-heatmap":
+        return main_splicing_heatmap(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "splicing-heatmap-subset":
+        return main_splicing_heatmap_subset(sys.argv[2:])
     ap = argparse.ArgumentParser(description="cellHarmony differential analysis and (optional) pseudobulk generation.")
     ap.add_argument("--h5ad", required=True, help="Input h5ad with aligned annotations")
     ap.add_argument(

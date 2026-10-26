@@ -286,7 +286,9 @@ def test_explicit_feature_reference_keeps_other_reference_records_in_audit():
     selected=feature_reference_selection(['G=P'],[pair],rows+other)
     features,audit,_=feature_plan(pair,rows+other,dict(A=seq,B=seq[:10]),reference_proteins=selected['G'])
     assert len(features)==1 and features[0]['reference_protein']=='P'
-    assert len(audit)==4 and any(r['feature_id']=='OTHER:1' and r['display_role']=='reference_not_in_view' for r in audit)
+    # Named domains are mandatory even when their reference was not selected;
+    # duplicate overlapping annotations remain explicitly coalesced in the audit.
+    assert len(audit)==4 and any(r['feature_id']=='OTHER:1' and r['display_role']=='coalesced_identical_display_annotation' for r in audit)
 
 
 def test_feature_reference_selection_rejects_unresolved_or_duplicate_requests():
@@ -306,11 +308,17 @@ def test_unplaced_annotation_line_does_not_overlap_native_identifier():
     import matplotlib.pyplot as plt;plt.close(fig)
 
 
-def test_long_key_uses_short_identifier_and_retains_complete_description():
+def test_long_key_is_wrapped_never_replaced_by_the_running_id():
+    # Changed 2026-10-24: the key column used to fall back to the running id (F1, F2) for a long name, which
+    # Nathan rejected ("What the hell are these?"); the name is now wrapped onto more lines and stays complete.
     ref='MACDEFGHIKLMNPQRSTVWY';alt=ref[:10];f,_,events=plan(ref,alt,6,16)
     f[0]['description']='W'*18
+    f[0]['class_label']=f[0]['class_display']='W'*18
     fig,_=render_compact_pair(dict(gene_symbol='G',isoform_A='A',isoform_B='B'),f,events,
                              dict(A=ref,B=alt),{i:dict(nmd='Not-NMD') for i in ('A','B')},'')
-    assert any(t.get_text()==f[0]['display_id'] for t in fig.texts)
-    assert any('W'*18 in t.get_text() for t in fig.texts)
+    texts=[t.get_text() for t in fig.texts]
+    assert not any(t==f[0]['display_id'] for t in texts)
+    key=[t for t in texts if t.replace('\n','')=='W'*18]
+    assert key and '\n' in key[0]
+    assert any('W'*18 in t for t in texts)
     import matplotlib.pyplot as plt;plt.close(fig)

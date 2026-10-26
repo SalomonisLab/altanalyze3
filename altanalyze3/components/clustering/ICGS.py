@@ -5049,12 +5049,11 @@ def biomarker_enrichment(markers: pd.DataFrame, background: Sequence[str], confi
             overlap = query & genes
             if not overlap:
                 continue
-            p = hypergeom(M=len(bg), n=len(genes), N=len(query)).sf(len(overlap) - 1)
             rows.append(
                 {
                     "cluster": cluster,
                     "term_name": term,
-                    "p_value": p,
+                    "p_value": None,  # Filled together below, preserving the output column order.
                     "overlap": len(overlap),
                     "query_size": len(query),
                     "term_size": len(genes),
@@ -5064,6 +5063,17 @@ def biomarker_enrichment(markers: pd.DataFrame, background: Sequence[str], confi
     if not rows:
         return pd.DataFrame()
     out = pd.DataFrame(rows)
+    probability_started = time.perf_counter()
+    # The same survival function and complete test family as the scalar loop;
+    # avoid constructing a scipy frozen distribution for every cluster/term.
+    out["p_value"] = hypergeom.sf(
+        out["overlap"].to_numpy(dtype=np.int64) - 1,
+        M=len(bg),
+        n=out["term_size"].to_numpy(dtype=np.int64),
+        N=out["query_size"].to_numpy(dtype=np.int64),
+    )
+    _log(f"GO-Elite BioMarkers probabilities: {len(out):,} hypergeometric tests in "
+         f"{time.perf_counter() - probability_started:.2f}s (vectorized)")
     out["fdr"] = multipletests(out["p_value"].values, method="fdr_bh")[1]
     out = out.sort_values(["cluster", "fdr", "p_value", "term_name"])
     # Written under --minimal-outputs too: these are results (the BioMarkers evidence behind
@@ -6417,14 +6427,95 @@ def fast_variance(folds, fold_threshold=1, samples_differing=3):
     return folds.index[keep]
 
 
+def _pearson_neighbor_counts(sub, threshold, *, block_genes=2048):
+    """Release screening buffers before any fallback to the original correlation."""
+    counts, refined, reason = _screened_pearson_neighbor_counts(sub, threshold, block_genes=block_genes)
+    if counts is None:
+        _log(f"Pearson guide-gene correlation: using baseline float64 ({reason})")
+        corr = np.nan_to_num(np.corrcoef(sub), copy=False)
+        return (corr > threshold).sum(axis=0), 0
+    return counts, refined
+
+
+def _screened_pearson_neighbor_counts(sub, threshold, *, block_genes):
+    """Count the original strict Pearson threshold, including self-correlation.
+
+    Screen unit-length, centered rows using float32 BLAS. A conservative dot
+    product error bound identifies pairs requiring float64 recalculation. If
+    those results are themselves at a float64 rounding boundary, use the exact
+    original np.corrcoef call for the whole matrix. No genes or cells are removed.
+    Upper-triangle tiles bound working memory without evaluating pairs twice.
+    """
+    n_genes, n_cells = sub.shape
+    if (n_genes < 128 or n_cells < 2 or not np.isfinite(threshold)
+            or not -1.0 < threshold < 1.0 or np.iscomplexobj(sub)
+            or sub.dtype.itemsize > 8):
+        return None, 0, "small matrix or unsupported screening range"
+    # Keep the source memory order: NumPy's covariance centers this same way.
+    values = np.array(sub, dtype=np.float64, copy=True, order="K")
+    if not np.isfinite(values).all():
+        return None, 0, "nonfinite input"
+    with np.errstate(over="ignore", invalid="ignore", under="ignore"):
+        values -= values.mean(axis=1, keepdims=True)
+        norms = np.linalg.norm(values, axis=1)
+    if not np.isfinite(norms).all():
+        return None, 0, "nonfinite centered norm"
+    valid = norms > 0
+    if (np.any(values[~valid] != 0)
+            or np.any(norms[valid] < np.sqrt(np.finfo(np.float64).tiny) * np.sqrt(n_cells))):
+        return None, 0, "subnormal variance"
+    np.divide(values, norms[:, None], out=values, where=valid[:, None])
+    values[~valid] = 0  # np.corrcoef NaNs for constant rows become zero in the baseline.
+    screen = values.astype(np.float32)
+    unit_roundoff = np.finfo(np.float32).eps / 2.0
+    error = n_cells * unit_roundoff
+    if error >= 0.01:
+        return None, 0, "screening error bound too wide"
+    # |fl(x.y)-x.y| <= gamma_n sum(|x_i*y_i|) <= gamma_n for unit rows.
+    # Also allow for rounding the normalized rows to float32.
+    band = error / (1.0 - error) + 8.0 * unit_roundoff
+    exact_band = 64.0 * n_cells * np.finfo(np.float64).eps
+    counts = np.zeros(n_genes, dtype=np.int64)
+    refined = 0
+    for start in range(0, n_genes, block_genes):
+        stop = min(start + block_genes, n_genes)
+        for other in range(start, n_genes, block_genes):
+            end = min(other + block_genes, n_genes)
+            corr = screen[start:stop] @ screen[other:end].T
+            passed = corr > threshold
+            rows, cols = np.nonzero((corr >= threshold - band) & (corr <= threshold + band))
+            if len(rows) > max(4096, corr.size // 100):
+                return None, 0, "many pairs require full precision"
+            # np.nonzero orders by row; recalculate its uncertain pairs together.
+            boundaries = np.r_[0, np.flatnonzero(np.diff(rows)) + 1, len(rows)]
+            for first, last in zip(boundaries[:-1], boundaries[1:]):
+                if first == last:
+                    continue
+                row = rows[first]
+                columns = cols[first:last]
+                exact = values[other + columns] @ values[start + row]
+                np.clip(exact, -1.0, 1.0, out=exact)
+                if np.any(np.abs(exact - threshold) <= exact_band):
+                    return None, 0, "pair at a float64 threshold boundary"
+                passed[row, columns] = exact > threshold
+            refined += len(rows)
+            if start == other:
+                counts[start:stop] += passed.sum(axis=0)
+            else:
+                counts[start:stop] += passed.sum(axis=1)
+                counts[other:end] += passed.sum(axis=0)
+    return counts, refined, None
+
+
 def fast_intercorrelation(folds, hvg_index, corr_threshold=0.4, corr_n_events=5):
-    """Original: pearson gene-gene corr on HVG genes; keep genes with
-    (corr>thr).sum() > corr_n_events (diagonal self-corr counted, as in original).
-    Vectorized via np.corrcoef."""
+    """Preserve UDON Pearson thresholds and ordering with bounded BLAS screening."""
+    started = time.perf_counter()
     sub = folds.loc[hvg_index].to_numpy()
-    R = np.corrcoef(sub)                                        # genes x genes
-    R = np.nan_to_num(R)
-    keep = (R > corr_threshold).sum(axis=0) > corr_n_events
+    counts, refined = _pearson_neighbor_counts(sub, corr_threshold)
+    keep = counts > corr_n_events
+    _log(f"Pearson guide-gene correlation: {len(hvg_index):,} genes x {sub.shape[1]:,} cells "
+         f"in {time.perf_counter() - started:.2f}s; {refined:,} pairs refined at float64; "
+         f"{int(np.sum(keep)):,} genes selected")
     return hvg_index[keep]
 
 

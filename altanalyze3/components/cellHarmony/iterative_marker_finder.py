@@ -51,6 +51,187 @@ CONTRAST_SEP = "::"
 BLOCK_KIND_ORDER = ["unique", "shared", "global", "single-coverage", "discordant"]
 
 
+def legacy_strongest_patterns(statistics, ordered_groups, rho_cutoff=0.4):
+    """AltAnalyze2 strongest up/down rule, including its literal equal-rho tie rule.
+
+    Statistics are the standard visualization hook's full signed rho/raw-P frames.
+    No FDR cutoff was applied by iterativeMarkerFinder.py; P/FDR remain reported.
+    """
+    candidates = {}
+    for scheme_name, result in statistics:
+        rho, pval, fdr = result['rho'], result['pval'], result['fdr']
+        for direction, sign in [('up', 1), ('down', -1)]:
+            for feature, values in rho.iterrows():
+                # The legacy per-run AllGenes table reports the best population per gene.
+                eligible = [(sign * float(r), float(pval.loc[feature, level]), str(level)) for level, r in values.items()
+                            if np.isfinite(r) and sign * r > rho_cutoff
+                            and np.isfinite(pval.loc[feature, level]) and pval.loc[feature, level] < 1]
+                if not eligible: continue
+                score, _, level = max(eligible)
+                candidates.setdefault(feature, {})[(score, level, direction)] = dict(
+                    scheme=scheme_name, pval=float(pval.loc[feature, level]),
+                    fdr=float(fdr.loc[feature, level]), signed_rho=sign * score)
+    records = []
+    for feature, options in candidates.items():
+        patterns = sorted(options)
+        best = patterns[-1]
+        if len(patterns) > 1 and patterns[-2][0] == best[0] and patterns[-2][2] == 'up':
+            best = patterns[-2]
+        score, level, direction = best
+        records.append(dict(feature=feature, rho=score, level=level, direction=direction,
+                            pattern=direction+'-'+level, **options[best]))
+    columns = ['feature','rho','level','direction','pattern','scheme','pval','fdr','signed_rho']
+    table = pd.DataFrame(records, columns=columns).set_index('feature')
+    rank = {direction+'-'+level: i for i, (direction, level) in enumerate(
+        (d, g) for d in ['up', 'down'] for g in ordered_groups)}
+    if not table.empty:
+        table['_order'] = table.pattern.map(rank)
+        if table['_order'].isna().any(): raise ValueError('Assigned level absent from group roster')
+        table = table.assign(_feature=table.index).sort_values(
+            ['_order','rho','_feature'], ascending=[True,False,False]).drop(columns=['_order','_feature'])
+    return table
+
+
+def assess_pattern_coverage(adata, assignments, group_key, min_observed=3, min_fraction=.7):
+    """Annotate every assigned event with measured PSI support in every displayed group.
+
+    This is a sensitivity/figure eligibility annotation, not a new correlation or
+    differential test. The source matrix and full assignments remain untouched.
+    """
+    if not assignments.index.isin(adata.var_names).all():
+        raise ValueError('Every assignment must retain its exact input feature identity')
+    if not 0 <= min_fraction <= 1 or min_observed < 0:
+        raise ValueError('Invalid observed-PSI coverage threshold')
+    data=adata[:,assignments.index].X
+    data=data.toarray() if hasattr(data,'toarray') else np.asarray(data)
+    result=assignments.copy();eligible=np.ones(len(assignments),dtype=bool)
+    labels=adata.obs[group_key].astype(str).to_numpy()
+    if assignments.empty:
+        result['measured_group_mean_PSI_range']=pd.Series(dtype=float)
+        result['coverage_eligible']=pd.Series(dtype=bool)
+        return result
+    levels=list(dict.fromkeys(labels))
+    aggregates=mh._prepare_marker_stats_aggregates(adata,group_key,assignments.index.tolist(),False,None)
+    centroids=mh._build_marker_centroids_from_aggregates(
+        assignments.index.tolist(),levels,aggregates,method='mean')
+    for level in levels:
+        result['mean_PSI__'+level]=centroids[level].reindex(result.index)
+    result['measured_group_mean_PSI_range']=centroids.max(axis=1)-centroids.min(axis=1)
+    for level in dict.fromkeys(labels):
+        mask=labels==level;observed=np.isfinite(data[mask]).sum(axis=0)
+        result['observed__'+level]=observed
+        result['total__'+level]=int(mask.sum())
+        eligible &= (observed>=min_observed)&(observed>=min_fraction*mask.sum())
+    result['coverage_eligible']=eligible
+    return result
+
+
+def assess_leave_patient_out_patterns(schemes, baseline, patient_key, output_dir,
+                                      rho_cutoff=.4, max_missing_fraction=.100000001):
+    """Native-hook patient-holdout sensitivity, retaining the full baseline and every feature.
+
+    All pseudobulks/time points from a verified patient leave together. This measures
+    literal legacy-pattern stability; it is not an independent clinical significance test.
+    Diagnostic hook calls omit plotting, but retain full feature-by-holdout assignments.
+    """
+    from pathlib import Path
+    root=Path(output_dir);root.mkdir(parents=True,exist_ok=True)
+    patients=list(dict.fromkeys(str(p) for s in schemes for p in s.adata.obs[patient_key]))
+    features=schemes[0].adata.var_names;patterns={};scored={};rosters=[]
+    for i,patient in enumerate(patients):
+        stats=[];groups=[]
+        for scheme in sorted(schemes,key=lambda s:s.name):
+            keep=scheme.adata.obs[patient_key].astype(str)!=patient
+            subset=scheme.adata[keep].copy()
+            if set(subset.obs[scheme.group_key].astype(str)) != set(scheme.levels()):
+                raise ValueError('Patient holdout removed an entire required group; retain an explicit unassessable result')
+            out=root/('holdout_'+str(i+1))/scheme.name;out.mkdir(parents=True,exist_ok=True)
+            for level in scheme.levels():
+                if level not in groups:groups.append(level)
+            result=mh.generate_marker_heatmap_from_adata(
+                subset,cluster_key=scheme.group_key,out=str(out/'diagnostic.pdf'),
+                marker_method='markerfinder',validate_scaling=False,centroid_method='mean',
+                top_n=100,min_rho=rho_cutoff,pval_threshold=1.,cells_per_cluster=0,
+                max_missing_fraction=max_missing_fraction,return_statistics=True,
+                render_heatmap=False,write_heatmap_cache=False,write_heatmap_tsv=False,
+                write_expression_tsv=False)
+            assert result['sample_ids']==subset.obs_names.tolist()
+            stats.append((scheme.name,result))
+            rosters.append(dict(held_patient=patient,scheme=scheme.name,
+                retained_samples=subset.obs_names.tolist(),held_samples=scheme.adata.obs_names[~keep].tolist()))
+        assigned=legacy_strongest_patterns(stats,groups,rho_cutoff)
+        patterns[patient]=assigned.pattern.reindex(features)
+        scored[patient]=assigned.rho.reindex(features)
+    pattern_table=pd.DataFrame(patterns,index=features)
+    score_table=pd.DataFrame(scored,index=features)
+    pattern_table.to_csv(root/'all_source_features_holdout_patterns.tsv',sep='\t')
+    score_table.to_csv(root/'all_source_features_holdout_rho.tsv',sep='\t')
+    audit=baseline.copy();target=audit.pattern
+    hold=pattern_table.reindex(audit.index)
+    audit['holdouts']=len(patients)
+    audit['holdouts_assigned']=hold.notna().sum(axis=1)
+    audit['literal_pattern_matches']=hold.eq(target,axis=0).sum(axis=1)
+    audit['literal_pattern_match_fraction']=audit.literal_pattern_matches/len(patients)
+    audit.to_csv(root/'all_baseline_assignments_holdout_stability.tsv',sep='\t')
+    (root/'patient_holdout_rosters.json').write_text(json.dumps(rosters,indent=2)+'\n')
+    return audit
+
+
+def run_legacy_iterative_marker_finder(schemes, display_adata, display_group_key, output_dir,
+                                      rho_cutoff=0.4, max_missing_fraction=1.0, top_n=100,
+                                      half_range=0.2, sample_missing_above_group_median=None,
+                                      covariate_columns=None, heatmap_dpi=600, label_events=None):
+    """Opt-in Python2-compatible consolidation through the standard public hook.
+
+    The existing broad/residual API is unchanged. All source features remain in the
+    full statistics tables, including untestable events. No PSI pre-imputation occurs.
+    """
+    from pathlib import Path
+    root = Path(output_dir); root.mkdir(parents=True, exist_ok=True)
+    statistics, groups, manifests = [], [], []
+    expected = display_adata.var_names
+    for scheme in sorted(schemes, key=lambda s: s.name):
+        if not scheme.adata.var_names.equals(expected):
+            raise ValueError('Every scheme must retain the entire ordered source feature roster')
+        if not scheme.adata.var_names.is_unique or not scheme.adata.obs_names.is_unique:
+            raise ValueError('Source event and pseudobulk identities must be unique')
+        if len(scheme.levels()) < 2 or set(scheme.groups()) != set(scheme.levels()):
+            raise ValueError('Every declared scheme group must match the complete observed roster')
+        values=scheme.adata.X
+        values=values.data if hasattr(values,'tocsr') else np.asarray(values)
+        if np.isinf(values).any():
+            raise ValueError('Infinite measurements are invalid; missing PSI must remain NaN')
+        for level in scheme.levels():
+            if level not in groups: groups.append(level)
+        out = root / scheme.name; out.mkdir(exist_ok=True)
+        result = mh.generate_marker_heatmap_from_adata(
+            scheme.adata.copy(), cluster_key=scheme.group_key, out=str(out/'markers.pdf'),
+            marker_method='markerfinder', validate_scaling=False, centroid_method='mean',
+            cells_per_cluster=0, top_n=top_n, min_rho=rho_cutoff, pval_threshold=1.0,
+            max_missing_fraction=max_missing_fraction, collapse_shared_exons=False,
+            max_sample_missing_above_group_median=sample_missing_above_group_median,
+            species='human', return_statistics=True, write_heatmap_tsv=True,
+            heatmap_dpi=heatmap_dpi, label_events=[] if label_events is None else label_events)
+        for kind in ['rho','pval','fdr']:
+            result[kind].reindex(expected).to_csv(out/(kind+'.tsv'), sep='\t')
+        statistics.append((scheme.name, result))
+        manifests.append(dict(name=scheme.name, source_samples=scheme.adata.obs_names.tolist(),
+                              scored_samples=result['sample_ids'], features=len(expected),
+                              group_counts=scheme.adata.obs[scheme.group_key].value_counts().to_dict()))
+    assignments = legacy_strongest_patterns(statistics, groups, rho_cutoff)
+    figure = mh.render_consolidated_marker_heatmap(
+        display_adata, assignments, cluster_key=display_group_key, out=str(root/'Consolidated-MarkerFinder.pdf'),
+        top_n=top_n, species='human', half_range=half_range, covariate_columns=covariate_columns,
+        dpi=heatmap_dpi, label_events=label_events)
+    manifest = dict(method='AltAnalyze2 strongest up/down pattern; no residualization or FDR selection',
+                    rho_strictly_greater_than=rho_cutoff, max_missing_fraction=max_missing_fraction,
+                    heatmap_dpi=heatmap_dpi,
+                    source_features=expected.tolist(), schemes=manifests, figure=figure,
+                    repeated_patient_pseudobulks='Pattern discovery units; not independent donor replication')
+    (root/'parameters.json').write_text(json.dumps(manifest, indent=2)+'\n')
+    return assignments, manifest
+
+
 # --------------------------------------------------------------------------------------- inputs
 
 
@@ -1422,5 +1603,36 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     return 0
 
 
+def legacy_manifest_main(argv):
+    """Replay an explicit native scheme manifest; PSI lives in H5AD, never a zero-filled text loader."""
+    import argparse
+    import anndata as ad
+    from pathlib import Path
+    parser = argparse.ArgumentParser(description='Legacy strongest-pattern iterative MarkerFinder')
+    parser.add_argument('--legacy-manifest', required=True)
+    parser.add_argument('--outdir', required=True)
+    parser.add_argument('--rho', type=float, default=.4)
+    parser.add_argument('--max-missing-fraction', type=float, default=1.)
+    parser.add_argument('--top-n', type=int, default=100)
+    parser.add_argument('--half-range', type=float, default=.2)
+    parser.add_argument('--sample-missing-above-group-median', type=float)
+    a = parser.parse_args(argv)
+    record = json.loads(Path(a.legacy_manifest).read_text())
+    cache = {}
+    def read(path):
+        if path not in cache: cache[path] = ad.read_h5ad(path)
+        return cache[path]
+    schemes = [Scheme(name=t['name'], adata=read(t['h5ad']), group_key=t['group_key'],
+                      level_order=t['level_order']) for t in record['schemes']]
+    run_legacy_iterative_marker_finder(
+        schemes, read(record['display_h5ad']), record['display_group_key'], a.outdir,
+        rho_cutoff=a.rho, max_missing_fraction=a.max_missing_fraction,
+        top_n=a.top_n, half_range=a.half_range,
+        sample_missing_above_group_median=a.sample_missing_above_group_median,
+        covariate_columns=record.get('covariate_columns'),
+        label_events=mh._read_label_events(record['label_events']) if record.get('label_events') else None)
+    return 0
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(legacy_manifest_main(sys.argv[1:]) if '--legacy-manifest' in sys.argv else main())

@@ -20,6 +20,9 @@ class GOTermNode:
     children: Tuple[str, ...] = field(default_factory=tuple)
     depth: int = 0
     genes: frozenset[str] = field(default_factory=frozenset)
+    # regulates / positively_regulates / negatively_regulates targets (2026-10-24): used for annotation
+    # propagation when the cache was built with propagation over regulates, never for the is_a/part_of hierarchy.
+    regulates: Tuple[str, ...] = field(default_factory=tuple)
 
     def with_children(self, children: Iterable[str]) -> "GOTermNode":
         return GOTermNode(
@@ -30,6 +33,7 @@ class GOTermNode:
             children=tuple(children),
             depth=self.depth,
             genes=self.genes,
+            regulates=self.regulates,
         )
 
     def with_parents(self, parents: Iterable[str]) -> "GOTermNode":
@@ -41,6 +45,7 @@ class GOTermNode:
             children=self.children,
             depth=self.depth,
             genes=self.genes,
+            regulates=self.regulates,
         )
 
     def with_depth(self, depth: int) -> "GOTermNode":
@@ -52,6 +57,7 @@ class GOTermNode:
             children=self.children,
             depth=depth,
             genes=self.genes,
+            regulates=self.regulates,
         )
 
     def with_genes(self, genes: Iterable[str]) -> "GOTermNode":
@@ -63,6 +69,7 @@ class GOTermNode:
             children=self.children,
             depth=self.depth,
             genes=frozenset(genes),
+            regulates=self.regulates,
         )
 
 

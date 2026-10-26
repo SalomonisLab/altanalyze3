@@ -22,6 +22,7 @@ import os
 import sys
 import argparse
 from collections import OrderedDict
+from pathlib import Path
 
 import numpy as np
 import matplotlib
@@ -51,6 +52,7 @@ CLUSTER_COLORS = [
 
 
 TWO_ISOFORM_COLORS = ["#E9B940", "#4884BC"]   # default fills when a gene shows EXACTLY two isoforms (gold, blue)
+THREE_ISOFORM_COLORS = ["#4884BC", "#E9B940", "#2f8a4e"]  # trans-splicing scheme: blue, gold, green
 
 
 def cluster_color(i):
@@ -639,13 +641,14 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
         lo, hi = min(f["start"] for f in locus_frames), max(f["end"] for f in locus_frames)
     track_x0, track_x1 = LEFT_, width - RIGHT - RMARGIN
 
-    # default two-isoform palette (gold / blue): applied ONLY when the gene shows exactly two isoforms,
-    # consistently across the molecule pileup and the structure track.
+    # Use the established two-/three-isoform schemes consistently across read and structure tracks.
+    # Explicit caller colors still take precedence.
     _ckeys = sorted({color_key(m) for m in all_mol + extra_models})
-    _two = {k: TWO_ISOFORM_COLORS[i] for i, k in enumerate(_ckeys)} if len(_ckeys) == 2 else {}
+    _palette = {2: TWO_ISOFORM_COLORS, 3: THREE_ISOFORM_COLORS}.get(len(_ckeys), [])
+    _auto_colors = dict(zip(_ckeys, _palette))
 
     def colof(m):
-        return m.get("display_color") or _two.get(color_key(m)) or color_for(m)
+        return m.get("display_color") or _auto_colors.get(color_key(m)) or color_for(m)
 
     # unique plotted isoforms (one structure row each) for the optional bottom structure track.
     #
@@ -1235,6 +1238,10 @@ def build_arg_parser():
                     help='Append exon-colored protein/domain tracks from completed iso2function protein-impact-plots output with a coding-exon map')
     ap.add_argument('--render-input', default=None,
                     help='Render a saved ISV response JSON(.gz) without loading native matrices or sequence files; query/filter options cannot be combined')
+    ap.add_argument('--render-input-sha256', default=None,
+                    help='Require this SHA256 for the saved response before rendering')
+    ap.add_argument('--caption-file', default=None,
+                    help='UTF-8 scientific figure caption appended below the exported PDF')
     ap.add_argument('--save-render-input', default=None,
                     help='Save the exact selected response as JSON(.gz) for indexed, reproducible rerendering')
     ap.add_argument("--conditions", default=None, help="restrict to these sample groups (comma-separated; default: ALL groups)")
@@ -1375,11 +1382,19 @@ def _render_selected(a, res, out, region):
                   label_protein_length=not a.no_protein_length, dense_exon_labels=a.figure_mode,
                   structure_labels_above=a.figure_mode, region=region,
                   iso_order='given' if a.isoforms or a.render_input else 'length',
-                  protein_features=a.protein_features)
+                  protein_features=a.protein_features,
+                  caption=(Path(a.caption_file).read_text().strip()
+                           if getattr(a, 'caption_file', None) else None))
 
 
 def main(argv=None):
-    a = build_arg_parser().parse_args(argv)
+    return run_from_args(build_arg_parser().parse_args(argv))
+
+
+def run_from_args(a):
+    """Shared standalone and ``altanalyze3 visualize isv-domains`` CLI handler."""
+    if a.render_input_sha256 and not a.render_input:
+        sys.exit('--render-input-sha256 requires --render-input')
     if a.hide_bleeding_reads:
         if a.bleed_tolerance < 0:
             sys.exit('bleed_tolerance must be nonnegative')
@@ -1399,6 +1414,11 @@ def main(argv=None):
         if a.max_isoforms != 1_000_000:
             sys.exit('--render-input is already selected; --max_isoforms cannot be applied')
         opener = gzip.open if a.render_input.endswith('.gz') else open
+        if a.render_input_sha256:
+            import hashlib
+            from pathlib import Path
+            if hashlib.sha256(Path(a.render_input).read_bytes()).hexdigest() != a.render_input_sha256:
+                sys.exit('--render-input SHA256 mismatch; saved response retained unchanged')
         with opener(a.render_input, 'rt') as fh:
             res = json.load(fh)
         if a.gene not in (res.get('gene'), res.get('symbol')):

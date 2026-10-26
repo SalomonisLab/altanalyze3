@@ -13,6 +13,21 @@ plt.rcParams['font.family'] = 'sans-serif'
 plt.rcParams['font.sans-serif'] = ['Arial', 'Helvetica', 'DejaVu Sans']
 plt.rcParams['figure.facecolor'] = 'white'
 
+# Fixed event-type -> RGB colour map so a given event type is the same colour in
+# every plot (positional colouring would shift as the set of event types changes).
+EVENT_COLOR_MAP = {
+    'Alt C-Terminal Exon':     '#808080',  # grey
+    "Alt3' SS":                '#87CEEB',  # skyblue
+    "Alt5' SS":                '#FA8072',  # salmon
+    'AltPolyA':                '#800080',  # purple
+    'AltPromoter':             '#FFD700',  # gold
+    'Cassette Exon':           '#6495ED',  # cornflowerblue
+    'Intron Retention':        '#00FF00',  # lime
+    'Mutually-Exclusive Exon': '#0000FF',  # blue
+    'Trans-Splicing':          '#FF0000',  # red
+}
+DEFAULT_EVENT_COLOR = '#BBBBBB'
+
 
 def parse_isoform_length(isoform_label):
     """Parse the protein length from an isoform token like 'ENST00000681979|973' or
@@ -66,10 +81,16 @@ def analyze_splicing_events(
     custom_events=None,
     sample_min=3,
     cluster_order=[],
-    write_significant=True
+    write_significant=True,
+    states_axis='y',
+    mirror=False,
+    mirror_min_samples=0,
+    mirror_min_events=0,
+    strict_thresholds=False
 ):
-    event_data = {}  
-    overall_event_data = {}  
+    event_data = {}
+    overall_event_data = {}
+    comparison_samples = {}  # mirror only: comparison -> {condition: largest per-event N}
     cond1_dict = {}
     cond2_dict = {}
     diff_dict = {}
@@ -106,8 +127,17 @@ def analyze_splicing_events(
                 sig_out.write("SourceFile\t" + "\t".join(header) + "\n")
 
             diff_means_col = [col for col in header if col.startswith("DiffMeans_")]
+            comp_n = [0, 0]; n_unparsed = 0
             for line in f:
                 cols = line.strip().split("\t")
+                if mirror:
+                    # comparison-level sample count = the largest per-event N of each condition, read from every
+                    # row before any event filter
+                    for k, ccol in enumerate(condition_cols[:2]):
+                        try:
+                            comp_n[k] = max(comp_n[k], int(cols[col_indices[ccol]]))
+                        except (ValueError, IndexError):
+                            n_unparsed += 1
 
                 feature = cols[col_indices["Feature"]]
                 isoform_1 = cols[col_indices["Isoform_1|Length"]]
@@ -138,6 +168,8 @@ def analyze_splicing_events(
                     diff_means = abs(float(cols[col_indices[diff_means_col[0]]]))
                 except:
                     continue
+                if not np.isfinite(pval) or not np.isfinite(diff_means):
+                    continue
 
                 event_tuple = tuple(sorted([isoform_1, isoform_2]))
 
@@ -145,7 +177,10 @@ def analyze_splicing_events(
                     if feature not in custom_events:
                         continue
                 else:
-                    if (pval > pval_threshold) or (diff_means < diff_means_threshold) or (n_count1 < sample_min) or (n_count2 < sample_min):
+                    outside = ((pval >= pval_threshold) or (diff_means <= diff_means_threshold)
+                               if strict_thresholds else
+                               (pval > pval_threshold) or (diff_means < diff_means_threshold))
+                    if outside or (n_count1 < sample_min) or (n_count2 < sample_min):
                         continue
 
                 if sig_out is not None:
@@ -177,6 +212,11 @@ def analyze_splicing_events(
 
         if sig_out is not None:
             sig_out.close()
+        if mirror:
+            comparison_samples[comparison_name] = {condition1_name: comp_n[0], condition2_name: comp_n[1]}
+            if n_unparsed:
+                print(f"Warning: {comparison_name}: {n_unparsed} N_ values could not be read as integers "
+                      f"(not counted in the comparison sample count)")
         print(comparison_name, significant_events, 'unique events')
 
     #print("Comparisons seen:", len(overall_event_data))
@@ -193,7 +233,8 @@ def analyze_splicing_events(
         event_types = sorted({etype for comp in data_dict.values() for etype in comp})
 
         if cluster_order:
-            cluster_order = cluster_order[::-1]
+            # states_axis 'y' lists the first state at the top (reversed order); 'x' runs left to right
+            cluster_order = cluster_order[::-1] if states_axis == 'y' else list(cluster_order)
             comparison_to_cluster = {comp: extract_cluster(comp, cluster_order) for comp in comparisons}
             comparisons = sorted(
                 comparisons,
@@ -202,20 +243,13 @@ def analyze_splicing_events(
 
         event_counts = {etype: [len(data_dict.get(comp, {}).get(etype, set())) for comp in comparisons] for etype in event_types}
 
-        # Fixed event-type -> RGB colour map so a given event type is the same colour in
-        # every plot (positional colouring would shift as the set of event types changes).
-        event_color_map = {
-            'Alt C-Terminal Exon':     '#808080',  # grey
-            "Alt3' SS":                '#87CEEB',  # skyblue
-            "Alt5' SS":                '#FA8072',  # salmon
-            'AltPolyA':                '#800080',  # purple
-            'AltPromoter':             '#FFD700',  # gold
-            'Cassette Exon':           '#6495ED',  # cornflowerblue
-            'Intron Retention':        '#00FF00',  # lime
-            'Mutually-Exclusive Exon': '#0000FF',  # blue
-            'Trans-Splicing':          '#FF0000',  # red
-        }
-        default_color = '#BBBBBB'
+        event_color_map = EVENT_COLOR_MAP
+        default_color = DEFAULT_EVENT_COLOR
+
+        if states_axis == 'x':
+            _plot_states_on_x(comparisons, event_types, event_counts, event_color_map, default_color,
+                              cluster_order, output_dir, output_filename)
+            return
 
         fig, ax = plt.subplots(figsize=(10, 6))
         bottom = [0] * len(comparisons)
@@ -227,8 +261,12 @@ def analyze_splicing_events(
                     color=event_color_map.get(etype, default_color))
             bottom = [bottom[j] + event_counts[etype][j] for j in range(len(comparisons))]
 
+        # y-labels = the clean cell-state / cluster name (ASDC), not the full comparison
+        # (healthy-ASDC-Others-ASDC). bars were placed at 0..n-1 in `comparisons` order.
+        ax.set_yticks(range(len(comparisons)))
+        ax.set_yticklabels([extract_cluster(c, cluster_order) for c in comparisons])
         ax.set_xlabel("Count of Splicing Events")
-        ax.set_ylabel("Comparisons (Stats Files)")
+        ax.set_ylabel("Cell state")
         ax.set_title(title)
         fontsize = min(8, max(3, int(300 / len(comparisons))))
         ax.tick_params(axis='y', labelsize=fontsize)
@@ -250,6 +288,134 @@ def analyze_splicing_events(
 
     for event_direction, comparison_data in event_data.items():
         plot_stacked_bar(comparison_data, f"Splicing Events for {event_direction}", f"splicing_events_{event_direction}.pdf", cluster_order=cluster_order)
+
+    if mirror:
+        _plot_mirror_states_on_x(event_data, overall_event_data, comparison_samples, cluster_order, output_dir,
+                                 mirror_min_samples, mirror_min_events)
+
+
+def _plot_mirror_states_on_x(event_data, overall_event_data, comparison_samples, cluster_order, output_dir,
+                             min_samples=0, min_events=0, output_stem="splicing_events_inclusion_exclusion_mirror"):
+    """Mirror panel: one bar per cell state along the x axis, inclusion/proximal events stacked upward and
+    exclusion/distal events stacked downward (same event-type colours), state labels below the axes.
+
+    A comparison is drawn only when every condition has >= min_samples samples (the largest per-event N of that
+    condition in its stats file) and it has >= min_events events (unique isoform pairs summed over event types,
+    the height of the splicing_events_all bar). Every comparison, with its counts and any exclusion reason, is
+    written to <output_stem>.tsv."""
+    from matplotlib.patches import Patch
+    from matplotlib.ticker import FuncFormatter
+    inc = event_data.get("inclusion_proximal", {})
+    exc = event_data.get("exclusion_distal", {})
+    comps = list(comparison_samples)
+    if cluster_order:
+        rank = {cl: i for i, cl in enumerate(cluster_order)}
+        comps = sorted(comps, key=lambda c: rank.get(extract_cluster(c, cluster_order), len(cluster_order)))
+    count = lambda d, c: sum(len(s) for s in d.get(c, {}).values())
+    rows, kept = [], []
+    for c in comps:
+        reasons = [f"{g} samples {n} < {min_samples}" for g, n in comparison_samples[c].items() if n < min_samples]
+        total = count(overall_event_data, c)
+        if total < min_events:
+            reasons.append(f"events {total} < {min_events}")
+        row = dict(comparison=c, cell_state=extract_cluster(c, cluster_order))
+        row.update({f"samples_{g}": n for g, n in comparison_samples[c].items()})
+        row.update(total_events=total, inclusion_proximal_events=count(inc, c), exclusion_distal_events=count(exc, c),
+                   kept=not reasons, excluded_because="; ".join(reasons))
+        rows.append(row)
+        if not reasons:
+            kept.append(c)
+    os.makedirs(output_dir, exist_ok=True)
+    table_path = os.path.join(output_dir, output_stem + ".tsv")
+    pd.DataFrame(rows).to_csv(table_path, sep="\t", index=False)
+    print(f"Mirror plot: {len(kept)} of {len(comps)} comparisons kept (min samples per condition {min_samples}, "
+          f"min events {min_events}); table: {table_path}")
+    if not kept:
+        print("No comparison passed the mirror filters. No mirror PDF generated.")
+        return
+
+    event_types = sorted({et for d in (inc, exc) for c in kept for et in d.get(c, {})})
+    n = len(kept)
+    xs = np.arange(n)
+    fig, ax = plt.subplots(figsize=(max(6.0, 0.13 * n + 1.4), 4.2))
+    up, down = np.zeros(n), np.zeros(n)
+    handles = []
+    for etype in event_types:
+        if etype not in EVENT_COLOR_MAP:
+            print(f"Warning: no colour defined for event type '{etype}'; using {DEFAULT_EVENT_COLOR}")
+        color = EVENT_COLOR_MAP.get(etype, DEFAULT_EVENT_COLOR)
+        vi = np.array([len(inc.get(c, {}).get(etype, ())) for c in kept], dtype=float)
+        ve = np.array([len(exc.get(c, {}).get(etype, ())) for c in kept], dtype=float)
+        nz = vi > 0
+        ax.bar(xs[nz], vi[nz], bottom=up[nz], width=0.8, linewidth=0, color=color)
+        nz = ve > 0
+        ax.bar(xs[nz], -ve[nz], bottom=-down[nz], width=0.8, linewidth=0, color=color)
+        up += vi
+        down += ve
+        handles.append(Patch(facecolor=color, edgecolor='none', label=f"{etype} ({int(vi.sum()):,} / {int(ve.sum()):,})"))
+    ax.axhline(0, color='#000000', linewidth=0.5)
+    ax.set_xticks(xs)
+    ax.set_xticklabels([extract_cluster(c, cluster_order) for c in kept], rotation=90,
+                       fontsize=min(7, max(4, int(400 / max(n, 1)))))
+    ax.set_xlim(-0.6, n - 0.4)
+    top, bot = max(up.max(), 1.0), max(down.max(), 1.0)
+    ax.set_ylim(-1.05 * bot, 1.05 * top)
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{abs(v):g}"))
+    ax.set_ylabel("Splicing events (unique isoform pairs)", fontsize=7)
+    ax.tick_params(axis='y', labelsize=6)
+    for side in ('top', 'right'):
+        ax.spines[side].set_visible(False)
+    ax.text(1.01, top / (top + bot) * 0.5 + bot / (top + bot), "Inclusion / proximal", transform=ax.transAxes,
+            rotation=90, ha='left', va='center', fontsize=6)
+    ax.text(1.01, bot / (top + bot) * 0.5, "Exclusion / distal", transform=ax.transAxes,
+            rotation=90, ha='left', va='center', fontsize=6)
+    ax.legend(handles=handles, title=(f"Event type (inclusion / exclusion; totals {int(up.sum()):,} / "
+                                      f"{int(down.sum()):,} in {n} states)"), fontsize=5.5, title_fontsize=6, ncol=5,
+              frameon=False, loc='lower left', bbox_to_anchor=(0.0, 1.01), handlelength=0.9, columnspacing=0.8)
+    # Illustrator-ready: no white background boxes and no per-artist clip groups (the y limits cover the data)
+    fig.patch.set_visible(False)
+    ax.patch.set_visible(False)
+    for art in ax.get_children():
+        if hasattr(art, "set_clip_on"):
+            art.set_clip_on(False)
+    pdf_path = os.path.join(output_dir, output_stem + ".pdf")
+    fig.savefig(pdf_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved plot: {pdf_path}")
+
+def _plot_states_on_x(comparisons, event_types, event_counts, event_color_map, default_color, cluster_order,
+                      output_dir, output_filename):
+    """Figure-panel layout: one stacked bar per cell state along the x axis, the event-type legend above the
+    axes and no title. Zero-height segments are not drawn (they become empty paths in Illustrator)."""
+    n = len(comparisons)
+    fig, ax = plt.subplots(figsize=(max(6.0, 0.13 * n + 1.4), 3.0))
+    xs = np.arange(n)
+    bottom = np.zeros(n)
+    for etype in event_types:
+        if etype not in event_color_map:
+            print(f"Warning: no colour defined for event type '{etype}'; using {default_color}")
+        v = np.asarray(event_counts[etype], dtype=float)
+        nz = v > 0
+        ax.bar(xs[nz], v[nz], bottom=bottom[nz], width=0.8, linewidth=0,
+               color=event_color_map.get(etype, default_color), label=f"{etype} ({int(v.sum()):,})")
+        bottom += v
+    ax.set_xticks(xs)
+    ax.set_xticklabels([extract_cluster(c, cluster_order) for c in comparisons], rotation=90,
+                       fontsize=min(7, max(4, int(400 / max(n, 1)))))
+    ax.set_xlim(-0.6, n - 0.4)
+    ax.set_ylabel("Splicing events (unique isoform pairs)", fontsize=7)
+    ax.tick_params(axis='y', labelsize=6)
+    for side in ('top', 'right'):
+        ax.spines[side].set_visible(False)
+    ax.legend(title=f"Event type (total {int(bottom.sum()):,} in {int((bottom > 0).sum())} states)", fontsize=5.5,
+              title_fontsize=6, ncol=5, frameon=False, loc='lower left', bbox_to_anchor=(0.0, 1.01),
+              handlelength=0.9, columnspacing=0.8)
+    os.makedirs(output_dir, exist_ok=True)
+    output_pdf_path = os.path.join(output_dir, output_filename.replace("/", "_"))
+    fig.savefig(output_pdf_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved plot: {output_pdf_path}")
+
 
 def plot_protein_length_distributions(cond1_dict, cond2_dict, diff_dict, output_dir, cluster_order=[]):
     """Generate and save HORIZONTAL box plots for protein length distributions and differences across all comparisons using IQR. 
@@ -383,10 +549,44 @@ def import_feature_ids(file_path):
     print('features to filter for imported...')
     return feature_ids
 
+# Canonical hematopoietic lineage cell-state order (top->bottom of the maturation hierarchy). Same order
+# used by the lineage/cell-state stacked plots. Used to order the bars by lineage when no --barcode-dir
+# cellHarmony labels file is supplied. A cellHarmony order via --barcode-dir still overrides this.
+CANONICAL_CELLSTATE_ORDER = [
+    # HSPC
+    "HSC-1", "HSC-2", "MPP-1", "MPP-2", "MPP-MEP", "LMPP-1", "LMPP-1-cycling", "LMPP-2", "Multilin-1", "Multilin-2",
+    # Erythroid
+    "MEP-1", "MEP-2", "MEP-Eryth-1", "MEP-Eryth-2", "ERP-1", "ERP-2", "ERP-3", "ERP-4", "ERP-5", "ERP-6", "ERP-7",
+    "ERP-8", "Erythroblast-1", "Erythroblast-2", "Erythroblast-3",
+    # Megakaryocyte
+    "MKP-early", "MKP-late", "MK-Platelet",
+    # Mast-Basophil
+    "BMCP-1", "BMCP-2",
+    # Granulocyte
+    "preNeu", "immNeu-1", "immNeu-2",
+    # GMP-Myeloid
+    "MultiLin-GMP-1", "MultiLin-GMP-2", "MultiLin-GMP-3",
+    "Myeloid intermediate 1", "Myeloid intermediate 2", "Myeloid intermediate 3",
+    # Monocyte
+    "cMOP", "Mono-1", "Mono-2", "Intermediate Mono-1", "Intermediate Mono-2", "Intermediate Mono-3",
+    "Classical-Mono", "Non-Classical Mono-1", "Non-Classical Mono-2", "Mac",
+    # Dendritic
+    "MDP-1", "MDP-2", "MDP-3", "MDP-4", "MDP-5", "MDP-6", "pre-DC-1", "pre-DC-2", "pre-DC-3",
+    "cDC1", "cDC2-1", "cDC2-2", "pDC", "ASDC",
+    # B-lymphoid
+    "CLP", "Pro-B-Early", "Pro-B-Early-cycling", "Pro-B-1", "Pro-B-2", "Pro-B-3",
+    "Pro-B-cycling-1", "Pro-B-cycling-2", "Transitional-B-1", "Transitional-B-2", "pre-B",
+    "B Memory-1", "B Memory-2", "Plasma Cell",
+    # T-NK
+    "CD4 TCM", "T CD4 Activated", "T CD4 Naive-1", "T CD4 Naive-2", "T CD8 Naive", "CD8 TEM", "MAIT", "NK-Mature",
+]
+
+
 def derive_cluster_order(input_dir):
     """Without a cellHarmony labels file, build the cluster vocabulary from cluster-events
     filenames (the authoritative <cluster>-Others-<cluster> labels) in the input folder and
-    a sibling dPSI-cluster-events folder, ordered alphabetically."""
+    a sibling dPSI-cluster-events folder, ordered by the canonical hematopoietic LINEAGE order
+    (clusters not in the canonical list are appended alphabetically at the end)."""
     vocab = set()
     sibling = os.path.join(os.path.dirname(os.path.normpath(input_dir)), "dPSI-cluster-events")
     for d in {input_dir, sibling}:
@@ -394,7 +594,9 @@ def derive_cluster_order(input_dir):
             comp = os.path.basename(f).replace("_stats-annotated.txt", "")
             if "Others-" in comp:
                 vocab.add(comp.split("Others-")[-1])
-    return sorted(vocab)
+    known = [c for c in CANONICAL_CELLSTATE_ORDER if c in vocab]
+    unknown = sorted(vocab - set(known))
+    return known + unknown
 
 
 if __name__ == '__main__':
@@ -425,6 +627,8 @@ if __name__ == '__main__':
                         help="Optional cellHarmony labels file; sets cluster (row) order via "
                              "isoform_matrix.return_cluster_order. If omitted, cluster order is "
                              "derived alphabetically from cluster-events filenames.")
+    parser.add_argument('--cluster-order', default=None,
+                        help='Explicit native cell-state order, one state per line; avoids requiring barcode files')
     parser.add_argument('--custom-events', default=None,
                         help="Optional file of Feature IDs to restrict to (bypasses thresholds).")
     parser.add_argument('--output-dir', default=None,
@@ -435,6 +639,22 @@ if __name__ == '__main__':
     parser.add_argument('--write-significant', action=argparse.BooleanOptionalAction, default=True,
                         help="Write <comparison>_significant-results.tsv per file. Default on "
                              "(--no-write-significant to disable).")
+    parser.add_argument('--states-axis', choices=['y', 'x'], default='y',
+                        help="Axis that lists the cell states in the event-count plots. y (default): horizontal "
+                             "bars, one row per state. x: figure-panel layout, one vertical stacked bar per state "
+                             "along the x axis, legend above, no title.")
+    parser.add_argument('--mirror', action=argparse.BooleanOptionalAction, default=False,
+                        help="Also write splicing_events_inclusion_exclusion_mirror.pdf/.tsv: one bar per cell state "
+                             "along x, inclusion/proximal events stacked up, exclusion/distal events stacked down, "
+                             "state labels at the bottom. Default off.")
+    parser.add_argument('--mirror-min-samples', type=int, default=0,
+                        help="Mirror plot only: keep a comparison when every condition has at least this many "
+                             "samples (largest per-event N_<condition> in its stats file). Default 0 (no filter).")
+    parser.add_argument('--mirror-min-events', type=int, default=0,
+                        help="Mirror plot only: drop a comparison with fewer than this many splicing events "
+                             "(unique isoform pairs over all event types and directions). Default 0 (no filter).")
+    parser.add_argument('--strict-thresholds', action='store_true',
+                        help='Use p < cutoff and |dPSI| > cutoff; default retains historical inclusive boundaries')
     args = parser.parse_args()
 
     if not os.path.isdir(args.input_dir):
@@ -468,7 +688,12 @@ if __name__ == '__main__':
     os.makedirs(output_dir, exist_ok=True)
     print(f"Output -> {output_dir}")
 
-    if args.barcode_dir:
+    if args.cluster_order:
+        with open(args.cluster_order) as handle:
+            cluster_order = [line.strip() for line in handle if line.strip()]
+        if len(cluster_order) != len(set(cluster_order)):
+            raise ValueError('--cluster-order contains duplicate state identities')
+    elif args.barcode_dir:
         repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
         sys.path.insert(0, repo_root)
         import altanalyze3.components.long_read.isoform_matrix as iso
@@ -499,4 +724,9 @@ if __name__ == '__main__':
         sample_min=args.sample_min,
         cluster_order=cluster_order,
         write_significant=args.write_significant,
+        states_axis=args.states_axis,
+        mirror=args.mirror,
+        mirror_min_samples=args.mirror_min_samples,
+        mirror_min_events=args.mirror_min_events,
+        strict_thresholds=args.strict_thresholds,
     )

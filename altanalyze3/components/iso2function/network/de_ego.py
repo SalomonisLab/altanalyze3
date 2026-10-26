@@ -198,7 +198,7 @@ def plot_regulator_states_de(regulator, states, out_path, gde, ide, iso_universe
                              collapse_redundant_clones=False, key_by_final_isoform=True, iso_order=None,
                              data_dir=None, unique_connections_only=False, figure_note=None,
                              isoform_links=None, expressed_isoforms=None, effect_label="log2FC",
-                             eligible_isoforms=None, isoform_annotations=None):
+                             eligible_isoforms=None, isoform_annotations=None, sig_label="FDR"):
     """One figure, one panel per state, fixed layout. `gde[state][ensg] = (signed_diff, adjp)` (targets),
     `ide[state][enst] = (signed_diff, adjp)` (regulator isoforms). A node is DIFFERENTIAL in a state when
     ``adjp < sig_thresh`` AND its signed log2 fold-change passes ``min_log2fc`` in ``direction``
@@ -217,6 +217,8 @@ def plot_regulator_states_de(regulator, states, out_path, gde, ide, iso_universe
     ``effect_label`` names the supplied effect scale in the legend; it does not transform values.
     ``eligible_isoforms`` optionally intersects either regulator rule with a verified per-state RNA
     eligibility set. ``isoform_annotations[state][transcript]`` adds measured support to node labels.
+    ``sig_label`` names the significance value that ``sig_thresh`` gates (default "FDR"; pass "rawP" when the second
+    tuple element supplied in ``gde``/``ide`` is the raw p-value) so the legend states the gate actually applied.
     Returns per-state DE counts."""
     plt = _mpl()
     from matplotlib.patches import Circle, RegularPolygon
@@ -388,8 +390,8 @@ def plot_regulator_states_de(regulator, states, out_path, gde, ide, iso_universe
         ax.set_aspect("equal"); ax.axis("off")
     for ax in axflat:
         ax.axis("off")
-    gate_txt = "FDR<%.2g & |%s|>%.2g" % (sig_thresh, effect_label, min_log2fc) if direction == "both" \
-        else "FDR<%.2g & %s%s%.2g" % (sig_thresh, effect_label, ">" if direction == "up" else "<-", min_log2fc)
+    gate_txt = "%s<%.2g & |%s|>%.2g" % (sig_label, sig_thresh, effect_label, min_log2fc) if direction == "both" \
+        else "%s<%.2g & %s%s%.2g" % (sig_label, sig_thresh, effect_label, ">" if direction == "up" else "<-", min_log2fc)
     handles = [Line2D([0], [0], marker="o", color="none", markerfacecolor=UP_COLOR, markersize=8,
                       label="up in state (%s)" % gate_txt),
                Line2D([0], [0], marker="o", color="none", markerfacecolor=DOWN_COLOR, markersize=8,

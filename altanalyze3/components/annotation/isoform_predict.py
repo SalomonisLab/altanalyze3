@@ -112,7 +112,10 @@ def _strip_version(identifier: str) -> str:
     value = _clean_string(identifier)
     if not value:
         return ""
-    return value.split(".", 1)[0]
+    # Dots in PB and library-qualified native IDs are part of their identity.
+    # Only Ensembl stable IDs have the version suffix understood here.
+    match = re.fullmatch(r"(ENS[A-Z]*[GTP]\d+)\.\d+", value)
+    return match.group(1) if match else value
 
 
 def _normalize_isoform_id(identifier: str) -> str:
@@ -129,9 +132,12 @@ def _isoform_lookup_keys(identifier: str) -> List[str]:
     if not value:
         return []
     keys = [value, _strip_version(value)]
-    if "_" in value:
-        tail = value.split("_")[-1]
-        keys.extend([tail, _strip_version(tail)])
+    # A documented gene prefix can be removed without truncating the physical
+    # library suffix. An arbitrary last underscore token is not a transcript.
+    match = re.fullmatch(r"ENS[A-Z]*G\d+(?:\.\d+)?_(.+)", value)
+    if match:
+        native_id = match.group(1)
+        keys.extend([native_id, _strip_version(native_id)])
     return [k for i, k in enumerate(keys) if k and k not in keys[:i]]
 
 
@@ -225,8 +231,6 @@ def _extract_record_lookup_keys(record) -> List[str]:
     primary = description.split(None, 1)[0].strip(";")
     if primary:
         candidates.append(primary)
-        if "_" in primary:
-            candidates.append(primary.split("_")[-1])
     keys: List[str] = []
     for candidate in candidates:
         for key in _isoform_lookup_keys(candidate):
@@ -243,7 +247,13 @@ def load_sequence_fasta(file_path: str) -> Dict[str, str]:
             if not sequence:
                 continue
             for key in _extract_record_lookup_keys(record):
-                lookup.setdefault(key, sequence)
+                if key in lookup and lookup[key] != sequence:
+                    raise ValueError(
+                        f"Ambiguous sequence identifier {key!r} in {file_path}: "
+                        "different literal records share this lookup key; "
+                        "retain and reconcile their complete source identities."
+                    )
+                lookup[key] = sequence
     return lookup
 
 

@@ -1368,3 +1368,41 @@ reach the application handler. The reported 307-second failure does not establis
 its cause. Check Apache `RequestReadTimeout`, proxy timeouts and the load balancer
 idle timeout together before changing them; backend code cannot extend an
 upstream request-body deadline. Resumable uploads are not implemented by this fix.
+
+### Session controls and stalled workers
+
+Uploading replacement data stops active work for the previous job and creates a
+new job ID. The interface clears its previous results, QC plots and polling state;
+late responses from another session are ignored. Newly selected files must be
+uploaded before QC can run. Each job permits one active pipeline or differential
+analysis, enforced by filesystem leases shared across web processes. Configuration
+changes are rejected while either analysis is active. Rerun logs are preserved
+under `logs/history/`; the current progress log contains only the current run.
+
+**Stop analysis** cancels queued work or terminates an isolated worker process
+group, preserving uploaded inputs and existing results. Reset data also stops any
+active work before clearing the workspace. Production must retain
+`CELLHARMONY_ISOLATE_JOBS=true` for running-worker cancellation.
+
+The isolated-worker watchdog stops a worker after 30 minutes with no child-tree
+CPU, logical I/O or log activity; quiet but active computations continue. A
+six-hour runtime ceiling also bounds continuously busy hangs. Override with
+`CELLHARMONY_WORKER_IDLE_SECONDS` (default `1800`) and
+`CELLHARMONY_WORKER_MAX_SECONDS` (default `21600`); `0` disables the respective
+limit. Missing activity telemetry alone never triggers idle termination. These
+controls apply to scALABLE-web and scALABLE-discover and require a service rebuild.
+
+Browser-close cancellation is scoped to an explicit job ID. A fresh visit without
+a job ID never cancels another session. Open tabs register independent browser
+leases for their job; closing the last tab requests cancellation after a
+20-second grace period, allowing normal reloads. A 20-second heartbeat renews a
+120-second lease so a lost close notification or browser crash is also detected.
+A remaining open tab for the same job keeps the analysis alive. These checks cover
+queued and running analyses and preserve uploaded data and saved results.
+
+`CELLHARMONY_BROWSER_CLOSE_GRACE_SECONDS` (default `20`) and
+`CELLHARMONY_BROWSER_LEASE_SECONDS` (default `120`) configure these periods. The
+server checks every five seconds; cancellation therefore follows expiry rather
+than occurring synchronously at browser close. API/CLI-only jobs without browser
+leases are unaffected. A network interruption lasting longer than the lease can
+also stop a browser-owned job. Rebuild web and Discover to enable this behavior.

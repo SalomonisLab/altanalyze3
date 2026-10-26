@@ -51,8 +51,36 @@ Input genes match the model by **symbol**; absent genes take the training mean (
 (CP10k+log1p on the all-gene library size, then z-score with training μ/σ) is applied internally; pass
 `--normalized` if the input is already CP10k+log1p.
 
+## Training (added 2026-10-21)
+`training.py` is the AML recipe as library functions, so a matched RNA-count + molecule table from
+any tissue can be trained and evaluated with it:
+
+| Function | What it does | Source of truth |
+|---|---|---|
+| `cp10k_log1p_symbol` | protein-coding (optional) symbol counts, CP10k on the all-gene library, TPM filter | `evaluate_imputation.cp10k_log1p_symbol` |
+| `cross_validate` | out-of-fold predictions; `splitter` = `kfold` (AML), `group_kfold`, `leave_one_group_out` | `evaluate_imputation.main` |
+| `per_target_metrics` | held-out Pearson/Spearman/R², top-10 gene record | `evaluate_imputation.main` |
+| `fit_final`, `to_bundle`, `write_bundle` | all-case fit and the bundle `_impute.py` loads | `build_imputation_model.build`, `make_altanalyze3_bundles.build` |
+| `nested_cross_validate` | outer leave-one-group-out; inner leave-one-group-out picks (universe, genes/target, alpha) | new |
+
+Validation (rerun after any edit to `training.py`):
+- `validation/reproduce_aml_bundle.py` rebuilds both AML models from their original inputs and
+  compares every value: expression matrix identical, out-of-fold predictions within 1.6e-14,
+  selected genes and coefficients identical, bundle arrays and held-out metadata identical
+  (PASS 2026-10-21, `validation/reproduce_aml_bundle_20261021.json`).
+- `validation/test_nested_cv.py`: per-fold predictions equal `cross_validate` exactly; a planted
+  5-gene signal is recovered (median held-out Spearman 0.387 at 22 rows / 11 groups) and pure noise
+  is not (−0.122); parallel and serial runs are identical (PASS 2026-10-21).
+  At 22 rows the recipe recovers planted signal only weakly (oracle 0.95), so small cohorts give
+  conservative accuracy. Genes outside the expressed pool (mean log-expression above the median)
+  are never selected.
+
 ## Files
-- `api.py`, `cli.py`, `_impute.py` — inference engine (no training code)
+- `api.py`, `cli.py`, `_impute.py` — inference engine
+- `training.py` — training and held-out evaluation (AML recipe + nested sweep)
+- `artifacts/rna2metabolite_lung_monash_A_aml_recipe_bundle.pkl.gz`, `artifacts/rna2metabolite_lung_lund_A_aml_recipe_bundle.pkl.gz`
+  — lung bundles (not the default); sources, held-out results and nulls in
+  [provenance/2026-10-21_lung/README.md](provenance/2026-10-21_lung/README.md)
 - `artifacts/rna2metabolite_aml_NA30_20261006_bundle.pkl.gz` — default classifier
 - `artifacts/rna2metabolite_aml_bundle.pkl.gz` — original rollback classifier
 - `VALIDATION.md` — methods + held-out evaluation

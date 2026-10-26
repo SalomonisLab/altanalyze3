@@ -29,8 +29,26 @@ from .scoring import (
     PseudobulkState,
     clean_labels,
     to_dense_frame,
+    prepare_ligand_receptor_table,
     score_ligand_receptor_expression,
 )
+
+EDGE_KEYS = ["sender_state", "receiver_state", "ligand", "receptor"]
+
+
+def load_candidate_edges(path: Path) -> pd.DataFrame:
+    """Candidate (sender_state, receiver_state, ligand, receptor) edges, labels cleaned as fastComm cleans them."""
+    cand = pd.read_csv(path, sep="\t", dtype=str)
+    missing = [c for c in EDGE_KEYS if c not in cand.columns]
+    if missing:
+        raise ValueError(f"{path}: candidate edge table is missing columns {missing}")
+    cand = cand[EDGE_KEYS].copy()
+    for c in EDGE_KEYS:
+        cand[c] = clean_labels(cand[c])
+    cand = cand.drop_duplicates().reset_index(drop=True)
+    if cand.empty:
+        raise ValueError(f"{path}: no candidate edges")
+    return cand
 
 
 @dataclass(frozen=True)
@@ -52,6 +70,9 @@ class FastCommBenchmarkParams:
     max_lr_candidates_per_state_pair: int = 25
     include_self_edges: bool = False
     top_n_stability: int = 100
+    # Candidate mode: score exactly these edges in every split, with the expression thresholds and the per-state-pair
+    # cap off, so each split reports its measured lr_expression_score instead of dropping edges below threshold.
+    candidate_edges: Optional[Path] = None
 
 
 def _edge_key_frame(scores: pd.DataFrame) -> pd.Series:
@@ -77,6 +98,7 @@ def _score_subset(
     params: FastCommBenchmarkParams,
     matrix_index=None,
     matrix_columns=None,
+    candidates: Optional[pd.DataFrame] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, object]]:
     started = time.perf_counter()
     if matrix_index is None:
@@ -88,17 +110,28 @@ def _score_subset(
                                state_key=params.state_key, min_cells=params.min_cells)
         n_cells = len(pd.Index(matrix_index).intersection(metadata.index.astype(str)))
         n_genes = len(set(clean_labels(matrix_columns)))
-    edges = score_ligand_receptor_expression(
-        state,
-        lr_table,
-        min_ligand_expr=params.min_ligand_expr,
-        min_receptor_expr=params.min_receptor_expr,
-        min_lr_expression_score=params.min_lr_expression_score,
-        include_self_edges=params.include_self_edges,
-    )
-    if params.min_lr_expression_score > 0 and not edges.empty:
-        edges = edges.loc[edges["lr_expression_score"] >= params.min_lr_expression_score].copy()
-    edges = limit_lr_candidates_per_state_pair(edges, params.max_lr_candidates_per_state_pair)
+    if candidates is not None:
+        lr = prepare_ligand_receptor_table(lr_table)
+        pairs = set(zip(candidates["ligand"], candidates["receptor"]))
+        lr = lr.loc[[(a, b) in pairs for a, b in zip(lr["ligand"], lr["receptor"])]]
+        edges = score_ligand_receptor_expression(
+            state, lr, min_ligand_expr=0.0, min_receptor_expr=0.0, min_lr_expression_score=0.0,
+            include_self_edges=params.include_self_edges,
+        )
+        if not edges.empty:
+            edges = edges.merge(candidates[EDGE_KEYS], on=EDGE_KEYS, how="inner")
+    else:
+        edges = score_ligand_receptor_expression(
+            state,
+            lr_table,
+            min_ligand_expr=params.min_ligand_expr,
+            min_receptor_expr=params.min_receptor_expr,
+            min_lr_expression_score=params.min_lr_expression_score,
+            include_self_edges=params.include_self_edges,
+        )
+        if params.min_lr_expression_score > 0 and not edges.empty:
+            edges = edges.loc[edges["lr_expression_score"] >= params.min_lr_expression_score].copy()
+        edges = limit_lr_candidates_per_state_pair(edges, params.max_lr_candidates_per_state_pair)
     receiver_delta = make_receiver_delta(state.expression)
     edges = add_receiver_response_scores(edges, receiver_delta, response_matrix)
     scores = finalize_scores(edges)
@@ -213,6 +246,7 @@ def run_benchmark(params: FastCommBenchmarkParams) -> Dict[str, object]:
         )
     )
     lr_table = _filter_lr_sources(pd.read_csv(resolved_lr_table, sep="\t"), params.lr_sources)
+    candidates = load_candidate_edges(params.candidate_edges) if params.candidate_edges else None
     response_matrix = load_response_matrix(str(resolved_response_path)) if resolved_response_path else None
     required_genes = _required_genes(lr_table, response_matrix)
     expression, matrix_index, matrix_columns, metadata, gene_diagnostics = _matrix_inputs_from_h5ad(
@@ -237,6 +271,7 @@ def run_benchmark(params: FastCommBenchmarkParams) -> Dict[str, object]:
         params=params,
         matrix_index=matrix_index,
         matrix_columns=matrix_columns,
+        candidates=candidates,
     )
     full_scores.to_csv(params.output_dir / "full_scores.tsv", sep="\t", index=False)
 
@@ -257,6 +292,7 @@ def run_benchmark(params: FastCommBenchmarkParams) -> Dict[str, object]:
                 params=params,
                 matrix_index=matrix_index,
                 matrix_columns=matrix_columns,
+                candidates=candidates,
             )
         except ValueError as exc:
             split_rows.append(
@@ -296,6 +332,8 @@ def run_benchmark(params: FastCommBenchmarkParams) -> Dict[str, object]:
         "lr_table": str(resolved_lr_table),
         "response_matrix": str(resolved_response_path) if resolved_response_path else None,
         "top_n_stability": int(params.top_n_stability),
+        "candidate_edges": str(params.candidate_edges) if params.candidate_edges else None,
+        "n_candidate_edges": int(len(candidates)) if candidates is not None else None,
         "full": full_summary,
         "n_splits": int(split_summary_df.shape[0]),
         "loaded_genes": int(len(set(clean_labels(matrix_columns)))),

@@ -128,3 +128,20 @@ def test_labels_use_existing_gene_model_sqlite_and_export_queried_rows(tmp_path)
     assert source['reference_rows']==1 and source['unresolved_blocks']==0
     assert models[0]['segments'][0]['exon_label']=='E9'
     assert rows['ENSG1'][0]['exon_id']=='E9.1' and len(source['queried_gene_rows_sha256'])==64
+
+
+def test_partner_gene_exons_of_a_multi_gene_model_are_gene_qualified(tmp_path):
+    db=tmp_path/'gene_model.db';c=sqlite3.connect(db)
+    c.execute('create table gene_model (gene,exon_id,chrom,strand,start,end,const,ens,splice_event,splice_junction)')
+    for row in [('ENSG1','E9.1','1','+',10,20),('ENSG2','E3.1','1','+',30,40)]:
+        c.execute('insert into gene_model values (?,?,?,?,?,?,?,?,?,?)',row+('','','',''))
+    c.commit();c.close()
+    segs=lambda:[dict(visible_genomic_start=10,visible_genomic_end=20),dict(visible_genomic_start=30,visible_genomic_end=40)]
+    fusion=dict(isoform_id='F',ensg='ENSG1',chrom='1',strand='+',partner_ensg='ENSG2',partner_gene_symbol='GB',segments=segs())
+    single=dict(isoform_id='S',ensg='ENSG1',chrom='1',strand='+',segments=segs())
+    source,rows=annotate_exon_map([fusion,single],db)
+    assert [b['exon_label'] for b in fusion['segments']]==['E9','GB:E3']
+    assert fusion['segments'][1]['altanalyze_region_ids']==['ENSG2:E3.1']
+    # Without partner_ensg the partner block stays unresolved, exactly as before.
+    assert single['segments'][1]['exon_label_status']=='unresolved_reference_coverage'
+    assert source['unresolved_blocks']==1 and set(rows)=={'ENSG1','ENSG2'}

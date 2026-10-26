@@ -5,6 +5,15 @@ const APP_ROOT_PATH = normalizeRootPath(window.__APP_ROOT_PATH__ || "");
 let registry = window.__REFERENCE_REGISTRY__ || { species: [] };
 let sampleCount = 0;
 let pollTimer = null;
+let jobSessionGeneration = 0;
+let uploadSubmissionInFlight = false;
+let uploadSelectionDirty = false;
+let stopSubmissionInFlight = false;
+let browserPresenceJobId = "";
+let browserPresenceTimer = null;
+let browserPresenceSequence = 0;
+const browserPresenceClientId = initializeBrowserPresenceClientId();
+const statusLoads = new Map();
 let jobStatusRequest = 0;
 let appliedJobStatusRequest = 0;
 const VISUALIZATION_PANELS = ["viz1", "viz2"];
@@ -606,14 +615,15 @@ async function saveSvgMarkupAsPdf(svgMarkup, filename, caption = "") {
   const availableWidth = pageWidth - margin * 2;
   pdf.setFontSize(9);
   const captionLines = caption ? pdf.splitTextToSize(caption.replaceAll("→", "->"), availableWidth) : [];
-  const captionHeight = captionLines.length ? captionLines.length * 11 + 12 : 0;
-  if (captionLines.length) pdf.text(captionLines, margin, margin + 9);
+  const captionGap = 12;
+  const captionHeight = captionLines.length ? captionLines.length * 11 + captionGap + 12 : 0;
+  if (captionLines.length) pdf.text(captionLines, margin, pageHeight - margin - captionHeight + captionGap + 9);
   const availableHeight = pageHeight - margin * 2 - captionHeight;
   const scale = Math.min(availableWidth / width, availableHeight / height, 1);
   const renderWidth = width * scale;
   const renderHeight = height * scale;
   const x = (pageWidth - renderWidth) / 2;
-  const y = margin + captionHeight + (availableHeight - renderHeight) / 2;
+  const y = margin + (availableHeight - renderHeight) / 2;
   // svg2pdf reads the SVG viewport, not the width/height options below. Keep
   // the original coordinate system while fitting the whole graph on the page.
   if (!documentSvg.hasAttribute("viewBox")) documentSvg.setAttribute("viewBox", `0 0 ${width} ${height}`);
@@ -900,6 +910,7 @@ function releaseVisualizationResources(panelKey, plot) {
 }
 
 function resetVisualizationSurface(panelKey) {
+  document.getElementById(`${panelPlotId(panelKey)}-communication-legend`)?.remove();
   parkPanelFigure(panelKey);
   hideMarkerHeatmapView(panelKey);
   markerHeatmapRenderTokens[panelKey] = null;
@@ -1085,6 +1096,8 @@ const FASTCOMM_PLOT_OPTIONS = [
   { id: "state_heatmap", label: "Cell-state heatmap" },
   { id: "top_table", label: "Top interactions table" },
   { id: "per_sample", label: "Per-sample comparison" },
+  { id: "shared_network", label: "Cell-state network, shared layout" },
+  { id: "differential_network", label: "Differential network (tested)" },
 ];
 
 function panelCommunicationPlotType(panelKey) {
@@ -1093,7 +1106,7 @@ function panelCommunicationPlotType(panelKey) {
 }
 
 function fastCommPlotNeedsPopulation(plotType) {
-  return !["cell_state_network", "state_heatmap"].includes(String(plotType || "").trim().toLowerCase());
+  return !["cell_state_network", "state_heatmap", "shared_network", "differential_network"].includes(String(plotType || "").trim().toLowerCase());
 }
 
 function panelMarkerAnalysis(panelKey) {
@@ -1655,14 +1668,71 @@ function setNetworkHoverTooltip(panelKey, text, renderedPosition = null) {
   }
 }
 
+function fastCommNetworkSvg(cy, payload = {}) {
+  const markup = cy.svg({ scale: 1, full: true });
+  const legend = payload.communication_legend;
+  if (!legend) return markup;
+  const ns = "http://www.w3.org/2000/svg";
+  const parsed = new DOMParser().parseFromString(markup, "image/svg+xml");
+  const graph = parsed.documentElement;
+  const size = getSvgIntrinsicSize(graph);
+  const width = Math.max(850, size.width), legendHeight = 195;
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("xmlns", ns);
+  svg.setAttribute("width", String(width));
+  svg.setAttribute("height", String(size.height + legendHeight));
+  svg.setAttribute("viewBox", `0 0 ${width} ${size.height + legendHeight}`);
+  graph.setAttribute("x", String((width - size.width) / 2));
+  graph.setAttribute("y", "0");
+  svg.appendChild(document.importNode(graph, true));
+  const add = (name, attrs, text = null) => {
+    const node = document.createElementNS(ns, name);
+    Object.entries(attrs).forEach(([key, value]) => node.setAttribute(key, String(value)));
+    if (text !== null) node.textContent = text;
+    svg.appendChild(node);
+    return node;
+  };
+  const y = size.height + 24;
+  add("rect", { x: 0, y: size.height, width, height: legendHeight, fill: "#ffffff" });
+  add("text", { x: 24, y, "font-family": "Arial", "font-size": 15, fill: "#111111" }, legend.node_title);
+  const stops = legend.node_stops || [];
+  // Explicit solid swatches form the gradient in both SVG and svg2pdf; this
+  // avoids relying on PDF support for SVG paint-server gradients.
+  for (let index = 0; index <= 20; index += 1) {
+    const value = index / 20;
+    const left = value <= .5 ? stops[0] : stops[1], right = value <= .5 ? stops[1] : stops[2];
+    const blend = value <= .5 ? value * 2 : (value - .5) * 2;
+    const color = "#" + [1, 3, 5].map((offset) => Math.round(
+      parseInt(left.color.slice(offset, offset + 2), 16) * (1 - blend)
+      + parseInt(right.color.slice(offset, offset + 2), 16) * blend
+    ).toString(16).padStart(2, "0")).join("");
+    add("rect", { x: 24 + index * 15, y: y + 12, width: 15, height: 13, fill: color });
+  }
+  ["Receiver (0)", "Balanced (0.5)", "Sender (1)"].forEach((text, index) =>
+    add("text", { x: 24 + index * 157.5, y: y + 43, "text-anchor": index === 2 ? "end" : index === 1 ? "middle" : "start",
+      "font-family": "Arial", "font-size": 13, fill: "#111111" }, text));
+  add("circle", { cx: 405, cy: y + 19, r: 8, fill: legend.isolated_color, stroke: "#777777" });
+  add("text", { x: 422, y: y + 24, "font-family": "Arial", "font-size": 13, fill: "#111111" }, "No displayed arrows");
+  (legend.edges || []).forEach((edge, index) => {
+    const ey = y + 72 + index * 24;
+    add("line", { x1: 24, y1: ey, x2: 72, y2: ey, stroke: edge.color, "stroke-width": 4 });
+    add("polygon", { points: `72,${ey - 5} 82,${ey} 72,${ey + 5}`, fill: edge.color });
+    add("text", { x: 96, y: ey + 5, "font-family": "Arial", "font-size": 14, fill: "#111111" }, edge.label);
+  });
+  return new XMLSerializer().serializeToString(svg);
+}
+
 function renderFastCommNetwork(panelKey, payload) {
   resetVisualizationSurface(panelKey);
   const plot = document.getElementById(panelPlotId(panelKey));
+  document.getElementById(`${panelPlotId(panelKey)}-communication-legend`)?.remove();
   const elements = payload.elements || [];
   if (!elements.length) {
     renderVisualizationMessage(panelKey, payload.message || `No fastComm interactions were available for ${payload.population}.`, "fastComm");
     return;
   }
+  // Shared-layout and differential networks carry fixed node positions so several plots line up.
+  const presetLayout = elements.filter((element) => !element.data?.source).every((element) => element.position);
   expressionCyByPanel[panelKey] = cytoscape({
     container: plot,
     elements,
@@ -1671,6 +1741,8 @@ function renderFastCommNetwork(panelKey, payload) {
         selector: "node",
         style: {
           "background-color": "data(color)",
+          "z-index-compare": "manual",
+          "z-index": 20,
           label: "data(label)",
           color: "#0f172a",
           "font-size": 12,
@@ -1697,11 +1769,27 @@ function renderFastCommNetwork(panelKey, payload) {
         selector: "edge",
         style: {
           width: "data(weight)",
+          "z-index-compare": "manual",
+          "z-index": 10,
           "line-color": "#0f766e",
           "target-arrow-color": "#0f766e",
           "target-arrow-shape": "triangle",
           "curve-style": "bezier",
           opacity: "data(edge_opacity)",
+        },
+      },
+      {
+        selector: "edge[edge_color]",
+        style: {
+          "line-color": "data(edge_color)",
+          "target-arrow-color": "data(edge_color)",
+        },
+      },
+      {
+        selector: "edge[?context_only]",
+        style: {
+          "z-index-compare": "manual",
+          "z-index": 0,
         },
       },
       {
@@ -1726,12 +1814,14 @@ function renderFastCommNetwork(panelKey, payload) {
         },
       },
     ],
-    layout: {
-      name: "circle",
-      animate: true,
-      fit: true,
-      padding: 56,
-    },
+    layout: presetLayout
+      ? { name: "preset", fit: true, padding: 56 }
+      : {
+        name: "circle",
+        animate: true,
+        fit: true,
+        padding: 56,
+      },
   });
   expressionCyByPanel[panelKey].on("mouseover", "edge", (event) => {
     event.target.addClass("hovered");
@@ -1741,6 +1831,13 @@ function renderFastCommNetwork(panelKey, payload) {
     event.target.removeClass("hovered");
     setNetworkHoverTooltip(panelKey, "");
   });
+  expressionCyByPanel[panelKey].on("mouseover", "node", (event) => {
+    const node = event.target;
+    if (node.data("sender_fraction") !== undefined) {
+      setNetworkHoverTooltip(panelKey, `${node.data("label")}: ${node.data("outgoing_arrows")} outgoing, ${node.data("incoming_arrows")} incoming displayed arrows.`, event.renderedPosition);
+    }
+  });
+  expressionCyByPanel[panelKey].on("mouseout", "node", () => setNetworkHoverTooltip(panelKey, ""));
   expressionCyByPanel[panelKey].on("tap", "edge", (event) => {
     event.target.addClass("hovered");
     setNetworkHoverTooltip(panelKey, event.target.data("tooltip"), event.renderedPosition);
@@ -1752,6 +1849,24 @@ function renderFastCommNetwork(panelKey, payload) {
       setPanelSummary(panelKey, `${directionLabel} cell communication view${payload.population ? ` for ${payload.population}` : ""}; selected ${label}.`);
     }
   });
+  if (payload.communication_legend) {
+    const legend = document.createElement("div");
+    legend.id = `${panelPlotId(panelKey)}-communication-legend`;
+    legend.style.cssText = "padding:12px;background:white;color:#111;font-size:12px;line-height:1.5";
+    const title = document.createElement("div");
+    title.textContent = payload.communication_legend.node_title;
+    const gradient = document.createElement("div");
+    gradient.style.cssText = "width:260px;height:14px;background:linear-gradient(to right,#5e3c99,#f7f7f7,#018571)";
+    const labels = document.createElement("div");
+    labels.textContent = "Receiver (0) — balanced (0.5) — sender (1); gray: no displayed arrows.";
+    legend.append(title, gradient, labels);
+    (payload.communication_legend.edges || []).forEach((item) => {
+      const row = document.createElement("div"), swatch = document.createElement("span");
+      swatch.style.cssText = `display:inline-block;width:28px;border-top:3px solid ${item.color};margin-right:8px;vertical-align:middle`;
+      row.append(swatch, document.createTextNode(item.label)); legend.appendChild(row);
+    });
+    plot.after(legend);
+  }
 }
 
 function renderFastCommHeatmap(panelKey, payload) {
@@ -2121,6 +2236,11 @@ document.addEventListener("DOMContentLoaded", () => {
   initGeneSetBoxes();
   initChatTab();
   restoreJobFromUrl();
+  window.addEventListener("pagehide", releaseBrowserPresence);
+  window.addEventListener("pageshow", () => {
+    const jobId = getResultsJobId();
+    if (jobId) void syncBrowserPresence(jobId, true).catch(console.warn);
+  });
 });
 
 async function restoreJobFromUrl() {
@@ -2128,9 +2248,10 @@ async function restoreJobFromUrl() {
   if (!jobId) return;
   const summaryLayer = new URLSearchParams(window.location.search).get("summary_layer");
   if (summaryLayer && /^[a-zA-Z0-9_]+$/.test(summaryLayer)) document.cookie = `scalable_layer_${jobId}=${encodeURIComponent(summaryLayer)}; path=${APP_ROOT_PATH || "/"}; SameSite=Lax`;
+  const session = jobSessionGeneration;
   const generation = explorePayloadCache.generation;
   const request = ++jobStatusRequest;
-  const isCurrent = () => generation === explorePayloadCache.generation
+  const isCurrent = () => session === jobSessionGeneration && generation === explorePayloadCache.generation
     && request >= appliedJobStatusRequest && (!getResultsJobId() || getResultsJobId() === jobId);
   let accepted = false;
   try {
@@ -2169,8 +2290,10 @@ async function restoreJobFromUrl() {
     if (!accepted && !isCurrent()) return;
     alert(error.message || "Unable to reopen this job.");
   } finally {
-    restoringSavedSession = false;
-    if (!currentJobStatus) loadReferencePreview();
+    if (session === jobSessionGeneration) {
+      restoringSavedSession = false;
+      if (!currentJobStatus) loadReferencePreview();
+    }
   }
 }
 
@@ -2339,6 +2462,12 @@ function addSampleRow() {
 
 function hookForms() {
   document.getElementById("job-form").addEventListener("submit", handleJobSubmit);
+  document.getElementById("job-form").addEventListener("change", (event) => {
+    if (event.target.matches(".sample-file, .sample-name")) {
+      uploadSelectionDirty = true;
+      updateAnalysisRunControl();
+    }
+  });
   document.getElementById("qc-form").addEventListener("submit", handleQcSubmit);
   document.getElementById("analysis-mode")?.addEventListener("change", () => {
     syncAnalysisControls();
@@ -2346,7 +2475,14 @@ function hookForms() {
   });
   document.getElementById("differential-form").addEventListener("submit", handleDifferentialSubmit);
   document.getElementById("results-form").addEventListener("submit", handleResultsSubmit);
-  document.getElementById("reset-data-btn").addEventListener("click", resetWorkspaceData);
+  document.getElementById("reset-data-btn").addEventListener("click", async () => {
+    try { await stopCurrentAnalysis(); resetWorkspaceData(); }
+    catch (err) { alert(err.message); }
+  });
+  document.getElementById("stop-analysis-btn")?.addEventListener("click", async () => {
+    try { await stopCurrentAnalysis(); await loadJobState(getResultsJobId()); }
+    catch (err) { alert(err.message); }
+  });
   document.getElementById("results-job-id").addEventListener("change", handleResultsJobChange);
   VISUALIZATION_PANELS.forEach((panelKey) => {
     document.getElementById(panelElementId(panelKey, "mode")).addEventListener("change", () => {
@@ -2593,7 +2729,12 @@ function updateResetDataButton() {
   button.classList.toggle("hidden", !hasDataset);
 }
 
-function resetWorkspaceData() {
+function resetWorkspaceData(options = {}) {
+  releaseBrowserPresence();
+  ++jobSessionGeneration;
+  uploadSelectionDirty = false;
+  qcSubmissionJobId = "";
+  restoringSavedSession = false;
   explorePayloadCache.clear();
   VISUALIZATION_PANELS.forEach(panel => {panelVisualizationRequest[panel] += 1;});
   setSessionUrl(null);
@@ -2703,10 +2844,12 @@ function resetWorkspaceData() {
     ambientLiveCaption.textContent = "Ambient RNA correction percentages will appear here when correction is performed.";
   }
 
-  const sampleContainer = document.getElementById("sample-container");
-  sampleContainer.innerHTML = "";
-  sampleCount = 0;
-  addSampleRow();
+  if (!options.preserveUploads) {
+    const sampleContainer = document.getElementById("sample-container");
+    sampleContainer.innerHTML = "";
+    sampleCount = 0;
+    addSampleRow();
+  }
   updateImputeModalityField();
 
   setExplorerTab("run");
@@ -2770,8 +2913,80 @@ function uploadFormDataWithProgress(url, formData, onProgress) {
   });
 }
 
+function initializeBrowserPresenceClientId() {
+  const fresh = window.crypto?.randomUUID?.() || `browser-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  try {
+    // Preserve only on reload. A newly opened/duplicated tab gets its own lease
+    // even when the browser copies sessionStorage from an opener.
+    const reload = performance.getEntriesByType("navigation")[0]?.type === "reload";
+    const id = (reload && sessionStorage.getItem("scalable_browser_client_id")) || fresh;
+    sessionStorage.setItem("scalable_browser_client_id", id);
+    return id;
+  } catch (_) { return fresh; }
+}
+
+function nextBrowserPresenceSequence() {
+  browserPresenceSequence = Math.max(browserPresenceSequence + 1, Date.now());
+  return browserPresenceSequence;
+}
+
+async function syncBrowserPresence(jobId, refresh = false) {
+  if (!jobId || window.__SCALABLE_VIEWER__) return;
+  const changed = browserPresenceJobId !== jobId;
+  if (changed) {
+    releaseBrowserPresence();
+    browserPresenceJobId = jobId;
+    browserPresenceTimer = setInterval(() => {
+      void syncBrowserPresence(jobId, true).catch(console.warn);
+    }, 20000);
+  }
+  if (!changed && !refresh) return;
+  const response = await fetch(apiPath(`/jobs/${jobId}/browser-presence`), {
+    method: "POST", headers: {"Content-Type": "application/json"}, keepalive: true,
+    body: JSON.stringify({client_id: browserPresenceClientId, state: "active", sequence: nextBrowserPresenceSequence()}),
+  });
+  if (!response.ok) throw new Error("Unable to register this browser session. Retry before starting analysis.");
+}
+
+function releaseBrowserPresence() {
+  if (browserPresenceTimer) clearInterval(browserPresenceTimer);
+  browserPresenceTimer = null;
+  const jobId = browserPresenceJobId;
+  browserPresenceJobId = "";
+  if (!jobId || window.__SCALABLE_VIEWER__) return;
+  const body = JSON.stringify({client_id: browserPresenceClientId, state: "leaving", sequence: nextBrowserPresenceSequence()});
+  const url = apiPath(`/jobs/${jobId}/browser-presence`);
+  if (!navigator.sendBeacon?.(url, new Blob([body], {type: "application/json"}))) {
+    void fetch(url, {method: "POST", headers: {"Content-Type": "application/json"}, body, keepalive: true}).catch(() => {});
+  }
+}
+
+async function stopCurrentAnalysis() {
+  const jobId = getResultsJobId();
+  if (!jobId) return;
+  if (stopSubmissionInFlight) throw new Error("The current analysis is already stopping.");
+  ++jobSessionGeneration;
+  stopSubmissionInFlight = true;
+  updateAnalysisRunControl();
+  try {
+    const response = await fetch(apiPath(`/jobs/${jobId}/cancel`), {method: "POST"});
+    const data = await parseApiResponse(response);
+    if (!response.ok) throw new Error(data.detail || "Unable to stop this analysis.");
+    if (response.status === 202) {
+      document.getElementById("qc-cell-status").textContent = "Stopping analysis…";
+      throw new Error("The analysis is stopping. Wait for the stopped status before starting a new session.");
+    }
+    return data;
+  } finally {
+    stopSubmissionInFlight = false;
+    updateAnalysisRunControl();
+  }
+}
+
 async function handleJobSubmit(evt) {
   evt.preventDefault();
+  if (uploadSubmissionInFlight) return;
+  if (qcSubmissionJobId) { alert("Wait for the analysis to finish starting before replacing this session."); return; }
   const species = document.getElementById("species-select").value;
   const reference = document.getElementById("reference-select").value;
   const formData = new FormData();
@@ -2804,16 +3019,25 @@ async function handleJobSubmit(evt) {
   }
 
   const submitBtn = document.getElementById("upload-submit-btn");
+  const previousJobId = getResultsJobId();
+  if (previousJobId) formData.append("previous_job_id", previousJobId);
+  uploadSubmissionInFlight = true;
+  let session;
   try {
     submitBtn.disabled = true;
+    await stopCurrentAnalysis();
+    resetWorkspaceData({preserveUploads: true});
+    session = jobSessionGeneration;
     setUploadProgress(0, true);
     const resp = await uploadFormDataWithProgress(apiPath("/jobs"), formData, (percent) => {
-      setUploadProgress(percent, true);
+      if (session === jobSessionGeneration) setUploadProgress(percent, true);
     });
+    if (session !== jobSessionGeneration) return;
     if (!resp.ok) {
       throw new Error(resp.data.detail || "Failed to create job.");
     }
     const data = resp.data;
+    uploadSelectionDirty = false;
     setSessionUrl(data.job_id);
     setUploadProgress(100, true);
     document.getElementById("upload-job-id").value = data.job_id;
@@ -2831,12 +3055,18 @@ async function handleJobSubmit(evt) {
     setUploadProgress(0, false);
     alert(err.message);
   } finally {
+    uploadSubmissionInFlight = false;
     submitBtn.disabled = false;
+    updateAnalysisRunControl();
   }
 }
 
 async function handleQcSubmit(evt) {
   evt.preventDefault();
+  if (uploadSelectionDirty || uploadSubmissionInFlight) {
+    alert("Upload the newly selected data before running QC.");
+    return;
+  }
   const jobId = document.getElementById("qc-job-id").value.trim();
   if (!jobId) {
     alert("Enter a job id.");
@@ -2866,10 +3096,13 @@ async function handleQcSubmit(evt) {
   if (typeof window.scalableQcOptions === "function") {
     Object.assign(payload, window.scalableQcOptions(evt.target));
   }
+  ++jobSessionGeneration;
+  const session = jobSessionGeneration;
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   qcSubmissionJobId = jobId;
   updateAnalysisRunControl();
   document.getElementById("qc-cell-status").textContent = "Starting analysis…";
-  const isCurrentJob = () => document.getElementById("qc-job-id").value.trim() === jobId;
+  const isCurrentJob = () => session === jobSessionGeneration && document.getElementById("qc-job-id").value.trim() === jobId;
   const recoverActiveSubmission = async (resp) => {
     if (resp.status !== 409 || !isCurrentJob()) return false;
     const statusResp = await fetch(apiPath(`/jobs/${jobId}/status`), { cache: "no-store" });
@@ -2881,6 +3114,8 @@ async function handleQcSubmit(evt) {
     return true;
   };
   try {
+    await syncBrowserPresence(jobId, true);
+    if (!isCurrentJob()) return;
     if (selectedReferenceDiffersFromLoadedJob()) {
       const configureResp = await fetch(apiPath(`/jobs/${jobId}/configure`), {
         method: "POST",
@@ -2956,6 +3191,7 @@ async function handleQcSubmit(evt) {
 
 async function handleDifferentialSubmit(evt) {
   evt.preventDefault();
+  const session = jobSessionGeneration;
   const jobId = document.getElementById("results-job-id").value.trim();
   if (!jobId) {
     alert("Enter a completed job id in Section 3 first.");
@@ -2972,12 +3208,15 @@ async function handleDifferentialSubmit(evt) {
   };
 
   try {
+    await syncBrowserPresence(jobId, true);
+    if (session !== jobSessionGeneration || jobId !== getResultsJobId()) return;
     const resp = await fetch(apiPath(`/jobs/${jobId}/differential`), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
     const data = await parseApiResponse(resp);
+    if (session !== jobSessionGeneration || jobId !== getResultsJobId()) return;
     if (!resp.ok) {
       throw new Error(data.detail || "Failed to start differential analysis.");
     }
@@ -3005,9 +3244,20 @@ function handleResultsSubmit(evt) {
 }
 
 async function loadJobState(jobId, quiet = false) {
+  if (!jobId) return;
+  const key = `${jobSessionGeneration}:${jobId}`;
+  if (statusLoads.has(key)) return statusLoads.get(key);
+  const request = loadJobStateOnce(jobId, quiet);
+  statusLoads.set(key, request);
+  try { return await request; }
+  finally { if (statusLoads.get(key) === request) statusLoads.delete(key); }
+}
+
+async function loadJobStateOnce(jobId, quiet = false) {
+  const session = jobSessionGeneration;
   const generation = explorePayloadCache.generation;
   const request = ++jobStatusRequest;
-  const isCurrent = () => generation === explorePayloadCache.generation
+  const isCurrent = () => session === jobSessionGeneration && generation === explorePayloadCache.generation
     && request >= appliedJobStatusRequest && getResultsJobId() === jobId;
   let accepted = false;
   try {
@@ -3048,7 +3298,9 @@ function setSessionUrl(jobId) {
 }
 
 function applyJobStatus(jobId, data) {
-  explorePayloadCache.setIdentity(JSON.stringify([jobId, data.status, data.analysis_completed_at,
+  if (getResultsJobId() && getResultsJobId() !== jobId) return;
+  void syncBrowserPresence(jobId).catch(console.warn);
+  explorePayloadCache.setIdentity(JSON.stringify([jobId, data.execution_id, data.status, data.analysis_completed_at,
     data.cluster_key, data.active_cell_state_layer, data.reference, data.bundle?.built_utc,
     data.artifacts?.combined_h5ad, data.modality_artifacts]));
   setSessionUrl(jobId);
@@ -3151,9 +3403,16 @@ function updateAnalysisRunControl() {
   const button = document.querySelector('#qc-form button[type="submit"]');
   if (!button) return;
   const submitting = Boolean(qcSubmissionJobId && qcSubmissionJobId === document.getElementById("qc-job-id")?.value.trim());
-  const active = ["queued", "processing"].includes(currentJobStatus);
-  button.disabled = submitting || active;
-  button.textContent = active ? (currentJobStatus === "queued" ? "Queued…" : "Running…")
+  const pipelineActive = ["queued", "processing"].includes(currentJobStatus);
+  const active = pipelineActive || ["queued", "processing"].includes(currentDifferentialState?.status);
+  const stop = document.getElementById("stop-analysis-btn");
+  if (stop) {
+    stop.classList.toggle("hidden", !active && !stopSubmissionInFlight);
+    stop.disabled = stopSubmissionInFlight;
+    stop.textContent = stopSubmissionInFlight ? "Stopping…" : "Stop analysis";
+  }
+  button.disabled = submitting || active || uploadSelectionDirty || uploadSubmissionInFlight || stopSubmissionInFlight;
+  button.textContent = uploadSelectionDirty ? "Upload new data first" : active ? (!pipelineActive ? "Differential running…" : currentJobStatus === "queued" ? "Queued…" : "Running…")
     : submitting ? "Starting…" : "Save QC and run";
   button.setAttribute("aria-busy", String(submitting || active));
 }
@@ -3856,6 +4115,7 @@ function updateDifferentialUi(state) {
     clearDifferentialGeneFilter();
   }
   currentDifferentialState = state;
+  updateAnalysisRunControl();
   const panel = document.getElementById("differential-panel");
   const emptyState = document.getElementById("differential-tab-empty");
   const resultsView = document.getElementById("differential-results-view");
@@ -6972,8 +7232,9 @@ async function downloadVisualizationImage(panelKey) {
     if (cy) {
       try {
         await ensureCytoscapeSvgLoaded();
-        await saveSvgMarkupAsPdf(cy.svg({ scale: 1, full: true }),
-          buildPdfFilename([jobId, panelKey, plotType], plotType));
+        await saveSvgMarkupAsPdf(fastCommNetworkSvg(cy, panelPlotData[panelKey]?.payload || {}),
+          buildPdfFilename([jobId, panelKey, plotType], plotType),
+          String(panelPlotData[panelKey]?.payload?.caption || ""));
       } catch (err) {
         showDownloadError(err);
       }

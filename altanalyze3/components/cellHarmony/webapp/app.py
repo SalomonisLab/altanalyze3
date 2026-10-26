@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import asyncio
 import json
 import math
 import logging
@@ -11,7 +12,7 @@ import threading
 import time
 import urllib.request
 import weakref
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -34,12 +35,15 @@ from pydantic import BaseModel, Field
 from altanalyze3.components.cellHarmony.flask import pipeline as pipeline_mod
 from altanalyze3.components.cellHarmony.flask.job_manager import JobStore
 from altanalyze3.components.cellHarmony.flask.tasks import JobRunner
+from altanalyze3.components.cellHarmony.flask.job_control import JobBusyError, control_job
+from altanalyze3.components.cellHarmony.flask.browser_presence import record_presence
 from altanalyze3.components.visualization import approximate_umap as approx_mod
 from altanalyze3.components.rna2metabolite import annotations as metabolite_annotations
 
 from .memory_cache import BoundedCache, CacheBudget
 from .plot_build import PlotBuildQueue
 from .config import BASE_DIR, load_config
+from .feature_lookup import AmbiguousFeatureError
 from . import job_bundle as _job_bundle
 from .grn_data import UploadedGrnData, completed_differentials, comparison_entry
 from altanalyze3.components.cellHarmony import grn_analysis as gnet
@@ -2309,7 +2313,27 @@ def _build_differential_cell_communication_network_payload(app: FastAPI, meta: D
     subset = detailed.loc[detailed["population"] == population].copy()
     if subset.empty:
         return {"population": population, "network_type": "cell_communication_diff", "elements": [], "default_gene": None}
+    elements, subset = _cell_communication_diff_elements(subset, focus=population)
+    default_gene = str(subset.iloc[0].get("gene", "") or "").strip() or None
+    return {
+        "population": population,
+        "network_type": "cell_communication_diff",
+        "elements": elements,
+        "default_gene": default_gene,
+    }
 
+
+def _cell_communication_diff_elements(
+    subset: pd.DataFrame,
+    *,
+    focus: str = "",
+    states: Optional[List[str]] = None,
+    positions: Optional[Dict[str, Dict[str, float]]] = None,
+    pair_limit: Optional[int] = None,
+) -> tuple[List[Dict[str, object]], pd.DataFrame]:
+    """Sender -> receiver edges of a cell-communication differential: summed delta per pair,
+    red when higher in the case group, blue when higher in the control group."""
+    subset = subset.copy()
     for column in ("delta_score", "case_mean_score", "control_mean_score", "fdr", "pval", "lr_expression_score", "receiver_response_score"):
         subset[column] = pd.to_numeric(subset.get(column), errors="coerce")
     subset["abs_delta_score"] = pd.to_numeric(subset.get("abs_delta_score"), errors="coerce").fillna(subset["delta_score"].abs())
@@ -2370,13 +2394,17 @@ def _build_differential_cell_communication_network_payload(app: FastAPI, meta: D
             }
         )
 
+    if pair_limit is not None:
+        pair_rows = sorted(pair_rows, key=lambda item: float(item["total_score"]), reverse=True)[: max(1, int(pair_limit))]
     pair_rows = _annotate_fastcomm_pair_visual_weights(pair_rows)
-    states = sorted({str(population).strip(), *subset["sender_state"].astype(str).tolist(), *subset["receiver_state"].astype(str).tolist()})
-    positions = _communication_focus_positions(states, population)
+    if states is None:
+        states = sorted({str(focus).strip(), *subset["sender_state"].astype(str).tolist(), *subset["receiver_state"].astype(str).tolist()})
+    if positions is None:
+        positions = _communication_focus_positions(states, focus)
     nodes: Dict[str, Dict[str, object]] = {}
     for state in states:
         node_id = f"state::{state}"
-        is_focus = state == str(population).strip()
+        is_focus = state == str(focus).strip()
         nodes[node_id] = {
             "data": {
                 "id": node_id,
@@ -2422,14 +2450,7 @@ def _build_differential_cell_communication_network_payload(app: FastAPI, meta: D
                 }
             }
         )
-
-    default_gene = str(subset.iloc[0].get("gene", "") or "").strip() or None
-    return {
-        "population": population,
-        "network_type": "cell_communication_diff",
-        "elements": list(nodes.values()) + edges,
-        "default_gene": default_gene,
-    }
+    return list(nodes.values()) + edges, subset
 
 
 def _build_differential_cell_communication_table_payload(app: FastAPI, meta: Dict, population: str, limit: int = 40) -> Dict:
@@ -2872,12 +2893,20 @@ def _fastcomm_split_scores_table(app: FastAPI, meta: Dict) -> pd.DataFrame:
     return scores
 
 
-def _prepare_fastcomm_scores(scores: pd.DataFrame) -> pd.DataFrame:
-    required = {"sender_state", "receiver_state", "ligand", "receptor", "fastcomm_score"}
+def _fastcomm_plot_score_column(meta: Dict) -> str:
+    # fastcomm_score is scaled by each split's own top edge, so a job can plot lr_expression_score
+    # (one log1p CP10k scale for every sample) by setting fastcomm_analysis.plot_score_column.
+    return str(_fastcomm_analysis(meta).get("plot_score_column") or "fastcomm_score").strip() or "fastcomm_score"
+
+
+def _prepare_fastcomm_scores(scores: pd.DataFrame, score_column: str = "fastcomm_score") -> pd.DataFrame:
+    required = {"sender_state", "receiver_state", "ligand", "receptor", "fastcomm_score", score_column}
     missing = required.difference(scores.columns)
     if missing:
         raise ValueError(f"fastComm scores missing required columns: {', '.join(sorted(missing))}")
     frame = scores.copy()
+    if score_column != "fastcomm_score":
+        frame["fastcomm_score"] = frame[score_column]
     for column in ("sender_state", "receiver_state", "ligand", "receptor"):
         frame[column] = frame[column].astype(str)
     for column in ("response_key", "response_support_genes", "pathway"):
@@ -2924,9 +2953,41 @@ def _fastcomm_selected_splits(
     if not sample_key:
         return None
     selected = _display_filter_values(display_filters, sample_key)
+    # Communication is scored per sample, so a sample-level annotation (an age group, a condition)
+    # selects the samples that carry it. It was ignored before, which pooled every sample silently.
+    state_fields = {sample_key, str(analysis.get("state_key") or "").strip(), str(meta.get("cluster_key") or "").strip()}
+    for field, values in display_filters:
+        field = str(field or "").strip()
+        if not field or field in state_fields or not values:
+            continue
+        annotated = _fastcomm_samples_for_annotation(app, meta, sample_key, field, values)
+        selected = annotated if not selected else [value for value in selected if value in set(annotated)]
+        if not selected:
+            raise HTTPException(status_code=404, detail=f"No {sample_key} matches every display filter.")
     if not selected:
         return None
     return sorted(dict.fromkeys(str(value).strip() for value in selected if str(value).strip()))
+
+
+def _fastcomm_samples_for_annotation(app: FastAPI, meta: Dict, sample_key: str, field: str, values: List[str]) -> List[str]:
+    obs_values = _get_expression_cache(app, meta, modality="rna").get("obs_filter_values") or {}
+    samples, annotation = obs_values.get(sample_key), obs_values.get(field)
+    if samples is None or annotation is None:
+        raise HTTPException(status_code=400, detail=f"Cell communication was scored per {sample_key}; {field} cannot be matched to {sample_key}.")
+    frame = pd.DataFrame({"sample": np.asarray(samples, dtype=str), "value": np.asarray(annotation, dtype=str)})
+    frame = frame.loc[frame["sample"] != ""]
+    mixed = frame.groupby("sample")["value"].nunique()
+    mixed = sorted(mixed.index[mixed > 1].astype(str).tolist())
+    if mixed:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"{field} varies within {len(mixed)} {sample_key} value(s) ({', '.join(mixed[:5])}); cell communication "
+                    f"was scored per {sample_key}, so this filter cannot select whole samples. Filter by {sample_key} instead."),
+        )
+    chosen = sorted(frame.loc[frame["value"].isin({str(value).strip() for value in values}), "sample"].unique().tolist())
+    if not chosen:
+        raise HTTPException(status_code=404, detail=f"No {sample_key} carries {field} = {', '.join(values)}.")
+    return chosen
 
 
 def _display_filter_values(display_filters: Optional[List[tuple[str, List[str]]]], field: str) -> List[str]:
@@ -3068,9 +3129,31 @@ def _annotate_fastcomm_pair_visual_weights(pair_rows: List[Dict[str, object]]) -
     return weighted_rows
 
 
-def _build_fastcomm_network_elements(pair_rows: List[Dict[str, object]], *, focus: str = "") -> List[Dict[str, object]]:
-    pair_rows = _annotate_fastcomm_pair_visual_weights(pair_rows)
+def _scale_fastcomm_pair_visual_weights(pair_rows: List[Dict[str, object]], scale: tuple[float, float]) -> List[Dict[str, object]]:
+    # One fixed total_score range for several plots, so the same width means the same strength in each.
+    low, high = float(scale[0]), float(scale[1])
+    weighted: List[Dict[str, object]] = []
+    for row in pair_rows:
+        total = float(row.get("total_score", 0.0) or 0.0)
+        norm = min(1.0, max(0.0, (total - low) / (high - low))) if high - low > 1e-12 else 1.0
+        weighted.append({**row, "visual_norm": norm, "weight": 2.0 + 12.0 * norm, "edge_opacity": 0.3 + 0.65 * norm})
+    return weighted
+
+
+def _build_fastcomm_network_elements(
+    pair_rows: List[Dict[str, object]],
+    *,
+    focus: str = "",
+    positions: Optional[Dict[str, Dict[str, float]]] = None,
+    scale: Optional[tuple[float, float]] = None,
+) -> List[Dict[str, object]]:
+    pair_rows = _annotate_fastcomm_pair_visual_weights(pair_rows) if scale is None else _scale_fastcomm_pair_visual_weights(pair_rows, scale)
     nodes: Dict[str, Dict[str, object]] = {}
+    for state, position in (positions or {}).items():
+        nodes[f"state::{state}"] = {
+            "data": {"id": f"state::{state}", "label": state, "node_type": "state", "color": "#e0f2fe"},
+            "position": position,
+        }
     if focus:
         focus_id = f"state::{focus}"
         nodes[focus_id] = {"data": {"id": focus_id, "label": focus, "node_type": "focus", "color": "#0f766e"}}
@@ -3130,7 +3213,7 @@ def _build_fastcomm_network_elements(pair_rows: List[Dict[str, object]], *, focu
 
 
 def _build_fastcomm_payload(app: FastAPI, meta: Dict, population: str, direction: str = "incoming", limit: int = 35) -> Dict:
-    scores = _prepare_fastcomm_scores(_fastcomm_scores_table(app, meta))
+    scores = _prepare_fastcomm_scores(_fastcomm_scores_table(app, meta), _fastcomm_plot_score_column(meta))
 
     focus = str(population or "").strip()
     if not focus:
@@ -3223,6 +3306,218 @@ def _build_fastcomm_focus_payload_from_scores(
     }
 
 
+def _fastcomm_comparison_groups(app: FastAPI, meta: Dict) -> Optional[Dict[str, object]]:
+    """The two groups of the job's completed cell-communication differential, resolved to samples."""
+    differential = meta.get("differential") or {}
+    config = differential.get("config") or {}
+    if differential.get("status") != "completed" or _normalize_modality_id(config.get("modality"), default="") != "cell_communication":
+        return None
+    analysis = _fastcomm_analysis(meta)
+    per_sample = analysis.get("per_sample") or {}
+    split_key = str(per_sample.get("split_key") or "").strip() if isinstance(per_sample, dict) else ""
+    sample_key = str(analysis.get("sample_key") or split_key or "").strip()
+    field = str(config.get("sample_field") or sample_key).strip()
+    groups = []
+    for label_key, values_key in (("case_label", "group1_samples"), ("control_label", "group2_samples")):
+        values = [str(value).strip() for value in (config.get(values_key) or []) if str(value).strip()]
+        splits = sorted(values) if field == sample_key else _fastcomm_samples_for_annotation(app, meta, sample_key, field, values)
+        groups.append({"label": str(differential.get(label_key) or ", ".join(values)), "values": values, "splits": splits})
+    return {"field": field, "run_id": str(differential.get("run_id") or ""), "groups": groups}
+
+
+def _fastcomm_shared_layout(app: FastAPI, meta: Dict, limit: int) -> Dict[str, object]:
+    """One node layout and one edge-width scale for both groups of the cell-communication differential
+    and for its differential network. Nodes: every state in the top `limit` pairs of either group or of
+    the differential. Width scale: the summed-score range of the drawn pairs over both groups."""
+    comparison = _fastcomm_comparison_groups(app, meta)
+    if comparison is None:
+        raise HTTPException(status_code=409, detail="The shared layout uses the two groups of a completed cell-communication differential. Run one in the Differential tab first.")
+    score_column = _fastcomm_plot_score_column(meta)
+    if not hasattr(app.state, "fastcomm_cache"):
+        app.state.fastcomm_cache = {}
+    cache_key = f"{meta.get('job_id')}:shared_layout_roles_v1:{comparison['run_id']}:{score_column}:{int(limit)}"
+    if cache_key in app.state.fastcomm_cache:
+        return app.state.fastcomm_cache[cache_key]
+    split_scores = _prepare_fastcomm_scores(_fastcomm_split_scores_table(app, meta), score_column)
+    split_scores["split"] = split_scores["split"].astype(str)
+    totals: Dict[str, pd.Series] = {}
+    drawn: set = set()
+    for group in comparison["groups"]:
+        aggregated = _aggregate_fastcomm_scores(split_scores.loc[split_scores["split"].isin(group["splits"])])
+        pair_totals = aggregated.groupby(["sender_state", "receiver_state"])["fastcomm_score"].sum()
+        totals[group["label"]] = pair_totals
+        drawn |= set(pair_totals.sort_values(ascending=False).head(int(limit)).index)
+    detail = _get_differential_detail_table(app, meta)
+    significant = detail.loc[pipeline_mod.cell_communication_significant(detail)]
+    diff_totals = (pd.to_numeric(significant["delta_score"], errors="coerce")
+                   .groupby([significant["sender_state"].astype(str), significant["receiver_state"].astype(str)]).sum())
+    # Each direction is ranked on its own, so pairs higher in the case group (red) and pairs higher
+    # in the control group (blue) are both drawn: half of `limit` each, the remainder to the other side.
+    higher_case = diff_totals[diff_totals > 0].sort_values(ascending=False)
+    higher_control = diff_totals[diff_totals < 0].sort_values(ascending=True)
+    n_case = min(len(higher_case), max(int(limit) // 2, int(limit) - len(higher_control)))
+    n_control = min(len(higher_control), int(limit) - n_case)
+    diff_pairs = set(higher_case.head(n_case).index) | set(higher_control.head(n_control).index)
+    states = {str(state) for pair in drawn | diff_pairs for state in pair}
+    order = [str(state) for state in (_fastcomm_analysis(meta).get("state_order") or [])]
+    ordered = [state for state in order if state in states] + sorted(states - set(order))
+    values = [float(pair_totals[pair]) for pair_totals in totals.values() for pair in drawn if pair in pair_totals.index]
+    modes = sorted(detail["comparison_mode"].astype(str).unique().tolist()) if "comparison_mode" in detail.columns else []
+    layout = {
+        "comparison": comparison,
+        "score_column": score_column,
+        "pairs": sorted(drawn),
+        "diff_pairs": sorted(diff_pairs),
+        "diff_pairs_per_direction": (n_case, n_control, int(len(higher_case)), int(len(higher_control))),
+        "states": ordered,
+        "positions": _communication_focus_positions(ordered, ""),
+        "scale": (min(values), max(values)),
+        "n_significant": int(significant.shape[0]),
+        "n_tested": int(detail.shape[0]),
+        "comparison_modes": modes,
+        # Context pairs come from the existing two-group display universe. This
+        # does not classify them as unchanged or perform another statistical test.
+        "shared_context_pairs": [
+            {"sender": str(pair[0]), "receiver": str(pair[1]),
+             "case_total_score": float(totals[comparison["groups"][0]["label"]][pair]),
+             "control_total_score": float(totals[comparison["groups"][1]["label"]][pair])}
+            for pair in sorted(drawn)
+            if all(pair in series.index and np.isfinite(series[pair]) and series[pair] > 0
+                   for series in totals.values())
+        ],
+    }
+    app.state.fastcomm_cache[cache_key] = layout
+    return layout
+
+
+def _fastcomm_role_encoding(elements: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    """Colour the displayed directed graph by outgoing / all incident arrows.
+
+    Counts describe only the visible topology; they are not another communication
+    score. Self-loops count once in each direction. Unconnected layout nodes are
+    gray, not mistaken for balanced senders/receivers. Do not mutate source data.
+    """
+    result = [{**element, "data": dict(element["data"])} for element in elements]
+    outgoing: Dict[str, int] = {}
+    incoming: Dict[str, int] = {}
+    for element in result:
+        data = element["data"]
+        if "source" in data:
+            outgoing[data["source"]] = outgoing.get(data["source"], 0) + 1
+            incoming[data["target"]] = incoming.get(data["target"], 0) + 1
+    for element in result:
+        data = element["data"]
+        if "source" in data:
+            continue
+        n_out, n_in = outgoing.get(data["id"], 0), incoming.get(data["id"], 0)
+        total = n_out + n_in
+        fraction = n_out / total if total else None
+        if fraction is None:
+            color = "#bdbdbd"
+        else:
+            left, right, blend = (("#5e3c99", "#f7f7f7", fraction * 2) if fraction <= .5
+                                  else ("#f7f7f7", "#018571", (fraction - .5) * 2))
+            color = "#" + "".join(f"{round(int(left[i:i+2], 16) * (1-blend) + int(right[i:i+2], 16) * blend):02x}"
+                                    for i in (1, 3, 5))
+        data.update(outgoing_arrows=n_out, incoming_arrows=n_in,
+                    sender_fraction=fraction, color=color)
+    return result
+
+
+def _fastcomm_encoding_legend(case: str, control: str, differential: bool) -> Dict[str, object]:
+    return {
+        "node_title": "Node role: outgoing / (outgoing + incoming) displayed arrows",
+        "node_stops": [{"value": 0, "label": "Receiver", "color": "#5e3c99"},
+                       {"value": .5, "label": "Balanced", "color": "#f7f7f7"},
+                       {"value": 1, "label": "Sender", "color": "#018571"}],
+        "isolated_color": "#bdbdbd",
+        "edges": ([{"color": "#dc2626", "label": f"Higher in {case}"},
+                   {"color": "#2563eb", "label": f"Higher in {control}"},
+                   {"color": "#d8ac00", "label": "Shared cohort context; not a displayed differential pair"}]
+                  if differential else [{"color": "#0f766e", "label": "Sender to receiver; width = native pair score"}]),
+        "shared_definition": ("Yellow: a sender-receiver pair with positive native scores in both groups, "
+                              "from the group display union and outside the highlighted differential pairs. "
+                              "It does not establish equal activity, nonsignificance, or the same ligand-receptor composition."),
+    }
+
+
+def _fastcomm_shared_plot_payload(
+    app: FastAPI,
+    meta: Dict,
+    plot_key: str,
+    scores: pd.DataFrame,
+    selected_splits: Optional[List[str]],
+    display_filters: Optional[List[tuple[str, List[str]]]],
+    limit: int,
+) -> Dict:
+    layout = _fastcomm_shared_layout(app, meta, limit)
+    groups = layout["comparison"]["groups"]
+    groups_text = "; ".join(f"{group['label']}: {len(group['splits'])} samples ({', '.join(group['splits'])})" for group in groups)
+    score_column = layout["score_column"]
+    base = {"plot_type": plot_key, "population": "", "direction": "global", "selected_splits": selected_splits or [],
+            "layout_states": layout["states"], "score_column": score_column}
+    if plot_key == "shared_network":
+        if not selected_splits:
+            return {**base, "elements": [], "message": "Choose one group in Annotation 1 to draw it on the shared layout."}
+        pair_set = set(layout["pairs"])
+        keys = zip(scores["sender_state"].astype(str), scores["receiver_state"].astype(str))
+        drawn_scores = scores.loc[[key in pair_set for key in keys]]
+        pair_rows = _fastcomm_pair_records(drawn_scores, limit=len(pair_set))
+        elements = _build_fastcomm_network_elements(pair_rows, positions=layout["positions"], scale=layout["scale"])
+        low, high = layout["scale"]
+        selection = "; ".join(f"{field} = {', '.join(values)}" for field, values in (display_filters or []))
+        caption = (
+            f"Cell communication, {selection} ({len(selected_splits)} samples). Edge width: {score_column} averaged over these "
+            f"samples for each ligand-receptor interaction, summed per sender -> receiver pair. Node layout and width scale "
+            f"({low:.3g} to {high:.3g}) are shared with the other group ({groups_text}). Drawn: the top {int(limit)} pairs of "
+            f"each group, {len(pair_set)} pairs; a pair absent from this selection is not drawn."
+        )
+        caption += " Node colour: receiver (purple) through balanced (white) to sender (teal), by the fraction of displayed arrows outgoing; gray means no displayed arrows."
+        return {**base, "elements": _fastcomm_role_encoding(elements), "caption": caption,
+                "communication_legend": _fastcomm_encoding_legend(groups[0]['label'], groups[1]['label'], False),
+                "summary": {"n_edges": int(scores.shape[0]), "n_displayed_edges": len(pair_rows), "width_scale": [low, high]}}
+    detail = _get_differential_detail_table(app, meta)
+    significant = detail.loc[pipeline_mod.cell_communication_significant(detail)].copy()
+    diff_pairs = set(layout["diff_pairs"])
+    keys = zip(significant["sender_state"].astype(str), significant["receiver_state"].astype(str))
+    significant = significant.loc[[key in diff_pairs for key in keys]]
+    elements, _ = _cell_communication_diff_elements(significant, states=layout["states"], positions=layout["positions"])
+    for index, pair in enumerate(layout["shared_context_pairs"]):
+        if (pair["sender"], pair["receiver"]) in diff_pairs:
+            continue
+        elements.append({"data": {
+            "id": f"shared-context-{index}", "source": "state::" + pair["sender"],
+            "target": "state::" + pair["receiver"], "interaction_type": "fastcomm_shared_context",
+            "direction": "shared", "context_only": True, "weight": 1.5,
+            "edge_opacity": .75, "edge_color": "#d8ac00", "label": "Shared cohort context",
+            "case_total_score": pair["case_total_score"], "control_total_score": pair["control_total_score"],
+            "tooltip": (f"{pair['sender']} -> {pair['receiver']}: positive native scores in both groups; "
+                        "shared display context, not a claim of equal activity or a nonsignificant test."),
+        }})
+    case, control = groups[0]["label"], groups[1]["label"]
+    n_case_drawn, n_control_drawn, n_case_pairs, n_control_pairs = layout["diff_pairs_per_direction"]
+    test = ("Mann-Whitney U per interaction, Benjamini-Hochberg FDR" if layout["comparison_modes"] == ["replicate_group_contrast"]
+            else f"comparison mode {', '.join(layout['comparison_modes'])}")
+    caption = (
+        f"Differential cell communication, {case} vs {control} ({groups_text}). {test} on per-sample {score_column}. "
+        f"Drawn: interactions with FDR <= {pipeline_mod.CELL_COMMUNICATION_DIFF_FDR:g} and |delta| >= "
+        f"{pipeline_mod.CELL_COMMUNICATION_DIFF_MIN_DELTA:g} ({layout['n_significant']} of {layout['n_tested']} tested), summed per "
+        f"sender -> receiver pair. Red: the top {n_case_drawn} of {n_case_pairs} pairs higher in {case}; blue: the top "
+        f"{n_control_drawn} of {n_control_pairs} pairs higher in {control}; each direction ranked by its own summed delta. "
+        f"Width: |summed delta| with cellHarmony-web's standard edge scaling, one scale for both colours. "
+        f"Node layout shared with the {case} and {control} networks."
+    )
+    legend = _fastcomm_encoding_legend(case, control, True)
+    caption += (" " + legend["shared_definition"] + " Yellow context edges have fixed thin width; red/blue widths retain the native |summed delta| scale. "
+                "Node colour: receiver (purple) through balanced (white) to sender (teal), by outgoing / all incident displayed arrows; gray means none. Self-loops count once in each direction.")
+    return {**base, "elements": _fastcomm_role_encoding(elements), "caption": caption,
+            "communication_legend": legend,
+            "summary": {"n_tested": layout["n_tested"], "n_significant": layout["n_significant"],
+                        "n_displayed_edges": sum("source" in e["data"] for e in elements),
+                        "n_displayed_differential_pairs": len(diff_pairs),
+                        "n_displayed_shared_context_pairs": sum(e["data"].get("context_only", False) for e in elements)}}
+
+
 def _build_fastcomm_plot_payload(
     app: FastAPI,
     meta: Dict,
@@ -3231,12 +3526,13 @@ def _build_fastcomm_plot_payload(
     limit: int = 60,
     display_filters: Optional[List[tuple[str, List[str]]]] = None,
 ) -> Dict:
-    scores = _prepare_fastcomm_scores(_fastcomm_scores_table(app, meta))
+    score_column = _fastcomm_plot_score_column(meta)
+    scores = _prepare_fastcomm_scores(_fastcomm_scores_table(app, meta), score_column)
     state_filter_values = _fastcomm_state_filter_values(meta, display_filters)
     selected_splits = _fastcomm_selected_splits(app, meta, display_filters)
     if selected_splits:
         try:
-            split_scores = _prepare_fastcomm_scores(_fastcomm_split_scores_table(app, meta))
+            split_scores = _prepare_fastcomm_scores(_fastcomm_split_scores_table(app, meta), score_column)
         except FileNotFoundError:
             split_scores = pd.DataFrame()
         if "split" not in split_scores.columns:
@@ -3269,8 +3565,13 @@ def _build_fastcomm_plot_payload(
         "state_heatmap",
         "top_table",
         "per_sample",
+        "shared_network",
+        "differential_network",
     }:
         plot_key = "focused_incoming"
+
+    if plot_key in {"shared_network", "differential_network"}:
+        return _fastcomm_shared_plot_payload(app, meta, plot_key, scores, selected_splits, display_filters, limit)
 
     focus = str(population or "").strip()
     if state_filter_values and (not focus or focus not in set(state_filter_values)):
@@ -3414,7 +3715,7 @@ def _build_fastcomm_plot_payload(
 
     if plot_key == "per_sample":
         try:
-            split_scores = _prepare_fastcomm_scores(_fastcomm_split_scores_table(app, meta))
+            split_scores = _prepare_fastcomm_scores(_fastcomm_split_scores_table(app, meta), score_column)
         except FileNotFoundError:
             return {
                 "plot_type": plot_key,
@@ -4580,8 +4881,9 @@ def _load_reference_states_table(meta: Dict) -> pd.DataFrame:
 
 
 def _build_reference_expression_payload(app: FastAPI, meta: Dict, gene: str) -> Dict:
+    from .feature_lookup import FeatureLookup
     reference_df = _load_reference_states_table(meta)
-    resolved_gene = _resolve_gene_name(reference_df.index.astype(str), gene)
+    resolved_gene = FeatureLookup(reference_df.index.astype(str)).resolve(gene)
     if not resolved_gene:
         return {
             "gene": gene,
@@ -5168,6 +5470,23 @@ def _build_expression_payload(
 
     normalized_modality = _normalize_modality_id(modality)
     cache_entry = _get_expression_cache(app, meta, modality=normalized_modality)
+    # A missing feature is a normal lookup result. Resolve it before building
+    # axes/reference overlays, which cannot make an absent query gene present.
+    resolved_gene = _resolve_expression_gene(cache_entry, gene)
+    if not resolved_gene and not str(gene or "").strip() and len(cache_entry["var_names"]):
+        resolved_gene = str(cache_entry["var_names"][0])
+    if not resolved_gene:
+        if (normalized_modality == "rna" and meta.get("analysis_mode") != "unsupervised"
+                and "scalable_viewer" not in meta):
+            try:
+                return _build_reference_expression_payload(app, meta, gene)
+            except (FileNotFoundError, KeyError, ValueError):
+                pass
+        label = "Gene" if normalized_modality == "rna" else "Feature"
+        return {"gene": gene, "requested_gene": gene, "resolved_gene": None,
+                "source": "missing", "modality": normalized_modality,
+                "message": f"{label} '{gene}' was not found in this dataset.",
+                "scatter": [], "violin": [], "umap": []}
     adata = cache_entry["adata"]
     populations = cache_entry["populations"]
     obs_names = cache_entry["obs_names"]
@@ -5185,17 +5504,6 @@ def _build_expression_payload(
         x_field=str(x_field) if _ax is not None and _ay is not None else "",
         y_field=str(y_field) if _ax is not None and _ay is not None else "") if view != "violin" else {})
     display_mask = _apply_display_filter_mask(cache_entry, display_filters)
-    resolved_gene = _resolve_expression_gene(cache_entry, gene)
-    if not resolved_gene and not str(gene or "").strip() and len(cache_entry["var_names"]):
-        resolved_gene = str(cache_entry["var_names"][0])
-    if not resolved_gene:
-        if normalized_modality == "rna" and meta.get("analysis_mode") != "unsupervised":
-            try:
-                return _build_reference_expression_payload(app, meta, gene)
-            except (FileNotFoundError, KeyError, ValueError):
-                pass
-        raise KeyError(f"Feature '{gene}' not found in the selected modality output.")
-
     values = _flatten_expr(adata[:, resolved_gene].X)
     global_min, global_max = _expression_global_range(values)
     scatter_data = [] if view != "all" else [
@@ -5300,7 +5608,7 @@ def _build_gene_suggestions_payload(app: FastAPI, meta: Dict, modality: str = "r
             import h5py
             with h5py.File(source, "r") as handle:
                 var = _read_elem(handle["var"])
-            lookup = FeatureLookup(var.index, var if normalized == "rna" else None)
+            lookup = FeatureLookup(var.index, var if normalized == "rna" else None, rna_aliases=normalized == "rna")
             info = _modality_definition(meta, modality)
             payload = {"genes": lookup.display_names, "keys": lookup.suggestions,
                        "modality": normalized, "feature_label": str(info.get("feature_label") or "gene")}
@@ -6176,9 +6484,20 @@ def create_app(test_config: dict | None = None) -> FastAPI:
     @asynccontextmanager
     async def plot_lifespan(application):
         async with previous_lifespan(application) as state:
+            async def browser_job_monitor():
+                while True:
+                    await asyncio.sleep(5)
+                    try:
+                        await run_in_threadpool(application.state.job_runner.cancel_disconnected_jobs)
+                    except Exception:
+                        logging.exception("Browser-session cleanup failed; retrying on the next check.")
+            browser_task = asyncio.create_task(browser_job_monitor())
             try:
                 yield state
             finally:
+                browser_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await browser_task
                 await run_in_threadpool(application.state.plot_build_queue.close)
                 await run_in_threadpool(application.state.summary_build_queue.close)
                 await run_in_threadpool(application.state.summary_detail_queue.close)
@@ -6194,6 +6513,10 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         worker_memory_limit_gib=cfg.get("WORKER_MEMORY_LIMIT_GIB", 15),
         total_memory_limit_gib=cfg.get("TOTAL_MEMORY_LIMIT_GIB", 27),
     )
+
+    @app.exception_handler(JobBusyError)
+    async def handle_job_busy(request: Request, exc: JobBusyError):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
 
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(request: Request, exc: RequestValidationError):
@@ -6247,10 +6570,11 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         analysis_mode: str = Form("supervised", pattern="^(supervised|unsupervised|both)$"),
         ambient_option: str | None = Form(None),
         soupx_option: str | None = Form(None),
+        previous_job_id: str | None = Form(None),
         sample_names: List[str] = Form(...),
         files: List[UploadFile] = File(...),
     ):
-        store, _ = _job_resources(app)
+        store, runner = _job_resources(app)
         if analysis_mode != "unsupervised" and not reference.strip():
             raise HTTPException(status_code=400, detail="Select a reference for Supervised or Both analysis.")
         reference = reference.strip() or "icgs3"
@@ -6295,6 +6619,14 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             validate_batch(input_headers)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if previous_job_id:
+            if not re.fullmatch(r"[a-f0-9]{32}", previous_job_id):
+                raise HTTPException(400, "Invalid previous session ID.")
+            if store.job_exists(previous_job_id):
+                old = await run_in_threadpool(runner.cancel_job, previous_job_id)
+                if (old.get("status") in {"queued", "processing"} or
+                        (old.get("differential") or {}).get("status") in {"queued", "processing"}):
+                    raise HTTPException(409, "The previous session is stopping. Wait for it to stop before uploading again.")
         effective_ambient_option = ambient_option if ambient_option is not None else soupx_option
         metadata = store.create_job(species, reference, effective_ambient_option, files=[])
         job_id = metadata["job_id"]
@@ -6351,68 +6683,106 @@ def create_app(test_config: dict | None = None) -> FastAPI:
 
     @app.post("/api/jobs/{job_id}/qc")
     async def update_qc(job_id: str, qc: QCSettings):
-        store, _ = _job_resources(app)
+        store, runner = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
-        meta = store.get_job(job_id)
-        if meta.get("status") in {"queued", "processing"}:
-            raise HTTPException(status_code=409, detail="Wait for the running analysis before changing its QC settings.")
-        registry_path = Path(app.state.config["REFERENCE_REGISTRY"])
-        reference_entry = ({} if qc.analysis_mode == "unsupervised" else
-                           pipeline_mod._lookup_reference(meta["species"], meta["reference"], registry_path))
-        if qc.analysis_mode != "supervised" and meta.get("species") not in {"human", "mouse"}:
-            raise HTTPException(status_code=400, detail="ICGS3 currently supports Human and Mouse.")
-        supported_modalities = {
-            _normalize_modality_id(value, default="")
-            for value in (reference_entry.get("impute_modalities") or [])
-        }
-        if qc.impute_modalities is not None:
-            requested_raw = qc.impute_modalities
-        elif qc.impute_modality and qc.impute_modality != "none":
-            requested_raw = [qc.impute_modality]
-        else:
-            requested_raw = []
-        requested = [m for m in (_normalize_modality_id(v, default="") for v in requested_raw) if m]
-        # "all" selects every supported modality (expanded at run time); not a literal modality
-        unsupported = [m for m in requested if m != "all" and m not in supported_modalities]
-        if unsupported:
-            raise HTTPException(status_code=400,
-                                detail=f"Impute modalities not supported for this reference: {', '.join(unsupported)}")
-        meta = store.update_job(job_id, qc=qc.model_dump(), analysis_mode=qc.analysis_mode, message="QC parameters saved.")
-        return JSONResponse({"job_id": job_id, "qc": meta["qc"]})
+        with control_job(store, job_id):
+            runner.assert_idle(job_id)
+            meta = store.get_job(job_id)
+            if meta.get("status") in {"queued", "processing"}:
+                raise HTTPException(status_code=409, detail="Wait for the running analysis before changing its QC settings.")
+            registry_path = Path(app.state.config["REFERENCE_REGISTRY"])
+            reference_entry = ({} if qc.analysis_mode == "unsupervised" else
+                               pipeline_mod._lookup_reference(meta["species"], meta["reference"], registry_path))
+            if qc.analysis_mode != "supervised" and meta.get("species") not in {"human", "mouse"}:
+                raise HTTPException(status_code=400, detail="ICGS3 currently supports Human and Mouse.")
+            supported_modalities = {
+                _normalize_modality_id(value, default="")
+                for value in (reference_entry.get("impute_modalities") or [])
+            }
+            if qc.impute_modalities is not None:
+                requested_raw = qc.impute_modalities
+            elif qc.impute_modality and qc.impute_modality != "none":
+                requested_raw = [qc.impute_modality]
+            else:
+                requested_raw = []
+            requested = [m for m in (_normalize_modality_id(v, default="") for v in requested_raw) if m]
+            # "all" selects every supported modality (expanded at run time); not a literal modality
+            unsupported = [m for m in requested if m != "all" and m not in supported_modalities]
+            if unsupported:
+                raise HTTPException(status_code=400,
+                                    detail=f"Impute modalities not supported for this reference: {', '.join(unsupported)}")
+            meta = store.update_job(job_id, qc=qc.model_dump(), analysis_mode=qc.analysis_mode, message="QC parameters saved.")
+            return JSONResponse({"job_id": job_id, "qc": meta["qc"]})
 
     @app.post("/api/jobs/{job_id}/configure")
     async def configure_job(job_id: str, config: JobConfigSettings):
-        store, _ = _job_resources(app)
+        store, runner = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
+        with control_job(store, job_id):
+            runner.assert_idle(job_id)
+            registry_path = Path(app.state.config["REFERENCE_REGISTRY"])
+            reference_entry = pipeline_mod._lookup_reference(config.species, config.reference, registry_path)
+            pipeline_mod._ensure_reference_fields(reference_entry)
 
-        registry_path = Path(app.state.config["REFERENCE_REGISTRY"])
-        reference_entry = pipeline_mod._lookup_reference(config.species, config.reference, registry_path)
-        pipeline_mod._ensure_reference_fields(reference_entry)
+            meta = store.get_job(job_id)
+            requested_ambient = config.ambient_option if config.ambient_option is not None else meta.get("ambient_option", meta.get("soupx_option"))
+            changed = (
+                str(meta.get("species") or "") != config.species
+                or str(meta.get("reference") or "") != config.reference
+                or str(meta.get("ambient_option", meta.get("soupx_option")) or "") != str(requested_ambient or "")
+            )
+            if changed:
+                _invalidate_expression_cache(app, job_id)
+                _invalidate_differential_cache(app, job_id)
+                _invalidate_marker_heatmap_cache(app, job_id)
+                _clear_directory_contents(store.outputs_dir(job_id))
+                _clear_directory_contents(store.logs_dir(job_id))
+                meta = store.update_job(
+                    job_id,
+                    species=config.species,
+                    reference=config.reference,
+                    ambient_option=requested_ambient,
+                    status="uploaded",
+                    progress=0,
+                    message="Reference updated. Configure QC and rerun alignment.",
+                    artifacts={},
+                    marker_analysis={},
+                    marker_analysis_by_modality={},
+                    fastcomm_analysis={},
+                    model_versions={},
+                    modality_artifacts={},
+                    modalities={"default": "rna", "available": [dict(_DEFAULT_MODALITY_DEFINITIONS["rna"])]},
+                    differential={},
+                )
+            return JSONResponse(
+                {
+                    "job_id": job_id,
+                    "status": meta.get("status"),
+                    "species": meta.get("species"),
+                    "reference": meta.get("reference"),
+                    "ambient_option": meta.get("ambient_option", meta.get("soupx_option")),
+                    "changed": changed,
+                }
+            )
 
-        meta = store.get_job(job_id)
-        requested_ambient = config.ambient_option if config.ambient_option is not None else meta.get("ambient_option", meta.get("soupx_option"))
-        changed = (
-            str(meta.get("species") or "") != config.species
-            or str(meta.get("reference") or "") != config.reference
-            or str(meta.get("ambient_option", meta.get("soupx_option")) or "") != str(requested_ambient or "")
-        )
-        if changed:
+    @app.post("/api/jobs/{job_id}/run")
+    async def run_job(job_id: str):
+        store, runner = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        with control_job(store, job_id):
+            runner.assert_idle(job_id)
+            if store.get_job(job_id).get("status") in {"queued", "processing"}:
+                raise HTTPException(status_code=409, detail="This analysis is already running.")
             _invalidate_expression_cache(app, job_id)
             _invalidate_differential_cache(app, job_id)
             _invalidate_marker_heatmap_cache(app, job_id)
-            _clear_directory_contents(store.outputs_dir(job_id))
-            _clear_directory_contents(store.logs_dir(job_id))
-            meta = store.update_job(
+            _invalidate_fastcomm_cache(app, job_id)
+            store.update_job(
                 job_id,
-                species=config.species,
-                reference=config.reference,
-                ambient_option=requested_ambient,
-                status="uploaded",
-                progress=0,
-                message="Reference updated. Configure QC and rerun alignment.",
-                artifacts={},
+                artifacts={}, bundle={}, cell_state_layers={}, icgs3_analysis={}, analysis_summary={},
                 marker_analysis={},
                 marker_analysis_by_modality={},
                 fastcomm_analysis={},
@@ -6421,41 +6791,35 @@ def create_app(test_config: dict | None = None) -> FastAPI:
                 modalities={"default": "rna", "available": [dict(_DEFAULT_MODALITY_DEFINITIONS["rna"])]},
                 differential={},
             )
-        return JSONResponse(
-            {
-                "job_id": job_id,
-                "status": meta.get("status"),
-                "species": meta.get("species"),
-                "reference": meta.get("reference"),
-                "ambient_option": meta.get("ambient_option", meta.get("soupx_option")),
-                "changed": changed,
-            }
-        )
+            runner.submit(job_id)
+            return JSONResponse({"job_id": job_id, "status": "queued"})
 
-    @app.post("/api/jobs/{job_id}/run")
-    async def run_job(job_id: str):
+    @app.post("/api/jobs/{job_id}/browser-presence")
+    async def browser_presence(job_id: str, request: Request):
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(404, "Job not found.")
+        try:
+            payload = await request.json()
+            with control_job(store, job_id):
+                record_presence(store, job_id, payload.get("client_id", ""), payload.get("state", "active"),
+                                sequence=payload.get("sequence", 0))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise HTTPException(400, "Invalid browser presence request.") from exc
+        return JSONResponse({"job_id": job_id, "status": "ok"})
+
+    @app.post("/api/jobs/{job_id}/cancel")
+    async def cancel_job(job_id: str):
         store, runner = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
-        if store.get_job(job_id).get("status") in {"queued", "processing"}:
-            raise HTTPException(status_code=409, detail="This analysis is already running.")
-        _invalidate_expression_cache(app, job_id)
-        _invalidate_differential_cache(app, job_id)
-        _invalidate_marker_heatmap_cache(app, job_id)
-        _invalidate_fastcomm_cache(app, job_id)
-        store.update_job(
-            job_id,
-            artifacts={}, bundle={}, cell_state_layers={}, icgs3_analysis={}, analysis_summary={},
-            marker_analysis={},
-            marker_analysis_by_modality={},
-            fastcomm_analysis={},
-            model_versions={},
-            modality_artifacts={},
-            modalities={"default": "rna", "available": [dict(_DEFAULT_MODALITY_DEFINITIONS["rna"])]},
-            differential={},
-        )
-        runner.submit(job_id)
-        return JSONResponse({"job_id": job_id, "status": "queued"})
+        meta = await run_in_threadpool(runner.cancel_job, job_id)
+        pending = (meta.get("status") in {"queued", "processing"} or
+                   (meta.get("differential") or {}).get("status") in {"queued", "processing"})
+        return JSONResponse({"job_id": job_id, "status": meta.get("status"),
+                             "differential_status": (meta.get("differential") or {}).get("status"),
+                             "cancel_requested": bool(meta.get("cancel_requested"))},
+                            status_code=202 if pending else 200)
 
     @app.get("/api/jobs/{job_id}/status")
     async def status(job_id: str):
@@ -6503,33 +6867,35 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         store, runner = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
-        meta = _job_metadata_with_recovery(store, runner, job_id)
-        if (meta.get("differential") or {}).get("status") in {"queued", "processing"}:
-            raise HTTPException(409, "A differential analysis is already running.")
-        history = completed_differentials(meta)
-        if history:
-            store.update_job(job_id, differential_history=history)
-        config = _validate_differential_request(meta, payload)
-        options = _differential_options(meta)
-        _invalidate_differential_cache(app, job_id)
-        store.update_job(
-            job_id,
-            differential={
-                "status": "queued",
-                "worker_pid": os.getpid(),
-                "progress": 5,
-                "message": "Differential analysis queued.",
-                "config": config,
-                "artifacts": {},
-                "networks": [],
-                "go_terms_included": False,
-                "default_population_col": options.get("default_population_col"),
-            },
-        )
-        store.append_log(job_id, "Differential analysis queued by user request.")
-        runner.submit_differential(job_id)
-        updated = store.get_job(job_id)
-        return JSONResponse(_build_differential_payload(app, job_id, updated, root_path=app.state.root_path))
+        with control_job(store, job_id):
+            runner.assert_idle(job_id)
+            meta = _job_metadata_with_recovery(store, runner, job_id)
+            if (meta.get("differential") or {}).get("status") in {"queued", "processing"}:
+                raise HTTPException(409, "A differential analysis is already running.")
+            history = completed_differentials(meta)
+            if history:
+                store.update_job(job_id, differential_history=history)
+            config = _validate_differential_request(meta, payload)
+            options = _differential_options(meta)
+            _invalidate_differential_cache(app, job_id)
+            store.update_job(
+                job_id,
+                differential={
+                    "status": "queued",
+                    "worker_pid": os.getpid(),
+                    "progress": 5,
+                    "message": "Differential analysis queued.",
+                    "config": config,
+                    "artifacts": {},
+                    "networks": [],
+                    "go_terms_included": False,
+                    "default_population_col": options.get("default_population_col"),
+                },
+            )
+            store.append_log(job_id, "Differential analysis queued by user request.")
+            runner.submit_differential(job_id)
+            updated = store.get_job(job_id)
+            return JSONResponse(_build_differential_payload(app, job_id, updated, root_path=app.state.root_path))
 
     @app.get("/api/jobs/{job_id}/umap")
     def umap(
@@ -6599,6 +6965,8 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc))
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
+        except AmbiguousFeatureError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
         except ValueError as exc:
             raise HTTPException(status_code=500, detail=str(exc))
 
@@ -6649,18 +7017,20 @@ def create_app(test_config: dict | None = None) -> FastAPI:
 
     @app.post("/api/jobs/{job_id}/differential/select")
     def select_completed_differential(job_id: str, contrast: str = Query(...)):
-        store, _ = _job_resources(app)
+        store, runner = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(404, "Job not found.")
-        meta = store.get_job(job_id)
-        if (meta.get("differential") or {}).get("status") in {"queued", "processing"}:
-            raise HTTPException(409, "Wait for the running comparison to finish.")
-        run = completed_differentials(meta).get(contrast)
-        if run is None:
-            raise HTTPException(404, "Unknown completed comparison.")
-        _invalidate_differential_cache(app, job_id)
-        store.update_job(job_id, differential=run)
-        return JSONResponse(_build_differential_payload(app, job_id, store.get_job(job_id), root_path=app.state.root_path))
+        with control_job(store, job_id):
+            runner.assert_idle(job_id)
+            meta = store.get_job(job_id)
+            if (meta.get("differential") or {}).get("status") in {"queued", "processing"}:
+                raise HTTPException(409, "Wait for the running comparison to finish.")
+            run = completed_differentials(meta).get(contrast)
+            if run is None:
+                raise HTTPException(404, "Unknown completed comparison.")
+            _invalidate_differential_cache(app, job_id)
+            store.update_job(job_id, differential=run)
+            return JSONResponse(_build_differential_payload(app, job_id, store.get_job(job_id), root_path=app.state.root_path))
 
     @app.get("/api/jobs/{job_id}/grn/network")
     def grn_network(
@@ -6986,6 +7356,8 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc))
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
+        except AmbiguousFeatureError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
         except ValueError as exc:
             raise HTTPException(status_code=500, detail=str(exc))
         pdf = _render_expression_pdf(metabolite_annotations.pdf_payload(payload, meta, modality), mode)
