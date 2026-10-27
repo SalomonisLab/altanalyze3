@@ -127,7 +127,57 @@ def native_psi_records(path, roster, cohorts, event_uid, identity_column='donor'
     return [records[c,d] for c in cohorts for d in roster[c]]
 
 
-def run(args):
+def draw_psi_axes(ax, args, roster, records, data, stats, marker_table):
+    """Shared native box/point/statistic drawing for single and composite figures."""
+    import numpy as np
+    labels = args.labels or args.cohort_order
+    positions = list(range(1, len(data)+1))
+    ax.boxplot([v if v else [np.nan] for v in data], positions=positions, widths=.5,
+               patch_artist=True, whis=1.5, showfliers=False,
+               boxprops={'facecolor': '#eeeeee', 'edgecolor': 'black'},
+               medianprops={'color': 'black', 'linewidth': 1.4},
+               whiskerprops={'color': 'black'}, capprops={'color': 'black'})
+    for j, (c, v) in enumerate(zip(args.cohort_order, data), 1):
+        point_x = np.full(len(v), j)+np.linspace(-.065, .065, len(v))
+        if marker_table:
+            observed = [r for r in records if r['condition'] == c and r['PSI'] is not None]
+            for marker in dict.fromkeys(r['point_marker'] for r in observed):
+                mask = np.array([r['point_marker'] == marker for r in observed])
+                ax.scatter(point_x[mask], np.asarray(v)[mask], marker=marker,
+                           s=42, facecolor='black', edgecolor='black', zorder=4, clip_on=False)
+        else:
+            ax.scatter(point_x, v, s=42, facecolor='black', edgecolor='black', zorder=4)
+        ax.text(j, 1.018, 'n = '+str(len(v))+'/'+str(len(roster[c])), ha='center',
+                transform=ax.get_xaxis_transform(), fontsize=10)
+        if args.show_clipped_points:
+            below = sum(x < args.y_min for x in v); above = sum(x > args.y_max for x in v)
+            for count, y, marker in [(below,args.y_min,'v'),(above,args.y_max,'^')]:
+                if count:
+                    ax.scatter(np.full(count,j)+np.linspace(-.12,.12,count),np.full(count,y),
+                               marker=marker,s=28,facecolor='white',edgecolor='black',clip_on=False,zorder=6)
+            if below:
+                ax.text(j,.03,str(below)+' below '+str(args.y_min),transform=ax.get_xaxis_transform(),
+                        fontsize=8,ha='center')
+    ax.set_xlim(.5, len(data)+.5)
+    for row in stats:
+        j = args.cohort_order.index(row['comparison'])+1
+        label = (('P unavailable\nNA' if row['p'] is None else
+                  'P = '+format(row['p'],'.3g')+'\n'+row['label'])
+                 if args.annotations_table else row['label'])
+        ax.text(j, .975, label, transform=ax.get_xaxis_transform(),
+                ha='center', va='top', fontsize=args.annotation_fontsize, fontweight='bold')
+    ax.set_ylim(args.y_min, args.y_max)
+    # Matplotlib expands the view to include requested ticks. A fixed tick
+    # at 1 silently defeated --y-max < 1 even though the manifest kept it.
+    ax.set_yticks(np.linspace(args.y_min, min(1., args.y_max), 6))
+    ax.set_xticks(positions, [s.replace('\\n', '\n') for s in labels])
+    ax.set_ylabel(args.ylabel.replace('\\n', '\n'), labelpad=args.ylabel_pad)
+    ax.grid(axis='y', color='#dddddd', linewidth=.5)
+    ax.set_axisbelow(True)
+    ax.spines[['top', 'right']].set_visible(False)
+
+
+def run(args, *, panel_ax=None):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -265,53 +315,23 @@ def run(args):
         caption += ' Symbols use supplied native raw P values: ns >0.05; * ≤0.05; ** ≤0.01; *** ≤0.001. No statistical test is rerun.'
         if any(row['p'] is None for row in stats):
             caption += ' NA denotes an unavailable native test, not a nonsignificant result.'
+    if panel_ax is not None:
+        # Reuse the complete native input/roster/statistic gates and drawing
+        # without creating separate PDF pages or intermediate single figures.
+        draw_psi_axes(panel_ax, args, roster, records, data, stats, marker_table)
+        return dict(records=records, statistics=stats, donor_roster=roster,
+                    cohort_order=args.cohort_order, event_uid=args.event_uid,
+                    native_PSI_table_sha256=source_hash if args.psi_table else None,
+                    donor_roster_sha256=sha256(args.donor_roster),
+                    existing_statistics_sha256=sha256(args.annotations_table) if args.annotations_table else None,
+                    marker_table_sha256=sha256(marker_table) if marker_table else None,
+                    marker_legend=marker_legend, y_limits=[args.y_min,args.y_max],
+                    caption=caption, all_defined_points_in_view=all(
+                        r['PSI'] is None or args.y_min <= r['PSI'] <= args.y_max for r in records))
     with plt.rc_context({'font.family': 'Arial', 'font.size': 11, 'pdf.fonttype': 42}):
         fig, ax = plt.subplots(figsize=(args.width, args.height))
         fig.subplots_adjust(left=.12, right=.98, bottom=.36 if marker_table else .32, top=.87)
-        positions = list(range(1, len(data)+1))
-        ax.boxplot([v if v else [np.nan] for v in data], positions=positions, widths=.5,
-                   patch_artist=True, whis=1.5, showfliers=False,
-                   boxprops={'facecolor': '#eeeeee', 'edgecolor': 'black'},
-                   medianprops={'color': 'black', 'linewidth': 1.4},
-                   whiskerprops={'color': 'black'}, capprops={'color': 'black'})
-        for j, (c, v) in enumerate(zip(args.cohort_order, data), 1):
-            point_x = np.full(len(v), j)+np.linspace(-.065, .065, len(v))
-            if marker_table:
-                observed = [r for r in records if r['condition'] == c and r['PSI'] is not None]
-                for marker in dict.fromkeys(r['point_marker'] for r in observed):
-                    mask = np.array([r['point_marker'] == marker for r in observed])
-                    ax.scatter(point_x[mask], np.asarray(v)[mask], marker=marker,
-                               s=42, facecolor='black', edgecolor='black', zorder=4, clip_on=False)
-            else:
-                ax.scatter(point_x, v, s=42, facecolor='black', edgecolor='black', zorder=4)
-            ax.text(j, 1.018, 'n = '+str(len(v))+'/'+str(len(roster[c])), ha='center',
-                    transform=ax.get_xaxis_transform(), fontsize=10)
-            if args.show_clipped_points:
-                below = sum(x < args.y_min for x in v); above = sum(x > args.y_max for x in v)
-                for count, y, marker in [(below,args.y_min,'v'),(above,args.y_max,'^')]:
-                    if count:
-                        ax.scatter(np.full(count,j)+np.linspace(-.12,.12,count),np.full(count,y),
-                                   marker=marker,s=28,facecolor='white',edgecolor='black',clip_on=False,zorder=6)
-                if below:
-                    ax.text(j,.03,str(below)+' below '+str(args.y_min),transform=ax.get_xaxis_transform(),
-                            fontsize=8,ha='center')
-        ax.set_xlim(.5, len(data)+.5)
-        for row in stats:
-            j = args.cohort_order.index(row['comparison'])+1
-            label = (('P unavailable\nNA' if row['p'] is None else
-                      'P = '+format(row['p'],'.3g')+'\n'+row['label'])
-                     if args.annotations_table else row['label'])
-            ax.text(j, .975, label, transform=ax.get_xaxis_transform(),
-                    ha='center', va='top', fontsize=args.annotation_fontsize, fontweight='bold')
-        ax.set_ylim(args.y_min, args.y_max)
-        # Matplotlib expands the view to include requested ticks. A fixed tick
-        # at 1 silently defeated --y-max < 1 even though the manifest kept it.
-        ax.set_yticks(np.linspace(args.y_min, min(1., args.y_max), 6))
-        ax.set_xticks(positions, [s.replace('\\n', '\n') for s in labels])
-        ax.set_ylabel(args.ylabel.replace('\\n', '\n'), labelpad=args.ylabel_pad)
-        ax.grid(axis='y', color='#dddddd', linewidth=.5)
-        ax.set_axisbelow(True)
-        ax.spines[['top', 'right']].set_visible(False)
+        draw_psi_axes(ax, args, roster, records, data, stats, marker_table)
         fig.suptitle(args.title, fontsize=14, y=.97)
         if marker_table:
             from matplotlib.lines import Line2D

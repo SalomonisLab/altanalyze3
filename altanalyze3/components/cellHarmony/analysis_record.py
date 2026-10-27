@@ -20,7 +20,7 @@ from pathlib import Path
 
 SCHEMA_VERSION = 1
 QC_DEFAULTS = {
-    "analysis_mode": "supervised", "existing_state_column": None, "umap_fit_mode": "landmark", "max_k": None,
+    "analysis_mode": "supervised", "existing_state_column": None, "existing_counts_source": "auto", "existing_embedding_key": None, "umap_fit_mode": "landmark", "max_k": None,
     "min_genes": 500, "min_counts": 1000, "min_cells": 0, "mit_percent": 15,
     "align_cutoff": 0.4, "ambient_correction": "no", "impute_modality": "none",
     "impute_modalities": None, "marker_render_heatmap": False,
@@ -288,6 +288,12 @@ def _preprocessing_methods(m):
     evidence = "\n".join(e["text"] for e in m.get("preprocessing_evidence", []))
     if ("skipping QC" in evidence or "Skipping QC filtering" in evidence) and "[qc] Use Existing:" not in evidence:
         lines.append("Count-based QC filtering was skipped because the input was already normalized and log-transformed.")
+    if 'using verified layers' in evidence and 'scale_data=True through the standard MarkerFinder hook' in evidence:
+        lines.append("Imported expression failed the strict MarkerFinder constant-depth validation on the supplied gene panel. MarkerFinder therefore used the verified counts layer through its standard scale_data=True route (log2 depth normalization with the native median cell-total scale factor). The supplied RNA expression and saved embedding were retained, and scaling validation remained enabled.")
+    if 'verified raw.X counts' in evidence:
+        lines.append("Raw counts were recovered from the supplied AnnData .raw matrix after confirming the complete matching RNA gene panel; the source raw matrix and normalized RNA were retained.")
+    if 'Mitochondrial filtering unavailable' in evidence:
+        lines.append("The requested mitochondrial filter could not be evaluated because mitochondrial genes were absent from the supplied gene panel; no zero mitochondrial percentage was fabricated.")
     retained = list(dict.fromkeys(re.findall(r"Cells remaining after (.+?) filtering: (\d+)", evidence)))
     if retained:
         lines += _table(["Applied QC filter", "Cells retained"], [(label, f"{int(count):,}") for label, count in retained])
@@ -351,6 +357,8 @@ def render_methods(manifest):
             "Supplied annotations and embeddings were retained for QC-passed cells. Missing labels were represented as Unassigned in a separate serving column. "
             f"Annotation column selection was recorded as {existing.get('method', 'user selection')}; "
             "the local model, when used, selected an existing column and did not generate per-cell annotations. "
+            f"The requested counts source was {qc.get('existing_counts_source', 'auto')!r}; "
+            f"the saved layout source was {qc.get('existing_embedding_key') or 'selected from supplied metadata'!r}. "
             "Downstream analyses used the selected grouping. Differential comparisons retained all selected cells because external annotations need not have native assignment scores."]
     if mode in {"supervised", "both"}:
         paragraphs += ["The supervised branch uses cellHarmony-lite (altanalyze3) reference alignment. Query cells are compared with reference cell-state profiles over the reference marker panel; the native pipeline uses cosine similarity and the requested alignment cutoff. This implementation builds on cellHarmony [cellHarmony], but its centroid alignment and approximate reference placement should not be described as the original full cell-to-cell matching algorithm.",

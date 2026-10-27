@@ -313,6 +313,7 @@ def combine_and_align_h5(
     unaligned_h5ad=None,
     bounded_h5ad=False,
     qc_normalized_input=False,
+    existing_counts_source=None,
 ):
     """``adata`` is an in-memory cells x genes AnnData, for example one read by
     ``sparse_stream.read_sparse_stream``. It takes the same path as ``h5ad_file``: gene
@@ -384,6 +385,13 @@ def combine_and_align_h5(
     def _apply_qc_filters(adata):
         workspace = getattr(adata, '_matrix_workspace', None)
         if workspace is not None:
+            if qc_normalized_input:
+                from .existing_inputs import mitochondrial_mask
+                mito = mitochondrial_mask(adata.var)
+                if mit_percent is not None and not mito.any():
+                    print('[qc] Mitochondrial filtering unavailable: mitochondrial genes are absent from the supplied gene panel.')
+                return workspace.qc(adata, min_genes, min_cells, min_counts,
+                                    mit_percent if mito.any() else None, mitochondrial_genes=mito)
             return workspace.qc(adata, min_genes, min_cells, min_counts, mit_percent)
         matrix, source = _qc_matrix(adata)
         if source != "X":
@@ -399,6 +407,12 @@ def combine_and_align_h5(
             return adata
         matrix, _ = _qc_matrix(adata)
         mito_genes = adata.var_names.str.upper().str.startswith("MT-")
+        if qc_normalized_input:
+            from .existing_inputs import mitochondrial_mask
+            mito_genes = mitochondrial_mask(adata.var)
+            if not mito_genes.any():
+                print('[qc] Mitochondrial filtering unavailable: mitochondrial genes are absent from the supplied gene panel.')
+                return adata
         mito_counts = np.asarray(matrix[:, mito_genes].sum(axis=1)).ravel()
         total_counts = np.asarray(matrix.sum(axis=1)).ravel()
         total_counts = np.maximum(total_counts, 1e-12)
@@ -519,6 +533,9 @@ def combine_and_align_h5(
             else:
                 adata_combined = sc.read_h5ad(h5ad_file)
             source_label = os.path.basename(h5ad_file)
+        if qc_normalized_input:
+            from .existing_inputs import select_counts
+            select_counts(adata_combined, existing_counts_source or "auto")
         apply_gene_translation(adata_combined, translation_map, source_label)
         adata_combined.var_names_make_unique()
         print(f"reimported adata shape: {adata_combined.shape} (cells x genes)")

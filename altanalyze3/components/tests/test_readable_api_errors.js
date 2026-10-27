@@ -1,0 +1,26 @@
+const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');
+const source=fs.readFileSync(path.join(__dirname,'../cellHarmony/webapp/static/app.js'),'utf8');
+const ctx=vm.createContext({console,Set,JSON,Array,Number,Promise});
+const start=source.indexOf('function readableApiError(');
+vm.runInContext(source.slice(start,source.indexOf('function setUploadProgress(',start)),ctx);
+const legacy=`1 validation error: {'type': 'string_pattern_mismatch', 'loc': ('body', 'analysis_mode'), 'msg': 'String should match pattern', 'input': 'existing'}\nFile "/Users/private/app.py", line 6186, in create_job`;
+const readable=ctx.decodeApiResponse(JSON.stringify({detail:legacy}),422).detail;
+assert.match(readable,/Restart scALABLE/);assert.doesNotMatch(readable,/validation error|pattern|\/Users|create_job/);
+assert.equal(ctx.decodeApiResponse(JSON.stringify({detail:[{loc:['body','min_genes'],type:'int_parsing',input:'private'}]}),422).detail,'Min genes must be a whole number.');
+assert.match(ctx.decodeApiResponse('<html>proxy timeout</html>',502).detail,/try again shortly/);
+assert.equal(ctx.decodeApiResponse('{"job_id":"unchanged"}',200).job_id,'unchanged');
+assert.equal(ctx.decodeApiResponse('{"detail":"Select a sample."}',400).detail,'Select a sample.');
+assert.match(ctx.existingUploadError('existing',['Travaglini.h5ad','BOS.h5']),/BOS.h5.*saved clusters/);
+assert.equal(ctx.existingUploadError('existing',['Travaglini.H5AD']),'');
+assert.equal(ctx.existingUploadError('supervised',['BOS.h5']),'');
+// The screenshot's invalid selection must never send bytes or stop an old job.
+let alerts=[],stops=0;
+ctx.uploadSubmissionInFlight=false;ctx.qcSubmissionJobId=null;ctx.alert=text=>alerts.push(text);
+ctx.FormData=class {append(){}};
+ctx.stopCurrentAnalysis=async()=>{stops++;throw Error('must not run')};
+const nodes={'species-select':{value:'human'},'reference-select':{value:'CellRef2'},'analysis-mode':{value:'existing'}};
+ctx.document={getElementById:id=>nodes[id],querySelectorAll:()=>[{querySelector(selector){return selector==='.sample-name'?{value:'test'}:{files:[{name:'BOS.h5'}]}}}]};
+const submit=source.indexOf('async function handleJobSubmit(');
+vm.runInContext(source.slice(submit,source.indexOf('async function handleQcSubmit(',submit)),ctx);
+(async()=>{await ctx.handleJobSubmit({preventDefault(){}});assert.equal(stops,0);assert.equal(alerts.length,1);assert.match(alerts[0],/BOS.h5.*saved clusters/);
+console.log('Readable errors passed: legacy server, validation fields, proxy errors and rejection before upload/session cancellation.');})().catch(error=>{console.error(error);process.exitCode=1});

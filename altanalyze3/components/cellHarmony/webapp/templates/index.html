@@ -55,6 +55,7 @@
                     <option value="existing">Use Existing</option>
                   </select>
                 </label>
+                <p id="existing-input-help" class="muted hidden">Upload an .h5ad file with saved clusters or cell types. To analyze a 10x .h5 counts file, choose Supervised, Unsupervised or Both.</p>
                 {% endif %}
                 <div class="field">
                   <label class="field-group-label" for="reference-select">Reference</label>
@@ -87,13 +88,31 @@
                 <input id="qc-job-id" name="job_id" type="hidden" required>
                 {% if unified_analysis_controls %}
                 <div id="existing-annotation-options" class="hidden">
+                  <div class="two-col">
+                    <label class="field">
+                      <span>Existing cell states / clusters</span>
+                      <select name="existing_state_column" id="existing-state-column">
+                        <option value="">Upload H5AD to inspect annotations</option>
+                      </select>
+                    </label>
+                    <label class="field">
+                      <span>Counts source</span>
+                      <select name="existing_counts_source" id="existing-counts-source">
+                        <option value="auto">Automatic</option>
+                      </select>
+                    </label>
+                  </div>
                   <label class="field">
-                    <span>Existing cell states / clusters</span>
-                    <select name="existing_state_column" id="existing-state-column">
-                      <option value="">Upload H5AD to inspect annotations</option>
+                    <span>Saved UMAP / t-SNE</span>
+                    <select name="existing_embedding_key" id="existing-embedding-key">
+                      <option value="">Inspecting saved layouts</option>
                     </select>
                   </label>
                   <div id="existing-annotation-status" class="notice" role="status" aria-live="polite"></div>
+                  <details id="existing-input-details" class="hidden">
+                    <summary>Input details and limitations</summary>
+                    <div id="existing-input-details-content"></div>
+                  </details>
                 </div>
                 <div class="two-col hidden" id="analysis-clustering-options">
                   <label class="field">
@@ -129,7 +148,7 @@
                     <input name="mit_percent" value="15">
                   </label>
                 </div>
-                <div class="two-col">
+                <div class="two-col" id="qc-ambient-row">
                   <label class="field">
                     <span>Minimum cosine similarity score</span>
                     <input name="align_cutoff" value="0.4">
@@ -142,7 +161,7 @@
                     </select>
                   </label>
                 </div>
-                <div class="two-col">
+                <div class="two-col" id="qc-impute-row">
                   <label class="field hidden" id="qc-impute-modality-field">
                     <span>Impute modality</span>
                     <select name="impute_modality" id="qc-impute-modality-select">

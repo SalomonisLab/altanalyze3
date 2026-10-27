@@ -1436,3 +1436,35 @@ select:disabled {
 .summary-methods-body a { display: inline; margin: 0; }
 .summary-methods-body code { font-size: .9em; overflow-wrap: anywhere; }
 .summary-methods-body pre { background: #f8fafc; padding: 12px; border-radius: 6px; }
+
+
+/* Keep input inspection readable without expanding the QC card into a log. */
+#existing-annotation-status {
+  font-size: 0.9rem;
+  line-height: 1.45;
+  padding: 10px 12px;
+  margin: 6px 0 10px;
+  min-height: 0;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+#existing-input-details {
+  font-size: 0.85rem;
+  line-height: 1.4;
+  margin: 0 0 12px;
+}
+#existing-input-details-content {
+  padding: 6px 0;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+/* Existing inputs use compact, editable slots and an optional structured audit. */
+#existing-annotation-options .two-col { align-items: start; }
+#existing-annotation-options .field { min-width: 0; }
+#existing-annotation-options select { min-width: 0; width: 100%; text-overflow: ellipsis; }
+#existing-input-details-content { white-space: normal; max-height: 220px; overflow: auto; }
+#existing-input-details-content table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+#existing-input-details-content th, #existing-input-details-content td { text-align: left; vertical-align: top; padding: 6px 8px; border-bottom: 1px solid #e1e6ef; overflow-wrap: anywhere; }
+#existing-input-details-content th { width: 30%; }
+#existing-annotation-status { padding: 6px 10px; font-size: .85rem; white-space: normal; }

@@ -15,6 +15,8 @@ import h5py
 import pandas as pd
 from anndata.io import read_elem
 
+INSPECTION_VERSION = 3
+
 CELL_NAMES = {'cell_type', 'celltype', 'cell_types', 'cell_state', 'cellstate',
               'cell_state_predicted', 'annotation', 'annotations', 'annotated_cell_type',
               'supervised_state', 'unsupervised_state', 'scalable_existing_state'}
@@ -31,7 +33,8 @@ def upload_paths(meta, uploads):
 
 
 def inspect_annotations(paths):
-    frames, embeddings, fingerprints, without_counts, recorded_keys = [], [], [], [], []
+    from ..existing_inputs import inspect_storage, choose_embedding, embedding_label
+    frames, embeddings, fingerprints, inputs, recorded_keys = [], [], [], [], []
     for path in paths:
         with h5py.File(path, 'r') as handle:
             obs = read_elem(handle['obs'])
@@ -49,9 +52,9 @@ def inspect_annotations(paths):
                             break
             recorded_keys.append(recorded)
             frames.append(obs)
-            embeddings.append([k for k in handle.get('obsm', {}) if 'umap' in k.lower()])
-            if 'counts' not in handle.get('layers', {}):
-                without_counts.append(Path(path).name)
+            storage = inspect_storage(handle, obs, var)
+            inputs.append(dict(storage, filename=Path(path).name))
+            embeddings.append(storage['embeddings'])
         stat = Path(path).stat()
         fingerprints.append([Path(path).name, stat.st_size, stat.st_mtime_ns])
     common = set(frames[0].columns).intersection(*(set(f.columns) for f in frames[1:]))
@@ -87,13 +90,25 @@ def inspect_annotations(paths):
     warnings = []
     if len(paths) > 1:
         warnings.append("Multiple files retain their supplied coordinates; a common coordinate frame is required for a joint UMAP interpretation. No cross-file alignment is performed.")
-    if without_counts:
-        warnings.append("No layers['counts'] in " + ', '.join(without_counts) + ". If X is normalized, count/mitochondrial QC requires a counts layer; otherwise set Min counts=0 and Mito %=100.")
+    if any(not info['count_source'] for info in inputs):
+        warnings.append('Raw counts were not identified. Count-based QC needs a counts matrix; normalized-only input can use Min counts 0 and Mito % 100.')
+    if any(not info['mitochondrial_genes'] for info in inputs):
+        warnings.append('Mitochondrial filtering is unavailable where mitochondrial genes are absent from the supplied gene panel.')
     if not selected:
         warnings.append('No unambiguous cell-state column was identified. Review the existing annotation selector before running.')
-    if not set.intersection(*(set(e) for e in embeddings)):
-        warnings.append('No common supplied UMAP was found. Non-UMAP analyses remain available; no new embedding or clustering will be fitted.')
-    return {'candidates': candidates, 'selected': selected, 'method': 'column_metadata' if selected else 'unresolved',
+    common_embeddings = set.intersection(*(set(e) for e in embeddings))
+    shared = [key for key in embeddings[0] if key in common_embeddings]
+    preferred = inputs[0]['embedding_key']
+    embedding = choose_embedding(shared, preferred)
+    if not embedding:
+        from ..existing_inputs import MISSING_LAYOUT
+        warnings.append(MISSING_LAYOUT)
+    return {'inspection_version': INSPECTION_VERSION, 'inputs': inputs,
+            'embedding_key': embedding, 'embedding_label': embedding_label(embedding) if embedding else None,
+            'embedding_candidates': [c for c in inputs[0]['embedding_candidates'] if c['key'] in shared],
+            'count_candidates': [c for c in inputs[0]['count_candidates'] if c['scale'] == 'counts' and all(
+                any(d['key'] == c['key'] and d['scale'] == 'counts' for d in i['count_candidates']) for i in inputs)],
+            'candidates': candidates, 'selected': selected, 'method': 'column_metadata' if selected else 'unresolved',
             'warnings': warnings, 'fingerprint': fingerprints, 'cells': sum(len(f) for f in frames)}
 
 
@@ -153,3 +168,16 @@ def validate_selection(report, key):
     if not candidate:
         raise ValueError('Select an existing cell-state/cluster column present in every uploaded H5AD before running.')
     return candidate
+
+
+def validate_slots(report, qc):
+    """Apply the same preflight to API saving, submission and isolated workers."""
+    from ..existing_inputs import MISSING_LAYOUT
+    validate_selection(report, qc.get('existing_state_column') or report['selected'])
+    embedding = qc.get('existing_embedding_key') or report['embedding_key']
+    if not embedding or embedding not in {c['key'] for c in report['embedding_candidates']}:
+        raise ValueError(MISSING_LAYOUT)
+    counts = qc.get('existing_counts_source') or 'auto'
+    if counts != 'auto' and counts not in {c['key'] for c in report['count_candidates']}:
+        raise ValueError('Select a genuine counts source present in every uploaded H5AD.')
+    return {'existing_embedding_key': embedding, 'existing_counts_source': counts}

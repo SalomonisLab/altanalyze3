@@ -463,7 +463,7 @@ class Workspace:
             result.layers['counts'] = sample(obj.layers['counts'])
         return result
 
-    def qc(self, obj, min_genes, min_cells, min_counts, mit_percent):
+    def qc(self, obj, min_genes, min_cells, min_counts, mit_percent, *, mitochondrial_genes=None):
         """Same ordered QC predicates as cellHarmony, one bounded final selection."""
         matrix = obj.layers.get('counts', obj.X)
         n, p = matrix.shape
@@ -480,7 +480,8 @@ class Workspace:
                       else np.sum(selected > 0, axis=0))
         print(f'Cells remaining after min_genes {min_genes} filtering: {int(rows.sum())}')
         columns = np.flatnonzero(genes >= min_cells) if min_cells is not None else np.arange(p)
-        mito = obj.var_names[columns].str.upper().str.startswith('MT-')
+        mito = (obj.var_names[columns].str.upper().str.startswith('MT-') if mitochondrial_genes is None
+                else np.asarray(mitochondrial_genes, bool)[columns])
         percentages = np.zeros(n, dtype=matrix.dtype if matrix.dtype.kind == 'f' else np.float64)
         counts_pass = np.ones(n, dtype=bool)
         for start in range(0, n, step):

@@ -71,6 +71,8 @@ _GO_ELITE_HIGHLIGHT_KEYWORDS = (
 class QCSettings(BaseModel):
     analysis_mode: str = Field(default="supervised", pattern="^(supervised|unsupervised|both|existing)$")
     existing_state_column: str | None = None
+    existing_counts_source: str = "auto"
+    existing_embedding_key: str | None = None
     umap_fit_mode: str = Field(default="landmark", pattern="^(full|landmark)$")
     max_k: int | None = Field(default=None, ge=2)
     min_genes: int = 500
@@ -1666,15 +1668,18 @@ def _get_expression_cache(app: FastAPI, meta: Dict, modality: str = "rna") -> Di
         default_coords_key = ""
         default_coords_label = "Supplied UMAP" if meta.get("analysis_mode") == "existing" else "cellHarmony UMAP"
         branch_embeddings = {}
-        if meta.get("analysis_mode") == "both":
+        if meta.get("analysis_mode") in {"both", "existing"}:
             # Imputed sidecars contain only the cells with predictions. Look up
             # the native RNA embeddings by barcode, never by sidecar row order.
             source = adata if normalized_modality == "rna" else _get_expression_cache(app, meta, "rna")["adata"]
             rows = source.obs_names.get_indexer(adata.obs_names)
             if (rows < 0).any():
                 raise ValueError("Modality barcodes do not match the combined RNA roster; no cells were discarded.")
-            for branch in ("supervised", "unsupervised"):
-                key = f"X_umap_{branch}"
+            branches = ("supervised", "unsupervised") if meta.get("analysis_mode") == "both" else ("existing",)
+            for branch in branches:
+                key = meta.get("existing_embedding_key") if branch == "existing" else f"X_umap_{branch}"
+                if not key:
+                    continue
                 if key in source.obsm:
                     branch_embeddings[key] = np.asarray(source.obsm[key])[rows, :2]
                 elif all(f"umap_{branch}_{axis}" in source.obs for axis in ("x", "y")):
@@ -1696,7 +1701,8 @@ def _get_expression_cache(app: FastAPI, meta: Dict, modality: str = "rna") -> Di
         # Select the active branch without changing or averaging coordinates.
         if not (umap_path and Path(umap_path).exists()):
             branch = "supervised" if cluster_key == "supervised_state" else "unsupervised"
-            preferred = f"X_umap_{branch}" if meta.get("analysis_mode") == "both" else "X_umap"
+            preferred = (meta.get("existing_embedding_key") if meta.get("analysis_mode") == "existing" else
+                         f"X_umap_{branch}" if meta.get("analysis_mode") == "both" else "X_umap")
             key = preferred if preferred in adata.obsm or preferred in branch_embeddings else "X_umap"
             if key in adata.obsm or key in branch_embeddings:
                 coordinates = branch_embeddings[key] if key in branch_embeddings else np.asarray(adata.obsm[key])
@@ -1705,7 +1711,7 @@ def _get_expression_cache(app: FastAPI, meta: Dict, modality: str = "rna") -> Di
                     default_coords_key = key
                     default_coords_label = (f"{branch.capitalize()} UMAP" if meta.get("analysis_mode") == "both"
                                             else "ICGS3 UMAP" if meta.get("analysis_mode") == "unsupervised"
-                                            else "Supplied UMAP" if meta.get("analysis_mode") == "existing" else "cellHarmony UMAP")
+                                            else "Supplied " + meta.get("existing_embedding_label", "UMAP") if meta.get("analysis_mode") == "existing" else "cellHarmony UMAP")
 
         obs_filter_values: Dict[str, np.ndarray] = {}
         filter_fields: List[Dict[str, str]] = []
@@ -4852,14 +4858,16 @@ def _build_umap_payload(
             "coords_key": resolved_coords,
             "coords_label": (resolved_coords[len(OBS_PAIR_PREFIX):].replace("_", " ")
                              if resolved_coords.startswith(OBS_PAIR_PREFIX)
-                             else (resolved_coords or "cellHarmony UMAP")),
+                             else (resolved_coords or cache_entry.get("default_coords_label", "cellHarmony UMAP"))),
             "axes_source": axes_source,
             "x_field": resolved_x,
             "y_field": resolved_y,
             "x_label": (f"{cache_entry.get('default_coords_label', 'UMAP')} 1" if resolved_x == UMAP_AXIS_FIELDS[0]
-                        else _axis_label(resolved_x) if resolved_x else "UMAP 1"),
+                        else _axis_label(resolved_x) if resolved_x else
+                        f"{cache_entry.get('default_coords_label', 'Embedding')} 1" if analysis_mode == "existing" else "UMAP 1"),
             "y_label": (f"{cache_entry.get('default_coords_label', 'UMAP')} 2" if resolved_y == UMAP_AXIS_FIELDS[1]
-                        else _axis_label(resolved_y) if resolved_y else "UMAP 2"),
+                        else _axis_label(resolved_y) if resolved_y else
+                        f"{cache_entry.get('default_coords_label', 'Embedding')} 2" if analysis_mode == "existing" else "UMAP 2"),
             "n_cells_selected": n_kept,
             "n_points_drawn": n_drawn,
             "n_dropped_no_coordinate": max(0, n_kept - n_drawn),
@@ -6523,7 +6531,8 @@ def create_app(test_config: dict | None = None) -> FastAPI:
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(request: Request, exc: RequestValidationError):
         if _is_api_request(request):
-            return JSONResponse(status_code=422, content={"detail": str(exc)})
+            from .api_errors import validation_message
+            return JSONResponse(status_code=422, content={"detail": validation_message(exc.errors())})
         raise exc
 
     @app.exception_handler(Exception)
@@ -6599,7 +6608,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         from altanalyze3.components.cellHarmony.mapped_h5ad import inspect_h5ad, validate_batch, needs_disk_backed_import
         suffixes = {Path(str(upload.filename or '')).suffix.lower() for upload in files}
         if analysis_mode == "existing" and suffixes != {'.h5ad'}:
-            raise HTTPException(400, "Use Existing requires H5AD files containing cell-state or cluster columns in .obs.")
+            raise HTTPException(400, "Use Existing needs an .h5ad file with saved clusters or cell types. For a 10x .h5 counts file, choose Supervised, Unsupervised or Both.")
         if '.h5ad' in suffixes and len(suffixes) > 1:
             raise HTTPException(status_code=400, detail='Upload H5AD files together, or 10x H5 files together; mixing the two formats is not supported.')
         input_headers = []
@@ -6690,7 +6699,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         store, _ = _job_resources(app)
         if not store.job_exists(job_id):
             raise HTTPException(404, "Job not found.")
-        from .existing_annotations import inspect_annotations, upload_paths, suggest_annotation
+        from .existing_annotations import inspect_annotations, upload_paths, suggest_annotation, INSPECTION_VERSION
         # The model runs only on this explicit pre-analysis request, in a worker
         # thread. Cached suggestions survive reloads; changed uploads invalidate it.
         with _get_cache_lock(app, "existing_annotation_locks", job_id):
@@ -6700,7 +6709,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             except ValueError as exc:
                 raise HTTPException(400, str(exc)) from exc
             saved = meta.get("existing_annotations") or {}
-            if saved.get("fingerprint") == report["fingerprint"]:
+            if saved.get("fingerprint") == report["fingerprint"] and saved.get("inspection_version") == INSPECTION_VERSION:
                 return JSONResponse(saved)
             report = suggest_annotation(report)
             store.update_job(job_id, existing_annotations=report)
@@ -6738,11 +6747,13 @@ def create_app(test_config: dict | None = None) -> FastAPI:
                 raise HTTPException(status_code=400,
                                     detail=f"Impute modalities not supported for this reference: {', '.join(unsupported)}")
             if qc.analysis_mode == "existing":
-                from .existing_annotations import inspect_annotations, upload_paths, validate_selection
+                from .existing_annotations import inspect_annotations, upload_paths, validate_selection, validate_slots
                 try:
                     report = inspect_annotations(upload_paths(meta, store.uploads_dir(job_id)))
                     qc.existing_state_column = qc.existing_state_column or (meta.get("existing_annotations") or {}).get("selected") or report["selected"]
                     validate_selection(report, qc.existing_state_column)
+                    slots = validate_slots(report, qc.model_dump())
+                    qc.existing_embedding_key = slots["existing_embedding_key"]
                     saved = meta.get("existing_annotations") or report
                     if qc.existing_state_column != saved.get("selected"):
                         store.update_job(job_id, existing_annotations=dict(saved,
@@ -6814,6 +6825,13 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             runner.assert_idle(job_id)
             if store.get_job(job_id).get("status") in {"queued", "processing"}:
                 raise HTTPException(status_code=409, detail="This analysis is already running.")
+            meta = store.get_job(job_id)
+            if (meta.get("qc") or {}).get("analysis_mode", meta.get("analysis_mode")) == "existing":
+                from .existing_annotations import inspect_annotations, upload_paths, validate_slots
+                try:
+                    validate_slots(inspect_annotations(upload_paths(meta, store.uploads_dir(job_id))), meta.get("qc") or {})
+                except ValueError as exc:
+                    raise HTTPException(400, str(exc)) from exc
             _invalidate_expression_cache(app, job_id)
             _invalidate_differential_cache(app, job_id)
             _invalidate_marker_heatmap_cache(app, job_id)

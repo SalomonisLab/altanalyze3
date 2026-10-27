@@ -1899,9 +1899,9 @@ def run_cellharmony_pipeline(
     meta = store.get_job(job_id)
     existing = (meta.get("qc") or {}).get("analysis_mode") == "existing"
     if existing:
-        from ..webapp.existing_annotations import inspect_annotations, upload_paths, validate_selection
+        from ..webapp.existing_annotations import inspect_annotations, upload_paths, validate_slots
         report = inspect_annotations(upload_paths(meta, store.uploads_dir(job_id)))
-        validate_selection(report, (meta.get("qc") or {}).get("existing_state_column") or report["selected"])
+        validate_slots(report, meta.get("qc") or {})
     # A reference in this mode selects optional prediction models only; its
     # annotation and coordinates are never used for alignment or placement.
     reference_entry = (_lookup_reference(meta["species"], meta["reference"], registry_path)
@@ -1989,6 +1989,7 @@ def run_cellharmony_pipeline(
         unaligned_h5ad=str(unaligned_h5ad_path),
         bounded_h5ad=bounded_h5ad,
         qc_normalized_input=existing,
+        existing_counts_source=qc.get("existing_counts_source", "auto") if existing else None,
     )
 
     assignments_path = outputs_dir / "cellHarmony_lite_assignments.txt"
@@ -2044,20 +2045,31 @@ def run_cellharmony_pipeline(
     )
     marker_dir = outputs_dir / "marker_heatmap"
     marker_dir.mkdir(parents=True, exist_ok=True)
+    marker_input_options = {}
+    marker_call_options = dict(
+        cluster_key=query_cluster_key,
+        out=str(marker_dir / "cell_state_marker_heatmap.pdf"),
+        top_n=50, marker_method="markerfinder", seed=0,
+        export_networks=True, network_top_n=1000,
+        network_jobs=max(1, min(4, os.cpu_count() or 1)),
+        species=meta.get("species"), **marker_output_options,
+    )
     try:
-        marker_outputs = marker_mod.generate_marker_heatmap_from_adata(
-            combined_adata,
-            cluster_key=query_cluster_key,
-            out=str(marker_dir / "cell_state_marker_heatmap.pdf"),
-            top_n=50,
-            marker_method="markerfinder",
-            seed=0,
-            export_networks=True,
-            network_top_n=1000,
-            network_jobs=max(1, min(4, os.cpu_count() or 1)),
-            species=meta.get("species"),
-            **marker_output_options,
-        )
+        try:
+            marker_outputs = marker_mod.generate_marker_heatmap_from_adata(combined_adata, **marker_call_options)
+        except marker_mod._load_marker_finder().MarkerFinderInputError:
+            # Imported RNA can have been normalized over an upstream gene panel,
+            # making the strict constant-total check fail on its supplied panel.
+            # Keep that gate enabled: the public hook already supports genuine
+            # counts + scale_data, exactly as in the canonical ICGS3 heatmap.
+            if not existing or "counts" not in combined_adata.layers or not combined_adata.uns.get("scalable_count_source"):
+                raise
+            marker_input_options = {"layer": "counts", "scale_data": True}
+            store.append_log(job_id, '[existing] [qc] Imported X failed MarkerFinder scaling validation; '
+                "using verified layers['counts'] with scale_data=True through the standard MarkerFinder hook. "
+                'Supplied X, source matrices and saved coordinates are retained; RNA scaling validation stays enabled.')
+            marker_outputs = marker_mod.generate_marker_heatmap_from_adata(
+                combined_adata, **marker_call_options, **marker_input_options)
     except marker_mod.NoMarkersSelectedError:
         marker_outputs = None
         marker_analysis = {
@@ -2082,6 +2094,7 @@ def run_cellharmony_pipeline(
             "archive": str(marker_archive_path),
             "networks": marker_outputs.get("networks", []),
             "output_options": marker_output_options,
+            "input_options": marker_input_options,
             "timings": marker_outputs.get("timings", {}),
         }
         if marker_outputs.get("pdf"):
@@ -2354,8 +2367,15 @@ def run_cellharmony_pipeline(
 
     prefix = outputs_dir / "approximate"
     prefix.mkdir(parents=True, exist_ok=True)
-    text_outputs = approx_result.write_text_outputs(prefix)
-    _append_umap_to_assignments(assignments_path, Path(text_outputs["coordinates"]))
+    if existing:
+        label = store.get_job(job_id).get("existing_embedding_label", "Embedding")
+        supplied = approx_result.coordinates.rename(columns={"umap_0": f"{label} 1", "umap_1": f"{label} 2"})
+        supplied.to_csv(prefix / "supplied_coordinates.tsv", sep="\t", index_label="CellBarcode")
+        combined_adata.obs[[query_cluster_key]].join(supplied).to_csv(assignments_path, sep="\t", index_label="CellBarcode")
+        text_outputs = {}
+    else:
+        text_outputs = approx_result.write_text_outputs(prefix)
+        _append_umap_to_assignments(assignments_path, Path(text_outputs["coordinates"]))
     annotated_pdf = None
     plain_pdf = None
     if export_approx_pdfs and not existing:
@@ -2372,9 +2392,10 @@ def run_cellharmony_pipeline(
     artifacts = {
         "assignments": assignments_path,
         "combined_h5ad": combined_h5ad_path,
-        "umap_coordinates": Path(text_outputs["coordinates"]),
-        "umap_placeholder_expression": Path(text_outputs["placeholder_expression"]),
     }
+    if not existing:
+        artifacts.update(umap_coordinates=Path(text_outputs["coordinates"]),
+                         umap_placeholder_expression=Path(text_outputs["placeholder_expression"]))
     if annotated_pdf and plain_pdf:
         artifacts["umap_pdf"] = Path(annotated_pdf)
         artifacts["umap_pdf_plain"] = Path(plain_pdf)

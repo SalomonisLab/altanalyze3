@@ -359,10 +359,12 @@ Requested QC is applied, followed by the standard downstream analyses, with no
 cellHarmony alignment, ICGS3 clustering or new UMAP fitting. Existing annotations,
 embeddings and embedded modality predictions are retained for QC-passed cells.
 A reference is optional and only selects models for newly requested imputation.
-Count-based QC needs counts in `X` or `layers['counts']`; for normalized-only input,
+Count-based QC uses verified counts in `X`, `layers['counts']`, or `.raw` with the complete matching gene panel. For normalized-only input,
 supply counts or disable count/mitochondrial thresholds with Min counts **0** and
-Mito % **100**. Without a supplied UMAP, use the other Explore plots. Multiple inputs
+Mito % **100**. A supplied UMAP or t-SNE layout is reused under its original name; no new layout is fitted. Without either layout, use the other Explore plots. Multiple inputs
 need a common annotation column and a common coordinate frame for joint UMAP display.
 Differential comparisons retain all selected cells rather than requiring absent
 alignment/SVM scores. External modality sidecars are not recovered from old file paths;
 only predictions embedded in the uploaded file are reusable.
+
+Use Existing automatically suggests a supplied cell-state column and detects count matrices and saved UMAP/t-SNE layouts. Review or override these with the cell-state, counts-source and saved-layout selectors before running. Count matrices must contain the complete matching gene panel. Named coordinate pairs in `.obs` are supported as well as layouts in `.obsm`; PCA alone is not a saved UMAP/t-SNE. A missing or nonfinite layout blocks this mode: select Supervised or Unsupervised to generate coordinates instead. Input details are available in a collapsed table. Original annotations and source matrices remain available; if another count source is selected, an original `counts` layer is retained under a recorded `source_counts` name.

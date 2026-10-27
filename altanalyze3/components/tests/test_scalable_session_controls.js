@@ -50,7 +50,7 @@ async function testUploadRestoresRunControl() {
   vm.runInContext(`let uploadSubmissionInFlight=false, uploadSelectionDirty=true, stopSubmissionInFlight=false;
     let jobSessionGeneration=0, qcSubmissionJobId='', currentJobStatus='', currentDifferentialState=null;
     let loadedResultsJobId=null;
-    ${body('handleJobSubmit')}\n${body('updateAnalysisRunControl')}`,context);
+    ${body('existingUploadError')}\n${body('handleJobSubmit')}\n${body('updateAnalysisRunControl')}`,context);
   await vm.runInContext('handleJobSubmit({preventDefault(){}})',context);
   assert.equal(node('qc-job-id').value,'new');
   assert.equal(node('run').disabled,false,'Run must become enabled after upload finally');

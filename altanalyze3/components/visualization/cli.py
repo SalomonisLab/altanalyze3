@@ -12,6 +12,10 @@ def add_arguments(parser):
     psi = commands.add_parser("psi-boxplot", help="Donor PSI boxes from complete native isoform count tables")
     add_psi_arguments(psi)
     psi.set_defaults(func=run_psi)
+    grid = commands.add_parser("psi-boxplot-grid", help="One-page panels of literal native donor PSI")
+    from .psi_boxplot_grid import add_arguments as add_grid_arguments
+    add_grid_arguments(grid)
+    grid.set_defaults(func=run_psi_grid)
 
 
 def run_isv(args):
@@ -21,4 +25,9 @@ def run_isv(args):
 
 def run_psi(args):
     from .psi_boxplot import run
+    return run(args)
+
+
+def run_psi_grid(args):
+    from .psi_boxplot_grid import run
     return run(args)

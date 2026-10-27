@@ -40,16 +40,29 @@ def prepare_annotations(matrix, meta, store, job_id):
 
 def supplied_embedding_result(matrix, cluster_key, store, job_id):
     from altanalyze3.components.visualization.approximate_umap import ApproximateUMAPResult
-    key = next((k for k in ['X_umap'] + list(matrix.obsm) if k in matrix.obsm and 'umap' in k.lower()
-                and len(matrix.obsm[k].shape) == 2 and matrix.obsm[k].shape[1] >= 2), None)
-    if key:
-        coordinates = np.asarray(matrix.obsm[key])[:, :2]
-        if 'X_umap' not in matrix.obsm:
-            matrix.obsm['X_umap'] = coordinates.copy()
-        store.append_log(job_id, f'[existing] Preserving supplied embedding {key}; no UMAP is fitted or projected.')
+    from ..existing_inputs import choose_embedding, embedding_label, embedding_candidates, MISSING_LAYOUT
+    candidates = embedding_candidates(matrix.obs, matrix.obsm)
+    requested = (store.get_job(job_id).get('qc') or {}).get('existing_embedding_key')
+    key = requested or choose_embedding([c['key'] for c in candidates], matrix.uns.get('default_embedding'))
+    candidate = next((c for c in candidates if c['key'] == key), None)
+    if not candidate:
+        raise ValueError(MISSING_LAYOUT)
+    if candidate['kind'] == 'obs':
+        coordinates = matrix.obs[candidate['columns']].to_numpy(dtype=float)
+        # A serving alias is added; original obs coordinates remain untouched.
+        alias = 'X_supplied_tsne' if 't-SNE' in candidate['label'] else 'X_supplied_umap'
+        while alias in matrix.obsm:
+            alias += '_saved'
+        matrix.obsm[alias] = coordinates
+        key = alias
     else:
-        coordinates = np.full((matrix.n_obs, 2), np.nan)
-        store.append_log(job_id, '[existing] WARNING: no supplied UMAP; use non-UMAP Explore plots. No coordinates were invented.')
+        coordinates = np.asarray(matrix.obsm[key])[:, :2]
+    label = embedding_label(key)
+    if 'umap' in key.lower() and 'X_umap' not in matrix.obsm:
+        matrix.obsm['X_umap'] = coordinates.copy()
+    matrix.uns['scalable_existing_embedding_source'] = candidate['key']
+    store.append_log(job_id, f'[existing] Preserving supplied embedding {candidate["key"]}; no layout is fitted or projected.')
+    store.update_job(job_id, existing_embedding_key=key, existing_embedding_label=label)
     store.update_job(job_id, progress=82, message='Use Existing: supplied annotations and coordinates retained; preparing downstream analyses.')
     frame = pd.DataFrame(coordinates, index=matrix.obs_names, columns=['umap_0', 'umap_1'])
     return ApproximateUMAPResult(query_adata=matrix, coordinates=frame, reference_choices={},

@@ -553,7 +553,30 @@ def downsample_cells_per_group(adata, groupby, cells_per_cluster=50, seed=0, gro
     return adata[idx].copy()
 
 
-def _select_unique_markers(pvals_df, cluster_order, top_n, effect_df=None, pval_threshold=0.05, min_rho=None):
+def _select_unique_markers(pvals_df, cluster_order, top_n, effect_df=None, pval_threshold=0.05, min_rho=None,
+                           ranking="fdr"):
+    if ranking not in {"fdr", "rho"}:
+        raise ValueError("Marker ranking must be fdr or rho")
+    if ranking == "rho":
+        if effect_df is None or pval_threshold is not None:
+            raise ValueError("Rho-only ranking requires effects and no P/FDR selection threshold")
+        effects = effect_df.reindex(columns=cluster_order).replace([np.inf, -np.inf], np.nan)
+        effects = effects.where(effects > 0)
+        if min_rho is not None:
+            effects = effects.where(effects >= min_rho)
+        effects = effects.loc[effects.notna().any(axis=1)]
+        if effects.empty:
+            return pd.DataFrame(columns=["gene", "cluster", "pval", "effect"])
+        winner = effects.idxmax(axis=1)
+        markers = pd.DataFrame({"gene": effects.index.astype(str), "cluster": winner.to_numpy()})
+        markers["effect"] = [effects.loc[g, c] for g, c in zip(effects.index, winner)]
+        markers["pval"] = [pvals_df.loc[g, c] for g, c in zip(effects.index, winner)]
+        markers["cluster"] = pd.Categorical(markers["cluster"], categories=cluster_order, ordered=True)
+        markers = markers.sort_values(["cluster", "effect", "gene"],
+                                      ascending=[True, False, True], kind="mergesort")
+        if top_n is not None:
+            markers = markers.groupby("cluster", sort=False, observed=True).head(top_n)
+        return markers.reset_index(drop=True)
     if pvals_df.empty:
         return pd.DataFrame(columns=["gene", "cluster", "pval"])
 
@@ -2075,6 +2098,8 @@ def generate_marker_heatmap_from_adata(
     go_terms=None,
     go_terms_max=30,
     return_statistics=False,
+    marker_ranking="fdr",
+    missing_psi="preserve",
 ):
     """Find markers using all input cells; output controls do not change scoring.
 
@@ -2087,6 +2112,14 @@ def generate_marker_heatmap_from_adata(
         raise ValueError("heatmap_dpi must be a finite positive number.")
     total_started = time.perf_counter()
     timings = {}
+    if marker_ranking not in {"fdr", "rho"}:
+        raise ValueError("marker_ranking must be fdr or rho")
+    if marker_ranking == "rho" and (marker_method != "markerfinder" or pval_threshold is not None):
+        raise ValueError("Rho-only ranking requires MarkerFinder and pval_threshold=None")
+    if missing_psi not in {"preserve", "row_median"}:
+        raise ValueError("missing_psi must be preserve or row_median")
+    if missing_psi == "row_median" and (marker_method != "markerfinder" or use_raw or scale_data):
+        raise ValueError("Row-median PSI filling requires MarkerFinder, use_raw=False and scale_data=False")
     out = str(out)
     out_dir = os.path.dirname(out) or "."
     base_name = os.path.splitext(os.path.basename(out))[0]
@@ -2128,6 +2161,22 @@ def generate_marker_heatmap_from_adata(
             adata, cluster_key, use_raw, layer, max_sample_missing_above_group_median,
             os.path.join(out_dir, f"{base_name}_sample_missing_filter.tsv"),
         )
+
+    source_adata = adata
+    imputation = {"method": missing_psi, "filled_cells": 0}
+    if missing_psi == "row_median":
+        source_matrix, source_features = _get_expression_matrix(adata, False, layer)
+        values = source_matrix.toarray() if sparse.issparse(source_matrix) else np.asarray(source_matrix)
+        frame = pd.DataFrame(values.T, index=source_features, columns=adata.obs_names)
+        filled, filled_mask = fill_PSI_row_median(frame)
+        adata = adata.copy()
+        if layer:
+            adata.layers[layer] = filled.to_numpy().T.copy()
+        else:
+            adata.X = filled.to_numpy().T.copy()
+        imputation.update(original_missing_cells=int(frame.isna().to_numpy().sum()),
+                          filled_cells=int(filled_mask.to_numpy().sum()),
+                          all_missing_events=int(frame.isna().all(axis=1).sum()))
 
     resolve_cluster_started = time.perf_counter()
     raw_clusters = adata.obs[cluster_key]
@@ -2199,6 +2248,7 @@ def generate_marker_heatmap_from_adata(
         effect_df=effect_df,
         pval_threshold=pval_threshold,
         min_rho=min_rho,
+        ranking=marker_ranking,
     )
     if collapse_shared_exons and not selected_all.empty:
         n_before = len(selected_all)
@@ -2211,7 +2261,8 @@ def generate_marker_heatmap_from_adata(
         selected_all.groupby("cluster", sort=False).head(top_n).reset_index(drop=True)
         if top_n is not None else selected_all
     )
-    print(f"[INFO] Assigned {selected_all.shape[0]} unique markers after FDR/effect filtering "
+    selection_description = "rho-only selection" if marker_ranking == "rho" else "FDR/effect filtering"
+    print(f"[INFO] Assigned {selected_all.shape[0]} unique markers after {selection_description} "
           f"(written to the marker TSV); {selected.shape[0]} go to the heatmap (top_n={top_n}).")
     _log_step_timing(
         "marker_heatmap.select_unique_markers",
@@ -2424,12 +2475,23 @@ def generate_marker_heatmap_from_adata(
     write_heatmap_matrices_started = time.perf_counter()
     if write_heatmap_cache and heatmap_cache:
         write_cache_started = time.perf_counter()
+        source_PSI = None
+        imputed_mask = None
+        if missing_psi == "row_median":
+            source_matrix, source_features = _get_expression_matrix(source_adata, False, layer)
+            values = source_matrix[source_adata.obs_names.get_indexer(ordered_cells), :]
+            values = values[:, pd.Index(source_features).get_indexer(heatmap_df.index)]
+            values = values.toarray() if sparse.issparse(values) else np.asarray(values)
+            source_PSI = pd.DataFrame(values.T, index=heatmap_df.index, columns=ordered_cells)
+            imputed_mask = source_PSI.isna() & source_PSI.median(axis=1).notna().to_numpy()[:, None]
         _write_heatmap_cache(
             heatmap_cache,
             heatmap_df,
             row_clusters,
             column_clusters,
             ordered_cells,
+            source_PSI=source_PSI,
+            imputed_mask=imputed_mask,
         )
         _log_step_timing(
             "marker_heatmap.write_heatmap_cache",
@@ -2518,10 +2580,13 @@ def generate_marker_heatmap_from_adata(
         "centroids_tsv": centroids_tsv,
         "networks": networks,
         "timings": timings,
+        "marker_ranking": marker_ranking,
+        "missing_PSI_handling": imputation,
     }
     if return_statistics:
         result.update(rho=effect_df.reindex(adata.var_names), pval=pvals.reindex(adata.var_names),
-                      fdr=fdr_df.reindex(adata.var_names), sample_ids=adata.obs_names.tolist())
+                      fdr=fdr_df.reindex(adata.var_names), sample_ids=adata.obs_names.tolist(),
+                      assignments=selected_all.copy())
     return result
 
 
@@ -3005,6 +3070,10 @@ def main():
             "(default 0.001, the API default pval_threshold)."
         ),
     )
+    parser.add_argument("--rho-only", action="store_true",
+                        help="MarkerFinder: assign and rank by positive rho alone; disable P/FDR selection.")
+    parser.add_argument("--missing-psi", choices=["preserve", "row_median"], default="preserve",
+                        help="Fill missing event PSI on a copy with its median over all input samples before scoring and scaling.")
     parser.add_argument(
         "--max-sample-missing-above-group-median",
         type=float,
@@ -3195,7 +3264,9 @@ def main():
             max_missing_fraction=args.max_missing_fraction,
             min_rho=args.min_rho,
             collapse_shared_exons=args.collapse_shared_exons,
-            pval_threshold=args.fdr_threshold,
+            pval_threshold=None if args.rho_only else args.fdr_threshold,
+            marker_ranking="rho" if args.rho_only else "fdr",
+            missing_psi=args.missing_psi,
             max_sample_missing_above_group_median=args.max_sample_missing_above_group_median,
             label_events=_read_label_events(args.label_events) if args.label_events else None,
             label_shared_exons=not args.label_events_exact,

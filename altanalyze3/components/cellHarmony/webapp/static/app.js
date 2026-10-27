@@ -1167,7 +1167,11 @@ function availableVisualizationModes(panelKey) {
   const modes = BASE_VISUALIZATION_MODES.filter(mode => mode.value !== "relative" || !["unsupervised", "existing"].includes(currentAnalysisMode));
   if (currentAnalysisMode !== "supervised") {
     const clusters = modes.find(mode=>mode.value==="cluster");
-    if (clusters) modes[modes.indexOf(clusters)] = {...clusters,label:"UMAP cell states"};
+    if (clusters) modes[modes.indexOf(clusters)] = {...clusters,label:currentAnalysisMode === "existing" ? "Cell states (saved layout)" : "UMAP cell states"};
+    if (currentAnalysisMode === "existing") {
+      const expression = modes.find(mode => mode.value === "expression_umap");
+      if (expression) modes[modes.indexOf(expression)] = {...expression, label:"Expression (saved layout)"};
+    }
   }
   if (clusterAssociationsAvailable) modes.push({value:"cluster_associations", label:"Cluster associations"});
   if (currentBiomarkersAvailable && !window.__SCALABLE_DISCOVER__) modes.push({value:"goelite_biomarkers",label:"GO-Elite BioMarkers"});
@@ -2276,7 +2280,7 @@ async function restoreJobFromUrl() {
     const imputed = data.qc?.impute_modalities || [];
     if (imputed.length) document.getElementById("qc-impute-modality-select").value = imputed.includes("all") ? "all" : imputed[0];
     applyJobStatus(jobId, data);
-    if (analysis?.value === "existing") await loadExistingAnnotations(jobId, data.qc?.existing_state_column);
+    if (analysis?.value === "existing") await loadExistingAnnotations(jobId, data.qc?.existing_state_column, data.qc);
     if (["queued", "processing"].includes(data.status) ||
         ["queued", "processing"].includes(data.differential_ui?.status)) {
       startStatusPolling(jobId);
@@ -2448,7 +2452,7 @@ function addSampleRow() {
     </label>
     <label class="field sample-inline-field">
       <span class="sample-inline-label">H5/H5AD file</span>
-      <input type="file" class="sample-file" accept=".h5,.h5ad" required>
+      <input type="file" class="sample-file" accept="${document.getElementById("analysis-mode")?.value === "existing" ? ".h5ad" : ".h5,.h5ad"}" required>
     </label>
     <div class="sample-actions">
       <button type="button" class="ghost-btn remove-sample">Remove</button>
@@ -2865,16 +2869,58 @@ function resetWorkspaceData(options = {}) {
   loadReferencePreview();
 }
 
+function readableApiError(detail, status) {
+  if (Array.isArray(detail)) {
+    return [...new Set(detail.map(issue => {
+      const field = (issue.loc || []).filter(value => typeof value === "string" && !["body", "query", "path"].includes(value)).pop() || "setting";
+      if (field === "analysis_mode") {
+        return issue.input === "existing"
+          ? "The server has not loaded Use Existing yet. Restart scALABLE, then reload this page."
+          : "Choose Supervised, Unsupervised, Both or Use Existing.";
+      }
+      const label = {max_k:"Max K",min_genes:"Min genes",min_counts:"Min counts",min_cells:"Min cells",mit_percent:"Mito %"}[field] || field.replaceAll("_", " ");
+      if (field === "max_k") return "Max K must be a whole number of 2 or more, or left blank.";
+      if (issue.type === "missing") return `${label} is required.`;
+      if (["int_parsing", "int_type", "int_from_float"].includes(issue.type)) return `${label} must be a whole number.`;
+      return `Check ${label} and try again.`;
+    }))].join(" ") || "Check the selected settings and try again.";
+  }
+  const text = typeof detail === "string" ? detail.trim() : "";
+  // Older servers return Pydantic's exception string, including local paths
+  // and source snippets. Translate it even before that server is restarted.
+  if (/analysis_mode/.test(text) && /string_pattern_mismatch|match pattern/.test(text)) {
+    return /existing/.test(text)
+      ? "The server has not loaded Use Existing yet. Restart scALABLE, then reload this page."
+      : "Choose Supervised, Unsupervised, Both or Use Existing.";
+  }
+  if ([502, 503, 504].includes(status)) return "The server could not respond in time. Please try again shortly.";
+  if (!text || /Traceback|File ["']|<(!doctype|html)|validation errors?:/i.test(text)) {
+    return status === 422 ? "Check the selected settings and try again."
+      : "The request could not be completed. Please try again; technical details are recorded in the server log.";
+  }
+  return text;
+}
+
+function decodeApiResponse(rawText, status) {
+  if (!rawText) return status >= 400 ? {detail: readableApiError("", status)} : {};
+  let data;
+  try { data = JSON.parse(rawText); }
+  catch (_) { return {detail: readableApiError(rawText, status)}; }
+  if (status >= 400) {
+    if (!data || typeof data !== "object" || Array.isArray(data)) return {detail: readableApiError(data, status)};
+    return {...data, detail: readableApiError(data.detail, status)};
+  }
+  return data;
+}
+
 async function parseApiResponse(resp) {
-  const rawText = await resp.text();
-  if (!rawText) {
-    return {};
-  }
-  try {
-    return JSON.parse(rawText);
-  } catch (_) {
-    return { detail: rawText.trim() || `HTTP ${resp.status}` };
-  }
+  return decodeApiResponse(await resp.text(), resp.status);
+}
+
+function existingUploadError(mode, filenames) {
+  if (mode !== "existing") return "";
+  const invalid = filenames.find(name => !name.toLowerCase().endsWith(".h5ad"));
+  return invalid ? `${invalid} cannot be used with Use Existing. Upload an .h5ad file with saved clusters or cell types. For a 10x .h5 counts file, choose Supervised, Unsupervised or Both.` : "";
 }
 
 function setUploadProgress(percent, visible = true) {
@@ -2901,15 +2947,7 @@ function uploadFormDataWithProgress(url, formData, onProgress) {
     };
 
     xhr.onload = () => {
-      const rawText = xhr.responseText || "";
-      let data = {};
-      if (rawText) {
-        try {
-          data = JSON.parse(rawText);
-        } catch (_) {
-          data = { detail: rawText.trim() || `HTTP ${xhr.status}` };
-        }
-      }
+      const data = decodeApiResponse(xhr.responseText || "", xhr.status);
       resolve({ ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, data });
     };
 
@@ -3017,6 +3055,10 @@ async function handleJobSubmit(evt) {
     formData.append("files", fileInput.files[0]);
   }
 
+  const inputError = existingUploadError(document.getElementById("analysis-mode")?.value,
+    Array.from(rows, row => row.querySelector(".sample-file").files[0].name));
+  if (inputError) { alert(inputError); return; }
+
   const formats = new Set(Array.from(rows, row =>
     row.querySelector('.sample-file').files[0].name.toLowerCase().split('.').pop()));
   if (formats.has('h5ad') && formats.size > 1) {
@@ -3086,6 +3128,8 @@ async function handleQcSubmit(evt) {
   const payload = {
     analysis_mode: document.getElementById("analysis-mode")?.value || "supervised",
     existing_state_column: evt.target.existing_state_column?.value || null,
+    existing_counts_source: evt.target.existing_counts_source?.value || "auto",
+    existing_embedding_key: evt.target.existing_embedding_key?.value || null,
     umap_fit_mode: evt.target.umap_fit_mode?.value || "landmark",
     max_k: evt.target.max_k?.value.trim() ? Number(evt.target.max_k.value) : null,
     min_genes: evt.target.min_genes.value,
@@ -3102,6 +3146,10 @@ async function handleQcSubmit(evt) {
   if (payload.analysis_mode === "existing" && evt.target.existing_state_column?.dataset.loading === "true") return;
   if (payload.analysis_mode === "existing" && !payload.existing_state_column) {
     alert("Select an existing cell-state / cluster column before running. Wait for annotation inspection if it is still loading.");
+    return;
+  }
+  if (payload.analysis_mode === "existing" && !payload.existing_embedding_key) {
+    alert("UMAP or t-SNE coordinates missing. Please select Supervised or Unsupervised to assign coordinates before proceeding.");
     return;
   }
   // App-specific QC controls, supplied only by interfaces that add them.
@@ -3284,7 +3332,7 @@ async function loadJobStateOnce(jobId, quiet = false) {
     applyJobStatus(jobId, data);
     if ((data.analysis_mode || data.qc?.analysis_mode) === "existing" &&
         document.getElementById("existing-state-column")?.dataset.jobId !== jobId) {
-      await loadExistingAnnotations(jobId, data.qc?.existing_state_column);
+      await loadExistingAnnotations(jobId, data.qc?.existing_state_column, data.qc);
     }
   } catch (err) {
     if (!accepted && !isCurrent()) return;
@@ -3429,7 +3477,8 @@ function updateAnalysisRunControl() {
   }
   const inspectingExisting = document.getElementById("analysis-mode")?.value === "existing" &&
     document.getElementById("existing-state-column")?.dataset.loading === "true";
-  button.disabled = submitting || active || uploadSelectionDirty || uploadSubmissionInFlight || stopSubmissionInFlight || inspectingExisting;
+  button.disabled = submitting || active || uploadSelectionDirty || uploadSubmissionInFlight || stopSubmissionInFlight || inspectingExisting || (document.getElementById("analysis-mode")?.value === "existing" &&
+    (!document.getElementById("existing-embedding-key")?.value || !document.getElementById("existing-state-column")?.value));
   button.textContent = uploadSelectionDirty ? "Upload new data first" : active ? (!pipelineActive ? "Differential running…" : currentJobStatus === "queued" ? "Queued…" : "Running…")
     : submitting ? "Starting…" : inspectingExisting ? "Inspecting annotations…" : "Save QC and run";
   button.setAttribute("aria-busy", String(submitting || active));
@@ -3946,6 +3995,13 @@ function buildQcCellSummary(data) {
   const message = String(data.message || "").trim();
   const progress = parseProgressPercent(data.progress);
   if (status === 'uploaded' && message) {
+    const input = data.input_memory;
+    if (input?.cells) {
+      const size = input.matrix_bytes ? ` · ${(input.matrix_bytes / 1024 ** 3).toFixed(1)} GiB of expression data` : "";
+      return `Upload complete: ${Number(input.cells).toLocaleString()} cells${size}. ` +
+        (input.bounded_h5ad ? "Disk-backed processing selected to conserve RAM." : "Ready to configure QC.") +
+        (/exceeds the server/.test(message) ? " The in-memory estimate exceeds the server budget." : "");
+    }
     return message;
   }
   // A rerun can still have stage logs from its previous analysis. Show the
@@ -9276,10 +9332,54 @@ function drawChatFrequency(spec) {
 }
 
 
-async function loadExistingAnnotations(jobId, savedSelection) {
+function existingInspectionText(info, selected) {
+  if (!info.embedding_key) return "UMAP or t-SNE coordinates missing. Please select Supervised or Unsupervised to assign coordinates before proceeding.";
+  if (!selected) return "Cell-state annotation could not be identified. Select a column before running.";
+  return info.method === "local_model" ? "AI suggested cell states; review the selections." : "Input selections ready. Review or change them above.";
+}
+
+function renderExistingDetails(info, selected, reset = false) {
+  const details = document.getElementById("existing-input-details");
+  const content = document.getElementById("existing-input-details-content");
+  if (!details || !content) return;
+  content.replaceChildren();
+  const table = document.createElement("table");
+  const row = (label, value) => {
+    const tr = document.createElement("tr");
+    const th = document.createElement("th"); th.scope = "row"; th.textContent = label;
+    const td = document.createElement("td"); td.textContent = value;
+    tr.append(th, td); table.append(tr);
+  };
+  row("Selected cell states", selected?.key || "Not selected");
+  row("Selected counts", document.getElementById("existing-counts-source")?.selectedOptions[0]?.textContent || "Automatic");
+  row("Selected layout", document.getElementById("existing-embedding-key")?.selectedOptions[0]?.textContent || "Missing");
+  row("Annotation suggestion", info.method === "local_model" ? `Local model: ${info.model || "configured model"}` : "Saved annotation metadata / column names");
+  if (info.reason) row("AI reasoning", info.reason);
+  (info.inputs || []).forEach(input => {
+    row(input.filename, `Detected counts: ${input.count_source || "not identified"}; saved layouts: ${(input.embeddings || []).join(", ") || "none"}; mitochondrial genes: ${input.mitochondrial_genes}.`);
+    if (input.count_note) row("Counts note", input.count_note);
+  });
+  (info.warnings || []).forEach(note => row("Review", note));
+  if (selected?.missing_cells) row("Unassigned", `${selected.missing_cells} cells without labels are retained.`);
+  if (selected?.kind === "cluster") row("Labels", "Supplied cluster IDs are retained; biological names are not inferred.");
+  content.append(table);
+  const summary = details.querySelector("summary");
+  if (summary) summary.textContent = `Input details${info.warnings?.length ? ` · ${info.warnings.length} to review` : ""}`;
+  details.classList.remove("hidden");
+  if (reset) details.open = false;
+}
+
+async function loadExistingAnnotations(jobId, savedSelection, savedSettings = {}) {
   const select = document.getElementById("existing-state-column");
   const status = document.getElementById("existing-annotation-status");
   if (!select || !status || !jobId) return;
+  const counts = document.getElementById("existing-counts-source");
+  const layout = document.getElementById("existing-embedding-key");
+  const sameJob = select.dataset.jobId === jobId;
+  const priorCounts = savedSettings?.existing_counts_source || (sameJob ? counts?.value : "");
+  const priorLayout = savedSettings?.existing_embedding_key || (sameJob ? layout?.value : "");
+  if (counts) { counts.disabled = true; counts.replaceChildren(new Option("Inspecting counts…", "auto")); }
+  if (layout) { layout.disabled = true; layout.replaceChildren(new Option("Inspecting layouts…", "")); }
   const session = jobSessionGeneration;
   const request = String(Number(select.dataset.inspectionRequest || 0) + 1);
   select.dataset.inspectionRequest = request;
@@ -9305,16 +9405,44 @@ async function loadExistingAnnotations(jobId, savedSelection) {
     select.value = info.candidates.some(c => c.key === choice) ? choice : "";
     select.dataset.jobId = jobId;
     const selected = info.candidates.find(c => c.key === select.value);
-    const notes = [...(info.warnings || [])];
-    if (selected?.kind === "cluster") notes.push("Cluster IDs will be retained; biological cell-type names are not inferred.");
-    if (selected?.missing_cells) notes.push(`${selected.missing_cells} cells have missing labels and will remain as Unassigned.`);
-    status.textContent = [info.method === "local_model" ? `Local-model suggestion: ${info.selected}. Review before running.` :
-      select.value ? `Detected ${select.value}. Review before running.` : "Cell-state annotation could not be identified. Select a column before running.", ...notes].join(" ");
+    if (counts) {
+      const detected = info.inputs?.map(input => input.count_source || "none");
+      counts.replaceChildren(new Option(`Automatic${detected?.length ? ` (${[...new Set(detected)].join(", ")})` : ""}`, "auto"));
+      (info.count_candidates || []).forEach(candidate => counts.add(new Option(candidate.label, candidate.key)));
+      counts.value = (info.count_candidates || []).some(c => c.key === priorCounts) ? priorCounts : "auto";
+    }
+    if (layout) {
+      layout.replaceChildren(new Option("Select saved UMAP / t-SNE", ""));
+      (info.embedding_candidates || []).forEach(candidate => layout.add(new Option(candidate.label, candidate.key)));
+      const wanted = priorLayout || info.embedding_key;
+      layout.value = (info.embedding_candidates || []).some(c => c.key === wanted) ? wanted : "";
+    }
+    const refresh = () => {
+      const chosen = info.candidates.find(c => c.key === select.value);
+      status.textContent = existingInspectionText({...info, embedding_key: layout ? layout.value : info.embedding_key}, chosen);
+      renderExistingDetails(info, chosen);
+      updateAnalysisRunControl();
+    };
+    select.onchange = refresh;
+    if (layout) layout.onchange = refresh;
+    if (counts) counts.onchange = refresh;
+    refresh();
+    const mito = document.querySelector('#qc-form [name="mit_percent"]');
+    if (mito && info.inputs?.length) {
+      const unavailable = info.inputs.every(input => input.mitochondrial_genes === 0);
+      mito.disabled = unavailable;
+      mito.title = unavailable ? "Mitochondrial genes were not supplied; this filter cannot be evaluated." : "";
+      const label = mito.closest(".field")?.querySelector("span");
+      if (label) label.textContent = unavailable ? "Mito % (unavailable)" : "Mito %";
+    }
+    renderExistingDetails(info, selected, true);
   } catch (error) {
     if (current()) status.textContent = error.message;
   } finally {
     if (current()) {
       select.disabled = false;
+      if (counts) counts.disabled = false;
+      if (layout) layout.disabled = false;
       select.dataset.loading = "false";
       updateAnalysisRunControl();
     }
@@ -9325,6 +9453,17 @@ function syncAnalysisControls() {
   const control = document.getElementById("analysis-mode");
   if (!control) return; // standalone discover/viewer owns its controls
   const mode = control.value;
+  if (mode !== "existing") {
+    const mito = document.querySelector('#qc-form [name="mit_percent"]');
+    if (mito) {
+      mito.disabled = false;
+      mito.title = "";
+      const label = mito.closest(".field")?.querySelector("span");
+      if (label) label.textContent = "Mito %";
+    }
+  }
+  document.getElementById("existing-input-help")?.classList.toggle("hidden", mode !== "existing");
+  document.querySelectorAll(".sample-file").forEach(input => { input.accept = mode === "existing" ? ".h5ad" : ".h5,.h5ad"; });
   const qcPanel = document.getElementById("qc-panel");
   if (qcPanel) qcPanel.dataset.analysisMode = mode;
   document.getElementById("analysis-clustering-options")?.classList.toggle("hidden", ["supervised", "existing"].includes(mode));
@@ -9351,6 +9490,13 @@ function syncAnalysisControls() {
   cutoff?.closest(".field")?.classList.toggle("hidden", ["unsupervised", "existing"].includes(mode));
   const heading = document.querySelector("#qc-panel h2");
   if (heading) heading.textContent = mode === "existing" ? "2. QC and existing annotations" : mode === "supervised" ? "2. QC and alignment" : mode === "unsupervised" ? "2. QC and ICGS3 clustering" : "2. QC, alignment and ICGS3 clustering";
+  const imputeField = document.getElementById("qc-impute-modality-field");
+  const imputeRow = document.getElementById("qc-impute-row");
+  const ambientRow = document.getElementById("qc-ambient-row");
+  if (imputeField && imputeRow && ambientRow) {
+    (mode === "existing" ? ambientRow : imputeRow).append(imputeField);
+    imputeRow.classList.toggle("hidden", mode === "existing");
+  }
   updateImputeModalityField();
   if (mode === "unsupervised") {
     document.getElementById("qc-impute-modality-field")?.classList.add("hidden");

@@ -477,6 +477,11 @@ def _marker_finder_missing_as_na(matrix, groups, gene_names, _indicator=None, bl
         x = np.asarray(block.toarray() if sparse.issparse(block) else block, dtype=np.float64)
         measured = ~np.isnan(x)
         n_measured = measured.sum(axis=0).astype(np.float64)
+        # A rounded mean can leave a tiny nonzero centered residual even when
+        # every measured value is identical. Pearson correlation is undefined
+        # for those features, regardless of that floating-point residual.
+        constant = (np.where(measured, x, np.inf).min(axis=0) ==
+                    np.where(measured, x, -np.inf).max(axis=0))
         too_sparse = (n_cells - n_measured) / n_cells >= max_missing_fraction
         n_with_missing += int((n_measured < n_cells).sum())
         n_excluded += int(too_sparse.sum())
@@ -487,7 +492,7 @@ def _marker_finder_missing_as_na(matrix, groups, gene_names, _indicator=None, bl
             in_group = measured.T.astype(np.float64) @ y
             ssy = in_group - in_group**2 / n_measured[:, None]
             r = np.clip((centered.T @ y) / np.sqrt(ssx[:, None] * ssy), -1.0, 1.0)
-            r[(ssx <= 0) | too_sparse, :] = np.nan
+            r[(ssx <= 0) | too_sparse | constant, :] = np.nan
             r[ssy <= 0] = np.nan
             df = np.broadcast_to((n_measured - 2)[:, None], r.shape)
             p = t.sf(np.abs(r * np.sqrt(df) / np.sqrt(1 - r**2)), df=df) * 2
