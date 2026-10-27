@@ -507,6 +507,18 @@ def prepare_locus_coordinates(response, intron_scale, trim_to_reads, isoform_tra
     return res, frames
 
 
+def _architecture_structure_length(model, track):
+    """Use audited sequence length on integrated figures, retaining source metadata."""
+    observed = model.get('protein_length')
+    literal = int(track['protein_aa'])
+    reported = int(track['reported_aa'] or literal)
+    if observed not in (None, '') and int(observed) not in (literal, reported):
+        raise ValueError('ISV protein length differs from audited architecture: ' + track['isoform_id'])
+    return dict(isoform_id=track['isoform_id'], source_RNA_protein_length=observed,
+                source_architecture_reported_aa=track['reported_aa'],
+                displayed_literal_sequence_aa=literal)
+
+
 def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
            font_scale=1.0, show_ruler=True, show_read_labels=True, trim_to_reads=False,
            title_gene=None, title_event=None, show_read_counts=True, show_structure_header=True,
@@ -554,7 +566,9 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
             note += f" Up to {res['display_read_cap_per_isoform']} eligible RNA per isoform are sampled after filtering."
         if not protein_features:
             caption = (str(caption) + ' ' if caption else '') + note
-    stack_reference_loci = is_trans_splicing_view(res)
+    # Overlapping annotations can share an axis without representing trans-splicing.
+    # Give each reference model its own row so its title/exons remain readable.
+    stack_reference_loci = is_trans_splicing_view(res) or bool(res.get('has_multiple_loci'))
     locus_frames = []
     if res.get("has_multiple_loci"):
         if region:
@@ -783,16 +797,18 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
         bundle = load_architectures(protein_features)
         ids = [str(m.get('final_isoform_id') or m.get('isoform_id')) for m in iso_rows]
         tracks = select_tracks(bundle, ids, res.get('symbol'))
+        length_audit = []
         for m, track in zip(iso_rows, tracks):
             if m.get('struct_source') != 'registered':
                 raise ValueError('Protein architecture requires the registered native transcript model: ' + track['isoform_id'])
-            observed = m.get('protein_length')
-            if observed not in (None, '') and int(observed) not in (track['protein_aa'], int(track['reported_aa'] or track['protein_aa'])):
-                raise ValueError('ISV protein length differs from audited architecture: ' + track['isoform_id'])
+            length_audit.append(_architecture_structure_length(m, track))
+            # res is a drawing-only deepcopy. Frozen RNA input metadata/counts stay intact.
+            m['protein_length'] = int(track['protein_aa'])
             track['display_color'] = colof(m)
         protein_top = height + 8 * FS
         protein_layout = layout_tracks(tracks, track_x1 - track_x0, FS)
         protein_layout['source'] = {k: bundle[k] for k in ('root', 'manifest_sha256', 'source_manifest_sha256', 'selection')}
+        protein_layout['structure_length_display_audit'] = length_audit
         protein_layout['RNA'] = dict(panels=[dict(condition=p['condition'],
             records=len(p['mol']), reads=sum(float(m.get('count', 0)) for m in p['mol'])) for p in panels],
             isoform_order=ids, read_filter=res.get('read_filter'),

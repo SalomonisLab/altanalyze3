@@ -431,7 +431,7 @@ def protein_outcome_classes(path):
 
 def protein_outcome_from_tables(diff_dir, group_A, group_B, classes, fold=1.5, rawp=0.05, min_donors=3,
                                 fold_scale="log2", pattern="*_stats-annotated.txt", log=print,
-                                min_usage_shift=None):
+                                min_usage_shift=None, fdr_threshold=None):
     """Every isoform differential between group_A and group_B in each state's covariate table: >= min_donors donors in
     each group, ebayesPval < rawp, and |DiffMeans| > log2(fold) (fold_scale log2, expression tables) or
     max(Mean_A / Mean_B, Mean_B / Mean_A) > fold (fold_scale ratio, usage tables). Returns one row per state and
@@ -440,6 +440,8 @@ def protein_outcome_from_tables(diff_dir, group_A, group_B, classes, fold=1.5, r
     absolute native DiffMeans threshold on fractional usage tables; no defaults change.
     """
     rows, manifest = [], []
+    if fdr_threshold is not None and (not np.isfinite(fdr_threshold) or not 0 <= fdr_threshold <= 1):
+        raise ValueError('fdr_threshold must be finite and within [0,1]')
     if min_usage_shift is not None:
         if fold_scale != 'ratio' or not np.isfinite(min_usage_shift) or not 0 <= min_usage_shift <= 1:
             raise ValueError('min_usage_shift requires ratio/usage tables and a finite threshold in [0,1]')
@@ -448,6 +450,7 @@ def protein_outcome_from_tables(diff_dir, group_A, group_B, classes, fold=1.5, r
         raw = open(path, "rb").read()
         header = raw[:raw.index(b"\n")].decode().rstrip("\r").split("\t")
         need = ["Feature", "ebayesPval", f"Mean_{group_A}", f"Mean_{group_B}", f"N_{group_A}", f"N_{group_B}"]
+        if fdr_threshold is not None: need.append('ebayesAdjPval')
         missing = [c for c in need if c not in header]
         if missing:
             raise ValueError(f"{path}: missing columns {missing}")
@@ -476,16 +479,21 @@ def protein_outcome_from_tables(diff_dir, group_A, group_B, classes, fold=1.5, r
                 big = (r > fold) | (r < 1.0 / fold)
             big &= (mA > 0) | (mB > 0)
         sig = tested & big & (p < rawp)
+        if fdr_threshold is not None:
+            q = pd.to_numeric(d.ebayesAdjPval, errors='coerce').to_numpy(float)
+            sig &= np.isfinite(q) & (q < fdr_threshold)
         feats = d.Feature.to_numpy()[sig]
         oc = classes.reindex(feats)
         unknown = int(oc.outcome.isna().sum())
         if unknown:
             raise ValueError(f"{path}: {unknown} differential isoforms are absent from the protein classes table")
-        rows.append(pd.DataFrame({"state": state, "feature": feats,
+        selected = pd.DataFrame({"state": state, "feature": feats,
                                   "direction": np.where(f[sig] > 0, f"higher in {group_A}", f"higher in {group_B}"),
                                   "diff": f[sig], "p": p[sig], "outcome": oc.outcome.to_numpy(),
                                   "protein_length": oc.protein_length.to_numpy(),
-                                  "length_vs_longest": oc.length_vs_longest.to_numpy()}))
+                                  "length_vs_longest": oc.length_vs_longest.to_numpy()})
+        if fdr_threshold is not None: selected['FDR'] = q[sig]
+        rows.append(selected)
         manifest.append(dict(state=state, path=os.path.abspath(path), sha256=hashlib.sha256(raw).hexdigest(),
                              fold_column=fc, mean_check_rows=checked, rows=len(d), tested=int(tested.sum()),
                              differential=int(sig.sum())))
@@ -944,7 +952,7 @@ def protein_outcome_counts(table, group_A, group_B, cluster_order=None, states=N
 LONGER_IN_COLORS = ("#2CA02C", "#FF7F0E")   # longer protein in group A, in group B
 
 
-def plot_protein_outcome(counts, outfile, group_A, group_B, title=None, switch_counts=None):
+def plot_protein_outcome(counts, outfile, group_A, group_B, title=None, switch_counts=None, caption=None):
     """Mirrored bars per state: isoforms higher in group_A above zero, higher in group_B below zero on the same
     scale, each stacked protein coding (altered length) then NMD. Isoforms of the gene's longest length and isoforms
     without a protein are left out of the bars (their counts stay in the TSV). With switch_counts (predominance_counts),
@@ -1014,6 +1022,9 @@ def plot_protein_outcome(counts, outfile, group_A, group_B, title=None, switch_c
         for art in ax.get_children():
             if hasattr(art, "set_clip_on"):
                 art.set_clip_on(False)
+    if caption:
+        import textwrap
+        fig.text(.05,-.49,'\n'.join(textwrap.wrap(str(caption),width=125)),ha='left',va='top',fontsize=6)
     fig.savefig(outfile, bbox_inches="tight")
     plt.close(fig)
 
@@ -1038,6 +1049,8 @@ def main_protein_outcome(argv):
                     help="--diff_dir: log2 = |DiffMeans| > log2(fold) (isoform expression tables); ratio = "
                          "Mean_A / Mean_B or its inverse > fold (isoform usage tables)")
     ap.add_argument("--rawp", type=float, default=0.05, help="--diff_dir: ebayesPval < this")
+    ap.add_argument("--fdr", type=float, default=None,
+                    help="--diff_dir: additionally require native ebayesAdjPval < this")
     ap.add_argument("--min_usage_shift", type=float, default=None,
                     help="With --fold_scale ratio: use absolute fractional usage difference > this instead of a fold-ratio gate")
     ap.add_argument("--min_donors", type=int, default=3, help="--diff_dir: donors with a value in each group")
@@ -1050,6 +1063,7 @@ def main_protein_outcome(argv):
                          "and whether the isoform's protein is longer or shorter than that other isoform")
     ap.add_argument("--groups", default=None, help="metadata with uid and groups columns (with --counts)")
     ap.add_argument("--title", default=None)
+    ap.add_argument("--caption_file", default=None, help="Optional scientific legend below the native protein mirror")
     ap.add_argument("--outdir", required=True)
     a = ap.parse_args(argv)
     if a.min_usage_shift is not None and not a.diff_dir:
@@ -1065,7 +1079,8 @@ def main_protein_outcome(argv):
         table, manifest = protein_outcome_from_tables(a.diff_dir, gA, gB, classes, fold=a.fold, rawp=a.rawp,
                                                       min_donors=a.min_donors, fold_scale=a.fold_scale,
                                                       pattern=a.diff_pattern, log=log,
-                                                      min_usage_shift=a.min_usage_shift)
+                                                      min_usage_shift=a.min_usage_shift,
+                                                      fdr_threshold=a.fdr)
     else:
         table, manifest = protein_outcome_from_switches(a.switches, classes, gA, gB), []
     keep_states = None
@@ -1093,7 +1108,7 @@ def main_protein_outcome(argv):
     table.to_csv(os.path.join(a.outdir, "protein_outcome_isoforms.tsv"), sep="\t", index=False)
     counts.to_csv(os.path.join(a.outdir, "protein_outcome_counts.tsv"), sep="\t", index=False)
     plot_protein_outcome(counts, os.path.join(a.outdir, "protein_outcome_by_state.pdf"), gA, gB, title=a.title,
-                         switch_counts=sw_counts)
+                         switch_counts=sw_counts, caption=open(a.caption_file).read() if a.caption_file else None)
     summ = counts.groupby(["direction", "outcome"]).isoforms.sum()
     extra = {}
     if sw_counts is not None:

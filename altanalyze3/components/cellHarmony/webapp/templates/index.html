@@ -52,6 +52,7 @@
                     <option value="supervised" selected>Supervised</option>
                     <option value="unsupervised">Unsupervised</option>
                     <option value="both">Both</option>
+                    <option value="existing">Use Existing</option>
                   </select>
                 </label>
                 {% endif %}
@@ -85,6 +86,15 @@
               <form id="qc-form">
                 <input id="qc-job-id" name="job_id" type="hidden" required>
                 {% if unified_analysis_controls %}
+                <div id="existing-annotation-options" class="hidden">
+                  <label class="field">
+                    <span>Existing cell states / clusters</span>
+                    <select name="existing_state_column" id="existing-state-column">
+                      <option value="">Upload H5AD to inspect annotations</option>
+                    </select>
+                  </label>
+                  <div id="existing-annotation-status" class="notice" role="status" aria-live="polite"></div>
+                </div>
                 <div class="two-col hidden" id="analysis-clustering-options">
                   <label class="field">
                     <span>UMAP fitting</span>

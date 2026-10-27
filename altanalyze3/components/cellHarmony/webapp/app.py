@@ -69,7 +69,8 @@ _GO_ELITE_HIGHLIGHT_KEYWORDS = (
 
 
 class QCSettings(BaseModel):
-    analysis_mode: str = Field(default="supervised", pattern="^(supervised|unsupervised|both)$")
+    analysis_mode: str = Field(default="supervised", pattern="^(supervised|unsupervised|both|existing)$")
+    existing_state_column: str | None = None
     umap_fit_mode: str = Field(default="landmark", pattern="^(full|landmark)$")
     max_k: int | None = Field(default=None, ge=2)
     min_genes: int = 500
@@ -1663,7 +1664,7 @@ def _get_expression_cache(app: FastAPI, meta: Dict, modality: str = "rna") -> Di
         umap_x = np.full(adata.n_obs, np.nan, dtype=float)
         umap_y = np.full(adata.n_obs, np.nan, dtype=float)
         default_coords_key = ""
-        default_coords_label = "cellHarmony UMAP"
+        default_coords_label = "Supplied UMAP" if meta.get("analysis_mode") == "existing" else "cellHarmony UMAP"
         branch_embeddings = {}
         if meta.get("analysis_mode") == "both":
             # Imputed sidecars contain only the cells with predictions. Look up
@@ -1703,7 +1704,8 @@ def _get_expression_cache(app: FastAPI, meta: Dict, modality: str = "rna") -> Di
                     umap_x, umap_y = coordinates[:, 0], coordinates[:, 1]
                     default_coords_key = key
                     default_coords_label = (f"{branch.capitalize()} UMAP" if meta.get("analysis_mode") == "both"
-                                            else "ICGS3 UMAP" if meta.get("analysis_mode") == "unsupervised" else "cellHarmony UMAP")
+                                            else "ICGS3 UMAP" if meta.get("analysis_mode") == "unsupervised"
+                                            else "Supplied UMAP" if meta.get("analysis_mode") == "existing" else "cellHarmony UMAP")
 
         obs_filter_values: Dict[str, np.ndarray] = {}
         filter_fields: List[Dict[str, str]] = []
@@ -5476,7 +5478,7 @@ def _build_expression_payload(
     if not resolved_gene and not str(gene or "").strip() and len(cache_entry["var_names"]):
         resolved_gene = str(cache_entry["var_names"][0])
     if not resolved_gene:
-        if (normalized_modality == "rna" and meta.get("analysis_mode") != "unsupervised"
+        if (normalized_modality == "rna" and meta.get("analysis_mode") not in {"unsupervised", "existing"}
                 and "scalable_viewer" not in meta):
             try:
                 return _build_reference_expression_payload(app, meta, gene)
@@ -6567,7 +6569,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
     async def create_job(
         species: str = Form(...),
         reference: str = Form(""),
-        analysis_mode: str = Form("supervised", pattern="^(supervised|unsupervised|both)$"),
+        analysis_mode: str = Form("supervised", pattern="^(supervised|unsupervised|both|existing)$"),
         ambient_option: str | None = Form(None),
         soupx_option: str | None = Form(None),
         previous_job_id: str | None = Form(None),
@@ -6575,9 +6577,9 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         files: List[UploadFile] = File(...),
     ):
         store, runner = _job_resources(app)
-        if analysis_mode != "unsupervised" and not reference.strip():
+        if analysis_mode in {"supervised", "both"} and not reference.strip():
             raise HTTPException(status_code=400, detail="Select a reference for Supervised or Both analysis.")
-        reference = reference.strip() or "icgs3"
+        reference = reference.strip() or ("existing" if analysis_mode == "existing" else "icgs3")
         if len(files) > cfg["MAX_FILES_PER_JOB"]:
             raise HTTPException(status_code=400, detail=f"Maximum {cfg['MAX_FILES_PER_JOB']} files are allowed per job.")
         if len(sample_names) != len(files):
@@ -6596,6 +6598,8 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         from altanalyze3.components.cellHarmony.input_validation import validate_10x_h5
         from altanalyze3.components.cellHarmony.mapped_h5ad import inspect_h5ad, validate_batch, needs_disk_backed_import
         suffixes = {Path(str(upload.filename or '')).suffix.lower() for upload in files}
+        if analysis_mode == "existing" and suffixes != {'.h5ad'}:
+            raise HTTPException(400, "Use Existing requires H5AD files containing cell-state or cluster columns in .obs.")
         if '.h5ad' in suffixes and len(suffixes) > 1:
             raise HTTPException(status_code=400, detail='Upload H5AD files together, or 10x H5 files together; mixing the two formats is not supported.')
         input_headers = []
@@ -6681,6 +6685,27 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         return JSONResponse({"job_id": job_id, "status": "uploaded", 'message': message,
                              'input_memory': memory_profile, 'analysis_mode': analysis_mode})
 
+    @app.get("/api/jobs/{job_id}/existing-annotations")
+    def existing_annotations(job_id: str):
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(404, "Job not found.")
+        from .existing_annotations import inspect_annotations, upload_paths, suggest_annotation
+        # The model runs only on this explicit pre-analysis request, in a worker
+        # thread. Cached suggestions survive reloads; changed uploads invalidate it.
+        with _get_cache_lock(app, "existing_annotation_locks", job_id):
+            meta = store.get_job(job_id)
+            try:
+                report = inspect_annotations(upload_paths(meta, store.uploads_dir(job_id)))
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            saved = meta.get("existing_annotations") or {}
+            if saved.get("fingerprint") == report["fingerprint"]:
+                return JSONResponse(saved)
+            report = suggest_annotation(report)
+            store.update_job(job_id, existing_annotations=report)
+            return JSONResponse(report)
+
     @app.post("/api/jobs/{job_id}/qc")
     async def update_qc(job_id: str, qc: QCSettings):
         store, runner = _job_resources(app)
@@ -6692,9 +6717,9 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             if meta.get("status") in {"queued", "processing"}:
                 raise HTTPException(status_code=409, detail="Wait for the running analysis before changing its QC settings.")
             registry_path = Path(app.state.config["REFERENCE_REGISTRY"])
-            reference_entry = ({} if qc.analysis_mode == "unsupervised" else
+            reference_entry = ({} if qc.analysis_mode == "unsupervised" or (qc.analysis_mode == "existing" and meta.get("reference") in {None, "", "existing"}) else
                                pipeline_mod._lookup_reference(meta["species"], meta["reference"], registry_path))
-            if qc.analysis_mode != "supervised" and meta.get("species") not in {"human", "mouse"}:
+            if qc.analysis_mode in {"unsupervised", "both"} and meta.get("species") not in {"human", "mouse"}:
                 raise HTTPException(status_code=400, detail="ICGS3 currently supports Human and Mouse.")
             supported_modalities = {
                 _normalize_modality_id(value, default="")
@@ -6712,6 +6737,19 @@ def create_app(test_config: dict | None = None) -> FastAPI:
             if unsupported:
                 raise HTTPException(status_code=400,
                                     detail=f"Impute modalities not supported for this reference: {', '.join(unsupported)}")
+            if qc.analysis_mode == "existing":
+                from .existing_annotations import inspect_annotations, upload_paths, validate_selection
+                try:
+                    report = inspect_annotations(upload_paths(meta, store.uploads_dir(job_id)))
+                    qc.existing_state_column = qc.existing_state_column or (meta.get("existing_annotations") or {}).get("selected") or report["selected"]
+                    validate_selection(report, qc.existing_state_column)
+                    saved = meta.get("existing_annotations") or report
+                    if qc.existing_state_column != saved.get("selected"):
+                        store.update_job(job_id, existing_annotations=dict(saved,
+                            suggested_column=saved.get("selected"), selected=qc.existing_state_column,
+                            suggestion_method=saved.get("method"), method="user_selection"))
+                except ValueError as exc:
+                    raise HTTPException(400, str(exc)) from exc
             meta = store.update_job(job_id, qc=qc.model_dump(), analysis_mode=qc.analysis_mode, message="QC parameters saved.")
             return JSONResponse({"job_id": job_id, "qc": meta["qc"]})
 

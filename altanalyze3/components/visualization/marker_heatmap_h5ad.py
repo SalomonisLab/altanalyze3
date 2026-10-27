@@ -37,7 +37,7 @@ from anndata import AnnData
 from pandas.errors import PerformanceWarning
 import scanpy as sc
 from scipy import sparse
-from matplotlib.colors import LinearSegmentedColormap, ListedColormap, TwoSlopeNorm, to_rgb, to_rgba
+from matplotlib.colors import LinearSegmentedColormap, ListedColormap, NoNorm, TwoSlopeNorm, to_rgb, to_rgba
 from matplotlib.patches import Rectangle
 from altanalyze3.components.visualization import NetPerspective
 
@@ -94,7 +94,8 @@ def _log_step_timing(label, started_at, timings=None, key=None):
     return elapsed
 
 
-def _write_heatmap_cache(cache_path, heatmap_df, row_clusters, column_clusters, ordered_cells):
+def _write_heatmap_cache(cache_path, heatmap_df, row_clusters, column_clusters, ordered_cells,
+                         source_PSI=None, imputed_mask=None):
     """Save the plotted fold matrix as an h5ad.
 
     Earlier versions wrote `np.savez_compressed`. An h5ad holds the same numbers plus named
@@ -129,6 +130,14 @@ def _write_heatmap_cache(cache_path, heatmap_df, row_clusters, column_clusters, 
         "version": 1,
         "orientation": "cells x markers; transpose for the plotted matrix",
     }
+    if source_PSI is not None:
+        if not source_PSI.index.equals(heatmap_df.index) or not source_PSI.columns.equals(heatmap_df.columns):
+            raise ValueError('Original PSI cache must match the complete plotted identity order')
+        cache.layers['source_PSI'] = np.asarray(source_PSI, dtype=np.float32).T.copy()
+    if imputed_mask is not None:
+        if source_PSI is None or not imputed_mask.index.equals(heatmap_df.index) or not imputed_mask.columns.equals(heatmap_df.columns):
+            raise ValueError('Imputation mask requires the aligned original PSI matrix')
+        cache.layers['imputed_PSI'] = np.asarray(imputed_mask, dtype=bool).T.copy()
     try:
         cache.write_h5ad(cache_path, compression="lzf")
     except Exception:
@@ -264,7 +273,9 @@ def render_heatmap_from_cache(cache_path, output_path, covariate_df=None, go_ter
                               covariate_columns=None, load_go_terms=True,
                               dpi=None, write_svg=True, label_events=None, species=None,
                               label_shared_exons=True, colorbar_label="Norm Exp (z-score)",
-                              label_replacements=None):
+                              label_replacements=None, label_shared_introns=False,
+                              callout_color='#000000', sample_labels=None,
+                              show_pattern_labels=False, caption=None):
     """Redraw a saved heatmap cache with the current plotting code.
 
     Use this to change how a finished result is drawn -- resolution, colour range, labels --
@@ -308,6 +319,9 @@ def render_heatmap_from_cache(cache_path, output_path, covariate_df=None, go_ter
         label_shared_exons=label_shared_exons,
         colorbar_label=colorbar_label,
         label_replacements=label_replacements,
+        label_shared_introns=label_shared_introns,
+        callout_color=callout_color, sample_labels=sample_labels,
+        show_pattern_labels=show_pattern_labels, caption=caption,
     )
     return output_path
 
@@ -385,7 +399,7 @@ def _read_label_events(path):
     return events
 
 
-def _draw_row_callouts(ax, labels, rows, n_rows, fontsize=6.0):
+def _draw_row_callouts(ax, labels, rows, n_rows, fontsize=6.0, color='#000000'):
     """Label only ``rows``, to the right of the heatmap, with 2-point leader lines spread to avoid overlap."""
     if not rows:
         return
@@ -407,23 +421,31 @@ def _draw_row_callouts(ax, labels, rows, n_rows, fontsize=6.0):
     transform = ax.get_yaxis_transform()
     artists = []
     for i, y in zip(order, placed):
-        artists += ax.plot([1.0, 1.03], [rows[i], y], color="#000000", linewidth=0.4, transform=transform,
+        artists += ax.plot([1.0, 1.03], [rows[i], y], color=color, linewidth=0.4, transform=transform,
                            clip_on=False)
         artists.append(ax.text(1.035, y, labels[i], transform=transform, ha="left", va="center",
-                               fontsize=fontsize, color="#000000", clip_on=False))
+                               fontsize=fontsize, color=color, clip_on=False))
     ax.set_ylim(original_ylim)
     # The page and the heatmap keep their size; a label that would run off the page shrinks the font instead.
     fig.canvas.draw()
     renderer = fig.canvas.get_renderer()
     extents = [a.get_window_extent(renderer) for a in artists if hasattr(a, "get_text")]
     left = min(e.x0 for e in extents)
-    # The canvas measures text a few points narrower than the PDF draws it, so keep 1.5% of the page free.
-    overflow = max(e.x1 for e in extents) - fig.bbox.x1 * 0.985
+    # Agg hinting can underestimate long labels in the exported PDF. Measure with
+    # the standard PDF backend as well, so vector output keeps the complete UID.
+    from matplotlib.backends.backend_pdf import RendererPdf
+    pdf_renderer = RendererPdf(None, fig.dpi, fig.get_figheight(), fig.get_figwidth())
+    pdf_right = [a.get_transform().transform(a.get_position())[0] +
+        pdf_renderer.get_text_width_height_descent(a.get_text(), a.get_fontproperties(), False)[0]
+        * fig.dpi / 72.0 for a in artists if hasattr(a, 'get_text')]
+    right = max([e.x1 for e in extents] + pdf_right)
+    overflow = right - (fig.bbox.x1 - 4.0 * fig.dpi / 72.0)
     if overflow > 0 and fontsize > 3.5:
         for artist in artists:
             artist.remove()
-        width = max(e.x1 for e in extents) - left
-        _draw_row_callouts(ax, labels, rows, n_rows, fontsize=max(3.5, fontsize * (width - overflow) / width))
+        width = right - left
+        _draw_row_callouts(ax, labels, rows, n_rows,
+                           fontsize=max(3.5, .99 * fontsize * (width - overflow) / width), color=color)
 
 
 # Splicing PSI defaults (Nathan, 2026-10-11): the settings of the KINNEX-5 healthy PSI run he approved, "appropriate for
@@ -599,10 +621,11 @@ def _select_unique_markers(pvals_df, cluster_order, top_n, effect_df=None, pval_
     return selected.reset_index(drop=True)
 
 
-def _event_exons(feature):
+def _event_exons(feature, include_introns=False):
     """(gene, exon block) pairs of an AltAnalyze splicing-event ID such as
     ENSG...:E4.5-E5.2|ENSG...:E4.5-E5.1. E4.5 and E4.2 both belong to exon E4. A suffix such as
-    _81510496 marks a novel splice site inside the region. Intron regions (I) are not exons."""
+    _81510496 marks a novel splice site inside the region. Intron regions (I) are
+    included only when explicitly requested for exon/intron signature callouts."""
     exons = set()
     for junction in str(feature).split("|"):
         if ":" not in junction:
@@ -613,7 +636,7 @@ def _event_exons(feature):
             if ":" in part:
                 part_gene, part = part.split(":", 1)
             region = part.split("_", 1)[0]
-            if region.startswith("E"):
+            if region.startswith("E") or (include_introns and region.startswith("I")):
                 exons.add((part_gene, region.split(".", 1)[0]))
     return exons
 
@@ -1470,6 +1493,12 @@ def _plot_heatmap(
     label_shared_exons=True,
     colorbar_label="Norm Exp (z-score)",
     label_replacements=None,
+    figure_title=None,
+    caption=None,
+    sample_labels=None,
+    show_pattern_labels=False,
+    label_shared_introns=False,
+    callout_color='#000000',
 ):
     if heatmap_df.empty:
         raise ValueError("Heatmap dataframe is empty.")
@@ -1506,6 +1535,14 @@ def _plot_heatmap(
     axes_top = 0.82
     heatmap_height_in = 6.12 if show_go_terms else 6.29
     below_axes_in = 2.43 if covariate_track is not None else (0.85 if show_go_terms else 0.68)
+    # Optional iterative-figure context is opt-in; ordinary MarkerFinder geometry is unchanged.
+    import textwrap
+    caption_lines = textwrap.wrap(str(caption), width=135) if caption else []
+    caption_height_in = (len(caption_lines) * 0.115 + 0.16) if caption_lines else 0.
+    sample_height_in = (max(.65, max((len(str(v)) for v in sample_labels.values()), default=0)
+                           * 5.5 * .55 / 72 + .12) if sample_labels is not None else 0.)
+    footer_height_in = caption_height_in + sample_height_in
+    below_axes_in += footer_height_in
     fixed_height = (heatmap_height_in + below_axes_in) / axes_top
     bottom_frac = below_axes_in / fixed_height
 
@@ -1526,7 +1563,8 @@ def _plot_heatmap(
         ax_labels = fig.add_subplot(gs[0, 2], sharey=ax)
     else:
         fig, ax = plt.subplots(figsize=(fixed_width, fixed_height))
-        fig.subplots_adjust(left=0.08, right=0.80, top=axes_top, bottom=bottom_frac)
+        fig.subplots_adjust(left=0.26 if show_pattern_labels else 0.08,
+                            right=0.80, top=axes_top, bottom=bottom_frac)
         ax_terms = None
         ax_labels = None
 
@@ -1541,10 +1579,13 @@ def _plot_heatmap(
         half_range = 1.5
     vmin, vmax = -half_range / contrast, half_range / contrast
     norm = TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax)
+    heatmap_cmap = YellowBlackSky()
+    # Missing PSI is visually black by explicit figure instruction; retain NaN in all data/caches.
+    heatmap_cmap.set_bad('black')
     im = ax.imshow(
         heatmap_df.values,
         aspect="auto",
-        cmap=YellowBlackSky(),
+        cmap=heatmap_cmap,
         norm=norm,
         interpolation="none",
     )
@@ -1596,7 +1637,8 @@ def _plot_heatmap(
         # label_shared_exons is False, when it shares an exon block with one: the redundancy rule of
         # the shared-exon collapse (Nathan, 2026-10-11).
         listed = {_event_key(e): _event_uid(e) for e in label_events}
-        listed_exons = {uid: _event_exons(uid) for uid in listed.values()}
+        listed_exons = {uid: _event_exons(uid, include_introns=label_shared_introns)
+                        for uid in listed.values()}
         records = []
         for i, g in enumerate(raw_labels):
             if _event_key(g) in listed:
@@ -1604,11 +1646,12 @@ def _plot_heatmap(
                 continue
             if not label_shared_exons:
                 continue
-            row_exons = _event_exons(_event_uid(g))
+            row_exons = _event_exons(_event_uid(g), include_introns=label_shared_introns)
             for uid, exons in listed_exons.items():
                 shared = sorted(row_exons & exons)
                 if shared:
-                    records.append((i, "shares an exon with a listed event", uid,
+                    records.append((i, ("shares an exon/intron with a listed event" if label_shared_introns
+                                        else "shares an exon with a listed event"), uid,
                                     ";".join(f"{gene}:{block}" for gene, block in shared)))
         callout_rows = sorted({r[0] for r in records})
         n_exact = len({r[0] for r in records if r[1] == "listed event"})
@@ -1638,19 +1681,36 @@ def _plot_heatmap(
     for boundary in boundaries:
         ax.axvline(boundary, color="white", linewidth=0.5)
 
+    if show_pattern_labels:
+        start = 0
+        while start < len(row_clusters):
+            end = start + 1
+            while end < len(row_clusters) and row_clusters[end] == row_clusters[start]:
+                end += 1
+            label = str(row_clusters[start]).replace('up-', 'up ', 1).replace('down-', 'down ', 1)
+            ax.text(-0.045, (start + end - 1) / 2., label,
+                    transform=ax.get_yaxis_transform(), ha='right', va='center',
+                    fontsize=6.5, clip_on=False)
+            if end < len(row_clusters):
+                ax.axhline(end - .5, color='white', linewidth=.6)
+            start = end
+
     divider = make_axes_locatable(ax)
     ax_top = divider.append_axes("top", size="1.125%", pad=0.02)
     ax_left = divider.append_axes("left", size="1.5%", pad=0.02)
     col_ids = np.array([cluster_to_id[c] for c in column_clusters], dtype=int)[None, :]
     row_ids = np.array([cluster_to_id[c] for c in row_clusters], dtype=int)[:, None]
 
-    ax_top.imshow(col_ids, aspect="auto", cmap=cluster_cmap,
+    # Categorical integer IDs index the full shared palette directly. Automatic
+    # normalization stretched a cohort-only subset across row-pattern colors,
+    # contradicting the same cohort's covariate legend in consolidated figures.
+    ax_top.imshow(col_ids, aspect="auto", cmap=cluster_cmap, norm=NoNorm(),
                   interpolation="none").set_rasterized(_heatmap_rasterize())
     ax_top.set_xticks([])
     ax_top.set_yticks([])
     ax_top.set_ylabel("")
 
-    ax_left.imshow(row_ids, aspect="auto", cmap=cluster_cmap,
+    ax_left.imshow(row_ids, aspect="auto", cmap=cluster_cmap, norm=NoNorm(),
                    interpolation="none").set_rasterized(_heatmap_rasterize())
     ax_left.set_xticks([])
     ax_left.set_yticks([])
@@ -1688,7 +1748,7 @@ def _plot_heatmap(
         _draw_covariate_legends(
             fig,
             covariate_legends,
-            rect=(0.255, 0.702 / fixed_height, 0.690, 1.035 / fixed_height),
+            rect=(0.255, (0.702 + caption_height_in) / fixed_height, 0.690, 1.035 / fixed_height),
         )
         cbar_anchor_ax = ax_cov
     else:
@@ -1715,7 +1775,7 @@ def _plot_heatmap(
             # GO terms. Fitting them to every matrix row made sparse labels overlap
             # and shrink on large heatmaps despite the empty rows between callouts.
             _draw_row_callouts(ax, [y_labels[i] for i in callout_rows],
-                               callout_rows, heatmap_df.shape[0])
+                               callout_rows, heatmap_df.shape[0], color=callout_color)
         else:
             for pos, gene in enumerate(y_labels):
                 ax_labels.text(
@@ -1748,9 +1808,30 @@ def _plot_heatmap(
     cbar.ax.text(1.08, 0.5, f"{vmax:g}", ha="left", va="center", transform=cbar.ax.transAxes)
 
     if ax_labels is None and callout_rows is not None:
-        _draw_row_callouts(ax, [y_labels[i] for i in callout_rows], callout_rows, heatmap_df.shape[0])
+        _draw_row_callouts(ax, [y_labels[i] for i in callout_rows], callout_rows,
+                           heatmap_df.shape[0], color=callout_color)
 
-    _save_figure(fig, output_path, dpi=dpi, write_svg=write_svg)
+    if sample_labels is not None:
+        labels = [str(sample_labels[c]) for c in heatmap_df.columns]
+        # Put donor identities below the covariates; the heatmap retains every ordered column.
+        identity_axis = cbar_anchor_ax.secondary_xaxis('bottom')
+        identity_axis.set_xticks(np.arange(len(labels)))
+        identity_axis.set_xticklabels(labels, rotation=90, ha='center', fontsize=5.5)
+        identity_axis.tick_params(length=0, pad=2)
+        identity_axis.spines['bottom'].set_visible(False)
+        cax.set_position([cbar_x, cbar_y - sample_height_in / fixed_height,
+                          cbar_width, cbar_height])
+    if figure_title:
+        fig.text(.5, .985, str(figure_title), ha='center', va='top', fontsize=12, weight='bold')
+    if caption_lines:
+        fig.text(.045, .035 / fixed_height, '\n'.join(caption_lines),
+                 ha='left', va='bottom', fontsize=7, linespacing=1.15)
+
+    # Iterative review labels can contain long literal multi-gene junction IDs.
+    # Preserve their full text by expanding the exported page, without shrinking
+    # fonts, clipping identifiers, or changing the heatmap data/axis geometry.
+    _save_figure(fig, output_path, dpi=dpi, write_svg=write_svg,
+                 bbox_inches="tight" if show_pattern_labels else None)
     plt.close(fig)
 
 
@@ -1781,7 +1862,7 @@ def _heatmap_dpi():
     return dpi if dpi > 0 else 2400.0
 
 
-def _save_figure(fig, output_path, dpi=None, write_svg=True):
+def _save_figure(fig, output_path, dpi=None, write_svg=True, bbox_inches=None):
     """Write the heatmap and, by default, a sibling `.svg`.
 
     Illustrator opens the SVG with the text still text, because `svg.fonttype='none'` keeps glyphs
@@ -1793,14 +1874,14 @@ def _save_figure(fig, output_path, dpi=None, write_svg=True):
     """
     written = [output_path]
     dpi = float(dpi) if dpi else _heatmap_dpi()
-    fig.savefig(output_path, facecolor="white", transparent=False, dpi=dpi)
+    fig.savefig(output_path, facecolor="white", transparent=False, dpi=dpi, bbox_inches=bbox_inches)
     base, ext = os.path.splitext(output_path)
     svg_path = base + ".svg"
     if write_svg and ext.lower() != ".svg":
         prior = plt.rcParams.get("svg.fonttype")
         try:
             plt.rcParams["svg.fonttype"] = "none"      # keep text editable
-            fig.savefig(svg_path, facecolor="white", transparent=False, dpi=dpi)
+            fig.savefig(svg_path, facecolor="white", transparent=False, dpi=dpi, bbox_inches=bbox_inches)
             written.append(svg_path)
             print(f"Saved marker heatmap SVG to: {svg_path}")
         except Exception as exc:                        # never lose the primary figure over the SVG
@@ -2444,15 +2525,85 @@ def generate_marker_heatmap_from_adata(
     return result
 
 
+def render_signed_marker_heatmap_from_saved_statistics(
+        adata, rho, pval, fdr, *, cluster_key, out, top_n=100, min_rho=.4,
+        pval_threshold=1., label_events=None, dpi=300, caption=None):
+    """Extend a native single-scheme view with inverse signatures, without rescoring.
+
+    Reuses the native unique-marker selection, row z-score builder and renderer.
+    Each event has one winning signed group, selected by the original FDR/rho rule.
+    Full original statistics and source observations must be supplied in exact order.
+    """
+    from pathlib import Path
+    for frame in (rho, pval, fdr):
+        if not frame.index.equals(adata.var_names) or not frame.columns.equals(rho.columns):
+            raise ValueError('Saved statistics must retain every ordered source event and group')
+    order = _resolve_cluster_order(adata.obs[cluster_key],
+                                  _coerce_lineage_order(adata.uns.get('lineage_order')))
+    if set(order) != set(rho.columns):
+        raise ValueError('Saved statistic groups differ from the complete source roster')
+    roles = [(direction, group) for direction in ('up', 'down') for group in order]
+    effects = pd.DataFrame({direction+' '+group: rho[group] * (1 if direction=='up' else -1)
+                            for direction, group in roles})
+    adjusted = pd.DataFrame({direction+' '+group: fdr[group] for direction, group in roles})
+    selected_all = _select_unique_markers(adjusted, list(effects.columns), None,
+        effect_df=effects, pval_threshold=pval_threshold, min_rho=min_rho)
+    selected = selected_all.groupby('cluster', sort=False, observed=True).head(top_n)
+    if selected.empty:
+        raise NoMarkersSelectedError('No signed markers pass the original selection rule')
+    out = Path(out); out.parent.mkdir(parents=True, exist_ok=True)
+    selected_all.to_csv(out.with_suffix('.all_assignments.tsv'), sep='\t', index=False)
+    selected.to_csv(out.with_suffix('.displayed_rows.tsv'), sep='\t', index=False)
+    matrix, _, counts, cells = _build_heatmap(adata, cluster_key,
+        selected.gene.tolist(), order, False, None, include_column_zscore=False)
+    groups = adata.obs.loc[cells, cluster_key].astype(str).tolist()
+    row_groups = selected.cluster.astype(str).tolist()
+    color_order = list(dict.fromkeys([*order, *row_groups]))
+    _plot_heatmap(matrix, str(out), counts, color_order, groups, row_groups, dpi=dpi,
+        species='human', label_events=label_events or [], show_pattern_labels=True,
+        colorbar_label='PSI row z-score', caption=caption)
+    matrix.to_csv(out.with_suffix('.zscore_matrix.tsv'), sep='\t')
+    cache = str(out.with_suffix('.zscore_matrix.h5ad'))
+    _write_heatmap_cache(cache, matrix, row_groups, groups, cells)
+    return dict(pdf=str(out), heatmap_cache=cache, assigned=len(selected_all),
+                plotted=len(selected), pattern_counts=selected.cluster.value_counts().to_dict(),
+                normalization='Native row z-score; missing standardized values displayed as zero',
+                selection='Native unique-marker FDR then rho ordering across up/down signed groups')
+
+
+def fill_PSI_row_median(matrix):
+    """Fill only missing PSI with its event median over all supplied samples.
+
+    Rows are events, columns are samples. Observed zeros remain measurements;
+    all-missing events remain missing because they have no observed median.
+    The supplied matrix is never modified.
+    """
+    if np.isinf(matrix.to_numpy()).any():
+        raise ValueError('Infinite PSI is invalid')
+    mask=matrix.isna()
+    result=matrix.T.fillna(matrix.median(axis=1)).T
+    imputed=mask & result.notna()
+    return result, imputed
+
+
 def render_consolidated_marker_heatmap(adata, assignments, *, cluster_key, out,
                                        top_n=100, species=None, half_range=0.2,
-                                       covariate_columns=None, dpi=600, label_events=None,
-                                       label_replacements=None):
-    """Render native iterative assignments, preserving PSI and centring each row by its median.
+                                       covariate_columns=None, dpi=None, label_events=None,
+                                       label_replacements=None, figure_title=None, caption=None,
+                                       sample_label_key=None, show_pattern_labels=False,
+                                       retain_callout_events=True, retain_unassigned_callouts=False,
+                                       label_shared_exons=True, normalization='row_median',
+                                       missing_psi='preserve'):
+    """Render native iterative assignments with an explicit display normalization.
+
+    ``row_median`` preserves the historical median-centred PSI display. ``row_zscore``
+    uses the standard native row z-score (population SD), retaining missing cache cells.
 
     Assignment order is supplied by iterative MarkerFinder, not re-ranked by a renderer.
     Missing measurements remain missing in the matrix/cache and are never converted to PSI zero.
     ``top_n=None`` displays all assignments; the full assignment table is always retained.
+    Only supplied discovery assignments are displayed by default, including qualifying
+    callouts beyond the cap. Unassigned reference rows require explicit historical opt-in.
     """
     from pathlib import Path
     out = str(out); root = Path(out).parent; root.mkdir(parents=True, exist_ok=True)
@@ -2460,8 +2611,37 @@ def render_consolidated_marker_heatmap(adata, assignments, *, cluster_key, out,
         raise ValueError("Consolidation requires unique feature and pseudobulk identities.")
     if not assignments.index.is_unique or not assignments.index.isin(adata.var_names).all():
         raise ValueError("Every assigned event must have exactly one source row.")
+    if top_n is not None and (not isinstance(top_n, (int, np.integer)) or top_n <= 0):
+        raise ValueError('top_n must be a positive integer or None')
+    if sample_label_key is not None and sample_label_key not in adata.obs:
+        raise ValueError('The sample-label column must exist in the verified input metadata')
+    if normalization not in {'row_median', 'row_zscore'}:
+        raise ValueError('normalization must be row_median or row_zscore')
+    if missing_psi not in {'preserve', 'row_median'}:
+        raise ValueError('missing_psi must be preserve or row_median')
     assignments.to_csv(Path(out).with_suffix('.assignments.tsv'), sep='\t')
     selected = assignments if top_n is None else assignments.groupby('pattern', sort=False).head(top_n)
+    callout_features = []
+    if label_events and (retain_callout_events or retain_unassigned_callouts):
+        listed = {_event_key(e) for e in label_events}
+        listed_exons = set().union(*(_event_exons(_event_uid(e)) for e in label_events))
+        callout_features = [feature for feature in adata.var_names
+            if _event_key(feature) in listed or (label_shared_exons and
+                _event_exons(_event_uid(feature)) & listed_exons)]
+    if retain_callout_events and callout_features:
+        keep = set(selected.index)
+        keep.update(set(callout_features) & set(assignments.index))
+        selected = assignments.loc[assignments.index.isin(keep)]
+    references = [feature for feature in callout_features if feature not in assignments.index]
+    selected = selected.copy()
+    selected['display_role'] = 'native_discovery_assignment'
+    if retain_unassigned_callouts and references:
+        reference_rows = pd.DataFrame(index=pd.Index(references, name=assignments.index.name),
+            columns=selected.columns)
+        reference_rows['pattern'] = 'Callout reference (not discovery-qualified)'
+        reference_rows['display_role'] = 'unassigned_callout_reference'
+        selected = pd.concat([selected, reference_rows])
+    selected.to_csv(Path(out).with_suffix('.displayed_rows.tsv'), sep='\t')
     if selected.empty:
         return {'pdf': None, 'status': 'NO_MARKERS_SELECTED', 'assigned': 0}
     order = _resolve_cluster_order(adata.obs[cluster_key], _coerce_lineage_order(adata.uns.get('lineage_order')))
@@ -2469,7 +2649,23 @@ def render_consolidated_marker_heatmap(adata, assignments, *, cluster_key, out,
     block = adata[cells, selected.index].X
     block = block.toarray() if sparse.issparse(block) else np.asarray(block)
     matrix = pd.DataFrame(block.T, index=selected.index, columns=cells)
-    matrix = matrix.sub(matrix.median(axis=1), axis=0)
+    source_PSI=matrix.copy()
+    imputed_mask=None
+    if missing_psi=='row_median':
+        matrix,imputed_mask=fill_PSI_row_median(matrix)
+        caption=(caption or '')+(' Missing PSI is filled with the event median over ALL plotted '
+            'MDS/control samples before scaling; observed PSI is unchanged. '
+            f'{int(imputed_mask.to_numpy().sum())} cells filled; '
+            f'{int(matrix.isna().to_numpy().sum())} cells lack an observed median and remain missing. '
+            'Original PSI and imputation mask are retained in cache layers.')
+    if normalization == 'row_zscore':
+        matrix = _zscore_rows(matrix).where(matrix.notna())
+        colorbar_label = 'PSI row z-score'
+        normalization_description = 'row z-score (population SD); original missing values retained'
+    else:
+        matrix = matrix.sub(matrix.median(axis=1), axis=0)
+        colorbar_label = 'ΔPSI from row median'
+        normalization_description = 'row median subtraction; original missing values retained'
     row_groups = selected['pattern'].astype(str).tolist()
     column_groups = adata.obs.loc[cells, cluster_key].astype(str).tolist()
     color_order = list(dict.fromkeys([*order, *row_groups]))
@@ -2481,18 +2677,29 @@ def render_consolidated_marker_heatmap(adata, assignments, *, cluster_key, out,
         os.environ['MARKER_HEATMAP_CONTRAST'] = '1'
         _plot_heatmap(matrix, out, counts, color_order, column_groups, row_groups,
                       covariate_df=cov, species=species, dpi=dpi,
-                      colorbar_label="ΔPSI from row median",
+                      colorbar_label=colorbar_label,
                       label_replacements=label_replacements,
+                      figure_title=figure_title, caption=caption,
+                      sample_labels=adata.obs[sample_label_key].to_dict() if sample_label_key else None,
+                      show_pattern_labels=show_pattern_labels,
+                      label_shared_exons=label_shared_exons,
                       label_events=[] if label_events is None else label_events)
     finally:
         for key, value in [('MARKER_HEATMAP_RANGE', old_range), ('MARKER_HEATMAP_CONTRAST', old_contrast)]:
             if value is None: os.environ.pop(key, None)
             else: os.environ[key] = value
     cache = str(Path(out).with_suffix('.fold_matrix.h5ad'))
-    _write_heatmap_cache(cache, matrix, row_groups, column_groups, cells)
+    _write_heatmap_cache(cache, matrix, row_groups, column_groups, cells,
+        source_PSI=source_PSI if missing_psi=='row_median' else None,imputed_mask=imputed_mask)
     matrix.to_csv(Path(out).with_suffix('.fold_matrix.tsv'), sep='\t')
     return dict(pdf=out, heatmap_cache=cache, assigned=len(assignments), plotted=len(selected),
-                normalization='row median subtraction; original missing values retained')
+                retain_callout_events=retain_callout_events,
+                label_shared_exons=label_shared_exons,
+                retain_unassigned_callouts=retain_unassigned_callouts,
+                unassigned_callout_references=len(references) if retain_unassigned_callouts else 0,
+                normalization=normalization_description,missing_PSI_handling=missing_psi,
+                original_missing_cells=int(source_PSI.isna().to_numpy().sum()),
+                imputed_cells=int(imputed_mask.to_numpy().sum()) if imputed_mask is not None else 0)
 
 
 def _load_text_expression_inputs(matrix_tsv, groups_tsv, cluster_key):

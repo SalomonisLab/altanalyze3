@@ -45,12 +45,13 @@ class _JobLogStream(io.TextIOBase):
             return
         meta = self.store.get_job(self.job_id)
         mode = (meta.get("qc") or {}).get("analysis_mode", "supervised")
-        if mode != "supervised" and getattr(self.store, "branch", "") != "supervised":
+        if mode not in {"supervised", "existing"} and getattr(self.store, "branch", "") != "supervised":
             return
         _, progress, description = stage
         if progress < meta.get("progress", 0):
             return
-        message = f"cellHarmony step {description}"
+        message = ("Use Existing: " + description.split(": ", 1)[-1]
+                   if mode == "existing" else f"cellHarmony step {description}")
         if meta.get("message") != message:
             self.store.update_job(self.job_id, progress=progress, message=message)
 

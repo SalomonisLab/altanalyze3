@@ -1164,7 +1164,7 @@ function panelCellsPerSample(panelKey) {
 function availableVisualizationModes(panelKey) {
   const modality = panelModality(panelKey);
   const modalityInfo = modalityDefinition(modality);
-  const modes = BASE_VISUALIZATION_MODES.filter(mode => mode.value !== "relative" || currentAnalysisMode !== "unsupervised");
+  const modes = BASE_VISUALIZATION_MODES.filter(mode => mode.value !== "relative" || !["unsupervised", "existing"].includes(currentAnalysisMode));
   if (currentAnalysisMode !== "supervised") {
     const clusters = modes.find(mode=>mode.value==="cluster");
     if (clusters) modes[modes.indexOf(clusters)] = {...clusters,label:"UMAP cell states"};
@@ -2276,6 +2276,7 @@ async function restoreJobFromUrl() {
     const imputed = data.qc?.impute_modalities || [];
     if (imputed.length) document.getElementById("qc-impute-modality-select").value = imputed.includes("all") ? "all" : imputed[0];
     applyJobStatus(jobId, data);
+    if (analysis?.value === "existing") await loadExistingAnnotations(jobId, data.qc?.existing_state_column);
     if (["queued", "processing"].includes(data.status) ||
         ["queued", "processing"].includes(data.differential_ui?.status)) {
       startStatusPolling(jobId);
@@ -2390,6 +2391,7 @@ function updateImputeModalityField() {
 function selectedReferenceDiffersFromLoadedJob() {
   const species = document.getElementById("species-select").value;
   const reference = document.getElementById("reference-select").value;
+  if (document.getElementById("analysis-mode")?.value === "existing" && !reference) return false;
   if (!currentJobSpecies || !currentJobReference) {
     return false;
   }
@@ -2471,6 +2473,10 @@ function hookForms() {
   document.getElementById("qc-form").addEventListener("submit", handleQcSubmit);
   document.getElementById("analysis-mode")?.addEventListener("change", () => {
     syncAnalysisControls();
+    if (document.getElementById("analysis-mode").value === "existing") {
+      const jobId = document.getElementById("qc-job-id").value;
+      if (jobId) loadExistingAnnotations(jobId);
+    }
     loadReferencePreview();
   });
   document.getElementById("differential-form").addEventListener("submit", handleDifferentialSubmit);
@@ -3079,6 +3085,7 @@ async function handleQcSubmit(evt) {
   }
   const payload = {
     analysis_mode: document.getElementById("analysis-mode")?.value || "supervised",
+    existing_state_column: evt.target.existing_state_column?.value || null,
     umap_fit_mode: evt.target.umap_fit_mode?.value || "landmark",
     max_k: evt.target.max_k?.value.trim() ? Number(evt.target.max_k.value) : null,
     min_genes: evt.target.min_genes.value,
@@ -3092,6 +3099,11 @@ async function handleQcSubmit(evt) {
       return value && value !== "none" ? [value] : [];   // "all" expands on the backend
     })(),
   };
+  if (payload.analysis_mode === "existing" && evt.target.existing_state_column?.dataset.loading === "true") return;
+  if (payload.analysis_mode === "existing" && !payload.existing_state_column) {
+    alert("Select an existing cell-state / cluster column before running. Wait for annotation inspection if it is still loading.");
+    return;
+  }
   // App-specific QC controls, supplied only by interfaces that add them.
   if (typeof window.scalableQcOptions === "function") {
     Object.assign(payload, window.scalableQcOptions(evt.target));
@@ -3270,6 +3282,10 @@ async function loadJobStateOnce(jobId, quiet = false) {
     }
     accepted = true;
     applyJobStatus(jobId, data);
+    if ((data.analysis_mode || data.qc?.analysis_mode) === "existing" &&
+        document.getElementById("existing-state-column")?.dataset.jobId !== jobId) {
+      await loadExistingAnnotations(jobId, data.qc?.existing_state_column);
+    }
   } catch (err) {
     if (!accepted && !isCurrent()) return;
     if (quiet) console.warn(err);
@@ -3411,9 +3427,11 @@ function updateAnalysisRunControl() {
     stop.disabled = stopSubmissionInFlight;
     stop.textContent = stopSubmissionInFlight ? "Stopping…" : "Stop analysis";
   }
-  button.disabled = submitting || active || uploadSelectionDirty || uploadSubmissionInFlight || stopSubmissionInFlight;
+  const inspectingExisting = document.getElementById("analysis-mode")?.value === "existing" &&
+    document.getElementById("existing-state-column")?.dataset.loading === "true";
+  button.disabled = submitting || active || uploadSelectionDirty || uploadSubmissionInFlight || stopSubmissionInFlight || inspectingExisting;
   button.textContent = uploadSelectionDirty ? "Upload new data first" : active ? (!pipelineActive ? "Differential running…" : currentJobStatus === "queued" ? "Queued…" : "Running…")
-    : submitting ? "Starting…" : "Save QC and run";
+    : submitting ? "Starting…" : inspectingExisting ? "Inspecting annotations…" : "Save QC and run";
   button.setAttribute("aria-busy", String(submitting || active));
 }
 
@@ -3439,7 +3457,7 @@ function updateWorkflowPanels(status) {
   qcLivePanel.classList.toggle("hidden", !hasStartedQcRun);
   differentialPanel.classList.toggle("hidden", !hasCompletedAlignment);
   exploreControlsPanel.classList.toggle("hidden", !hasExploreReady);
-  previewPanel.classList.toggle("hidden", hasUploadedJob || document.getElementById("analysis-mode")?.value === "unsupervised");
+  previewPanel.classList.toggle("hidden", hasUploadedJob || ["unsupervised", "existing"].includes(document.getElementById("analysis-mode")?.value));
   if (runGrid) {
     runGrid.classList.toggle("preupload-mode", !hasUploadedJob);
     runGrid.classList.toggle("workflow-mode", hasUploadedJob);
@@ -3470,7 +3488,7 @@ function updateWorkflowPanels(status) {
 async function loadReferencePreview() {
   if (restoringSavedSession) return;
   const previewPanel = document.getElementById("reference-preview-panel");
-  if (currentJobStatus || document.getElementById("analysis-mode")?.value === "unsupervised") {
+  if (currentJobStatus || ["unsupervised", "existing"].includes(document.getElementById("analysis-mode")?.value)) {
     previewPanel.classList.add("hidden");
     return;
   }
@@ -4260,7 +4278,7 @@ function updateDifferentialUi(state) {
   }
 
   intro.textContent = enabled
-    ? `Perform cell-state differential ${featureLabel} analysis. New comparisons select up to 500 cells per cell state per sample by highest assignment score: reference alignment for Supervised/Both, ICGS3 SVM for Unsupervised. Equal scores use barcode order. Groups below the cap retain all cells.`
+    ? currentAnalysisMode === "existing" ? `Perform cell-state differential ${featureLabel} analysis using the supplied annotations. All selected cells are retained; no native assignment score or random sampling is assumed.` : `Perform cell-state differential ${featureLabel} analysis. New comparisons select up to 500 cells per cell state per sample by highest assignment score: reference alignment for Supervised/Both, ICGS3 SVM for Unsupervised. Equal scores use barcode order. Groups below the cap retain all cells.`
     : "Differential analysis is only enabled when two or more samples were uploaded for the job.";
   if (detailTitle) {
     detailTitle.textContent = selectedModality === "grn"
@@ -9258,21 +9276,81 @@ function drawChatFrequency(spec) {
 }
 
 
+async function loadExistingAnnotations(jobId, savedSelection) {
+  const select = document.getElementById("existing-state-column");
+  const status = document.getElementById("existing-annotation-status");
+  if (!select || !status || !jobId) return;
+  const session = jobSessionGeneration;
+  const request = String(Number(select.dataset.inspectionRequest || 0) + 1);
+  select.dataset.inspectionRequest = request;
+  const previous = savedSelection || (select.dataset.jobId === jobId ? select.value : "");
+  const current = () => session === jobSessionGeneration && document.getElementById("qc-job-id").value === jobId &&
+    select.dataset.inspectionRequest === request;
+  select.dataset.loading = "true";
+  select.replaceChildren(new Option("Inspecting annotations…", ""));
+  status.textContent = "Inspecting existing annotations… Ambiguous columns are checked by the local model (up to 30 seconds).";
+  select.disabled = true;
+  updateAnalysisRunControl();
+  try {
+    const response = await fetch(apiPath(`/jobs/${encodeURIComponent(jobId)}/existing-annotations`));
+    const info = await parseApiResponse(response);
+    if (!current()) return;
+    if (!response.ok) throw new Error(info.detail || "Unable to inspect annotations.");
+    select.replaceChildren();
+    select.add(new Option("Select existing cell states / clusters", ""));
+    for (const candidate of info.candidates) {
+      select.add(new Option(`${candidate.key} (${candidate.categories} groups${candidate.likely_covariate ? "; likely covariate" : ""})`, candidate.key));
+    }
+    const choice = previous || info.selected || "";
+    select.value = info.candidates.some(c => c.key === choice) ? choice : "";
+    select.dataset.jobId = jobId;
+    const selected = info.candidates.find(c => c.key === select.value);
+    const notes = [...(info.warnings || [])];
+    if (selected?.kind === "cluster") notes.push("Cluster IDs will be retained; biological cell-type names are not inferred.");
+    if (selected?.missing_cells) notes.push(`${selected.missing_cells} cells have missing labels and will remain as Unassigned.`);
+    status.textContent = [info.method === "local_model" ? `Local-model suggestion: ${info.selected}. Review before running.` :
+      select.value ? `Detected ${select.value}. Review before running.` : "Cell-state annotation could not be identified. Select a column before running.", ...notes].join(" ");
+  } catch (error) {
+    if (current()) status.textContent = error.message;
+  } finally {
+    if (current()) {
+      select.disabled = false;
+      select.dataset.loading = "false";
+      updateAnalysisRunControl();
+    }
+  }
+}
+
 function syncAnalysisControls() {
   const control = document.getElementById("analysis-mode");
   if (!control) return; // standalone discover/viewer owns its controls
   const mode = control.value;
   const qcPanel = document.getElementById("qc-panel");
   if (qcPanel) qcPanel.dataset.analysisMode = mode;
-  document.getElementById("analysis-clustering-options")?.classList.toggle("hidden", mode === "supervised");
+  document.getElementById("analysis-clustering-options")?.classList.toggle("hidden", ["supervised", "existing"].includes(mode));
+  document.getElementById("existing-annotation-options")?.classList.toggle("hidden", mode !== "existing");
   const reference = document.getElementById("reference-select");
   reference?.closest(".field")?.classList.toggle("hidden", mode === "unsupervised");
-  if (reference) reference.required = mode !== "unsupervised";
-  document.getElementById("reference-preview-panel")?.classList.toggle("hidden", Boolean(currentJobStatus) || mode === "unsupervised");
+  if (reference) reference.required = !["unsupervised", "existing"].includes(mode);
+  if (reference) {
+    const none = reference.querySelector('option[data-existing-none]');
+    if (mode === "existing" && !none) {
+      const option = new Option("None (reuse supplied annotations)", "");
+      option.dataset.existingNone = "true";
+      reference.insertBefore(option, reference.firstChild);
+    } else if (mode !== "existing" && none) {
+      const wasEmpty = reference.value === "";
+      none.remove();
+      if (wasEmpty && reference.options.length) reference.selectedIndex = 0;
+    }
+  }
+  const referenceLabel = document.querySelector('label[for="reference-select"]');
+  if (referenceLabel) referenceLabel.textContent = mode === "existing" ? "Reference (optional prediction models)" : "Reference";
+  document.getElementById("reference-preview-panel")?.classList.toggle("hidden", Boolean(currentJobStatus) || ["unsupervised", "existing"].includes(mode));
   const cutoff = document.querySelector('#qc-form [name="align_cutoff"]');
-  cutoff?.closest(".field")?.classList.toggle("hidden", mode === "unsupervised");
+  cutoff?.closest(".field")?.classList.toggle("hidden", ["unsupervised", "existing"].includes(mode));
   const heading = document.querySelector("#qc-panel h2");
-  if (heading) heading.textContent = mode === "supervised" ? "2. QC and alignment" : mode === "unsupervised" ? "2. QC and ICGS3 clustering" : "2. QC, alignment and ICGS3 clustering";
+  if (heading) heading.textContent = mode === "existing" ? "2. QC and existing annotations" : mode === "supervised" ? "2. QC and alignment" : mode === "unsupervised" ? "2. QC and ICGS3 clustering" : "2. QC, alignment and ICGS3 clustering";
   updateImputeModalityField();
   if (mode === "unsupervised") {
     document.getElementById("qc-impute-modality-field")?.classList.add("hidden");

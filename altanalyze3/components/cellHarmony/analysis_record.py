@@ -20,7 +20,7 @@ from pathlib import Path
 
 SCHEMA_VERSION = 1
 QC_DEFAULTS = {
-    "analysis_mode": "supervised", "umap_fit_mode": "landmark", "max_k": None,
+    "analysis_mode": "supervised", "existing_state_column": None, "umap_fit_mode": "landmark", "max_k": None,
     "min_genes": 500, "min_counts": 1000, "min_cells": 0, "mit_percent": 15,
     "align_cutoff": 0.4, "ambient_correction": "no", "impute_modality": "none",
     "impute_modalities": None, "marker_render_heatmap": False,
@@ -195,6 +195,7 @@ def build_manifest(meta, job_dir):
         "inputs": pipeline_record.get("inputs") or [{"filename": Path(i.get("filename", "")).name,
                      "sample_name": i.get("sample_name")} for i in meta.get("files") or []],
         "input_memory": meta.get("input_memory") or {},
+        "existing_annotations": meta.get("existing_annotations") or {},
         "qc": pipeline_record.get("qc") or meta.get("qc") or {},
         "interface_defaults_at_execution": pipeline_record.get("interface_defaults") or {},
         "model_versions": models, "software_provenance": version_sources,
@@ -280,11 +281,12 @@ def _preprocessing_methods(m):
         "align_cutoff":"Minimum alignment similarity", "ambient_correction":"Ambient RNA correction"}
     rows = [(label, qc.get(key), defaults.get(key),
              ("yes" if qc[key] != defaults[key] else "no") if key in defaults else "unknown")
-            for key, label in labels.items() if key in qc]
-    lines = ["Quality-control thresholds and the reference-alignment cutoff were configured as follows."]
+            for key, label in labels.items() if key in qc and not (m.get("analysis_mode") == "existing" and key == "align_cutoff")]
+    lines = ["Quality-control thresholds were configured as follows." if m.get("analysis_mode") == "existing" else
+             "Quality-control thresholds and the reference-alignment cutoff were configured as follows."]
     lines += _table(["Setting", "Recorded value", "Interface default at execution", "Changed from default"], rows)
     evidence = "\n".join(e["text"] for e in m.get("preprocessing_evidence", []))
-    if "skipping QC" in evidence or "Skipping QC filtering" in evidence:
+    if ("skipping QC" in evidence or "Skipping QC filtering" in evidence) and "[qc] Use Existing:" not in evidence:
         lines.append("Count-based QC filtering was skipped because the input was already normalized and log-transformed.")
     retained = list(dict.fromkeys(re.findall(r"Cells remaining after (.+?) filtering: (\d+)", evidence)))
     if retained:
@@ -325,18 +327,31 @@ def render_methods(manifest):
         "Inputs retain their recorded library/sample names. For an annotated H5AD, the selected observation field defines the sample identities used in each differential comparison.",
         *_table(["Library / sample", "Input file"], [(i.get("sample_name"), i.get("filename")) for i in m["inputs"]]), "", "## Selected reference", ""]
     ref = m.get("reference") or {}
+    if mode == "existing":
+        paragraphs += ["Supplied annotations define the cell populations. Any reference selected below is used only to select optional imputation models; it was not used for alignment."]
     if ref:
         paragraphs += [f"Selected reference: {ref.get('label', m['reference_id'])}."]
         if ref.get("study_url"):
             paragraphs += [f"Reference citation: [{ref.get('study_citation') or ref['study_url']}]({ref['study_url']})."]
         else:
             paragraphs += ["No published study citation is recorded for this reference; no citation to a different reference version has been substituted."]
+    elif mode == "existing":
+        paragraphs += ["No reference was required to reuse the supplied annotations and embeddings."]
     else:
         paragraphs += ["Reference metadata/version at execution was not recorded. The saved identifier and resource paths in run_manifest.json are the available record."]
     paragraphs += ["Reference resource identities are retained in Software versions and reproducibility and in `run_manifest.json`.",
         "", "## Quality control, ambient RNA correction and expression scale", ""]
     paragraphs += _preprocessing_methods(m)
     paragraphs += ["", "## Cell-state inference and embedding", ""]
+    if mode == "existing":
+        existing = m.get("existing_annotations") or {}
+        paragraphs += [f"Use Existing retained the supplied cell-state/cluster labels from obs[{qc.get('existing_state_column')!r}]. "
+            "Requested QC used counts when available, preserving already normalized RNA without a second normalization. "
+            "No supervised reference alignment, ICGS3 clustering, UMAP fitting or reference projection was performed. "
+            "Supplied annotations and embeddings were retained for QC-passed cells. Missing labels were represented as Unassigned in a separate serving column. "
+            f"Annotation column selection was recorded as {existing.get('method', 'user selection')}; "
+            "the local model, when used, selected an existing column and did not generate per-cell annotations. "
+            "Downstream analyses used the selected grouping. Differential comparisons retained all selected cells because external annotations need not have native assignment scores."]
     if mode in {"supervised", "both"}:
         paragraphs += ["The supervised branch uses cellHarmony-lite (altanalyze3) reference alignment. Query cells are compared with reference cell-state profiles over the reference marker panel; the native pipeline uses cosine similarity and the requested alignment cutoff. This implementation builds on cellHarmony [cellHarmony], but its centroid alignment and approximate reference placement should not be described as the original full cell-to-cell matching algorithm.",
             "The approximate supervised UMAP places accepted query cells using reference coordinates rather than fitting a new UMAP to all query cells. The recorded placement parameters specify the reference-cell count and jitter; a seed is only claimed if recorded."]

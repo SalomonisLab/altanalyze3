@@ -23,7 +23,7 @@ from ..flask import pipeline as P
 from ..flask.job_manager import JobStore
 from ..mapped_h5ad import Workspace, inspect_h5ad, merge_h5ads, needs_disk_backed_import
 
-MODES = ("supervised", "unsupervised", "both")
+MODES = ("supervised", "unsupervised", "both", "existing")
 SUPERVISED = "supervised_state"
 UNSUPERVISED = "unsupervised_cluster"
 UNALIGNED = "Unaligned"
@@ -364,7 +364,7 @@ def run_analysis_workflow(job_id, store, registry_path, *, export_approx_pdfs=Fa
     mode = (original.get("qc") or {}).get("analysis_mode", "supervised")
     if mode not in MODES:
         raise ValueError(f"Unknown analysis mode: {mode}")
-    if mode == "supervised":
+    if mode in {"supervised", "existing"}:
         return P.run_cellharmony_pipeline(job_id, store, registry_path, export_approx_pdfs=export_approx_pdfs,
                                           h5ad_compression=h5ad_compression)
     from ..scalable_discover.pipeline import run_discover_pipeline

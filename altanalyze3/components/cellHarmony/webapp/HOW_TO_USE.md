@@ -344,3 +344,25 @@ Without a configured model, the button returns computed cross-modality synthesis
 and evidence-linked hypotheses, explicitly labelled as computed, rather than
 presenting them as an AI narrative. The animated button is available after new
 analyses and in saved sessions, with a static icon for reduced-motion preferences.
+
+
+### Reuse an annotated dataset
+
+Choose **Analysis → Use Existing** and upload an H5AD from scALABLE or another tool.
+After upload, review **Existing cell states / clusters** before running. Clear cell-state
+columns are detected directly; ambiguous choices use the configured local summary
+model (`SCALABLE_SUMMARY_URL` and `SCALABLE_SUMMARY_MODEL`). The model selects an
+existing observation column; it does not generate cell annotations. An unresolved
+choice produces a warning and requires manual selection.
+
+Requested QC is applied, followed by the standard downstream analyses, with no
+cellHarmony alignment, ICGS3 clustering or new UMAP fitting. Existing annotations,
+embeddings and embedded modality predictions are retained for QC-passed cells.
+A reference is optional and only selects models for newly requested imputation.
+Count-based QC needs counts in `X` or `layers['counts']`; for normalized-only input,
+supply counts or disable count/mitochondrial thresholds with Min counts **0** and
+Mito % **100**. Without a supplied UMAP, use the other Explore plots. Multiple inputs
+need a common annotation column and a common coordinate frame for joint UMAP display.
+Differential comparisons retain all selected cells rather than requiring absent
+alignment/SVM scores. External modality sidecars are not recovered from old file paths;
+only predictions embedded in the uploaded file are reusable.

@@ -312,6 +312,7 @@ def combine_and_align_h5(
     stream_10x_inputs=False,
     unaligned_h5ad=None,
     bounded_h5ad=False,
+    qc_normalized_input=False,
 ):
     """``adata`` is an in-memory cells x genes AnnData, for example one read by
     ``sparse_stream.read_sparse_stream``. It takes the same path as ``h5ad_file``: gene
@@ -524,7 +525,17 @@ def combine_and_align_h5(
         adata_combined = _apply_ambient_correction(adata_combined)
         pre_qc_scale = assess_expression_scale(adata_combined)
         pre_qc_shape = adata_combined.shape
-        if pre_qc_scale["skip_qc"]:
+        if qc_normalized_input:
+            # Opt-in for Use Existing only. Preserve normalized X, but apply the
+            # requested count predicates to genuine counts when available.
+            if pre_qc_scale["x_verdict"] != "counts" and pre_qc_scale["counts_verdict"] != "counts":
+                if min_counts or (mit_percent is not None and mit_percent < 100):
+                    raise ValueError("Requested count/mitochondrial QC requires counts in X or layers['counts']. "
+                                     "For normalized-only input, supply counts or set Min counts=0 and Mito %=100.")
+                mit_percent = None
+            print("[qc] Use Existing: applying requested QC without re-normalizing normalized RNA.")
+            adata_combined = _apply_qc_filters(adata_combined)
+        elif pre_qc_scale["skip_qc"]:
             print("...skipping QC: input is already scaled and log-transformed")
         else:
             print("...performing QC")

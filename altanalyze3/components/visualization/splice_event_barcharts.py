@@ -86,8 +86,13 @@ def analyze_splicing_events(
     mirror=False,
     mirror_min_samples=0,
     mirror_min_events=0,
-    strict_thresholds=False
+    strict_thresholds=False,
+    additional_fdr_threshold=None,
+    figure_caption=None,
 ):
+    if additional_fdr_threshold is not None and (not np.isfinite(additional_fdr_threshold)
+                                                or not 0 <= additional_fdr_threshold <= 1):
+        raise ValueError('additional_fdr_threshold must be finite and within [0,1]')
     event_data = {}
     overall_event_data = {}
     comparison_samples = {}  # mirror only: comparison -> {condition: largest per-event N}
@@ -115,6 +120,9 @@ def analyze_splicing_events(
             condition2_name = condition_cols[1].replace("N_", "")
 
             pval_col = resolve_pval_column(col_indices, pval_type)
+            fdr_col = resolve_pval_column(col_indices, 'fdr')
+            if additional_fdr_threshold is not None and fdr_col is None:
+                raise ValueError(f'{stats_file}: FDR column required for the requested joint filter')
             required_cols = {"Feature", "Isoform_1|Length", "Isoform_2|Length", "Event_Type", "Event_Direction"}
             if pval_col is None or not required_cols.issubset(set(col_indices.keys())):
                 print(f"Skipping {stats_file}: missing required columns or no '{pval_type}' p-value column.")
@@ -182,6 +190,12 @@ def analyze_splicing_events(
                                (pval > pval_threshold) or (diff_means < diff_means_threshold))
                     if outside or (n_count1 < sample_min) or (n_count2 < sample_min):
                         continue
+                    if additional_fdr_threshold is not None:
+                        try: qval = float(cols[col_indices[fdr_col]])
+                        except (ValueError, IndexError): continue
+                        if not np.isfinite(qval) or (qval >= additional_fdr_threshold if strict_thresholds
+                                                    else qval > additional_fdr_threshold):
+                            continue
 
                 if sig_out is not None:
                     sig_out.write(comparison_name + "\t" + line.strip() + "\n")
@@ -282,6 +296,10 @@ def analyze_splicing_events(
 
     plot_stacked_bar(overall_event_data, "Splicing Events Across All Comparisons", "splicing_events_all.pdf", cluster_order=cluster_order)
 
+    if mirror:
+        _plot_mirror_states_on_x(event_data, overall_event_data, comparison_samples, cluster_order, output_dir,
+                                 mirror_min_samples, mirror_min_events, caption=figure_caption)
+
     if not event_data:
         print("No events passed the filtering criteria. No PDFs generated.")
         return
@@ -289,13 +307,8 @@ def analyze_splicing_events(
     for event_direction, comparison_data in event_data.items():
         plot_stacked_bar(comparison_data, f"Splicing Events for {event_direction}", f"splicing_events_{event_direction}.pdf", cluster_order=cluster_order)
 
-    if mirror:
-        _plot_mirror_states_on_x(event_data, overall_event_data, comparison_samples, cluster_order, output_dir,
-                                 mirror_min_samples, mirror_min_events)
-
-
 def _plot_mirror_states_on_x(event_data, overall_event_data, comparison_samples, cluster_order, output_dir,
-                             min_samples=0, min_events=0, output_stem="splicing_events_inclusion_exclusion_mirror"):
+                             min_samples=0, min_events=0, output_stem="splicing_events_inclusion_exclusion_mirror",caption=None):
     """Mirror panel: one bar per cell state along the x axis, inclusion/proximal events stacked upward and
     exclusion/distal events stacked downward (same event-type colours), state labels below the axes.
 
@@ -379,6 +392,9 @@ def _plot_mirror_states_on_x(event_data, overall_event_data, comparison_samples,
         if hasattr(art, "set_clip_on"):
             art.set_clip_on(False)
     pdf_path = os.path.join(output_dir, output_stem + ".pdf")
+    if caption:
+        import textwrap
+        fig.text(.05,-.39,'\n'.join(textwrap.wrap(str(caption),width=125)),ha='left',va='top',fontsize=6)
     fig.savefig(pdf_path, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved plot: {pdf_path}")
@@ -655,6 +671,9 @@ if __name__ == '__main__':
                              "(unique isoform pairs over all event types and directions). Default 0 (no filter).")
     parser.add_argument('--strict-thresholds', action='store_true',
                         help='Use p < cutoff and |dPSI| > cutoff; default retains historical inclusive boundaries')
+    parser.add_argument('--additional-fdr', type=float,
+                        help='Also require native FDR below this threshold, in addition to --pval selection')
+    parser.add_argument('--caption-file', help='Optional scientific figure legend for the mirror panel')
     args = parser.parse_args()
 
     if not os.path.isdir(args.input_dir):
@@ -729,4 +748,6 @@ if __name__ == '__main__':
         mirror_min_samples=args.mirror_min_samples,
         mirror_min_events=args.mirror_min_events,
         strict_thresholds=args.strict_thresholds,
+        additional_fdr_threshold=args.additional_fdr,
+        figure_caption=open(args.caption_file).read() if args.caption_file else None,
     )

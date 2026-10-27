@@ -1897,14 +1897,23 @@ def run_cellharmony_pipeline(
     """
 
     meta = store.get_job(job_id)
-    reference_entry = _lookup_reference(meta["species"], meta["reference"], registry_path)
-    _ensure_reference_fields(reference_entry)
+    existing = (meta.get("qc") or {}).get("analysis_mode") == "existing"
+    if existing:
+        from ..webapp.existing_annotations import inspect_annotations, upload_paths, validate_selection
+        report = inspect_annotations(upload_paths(meta, store.uploads_dir(job_id)))
+        validate_selection(report, (meta.get("qc") or {}).get("existing_state_column") or report["selected"])
+    # A reference in this mode selects optional prediction models only; its
+    # annotation and coordinates are never used for alignment or placement.
+    reference_entry = (_lookup_reference(meta["species"], meta["reference"], registry_path)
+                       if not existing or meta.get("reference") not in {None, "", "existing"} else {})
+    if not existing:
+        _ensure_reference_fields(reference_entry)
     from ..analysis_record import capture_execution
     capture_execution(store, job_id, reference=reference_entry, effective={
         "export_approx_pdfs": export_approx_pdfs, "h5ad_compression": h5ad_compression,
         "build_bundle": build_bundle, "allow_empty_alignment": allow_empty_alignment})
     store.append_log(job_id, "Reference metadata loaded.")
-    default_gene = _first_reference_gene(reference_entry["states_tsv"])
+    default_gene = _first_reference_gene(reference_entry["states_tsv"]) if not existing else None
 
     uploads_dir = store.uploads_dir(job_id)
     outputs_dir = store.outputs_dir(job_id)
@@ -1928,15 +1937,15 @@ def run_cellharmony_pipeline(
     selected_impute_modalities = _selected_impute_modalities(meta, reference_entry)
     selected_impute_modality = selected_impute_modalities[0] if selected_impute_modalities else None
 
-    store.append_log(job_id, "Running cellHarmony_lite pipeline.")
+    store.append_log(job_id, "Use Existing: QC and standard downstream analyses; no alignment or clustering." if existing else "Running cellHarmony_lite pipeline.")
     store.append_log(
         job_id,
         (
-            "[params] alignment "
-            f"input_mode={'multi_h5ad' if multiple_h5ad else 'single_h5ad' if h5ad_file else 'multi_h5'} "
+            ("[params] existing " if existing else "[params] alignment ")
+            + f"input_mode={'multi_h5ad' if multiple_h5ad else 'single_h5ad' if h5ad_file else 'multi_h5'} "
             f"n_h5={len(h5_files)} "
             f"h5ad={'yes' if h5ad_file else 'no'} "
-            f"reference={reference_entry['states_tsv']} "
+            f"reference={reference_entry.get('states_tsv', 'none')} "
             f"min_genes={int(qc.get('min_genes', 200))} "
             f"min_cells={int(qc.get('min_cells', 3))} "
             f"min_counts={int(qc.get('min_counts', 500))} "
@@ -1956,7 +1965,7 @@ def run_cellharmony_pipeline(
     _, combined_adata = cellHarmony_lite.combine_and_align_h5(
         h5_files=h5_files,
         h5ad_file=h5ad_file,
-        cellharmony_ref=reference_entry["states_tsv"],
+        cellharmony_ref=None if existing else reference_entry["states_tsv"],
         output_dir=str(outputs_dir),
         export_cptt=False,
         export_h5ad=False,
@@ -1979,15 +1988,21 @@ def run_cellharmony_pipeline(
         return_adata=True,
         unaligned_h5ad=str(unaligned_h5ad_path),
         bounded_h5ad=bounded_h5ad,
+        qc_normalized_input=existing,
     )
 
     assignments_path = outputs_dir / "cellHarmony_lite_assignments.txt"
     combined_h5ad_path = outputs_dir / "combined_with_umap_and_markers.h5ad"
-    if not assignments_path.exists():
-        raise FileNotFoundError("cellHarmony-lite assignments file missing.")
-
-    query_cluster_key = Path(reference_entry["states_tsv"]).stem
-    reference_cluster_key = reference_entry.get("cluster_key", query_cluster_key)
+    if existing:
+        from ..webapp.existing_workflow import prepare_annotations
+        query_cluster_key = prepare_annotations(combined_adata, meta, store, job_id)
+        combined_adata.obs[[query_cluster_key]].to_csv(assignments_path, sep="\t", index_label="CellBarcode")
+        default_gene = str(combined_adata.var_names[0]) if combined_adata.n_vars else None
+    else:
+        if not assignments_path.exists():
+            raise FileNotFoundError("cellHarmony-lite assignments file missing.")
+        query_cluster_key = Path(reference_entry["states_tsv"]).stem
+    reference_cluster_key = query_cluster_key if existing else reference_entry.get("cluster_key", query_cluster_key)
 
     if allow_empty_alignment and combined_adata.n_obs == 0:
         # Both still has an independent ICGS3 branch. An empty alignment is a
@@ -2080,41 +2095,62 @@ def run_cellharmony_pipeline(
     marker_analysis_by_modality["rna"] = dict(marker_analysis)
     store.append_log(job_id, "Cell-state marker gene export complete.")
 
-    store.update_job(job_id, progress=82, message="cellHarmony step 7 of 10: approximate UMAP placement.")
-    store.append_log(job_id, "Running approximate UMAP placement.")
     resolved_h5ad_compression = _normalize_h5ad_compression(h5ad_compression)
-    store.append_log(
-        job_id,
-        (
-            "[params] approximate_umap "
-            f"query_cluster_key={query_cluster_key} "
-            f"reference_cluster_key={reference_cluster_key} "
-            f"umap_key=X_umap jitter=0.05 num_reference_cells=1 export_pdf={bool(export_approx_pdfs)} "
-            f"h5ad_compression={resolved_h5ad_compression or 'none'}"
-        ),
-    )
-    reference_adata = approx_mod._load_reference_from_tsv(
-        reference_entry["reference_coords_tsv"],
-        reference_entry["reference_clusters_tsv"],
-        umap_key="X_umap",
-        cluster_key=reference_cluster_key,
-    )
-    approx_result = approx_mod.approximate_umap(
-        query=combined_adata,
-        reference=reference_adata,
-        query_cluster_key=query_cluster_key,
-        reference_cluster_key=reference_cluster_key,
-        umap_key="X_umap",
-        jitter=0.05,
-        num_reference_cells=1,
-        copy_query=False,
-    )
+    if existing:
+        from ..webapp.existing_workflow import supplied_embedding_result
+        approx_result = supplied_embedding_result(combined_adata, query_cluster_key, store, job_id)
+        reference_adata = None
+    else:
+        store.update_job(job_id, progress=82, message="cellHarmony step 7 of 10: approximate UMAP placement.")
+        store.append_log(job_id, "Running approximate UMAP placement.")
+        store.append_log(
+            job_id,
+            (
+                "[params] approximate_umap "
+                f"query_cluster_key={query_cluster_key} "
+                f"reference_cluster_key={reference_cluster_key} "
+                f"umap_key=X_umap jitter=0.05 num_reference_cells=1 export_pdf={bool(export_approx_pdfs)} "
+                f"h5ad_compression={resolved_h5ad_compression or 'none'}"
+            ),
+        )
+        reference_adata = approx_mod._load_reference_from_tsv(
+            reference_entry["reference_coords_tsv"],
+            reference_entry["reference_clusters_tsv"],
+            umap_key="X_umap",
+            cluster_key=reference_cluster_key,
+        )
+        approx_result = approx_mod.approximate_umap(
+            query=combined_adata,
+            reference=reference_adata,
+            query_cluster_key=query_cluster_key,
+            reference_cluster_key=reference_cluster_key,
+            umap_key="X_umap",
+            jitter=0.05,
+            num_reference_cells=1,
+            copy_query=False,
+        )
     modality_artifacts: Dict[str, Dict[str, str]] = {
         "rna": {
             "h5ad": str(combined_h5ad_path),
         }
     }
-    modalities_payload = _modalities_payload(selected_impute_modalities)
+    imported_modalities = []
+    if existing:
+        from ..webapp.existing_workflow import reuse_embedded_modalities
+        imported, imported_markers, warnings = reuse_embedded_modalities(
+            combined_adata, outputs_dir, selected_impute_modalities, query_cluster_key, meta, resolved_h5ad_compression)
+        modality_artifacts.update(imported)
+        marker_analysis_by_modality.update(imported_markers)
+        imported_modalities = list(imported)
+        for warning in warnings:
+            store.append_log(job_id, '[existing] WARNING: ' + warning)
+        store.update_job(job_id, existing_warnings=warnings)
+    modalities_payload = _modalities_payload(selected_impute_modalities + imported_modalities)
+    # Do not advertise a GRN TF layer unless its values are actually present.
+    if existing:
+        modalities_payload["available"] = [m for m in modalities_payload["available"]
+            if m["id"] in modality_artifacts or m["id"] in selected_impute_modalities or
+               (m["id"] == "grn_tf" and "grn" in selected_impute_modalities)]
     disk_imputation = approx_result.query_adata.n_obs >= int(os.getenv('CELLHARMONY_DISK_ANALYSIS_MIN_CELLS', '20000'))
 
     if "lipids" in selected_impute_modalities:
@@ -2141,12 +2177,8 @@ def run_cellharmony_pipeline(
         lipid_h5ad_path = outputs_dir / "combined_with_umap_and_markers_lipids.h5ad"
         approx_result.query_adata.obsm["X_lipids"] = np.asarray(lipid_adata.X, dtype=np.float32)
         approx_result.query_adata.uns["lipid_feature_names"] = lipid_adata.var_names.astype(str).tolist()
-        approx_result.query_adata.uns["imputed_modalities"] = {
-            "lipids": {
-                "obsm_key": "X_lipids",
-                "feature_names_key": "lipid_feature_names",
-                "summary": lipid_summary,
-            }
+        approx_result.query_adata.uns.setdefault("imputed_modalities", {})["lipids"] = {
+            "obsm_key": "X_lipids", "feature_names_key": "lipid_feature_names", "summary": lipid_summary,
         }
         approx_mod.ensure_h5ad_compat_for_write(lipid_adata)
         lipid_adata.write(lipid_h5ad_path, compression=resolved_h5ad_compression)
@@ -2318,7 +2350,7 @@ def run_cellharmony_pipeline(
         # HDF5 export reads every retained layer. Release those clean pages
         # before communication buffers overlap them; all matrices remain usable.
         analysis_workspace.release_pages()
-    store.append_log(job_id, "Aligned RNA and count matrices saved; work-array pages released.")
+    store.append_log(job_id, "RNA and count matrices saved; work-array pages released.")
 
     prefix = outputs_dir / "approximate"
     prefix.mkdir(parents=True, exist_ok=True)
@@ -2326,7 +2358,7 @@ def run_cellharmony_pipeline(
     _append_umap_to_assignments(assignments_path, Path(text_outputs["coordinates"]))
     annotated_pdf = None
     plain_pdf = None
-    if export_approx_pdfs:
+    if export_approx_pdfs and not existing:
         annotated_pdf, plain_pdf = approx_result.write_comparison_pdf(
             reference_adata=reference_adata,
             umap_key="X_umap",
@@ -2422,7 +2454,10 @@ def run_cellharmony_pipeline(
             continue
         summary = read_result_provenance(modality_files["h5ad"])
         if not summary.get("model_version_id"):
-            raise RuntimeError(f"Missing model version provenance for {modality_id} output")
+            if existing and modality_files.get("imported_existing"):
+                summary = {"status": "unrecorded_in_uploaded_prediction", "source": "uploaded_h5ad", "modality": modality_id}
+            else:
+                raise RuntimeError(f"Missing model version provenance for {modality_id} output")
         model_versions[modality_id] = summary
     if fastcomm_analysis.get("enabled"):
         model_versions["fastComm"] = fastcomm_analysis["summary"]
@@ -2513,8 +2548,8 @@ def run_cellharmony_pipeline(
         job_id,
         cluster_key=query_cluster_key,
         reference_cluster_key=reference_cluster_key,
-        reference_coords_tsv=reference_entry["reference_coords_tsv"],
-        reference_clusters_tsv=reference_entry["reference_clusters_tsv"],
+        reference_coords_tsv=None if existing else reference_entry["reference_coords_tsv"],
+        reference_clusters_tsv=None if existing else reference_entry["reference_clusters_tsv"],
         default_gene=default_gene,
         marker_analysis=marker_analysis,
         marker_analysis_by_modality=marker_analysis_by_modality,
@@ -2534,6 +2569,12 @@ def run_cellharmony_pipeline(
         ),
         message="cellHarmony step 10 of 10: results ready.",
     )
+    if existing:
+        store.update_job(job_id, cell_state_layers={"default": query_cluster_key, "layers": [{
+            "key": query_cluster_key, "label": "Existing cell states / clusters",
+            "marker_analysis": marker_analysis, "marker_analysis_by_modality": marker_analysis_by_modality,
+            "fastcomm_analysis": fastcomm_analysis}]},
+            message="Use Existing: downstream analyses complete; supplied annotations and embeddings retained.")
     # Everything needed below is on disk. Do not overlap the bundle builder's
     # buffers with RNA layers and all of the per-cell imputation outputs.
     if analysis_workspace is not None:
@@ -2785,14 +2826,17 @@ def run_cellharmony_differential(job_id: str, store: JobStore) -> Dict[str, obje
     from ..differential_sampling import needs_cap, web_assignment_scores
     scores, score_sources = None, []
     selection_method, selection_metric = None, None
-    capped = not already_pseudobulk and needs_cap(adata.obs, population_col, sample_col,
+    use_all_existing = (meta.get("analysis_mode") == "existing")
+    capped = not use_all_existing and not already_pseudobulk and needs_cap(adata.obs, population_col, sample_col,
                                                  resolved_group1 + resolved_group2, limit)
     if capped:
         scores, score_sources, selection_method, selection_metric = web_assignment_scores(meta, adata.obs_names)
     rows = _sample_differential_cells(adata.obs, population_col, sample_col,
-                                      resolved_group1 + resolved_group2, limit, scores) if not already_pseudobulk else np.flatnonzero(subset_mask)
+                                      resolved_group1 + resolved_group2, limit, scores) if not already_pseudobulk and not use_all_existing else np.flatnonzero(subset_mask)
+    if use_all_existing and not already_pseudobulk:
+        rows = rows[np.argsort(adata.obs_names[rows].astype(str), kind="stable")]
     before = int(np.asarray(subset_mask).sum())
-    cell_selection = {"method": selection_method if capped else
+    cell_selection = {"method": "all_existing_cells" if use_all_existing else selection_method if capped else
                       "precomputed_pseudobulk_no_cell_selection" if already_pseudobulk else "all_cells_within_cap",
                       "metric": selection_metric,
                       "tie_breaker": "cell_barcode_ascending", "analysis_order": "cell_barcode_ascending" if not already_pseudobulk else "stored",

@@ -64,3 +64,16 @@ def test_strict_cutoffs_and_nonfinite_do_not_leak_into_event_counts(tmp_path):
         pval_threshold=.05,diff_means_threshold=.1,strict_thresholds=True)
     table=pd.read_csv(out/'splicing_events_inclusion_exclusion_mirror.tsv',sep='\t')
     assert table.total_events.tolist()==[1]
+
+
+def test_joint_raw005_and_fdr_half_are_both_strict(tmp_path):
+    source=tmp_path/'aged-young-S1_stats-annotated.txt'
+    _write(source,[('Cassette Exon','inclusion',.2,p,3) for p in [.004,.005,.004,.004]])
+    table=pd.read_csv(source,sep='\t');table['ebayesAdjPval']=[.49,.1,.5,float('nan'),1.]
+    table.to_csv(source,sep='\t',index=False)
+    out=tmp_path/'joint'
+    seb.analyze_splicing_events([str(source)],output_dir=str(out),sample_min=3,
+        cluster_order=['S1'],mirror=True,pval_threshold=.005,diff_means_threshold=.1,
+        strict_thresholds=True,additional_fdr_threshold=.5)
+    result=pd.read_csv(out/'splicing_events_inclusion_exclusion_mirror.tsv',sep='\t')
+    assert result.total_events.tolist()==[1]

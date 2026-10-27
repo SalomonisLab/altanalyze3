@@ -42,6 +42,19 @@ def test_classes_outcome(tmp_path):
     assert c.loc["G2:ENST3", "outcome"] == "same length"
 
 
+def test_native_fdr_half_and_raw005_joint_filter(tmp_path):
+    cls=iss.protein_outcome_classes(_classes(tmp_path));d=tmp_path/'joint';d.mkdir()
+    path=d/'young-aged-S1_stats-annotated.txt'
+    _table(path,[('G1:nov1',3,3,.8,.6,.004),('G1:nov2',3,3,.8,.6,.005),
+                 ('G2:nov3',3,3,.8,.6,.004)])
+    table=pd.read_csv(path,sep='\t');table['ebayesAdjPval']=[.49,.1,.5]
+    table.to_csv(path,sep='\t',index=False)
+    selected,_=iss.protein_outcome_from_tables(d,'aged','young',cls,rawp=.005,
+        fold_scale='ratio',min_usage_shift=.1,fdr_threshold=.5,log=lambda *args:None)
+    assert selected.feature.tolist()==['G1:nov1']
+    assert selected.FDR.tolist()==[.49]
+
+
 def test_from_tables_rules_and_counts(tmp_path):
     cls = iss.protein_outcome_classes(_classes(tmp_path))
     d = tmp_path / "diff"; d.mkdir()

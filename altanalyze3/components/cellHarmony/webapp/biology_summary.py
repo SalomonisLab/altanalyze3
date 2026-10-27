@@ -245,7 +245,7 @@ def _regulatory_predictions(entry, layer):
 def collect_evidence(meta):
     digest={"schema_version":VERSION,"job_id":meta['job_id'],"species":meta.get('species'),
             "reference":meta.get('reference'),"analysis_mode":meta.get('analysis_mode','supervised'),
-            "reference_alignment_used":meta.get('analysis_mode','supervised')!='unsupervised',
+            "reference_alignment_used":meta.get('analysis_mode','supervised') not in {'unsupervised','existing'},
             "qc":meta.get('qc',{}),"model_versions":meta.get('model_versions',{}),
             "evidence":[],"coverage":[],"modalities":[],"comparisons":[]}
     manifest=modality_artifacts(meta)

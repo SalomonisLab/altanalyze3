@@ -29,6 +29,7 @@ All code edits must be validated within altanalyze3.
 from __future__ import annotations
 
 import json
+import collections
 import os
 import subprocess
 import sys
@@ -92,6 +93,79 @@ def legacy_strongest_patterns(statistics, ordered_groups, rho_cutoff=0.4):
     return table
 
 
+def collapse_discrete_pattern_logic(assignments, schemes, ordered_groups=None, pattern_precedence=None):
+    """Merge identical signed design partitions into the first listed category.
+
+    Up means high inside a level; down means high in its within-scheme complement.
+    Samples outside a scheme remain unconstrained, so partial and complete designs
+    cannot be conflated. Neither expression values nor correlations define identity.
+    Original winning statistics, direction, level and scheme remain unchanged.
+    ``pattern_precedence`` optionally lists (scheme, direction, level) roles in
+    report order, including which representative to retain for complementary roles.
+    """
+    if not schemes or len({s.name for s in schemes}) != len(schemes):
+        raise ValueError('Pattern logic requires uniquely named source schemes')
+    axis = list(dict.fromkeys(str(x) for s in schemes for x in s.adata.obs_names))
+    levels = list(ordered_groups) if ordered_groups is not None else list(
+        dict.fromkeys(level for s in schemes for level in s.levels()))
+    designs = {}
+    for s in schemes:
+        if not s.adata.obs_names.is_unique or set(s.groups()) != set(s.levels()):
+            raise ValueError('Pattern design must retain unique samples and every declared level')
+        designs[s.name] = dict(zip(s.adata.obs_names.astype(str), s.groups()))
+    entries = []
+    for direction in ['up', 'down']:
+        for level in levels:
+            for s in schemes:
+                if level not in s.levels():
+                    continue
+                design = designs[s.name]
+                key = tuple(-1 if sample not in design else int(
+                    (design[sample] == level) == (direction == 'up')) for sample in axis)
+                entry = dict(scheme=s.name, direction=direction, level=level,
+                             source_pattern=direction+'-'+level, logic=key)
+                entries.append(entry)
+    if pattern_precedence is not None:
+        priority=[tuple(map(str,role)) for role in pattern_precedence]
+        available={(e['scheme'],e['direction'],e['level']) for e in entries}
+        if any(len(role)!=3 for role in priority) or len(set(priority))!=len(priority):
+            raise ValueError('Pattern precedence must contain unique (scheme, direction, level) roles')
+        if not set(priority)<=available:
+            raise ValueError('Pattern precedence contains an unresolved source design role')
+        rank={role:i for i,role in enumerate(priority)}
+        entries.sort(key=lambda e:rank.get((e['scheme'],e['direction'],e['level']),len(rank)))
+    first = {}
+    for entry in entries:
+        first.setdefault(entry['logic'],entry)
+    # Equal labels on genuinely different sample partitions must remain distinct.
+    names = collections.Counter(e['source_pattern'] for e in first.values())
+    canonical = {key: (e['scheme']+'::' if names[e['source_pattern']] > 1 else '')+
+                       e['source_pattern'] for key,e in first.items()}
+    mapping = {}
+    aliases = []
+    for e in entries:
+        key=e['logic']; target=first[key]
+        mapping[e['scheme'],e['direction'],e['level']] = canonical[key]
+        aliases.append(dict(source_scheme=e['scheme'], source_direction=e['direction'],
+            source_level=e['level'], source_pattern=e['source_pattern'],
+            canonical_pattern=canonical[key], canonical_scheme=target['scheme'],
+            canonical_direction=target['direction'], canonical_level=target['level'],
+            high_samples=json.dumps([s for s,v in zip(axis,key) if v==1]),
+            low_samples=json.dumps([s for s,v in zip(axis,key) if v==0]),
+            unconstrained_samples=json.dumps([s for s,v in zip(axis,key) if v==-1])))
+    result=assignments.copy()
+    result['source_pattern']=result.get('source_pattern', result['pattern'])
+    result['pattern']=[mapping[str(r.scheme),str(r.direction),str(r.level)]
+                       for r in result.itertuples()]
+    rank={name:i for i,name in enumerate(canonical.values())}
+    if not result.empty:
+        result['_pattern_order']=result.pattern.map(rank)
+        result=result.assign(_feature=result.index).sort_values(
+            ['_pattern_order','rho','_feature'],ascending=[True,False,False]
+        ).drop(columns=['_pattern_order','_feature'])
+    return result,pd.DataFrame(aliases)
+
+
 def assess_pattern_coverage(adata, assignments, group_key, min_observed=3, min_fraction=.7):
     """Annotate every assigned event with measured PSI support in every displayed group.
 
@@ -126,6 +200,226 @@ def assess_pattern_coverage(adata, assignments, group_key, min_observed=3, min_f
     return result
 
 
+def review_legacy_pattern_selection(adata, assignments, group_key, *, rho_cutoff=.7,
+                                    min_observed=3, min_fraction=.9, min_mean_psi_range=.1,
+                                    excluded_schemes=()):
+    """Native figure-selection sensitivity with complete, auditable assignment retention.
+
+    The legacy strongest-pattern assignment and its ordering are unchanged. This
+    annotates stricter rho, measured-PSI coverage and amplitude gates; it neither
+    reassigns an event to a more convenient pattern nor imputes a measurement.
+    A fixed top-N cap is applied only by render_consolidated_marker_heatmap.
+    """
+    if not np.isfinite(rho_cutoff) or not 0 <= rho_cutoff <= 1:
+        raise ValueError('rho_cutoff must be finite and within [0,1]')
+    if not np.isfinite(min_mean_psi_range) or not 0 <= min_mean_psi_range <= 1:
+        raise ValueError('min_mean_psi_range must be finite and within [0,1]')
+    result=assess_pattern_coverage(adata,assignments,group_key,min_observed,min_fraction)
+    result['rho_eligible']=np.isfinite(result.rho)&(result.rho>rho_cutoff)
+    result['amplitude_eligible']=result.measured_group_mean_PSI_range>=min_mean_psi_range
+    result['scheme_eligible']=~result.scheme.isin(excluded_schemes)
+    result['figure_eligible']=result.coverage_eligible&result.rho_eligible&result.amplitude_eligible&result.scheme_eligible
+    return result
+
+
+def annotate_native_differential_eligibility(features, tables, *, max_raw_p=.05,
+                                            max_fdr=None, min_abs_dpsi=.1,
+                                            min_observed=3):
+    """Annotate a complete native event universe from existing differential tables.
+
+    This is the reference harness's nominal-P/effect/observed-N display gate,
+    optionally with an additional native FDR gate. It never fits statistics,
+    substitutes a feature, changes a pattern winner or discards an input row.
+    Multiple tables mean an explicit UNION of qualifying source comparisons.
+    """
+    import hashlib
+    from pathlib import Path
+    axis = pd.Index(features).astype(str)
+    if not axis.is_unique or not len(axis) or not tables:
+        raise ValueError('Differential gating requires complete unique features and source tables')
+    if not 0 < max_raw_p <= 1 or (max_fdr is not None and not 0 < max_fdr <= 1):
+        raise ValueError('Invalid native differential P/FDR threshold')
+    if not 0 <= min_abs_dpsi <= 1 or min_observed < 0:
+        raise ValueError('Invalid native differential effect/observed-N threshold')
+    audit = pd.DataFrame(index=axis)
+    audit.index.name = 'feature'
+    audit['native_differential_eligible'] = False
+    proofs = []
+    for i, value in enumerate(tables, 1):
+        path = Path(value)
+        before = hashlib.sha256(path.read_bytes()).hexdigest()
+        table = pd.read_csv(path, sep='\t')
+        if 'Feature' not in table or not table.Feature.is_unique:
+            raise ValueError('Native differential table requires unique literal Feature identities')
+        if len(table) != len(axis) or set(table.Feature.astype(str)) != set(axis):
+            raise ValueError('Native differential table must retain the COMPLETE source event universe')
+        table = table.set_index('Feature').reindex(axis)
+        effects = [c for c in table if c.startswith('DiffMeans_')]
+        counts = [c for c in table if c.startswith('N_')]
+        required = ['ebayesPval', 'ebayesAdjPval', *effects, *counts]
+        if len(effects) != 1 or len(counts) != 2 or not set(required) <= set(table):
+            raise ValueError('Expected one unchanged native covariate contrast and its two observed-N fields')
+        native = table[required].apply(pd.to_numeric, errors='raise')
+        passed = ((native.ebayesPval < max_raw_p) &
+                  np.isfinite(native.ebayesPval) & np.isfinite(native[effects[0]]) &
+                  (native[effects[0]].abs() > min_abs_dpsi) &
+                  np.isfinite(native[counts]).all(axis=1) &
+                  (native[counts] >= min_observed).all(axis=1))
+        if max_fdr is not None:
+            passed &= np.isfinite(native.ebayesAdjPval) & (native.ebayesAdjPval < max_fdr)
+        prefix = f'comparison_{i}__'
+        for column in required:
+            audit[prefix+column] = native[column]
+        audit[prefix+'eligible'] = passed
+        audit['native_differential_eligible'] |= passed
+        if hashlib.sha256(path.read_bytes()).hexdigest() != before:
+            raise ValueError('Native differential source changed during review')
+        proofs.append(dict(path=str(path), sha256=before, rows=len(table),
+                           effect_column=effects[0], observed_N_columns=counts,
+                           eligible=int(passed.sum())))
+    return audit, proofs
+
+
+def review_legacy_markerfinder_fit(manifest, fit_dir, output_dir, *, input_sha256,
+                                   rho_cutoff=.4, top_n=100, min_observed=3,
+                                   min_fraction=.9, min_mean_psi_range=.1,
+                                   patient_stability_table=None,min_patient_agreement=0.,
+                                   excluded_schemes=(),figure_title=None,caption=None,
+                                   sample_label_key=None,show_pattern_labels=True,dpi=None,
+                                   collapse_pattern_logic=True, strict_top_n=False,
+                                   display_patterns=None, differential_tables=None,
+                                   differential_max_raw_p=.05, differential_max_fdr=None,
+                                   differential_min_abs_dpsi=.1,
+                                   differential_min_observed=3,
+                                   display_normalization='row_median', half_range=.2,
+                                   display_label_replacements=None, missing_psi='preserve'):
+    """Review an immutable native fit through explicit figure gates and the native renderer.
+
+    Does not refit MarkerFinder, modify the original winner, or pad a pattern to
+    the display cap. Every original assignment and every eligibility decision is
+    retained. The caller must supply the exact fitted input's SHA-256.
+    """
+    from pathlib import Path
+    import hashlib
+    import anndata as ad
+    m=json.loads(Path(manifest).read_text()) if isinstance(manifest,(str,Path)) else manifest
+    data_path=Path(m['display_h5ad'])
+    with data_path.open('rb') as f: actual=hashlib.file_digest(f,'sha256').hexdigest()
+    if actual!=input_sha256:raise ValueError('Fitted input SHA-256 does not match the supplied source')
+    data=ad.read_h5ad(data_path);fit=Path(fit_dir)
+    params=json.loads((fit/'parameters.json').read_text())
+    if params['source_features']!=data.var_names.tolist():
+        raise ValueError('Complete fitted feature order does not match the supplied source')
+    if any(r['source_samples']!=data.obs_names.tolist() or r['scored_samples']!=data.obs_names.tolist() for r in params['schemes']):
+        raise ValueError('Complete scored pseudobulk roster does not match the supplied source')
+    if rho_cutoff<params['rho_strictly_greater_than']:
+        raise ValueError('A review cannot lower rho below the original assignment threshold')
+    if not 0<=min_patient_agreement<=1:raise ValueError('Invalid patient-agreement threshold')
+    assignments=pd.read_csv(fit/'Consolidated-MarkerFinder.assignments.tsv',sep='\t',index_col=0)
+    audit=review_legacy_pattern_selection(data,assignments,m['display_group_key'],rho_cutoff=rho_cutoff,
+        min_observed=min_observed,min_fraction=min_fraction,min_mean_psi_range=min_mean_psi_range,excluded_schemes=excluded_schemes)
+    if patient_stability_table:
+        stability=pd.read_csv(patient_stability_table,sep='\t',index_col=0)
+        if not stability.index.is_unique or not audit.index.isin(stability.index).all():
+            raise ValueError('Every source assignment requires its patient-stability record')
+        audit['literal_pattern_match_fraction']=stability.literal_pattern_match_fraction.reindex(audit.index)
+        if audit.literal_pattern_match_fraction.isna().any():raise ValueError('Missing patient-stability value')
+        audit['figure_eligible'] &= audit.literal_pattern_match_fraction>=min_patient_agreement
+    elif min_patient_agreement>0:
+        raise ValueError('Patient-agreement filtering requires the complete native holdout table')
+    out=Path(output_dir);out.mkdir(parents=True,exist_ok=True)
+    differential_proof = None
+    if differential_tables:
+        differential, sources = annotate_native_differential_eligibility(
+            data.var_names, differential_tables, max_raw_p=differential_max_raw_p,
+            max_fdr=differential_max_fdr, min_abs_dpsi=differential_min_abs_dpsi,
+            min_observed=differential_min_observed)
+        differential.to_csv(out/'all_source_events_native_differential_gate.tsv', sep='\t')
+        audit['native_differential_eligible'] = differential.native_differential_eligible.reindex(audit.index)
+        if audit.native_differential_eligible.isna().any():
+            raise ValueError('Every original assignment requires its native differential gate record')
+        audit['figure_eligible'] &= audit.native_differential_eligible
+        differential_proof = dict(sources=sources, combination='UNION',
+            max_raw_p=differential_max_raw_p, max_fdr=differential_max_fdr,
+            min_abs_dpsi=differential_min_abs_dpsi, min_observed=differential_min_observed,
+            all_source_features=len(differential), eligible=int(differential.native_differential_eligible.sum()))
+    audit.to_csv(out/'all_original_assignments_and_review_gates.tsv',sep='\t')
+    display=audit.loc[audit.figure_eligible]
+    if collapse_pattern_logic:
+        sources={str(data_path):data};schemes=[]
+        for task in m['schemes']:
+            path=str(task['h5ad'])
+            if path not in sources:sources[path]=ad.read_h5ad(path)
+            schemes.append(Scheme(task['name'],sources[path],task['group_key'],task['level_order']))
+        display,aliases=collapse_discrete_pattern_logic(display,schemes,
+            pattern_precedence=m.get('pattern_precedence'))
+        aliases.to_csv(out/'pattern_logic_aliases.tsv',sep='\t',index=False)
+    requested_pattern_counts = None
+    if display_patterns is not None:
+        requested = list(display_patterns)
+        if not requested or len(set(requested)) != len(requested):
+            raise ValueError('Display patterns must be nonempty and unique')
+        if collapse_pattern_logic:
+            mapping = {(r.source_scheme, r.source_direction, r.source_level): r.canonical_pattern
+                       for r in aliases.itertuples()}
+            available = set(mapping.values())
+            names = pd.Series([mapping[str(r.scheme), str(r.direction), str(r.level)]
+                               for r in audit.itertuples()], index=audit.index)
+        else:
+            available = {d+'-'+level for s in m['schemes']
+                         for level in s['level_order'] for d in ['up', 'down']}
+            names = audit.pattern
+        if not set(requested) <= available:
+            raise ValueError('Requested display pattern has no source design: '+
+                             str(sorted(set(requested)-available)))
+        # Restrict the figure only. Preserve every fitted assignment and eligibility decision.
+        audit['reviewed_display_pattern'] = names
+        audit['display_pattern_requested'] = names.isin(requested)
+        audit.to_csv(out/'all_original_assignments_and_review_gates.tsv',sep='\t')
+        display = display.loc[display.pattern.isin(requested)]
+        counts = display.pattern.value_counts()
+        requested_pattern_counts = {p:int(counts.get(p,0)) for p in requested}
+    labels=mh._read_label_events(m['label_events']) if m.get('label_events') else []
+    result=mh.render_consolidated_marker_heatmap(data,display,
+        cluster_key=m['display_group_key'],out=out/'reviewed_patterns.pdf',top_n=top_n,species='human',
+        half_range=half_range,covariate_columns=m.get('covariate_columns'),dpi=dpi,
+        label_events=labels,
+        figure_title=figure_title,caption=caption,sample_label_key=sample_label_key,show_pattern_labels=show_pattern_labels,
+        retain_callout_events=not strict_top_n,retain_unassigned_callouts=False,
+        normalization=display_normalization,label_replacements=display_label_replacements,
+        missing_psi=missing_psi)
+    expected=display if top_n is None else display.groupby('pattern',sort=False).head(top_n)
+    listed={mh._event_key(e) for e in labels}
+    exons=set().union(*(mh._event_exons(mh._event_uid(e)) for e in labels))
+    callouts=[f for f in data.var_names if mh._event_key(f) in listed or mh._event_exons(mh._event_uid(f)) & exons]
+    kept=set(expected.index)|set(callouts)
+    expected_ids=(expected.index.tolist() if strict_top_n else
+        display.index[display.index.isin(kept)].tolist())
+    if result.get('plotted',0)!=len(expected_ids):
+        raise ValueError('Rendered row count violates top-N plus explicit callout retention')
+    if result.get('heatmap_cache'):
+        cached=ad.read_h5ad(result['heatmap_cache'])
+        if cached.var.gene.tolist()!=expected_ids:
+            raise ValueError('Rendered event identities/order violate the explicit selection')
+        if strict_top_n and cached.var['cluster'].astype(str).tolist()!=expected.pattern.astype(str).tolist():
+            raise ValueError('Rendered pattern order violates strict top-N selection')
+    (out/'native_review_parameters.json').write_text(json.dumps(dict(input_sha256=actual,
+        fit_dir=str(fit),rho_strictly_greater_than=rho_cutoff,top_events_per_pattern=top_n,
+        minimum_observed_each_group=min_observed,minimum_present_fraction_each_group=min_fraction,
+        minimum_group_mean_PSI_range=min_mean_psi_range,minimum_patient_agreement=min_patient_agreement,
+        collapse_pattern_logic=collapse_pattern_logic,
+        strict_top_n=strict_top_n,
+        **(dict(requested_display_patterns=requested,
+                requested_pattern_eligible_counts=requested_pattern_counts)
+           if display_patterns is not None else {}),
+        patient_stability_table=str(patient_stability_table) if patient_stability_table else None,
+        **(dict(native_differential_display_gate=differential_proof) if differential_proof else {}),
+        **(dict(display_label_replacements=display_label_replacements) if display_label_replacements else {}),
+        fitted_missing_PSI_handling=params.get('missing_PSI_handling','preserve'),
+        original_assignments=len(audit),eligible_assignments=int(audit.figure_eligible.sum()),figure=result),indent=2)+'\n')
+    return result
+
+
 def assess_leave_patient_out_patterns(schemes, baseline, patient_key, output_dir,
                                       rho_cutoff=.4, max_missing_fraction=.100000001):
     """Native-hook patient-holdout sensitivity, retaining the full baseline and every feature.
@@ -139,10 +433,11 @@ def assess_leave_patient_out_patterns(schemes, baseline, patient_key, output_dir
     patients=list(dict.fromkeys(str(p) for s in schemes for p in s.adata.obs[patient_key]))
     features=schemes[0].adata.var_names;patterns={};scored={};rosters=[]
     for i,patient in enumerate(patients):
-        stats=[];groups=[]
+        stats=[];groups=[];held_schemes=[]
         for scheme in sorted(schemes,key=lambda s:s.name):
             keep=scheme.adata.obs[patient_key].astype(str)!=patient
             subset=scheme.adata[keep].copy()
+            held_schemes.append(Scheme(scheme.name, subset, scheme.group_key, scheme.level_order))
             if set(subset.obs[scheme.group_key].astype(str)) != set(scheme.levels()):
                 raise ValueError('Patient holdout removed an entire required group; retain an explicit unassessable result')
             out=root/('holdout_'+str(i+1))/scheme.name;out.mkdir(parents=True,exist_ok=True)
@@ -160,6 +455,8 @@ def assess_leave_patient_out_patterns(schemes, baseline, patient_key, output_dir
             rosters.append(dict(held_patient=patient,scheme=scheme.name,
                 retained_samples=subset.obs_names.tolist(),held_samples=scheme.adata.obs_names[~keep].tolist()))
         assigned=legacy_strongest_patterns(stats,groups,rho_cutoff)
+        if 'source_pattern' in baseline.columns:
+            assigned,_=collapse_discrete_pattern_logic(assigned,held_schemes,groups)
         patterns[patient]=assigned.pattern.reindex(features)
         scored[patient]=assigned.rho.reindex(features)
     pattern_table=pd.DataFrame(patterns,index=features)
@@ -180,16 +477,21 @@ def assess_leave_patient_out_patterns(schemes, baseline, patient_key, output_dir
 def run_legacy_iterative_marker_finder(schemes, display_adata, display_group_key, output_dir,
                                       rho_cutoff=0.4, max_missing_fraction=1.0, top_n=100,
                                       half_range=0.2, sample_missing_above_group_median=None,
-                                      covariate_columns=None, heatmap_dpi=600, label_events=None):
+                                      covariate_columns=None, heatmap_dpi=None, label_events=None,
+                                      collapse_pattern_logic=True, pattern_precedence=None,
+                                      missing_psi='preserve'):
     """Opt-in Python2-compatible consolidation through the standard public hook.
 
     The existing broad/residual API is unchanged. All source features remain in the
-    full statistics tables, including untestable events. No PSI pre-imputation occurs.
+    full statistics tables, including untestable events. Optional row-median PSI
+    filling is explicit and operates on a copy; the original input stays unchanged.
     """
     from pathlib import Path
     root = Path(output_dir); root.mkdir(parents=True, exist_ok=True)
     statistics, groups, manifests = [], [], []
     expected = display_adata.var_names
+    if missing_psi not in {'preserve','row_median'}:
+        raise ValueError('missing_psi must be preserve or row_median')
     for scheme in sorted(schemes, key=lambda s: s.name):
         if not scheme.adata.var_names.equals(expected):
             raise ValueError('Every scheme must retain the entire ordered source feature roster')
@@ -204,8 +506,17 @@ def run_legacy_iterative_marker_finder(schemes, display_adata, display_group_key
         for level in scheme.levels():
             if level not in groups: groups.append(level)
         out = root / scheme.name; out.mkdir(exist_ok=True)
+        scoring_data=scheme.adata.copy()
+        source_missing=int(np.isnan(values).sum())
+        imputed_cells=0
+        if missing_psi=='row_median':
+            dense=scoring_data.X.toarray() if hasattr(scoring_data.X,'toarray') else np.asarray(scoring_data.X)
+            frame=pd.DataFrame(dense.T,index=scoring_data.var_names,columns=scoring_data.obs_names)
+            filled,mask=mh.fill_PSI_row_median(frame)
+            scoring_data.X=filled.to_numpy().T.copy()
+            imputed_cells=int(mask.to_numpy().sum())
         result = mh.generate_marker_heatmap_from_adata(
-            scheme.adata.copy(), cluster_key=scheme.group_key, out=str(out/'markers.pdf'),
+            scoring_data, cluster_key=scheme.group_key, out=str(out/'markers.pdf'),
             marker_method='markerfinder', validate_scaling=False, centroid_method='mean',
             cells_per_cluster=0, top_n=top_n, min_rho=rho_cutoff, pval_threshold=1.0,
             max_missing_fraction=max_missing_fraction, collapse_shared_exons=False,
@@ -217,15 +528,24 @@ def run_legacy_iterative_marker_finder(schemes, display_adata, display_group_key
         statistics.append((scheme.name, result))
         manifests.append(dict(name=scheme.name, source_samples=scheme.adata.obs_names.tolist(),
                               scored_samples=result['sample_ids'], features=len(expected),
-                              group_counts=scheme.adata.obs[scheme.group_key].value_counts().to_dict()))
+                              group_counts=scheme.adata.obs[scheme.group_key].value_counts().to_dict(),
+                              original_missing_PSI_cells=source_missing,imputed_PSI_cells=imputed_cells))
     assignments = legacy_strongest_patterns(statistics, groups, rho_cutoff)
+    assignments.to_csv(root/'Consolidated-MarkerFinder.raw_assignments.tsv', sep='\t')
+    if collapse_pattern_logic:
+        assignments, aliases = collapse_discrete_pattern_logic(assignments, schemes, groups, pattern_precedence)
+        aliases.to_csv(root/'pattern_logic_aliases.tsv', sep='\t', index=False)
     figure = mh.render_consolidated_marker_heatmap(
         display_adata, assignments, cluster_key=display_group_key, out=str(root/'Consolidated-MarkerFinder.pdf'),
         top_n=top_n, species='human', half_range=half_range, covariate_columns=covariate_columns,
-        dpi=heatmap_dpi, label_events=label_events)
+        dpi=heatmap_dpi, label_events=label_events,missing_psi=missing_psi)
     manifest = dict(method='AltAnalyze2 strongest up/down pattern; no residualization or FDR selection',
                     rho_strictly_greater_than=rho_cutoff, max_missing_fraction=max_missing_fraction,
                     heatmap_dpi=heatmap_dpi,
+                    missing_PSI_handling=missing_psi,
+                    collapse_pattern_logic=collapse_pattern_logic,
+                    pattern_precedence=pattern_precedence,
+                    pattern_identity='Exact high/low/unconstrained sample-design membership; no correlation test',
                     source_features=expected.tolist(), schemes=manifests, figure=figure,
                     repeated_patient_pseudobulks='Pattern discovery units; not independent donor replication')
     (root/'parameters.json').write_text(json.dumps(manifest, indent=2)+'\n')
@@ -1615,9 +1935,56 @@ def legacy_manifest_main(argv):
     parser.add_argument('--max-missing-fraction', type=float, default=1.)
     parser.add_argument('--top-n', type=int, default=100)
     parser.add_argument('--half-range', type=float, default=.2)
+    parser.add_argument('--dpi', type=float,
+                        help='Heatmap raster DPI; inherit the standard native renderer default when omitted')
     parser.add_argument('--sample-missing-above-group-median', type=float)
+    parser.add_argument('--review-existing-fit',help='Review an immutable native fit without refitting')
+    parser.add_argument('--input-sha256',help='Required exact input identity for --review-existing-fit')
+    parser.add_argument('--min-observed-per-group',type=int,default=3)
+    parser.add_argument('--min-group-present',type=float,default=.9)
+    parser.add_argument('--min-mean-psi-range',type=float,default=.1)
+    parser.add_argument('--patient-stability-table')
+    parser.add_argument('--min-patient-agreement',type=float,default=0.)
+    parser.add_argument('--exclude-winning-scheme',action='append',default=[])
+    parser.add_argument('--title')
+    parser.add_argument('--caption-file')
+    parser.add_argument('--sample-label-key')
+    parser.add_argument('--strict-top-n',action='store_true',
+                        help='Enforce top-N qualified events per pattern without adding reference/callout rows')
+    parser.add_argument('--display-pattern',action='append',
+                        help='Display only this native pattern (repeatable); retain all fitted assignments')
+    parser.add_argument('--differential-table',action='append',
+                        help='Complete native event differential table; repeat for an explicit UNION display gate')
+    parser.add_argument('--differential-max-raw-p',type=float,default=.05)
+    parser.add_argument('--differential-max-fdr',type=float)
+    parser.add_argument('--differential-min-abs-dpsi',type=float,default=.1)
+    parser.add_argument('--differential-min-observed',type=int,default=3)
+    parser.add_argument('--display-normalization',choices=['row_median','row_zscore'],default='row_median',
+                        help='Existing native display transform only; does not change fitted statistics')
+    parser.add_argument('--missing-psi',choices=['preserve','row_median'],default='preserve',
+                        help='Explicit event-median filling over all samples; fit on a copy and retain raw coverage. Review-only calls change display handling only.')
+    parser.add_argument('--display-label-map',help='JSON display-label replacements; native identities stay unchanged')
+    parser.add_argument('--no-collapse-pattern-logic', action='store_true',
+                        help='Replay historical unmerged category labels; scores are unchanged')
     a = parser.parse_args(argv)
     record = json.loads(Path(a.legacy_manifest).read_text())
+    if a.review_existing_fit:
+        if not a.input_sha256:parser.error('--review-existing-fit requires --input-sha256')
+        review_legacy_markerfinder_fit(record,a.review_existing_fit,a.outdir,input_sha256=a.input_sha256,
+            rho_cutoff=a.rho,top_n=a.top_n,min_observed=a.min_observed_per_group,
+            min_fraction=a.min_group_present,min_mean_psi_range=a.min_mean_psi_range,
+            patient_stability_table=a.patient_stability_table,min_patient_agreement=a.min_patient_agreement,
+            excluded_schemes=a.exclude_winning_scheme,figure_title=a.title,
+            caption=Path(a.caption_file).read_text() if a.caption_file else None,sample_label_key=a.sample_label_key,
+            collapse_pattern_logic=not a.no_collapse_pattern_logic,strict_top_n=a.strict_top_n,
+            display_patterns=a.display_pattern,differential_tables=a.differential_table,
+            differential_max_raw_p=a.differential_max_raw_p,
+            differential_max_fdr=a.differential_max_fdr,
+            differential_min_abs_dpsi=a.differential_min_abs_dpsi,
+            differential_min_observed=a.differential_min_observed,
+            display_normalization=a.display_normalization,half_range=a.half_range,dpi=a.dpi,missing_psi=a.missing_psi,
+            display_label_replacements=json.loads(Path(a.display_label_map).read_text()) if a.display_label_map else None)
+        return 0
     cache = {}
     def read(path):
         if path not in cache: cache[path] = ad.read_h5ad(path)
@@ -1627,9 +1994,12 @@ def legacy_manifest_main(argv):
     run_legacy_iterative_marker_finder(
         schemes, read(record['display_h5ad']), record['display_group_key'], a.outdir,
         rho_cutoff=a.rho, max_missing_fraction=a.max_missing_fraction,
-        top_n=a.top_n, half_range=a.half_range,
+        top_n=a.top_n, half_range=a.half_range, heatmap_dpi=a.dpi,
         sample_missing_above_group_median=a.sample_missing_above_group_median,
         covariate_columns=record.get('covariate_columns'),
+        collapse_pattern_logic=not a.no_collapse_pattern_logic,
+        pattern_precedence=record.get('pattern_precedence'),
+        missing_psi=a.missing_psi,
         label_events=mh._read_label_events(record['label_events']) if record.get('label_events') else None)
     return 0
 

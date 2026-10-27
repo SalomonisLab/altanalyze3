@@ -30,6 +30,40 @@ def test_zero_support_is_undefined_and_every_roster_identity_is_preserved(tmp_pa
     assert records[0]['status'] == 'UNDEFINED_ZERO_INFORMATIVE_READS_RETAINED'
 
 
+def test_donor_marker_shapes_preserve_literal_psi_and_missing_roles(tmp_path, monkeypatch):
+    from matplotlib.axes import Axes
+    source = tmp_path / 'native.tsv'
+    source.write_text('cohort\tdonor\tevent_uid\tPSI\n'
+                      'healthy\tY\tE\t0.0\nhealthy\tY_missing\tE\t\n'
+                      'healthy\tA\tE\t0.4\nMDS\tD\tE\t0.8\n')
+    roster = tmp_path / 'roster.json'
+    roster.write_text(json.dumps({'healthy': ['Y', 'Y_missing', 'A'], 'MDS': ['D']}))
+    markers = tmp_path / 'markers.tsv'
+    markers.write_text('cohort\tdonor\tmarker\tlabel\nhealthy\tY\t^\tYoung\n'
+                       'healthy\tY_missing\t^\tYoung\nhealthy\tA\to\tAged / MDS\n'
+                       'MDS\tD\to\tAged / MDS\n')
+    calls = []
+    original = Axes.scatter
+    def capture(self, x, y, *args, **kwargs):
+        calls.append((kwargs.get('marker'), list(y), kwargs.get('clip_on')))
+        return original(self, x, y, *args, **kwargs)
+    monkeypatch.setattr(Axes, 'scatter', capture)
+    before = source.read_bytes()
+    result = main(['--psi-table', str(source), '--event-uid', 'E', '--donor-roster', str(roster),
+                   '--cohort-order', 'healthy', 'MDS', '--marker-table', str(markers),
+                   '--out', str(tmp_path / 'markers.pdf')])
+    assert calls == [('^', [0.], False), ('o', [.4], False), ('o', [.8], False)]
+    assert [r['PSI'] for r in result['records']] == [0., None, .4, .8]
+    assert [r['point_marker'] for r in result['records']] == ['^', '^', 'o', 'o']
+    assert result['marker_legend'] == {'Young': '^', 'Aged / MDS': 'o'}
+    assert source.read_bytes() == before
+    markers.write_text(markers.read_text().replace('healthy\tY_missing\t^\tYoung\n', ''))
+    with pytest.raises(ValueError, match='every donor role'):
+        main(['--psi-table', str(source), '--event-uid', 'E', '--donor-roster', str(roster),
+              '--cohort-order', 'healthy', 'MDS', '--marker-table', str(markers),
+              '--out', str(tmp_path / 'bad.pdf')])
+
+
 @pytest.mark.parametrize('failure', ['missing', 'duplicate', 'unknown', 'nan', 'negative'])
 def test_bad_count_records_fail_without_reducing_the_roster(tmp_path, failure):
     path, roster, _ = source(tmp_path)
@@ -151,6 +185,56 @@ def test_existing_native_statistics_are_annotated_without_retesting(tmp_path):
     assert result['statistics'][0]['p']==.012
     assert result['statistics'][0]['label']=='*' and result['statistics'][0]['native_FDR']=='1.0'
     assert result['existing_statistics_sha256']==hashlib.sha256(stats.read_bytes()).hexdigest()
+
+
+def test_unavailable_native_test_keeps_donors_and_is_not_ns(tmp_path):
+    path = tmp_path/'psi.tsv'; event = 'G:E11-E12|G:E10-E12'
+    path.write_text('cohort\tdonor\tevent_uid\tPSI\nhealthy\tA\t'+event+'\t0.8\n'
+                    'MDS\tD\t'+event+'\t0.6\nMDS\tD0\t'+event+'\t\n')
+    roster = tmp_path/'roster.json'
+    roster.write_text(json.dumps({'healthy':['A'], 'MDS':['D','D0']}))
+    stats = tmp_path/'native.tsv'
+    stats.write_text('reference\tcomparison\tp\ttest\tcorrection\n'
+                     'healthy\tMDS\t\tnative unavailable\tnative raw P\n')
+    result = main(['--psi-table',str(path),'--event-uid',event,'--donor-roster',str(roster),
+                   '--cohort-order','healthy','MDS','--annotations-table',str(stats),
+                   '--out',str(tmp_path/'unavailable.pdf')])
+    assert result['statistics'][0]['p'] is None
+    assert result['statistics'][0]['label'] == 'NA'
+    assert len(result['records']) == 3 and result['records'][-1]['PSI'] is None
+    assert 'not a nonsignificant result' in result['caption']
+
+
+def test_annotation_headroom_does_not_expand_valid_psi_range(tmp_path):
+    path = tmp_path/'psi.tsv'; event = 'G:E11-E12|G:E10-E12'
+    path.write_text('cohort\tdonor\tevent_uid\tPSI\nhealthy\tA\t'+event+'\t1\n'
+                    'MDS\tD\t'+event+'\t0.6\n')
+    roster = tmp_path/'roster.json'
+    roster.write_text(json.dumps({'healthy':['A'], 'MDS':['D']}))
+    result = main(['--psi-table',str(path),'--event-uid',event,'--donor-roster',str(roster),
+                   '--cohort-order','healthy','MDS','--y-max','1.15',
+                   '--out',str(tmp_path/'headroom.pdf')])
+    assert result['y_limits'] == [0,1.15]
+    assert [r['PSI'] for r in result['records']] == [1,.6]
+    path.write_text(path.read_text().replace('\t1\n', '\t1.1\n'))
+    with pytest.raises(ValueError, match=r'within \[0,1\]'):
+        native_psi_records(path, {'healthy':['A'], 'MDS':['D']}, ['healthy','MDS'], event)
+
+
+def test_requested_upper_limit_is_respected_by_rendered_axis(tmp_path, monkeypatch):
+    from matplotlib.figure import Figure
+    path=tmp_path/'psi.tsv'
+    path.write_text('cohort\tdonor\tevent_uid\tPSI\nhealthy\tA\tE\t0.02\nMDS\tD\tE\t0.2\n')
+    roster=tmp_path/'roster.json';roster.write_text(json.dumps({'healthy':['A'],'MDS':['D']}))
+    limits=[];original=Figure.savefig
+    def capture(self,*args,**kwargs):
+        limits.append(self.axes[0].get_ylim())
+        return original(self,*args,**kwargs)
+    monkeypatch.setattr(Figure,'savefig',capture)
+    result=main(['--psi-table',str(path),'--event-uid','E','--donor-roster',str(roster),
+                 '--cohort-order','healthy','MDS','--y-max','.35','--out',str(tmp_path/'zoom.pdf')])
+    assert limits and all(v==pytest.approx((0.,.35)) for v in limits)
+    assert result['y_limits']==[0.,.35]
 
 
 def test_saved_pseudobulk_display_tests_each_donor_once(tmp_path):

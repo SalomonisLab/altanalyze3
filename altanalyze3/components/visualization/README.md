@@ -47,6 +47,10 @@ The table must contain `cohort`, `donor`, `event_uid`, and `PSI`, retaining ever
 roster identity. Empty PSI remains undefined. `--psi-sha256` pins the input.
 No isoform selection or PSI recalculation occurs in the plotter.
 
+With `--annotations-table`, blank/NA native P values remain unavailable and are
+labelled `NA`; they are not converted to `ns` or replaced with a newly computed
+test. All donor roles and saved PSI values remain in the output table.
+
 `--reference-condition aged` adds `ns`, `*`, `**`, or `***` above each other
 condition, using the existing visualization Mann–Whitney U test (two-sided).
 `--stat-correction holm` is the default across reference comparisons; `bh` and
@@ -114,3 +118,62 @@ The native `isoform_state_switches protein-outcome` CLI accepts
 usage shift instead of a fold ratio. Input means must lie in [0,1]. Existing
 expression-fold and usage-fold defaults are unchanged. Literal source DiffMeans
 values define the threshold; rounded displayed means are not substituted.
+
+### Immutable-fit PSI figure review
+
+`iterative_marker_finder --legacy-manifest ... --review-existing-fit <fit-dir>
+--input-sha256 <exact-h5ad-sha256> --outdir <new-dir>` reviews saved native
+assignments without refitting or changing their winning categories. Supply
+`--rho 0.8 --top-n 5 --min-observed-per-group 3 --min-group-present 0.9
+--min-mean-psi-range 0.1` for an explicit stricter figure sensitivity. Optional
+`--patient-stability-table <native-holdout-table> --min-patient-agreement 0.8`
+uses recorded whole-patient stability. These are stated study choices, not new
+universal defaults or independent validation. Every original assignment and
+eligibility flag remains in `all_original_assignments_and_review_gates.tsv`;
+small patterns are never padded to the top-N cap. The exact fitted feature and
+sample rosters are checked before rendering. `--title`, `--caption-file` and
+`--sample-label-key` add scientific context and verified donor labels.
+Use `--strict-top-n --no-collapse-pattern-logic` to retain literal saved winning
+categories and enforce an exact per-pattern cap, including listed callouts.
+This mode does not append unqualified reference rows. Iterative pattern-label
+exports expand their page bounds to keep long literal event identifiers visible.
+
+Missing heatmap values render black (user instruction, 2026-10-26) and remain
+NaN in statistics, tables and caches. For median-centered PSI, black can therefore
+mean missing or zero deviation; the missingness tables distinguish them.
+
+Native event mirrors accept `--additional-fdr 0.5` alongside `--pval 0.005
+--pval-type raw --strict-thresholds` for the joint filter, and `--caption-file`.
+Protein mirrors accept `--rawp 0.005 --fdr 0.5` and `--caption_file`; original
+native FDR values and correction families are reused. FDR 0.5 is not FDR 0.05.
+`pseudobulk_depth_qc.expected_detected_features` is a descriptive exact
+without-replacement detection expectation, not a differential test or imputation.
+
+Iterative MarkerFinder consolidations preserve supplied splice-event callouts beyond
+`top_n` using the existing exact/opposed-arm and shared-exon matching rules. Only callouts with a native discovery assignment are displayed; unassigned
+reference rows are off by default (2026-10-26 user correction). The complete source
+matrix, label roster and assignment table remain retained, including callout
+annotations that do not qualify for this figure. `.displayed_rows.tsv` records
+the displayed native assignments. Historical reference-block replay requires an
+explicit API opt-in and is not used by the current figures.
+
+Legacy iterative category labels now collapse only when their signed high/low
+sample-design partitions are identical. Down-regulation of one group equals
+up-regulation of its complement only for an identical sample partition. Partial
+schemes retain unconstrained sample roles. `pattern_logic_aliases.tsv` records the
+first-listed category and complete high/low/unconstrained sample identities;
+`source_pattern` and all native winning statistics remain preserved. Use
+`--no-collapse-pattern-logic` for historical label replay. Pattern identity uses no
+expression correlation threshold.
+
+For an explicit report hierarchy, `collapse_discrete_pattern_logic(...,
+pattern_precedence=[(scheme, direction, level), ...])` chooses canonical
+representatives in that order, appending only still-distinct design patterns.
+For the ERP-5/LMPP-2 literal reference, the instructed order is up ERP-5
+(shared lineage), the four up state/condition groups, up MDS-pre/post-SRSF2
+(shared condition), followed by the corresponding down patterns only when
+their exact signed design partition is absent above. This changes display
+labels/order only; native scores, original winners, features and samples remain
+unchanged. `--legacy-manifest` accepts `pattern_precedence` for fitting/replay.
+
+Saved heatmap annotation can use `render_heatmap_from_cache(..., label_shared_introns=True, callout_color="#d62728", sample_labels={sample: sample for sample in cache.obs_names}, show_pattern_labels=True)`. Exon/intron matching remains gene-specific and uses parent region blocks from either event arm; it does not imply exact event or directional replication. Defaults preserve exon-only black callouts. Long sample labels receive additional footer space.

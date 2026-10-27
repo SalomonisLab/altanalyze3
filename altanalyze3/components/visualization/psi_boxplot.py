@@ -40,6 +40,7 @@ def add_arguments(parser):
     parser.add_argument('--caption-file', help='Complete UTF-8 scientific figure caption')
     parser.add_argument('--reference-condition', help='Compare every other condition with this reference')
     parser.add_argument('--annotations-table', help='Existing statistics TSV: reference, comparison, p, test, correction; no test is rerun')
+    parser.add_argument('--marker-table', help='Complete donor-style TSV: cohort, donor, marker, label; changes point shapes only')
     parser.add_argument('--stat-correction', choices=['holm', 'bh', 'none'], default='holm',
                         help='Correction across reference comparisons (default: Holm)')
     parser.add_argument('--y-min', type=float, default=0.0)
@@ -132,8 +133,9 @@ def run(args):
     import matplotlib.pyplot as plt
     import numpy as np
 
-    if not (0 <= args.y_min < args.y_max and args.y_max <= 1.1):
-        raise ValueError('Require 0 <= y-min < y-max <= 1.1')
+    # Axis headroom is for annotations; native_psi_records still requires PSI in [0, 1].
+    if not (0 <= args.y_min < args.y_max and args.y_max <= 1.2):
+        raise ValueError('Require 0 <= y-min < y-max <= 1.2')
     if args.width <= 0 or args.height <= 0:
         raise ValueError('Figure dimensions must be positive')
     roster = json.loads(Path(args.donor_roster).read_text())
@@ -150,6 +152,29 @@ def run(args):
         records = donor_psi_records(args.counts, roster, args.cohort_order,
                                    args.inclusion_isoforms, args.exclusion_isoforms,
                                    (args.condition_column, args.donor_column, args.isoform_column, args.count_column))
+    marker_table = getattr(args, 'marker_table', None)
+    marker_legend = {}
+    if marker_table:
+        from matplotlib.markers import MarkerStyle
+        with Path(marker_table).open() as handle:
+            reader = csv.DictReader(handle, delimiter='\t')
+            if not {'cohort', 'donor', 'marker', 'label'} <= set(reader.fieldnames or []):
+                raise ValueError('Marker table requires cohort, donor, marker and label')
+            styles = {}
+            for row in reader:
+                key = row['cohort'], row['donor']
+                if key in styles or not row['label'].strip():
+                    raise ValueError('Duplicate donor style or missing marker label')
+                MarkerStyle(row['marker'])
+                if row['label'] in marker_legend and marker_legend[row['label']] != row['marker']:
+                    raise ValueError('Each marker label must have one consistent shape')
+                marker_legend[row['label']] = row['marker']
+                styles[key] = row
+        if set(styles) != {(r['condition'], r['donor']) for r in records}:
+            raise ValueError('Marker table must retain every donor role exactly')
+        for row in records:
+            style = styles[row['condition'], row['donor']]
+            row['point_marker'], row['point_marker_label'] = style['marker'], style['label']
     labels = args.labels or args.cohort_order
     if len(labels) != len(args.cohort_order):
         raise ValueError('Provide one label per condition')
@@ -227,19 +252,22 @@ def run(args):
             reference, comparison = row['reference'], row['comparison']
             if reference not in roster or comparison not in roster or reference == comparison or comparison in seen:
                 raise ValueError('Existing statistics do not match unique displayed comparisons')
-            p = float(row['p'])
-            if not math.isfinite(p) or not 0 <= p <= 1:
+            raw_p = row['p'].strip()
+            p = None if raw_p.lower() in ('', 'na', 'nan') else float(raw_p)
+            if p is not None and (not math.isfinite(p) or not 0 <= p <= 1):
                 raise ValueError('Existing annotation P must be finite within [0,1]')
             if set(roster[reference]) & set(roster[comparison]):
                 raise ValueError('Reference/comparison donor identities overlap')
-            row['p'] = p; row['label'] = _significance_stars(p)
+            row['p'] = p; row['label'] = 'NA' if p is None else _significance_stars(p)
             seen.add(comparison); references.add(reference)
         if len(references) != 1 or seen != set(roster)-references:
             raise ValueError('Existing statistics must cover every non-reference condition exactly once')
         caption += ' Symbols use supplied native raw P values: ns >0.05; * ≤0.05; ** ≤0.01; *** ≤0.001. No statistical test is rerun.'
+        if any(row['p'] is None for row in stats):
+            caption += ' NA denotes an unavailable native test, not a nonsignificant result.'
     with plt.rc_context({'font.family': 'Arial', 'font.size': 11, 'pdf.fonttype': 42}):
         fig, ax = plt.subplots(figsize=(args.width, args.height))
-        fig.subplots_adjust(left=.12, right=.98, bottom=.32, top=.87)
+        fig.subplots_adjust(left=.12, right=.98, bottom=.36 if marker_table else .32, top=.87)
         positions = list(range(1, len(data)+1))
         ax.boxplot([v if v else [np.nan] for v in data], positions=positions, widths=.5,
                    patch_artist=True, whis=1.5, showfliers=False,
@@ -247,8 +275,15 @@ def run(args):
                    medianprops={'color': 'black', 'linewidth': 1.4},
                    whiskerprops={'color': 'black'}, capprops={'color': 'black'})
         for j, (c, v) in enumerate(zip(args.cohort_order, data), 1):
-            ax.scatter(np.full(len(v), j)+np.linspace(-.065, .065, len(v)), v,
-                       s=42, facecolor='black', edgecolor='black', zorder=4)
+            point_x = np.full(len(v), j)+np.linspace(-.065, .065, len(v))
+            if marker_table:
+                observed = [r for r in records if r['condition'] == c and r['PSI'] is not None]
+                for marker in dict.fromkeys(r['point_marker'] for r in observed):
+                    mask = np.array([r['point_marker'] == marker for r in observed])
+                    ax.scatter(point_x[mask], np.asarray(v)[mask], marker=marker,
+                               s=42, facecolor='black', edgecolor='black', zorder=4, clip_on=False)
+            else:
+                ax.scatter(point_x, v, s=42, facecolor='black', edgecolor='black', zorder=4)
             ax.text(j, 1.018, 'n = '+str(len(v))+'/'+str(len(roster[c])), ha='center',
                     transform=ax.get_xaxis_transform(), fontsize=10)
             if args.show_clipped_points:
@@ -263,17 +298,27 @@ def run(args):
         ax.set_xlim(.5, len(data)+.5)
         for row in stats:
             j = args.cohort_order.index(row['comparison'])+1
-            label = ('P = '+format(row['p'],'.3g')+'\n'+row['label']) if args.annotations_table else row['label']
+            label = (('P unavailable\nNA' if row['p'] is None else
+                      'P = '+format(row['p'],'.3g')+'\n'+row['label'])
+                     if args.annotations_table else row['label'])
             ax.text(j, .975, label, transform=ax.get_xaxis_transform(),
                     ha='center', va='top', fontsize=args.annotation_fontsize, fontweight='bold')
         ax.set_ylim(args.y_min, args.y_max)
-        ax.set_yticks(np.linspace(args.y_min, 1, 6))
+        # Matplotlib expands the view to include requested ticks. A fixed tick
+        # at 1 silently defeated --y-max < 1 even though the manifest kept it.
+        ax.set_yticks(np.linspace(args.y_min, min(1., args.y_max), 6))
         ax.set_xticks(positions, [s.replace('\\n', '\n') for s in labels])
         ax.set_ylabel(args.ylabel.replace('\\n', '\n'), labelpad=args.ylabel_pad)
         ax.grid(axis='y', color='#dddddd', linewidth=.5)
         ax.set_axisbelow(True)
         ax.spines[['top', 'right']].set_visible(False)
         fig.suptitle(args.title, fontsize=14, y=.97)
+        if marker_table:
+            from matplotlib.lines import Line2D
+            handles = [Line2D([], [], marker=marker, linestyle='none', color='black',
+                              markersize=5, label=label) for label, marker in marker_legend.items()]
+            fig.legend(handles=handles, loc='upper center', bbox_to_anchor=(.55, .29),
+                       ncol=len(handles), frameon=False, fontsize=8)
         fig.text(.055, .015, textwrap.fill(caption, width=args.caption_wrap), fontsize=8.1,
                  ha='left', va='bottom', linespacing=1.25)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -307,6 +352,9 @@ def run(args):
                     figure_inches=[args.width,args.height],
                     all_defined_points_in_view=all(r['PSI'] is None or args.y_min <= r['PSI'] <= args.y_max
                                                    for r in records))
+    if marker_table:
+        manifest['marker_table_sha256'] = sha256(marker_table)
+        manifest['marker_legend'] = marker_legend
     outputs[2].write_text(json.dumps(manifest, indent=2)+'\n')
     return manifest
 
