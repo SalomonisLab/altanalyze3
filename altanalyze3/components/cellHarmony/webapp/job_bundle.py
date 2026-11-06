@@ -35,10 +35,7 @@ import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 
-try:                                     # anndata >= 0.11
-    from anndata.io import read_elem as _read_elem
-except ImportError:                      # anndata 0.10
-    from anndata.experimental import read_elem as _read_elem
+from altanalyze3.components.anndata_compat import read_elem as _read_elem
 
 from .memory_cache import BoundedCache, CacheBudget
 

@@ -40,6 +40,7 @@ def add_arguments(parser):
     parser.add_argument('--caption-file', help='Complete UTF-8 scientific figure caption')
     parser.add_argument('--reference-condition', help='Compare every other condition with this reference')
     parser.add_argument('--annotations-table', help='Existing statistics TSV: reference, comparison, p, test, correction; no test is rerun')
+    parser.add_argument('--annotation-pairs', help='JSON of explicit [reference,comparison] pairs; disjoint pairs must cover the complete displayed group roster')
     parser.add_argument('--marker-table', help='Complete donor-style TSV: cohort, donor, marker, label; changes point shapes only')
     parser.add_argument('--stat-correction', choices=['holm', 'bh', 'none'], default='holm',
                         help='Correction across reference comparisons (default: Holm)')
@@ -183,6 +184,8 @@ def run(args, *, panel_ax=None):
     import matplotlib.pyplot as plt
     import numpy as np
 
+    if args.annotation_pairs and not args.annotations_table:
+        raise ValueError('Explicit annotation pairs require an existing statistics table')
     # Axis headroom is for annotations; native_psi_records still requires PSI in [0, 1].
     if not (0 <= args.y_min < args.y_max and args.y_max <= 1.2):
         raise ValueError('Require 0 <= y-min < y-max <= 1.2')
@@ -310,7 +313,17 @@ def run(args, *, panel_ax=None):
                 raise ValueError('Reference/comparison donor identities overlap')
             row['p'] = p; row['label'] = 'NA' if p is None else _significance_stars(p)
             seen.add(comparison); references.add(reference)
-        if len(references) != 1 or seen != set(roster)-references:
+        if args.annotation_pairs:
+            pairs = json.loads(Path(args.annotation_pairs).read_text())
+            if (not isinstance(pairs, list) or not pairs or
+                any(not isinstance(p, list) or len(p) != 2 for p in pairs)):
+                raise ValueError('Annotation pairs require explicit reference/comparison pairs')
+            roles = [c for p in pairs for c in p]
+            if len(roles) != len(set(roles)) or set(roles) != set(roster):
+                raise ValueError('Annotation pairs must cover every displayed group exactly once')
+            if pairs != [[r['reference'], r['comparison']] for r in stats]:
+                raise ValueError('Existing statistics differ from the explicit annotation pairs')
+        elif len(references) != 1 or seen != set(roster)-references:
             raise ValueError('Existing statistics must cover every non-reference condition exactly once')
         caption += ' Symbols use supplied native raw P values: ns >0.05; * ≤0.05; ** ≤0.01; *** ≤0.001. No statistical test is rerun.'
         if any(row['p'] is None for row in stats):

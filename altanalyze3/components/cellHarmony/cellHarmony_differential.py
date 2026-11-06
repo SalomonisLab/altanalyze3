@@ -1720,6 +1720,8 @@ def build_fixed_order_heatmap(
     show_go_terms=False,
     goelite_max_terms=30,
     goelite_pattern_path=None,
+    ax=None,
+    vector=False,
 ):
     """
     Build a fixed-order heatmap of log2 fold-changes for all populations,
@@ -1729,7 +1731,13 @@ def build_fixed_order_heatmap(
       1) Global up/down (ranked by p ascending)
       2) Co-regulated up/down (ranked by p ascending; patterns with more locals first)
       3) Local up/down per population (ranked by p ascending)
+    vector=True draws the matrix and the row/column colour bars as vector cells (pcolormesh) instead of an
+    embedded image (imshow). ax= draws into the caller's axes and leaves saving the figure to the caller (the
+    heatmap TSV is still written); it cannot be combined with GO term panels.
     """
+    external_ax = ax is not None
+    if external_ax and show_go_terms:
+        raise ValueError("ax= cannot be combined with show_go_terms")
 
     assigned = de_store["assigned_groups"]
     detailed = de_store["detailed_deg"]
@@ -2136,7 +2144,10 @@ def build_fixed_order_heatmap(
     fixed_height = 4.2  # preserve the original working height
     fixed_width = 7.5
     ax_labels = None
-    if show_go_terms:
+    if external_ax:
+        fig = ax.figure
+        ax_terms = None
+    elif show_go_terms:
         fig = plt.figure(figsize=(fixed_width, fixed_height))
         plot_top = 0.78
         plot_bottom = 0.10
@@ -2174,13 +2185,21 @@ def build_fixed_order_heatmap(
     column_clusters = list(fold_df.columns)
 
     # --- Draw the heatmap ---
-    im = ax.imshow(
-        fold_df.values,
-        aspect="auto",
-        cmap=cmap,
-        norm=norm,
-        interpolation="none",
-    )
+    n_rows, n_cols = fold_df.shape
+    if vector:
+        # One vector cell per value, with the orientation and extent imshow uses (row 0 at the top).
+        im = ax.pcolormesh(np.arange(n_cols + 1) - 0.5, np.arange(n_rows + 1) - 0.5, fold_df.values,
+                           cmap=cmap, norm=norm, shading="flat", edgecolors="none", antialiased=False)
+        ax.set_xlim(-0.5, n_cols - 0.5)
+        ax.set_ylim(n_rows - 0.5, -0.5)
+    else:
+        im = ax.imshow(
+            fold_df.values,
+            aspect="auto",
+            cmap=cmap,
+            norm=norm,
+            interpolation="none",
+        )
 
     # --- Add vertical and horizontal white gridlines ---
     for x in range(1, fold_df.shape[1]):
@@ -2226,12 +2245,24 @@ def build_fixed_order_heatmap(
     col_ids = np.array([column_to_id[c] for c in column_clusters], dtype=int)[None, :]
     row_ids = np.array([row_to_id.get(c, 0) for c in row_clusters], dtype=int)[:, None]
 
-    ax_top.imshow(col_ids, aspect="auto", cmap=column_cmap, interpolation="none")
+    if vector:
+        ax_top.pcolormesh(np.arange(n_cols + 1) - 0.5, [-0.5, 0.5], col_ids, cmap=column_cmap, shading="flat",
+                          edgecolors="none", antialiased=False)
+        ax_top.set_xlim(-0.5, n_cols - 0.5)
+        ax_top.set_ylim(0.5, -0.5)
+    else:
+        ax_top.imshow(col_ids, aspect="auto", cmap=column_cmap, interpolation="none")
     ax_top.set_xticks([])
     ax_top.set_yticks([])
     ax_top.set_ylabel("")
 
-    ax_left.imshow(row_ids, aspect="auto", cmap=row_cmap, interpolation="none")
+    if vector:
+        ax_left.pcolormesh([-0.5, 0.5], np.arange(n_rows + 1) - 0.5, row_ids, cmap=row_cmap, shading="flat",
+                           edgecolors="none", antialiased=False)
+        ax_left.set_xlim(-0.5, 0.5)
+        ax_left.set_ylim(n_rows - 0.5, -0.5)
+    else:
+        ax_left.imshow(row_ids, aspect="auto", cmap=row_cmap, interpolation="none")
     ax_left.set_xticks([])
     ax_left.set_yticks([])
     ax_left.set_xlabel("")
@@ -2357,6 +2388,8 @@ def build_fixed_order_heatmap(
         borderpad=0,
     )
     cbar = plt.colorbar(im, cax=cax, orientation="horizontal")
+    if vector and getattr(cbar, "solids", None) is not None:
+        cbar.solids.set_rasterized(False)  # matplotlib rasterizes colour-bar solids with >= 50 levels
     cbar.ax.set_xlim(vmin, vmax)
     cbar.set_label(de_store.get("value_label", "log2 fold change"), fontsize=6)
     cbar.set_ticks([])
@@ -2414,6 +2447,10 @@ def build_fixed_order_heatmap(
                 fontstyle="italic",
                 clip_on=True,
             )
+
+    if external_ax:
+        print(f"[INFO] Drew heatmap into the caller's axes; the caller saves the figure (TSV: {heatmap_path}).")
+        return None, heatmap_path
 
     pdf_path = os.path.join(outdir, heatmap_png)
     base_path, ext = os.path.splitext(pdf_path)
@@ -4569,11 +4606,377 @@ def main_splicing_heatmap_subset(argv):
     return store
 
 
+def _read_heatmap_tsv(path):
+    """Heatmap TSV -> (row block labels, genes, populations, values) as build_fixed_order_heatmap wrote it."""
+    heat = pd.read_csv(path, sep="\t", index_col=0, float_precision="round_trip")
+    blocks = [str(i).rsplit(":", 1)[0] if ":" in str(i) else "" for i in heat.index]
+    genes = [str(i).rsplit(":", 1)[1] if ":" in str(i) else str(i) for i in heat.index]
+    pops = [str(c).split(":", 1)[0] for c in heat.columns]
+    return blocks, genes, pops, heat.to_numpy(dtype=float)
+
+
+def load_gene_store_from_run(comparison_dir, alpha=0.05, use_rawp=False):
+    """Rebuild the heatmap store of one finished gene comparison (<outdir>/<case>_vs_<control>/) from its saved tables:
+    DEGs/DEG_assigned_groups, DEG_detailed, DEG_fold_matrix, DEG_summary, DEG_pooled_overall and DEG_coreg_pooled
+    when present, and the heatmap TSV for the population (column) order. Group assignment and ranking are the run's
+    own; nothing is retested. alpha and use_rawp must be the values the run used. Tables are parsed with
+    float_precision="round_trip": the default parser is off by one ulp on some values."""
+    import glob as _glob
+    deg = os.path.join(comparison_dir, "DEGs")
+    found = _glob.glob(os.path.join(deg, "DEG_assigned_groups_*.tsv"))
+    if len(found) != 1:
+        raise FileNotFoundError(f"{comparison_dir}: expected one DEG_assigned_groups_*.tsv, found {len(found)}")
+    tag = os.path.basename(found[0])[len("DEG_assigned_groups_"):-len(".tsv")]
+    heats = _glob.glob(os.path.join(comparison_dir, "heatmaps", f"heatmap_{tag}_by_*.tsv"))
+    if len(heats) != 1:
+        raise FileNotFoundError(f"{comparison_dir}: expected one heatmaps/heatmap_{tag}_by_*.tsv, found {len(heats)}")
+    population_col = os.path.basename(heats[0])[len(f"heatmap_{tag}_by_"):-len(".tsv")]
+    assigned = pd.read_csv(found[0], sep="\t", float_precision="round_trip")
+    detailed = pd.read_csv(os.path.join(deg, f"DEG_detailed_{tag}.tsv"), sep="\t", float_precision="round_trip")
+    for frame in (assigned, detailed):
+        frame["gene"] = frame["gene"].astype(str)
+    detailed["population"] = detailed["population"].astype(str)
+    assigned["population_or_pattern"] = assigned["population_or_pattern"].astype(str)
+    fold = pd.read_csv(os.path.join(deg, f"DEG_fold_matrix_{tag}.tsv"), sep="\t", index_col=0,
+                       float_precision="round_trip")
+    fold.index = fold.index.astype(str)
+    fold.columns = fold.columns.astype(str)
+    summary = pd.read_csv(os.path.join(deg, f"DEG_summary_{tag}.tsv"), sep="\t", float_precision="round_trip")
+    summary["population"] = summary["population"].astype(str)
+    po_path = os.path.join(deg, f"DEG_pooled_overall_{tag}.tsv")
+    cr_path = os.path.join(deg, f"DEG_coreg_pooled_{tag}.tsv")
+    pooled = pd.read_csv(po_path, sep="\t", index_col=0, float_precision="round_trip") if os.path.exists(po_path) else pd.DataFrame()
+    coreg = pd.read_csv(cr_path, sep="\t", float_precision="round_trip") if os.path.exists(cr_path) else pd.DataFrame()
+    _, _, pops, _ = _read_heatmap_tsv(heats[0])
+    case = str(detailed["case_label"].iloc[0]) if "case_label" in detailed and len(detailed) else tag.split("_vs_", 1)[0]
+    control = (str(detailed["control_label"].iloc[0]) if "control_label" in detailed and len(detailed)
+               else tag.split("_vs_", 1)[-1])
+    return {"detailed_deg": detailed, "assigned_groups": assigned, "fold_matrix": fold, "summary_per_population": summary,
+            "pooled_overall": pooled, "coreg_pooled": coreg, "population_order": pops, "lineage_order": list(pops),
+            "case_label": case, "control_label": control, "alpha": float(alpha), "use_rawp": bool(use_rawp),
+            "tag": tag, "population_col": population_col, "heatmap_tsv": heats[0], "comparison_dir": comparison_dir}
+
+
+def _store_hits(store, alpha, fc):
+    """(gene, population) pairs meeting the run's own hit rule (_assign_de_groups: sig < alpha and |log2FC| > log2 fc),
+    and the number of detailed rows that do not meet it."""
+    d = store["detailed_deg"]
+    metric = d["pval"] if store["use_rawp"] else d["fdr"]
+    ok = (metric.astype(float) < alpha) & (d["log2fc"].astype(float).abs() > np.log2(float(fc)))
+    return d.loc[ok, ["gene", "population", "log2fc"]].assign(sig=metric[ok].astype(float).to_numpy()), int((~ok).sum())
+
+
+def main_matched_heatmaps(argv):
+    """matched-heatmaps: genes significant in the same cell state in two finished comparisons, drawn for both with
+    build_fixed_order_heatmap in the REFERENCE comparison's row order, restricted to cell states tested in both, on one
+    shared colour limit."""
+    ap = argparse.ArgumentParser(
+        prog="cellHarmony_differential matched-heatmaps",
+        description="Two side-by-side fixed-order heatmaps (reference, query) of the genes that are differential in the "
+                    "same cell state in both comparisons. Rows follow the reference comparison's own grouping and "
+                    "ranking; columns are the cell states tested in both; both share one colour limit.")
+    ap.add_argument("--reference_dir", required=True, help="finished comparison folder <outdir>/<case>_vs_<control> (row order)")
+    ap.add_argument("--query_dir", required=True, help="finished comparison folder drawn in the reference row order")
+    ap.add_argument("--alpha", type=float, default=0.05, help="the runs' significance threshold (default 0.05)")
+    ap.add_argument("--fc", type=float, default=1.2, help="the runs' fold-change threshold (default 1.2)")
+    ap.add_argument("--use_rawp", action="store_true", help="the runs used raw P instead of FDR")
+    ap.add_argument("--direction", choices=["same", "any"], default="same",
+                    help="same: a match needs the same sign in both comparisons (default); any: sign ignored")
+    ap.add_argument("--value_quantile", type=float, default=0.95,
+                    help="shared colour limit = this quantile of |log2FC| over both displayed matrices, rounded up to 0.25")
+    ap.add_argument("--value_limit", type=float, default=None, help="fixed shared colour limit (overrides --value_quantile)")
+    ap.add_argument("--reference_label", default=None, help="column suffix for the reference half of the side-by-side "
+                                                             "heatmap (default: the reference case label)")
+    ap.add_argument("--query_label", default=None, help="column suffix for the query half (default: the query case label)")
+    ap.add_argument("--outdir", required=True)
+    a = ap.parse_args(argv)
+    os.makedirs(a.outdir, exist_ok=True)
+    ref = load_gene_store_from_run(a.reference_dir, a.alpha, a.use_rawp)
+    qry = load_gene_store_from_run(a.query_dir, a.alpha, a.use_rawp)
+    if ref["population_col"] != qry["population_col"]:
+        raise ValueError(f"population columns differ: {ref['population_col']} vs {qry['population_col']}")
+    population_col = ref["population_col"]
+
+    # Golden check: each loader must rebuild its run's own heatmap TSV exactly before it is used.
+    check_dir = os.path.join(a.outdir, "loader_validation")
+    os.makedirs(check_dir, exist_ok=True)
+    validation = {}
+    for role, store in (("reference", ref), ("query", qry)):
+        out_tsv = f"rebuilt_{store['tag']}.tsv"
+        build_fixed_order_heatmap(dict(store), check_dir, population_col, a.fc,
+                                  heatmap_png=f"rebuilt_{store['tag']}.pdf", heatmap_tsv=out_tsv)
+        b0, g0, p0, v0 = _read_heatmap_tsv(store["heatmap_tsv"])
+        b1, g1, p1, v1 = _read_heatmap_tsv(os.path.join(check_dir, out_tsv))
+        # build_fixed_order_heatmap sorts key_p with an unstable sort whose order among EXACT ties differs between
+        # CPUs (numpy SIMD quicksort). The rebuild must match the run's heatmap in genes, columns, row blocks, every
+        # value, and the row-by-row sequence of (block, key_p); only genes sharing (block, key_p) may be permuted.
+        key = store["assigned_groups"].drop_duplicates("gene").set_index("gene")["key_p"].to_dict()
+        rank0 = [(b, key.get(g, g)) for b, g in zip(b0, g0)]
+        rank1 = [(b, key.get(g, g)) for b, g in zip(b1, g1)]
+        same_rows = p0 == p1 and sorted(g0) == sorted(g1) and b0 == b1 and rank0 == rank1
+        row1 = {g: i for i, g in enumerate(g1)}
+        same_values = same_rows and bool(np.array_equal(v0, v1[[row1[g] for g in g0]], equal_nan=True))
+        permuted = int(sum(a != b for a, b in zip(g0, g1)))
+        validation[role] = dict(tag=store["tag"], rows=len(g0), columns=len(p0), identical=same_rows and same_values,
+                                rows_permuted_within_exact_key_p_ties=permuted)
+        if not (same_rows and same_values):
+            raise AssertionError(f"{role} heatmap rebuilt from saved tables differs from {store['heatmap_tsv']}")
+
+    tested = lambda s: set(s["summary_per_population"].loc[s["summary_per_population"]["tested_genes"] > 0, "population"])
+    shared = [p for p in ref["population_order"] if p in tested(ref) and p in tested(qry)]
+    if not shared:
+        raise ValueError("no cell state was tested in both comparisons")
+    hr, bad_r = _store_hits(ref, a.alpha, a.fc)
+    hq, bad_q = _store_hits(qry, a.alpha, a.fc)
+    hr, hq = hr[hr.population.isin(shared)], hq[hq.population.isin(shared)]
+    pairs = hr.merge(hq, on=["gene", "population"], suffixes=("_reference", "_query"))
+    pairs["same_sign"] = np.sign(pairs.log2fc_reference) == np.sign(pairs.log2fc_query)
+    matched = pairs[pairs.same_sign] if a.direction == "same" else pairs
+    genes_set = set(matched.gene)
+    if not genes_set:
+        raise ValueError("no gene is differential in the same cell state in both comparisons")
+
+    _, full_genes, _, _ = _read_heatmap_tsv(ref["heatmap_tsv"])
+    missing = sorted(genes_set - set(full_genes))
+    if missing:
+        raise AssertionError(f"{len(missing)} matched genes are absent from the reference heatmap: {missing[:10]}")
+    sub_assigned = ref["assigned_groups"][ref["assigned_groups"].gene.isin(genes_set)].copy()
+    # build_fixed_order_heatmap ranks rows by key_p with an unstable sort, and key_p ties (often P = 0 with cells as
+    # replicates) would reorder on a subset. key_p only orders rows, so set it to each gene's row position in the
+    # reference heatmap: the subset then keeps the reference heatmap's exact order.
+    position = {g: float(i) for i, g in enumerate(full_genes)}
+    sub_assigned["key_p"] = sub_assigned["gene"].map(position)
+    sub_detailed = ref["detailed_deg"][ref["detailed_deg"].gene.isin(genes_set)
+                                       & ref["detailed_deg"].population.isin(shared)].copy()
+    genes = [g for g in full_genes if g in genes_set]
+    fold_r = ref["fold_matrix"].reindex(index=genes, columns=shared).astype(float)
+    fold_q = qry["fold_matrix"].reindex(index=genes, columns=shared).astype(float)
+    values = np.abs(np.concatenate([fold_r.to_numpy().ravel(), fold_q.to_numpy().ravel()]))
+    values = values[np.isfinite(values)]
+    vlim = (float(a.value_limit) if a.value_limit else
+            max(float(np.ceil(np.quantile(values, a.value_quantile) / 0.25) * 0.25), float(np.log2(a.fc))))
+
+    base = {k: ref[k] for k in ("pooled_overall", "coreg_pooled", "alpha", "use_rawp", "control_label")}
+    base.update(assigned_groups=sub_assigned, population_order=list(shared), lineage_order=list(shared), value_limit=vlim)
+    ref_label = f"{ref['case_label']} vs {ref['control_label']}"
+    qry_label = f"{qry['case_label']} vs {qry['control_label']}, rows in {ref['case_label']} order"
+    plt.rcParams["font.family"] = "sans-serif"
+    plt.rcParams["font.sans-serif"] = ["Arial", "Helvetica", "DejaVu Sans"]
+    plt.rcParams["pdf.fonttype"] = 42
+    plt.rcParams["svg.fonttype"] = "none"
+    files, stores = {}, {}
+    for role, store, fold, label, case in (("reference", ref, fold_r, ref_label, ref["case_label"]),
+                                           ("query", qry, fold_q, qry_label, qry["case_label"])):
+        s = dict(base, detailed_deg=sub_detailed.copy(), fold_matrix=fold, case_label=case, comparison_label=label,
+                 title_prefix="Matched DEGs log2FC")
+        stem = f"heatmap_matched_{NetPerspective.safe_component(case)}_by_{NetPerspective.safe_component(population_col)}"
+        build_fixed_order_heatmap(s, a.outdir, population_col, a.fc, heatmap_png=stem + ".pdf", heatmap_tsv=stem + ".tsv",
+                                  vector=True)
+        files[role] = os.path.join(a.outdir, stem + ".tsv")
+        stores[role] = s
+    br, gr, pr, vr = _read_heatmap_tsv(files["reference"])
+    bq, gq, pq, vq = _read_heatmap_tsv(files["query"])
+    if gr != gq or br != bq or pr != pq:
+        raise AssertionError("query heatmap rows or columns do not follow the reference heatmap")
+    # A local gene whose key state is not shared has no block among the shared columns; the heatmap appends it to its
+    # 'unassigned' block in the reference order. Every other row keeps the reference run's own order.
+    local_key = sub_assigned[sub_assigned.group == "local"].set_index("gene")["population_or_pattern"]
+    orphans = [g for g in genes if g in local_key.index and local_key[g] not in shared]
+    expected = [g for g in genes if g not in orphans] + orphans
+    if gr != expected:
+        raise AssertionError("reference heatmap rows differ from the reference run's own order")
+    if not np.allclose(vq, fold_q.reindex(index=gq, columns=pq).to_numpy(), equal_nan=True):
+        raise AssertionError("query heatmap values are not the query run's log2FC")
+
+    # Side by side in one heatmap: the reference's shared states, then the query's, same rows and colour limit. Local
+    # genes keep their reference block, placed under the reference column of their key state.
+    rl, ql = a.reference_label or ref["case_label"], a.query_label or qry["case_label"]
+    if rl == ql:
+        raise ValueError("--reference_label and --query_label must differ")
+    col_r, col_q = {p: f"{p} | {rl}" for p in shared}, {p: f"{p} | {ql}" for p in shared}
+    side_order = [col_r[p] for p in shared] + [col_q[p] for p in shared]
+    side_assigned = sub_assigned.copy()
+    is_local = side_assigned.group == "local"
+    side_assigned.loc[is_local, "population_or_pattern"] = side_assigned.loc[is_local, "population_or_pattern"].map(
+        lambda p: col_r.get(p, p))
+    side_detailed = sub_detailed.copy()
+    side_detailed["population"] = side_detailed["population"].map(lambda p: col_r.get(p, p))
+    s = dict(base, assigned_groups=side_assigned, detailed_deg=side_detailed,
+             fold_matrix=pd.concat([fold_r.rename(columns=col_r), fold_q.rename(columns=col_q)], axis=1),
+             population_order=side_order, lineage_order=side_order, case_label=f"{rl} | {ql}",
+             comparison_label=f"left {ref['case_label']}, right {qry['case_label']}, each vs {ref['control_label']}; "
+                              f"rows in {ref['case_label']} order", title_prefix="Matched DEGs log2FC")
+    stem = (f"heatmap_matched_side_by_side_{NetPerspective.safe_component(rl)}_{NetPerspective.safe_component(ql)}"
+            f"_by_{NetPerspective.safe_component(population_col)}")
+    build_fixed_order_heatmap(s, a.outdir, population_col, a.fc, heatmap_png=stem + ".pdf", heatmap_tsv=stem + ".tsv",
+                              vector=True)
+    files["side_by_side"] = os.path.join(a.outdir, stem + ".tsv")
+    _, gs, ps, vs = _read_heatmap_tsv(files["side_by_side"])
+    if gs != gr or ps != side_order:
+        raise AssertionError("side-by-side heatmap rows or columns differ from the matched heatmaps")
+    if not (np.array_equal(vs[:, :len(shared)], vr, equal_nan=True)
+            and np.array_equal(vs[:, len(shared):], vq, equal_nan=True)):
+        raise AssertionError("side-by-side heatmap values differ from the matched reference and query heatmaps")
+
+    # Two-panel vector figure: the reference and the query heatmap, each drawn by build_fixed_order_heatmap into its
+    # own axes of one figure. Both axes share one height and the same rows, so each gene sits at the same height.
+    fig = plt.figure(figsize=(16.0, 4.6))
+    panel_axes = {"reference": fig.add_axes([0.06, 0.11, 0.36, 0.70]), "query": fig.add_axes([0.56, 0.11, 0.36, 0.70])}
+    panel_dir = os.path.join(a.outdir, "two_panel_tables")
+    os.makedirs(panel_dir, exist_ok=True)
+    for role, label in (("reference", rl), ("query", ql)):
+        order_note = "" if role == "reference" else f"; rows in {ref['case_label']} order"
+        s = dict(stores[role], detailed_deg=sub_detailed.copy(), title_prefix=label,
+                 comparison_label=f"{(ref if role == 'reference' else qry)['case_label']} vs {ref['control_label']}"
+                                  f"{order_note}")
+        build_fixed_order_heatmap(s, panel_dir, population_col, a.fc, heatmap_png=f"panel_{role}.pdf",
+                                  heatmap_tsv=f"panel_{role}.tsv", ax=panel_axes[role], vector=True)
+    _, g_left, p_left, v_left = _read_heatmap_tsv(os.path.join(panel_dir, "panel_reference.tsv"))
+    _, g_right, p_right, v_right = _read_heatmap_tsv(os.path.join(panel_dir, "panel_query.tsv"))
+    if not (g_left == gr and g_right == gr and p_left == pr and p_right == pr
+            and np.array_equal(v_left, vr, equal_nan=True) and np.array_equal(v_right, vq, equal_nan=True)):
+        raise AssertionError("two-panel figure rows, columns or values differ from the matched heatmaps")
+    if panel_axes["reference"].get_position().bounds[1::2] != panel_axes["query"].get_position().bounds[1::2]:
+        raise AssertionError("the two panels differ in vertical position or height; rows would not align")
+    panels = (f"heatmap_matched_side_by_side_panels_{NetPerspective.safe_component(rl)}_left_"
+              f"{NetPerspective.safe_component(ql)}_right_by_{NetPerspective.safe_component(population_col)}")
+    fig.savefig(os.path.join(a.outdir, panels + ".pdf"), bbox_inches="tight", pad_inches=0.05)
+    plt.close(fig)
+    files["side_by_side_panels"] = os.path.join(a.outdir, panels + ".pdf")
+
+    tag_r, tag_q = ref["tag"], qry["tag"]
+    table = pairs.rename(columns={"sig_reference": f"sig_{tag_r}", "sig_query": f"sig_{tag_q}",
+                                  "log2fc_reference": f"log2fc_{tag_r}", "log2fc_query": f"log2fc_{tag_q}"})
+    table["included"] = table["same_sign"] if a.direction == "same" else True
+    table.sort_values(["included", "population", "gene"], ascending=[False, True, True]).to_csv(
+        os.path.join(a.outdir, "matched_gene_cell_state_pairs.tsv"), sep="\t", index=False)
+    summary = dict(
+        tool="altanalyze3.components.cellHarmony.cellHarmony_differential matched-heatmaps", argv=list(argv),
+        args=vars(a), reference=tag_r, query=tag_q, population_col=population_col, loader_validation=validation,
+        states_tested_reference=len(tested(ref)), states_tested_query=len(tested(qry)), shared_states=shared,
+        hits_reference_all_states=int(len(_store_hits(ref, a.alpha, a.fc)[0])),
+        hits_query_all_states=int(len(_store_hits(qry, a.alpha, a.fc)[0])),
+        hits_reference_shared_states=int(len(hr)), hits_query_shared_states=int(len(hq)),
+        detailed_rows_failing_hit_rule=dict(reference=bad_r, query=bad_q),
+        pairs_same_state=int(len(pairs)), pairs_same_sign=int(pairs.same_sign.sum()),
+        pairs_opposite_sign=int((~pairs.same_sign).sum()), genes_drawn=len(genes),
+        genes_in_unassigned_block_key_state_not_shared=len(orphans),
+        row_order_source=ref["heatmap_tsv"],
+        value_limit=vlim, value_quantile=a.value_quantile,
+        saturated_fraction=dict(reference=float(np.mean(np.abs(vr[np.isfinite(vr)]) >= vlim)),
+                                query=float(np.mean(np.abs(vq[np.isfinite(vq)]) >= vlim))),
+        outputs=files)
+    with open(os.path.join(a.outdir, "matched_heatmaps_summary.json"), "w") as fh:
+        json.dump(summary, fh, indent=2)
+    print(f"[matched-heatmaps] {tag_r} x {tag_q}: {len(shared)} shared states, {len(pairs)} same-state pairs "
+          f"({int(pairs.same_sign.sum())} same sign), {len(genes)} genes drawn, colour limit +/-{vlim}")
+    return summary
+
+
+def main_deg_venn(argv):
+    """deg-venn: two-set Venn of the unique DEGs (any cell state) of two finished comparisons; the intersection counts
+    genes differential in both with at least one shared direction; each gene counts once."""
+    ap = argparse.ArgumentParser(prog="cellHarmony_differential deg-venn",
+                                 description="Venn diagram of unique genes differential in a reference and a query "
+                                             "comparison, with a directional intersection.")
+    ap.add_argument("--reference_dir", required=True, help="finished comparison folder <outdir>/<case>_vs_<control>")
+    ap.add_argument("--query_dir", required=True, help="finished comparison folder <outdir>/<case>_vs_<control>")
+    ap.add_argument("--reference_label", default=None)
+    ap.add_argument("--query_label", default=None)
+    ap.add_argument("--alpha", type=float, default=0.05, help="the runs' significance threshold (default 0.05)")
+    ap.add_argument("--fc", type=float, default=1.2, help="the runs' fold-change threshold (default 1.2)")
+    ap.add_argument("--use_rawp", action="store_true")
+    ap.add_argument("--name", required=True, help="tag for the output file names")
+    ap.add_argument("--outdir", required=True)
+    a = ap.parse_args(argv)
+    import matplotlib.pyplot as _plt
+    from matplotlib.patches import Circle
+    os.makedirs(a.outdir, exist_ok=True)
+    ref = load_gene_store_from_run(a.reference_dir, a.alpha, a.use_rawp)
+    qry = load_gene_store_from_run(a.query_dir, a.alpha, a.use_rawp)
+    rl, ql = a.reference_label or ref["case_label"], a.query_label or qry["case_label"]
+    hr, bad_r = _store_hits(ref, a.alpha, a.fc)
+    hq, bad_q = _store_hits(qry, a.alpha, a.fc)
+
+    def directions(h):
+        d = h.assign(direction=np.where(h.log2fc > 0, "up", "down"))
+        return (d.groupby("gene")["direction"].agg(lambda s: ",".join(sorted(set(s)))),
+                d.groupby("gene")["population"].agg(lambda s: ",".join(sorted(set(map(str, s))))))
+
+    dir_r, st_r = directions(hr)
+    dir_q, st_q = directions(hq)
+    genes_r, genes_q = set(dir_r.index), set(dir_q.index)
+    both = genes_r & genes_q
+    overlap = {g for g in both if set(dir_r[g].split(",")) & set(dir_q[g].split(","))}
+    opposite = both - overlap
+    only_r, only_q = genes_r - genes_q, genes_q - genes_r
+    if len(only_r) + len(overlap) + len(opposite) != len(genes_r) or len(only_q) + len(overlap) + len(opposite) != len(genes_q):
+        raise AssertionError("Venn regions do not partition the gene sets")
+    region = {**{g: f"{rl} only" for g in only_r}, **{g: f"{ql} only" for g in only_q},
+              **{g: "both, same direction" for g in overlap}, **{g: "both, opposite direction only" for g in opposite}}
+    table = pd.DataFrame({"gene": sorted(region)})
+    table["region"] = table.gene.map(region)
+    table[f"{rl}_directions"] = table.gene.map(dir_r)
+    table[f"{ql}_directions"] = table.gene.map(dir_q)
+    table[f"{rl}_cell_states"] = table.gene.map(st_r)
+    table[f"{ql}_cell_states"] = table.gene.map(st_q)
+    tag = NetPerspective.safe_component(a.name)
+    table.to_csv(os.path.join(a.outdir, f"{tag}_venn_genes.tsv"), sep="\t", index=False)
+
+    _plt.rcParams.update({"pdf.fonttype": 42, "ps.fonttype": 42, "font.family": "sans-serif",
+                          "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"]})
+    fig = _plt.figure(figsize=(5.2, 4.6))
+    ax = fig.add_axes([0.04, 0.30, 0.92, 0.62])
+    for cx, col in ((-0.55, "#C0392B"), (0.55, "#2471A3")):
+        ax.add_patch(Circle((cx, 0.0), 1.0, facecolor=(*matplotlib.colors.to_rgb(col), 0.25), edgecolor=col,
+                            linewidth=1.0, clip_on=False))
+    ax.text(-1.0, 0.0, f"{len(only_r):,}", ha="center", va="center", fontsize=11)
+    ax.text(1.0, 0.0, f"{len(only_q):,}", ha="center", va="center", fontsize=11)
+    ax.text(0.0, 0.0, f"{len(overlap):,}", ha="center", va="center", fontsize=11, fontweight="bold")
+    ax.text(-0.95, 1.12, f"{rl}\n{len(genes_r):,} DEGs", ha="center", va="bottom", fontsize=8, color="#C0392B")
+    ax.text(0.95, 1.12, f"{ql}\n{len(genes_q):,} DEGs", ha="center", va="bottom", fontsize=8, color="#2471A3")
+    ax.text(0.0, -1.18, f"In both with opposite direction only (not in the overlap): {len(opposite):,}",
+            ha="center", va="top", fontsize=7)
+    ax.set_xlim(-1.7, 1.7)
+    ax.set_ylim(-1.35, 1.55)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    n_states_r = int((ref["summary_per_population"].tested_genes > 0).sum())
+    n_states_q = int((qry["summary_per_population"].tested_genes > 0).sum())
+    legend = (f"{rl} and {ql} share {len(overlap):,} genes changed in the same direction versus {ref['control_label']}. "
+              f"Each circle holds the unique genes differential in any cell state of one comparison "
+              f"(cellHarmony-differential, {'raw P' if a.use_rawp else 'BH FDR'} < {a.alpha} and |fold change| > {a.fc}); "
+              f"a gene up in one state and down in another counts once, and the centre counts genes differential in "
+              f"both comparisons with at least one shared direction. Circles are not drawn to scale. "
+              f"Cell states tested: {rl} {n_states_r}, {ql} {n_states_q}; genes in states tested in only one "
+              f"comparison can only fall in that comparison's circle.")
+    import textwrap as _tw
+    fig.text(0.04, 0.02, "\n".join(_tw.wrap(legend, 105)), ha="left", va="bottom", fontsize=5.6)
+    out_pdf = os.path.join(a.outdir, f"{tag}_venn.pdf")
+    fig.savefig(out_pdf)
+    _plt.close(fig)
+    summary = dict(tool="altanalyze3.components.cellHarmony.cellHarmony_differential deg-venn", argv=list(argv),
+                   args=vars(a), reference=ref["tag"], query=qry["tag"], reference_genes=len(genes_r),
+                   query_genes=len(genes_q), reference_only=len(only_r), query_only=len(only_q),
+                   both_same_direction=len(overlap), both_opposite_direction_only=len(opposite),
+                   states_tested_reference=n_states_r, states_tested_query=n_states_q,
+                   detailed_rows_failing_hit_rule=dict(reference=bad_r, query=bad_q), outputs=[out_pdf])
+    with open(os.path.join(a.outdir, f"{tag}_venn_summary.json"), "w") as fh:
+        json.dump(summary, fh, indent=2)
+    print(f"[deg-venn] {a.name}: {rl} {len(genes_r)} | {ql} {len(genes_q)} | same direction {len(overlap)} | "
+          f"opposite only {len(opposite)} | {rl} only {len(only_r)} | {ql} only {len(only_q)}")
+    return summary
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "deg-venn":
+        return main_deg_venn(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "splicing-heatmap":
         return main_splicing_heatmap(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "splicing-heatmap-subset":
         return main_splicing_heatmap_subset(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "matched-heatmaps":
+        return main_matched_heatmaps(sys.argv[2:])
     ap = argparse.ArgumentParser(description="cellHarmony differential analysis and (optional) pseudobulk generation.")
     ap.add_argument("--h5ad", required=True, help="Input h5ad with aligned annotations")
     ap.add_argument(

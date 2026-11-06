@@ -75,6 +75,8 @@ def main(argv=None):
     combine = commands.add_parser('combine-hla')
     combine.add_argument('--inputs', nargs='+', required=True)
     combine.add_argument('--output', required=True)
+    combine.add_argument('--groups', help='TSV with sample and group columns; writes one concordant row per group')
+    combine.add_argument('--report', help='Per group x gene concordance table (default: <output>.concordance.tsv)')
     binding = commands.add_parser('bind')
     binding.add_argument('--evidence', required=True)
     binding.add_argument('--hla', required=True)
@@ -110,8 +112,13 @@ def main(argv=None):
         prepare_hla(args.sample, args.output, args.qc, args.bam, args.supplied, args.build, args.min_depth, args.require_all,
                     typer=args.typer)
     elif args.command == 'combine-hla':
-        from .hla import combine_hla
-        combine_hla(args.inputs, args.output)
+        if args.groups:
+            from .hla import combine_hla_groups
+            combine_hla_groups(args.inputs, args.groups, args.output,
+                               args.report or str(args.output) + '.concordance.tsv')
+        else:
+            from .hla import combine_hla
+            combine_hla(args.inputs, args.output)
     elif args.command == 'bind':
         from .hla import predict_binding
         predict_binding(args.evidence, args.hla, args.output, args.method, args.software_path)

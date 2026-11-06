@@ -281,6 +281,13 @@ with _io.smart_open(transcript_associations_file) as f:
 association_ids = {
     g: {(t.split('.')[0] if t[:1].isdigit() else t) for _s, t, _st in rows}
     for g, rows in transcript_associations.items()}
+# DEFECT 6 -- the corrected KINNEX-5 catalogue (isoform_final_20261016) writes each ORF header as
+# the FULL association id, ">9407667.MDS5801-preVEN_342__source008 ;CDS;...", where the older
+# build wrote the bare number. The split("_")[-1] key became "source008" (or the whole id when
+# the sample carries no underscore), never equalled the numeric assoc_base, and every novel
+# KINNEX isoform was dropped: on the KINNEX MDS donor run only ENST isoforms matched (1,524 of
+# 4,143 junctions). The full id is used, and matched exactly, when it IS an association id.
+association_full = {g: {t for _s, t, _st in rows} for g, rows in transcript_associations.items()}
 
 protein_dict = load_protein_summary(protein_summary_file)
 
@@ -307,7 +314,8 @@ with open(orf_sequences_file, "r") as orf_handle, open(output_file, "w") as out_
         # the old key stands. KINNEX-5 ORF ids carry no underscore (0 of 1,760,990), so for
         # them both keys are the same string and the output is unchanged.
         full_id = header.split(";")[0].split(" ")[0]
-        if full_id != transcript_id and full_id in association_ids.get(gene_id, ()):
+        if full_id != transcript_id and (full_id in association_ids.get(gene_id, ())
+                                         or full_id in association_full.get(gene_id, ())):
             transcript_id = full_id
         sequence = str(record.seq).upper()
         if gene_id in junctions:
@@ -326,7 +334,7 @@ with open(orf_sequences_file, "r") as orf_handle, open(output_file, "w") as out_
                         # unchanged.
                         assoc_base = (assoc_transcript_id.split('.')[0]
                                       if assoc_transcript_id[:1].isdigit() else assoc_transcript_id)
-                        if transcript_id == assoc_base and junction_name in transcript_structure:
+                        if (transcript_id == assoc_base or transcript_id == assoc_transcript_id) and junction_name in transcript_structure:
                             # Extract junction sequence from genome
                             # DEFECT 4 -- the strand comes from column 2 of
                             # transcript_associations.txt, and the KINNEX-5 build writes '.'

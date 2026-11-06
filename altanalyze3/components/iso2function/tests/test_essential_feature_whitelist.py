@@ -227,3 +227,37 @@ def test_fbar_wh2_and_separate_ef_hands_have_native_specific_labels():
                                  rows, dict(A=REF, B=REF[:60]), feature_types=('NONE',),
                                  sources=('protein_features',))
     assert [(f['A_start'], f['A_end'], f['class_display']) for f in feats] == [(5, 20, 'EF-hand1'), (30, 45, 'EF-hand2')]
+
+
+def _dbd(fid, a_start, a_end, b_start, b_end, status, ref):
+    return dict(gene_symbol='G', provider='protein_features', feature_id=fid, feature_type='PF00853', description='Runt_dom',
+                reference_protein=ref, reference_start=1, reference_end=20, A_start=a_start, A_end=a_end,
+                B_native_start=b_start, B_native_end=b_end, B_native_segments=[[b_start, b_end]] if a_start != '' and b_start != '' else [],
+                status=status, source_feature_ids=[fid], essential_class='DNA_BINDING', class_label='DNA-binding',
+                class_display='DNA-binding', class_priority=10, class_color='#117733')
+
+
+def test_row_folded_into_a_b_bar_stays_unplaced_on_a_whatever_the_partner():
+    """RUNX1, 2026-11-03: a DNA-binding row with no A coordinate was folded into the same-class B bar when the
+    partner carried it, and listed as unplaced on A when the partner did not. A's track then depended on its
+    partner and select_tracks refused the 3-isoform ISV. The fold now acts on B only."""
+    def plan(partner, b_has_it):
+        display = [_dbd('host', 10, 30, 5 if b_has_it else '', 25 if b_has_it else '', 'partial' if b_has_it else 'absent', 'P1'),
+                   _dbd('other', '', '', 8 if b_has_it else '', 20 if b_has_it else '', 'unplaced_annotation', 'P2')]
+        audit = {f['feature_id']: dict(display_role='displayed_without_A_coordinate' if f['A_start'] == '' else 'displayed') for f in display}
+        final = pf._coalesce_same_essential_class(display, audit)
+        for i, f in enumerate(final, 1): f['display_id'] = 'F' + str(i)
+        return dict(pair=dict(gene_symbol='G', isoform_A='A', isoform_B=partner), features=final), audit
+    folded, audit_folded = plan('B1', True)
+    unfolded, _ = plan('B2', False)
+    assert audit_folded['other']['display_role'] == 'coalesced_same_essential_class'
+    assert [f['feature_id'] for f in folded['features'] if f.get('folded_into_B_bar')] == ['other']
+    for p in (folded, unfolded):
+        placed_a, unplaced_a = pf.architecture_features(p['features'], 'A')
+        assert [i['feature']['feature_id'] for i in placed_a] == ['host']
+        assert [next(f['feature_id'] for f in p['features'] if f['display_id'] == u) for u in unplaced_a] == ['other']
+    placed_b, unplaced_b = pf.architecture_features(folded['features'], 'B')
+    assert [i['feature']['feature_id'] for i in placed_b] == ['host'] and unplaced_b == []   # one bar on B, no extra row
+    bundle = dict(models=dict(A=dict(gene_symbol='G', protein_aa=40, coding_exons=[])), plans=[folded, unfolded])
+    track = select_tracks(bundle, ['A'], 'G')[0]
+    assert [f['feature_id'] for f in track['features']] == ['host'] and track['unplaced_text'] == 'DNA-binding'

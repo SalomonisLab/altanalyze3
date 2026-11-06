@@ -20,10 +20,7 @@ def _sample_counts(adata, rows, h5ad_path=None):
     if not h5ad_path:
         raise ValueError('Integrated TF expression requires raw counts.')
     import h5py
-    try:
-        from anndata.io import sparse_dataset
-    except ImportError:
-        from anndata.experimental import sparse_dataset
+    from altanalyze3.components.anndata_compat import sparse_dataset
     with h5py.File(h5ad_path, 'r') as fh:
         if 'counts' not in fh.get('layers', {}):
             raise ValueError('Integrated TF expression requires raw counts.')

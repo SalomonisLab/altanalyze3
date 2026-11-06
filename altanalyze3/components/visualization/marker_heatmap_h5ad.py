@@ -275,7 +275,9 @@ def render_heatmap_from_cache(cache_path, output_path, covariate_df=None, go_ter
                               label_shared_exons=True, colorbar_label="Norm Exp (z-score)",
                               label_replacements=None, label_shared_introns=False,
                               callout_color='#000000', sample_labels=None,
-                              show_pattern_labels=False, caption=None):
+                              show_pattern_labels=False, caption=None, figure_title=None,
+                              row_marks=None, row_mark_label=None, callout_label_overrides=None,
+                              callout_colors=None, missing_color='black'):
     """Redraw a saved heatmap cache with the current plotting code.
 
     Use this to change how a finished result is drawn -- resolution, colour range, labels --
@@ -321,7 +323,11 @@ def render_heatmap_from_cache(cache_path, output_path, covariate_df=None, go_ter
         label_replacements=label_replacements,
         label_shared_introns=label_shared_introns,
         callout_color=callout_color, sample_labels=sample_labels,
-        show_pattern_labels=show_pattern_labels, caption=caption,
+        show_pattern_labels=show_pattern_labels, caption=caption, figure_title=figure_title,
+        row_marks=row_marks, row_mark_label=row_mark_label,
+        callout_label_overrides=callout_label_overrides,
+        callout_colors=callout_colors,
+        missing_color=missing_color,
     )
     return output_path
 
@@ -399,10 +405,13 @@ def _read_label_events(path):
     return events
 
 
-def _draw_row_callouts(ax, labels, rows, n_rows, fontsize=6.0, color='#000000'):
+def _draw_row_callouts(ax, labels, rows, n_rows, fontsize=6.0, color='#000000', x_offset=0.,
+                       fit_to_page=True):
     """Label only ``rows``, to the right of the heatmap, with 2-point leader lines spread to avoid overlap."""
     if not rows:
         return
+    if isinstance(color, (list, tuple)) and len(color)!=len(rows):
+        raise ValueError('Each callout row requires exactly one color')
     fig = ax.figure
     fig.canvas.draw()
     height_pt = ax.get_window_extent().height * 72.0 / fig.dpi
@@ -421,11 +430,16 @@ def _draw_row_callouts(ax, labels, rows, n_rows, fontsize=6.0, color='#000000'):
     transform = ax.get_yaxis_transform()
     artists = []
     for i, y in zip(order, placed):
-        artists += ax.plot([1.0, 1.03], [rows[i], y], color=color, linewidth=0.4, transform=transform,
+        row_color=color[i] if isinstance(color,(list,tuple)) else color
+        artists += ax.plot([1.0+x_offset, 1.03+x_offset], [rows[i], y], color=row_color, linewidth=0.4, transform=transform,
                            clip_on=False)
-        artists.append(ax.text(1.035, y, labels[i], transform=transform, ha="left", va="center",
-                               fontsize=fontsize, color=color, clip_on=False))
+        artists.append(ax.text(1.035+x_offset, y, labels[i], transform=transform, ha="left", va="center",
+                               fontsize=fontsize, color=row_color, clip_on=False))
     ax.set_ylim(original_ylim)
+    if not fit_to_page:
+        # Tight-bbox exports expand the page to fit complete callouts. Retain
+        # readable fonts instead of shrinking them to the original page width.
+        return
     # The page and the heatmap keep their size; a label that would run off the page shrinks the font instead.
     fig.canvas.draw()
     renderer = fig.canvas.get_renderer()
@@ -445,7 +459,22 @@ def _draw_row_callouts(ax, labels, rows, n_rows, fontsize=6.0, color='#000000'):
             artist.remove()
         width = right - left
         _draw_row_callouts(ax, labels, rows, n_rows,
-                           fontsize=max(3.5, .99 * fontsize * (width - overflow) / width), color=color)
+                           fontsize=max(3.5, .99 * fontsize * (width - overflow) / width),
+                           color=color, x_offset=x_offset, fit_to_page=fit_to_page)
+
+
+def _draw_event_row_marks(ax, raw_labels, row_marks):
+    """Draw exact, orientation-preserving event annotations without changing data."""
+    requested={_event_uid(event) for event in row_marks}
+    available={_event_uid(event) for event in raw_labels}
+    if not requested <= available:
+        raise ValueError('Every row mark must match an exact displayed event identity')
+    rows=[i for i,event in enumerate(raw_labels) if _event_uid(event) in requested]
+    for row in rows:
+        ax.plot([1.006,1.038],[row,row],transform=ax.get_yaxis_transform(),
+                color='#d62728',linewidth=.9,linestyle='-',
+                clip_on=False,zorder=8)
+    return rows
 
 
 # Splicing PSI defaults (Nathan, 2026-10-11): the settings of the KINNEX-5 healthy PSI run he approved, "appropriate for
@@ -1005,6 +1034,10 @@ def _build_heatmap(adata, cluster_key, genes, cluster_order, use_raw, layer, inc
     heatmap_raw_df = pd.DataFrame(values.T, index=genes_present, columns=ordered_cells)
     heatmap_col_df = _zscore_columns(heatmap_raw_df) if include_column_zscore else pd.DataFrame()
     heatmap_row_df = _zscore_rows(heatmap_raw_df)
+    if all(_is_event_label(gene) for gene in genes_present):
+        # Missing PSI is not a zero z-score. Keep its source mask through plotting
+        # and cache export; measured PSI=0 remains a measured value.
+        heatmap_row_df = heatmap_row_df.where(heatmap_raw_df.notna())
     return heatmap_row_df, heatmap_col_df, cluster_counts, ordered_cells
 
 
@@ -1522,6 +1555,11 @@ def _plot_heatmap(
     show_pattern_labels=False,
     label_shared_introns=False,
     callout_color='#000000',
+    row_marks=None,
+    row_mark_label=None,
+    callout_label_overrides=None,
+    callout_colors=None,
+    missing_color='black',
 ):
     if heatmap_df.empty:
         raise ValueError("Heatmap dataframe is empty.")
@@ -1562,6 +1600,8 @@ def _plot_heatmap(
     import textwrap
     caption_lines = textwrap.wrap(str(caption), width=135) if caption else []
     caption_height_in = (len(caption_lines) * 0.115 + 0.16) if caption_lines else 0.
+    if row_marks is not None and row_mark_label:
+        caption_height_in += .26
     sample_height_in = (max(.65, max((len(str(v)) for v in sample_labels.values()), default=0)
                            * 5.5 * .55 / 72 + .12) if sample_labels is not None else 0.)
     footer_height_in = caption_height_in + sample_height_in
@@ -1603,8 +1643,9 @@ def _plot_heatmap(
     vmin, vmax = -half_range / contrast, half_range / contrast
     norm = TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax)
     heatmap_cmap = YellowBlackSky()
-    # Missing PSI is visually black by explicit figure instruction; retain NaN in all data/caches.
-    heatmap_cmap.set_bad('black')
+    # Black remains the established default; an explicit missing-data color can
+    # distinguish unavailable measurements from measured, neutral z-scores.
+    heatmap_cmap.set_bad(missing_color)
     im = ax.imshow(
         heatmap_df.values,
         aspect="auto",
@@ -1651,19 +1692,35 @@ def _plot_heatmap(
     gene_fontsize = _axis_label_fontsize(heatmap_df.shape[0], axis="y")
     y_positions = np.arange(heatmap_df.shape[0])
     raw_labels = [str(g) for g in heatmap_df.index]
+    event_colors={_event_uid(k):v for k,v in (callout_colors or {}).items()}
+    if not set(event_colors)<={_event_uid(g) for g in raw_labels}:
+        raise ValueError('Every explicit callout color must match a displayed event identity')
+    callout_offset=.05 if row_marks is not None else 0.
+    marked_rows=[] if row_marks is None else _draw_event_row_marks(ax,raw_labels,row_marks)
+    if row_marks is not None:
+        pd.DataFrame([dict(heatmap_row=i+1,event=_event_uid(raw_labels[i]),annotation=row_mark_label)
+                      for i in marked_rows],columns=['heatmap_row','event','annotation']).to_csv(
+            os.path.splitext(output_path)[0]+'_row_marks.tsv',sep='\t',index=False)
     # Splicing events read as SYMBOL:junction|junction (Nathan, 2026-10-11); other labels are unchanged.
     symbols = _load_gene_symbols(species) if any(_is_event_label(g) for g in raw_labels) else {}
     y_labels = [_format_event_label(g, symbols) if symbols and _is_event_label(g) else g for g in raw_labels]
+    overrides={_event_uid(k):str(v) for k,v in (callout_label_overrides or {}).items()}
+    if not set(overrides)<={_event_uid(g) for g in raw_labels}:
+        raise ValueError('Every explicit callout override must match a displayed event identity')
+    y_labels=[overrides.get(_event_uid(g),label) for g,label in zip(raw_labels,y_labels)]
     callout_rows = None
-    if label_events is not None:
+    if label_events is not None or overrides:
         # A row is labelled when it is a listed event (either junction order) or, unless
         # label_shared_exons is False, when it shares an exon block with one: the redundancy rule of
         # the shared-exon collapse (Nathan, 2026-10-11).
-        listed = {_event_key(e): _event_uid(e) for e in label_events}
+        listed = {_event_key(e): _event_uid(e) for e in (label_events or [])}
         listed_exons = {uid: _event_exons(uid, include_introns=label_shared_introns)
                         for uid in listed.values()}
         records = []
         for i, g in enumerate(raw_labels):
+            if _event_uid(g) in overrides:
+                records.append((i,'explicit literature callout',_event_uid(g),''))
+                continue
             if _event_key(g) in listed:
                 records.append((i, "listed event", listed[_event_key(g)], ""))
                 continue
@@ -1678,9 +1735,11 @@ def _plot_heatmap(
                                     ";".join(f"{gene}:{block}" for gene, block in shared)))
         callout_rows = sorted({r[0] for r in records})
         n_exact = len({r[0] for r in records if r[1] == "listed event"})
+        n_literature = len({r[0] for r in records if r[1] == "explicit literature callout"})
         print(f"[INFO] Row-label whitelist: {len(callout_rows)} of {len(raw_labels)} heatmap rows labelled for "
               f"{len(listed)} listed events: {n_exact} listed events (either junction order), "
-              f"{len(callout_rows) - n_exact} sharing an exon with one")
+              f"{len(callout_rows) - n_exact - n_literature} sharing an exon with one"
+              + (f", {n_literature} explicit literature callouts" if n_literature else ""))
         label_table = os.path.splitext(output_path)[0] + "_label_events.tsv"
         pd.DataFrame(
             [{"heatmap_row": i + 1, "event": _event_uid(raw_labels[i]), "label": y_labels[i],
@@ -1798,7 +1857,10 @@ def _plot_heatmap(
             # GO terms. Fitting them to every matrix row made sparse labels overlap
             # and shrink on large heatmaps despite the empty rows between callouts.
             _draw_row_callouts(ax, [y_labels[i] for i in callout_rows],
-                               callout_rows, heatmap_df.shape[0], color=callout_color)
+                               callout_rows, heatmap_df.shape[0],
+                               color=([event_colors.get(_event_uid(raw_labels[i]),callout_color) for i in callout_rows]
+                                      if event_colors else callout_color),x_offset=callout_offset,
+                               fit_to_page=not show_pattern_labels)
         else:
             for pos, gene in enumerate(y_labels):
                 ax_labels.text(
@@ -1832,7 +1894,10 @@ def _plot_heatmap(
 
     if ax_labels is None and callout_rows is not None:
         _draw_row_callouts(ax, [y_labels[i] for i in callout_rows], callout_rows,
-                           heatmap_df.shape[0], color=callout_color)
+                           heatmap_df.shape[0],
+                           color=([event_colors.get(_event_uid(raw_labels[i]),callout_color) for i in callout_rows]
+                                  if event_colors else callout_color),x_offset=callout_offset,
+                           fit_to_page=not show_pattern_labels)
 
     if sample_labels is not None:
         labels = [str(sample_labels[c]) for c in heatmap_df.columns]
@@ -1849,6 +1914,13 @@ def _plot_heatmap(
     if caption_lines:
         fig.text(.045, .035 / fixed_height, '\n'.join(caption_lines),
                  ha='left', va='bottom', fontsize=7, linespacing=1.15)
+
+    if row_marks is not None and row_mark_label:
+        from matplotlib.lines import Line2D
+        legend_y=max(.12,caption_height_in-.12)/fixed_height
+        fig.add_artist(Line2D([.27,.305],[legend_y,legend_y],transform=fig.transFigure,
+                             color='#d62728',linewidth=.9,linestyle='-'))
+        fig.text(.315,legend_y,str(row_mark_label),ha='left',va='center',fontsize=7)
 
     # Iterative review labels can contain long literal multi-gene junction IDs.
     # Preserve their full text by expanding the exported page, without shrinking
@@ -1897,6 +1969,18 @@ def _save_figure(fig, output_path, dpi=None, write_svg=True, bbox_inches=None):
     """
     written = [output_path]
     dpi = float(dpi) if dpi else _heatmap_dpi()
+    # Keep page-resolution rasterization even for small matrices. Native-size
+    # (one pixel per cell) PDF images are smoothed by some PDF viewers despite
+    # interpolation='none', blurring measured cells and categorical strips.
+    # Bound the small-matrix mixed-mode buffer instead of disabling it; large
+    # single-cell matrices retain the existing requested-DPI path.
+    from matplotlib.image import AxesImage
+    images = fig.findobj(AxesImage)
+    native_small = (images and sum(image.get_array().size for image in images) <= 1_000_000
+                    and all(image.get_interpolation() == 'none' for image in images)
+                    and os.path.splitext(str(output_path))[1].lower() in {'.pdf', '.svg'})
+    if native_small:
+        dpi = min(dpi, 600.)
     fig.savefig(output_path, facecolor="white", transparent=False, dpi=dpi, bbox_inches=bbox_inches)
     base, ext = os.path.splitext(output_path)
     svg_path = base + ".svg"
@@ -1955,6 +2039,33 @@ def _markerfinder_stats(adata, cluster_key, use_raw, layer, scale_data=False,
         max_missing_fraction=max_missing_fraction,
     )
     return p_df, r_df
+
+
+def _measured_group_eligibility(adata, cluster_key, use_raw, layer, minimum, cluster_order):
+    """Count original measured values, retaining every source feature and sample.
+
+    This optional assignment gate does not change correlations, P values or the
+    BH correction family. Each query group and its combined reference must have
+    ``minimum`` measured observations. Implicit sparse zeros are measurements.
+    """
+    if isinstance(minimum, bool) or not isinstance(minimum, (int, np.integer)) or minimum < 1:
+        raise ValueError('min_measured_per_group must be a positive integer or None')
+    matrix, features = _get_expression_matrix(adata, use_raw, layer)
+    groups = adata.obs[cluster_key].astype(str).to_numpy()
+    counts = np.zeros((len(features), len(cluster_order)), dtype=np.int64)
+    total = np.zeros(len(features), dtype=np.int64)
+    for start in range(0, len(features), 4096):
+        stop = min(start + 4096, len(features))
+        block = matrix[:, start:stop]
+        values = block.toarray() if sparse.issparse(block) else np.asarray(block)
+        measured = np.isfinite(values)
+        total[start:stop] = measured.sum(axis=0)
+        for j, group in enumerate(cluster_order):
+            counts[start:stop, j] = measured[groups == group, :].sum(axis=0)
+    counts = pd.DataFrame(counts, index=features, columns=cluster_order)
+    reference = pd.DataFrame(total[:, None] - counts.to_numpy(),
+                             index=features, columns=cluster_order)
+    return counts.ge(minimum) & reference.ge(minimum), counts, reference
 
 
 def _generate_single_marker_network(cluster, selected, interactions_df, output_prefix):
@@ -2100,6 +2211,9 @@ def generate_marker_heatmap_from_adata(
     return_statistics=False,
     marker_ranking="fdr",
     missing_psi="preserve",
+    missing_color='black',
+    min_measured_per_group=None,
+    raw_pval_threshold=None,
 ):
     """Find markers using all input cells; output controls do not change scoring.
 
@@ -2112,14 +2226,26 @@ def generate_marker_heatmap_from_adata(
         raise ValueError("heatmap_dpi must be a finite positive number.")
     total_started = time.perf_counter()
     timings = {}
-    if marker_ranking not in {"fdr", "rho"}:
-        raise ValueError("marker_ranking must be fdr or rho")
+    if raw_pval_threshold is not None and (
+        marker_method != 'markerfinder' or marker_ranking != 'fdr' or
+        not np.isfinite(raw_pval_threshold) or not 0 < raw_pval_threshold <= 1
+    ):
+        raise ValueError('raw_pval_threshold requires MarkerFinder P-value ranking and a threshold in (0,1]')
+    if min_measured_per_group is not None and (
+        isinstance(min_measured_per_group, bool) or
+        not isinstance(min_measured_per_group, (int, np.integer)) or min_measured_per_group < 1
+    ):
+        raise ValueError('min_measured_per_group must be a positive integer or None')
+    if marker_ranking not in {"fdr", "rho", "statistic"}:
+        raise ValueError("marker_ranking must be fdr, rho or statistic")
     if marker_ranking == "rho" and (marker_method != "markerfinder" or pval_threshold is not None):
         raise ValueError("Rho-only ranking requires MarkerFinder and pval_threshold=None")
+    if marker_ranking == "statistic" and (marker_method != "scanpy" or method != "wilcoxon" or pval_threshold is not None):
+        raise ValueError("Statistic-only ranking requires scanpy Wilcoxon and pval_threshold=None")
     if missing_psi not in {"preserve", "row_median"}:
         raise ValueError("missing_psi must be preserve or row_median")
-    if missing_psi == "row_median" and (marker_method != "markerfinder" or use_raw or scale_data):
-        raise ValueError("Row-median PSI filling requires MarkerFinder, use_raw=False and scale_data=False")
+    if missing_psi == "row_median" and (use_raw or scale_data):
+        raise ValueError("Row-median filling requires use_raw=False and scale_data=False")
     out = str(out)
     out_dir = os.path.dirname(out) or "."
     base_name = os.path.splitext(os.path.basename(out))[0]
@@ -2230,6 +2356,24 @@ def generate_marker_heatmap_from_adata(
         if "logfoldchanges" not in rg_df.columns:
             raise ValueError("logfoldchanges missing; cannot enforce upregulated marker selection.")
         effect_df = rg_df.pivot_table(index="names", columns="group", values="logfoldchanges", aggfunc="first")
+        if marker_ranking == "statistic":
+            # Scanpy computes the native Wilcoxon rank-sum scores. Do not rank
+            # PSI by a count/log-expression fold-change model or call z a rho.
+            effect_df = rg_df.pivot_table(index="names", columns="group", values="scores", aggfunc="first")
+            pvals = rg_df.pivot_table(index="names", columns="group", values="pvals", aggfunc="first")
+            fdr_df = rg_df.pivot_table(index="names", columns="group", values="pvals_adj", aggfunc="first")
+            if missing_psi == "row_median":
+                # Rank routines can return an apparent signed score for an
+                # all-NaN column. There is no observed median or defined test
+                # for that feature. Retain its identity with undefined scores.
+                values = filled.to_numpy()
+                finite = np.isfinite(values)
+                undefined = (~finite.any(axis=1) |
+                    (np.where(finite, values, np.inf).min(axis=1) ==
+                     np.where(finite, values, -np.inf).max(axis=1)))
+                names = filled.index[undefined]
+                for statistics in (effect_df, pvals, fdr_df):
+                    statistics.loc[statistics.index.isin(names), :] = np.nan
     _log_step_timing(
         "marker_heatmap.compute_markers",
         marker_core_started,
@@ -2238,17 +2382,41 @@ def generate_marker_heatmap_from_adata(
     )
 
     unique_select_started = time.perf_counter()
+    # Opt-in nominal-P selection changes eligibility/ranking only. Keep the
+    # native BH family and its full-precision adjusted values for reporting.
+    assignment_fdr = pvals if raw_pval_threshold is not None else fdr_df
+    selection_threshold = raw_pval_threshold if raw_pval_threshold is not None else pval_threshold
+    assignment_effect = effect_df
+    measurement_eligibility_tsv = None
+    eligibility = None
+    if min_measured_per_group is not None:
+        eligibility, measured, reference = _measured_group_eligibility(
+            source_adata, cluster_key, use_raw, layer, min_measured_per_group, cluster_order)
+        measurement_eligibility_tsv = os.path.join(out_dir, f'{base_name}_measurement_eligibility.tsv')
+        audit = pd.concat([
+            pd.DataFrame({'event': measured.index, 'group': group,
+                          'measured_query': measured[group].to_numpy(),
+                          'measured_reference': reference[group].to_numpy(),
+                          'minimum_required': min_measured_per_group,
+                          'eligible_for_assignment': eligibility[group].to_numpy()})
+            for group in cluster_order], ignore_index=True)
+        audit.to_csv(measurement_eligibility_tsv, sep='\t', index=False)
+        assignment_fdr = assignment_fdr.where(eligibility.reindex(index=assignment_fdr.index, columns=assignment_fdr.columns,
+                                                        fill_value=False))
+        if effect_df is not None:
+            assignment_effect = effect_df.where(eligibility.reindex(
+                index=effect_df.index, columns=effect_df.columns, fill_value=False))
     # The marker TABLE keeps every assigned gene; the HEATMAP takes top_n per cluster, because
     # a figure with one row per assigned gene is unreadable. The two were the same object, so
     # the figure's size silently defined the table.
     selected_all = _select_unique_markers(
-        fdr_df,
+        assignment_fdr,
         cluster_order,
         None,
-        effect_df=effect_df,
-        pval_threshold=pval_threshold,
+        effect_df=assignment_effect,
+        pval_threshold=selection_threshold,
         min_rho=min_rho,
-        ranking=marker_ranking,
+        ranking="rho" if marker_ranking == "statistic" else marker_ranking,
     )
     if collapse_shared_exons and not selected_all.empty:
         n_before = len(selected_all)
@@ -2261,7 +2429,9 @@ def generate_marker_heatmap_from_adata(
         selected_all.groupby("cluster", sort=False).head(top_n).reset_index(drop=True)
         if top_n is not None else selected_all
     )
-    selection_description = "rho-only selection" if marker_ranking == "rho" else "FDR/effect filtering"
+    selection_description = ("rho-only selection" if marker_ranking == "rho" else
+                             "native Wilcoxon score-only selection" if marker_ranking == "statistic" else
+                             "raw P/effect filtering" if raw_pval_threshold is not None else "FDR/effect filtering")
     print(f"[INFO] Assigned {selected_all.shape[0]} unique markers after {selection_description} "
           f"(written to the marker TSV); {selected.shape[0]} go to the heatmap (top_n={top_n}).")
     _log_step_timing(
@@ -2274,16 +2444,22 @@ def generate_marker_heatmap_from_adata(
         if return_statistics and marker_method == "markerfinder":
             return {"pdf": None, "rho": effect_df.reindex(adata.var_names),
                     "pval": pvals.reindex(adata.var_names), "fdr": fdr_df.reindex(adata.var_names),
-                    "sample_ids": adata.obs_names.tolist(), "status": "NO_MARKERS_SELECTED"}
+                    "sample_ids": adata.obs_names.tolist(), "status": "NO_MARKERS_SELECTED",
+                    "measurement_eligibility_tsv": measurement_eligibility_tsv,
+                    "min_measured_per_group": min_measured_per_group}
         raise NoMarkersSelectedError("No markers were selected. Check inputs and parameters.")
 
     redundant_select_started = time.perf_counter()
     redundant_selected = _select_top_markers_per_cluster(
-        fdr_df,
+        assignment_fdr,
         cluster_order,
         250,
-        effect_df=effect_df,
+        effect_df=assignment_effect,
     )
+    if eligibility is not None and not redundant_selected.empty:
+        redundant_selected = redundant_selected.loc[
+            [bool(eligibility.loc[row.gene, str(row.cluster)])
+             for row in redundant_selected.itertuples(index=False)]].reset_index(drop=True)
     print(f"[INFO] Selected {redundant_selected.shape[0]} redundant markers for network export.")
     _log_step_timing(
         "marker_heatmap.select_redundant_markers",
@@ -2381,6 +2557,7 @@ def generate_marker_heatmap_from_adata(
                 label_events=label_events,
                 species=species,
                 label_shared_exons=label_shared_exons,
+                missing_color=missing_color,
             )
             _log_step_timing(
                 "marker_heatmap.render_heatmap_pdf",
@@ -2427,8 +2604,11 @@ def generate_marker_heatmap_from_adata(
         use_raw,
         layer,
         aggregates=stats_aggregates,
-        effect_column="rho" if marker_method == "markerfinder" else None,
+        effect_column="rho" if marker_method == "markerfinder" else ("wilcoxon_z" if marker_ranking == "statistic" else None),
     )
+    if raw_pval_threshold is not None:
+        marker_stats['Raw p-value'] = [pvals.loc[g, str(c)] for g,c in
+                                      zip(marker_stats['Gene'],marker_stats['cluster'])]
     _log_step_timing(
         "marker_heatmap.compute_marker_stats_unique",
         marker_stats_started,
@@ -2454,8 +2634,11 @@ def generate_marker_heatmap_from_adata(
         use_raw,
         layer,
         aggregates=stats_aggregates,
-        effect_column="rho" if marker_method == "markerfinder" else None,
+        effect_column="rho" if marker_method == "markerfinder" else ("wilcoxon_z" if marker_ranking == "statistic" else None),
     )
+    if raw_pval_threshold is not None:
+        redundant_marker_stats['Raw p-value'] = [pvals.loc[g, str(c)] for g,c in
+            zip(redundant_marker_stats['Gene'],redundant_marker_stats['cluster'])]
     _log_step_timing(
         "marker_heatmap.compute_marker_stats_redundant",
         redundant_stats_started,
@@ -2477,13 +2660,14 @@ def generate_marker_heatmap_from_adata(
         write_cache_started = time.perf_counter()
         source_PSI = None
         imputed_mask = None
-        if missing_psi == "row_median":
+        if missing_psi == "row_median" or all(_is_event_label(gene) for gene in heatmap_df.index):
             source_matrix, source_features = _get_expression_matrix(source_adata, False, layer)
             values = source_matrix[source_adata.obs_names.get_indexer(ordered_cells), :]
             values = values[:, pd.Index(source_features).get_indexer(heatmap_df.index)]
             values = values.toarray() if sparse.issparse(values) else np.asarray(values)
             source_PSI = pd.DataFrame(values.T, index=heatmap_df.index, columns=ordered_cells)
-            imputed_mask = source_PSI.isna() & source_PSI.median(axis=1).notna().to_numpy()[:, None]
+            if missing_psi == "row_median":
+                imputed_mask = source_PSI.isna() & source_PSI.median(axis=1).notna().to_numpy()[:, None]
         _write_heatmap_cache(
             heatmap_cache,
             heatmap_df,
@@ -2582,17 +2766,22 @@ def generate_marker_heatmap_from_adata(
         "timings": timings,
         "marker_ranking": marker_ranking,
         "missing_PSI_handling": imputation,
+        "measurement_eligibility_tsv": measurement_eligibility_tsv,
+        "min_measured_per_group": min_measured_per_group,
+        "raw_pval_threshold": raw_pval_threshold,
     }
     if return_statistics:
-        result.update(rho=effect_df.reindex(adata.var_names), pval=pvals.reindex(adata.var_names),
+        result.update(pval=pvals.reindex(adata.var_names),
                       fdr=fdr_df.reindex(adata.var_names), sample_ids=adata.obs_names.tolist(),
                       assignments=selected_all.copy())
+        result["scores" if marker_ranking == "statistic" else "rho"] = effect_df.reindex(adata.var_names)
     return result
 
 
 def render_signed_marker_heatmap_from_saved_statistics(
         adata, rho, pval, fdr, *, cluster_key, out, top_n=100, min_rho=.4,
-        pval_threshold=1., label_events=None, dpi=300, caption=None):
+        pval_threshold=1., label_events=None, dpi=300, caption=None,
+        missing_psi='preserve'):
     """Extend a native single-scheme view with inverse signatures, without rescoring.
 
     Reuses the native unique-marker selection, row z-score builder and renderer.
@@ -2600,6 +2789,8 @@ def render_signed_marker_heatmap_from_saved_statistics(
     Full original statistics and source observations must be supplied in exact order.
     """
     from pathlib import Path
+    if missing_psi not in {'preserve','row_median'}:
+        raise ValueError('missing_psi must be preserve or row_median')
     for frame in (rho, pval, fdr):
         if not frame.index.equals(adata.var_names) or not frame.columns.equals(rho.columns):
             raise ValueError('Saved statistics must retain every ordered source event and group')
@@ -2619,7 +2810,15 @@ def render_signed_marker_heatmap_from_saved_statistics(
     out = Path(out); out.parent.mkdir(parents=True, exist_ok=True)
     selected_all.to_csv(out.with_suffix('.all_assignments.tsv'), sep='\t', index=False)
     selected.to_csv(out.with_suffix('.displayed_rows.tsv'), sep='\t', index=False)
-    matrix, _, counts, cells = _build_heatmap(adata, cluster_key,
+    drawing_data=adata
+    source_frame=imputed_mask=None
+    if missing_psi=='row_median':
+        values=adata.X.toarray() if sparse.issparse(adata.X) else np.asarray(adata.X)
+        source_frame=pd.DataFrame(values.T,index=adata.var_names,columns=adata.obs_names)
+        filled,imputed_mask=fill_PSI_row_median(source_frame)
+        drawing_data=adata.copy()
+        drawing_data.X=filled.to_numpy().T.copy()
+    matrix, _, counts, cells = _build_heatmap(drawing_data, cluster_key,
         selected.gene.tolist(), order, False, None, include_column_zscore=False)
     groups = adata.obs.loc[cells, cluster_key].astype(str).tolist()
     row_groups = selected.cluster.astype(str).tolist()
@@ -2629,10 +2828,14 @@ def render_signed_marker_heatmap_from_saved_statistics(
         colorbar_label='PSI row z-score', caption=caption)
     matrix.to_csv(out.with_suffix('.zscore_matrix.tsv'), sep='\t')
     cache = str(out.with_suffix('.zscore_matrix.h5ad'))
-    _write_heatmap_cache(cache, matrix, row_groups, groups, cells)
+    _write_heatmap_cache(cache, matrix, row_groups, groups, cells,
+        source_PSI=source_frame.loc[selected.gene.tolist(),cells] if source_frame is not None else None,
+        imputed_mask=imputed_mask.loc[selected.gene.tolist(),cells] if imputed_mask is not None else None)
     return dict(pdf=str(out), heatmap_cache=cache, assigned=len(selected_all),
                 plotted=len(selected), pattern_counts=selected.cluster.value_counts().to_dict(),
-                normalization='Native row z-score; missing standardized values displayed as zero',
+                normalization=('Native row z-score after event-row-median filling' if missing_psi=='row_median'
+                               else 'Native row z-score; missing standardized values displayed as zero'),
+                missing_PSI_handling=missing_psi,
                 selection='Native unique-marker FDR then rho ordering across up/down signed groups')
 
 
@@ -2646,7 +2849,15 @@ def fill_PSI_row_median(matrix):
     if np.isinf(matrix.to_numpy()).any():
         raise ValueError('Infinite PSI is invalid')
     mask=matrix.isna()
-    result=matrix.T.fillna(matrix.median(axis=1)).T
+    # Transposing before DataFrame.fillna creates one fill operation per event
+    # column (tens of thousands for PSI). Broadcast the same pandas row medians
+    # over the numeric array instead; keep labels and the source frame intact.
+    values=matrix.to_numpy(copy=True)
+    medians=matrix.median(axis=1).to_numpy()
+    # Match the old transpose/fill/transpose result's C layout too: pandas
+    # float32 row reductions can accumulate differently on an F-layout block.
+    result=pd.DataFrame(np.ascontiguousarray(np.where(mask.to_numpy(), medians[:, None], values)),
+                        index=matrix.index, columns=matrix.columns)
     imputed=mask & result.notna()
     return result, imputed
 
@@ -2878,6 +3089,10 @@ def main():
     )
     parser.add_argument("--top-n", type=int, default=5, help="Markers per cluster (default 5).")
     parser.add_argument("--out", default="marker_heatmap.pdf", help="Output figure path.")
+    parser.add_argument("--missing-color", default="black",
+                        help="Color of missing heatmap measurements; default black. Does not impute or rescore.")
+    parser.add_argument("--min-measured-per-group", type=int, default=None,
+                        help="Optional minimum measured observations in both query and reference for assignment; scores and BH family remain unchanged.")
     parser.add_argument(
         "--covariate-h5ad",
         default=None,
@@ -3072,6 +3287,8 @@ def main():
     )
     parser.add_argument("--rho-only", action="store_true",
                         help="MarkerFinder: assign and rank by positive rho alone; disable P/FDR selection.")
+    parser.add_argument('--raw-p-threshold', type=float, default=None,
+                        help='MarkerFinder: select by nominal P instead of FDR; retain native BH values in output.')
     parser.add_argument("--missing-psi", choices=["preserve", "row_median"], default="preserve",
                         help="Fill missing event PSI on a copy with its median over all input samples before scoring and scaling.")
     parser.add_argument(
@@ -3157,6 +3374,7 @@ def main():
             label_events=_read_label_events(args.label_events) if args.label_events else None,
             species=args.species,
             label_shared_exons=not args.label_events_exact,
+            missing_color=args.missing_color,
         )
         print(f"Saved marker heatmap to: {written}")
         return
@@ -3266,8 +3484,11 @@ def main():
             collapse_shared_exons=args.collapse_shared_exons,
             pval_threshold=None if args.rho_only else args.fdr_threshold,
             marker_ranking="rho" if args.rho_only else "fdr",
+            raw_pval_threshold=args.raw_p_threshold,
             missing_psi=args.missing_psi,
+            missing_color=args.missing_color,
             max_sample_missing_above_group_median=args.max_sample_missing_above_group_median,
+            min_measured_per_group=args.min_measured_per_group,
             label_events=_read_label_events(args.label_events) if args.label_events else None,
             label_shared_exons=not args.label_events_exact,
             cells_per_cluster=args.cells_per_cluster,

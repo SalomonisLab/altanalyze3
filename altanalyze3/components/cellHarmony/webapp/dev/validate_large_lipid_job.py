@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 import anndata as ad
-from anndata.io import read_elem, sparse_dataset
+from altanalyze3.components.anndata_compat import read_elem, sparse_dataset
 import h5py
 import numpy as np
 import pandas as pd

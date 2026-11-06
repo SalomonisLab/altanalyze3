@@ -46,6 +46,7 @@ import argparse
 import json
 import os
 import sys
+import textwrap
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -65,8 +66,19 @@ except ImportError:  # pragma: no cover - direct script execution
 
 # ------------------------------------------------------------------ inputs
 
-def find_annotation_file(cell_type_dir: Path) -> Tuple[Path, bool]:
-    """Return (path, has_header). FinalGroups-CellTypesFull.txt has no header; round1Metadata has."""
+def find_annotation_file(cell_type_dir: Path, annotation_dir: Optional[Path] = None) -> Tuple[Path, bool]:
+    """Return (path, has_header). FinalGroups-CellTypesFull.txt has no header; round1Metadata has.
+
+    ``annotation_dir`` overrides the search with ``<annotation_dir>/<cell state>.txt`` (uid, V0, V1
+    with a header). Use it to supply labels the run did not write, such as the SVM assignment
+    recovered from ``SVMOutputs/round1SVC_decision_func.txt``. A missing file is an error, never a
+    silent fall back to the NMF round-1 labels.
+    """
+    if annotation_dir is not None:
+        path = Path(annotation_dir) / (cell_type_dir.name + ".txt")
+        if not path.exists():
+            raise FileNotFoundError(f"--annotation-dir given but {path} is missing")
+        return path, True
     icgs = cell_type_dir / "ICGS-NMF" / "FinalGroups-CellTypesFull.txt"
     if icgs.exists():
         return icgs, False
@@ -78,8 +90,28 @@ def find_annotation_file(cell_type_dir: Path) -> Tuple[Path, bool]:
     raise FileNotFoundError(f"no FinalGroups-CellTypesFull.txt or round1Metadata*.txt in {cell_type_dir}")
 
 
-def read_annotation(cell_type_dir: Path) -> pd.DataFrame:
-    path, has_header = find_annotation_file(cell_type_dir)
+def read_annotation(cell_type_dir: Path, annotation_dir: Optional[Path] = None,
+                    method: str = "svm", log=None) -> pd.DataFrame:
+    """Per-cell sub-cluster labels.
+
+    ``annotation_dir`` wins when given. Otherwise ``method`` decides: ``nmf`` reads the file the run
+    wrote, which for a k=2 run is the NMF round-1 membership and ignores the SVM; ``svm`` and
+    ``svm+centroid`` derive the labels with ``subcluster_labels``. The default is ``svm`` because a
+    k=2 run never saves the supervised assignment it computed.
+    """
+    if annotation_dir is None and method != "nmf":
+        from altanalyze3.components.visualization.subcluster_labels import labels_for_state
+        table, row = labels_for_state(cell_type_dir, method, log or (lambda *a, **k: None))
+        names = [c for c in table.columns if c != "uid"]
+        # the same convention the run's own file uses: the value of the second component column,
+        # so a derived table and a read table give identical sub-cluster names
+        meta = pd.DataFrame({"uid": table["uid"].astype(str),
+                             "subcluster": table[names[-1]].astype(int).astype(str)})
+        if log:
+            log(f"  labels {method}: moved by SVM {row['n_moved_svm']}, by centroid "
+                f"{row['n_moved_centroid']}; {row['n_undecidable']} cells had no variance")
+        return meta
+    path, has_header = find_annotation_file(cell_type_dir, annotation_dir)
     if has_header:
         meta = pd.read_csv(path, sep="\t")
     else:
@@ -201,8 +233,9 @@ def centroid_correlation(expr: pd.DataFrame, data: pd.DataFrame) -> Tuple[float,
 
 def analyse_cell_type(cell_type_dir: Path, groups: pd.DataFrame, group_a: str, group_b: str,
                       min_donors: int, max_donor_fraction: float, donor_min_fraction: float,
-                      log) -> Tuple[pd.DataFrame, dict]:
-    meta = read_annotation(cell_type_dir)
+                      log, annotation_dir: Optional[Path] = None,
+                      method: str = "svm") -> Tuple[pd.DataFrame, dict]:
+    meta = read_annotation(cell_type_dir, annotation_dir, method, log)
     data = groups.merge(meta, on="uid")
     if len(data) != len(meta):
         log(f"  WARNING {len(meta) - len(data)} of {len(meta)} cells have no groups row")
@@ -256,7 +289,15 @@ def plot_dotplot(table: pd.DataFrame, out_pdf: Path, group_a: str, group_b: str,
     ax.set_ylim(min(0.0, float(np.nanmin(t["distance"])) - 0.05), ymax + 0.08)
     ax.set_xticks(x)
     ax.set_xticklabels(t["cell_type"], rotation=90, fontsize=6)
-    ax.set_ylabel("Age-induced distance\n(1 - Pearson r between the two subcluster centroids, MarkerFinder genes)")
+    # A rotated y-label runs along the figure HEIGHT, so its longest line must fit in it. The
+    # wrap keeps every word and only breaks the definition line when the figure is short.
+    # 4.0 pt per character is the measured width of this label at 7 pt Arial: its 72-character
+    # definition line exactly fills a 4-inch figure, the height of the panels delivered so far,
+    # so those are unchanged and only a shorter figure wraps.
+    budget = max(24, int(figsize[1] * 72 / 4.0))
+    definition = "(1 - Pearson r between the two subcluster centroids, MarkerFinder genes)"
+    lines = ["Age-induced distance"] + textwrap.wrap(definition, width=budget)
+    ax.set_ylabel("\n".join(lines))
     n_ok = int(ok.sum())
     ax.set_title(f"k=2 subcluster split per cell state, {group_b} vs {group_a} donors: "
                  f"{n_ok} of {len(t)} cell states tested; "
@@ -310,6 +351,13 @@ def run(args) -> None:
         plot_dotplot(plotted, pdf_path, args.group_a, args.group_b, order, args.hline, args.cmap,
                      args.size_scale, args.alpha, (args.fig_width, args.fig_height))
         log(f"[write] {pdf_path}")
+        # A redraw must leave a record of what it drew. parameters.json belongs to the run that
+        # computed the table, so the redraw writes its own file instead of overwriting it.
+        plot_params = {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()}
+        plot_params["pdf"] = pdf_vector_report(pdf_path)
+        with open(outdir / "plot_parameters.json", "w") as fh:
+            json.dump(plot_params, fh, indent=2)
+        log(f"[write] {outdir / 'plot_parameters.json'}")
         log_fh.close()
         return
     sub_root = Path(args.subclusters_dir)
@@ -335,7 +383,8 @@ def run(args) -> None:
         try:
             tests, summary = analyse_cell_type(
                 sub_root / ct, groups, args.group_a, args.group_b, args.min_donors,
-                args.max_donor_fraction, args.donor_min_fraction, log)
+                args.max_donor_fraction, args.donor_min_fraction, log,
+                Path(args.annotation_dir) if args.annotation_dir else None, args.labels)
         except Exception as exc:  # recorded, never swallowed
             log(f"  FAILED: {type(exc).__name__}: {exc}")
             failures.append({"cell_type": ct, "status": f"failed: {type(exc).__name__}: {exc}"})
@@ -390,6 +439,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--subclusters-dir", default=None,
                    help="AltAnalyze2 ICGS2 sub-clustering output: one folder per cell state")
     p.add_argument("--groups", default=None, help="tab file: uid, donor, group columns")
+    p.add_argument("--labels", default="svm", choices=["nmf", "svm", "svm+centroid"],
+                   help="nmf reads the labels the run wrote, which for k=2 are the NMF round-1 "
+                        "membership; svm (the default) recovers the supervised assignment the run "
+                        "computed but never saved; svm+centroid adds nearest-centroid passes, which "
+                        "tunes the quantity this panel measures and is not the default here")
+    p.add_argument("--annotation-dir", default=None,
+                   help="directory of per-state label files <cell state>.txt (uid, V0, V1 with a "
+                        "header) used instead of the run's own files; a missing file is an error")
     p.add_argument("--outdir", required=True)
     p.add_argument("--plot-only", action="store_true",
                    help="re-draw the dot plot from age_induced_distance.tsv in --outdir")

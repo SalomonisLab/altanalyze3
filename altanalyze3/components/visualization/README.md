@@ -27,6 +27,12 @@ rejects additional selection flags. The existing native junction filter accepts
 `'E4-junction + E11-junction'` for an AND clause, with multiple clauses ORed.
 No alternative junction-selection algorithm is introduced by these commands.
 
+For cohort comparisons, `isv-domains --equal-panel-heights` gives each RNA
+pileup the same display height. This prevents sparse-read legibility expansion
+from making a lower-depth cohort appear taller. It retains every selected read
+and count; use the header counts for depth. The default layout is unchanged.
+The option also works with `--render-input` and an event-level `--region` zoom.
+
 PSI input is a long TSV with `cohort`, `donor`, `isoform_id`, `assigned_RNA`
 columns (column names are configurable). The independent roster JSON maps every
 condition to its full ordered donor list. Each donor/isoform count, including
@@ -47,9 +53,27 @@ The table must contain `cohort`, `donor`, `event_uid`, and `PSI`, retaining ever
 roster identity. Empty PSI remains undefined. `--psi-sha256` pins the input.
 No isoform selection or PSI recalculation occurs in the plotter.
 
+`psi-boxplot-grid` also accepts selected-isoform count panels through the same
+`psi-boxplot --counts` arguments. Each panel must declare
+`"psi_source": "selected_isoform_counts"` and an `isoform_definition` mapping
+`numerator` and `other` to the exact ID lists passed as `--inclusion-isoforms`
+and `--exclusion-isoforms`. The grid computes PSI from those counts, labels
+both ID lists on the panel, retains zero-total roles as undefined, and records
+the count-source hash. Counts and native junction PSI cannot be mixed or
+mislabelled within a composite. Supplied statistics must be computed for the
+selected-form ratios; native junction P values must not be reused.
+
 With `--annotations-table`, blank/NA native P values remain unavailable and are
 labelled `NA`; they are not converted to `ns` or replaced with a newly computed
 test. All donor roles and saved PSI values remain in the output table.
+
+For two within-lineage comparisons in a four-group view, supply
+`--annotation-pairs planned_pairs.json` alongside `--annotations-table`.
+The JSON lists ordered `[reference, comparison]` pairs. The supplied statistics
+must match those pairs exactly, and each displayed group must occur exactly
+once. This changes annotation scope only; PSI values, point styles and the
+default single-reference validation remain unchanged. Repeated pre/post
+observations must not be counted as independent patients in the supplied tests.
 
 `--reference-condition aged` adds `ns`, `*`, `**`, or `***` above each other
 condition, using the existing visualization Mann–Whitney U test (two-sided).

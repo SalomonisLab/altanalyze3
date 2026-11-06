@@ -111,6 +111,33 @@ python -m altanalyze3.components.visualization.marker_heatmap_h5ad --h5ad <psi.h
 | `--collapse-shared-exons` | off | on | Of the assigned events that share an exon block, keep the most significant (FDR, then rho); the rest go to `*_shared_exon_excluded.tsv` |
 | `--top-n` | 5 | 100 | Events per state on the HEATMAP only; the marker table keeps every assigned event |
 
+`--min-measured-per-group N` is an opt-in assignment safeguard (API
+`min_measured_per_group=N`), not part of `PSI_DEFAULTS`. It requires at least N
+original measured observations in both the query group and its combined reference.
+For a two-condition comparison, both conditions must meet the minimum. It retains
+every source event/sample and the original correlations, P values and BH family;
+only marker assignment eligibility changes. Every source event/group count and
+decision is exported to `*_measurement_eligibility.tsv`. An imputed value does not
+count as an original measurement. Changes to this selection rule require the
+user's authorization when reproducing a specified scientific analysis.
+
+For explicitly instructed nominal-P selection, use `--raw-p-threshold 0.05`
+(API `raw_pval_threshold=0.05`). This replaces the FDR eligibility/ranking
+gate with native unadjusted MarkerFinder P values; it does not change scoring
+or the original BH correction family. The marker table retains `FDR p-value`
+and adds `Raw p-value`. `--top-n 100` still caps the displayed rows per group,
+after native unique assignment and any requested shared-exon collapse.
+The default remains FDR selection. Do not call a nominal-P selected signature
+FDR-significant.
+
+PSI heatmap caches preserve the original missing-value mask and include a
+`source_PSI` layer. Measured PSI=0 remains a measurement. The established missing
+color is black; `--missing-color '#d9d9d9'` (API `missing_color`) distinguishes
+unavailable measurements from observed neutral z-scores without imputation or
+rescoring. This option also works with `--render-from-cache`; an older cache that
+already replaced missing values with zero must first recover its mask from its
+verified source PSI, rather than guessing which zeros were missing.
+
 Upstream of the hook, the approved run prepared its input with analysis scripts, not the hook: healthy donors only;
 pseudobulks with |robust z| > 3 of log10 junction reads within their state removed; states with >= 5 pseudobulks and
 <= 70% missing PSI kept; then one HSC, one LMPP and one MEP state, and other states with >= 3 events
@@ -123,6 +150,14 @@ shared-exon exclusions. Without `--psi`, output is unchanged (marker table byte-
 
 Keep the hook's rasterized heatmap PDF for PSI. Nathan rejected a `--no-rasterize` (one pixel per cell) render on
 2026-10-11.
+Small rasterized matrices also retain page-resolution images: a native one-pixel-per-cell
+PDF can be blurred by the viewer. Their export DPI is capped at600 to bound the
+mixed-mode buffer; large-matrix export retains the requested DPI.
+For an explicitly requested median-imputed display of existing assignments, use
+`render_consolidated_marker_heatmap(..., missing_psi='row_median', normalization='row_zscore')`.
+This fills PSI before display scaling, preserves source PSI and an imputation mask in
+the cache, and does not recompute discovery scores. Never describe such a display as
+a newly rescored analysis of its displayed sample subset.
 
 Row labels for splicing events (Nathan, 2026-10-11). The heatmap prints each event as
 `SYMBOL:junction|junction`, for example `ATP5J:E1.7-E3.1|E1.11-E3.1`. The gene ID becomes its symbol

@@ -26,10 +26,10 @@ from matplotlib.colors import to_rgba
 from matplotlib.patches import Rectangle
 
 HEMATOPOIETIC_STATE_ORDER: List[str] = [
-    "HSC-1", "HSC-2", "MPP-1", "MPP-2", "MPP-MEP", "LMPP-1", "LMPP-1-cycling", "Multilin-1",
+    "HSC-1", "HSC-2", "MPP-1", "MPP-2", "MPP-MEP", "Multilin-1",
     "Multilin-2", "MEP-1", "MEP-2", "MEP-Eryth-1", "MEP-Eryth-2", "ERP-1", "ERP-2", "ERP-3",
     "ERP-4", "ERP-5", "ERP-6", "ERP-7", "ERP-8", "Erythroblast-1", "Erythroblast-2",
-    "Erythroblast-3", "MKP-early", "MKP-late", "MK-Platelet", "BMCP-1", "BMCP-2", "LMPP-2", "CLP",
+    "Erythroblast-3", "MKP-early", "MKP-late", "MK-Platelet", "BMCP-1", "BMCP-2", "LMPP-1", "LMPP-1-cycling", "LMPP-2", "CLP",
     "Pro-B-Early", "Pro-B-1", "Pro-B-cycling-2", "Pro-B-Early-cycling", "Pro-B-cycling-1",
     "Transitional-B-1", "Transitional-B-2", "Pro-B-2", "Pro-B-3", "pre-B", "B Memory-1",
     "B Memory-2", "Plasma Cell", "CD4 TCM", "T CD4 Activated", "T CD4 Naive-1", "T CD4 Naive-2",
@@ -135,15 +135,34 @@ def strip_masks(fig):
     return fig
 
 
+def count_pdf_text_chars(path) -> int:
+    """Characters of extractable text in a PDF: 0 means every label is an outline, not live text.
+
+    A label drawn with a path effect, a stroke or an outline conversion still looks like text and
+    still passes a raster check, but it cannot be edited and does not count here.
+    """
+    try:
+        from pypdf import PdfReader
+    except ImportError:  # pragma: no cover - reported, never silently skipped
+        return -1
+    total = 0
+    for page in PdfReader(str(path)).pages:
+        total += len((page.extract_text() or "").strip())
+    return total
+
+
 def pdf_vector_report(path) -> dict:
-    """Count raster image stamps and embedded TrueType fonts in a PDF (both must be checked)."""
+    """Count raster image stamps, embedded TrueType fonts and live text characters in a PDF."""
     with open(path, "rb") as fh:
         b = fh.read()
     report = {
         "raster_images": b.count(b"/Subtype/Image") + b.count(b"/Subtype /Image"),
         "truetype_fonts": b.count(b"/FontFile2"),
+        "text_chars": count_pdf_text_chars(path),
         "bytes": len(b),
     }
+    note = "" if report["text_chars"] >= 0 else " (pypdf absent, text not counted)"
     print(f"[pdf] {path}: raster stamps {report['raster_images']}, "
-          f"embedded TrueType fonts {report['truetype_fonts']}, {report['bytes']} bytes")
+          f"embedded TrueType fonts {report['truetype_fonts']}, "
+          f"live text characters {report['text_chars']}{note}, {report['bytes']} bytes")
     return report

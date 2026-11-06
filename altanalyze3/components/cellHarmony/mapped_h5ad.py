@@ -17,10 +17,7 @@ import h5py
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
-try:
-    from anndata.io import read_elem
-except ImportError:
-    from anndata.experimental import read_elem
+from altanalyze3.components.anndata_compat import read_elem
 
 
 def matrix_bytes(node):
@@ -69,7 +66,7 @@ def validate_batch(headers):
 
 def validate_merge_scales(paths):
     """Do not apply one normalization decision to incompatible input scales."""
-    from anndata.io import sparse_dataset
+    from altanalyze3.components.anndata_compat import sparse_dataset
     from altanalyze3.components.clustering.ICGS import infer_expression_scale
     scales = {}
     for name, path in paths.items():
@@ -505,7 +502,7 @@ class Workspace:
 def merge_h5ads(entries, directory):
     """Outer disk merge; retain source annotations and a unique upload identity."""
     from anndata.experimental import concat_on_disk
-    from anndata.io import write_elem
+    from altanalyze3.components.anndata_compat import write_elem
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     paths = {str(name): str(path) for path, name in entries}
@@ -639,10 +636,7 @@ def merge_h5ads(entries, directory):
                     if node is None:
                         ptr[row_offset + 1:row_offset + size + 1] = nnz
                     else:
-                        try:
-                            from anndata.io import sparse_dataset
-                        except ImportError:
-                            from anndata.experimental import sparse_dataset
+                        from altanalyze3.components.anndata_compat import sparse_dataset
                         source = node if isinstance(node, h5py.Dataset) else sparse_dataset(node)
                         for start in range(0, size, 256):
                             block = sp.csr_matrix(source[start:start + 256, :])

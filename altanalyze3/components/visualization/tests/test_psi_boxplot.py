@@ -260,3 +260,25 @@ def test_saved_pseudobulk_display_tests_each_donor_once(tmp_path):
     with (tmp_path/'p.statistical_units.tsv').open() as h: units=list(csv.DictReader(h,delimiter='\t'))
     assert len(units)==5 and units[-1]['biological_donor']=='B3'
     assert units[-1]['mean_saved_PSI']=='' and units[-1]['status']=='NO_DEFINED_NATIVE_PSI_RETAINED'
+
+
+def test_explicit_within_lineage_annotation_pairs_preserve_all_groups(tmp_path):
+    table=tmp_path/'native.tsv'
+    table.write_text('cohort\tdonor\tevent_uid\tPSI\nAwt\tH\tE\t0.1\nAmut\tM\tE\t0.4\nBwt\tH\tE\t0.2\nBmut\tM\tE\t0.9\n')
+    roster=tmp_path/'roster.json'
+    roster.write_text(json.dumps({'Awt':['H'],'Amut':['M'],'Bwt':['H'],'Bmut':['M']}))
+    stats=tmp_path/'stats.tsv'
+    stats.write_text('reference\tcomparison\tp\ttest\tcorrection\nAwt\tAmut\t0.02\tMWU\tnone\nBwt\tBmut\t0.004\tMWU\tnone\n')
+    pairs=tmp_path/'pairs.json'
+    pairs.write_text(json.dumps([['Awt','Amut'],['Bwt','Bmut']]))
+    argv=['--psi-table',str(table),'--event-uid','E','--donor-roster',str(roster),
+          '--cohort-order','Awt','Amut','Bwt','Bmut','--annotations-table',str(stats),
+          '--out',str(tmp_path/'out.pdf')]
+    with pytest.raises(ValueError,match='every non-reference'):
+        main(argv)
+    result=main(argv+['--annotation-pairs',str(pairs)])
+    assert [r['PSI'] for r in result['records']]==[.1,.4,.2,.9]
+    assert [r['label'] for r in result['statistics']]==['*','**']
+    pairs.write_text(json.dumps([['Awt','Amut']]))
+    with pytest.raises(ValueError,match='every displayed group'):
+        main(argv[:-1]+[str(tmp_path/'bad.pdf'),'--annotation-pairs',str(pairs)])

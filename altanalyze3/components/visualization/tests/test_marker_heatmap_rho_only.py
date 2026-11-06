@@ -11,6 +11,26 @@ from altanalyze3.components.visualization import marker_heatmap_h5ad as mh
 
 
 class RhoOnlyMarkerHeatmap(unittest.TestCase):
+    def test_signed_saved_statistics_display_median_fill_preserves_source(self):
+        raw=np.array([[.9,.1],[.8,.2],[np.nan,.1],[.1,.9],[.2,.8],[.1,np.nan]])
+        data=ad.AnnData(raw.copy(),obs=pd.DataFrame({'group':['A']*3+['B']*3},index=list('abcdef')),
+                        var=pd.DataFrame(index=['x','y']))
+        data.uns['lineage_order']=['A','B']
+        rho=pd.DataFrame([[.9,-.9],[-.9,.9]],index=data.var_names,columns=['A','B'])
+        fdr=pd.DataFrame(.01,index=data.var_names,columns=['A','B'])
+        with tempfile.TemporaryDirectory() as directory:
+            result=mh.render_signed_marker_heatmap_from_saved_statistics(data,rho,fdr,fdr,
+                cluster_key='group',out=Path(directory)/'signed.pdf',missing_psi='row_median',dpi=30)
+            cache=ad.read_h5ad(result['heatmap_cache'])
+            selected=cache.var.gene.tolist()
+            expected_raw=data[cache.obs_names,selected].X
+            np.testing.assert_array_equal(cache.layers['source_PSI'],expected_raw.astype(np.float32))
+            self.assertEqual(int(cache.layers['imputed_PSI'].sum()),2)
+            filled,_=mh.fill_PSI_row_median(pd.DataFrame(expected_raw.T))
+            expected=mh._zscore_rows(filled).to_numpy().T
+            np.testing.assert_array_equal(cache.X,expected.astype(np.float32))
+            np.testing.assert_array_equal(data.X,raw)
+
     def test_assignment_and_order_ignore_conflicting_or_missing_pvalues(self):
         groups = ["Young", "Shared"]
         rho = pd.DataFrame([[.61, .9], [.8, -.8], [.7, .71]],

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 import h5py
-from anndata.io import read_elem, sparse_dataset
+from altanalyze3.components.anndata_compat import read_elem, sparse_dataset
 
 
 def embedding_label(key):

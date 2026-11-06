@@ -130,6 +130,7 @@ class ApproximateUMAPRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     question: str = ""
+    stream: bool = False
 
 
 class ClientLogRequest(BaseModel):
@@ -4396,11 +4397,9 @@ def _labels_for_color_by(cache: Dict[str, Any], color_by: str = "") -> tuple:
     return values, column
 
 
-#: Where a chat question is read into one supported query. The model runs in the
-#: LungMAP site process; this app holds none of its own. Override with
-#: CELLHARMONY_ASSISTANT_URL when the site is not on the same host.
-CHAT_ASSISTANT_URL = os.environ.get(
-    "CELLHARMONY_ASSISTANT_URL", "http://127.0.0.1:8001/api/assistant/viewer-intent")
+# Built-in routing works without a site process. An explicitly configured
+# external router remains optional; ambiguous questions can use the summary model.
+CHAT_ASSISTANT_URL = os.environ.get("CELLHARMONY_ASSISTANT_URL", "").strip()
 
 #: The router speaks protocol names. These are answered by the executors below.
 _CHAT_PROTOCOL_ALIAS = {
@@ -4659,6 +4658,9 @@ def _chat_read_question(question: str, cache: Dict[str, Any], meta: Dict) -> Dic
     from .chat_service import read_question
     local=read_question(question,[s for s,_ in _chat_states_by_size(cache)],gene_names,cache['adata'].obs.columns)
     if local is not None:return local
+    from .chat_agent import _custom_graphic_requested
+    if _custom_graphic_requested(question):
+        return {'intent':'clarify','router':'local_protocol','missing':'a graphic outside the standard query catalog'}
     contrast = _chat_contrast(meta)
     payload = json.dumps({
         "question": question,
@@ -4669,22 +4671,24 @@ def _chat_read_question(question: str, cache: Dict[str, Any], meta: Dict) -> Dic
                        in ((meta.get("modalities") or {}).get("available") or [])] or ["rna"],
     }).encode()
 
-    last_error = None
-    for attempt in (1, 2):
+    if CHAT_ASSISTANT_URL:
         try:
-            request = urllib.request.Request(
-                CHAT_ASSISTANT_URL, data=payload,
+            request = urllib.request.Request(CHAT_ASSISTANT_URL, data=payload,
                 headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(request, timeout=120) as response:
-                return json.loads(response.read().decode())
-        except Exception as exc:  # noqa: BLE001 - the site may be down
-            last_error = exc
-            if attempt == 1:
-                time.sleep(0.25)
-    raise HTTPException(
-        status_code=503,
-        detail=(f"the assistant at {CHAT_ASSISTANT_URL} did not answer ({last_error}). "
-                "cellHarmony web holds no model of its own."))
+            with urllib.request.urlopen(request, timeout=10) as response:
+                reading = json.loads(response.read(65536).decode())
+            if isinstance(reading, dict) and reading.get("intent"):
+                return reading
+        except (OSError, ValueError, TypeError):
+            pass  # Fall back to the included routing path; never require the site.
+    from .local_router import read_with_model
+    reading = read_with_model(question, states=[s for s, _ in _chat_states_by_size(cache)],
+        genes=_chat_genes_in_question(question, cache), covariates=[entry["field"] for entry in _groupable_columns(cache)],
+        modalities=[str(entry.get("id")) for entry in ((meta.get("modalities") or {}).get("available") or [])] or ["rna"])
+    if reading is not None:
+        return reading
+    return {"intent": "clarify", "router": "local_protocol",
+            "missing": "a supported analysis and its cell state or gene (for example, 'What are the marker genes of AT2?')"}
 
 
 def _plot_population_colors(order):
@@ -4760,12 +4764,19 @@ def _build_umap_payload(
     x_field: str = "",
     y_field: str = "",
     compact: bool = False,
+    sample_field_override: str = "",
+    include_frequency_counts: bool = False,
 ) -> Dict[str, List[Dict]]:
     cache_entry = _get_expression_cache(app, meta, modality=modality)
     obs_names = cache_entry["obs_names"]
     populations, resolved_color_by = _labels_for_color_by(cache_entry, color_by)
     sample_field = str(cache_entry.get("sample_field") or "").strip()
     sample_labels = cache_entry.get("sample_labels")
+    if sample_field_override:
+        if sample_field_override not in cache_entry['adata'].obs:
+            raise ValueError('The requested sample field is not present in obs.')
+        sample_field = sample_field_override
+        sample_labels = cache_entry['adata'].obs[sample_field].astype('string').fillna('').to_numpy(dtype=str)
     umap_x, umap_y, resolved_coords = _coordinates_for_key(cache_entry, coords_key)
     # A pair of numeric obs columns replaces the embedding outright. Both have to
     # resolve: one axis alone would silently mix a metadata value against a UMAP
@@ -4849,7 +4860,7 @@ def _build_umap_payload(
     frequency_counts = (pd.DataFrame({"sample": np.asarray(sample_labels)[display_mask],
                                      "population": np.asarray(populations)[display_mask]})
                         .value_counts().rename("cells").reset_index().to_dict("records")
-                        if meta.get("analysis_mode") == "both" and sample_labels is not None else None)
+                        if (meta.get("analysis_mode") == "both" or include_frequency_counts) and sample_labels is not None else None)
     return {**parent_context, "reference": reference_points, "query": query_points,
             "frequency_counts": frequency_counts,
             "sample_field": sample_field,
@@ -6822,6 +6833,7 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         with control_job(store, job_id):
+            _job_metadata_with_recovery(store, runner, job_id)
             runner.assert_idle(job_id)
             if store.get_job(job_id).get("status") in {"queued", "processing"}:
                 raise HTTPException(status_code=409, detail="This analysis is already running.")
@@ -6924,8 +6936,8 @@ def create_app(test_config: dict | None = None) -> FastAPI:
         if not store.job_exists(job_id):
             raise HTTPException(status_code=404, detail="Job not found.")
         with control_job(store, job_id):
-            runner.assert_idle(job_id)
             meta = _job_metadata_with_recovery(store, runner, job_id)
+            runner.assert_idle(job_id)
             if (meta.get("differential") or {}).get("status") in {"queued", "processing"}:
                 raise HTTPException(409, "A differential analysis is already running.")
             history = completed_differentials(meta)
@@ -7568,6 +7580,42 @@ def create_app(test_config: dict | None = None) -> FastAPI:
 
     @app.post("/api/jobs/{job_id}/chat")
     def chat(job_id: str, payload: ChatRequest):
+        # Keep the established search/executors first. Only unsuccessful answers
+        # enter the general data assistant, never a new analysis pipeline.
+        store, _ = _job_resources(app)
+        if not store.job_exists(job_id):
+            raise HTTPException(status_code=404, detail="Job not found.")
+        if not str(payload.question or '').strip():
+            raise HTTPException(status_code=400, detail="question is required")
+        try:
+            response = _standard_chat(job_id, payload)
+            result = json.loads(response.body)
+        except HTTPException as exc:
+            if exc.status_code < 500 and exc.status_code not in {400, 404, 409, 422}:
+                raise
+            result = dict(status='error', answer=str(exc.detail))
+        except MemoryError:
+            raise  # Do not allocate another data context under memory pressure.
+        except Exception as exc:
+            logging.getLogger(__name__).exception('Standard Chat failed for job %s; trying read-only retrieval.', job_id)
+            result = dict(status='error', answer=f'{type(exc).__name__}: {exc}')
+        from .chat_agent import needs_fallback, answer_events
+        if not needs_fallback(result, payload.question):
+            return JSONResponse(result)
+        events = answer_events(app, store.get_job(job_id), payload.question.strip(), result)
+        if payload.stream:
+            def stream_answer():
+                for event in events:
+                    yield json.dumps(event, default=str) + '\n'
+            return StreamingResponse(stream_answer(), media_type='application/x-ndjson',
+                headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+        final = result
+        for event in events:
+            if event['type'] == 'result':
+                final = event['result']
+        return JSONResponse(final)
+
+    def _standard_chat(job_id: str, payload: ChatRequest):
         """Answer one question about this job, with numbers from this job.
 
         Two steps, deliberately separated. The assistant reads the sentence into

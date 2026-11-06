@@ -524,7 +524,7 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
            title_gene=None, title_event=None, show_read_counts=True, show_structure_header=True,
            label_protein_length=True, dense_exon_labels=False, structure_labels_above=False,
            region=None, iso_order="length", caption=None, hide_bleeding_reads=False, bleed_tolerance=0,
-           protein_features=None):
+           protein_features=None, equal_panel_heights=False):
     """Render query_reads() panels as the drawReads molecule pileup to a single-page vector PDF.
     intron_scale<1.0 shrinks intron display spans (enlarging exons); 1.0 = true genomic scale.
     font_scale multiplies EVERY font size and the label margins and header heights that depend on them,
@@ -549,9 +549,10 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
     from .locus_view import is_trans_splicing_view
     if protein_features and not isoform_track:
         raise ValueError('Protein architecture requires the registered isoform structure track')
-    if protein_features:
+    if protein_features or equal_panel_heights:
         from copy import deepcopy
         res = deepcopy(res)
+    if protein_features:
         if any(len(p.get('molecules', [])) > MAX_ROWS for p in res.get('panels', [])):
             raise ValueError('Protein architecture would exceed the ISV row limit; explicitly select the display read cap first')
     if hide_bleeding_reads and not res.get('read_filter', {}).get('enabled'):
@@ -757,6 +758,18 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
         p["_rows"] = rows
         p["_bodyH"] = max(18, h, n_clusters * 10 * FS if show_read_labels else 0)
         p["_label_minH"] = n_clusters * 10 * FS if show_read_labels else 0
+
+    # Optional comparison layout: sparse-row legibility expansion must not make
+    # a lower-depth cohort appear to have a larger pileup. Rescale drawing
+    # coordinates only; retain every molecule, assignment and count.
+    if equal_panel_heights and panels:
+        common_height = max(p['_bodyH'] for p in panels)
+        for p in panels:
+            factor = common_height / p['_bodyH']
+            for row in p['_rows']:
+                row['dy'] *= factor
+                row['h'] *= factor
+            p['_bodyH'] = common_height
 
     # Auto-fit (no knob): stacking every cell-state panel on one page makes it taller than a screen, so
     # viewers cut off the lower panels. If the figure would exceed one screenful, shrink ALL panel bodies
@@ -1272,6 +1285,8 @@ def build_arg_parser():
                     help="exclude final isoforms whose reads are < this %% of the gene's total reads in the "
                          "rendered selection (declutter rare isoforms; default 0 = keep all)")
     ap.add_argument("--width", type=int, default=1100, help="figure width in points (default 1100)")
+    ap.add_argument("--equal-panel-heights", action="store_true",
+                    help="Use equal pileup panel heights for cohort comparisons without sampling or changing read counts; headers retain the depth information")
     ap.add_argument("--intron_scale", "--intron-scale", dest="intron_scale", type=float, default=1.0,
                     help="relative INTRON display size to enlarge exons (1.0=true genomic scale; "
                          "0.5=introns at 50%%, 0.2=20%%), like isoform_structure_view --intron-scale")
@@ -1399,6 +1414,7 @@ def _render_selected(a, res, out, region):
                   structure_labels_above=a.figure_mode, region=region,
                   iso_order='given' if a.isoforms or a.render_input else 'length',
                   protein_features=a.protein_features,
+                  equal_panel_heights=getattr(a, 'equal_panel_heights', False),
                   caption=(Path(a.caption_file).read_text().strip()
                            if getattr(a, 'caption_file', None) else None))
 

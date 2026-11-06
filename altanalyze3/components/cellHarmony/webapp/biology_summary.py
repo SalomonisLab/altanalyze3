@@ -21,7 +21,7 @@ import urllib.request
 import h5py
 import numpy as np
 import pandas as pd
-from anndata.io import read_elem, sparse_dataset
+from altanalyze3.components.anndata_compat import read_elem, sparse_dataset
 
 from .grn_data import completed_differentials, comparison_entry
 from ..modalities import modality_artifacts, normalize_modality_id

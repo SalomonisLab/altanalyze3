@@ -12,7 +12,7 @@ import re
 
 import h5py
 import numpy as np
-from anndata.io import read_elem, sparse_dataset
+from altanalyze3.components.anndata_compat import read_elem, sparse_dataset
 
 from .. import analysis_record, discover_integration
 from ..grn_analysis import _sibling_comparison

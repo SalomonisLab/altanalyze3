@@ -64,3 +64,34 @@ def test_float32_decimal_boundary_keeps_actual_point_without_extra_tenth():
     flat=observed_psi_limits([{'PSI':lo}],.1)
     assert flat[1]-flat[0]==pytest.approx(.1)
     assert flat[0]<=lo<=flat[1]
+
+
+def test_selected_isoform_count_grid_calculates_ratios_and_labels_exact_ids(tmp_path):
+    roster=tmp_path/'roster.json';roster.write_text(json.dumps({'healthy':['H1','H0'],'MDS':['M1']}))
+    counts=tmp_path/'counts.tsv'
+    counts.write_text('cohort\tdonor\tisoform_id\tassigned_RNA\n'
+                      'healthy\tH1\tBLUE\t1\nhealthy\tH1\tGOLD\t3\n'
+                      'healthy\tH0\tBLUE\t0\nhealthy\tH0\tGOLD\t0\n'
+                      'MDS\tM1\tBLUE\t8\nMDS\tM1\tGOLD\t2\n')
+    uid='G:E1-E3|G:E2-E3'
+    panel=dict(gene='G',event_uid=uid,event_label='G:E1-E3|E2-E3',
+               psi_source='selected_isoform_counts',isoform_definition=dict(numerator=['BLUE'],other=['GOLD']),
+               native_argv=['--counts',str(counts),'--counts-sha256',hashlib.sha256(counts.read_bytes()).hexdigest(),
+                            '--event-uid',uid,'--donor-roster',str(roster),'--cohort-order','healthy','MDS',
+                            '--inclusion-isoforms','BLUE','--exclusion-isoforms','GOLD',
+                            '--ylabel','Selected-isoform PSI','--out',str(tmp_path/'unused.pdf')])
+    path=tmp_path/'panels.json';path.write_text(json.dumps(dict(required_genes=['G'],panels=[panel],title='Selected isoforms',caption='PSI = numerator/(numerator+other); no imputation.')))
+    out=tmp_path/'counts_grid.pdf'
+    result=main(['--panel-manifest',str(path),'--columns','2','--width','12','--height','8',
+                 '--panel-range-step','.1','--out',str(out)])
+    p=result['panels'][0]
+    assert [r['PSI'] for r in p['records']]==[.25,None,.8]
+    assert p['isoform_definition']=={'numerator':['BLUE'],'other':['GOLD']}
+    assert p['counts_sha256']==hashlib.sha256(counts.read_bytes()).hexdigest()
+    assert all(r['event_uid']==uid for r in p['records'])
+    text=PdfReader(out).pages[0].extract_text()
+    assert 'Numerator: BLUE' in text and 'Other: GOLD' in text
+    panel['isoform_definition']['numerator']=['OTHER_ID']
+    path.write_text(json.dumps(dict(required_genes=['G'],panels=[panel],title='Bad',caption='')))
+    with pytest.raises(ValueError,match='exact explicit selected-isoform'):
+        main(['--panel-manifest',str(path),'--out',str(tmp_path/'bad_counts.pdf')])

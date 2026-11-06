@@ -111,9 +111,13 @@ def test_invalid_mode_and_running_configuration_changes_are_rejected(tmp_path):
     job=app.state.job_store.create_job('human','fixture',None,[])['job_id']
     with TestClient(app) as client:
         assert client.post(f'/api/jobs/{job}/qc',json={'analysis_mode':'silently_fallback'}).status_code==422
+        from concurrent.futures import Future
+        pending = Future()  # An active worker, rather than an orphaned persisted flag.
+        app.state.job_runner._futures[f'pipeline:{job}'] = pending
         app.state.job_store.update_job(job,status='processing')
         assert client.post(f'/api/jobs/{job}/qc',json={'analysis_mode':'both'}).status_code==409
         assert client.post(f'/api/jobs/{job}/run').status_code==409
+        pending.set_result(None)
     app.state.job_runner.executor.shutdown(wait=True)
 
 

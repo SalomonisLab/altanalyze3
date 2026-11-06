@@ -26,10 +26,7 @@ def main():
     parser.add_argument('--rounds',type=int,default=3)
     args=parser.parse_args()
     from altanalyze3.components.cellHarmony import cellHarmony_lite as module
-    try:
-        from anndata.io import read_elem
-    except ImportError:
-        from anndata.experimental import read_elem
+    from altanalyze3.components.anndata_compat import read_elem
     with h5py.File(args.h5ad,'r') as fh:
         matrix=read_elem(fh['layers/counts'] if 'counts' in fh.get('layers',{}) else fh['X'])
     obj=ad.AnnData(matrix)

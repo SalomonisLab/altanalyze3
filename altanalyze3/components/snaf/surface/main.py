@@ -2407,11 +2407,19 @@ def subexon_tran(subexon,EnsID,flag):  # flag either site1 or site2
             if  '_' in fusionGeneExon:   # ENSG:E2.1_473843893894
                 suffix = fusionGeneExon.split('_')[1]
                 subexon = fusionGeneExon.split('_')[0]
-                attrs = dict_exonCoords[fusionGeneEnsID][subexon]
-                if attrs[1] == '+':  
-                    exon_seq = query_from_dict_fa(suffix,attrs[3],fusionGeneEnsID,attrs[1]) 
-                else:  
-                    exon_seq = query_from_dict_fa(attrs[2],suffix,fusionGeneEnsID,attrs[1])
+                try:
+                    attrs = dict_exonCoords[fusionGeneEnsID][subexon]
+                except KeyError:  # partner region absent from Alt91 (e.g. ENSG:U7.1_<site>): UTR, as for a same-gene U0.1_<site>
+                    if fusionGeneEnsID in dict_exonCoords:
+                        chrUTR,strandUTR = utrAttrs(fusionGeneEnsID)
+                        exon_seq = utrJunction(suffix,fusionGeneEnsID,strandUTR,chrUTR,flag)
+                    else:
+                        exon_seq = '*' * 10  # indicator for error on MultiPath-PSI itself
+                else:
+                    if attrs[1] == '+':
+                        exon_seq = query_from_dict_fa(suffix,attrs[3],fusionGeneEnsID,attrs[1])
+                    else:
+                        exon_seq = query_from_dict_fa(attrs[2],suffix,fusionGeneEnsID,attrs[1])
             else:  # ENSG:E2.1
                 try:
                     attrs = dict_exonCoords[fusionGeneEnsID][fusionGeneExon]

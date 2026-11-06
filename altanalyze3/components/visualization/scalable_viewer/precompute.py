@@ -71,10 +71,7 @@ def read_gene_symbols(var: h5py.Group, gene_ids: List[str]) -> List[str]:
     if "gene_symbols" not in var:
         return list(gene_ids)
     import pandas as pd
-    try:
-        from anndata.io import read_elem
-    except ImportError:
-        from anndata.experimental import read_elem
+    from altanalyze3.components.anndata_compat import read_elem
     values = read_elem(var["gene_symbols"])
     if len(values) != len(gene_ids):
         raise ValueError("var/gene_symbols length does not match the gene index")
@@ -458,10 +455,7 @@ def _read_feature_matrix(path: str, *, lazy_dense=False):
     with open(path, "rb") as fh:
         head = fh.read(8)
     if head[:8] == b"\x89HDF\r\n\x1a\n":
-        try:
-            from anndata.io import read_elem
-        except ImportError:
-            from anndata.experimental import read_elem
+        from altanalyze3.components.anndata_compat import read_elem
         from types import SimpleNamespace
         with h5py.File(path, 'r') as fh:
             obs, var = read_elem(fh['obs']), read_elem(fh['var'])

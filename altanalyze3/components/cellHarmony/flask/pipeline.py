@@ -1114,10 +1114,7 @@ def _resolve_samples_for_adata(
 def _read_h5ad_obs(h5ad_path):
     """Read annotations alone; backed AnnData still imports layers and obsm."""
     import h5py
-    try:
-        from anndata.io import read_elem
-    except ImportError:
-        from anndata.experimental import read_elem
+    from altanalyze3.components.anndata_compat import read_elem
     with h5py.File(h5ad_path, "r") as fh:
         return read_elem(fh["obs"])
 
@@ -2634,19 +2631,13 @@ def _trim_differential_working_data(adata):
 def _read_differential_h5ad(path, *, disk_backed=False):
     """Read DE inputs without importing wide visualization/imputation copies."""
     import h5py
-    try:
-        from anndata.io import read_elem
-    except ImportError:
-        from anndata.experimental import read_elem
+    from altanalyze3.components.anndata_compat import read_elem
     if disk_backed:
         fh = h5py.File(path, 'r')
         if 'raw' not in fh:
             try:
                 kwargs = {key: read_elem(fh[key]) for key in ('obs', 'var', 'uns') if key in fh}
-                try:
-                    from anndata.io import sparse_dataset
-                except ImportError:
-                    from anndata.experimental import sparse_dataset
+                from altanalyze3.components.anndata_compat import sparse_dataset
                 def matrix(node):
                     return node if isinstance(node, h5py.Dataset) else sparse_dataset(node)
                 layers = {'counts': matrix(fh['layers/counts'])} if 'counts' in fh.get('layers', {}) else {}

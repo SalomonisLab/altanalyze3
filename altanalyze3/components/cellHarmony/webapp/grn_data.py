@@ -61,7 +61,7 @@ def aggregate_state_column(meta, record, adata, key):
     if not alias or alias not in adata.obs or not source.is_file():
         raise KeyError(f"GRN output has no recorded {key} cell-state column")
     import h5py
-    from anndata.io import read_elem
+    from altanalyze3.components.anndata_compat import read_elem
     with h5py.File(source,'r') as f:obs=read_elem(f['obs'])
     if key not in obs or alias not in obs or obs[[key,alias]].isna().any().any() or not np.array_equal(obs[key].astype(str).to_numpy(),obs[alias].astype(str).to_numpy()):
         raise ValueError('The recorded supervised GRN annotation alias does not match every source cell; no aggregate labels were substituted.')

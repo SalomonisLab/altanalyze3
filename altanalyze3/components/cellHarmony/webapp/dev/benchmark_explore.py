@@ -12,10 +12,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 import h5py
-try:
-    from anndata.io import read_elem
-except ImportError:
-    from anndata.experimental import read_elem
+from altanalyze3.components.anndata_compat import read_elem
 
 
 def main():

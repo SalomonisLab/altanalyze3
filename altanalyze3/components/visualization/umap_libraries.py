@@ -31,6 +31,11 @@ def parse_args():
     ap.add_argument("--outdir", required=True)
     ap.add_argument("--library-merge-tsv", default=None)
     ap.add_argument("--cluster-color-tsv", default="cluster_colors.tsv")
+    ap.add_argument("--label-clusters", action="store_true",
+                    help="write each cluster's name on the panel at its scALABLE label position "
+                         "(approximate_umap._annotate_clusters: per-cluster median, relaxed to avoid overlap)")
+    ap.add_argument("--vector-points", action="store_true",
+                    help="draw points as vector circles (EllipseCollection) instead of scatter marker stamps")
     return ap.parse_args()
 
 """
@@ -99,20 +104,37 @@ def plot_umap(
     xlim,
     ylim,
     legend_title,
+    vector_points=False,
+    annotate=False,
 ):
+    handles = []
     for lab, col in color_map.items():
         mask = labels == lab
         if mask.sum() == 0:
             continue
-        ax.scatter(
-            x[mask],
-            y[mask],
-            s=4,
-            c=[col],
-            linewidths=0,
-            alpha=0.8,
-            label=lab,
-        )
+        if vector_points:
+            # Same size (s=4 -> 2 pt diameter) and alpha as the scatter, baked into RGBA; one vector circle per cell.
+            from matplotlib.collections import EllipseCollection
+            from matplotlib.patches import Patch
+            n = int(mask.sum())
+            ax.add_collection(EllipseCollection(
+                widths=np.full(n, 2.0), heights=np.full(n, 2.0), angles=np.zeros(n), units="points",
+                offsets=np.column_stack([x[mask], y[mask]]), offset_transform=ax.transData,
+                facecolors=[mcolors.to_rgba(col, 0.8)], edgecolors="none", linewidths=0))
+            handles.append(Patch(facecolor=col, edgecolor="none", label=lab))
+        else:
+            ax.scatter(
+                x[mask],
+                y[mask],
+                s=4,
+                c=[col],
+                linewidths=0,
+                alpha=0.8,
+                label=lab,
+            )
+    if annotate:
+        from altanalyze3.components.visualization.approximate_umap import _annotate_clusters
+        _annotate_clusters(ax, np.column_stack([np.asarray(x), np.asarray(y)]), pd.Series(np.asarray(labels).astype(str)))
 
     ax.set_title(title, fontsize=10)
     ax.set_xlim(xlim)
@@ -124,6 +146,7 @@ def plot_umap(
     ax.set_ylabel("UMAP-Y")
 
     ax.legend(
+        handles=handles or None,
         title=legend_title,
         loc="center left",
         bbox_to_anchor=(1.02, 0.5),
@@ -179,6 +202,8 @@ def main():
         xlim,
         ylim,
         "Cluster",
+        vector_points=args.vector_points,
+        annotate=args.label_clusters,
     )
     fig.savefig(outdir / "UMAP_combined.pdf", bbox_inches="tight")
     plt.close(fig)
@@ -199,6 +224,8 @@ def main():
             xlim,
             ylim,
             "Cluster",
+            vector_points=args.vector_points,
+            annotate=args.label_clusters,
         )
         fig.savefig(outdir / f"UMAP_{lib}.pdf", bbox_inches="tight")
         plt.close(fig)
@@ -217,6 +244,7 @@ def main():
         xlim,
         ylim,
         "Library",
+        vector_points=args.vector_points,
     )
     fig.savefig(outdir / "UMAP_by_library.pdf", bbox_inches="tight")
     plt.close(fig)

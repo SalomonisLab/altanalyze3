@@ -502,6 +502,10 @@ class JobRunner:
             meta = self.store.get_job(job_id)
             if meta.get("status") not in {"queued", "processing"}:
                 return meta
+            # A child can retain the inherited lease after its supervisor exits.
+            # Never recover such an analysis merely because this runner has no Future.
+            if execution_busy(self.store, job_id):
+                return meta
             future = self._futures.get(f"pipeline:{job_id}")
             if future is not None and not future.done():
                 return meta
@@ -531,6 +535,10 @@ class JobRunner:
             meta = self.store.get_job(job_id)
             differential = dict(meta.get("differential") or {})
             if differential.get("status") not in {"queued", "processing"}:
+                return meta
+            # A child can retain the inherited lease after its supervisor exits.
+            # Never recover such an analysis merely because this runner has no Future.
+            if execution_busy(self.store, job_id):
                 return meta
             future = self._futures.get(f"differential:{job_id}")
             if future is not None and not future.done():

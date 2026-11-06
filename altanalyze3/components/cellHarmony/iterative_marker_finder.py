@@ -52,7 +52,7 @@ CONTRAST_SEP = "::"
 BLOCK_KIND_ORDER = ["unique", "shared", "global", "single-coverage", "discordant"]
 
 
-def legacy_strongest_patterns(statistics, ordered_groups, rho_cutoff=0.4):
+def legacy_strongest_patterns(statistics, ordered_groups, rho_cutoff=0.4, *, score_key='rho'):
     """AltAnalyze2 strongest up/down rule, including its literal equal-rho tie rule.
 
     Statistics are the standard visualization hook's full signed rho/raw-P frames.
@@ -60,7 +60,7 @@ def legacy_strongest_patterns(statistics, ordered_groups, rho_cutoff=0.4):
     """
     candidates = {}
     for scheme_name, result in statistics:
-        rho, pval, fdr = result['rho'], result['pval'], result['fdr']
+        rho, pval, fdr = result[score_key], result['pval'], result['fdr']
         for direction, sign in [('up', 1), ('down', -1)]:
             for feature, values in rho.iterrows():
                 # The legacy per-run AllGenes table reports the best population per gene.
@@ -90,6 +90,9 @@ def legacy_strongest_patterns(statistics, ordered_groups, rho_cutoff=0.4):
         if table['_order'].isna().any(): raise ValueError('Assigned level absent from group roster')
         table = table.assign(_feature=table.index).sort_values(
             ['_order','rho','_feature'], ascending=[True,False,False]).drop(columns=['_order','_feature'])
+    if score_key != 'rho':
+        table = table.rename(columns={'rho':'score','signed_rho':'signed_score'})
+        table['score_name'] = score_key
     return table
 
 
@@ -160,8 +163,9 @@ def collapse_discrete_pattern_logic(assignments, schemes, ordered_groups=None, p
     rank={name:i for i,name in enumerate(canonical.values())}
     if not result.empty:
         result['_pattern_order']=result.pattern.map(rank)
+        score_column = 'rho' if 'rho' in result.columns else 'score'
         result=result.assign(_feature=result.index).sort_values(
-            ['_pattern_order','rho','_feature'],ascending=[True,False,False]
+            ['_pattern_order',score_column,'_feature'],ascending=[True,False,False]
         ).drop(columns=['_pattern_order','_feature'])
     return result,pd.DataFrame(aliases)
 
@@ -280,6 +284,27 @@ def annotate_native_differential_eligibility(features, tables, *, max_raw_p=.05,
     return audit, proofs
 
 
+def apply_pattern_differential_gate(audit, eligibility, canonical_patterns, limited_patterns=None):
+    """Apply a native differential display gate only to the explicit pattern scope.
+
+    Keep every fitted assignment and decision. This runs before the display cap;
+    it never changes an event's winning pattern or its correlation.
+    """
+    if not audit.index.is_unique or not audit.index.isin(eligibility.index).all():
+        raise ValueError('Every assignment requires a unique native differential record')
+    passed=eligibility.reindex(audit.index)
+    names=canonical_patterns.reindex(audit.index)
+    if passed.isna().any() or names.isna().any():
+        raise ValueError('Missing differential decision or canonical pattern identity')
+    if limited_patterns is not None and (not limited_patterns or len(set(limited_patterns))!=len(limited_patterns)):
+        raise ValueError('Differential pattern scope must be nonempty and unique')
+    result=audit.copy()
+    result['native_differential_eligible']=passed.astype(bool)
+    result['native_differential_applies']=(True if limited_patterns is None else names.isin(limited_patterns))
+    result['figure_eligible'] &= ~result.native_differential_applies | result.native_differential_eligible
+    return result
+
+
 def review_legacy_markerfinder_fit(manifest, fit_dir, output_dir, *, input_sha256,
                                    rho_cutoff=.4, top_n=100, min_observed=3,
                                    min_fraction=.9, min_mean_psi_range=.1,
@@ -291,6 +316,7 @@ def review_legacy_markerfinder_fit(manifest, fit_dir, output_dir, *, input_sha25
                                    differential_max_raw_p=.05, differential_max_fdr=None,
                                    differential_min_abs_dpsi=.1,
                                    differential_min_observed=3,
+                                   differential_patterns=None,
                                    display_normalization='row_median', half_range=.2,
                                    display_label_replacements=None, missing_psi='preserve'):
     """Review an immutable native fit through explicit figure gates and the native renderer.
@@ -329,19 +355,36 @@ def review_legacy_markerfinder_fit(manifest, fit_dir, output_dir, *, input_sha25
         raise ValueError('Patient-agreement filtering requires the complete native holdout table')
     out=Path(output_dir);out.mkdir(parents=True,exist_ok=True)
     differential_proof = None
+    if differential_patterns is not None and not differential_tables:
+        raise ValueError('A differential pattern scope requires its native source table')
     if differential_tables:
         differential, sources = annotate_native_differential_eligibility(
             data.var_names, differential_tables, max_raw_p=differential_max_raw_p,
             max_fdr=differential_max_fdr, min_abs_dpsi=differential_min_abs_dpsi,
             min_observed=differential_min_observed)
         differential.to_csv(out/'all_source_events_native_differential_gate.tsv', sep='\t')
-        audit['native_differential_eligible'] = differential.native_differential_eligible.reindex(audit.index)
-        if audit.native_differential_eligible.isna().any():
-            raise ValueError('Every original assignment requires its native differential gate record')
-        audit['figure_eligible'] &= audit.native_differential_eligible
+        names=audit.pattern
+        if differential_patterns is not None:
+            scope_sources={str(data_path):data};scope_schemes=[]
+            for task in m['schemes']:
+                path=str(task['h5ad'])
+                if path not in scope_sources:scope_sources[path]=ad.read_h5ad(path)
+                scope_schemes.append(Scheme(task['name'],scope_sources[path],task['group_key'],task['level_order']))
+            if collapse_pattern_logic:
+                canonical,scope_aliases=collapse_discrete_pattern_logic(audit,scope_schemes,
+                    pattern_precedence=m.get('pattern_precedence'))
+                names=canonical.pattern.reindex(audit.index)
+                available=set(scope_aliases.canonical_pattern)
+            else:
+                available={d+'-'+level for s in m['schemes'] for level in s['level_order'] for d in ['up','down']}
+            if not set(differential_patterns)<=available:
+                raise ValueError('Differential pattern scope has no source design')
+        audit=apply_pattern_differential_gate(audit,differential.native_differential_eligible,
+            names,differential_patterns)
         differential_proof = dict(sources=sources, combination='UNION',
             max_raw_p=differential_max_raw_p, max_fdr=differential_max_fdr,
             min_abs_dpsi=differential_min_abs_dpsi, min_observed=differential_min_observed,
+            limited_to_patterns=differential_patterns,
             all_source_features=len(differential), eligible=int(differential.native_differential_eligible.sum()))
     audit.to_csv(out/'all_original_assignments_and_review_gates.tsv',sep='\t')
     display=audit.loc[audit.figure_eligible]
@@ -1959,6 +2002,8 @@ def legacy_manifest_main(argv):
     parser.add_argument('--differential-max-fdr',type=float)
     parser.add_argument('--differential-min-abs-dpsi',type=float,default=.1)
     parser.add_argument('--differential-min-observed',type=int,default=3)
+    parser.add_argument('--differential-pattern',action='append',
+                        help='Apply native differential eligibility only to this canonical pattern (repeatable); other patterns retain their original selection')
     parser.add_argument('--display-normalization',choices=['row_median','row_zscore'],default='row_median',
                         help='Existing native display transform only; does not change fitted statistics')
     parser.add_argument('--missing-psi',choices=['preserve','row_median'],default='preserve',
@@ -1982,6 +2027,7 @@ def legacy_manifest_main(argv):
             differential_max_fdr=a.differential_max_fdr,
             differential_min_abs_dpsi=a.differential_min_abs_dpsi,
             differential_min_observed=a.differential_min_observed,
+            differential_patterns=a.differential_pattern,
             display_normalization=a.display_normalization,half_range=a.half_range,dpi=a.dpi,missing_psi=a.missing_psi,
             display_label_replacements=json.loads(Path(a.display_label_map).read_text()) if a.display_label_map else None)
         return 0

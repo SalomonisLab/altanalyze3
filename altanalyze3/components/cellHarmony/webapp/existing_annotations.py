@@ -13,7 +13,7 @@ from pathlib import Path
 
 import h5py
 import pandas as pd
-from anndata.io import read_elem
+from altanalyze3.components.anndata_compat import read_elem
 
 INSPECTION_VERSION = 3
 

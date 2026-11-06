@@ -21,6 +21,8 @@ mount the same library and set that variable to its path inside the container.
 
 ## AI summary service
 
+For a developer checkout, the README’s **Local setup** commands install the optional runtime, download the two official Qwen shards, and launch both included services without manually setting environment variables. Production can continue using the isolated service below.
+
 Run the included `biology_model.py` with `llama-cpp-python` and the
 Qwen2.5-7B-Instruct Q4_K_M GGUF weights in a separate internal service named
 `scalable-summary`, listening on port 8086. Configure scALABLE with:

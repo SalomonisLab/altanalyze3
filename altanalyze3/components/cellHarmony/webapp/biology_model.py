@@ -6,17 +6,41 @@ dataset reads or inference dependencies are added to the analysis container.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import select
+import re
 import signal
+import socket
 import subprocess
 import sys
 import threading
 import time
 
 MAX_BODY = 256 * 1024
+
+
+def validate_model(path):
+    model = Path(path).expanduser().resolve()
+    if not model.is_file():
+        raise ValueError('Model file not found. Download the GGUF weights or provide their installed path.')
+    match = re.match(r'^(.*)-\d{5}-of-(\d{5})\.gguf$', model.name)
+    if match:
+        total = int(match[2])
+        if not 1 <= total <= 100:
+            raise ValueError('Invalid GGUF shard count.')
+        first = model.with_name(f'{match[1]}-00001-of-{total:05d}.gguf')
+        shards = [model.with_name(f'{match[1]}-{i:05d}-of-{total:05d}.gguf') for i in range(1, total + 1)]
+        if any(not p.is_file() for p in shards):
+            raise ValueError('Split GGUF model is incomplete. Download every shard into the same directory.')
+        model = first
+    with model.open('rb') as stream:
+        if stream.read(4) != b'GGUF':
+            raise ValueError('The selected file is not GGUF model weights.')
+    return model
+
 
 
 class ModelWorker:
@@ -32,8 +56,17 @@ class ModelWorker:
             process.kill()
             process.wait(timeout=5)
 
-    def complete(self, payload):
-        with self.lock:
+    def complete(self, payload, cancelled=lambda: False):
+        budget = max(1, min(230, float(payload.get('scalable_timeout_seconds', 230))))
+        deadline = time.monotonic() + budget
+        if cancelled():
+            raise ConnectionAbortedError('The model request was cancelled.')
+        while not self.lock.acquire(timeout=.2):
+            if cancelled():
+                raise ConnectionAbortedError('The queued model request was cancelled.')
+            if time.monotonic() >= deadline:
+                raise TimeoutError('Model service was busy beyond the request deadline.')
+        try:
             if self.process is None or self.process.poll() is not None:
                 self.process = subprocess.Popen(
                     [sys.executable, str(Path(__file__).resolve()), '--worker'],
@@ -44,8 +77,14 @@ class ModelWorker:
             try:
                 process.stdin.write(json.dumps(request) + '\n')
                 process.stdin.flush()
-                if not select.select([process.stdout], [], [], 230)[0]:
-                    raise TimeoutError('Local interpretation exceeded generation timeout')
+                while True:
+                    if cancelled():
+                        raise ConnectionAbortedError('The model request was cancelled.')
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError('Local interpretation exceeded generation timeout')
+                    if select.select([process.stdout], [], [], min(.25, remaining))[0]:
+                        break
                 line = process.stdout.readline()
                 if not line:
                     raise RuntimeError('Local interpretation process exited')
@@ -58,6 +97,8 @@ class ModelWorker:
                 raise
             finally:
                 self.last_used = time.monotonic()
+        finally:
+            self.lock.release()
 
     def reap_idle(self):
         # Return model memory after inactivity; the next request reloads lazily.
@@ -94,7 +135,7 @@ def worker_main():
                 LlamaGrammar.from_json_schema(json.dumps(response_format['schema']), verbose=False)
             generation_started = time.monotonic()
             reply = engine.create_chat_completion(messages=messages,
-                temperature=0.1, max_tokens=min(int(payload.get('max_tokens', 3000)), 3000),
+                temperature=float(payload.get('temperature', 0.1)), max_tokens=min(int(payload.get('max_tokens', 3000)), 3000),
                 response_format=payload.get('response_format', {'type':'json_object'}))
             reply['model'] = options['model_name']
             seconds = time.monotonic() - generation_started
@@ -131,6 +172,12 @@ def serve(options):
             if self.path != '/v1/chat/completions':
                 self.send_json(404, {'error': 'Unknown route'})
                 return
+            def disconnected():
+                try:
+                    return bool(select.select([self.connection], [], [], 0)[0]
+                                and self.connection.recv(1, socket.MSG_PEEK) == b'')
+                except OSError:
+                    return True
             try:
                 length = int(self.headers.get('Content-Length', '0'))
                 if length <= 0 or length > MAX_BODY:
@@ -143,11 +190,14 @@ def serve(options):
                 if payload.get('stream'):
                     self.send_json(400, {'error': 'Use asynchronous scALABLE summary polling'})
                     return
-                self.send_json(200, worker.complete(payload))
+                self.send_json(200, worker.complete(payload, cancelled=disconnected))
+            except ConnectionAbortedError:
+                return
             except (ValueError, TypeError):
                 self.send_json(400, {'error': 'Invalid completion request'})
             except Exception as exc:
-                self.send_json(503, {'error': f'{type(exc).__name__}: {exc}'})
+                if not disconnected():
+                    self.send_json(503, {'error': f'{type(exc).__name__}: {exc}'})
 
     threading.Thread(target=worker.reap_idle, daemon=True).start()
     server = ThreadingHTTPServer((options['host'], options['port']), Handler)
@@ -174,8 +224,12 @@ def main():
     if options.pop('worker'):
         worker_main()
         return
-    if not options['model_path'] or not Path(options['model_path']).is_file():
-        parser.error('--model must name an installed GGUF file (first shard for split models)')
+    if not importlib.util.find_spec('llama_cpp'):
+        parser.error('Missing llama-cpp-python. Install AltAnalyze3[biology-summary] in this model-service environment.')
+    try:
+        options['model_path'] = str(validate_model(options['model_path'] or ''))
+    except ValueError as exc:
+        parser.error(str(exc))
     if options['ctx_size'] < 4096 or options['threads'] < 1 or options['idle_seconds'] < 30:
         parser.error('ctx-size >= 4096, threads >= 1 and idle-seconds >= 30 are required')
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))

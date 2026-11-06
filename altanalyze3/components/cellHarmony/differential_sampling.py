@@ -11,7 +11,7 @@ import json
 import h5py
 import numpy as np
 import pandas as pd
-from anndata.io import read_elem
+from altanalyze3.components.anndata_compat import read_elem
 
 
 def select_cells(obs, population_col, sample_col, selected_samples, limit=500, scores=None):

@@ -95,6 +95,63 @@ def combine_hla(paths, output):
     write_table(output, [{'sample': s, 'hla': ','.join(combined[s])} for s in sorted(combined)], ['sample', 'hla'])
 
 
+def combine_hla_groups(paths, groups, output, report):
+    """Collapse per-sample HLA tables into one row per group (e.g. a donor typed from several BAMs).
+
+    groups is a TSV with columns sample and group. For each group and gene, every sample that called
+    the gene must report the same allele set. A sample with no call for a gene does not contradict the
+    others. A group with any conflicting gene gets no row in output; report lists every group x gene
+    with its status (agreed, conflict, no_call) and the per-sample calls behind it."""
+    rows, fields = read_table(groups)
+    if fields[:2] != ['sample', 'group']:
+        raise ValueError(f'{groups}: first two columns must be sample and group, found {fields[:2]}')
+    sample_group = {}
+    for row in rows:
+        sample, group = row['sample'].strip(), row['group'].strip()
+        if not sample or not group:
+            raise ValueError(f'{groups}: empty sample or group field')
+        if sample in sample_group:
+            raise ValueError(f'{groups}: sample {sample} listed twice')
+        sample_group[sample] = group
+    typed = {}
+    for path in paths:
+        for sample, alleles in read_hla_table(path).items():
+            if sample in typed:
+                raise ValueError(f'Duplicate HLA sample: {sample}')
+            if sample not in sample_group:
+                raise ValueError(f'HLA sample {sample} from {path} has no row in {groups}')
+            typed[sample] = alleles
+    members = {}
+    for sample, group in sample_group.items():
+        members.setdefault(group, []).append(sample)
+    called, report_rows = {}, []
+    for group in sorted(members):
+        samples = members[group]
+        alleles, conflict = [], False
+        for gene in ('A', 'B', 'C'):
+            calls = {s: tuple(a for a in typed[s] if a.startswith(f'HLA-{gene}*'))
+                     for s in samples if s in typed}
+            calls = {s: c for s, c in calls.items() if c}
+            distinct = {tuple(sorted(c)) for c in calls.values()}
+            status = 'no_call' if not calls else ('agreed' if len(distinct) == 1 else 'conflict')
+            if status == 'agreed':
+                alleles.extend(next(iter(calls.values())))
+            conflict |= status == 'conflict'
+            report_rows.append(dict(group=group, gene=f'HLA-{gene}', status=status,
+                                    n_samples_called=len(calls), n_samples_typed=sum(s in typed for s in samples),
+                                    n_samples_in_group=len(samples),
+                                    calls=';'.join(f'{s}={",".join(c)}' for s, c in sorted(calls.items())),
+                                    not_typed=','.join(s for s in samples if s not in typed)))
+        if alleles and not conflict:
+            called[group] = alleles
+    write_table(report, report_rows, ['group', 'gene', 'status', 'n_samples_called', 'n_samples_typed',
+                                      'n_samples_in_group', 'calls', 'not_typed'])
+    if not called:
+        raise ValueError(f'No group has a concordant HLA call; inspect {report}')
+    write_table(output, [{'sample': g, 'hla': ','.join(called[g])} for g in sorted(called)], ['sample', 'hla'])
+    return called
+
+
 def predict_binding(evidence, hla, output, method='MHCflurry', software_path=None):
     """Emit all sample/peptide/allele pairs for the pyNeoQuant prediction contract."""
     from altanalyze3.components.snaf.binding import run_MHCflurry, run_netMHCpan

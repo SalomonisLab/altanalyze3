@@ -30,10 +30,7 @@ def main():
     args = parser.parse_args()
     if args.cells < 4 or args.output.exists():
         parser.error('Use at least four cells and a fresh output directory')
-    try:
-        from anndata.io import read_elem
-    except ImportError:
-        from anndata.experimental import read_elem
+    from altanalyze3.components.anndata_compat import read_elem
     with h5py.File(args.source) as source:
         if not isinstance(source['X'], h5py.Dataset):
             parser.error('This benchmark requires a dense imputed-modality H5AD')

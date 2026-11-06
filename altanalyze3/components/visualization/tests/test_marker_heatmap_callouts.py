@@ -11,6 +11,16 @@ from altanalyze3.components.visualization import marker_heatmap_h5ad as heatmap
 
 
 class MarkerHeatmapCallouts(unittest.TestCase):
+    def test_callout_colors_follow_rows_when_positions_are_sorted(self):
+        import matplotlib.pyplot as plt
+        fig,ax=plt.subplots()
+        heatmap._draw_row_callouts(ax,['red','black'],[8,2],10,
+                                  color=['#d62728','#000000'],fit_to_page=False)
+        self.assertEqual({t.get_text():t.get_color() for t in ax.texts},
+                         {'red':'#d62728','black':'#000000'})
+        self.assertEqual([line.get_color() for line in ax.lines],['#000000','#d62728'])
+        plt.close(fig)
+
     def test_go_terms_keep_sparse_callouts_legible_and_spaced(self):
         features = [f"ENSG{i:011d}:E1.1-E2.1|ENSG{i:011d}:E1.1-E3.1"
                     for i in range(1600)]

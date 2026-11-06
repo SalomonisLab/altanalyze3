@@ -84,14 +84,29 @@ def run(args):
         try:
             for index, (panel, ax) in enumerate(zip(panels, axes.flat)):
                 native = parser.parse_args(panel['native_argv'])
-                if not native.psi_table or native.reference_condition:
-                    raise ValueError('Composite accepts literal native PSI and existing statistics only')
+                if native.reference_condition:
+                    raise ValueError('Composite requires supplied statistics, not new reference tests')
+                source_kind = panel.get('psi_source', 'native_junction_PSI')
+                definition = panel.get('isoform_definition')
+                if native.counts:
+                    if (source_kind != 'selected_isoform_counts' or not definition or
+                        definition.get('numerator') != native.inclusion_isoforms or
+                        definition.get('other') != native.exclusion_isoforms):
+                        raise ValueError('Count panels require the exact explicit selected-isoform definition')
+                elif source_kind != 'native_junction_PSI' or definition:
+                    raise ValueError('Native junction PSI cannot be labelled as selected-isoform PSI')
                 if native.event_uid != panel['event_uid']:
                     raise ValueError('Panel/native event identities differ')
                 if args.panel_range_step:
                     roster=json.loads(Path(native.donor_roster).read_text())
-                    original=psi_boxplot.native_psi_records(native.psi_table,roster,native.cohort_order,
-                                                            native.event_uid,native.donor_column,native.stat_donor_column)
+                    if native.counts:
+                        original=psi_boxplot.donor_psi_records(
+                            native.counts,roster,native.cohort_order,
+                            native.inclusion_isoforms,native.exclusion_isoforms,
+                            (native.condition_column,native.donor_column,native.isoform_column,native.count_column))
+                    else:
+                        original=psi_boxplot.native_psi_records(native.psi_table,roster,native.cohort_order,
+                                                                native.event_uid,native.donor_column,native.stat_donor_column)
                     native.y_min,native.y_max=observed_psi_limits(original,args.panel_range_step)
                 result = psi_boxplot.run(native, panel_ax=ax)
                 if not result['all_defined_points_in_view']:
@@ -99,6 +114,8 @@ def run(args):
                 if results and (result['donor_roster'] != results[0]['donor_roster'] or
                                 result['cohort_order'] != results[0]['cohort_order']):
                     raise ValueError('Every panel must retain the same independent cohort/donor roster')
+                if results and source_kind != results[0]['psi_source']:
+                    raise ValueError('A composite must use one explicit PSI source definition')
                 gene_id=native.event_uid.split(':',1)[0]
                 expected_label=panel['gene']+':'+native.event_uid.split(':',1)[1].replace('|'+gene_id+':','|')
                 if panel['event_label'] != expected_label:
@@ -124,13 +141,23 @@ def run(args):
                 title=panel['gene']+(' · '+panel['state'] if panel.get('state') else '')
                 ax.text(.5,1.68 if args.panel_range_step else 1.32,title,ha='center',va='bottom',transform=ax.transAxes,
                         fontsize=11.5 if panel.get('state') else 13,fontweight='bold')
+                if native.counts:
+                    event_lines=('Numerator: '+', '.join(definition['numerator'])+
+                                 '\nOther: '+', '.join(definition['other']))
                 ax.text(.5,1.43 if args.panel_range_step else 1.13,event_lines,ha='center',va='bottom',transform=ax.transAxes,
                         fontsize=8.3,linespacing=1.2)
                 ax.text(-.13,1.68 if args.panel_range_step else 1.32,chr(65+index),transform=ax.transAxes,ha='left',va='bottom',
                         fontsize=12,fontweight='bold')
                 result.update(gene=panel['gene'],event_label=panel['event_label'],
                               state=panel.get('state'),
-                              source_selection=panel.get('source_selection'))
+                              source_selection=panel.get('source_selection'),
+                              psi_source=source_kind,isoform_definition=definition,
+                              counts_sha256=psi_boxplot.sha256(native.counts) if native.counts else None)
+                if native.counts:
+                    # Junction identity remains explicit context; these values
+                    # are calculated from the named isoforms, not saved junction PSI.
+                    for record in result['records']:
+                        record['event_uid']=panel['event_uid']
                 results.append(result)
             for ax in list(axes.flat)[len(panels):]:
                 ax.set_visible(False)
@@ -161,7 +188,11 @@ def run(args):
     with outputs[2].open('w') as handle:
         writer=csv.DictWriter(handle,fieldnames=list(records[0]),delimiter='\t',lineterminator='\n')
         writer.writeheader();writer.writerows(records)
-    result=dict(status='COMPLETE_SINGLE_PAGE_NATIVE_PSI_COMPOSITE',panels=results,pages=1,
+    source_kind=results[0]['psi_source']
+    result=dict(status=('COMPLETE_SINGLE_PAGE_SELECTED_ISOFORM_COUNT_PSI_COMPOSITE'
+                        if source_kind=='selected_isoform_counts' else
+                        'COMPLETE_SINGLE_PAGE_NATIVE_PSI_COMPOSITE'),
+                psi_source=source_kind,panels=results,pages=1,
                 required_genes=genes,source_manifest_sha256=source_hash,
                 code_sha256=psi_boxplot.sha256(__file__),
                 native_renderer_sha256=psi_boxplot.sha256(psi_boxplot.__file__),

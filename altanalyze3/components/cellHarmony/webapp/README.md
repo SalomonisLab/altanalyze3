@@ -1,3 +1,38 @@
+## Local setup from a fresh checkout
+
+The web app and its built-in Chat protocols work without a separate LungMAP server.
+AI interpretation is optional and needs model weights plus a runtime; these large files are not in Git.
+From the repository root, in a Python 3.11 virtual environment:
+
+```bash
+python -m pip install -e '.[web,biology-summary]'
+python -m pip install huggingface-hub
+hf download Qwen/Qwen2.5-7B-Instruct-GGUF --include 'qwen2.5-7b-instruct-q4_k_m-*.gguf' --local-dir ./models/qwen
+python -m altanalyze3.components.cellHarmony.webapp.local --model ./models/qwen/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf
+```
+
+On Apple Silicon, use `CMAKE_ARGS="-DGGML_METAL=on"` before the first install command
+([runtime installation](https://llama-cpp-python.readthedocs.io/en/latest/)).
+Download **both** shards from the [official Qwen model repository](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/tree/main).
+The launcher starts the included model service and web app, configures all three
+`SCALABLE_SUMMARY_*` variables for its web process, and stops both services on exit.
+It uses Metal on macOS and CPU elsewhere; override with `--gpu-layers 0` for CPU.
+Use `--port` and `--model-port` if the defaults (8000/8086) are occupied.
+With no model, start the web app alone using
+`python -m uvicorn altanalyze3.components.cellHarmony.webapp.app:app --port 8000`.
+Built-in Chat still answers supported data queries; LLM interpretations require the configured service.
+The core pin AnnData 0.10.9 supports single H5AD inputs; multi-H5AD on-disk merging
+requires the newer web/container dependency set in `requirements.docker.txt`.
+
+To create a small synthetic H5AD for a manual **Use Existing** upload test:
+
+```bash
+python -m altanalyze3.components.cellHarmony.webapp.dev.create_existing_fixture --out ./scalable-existing-example.h5ad
+```
+
+It contains 200 labelled test cells, 800 features, counts and explicitly synthetic
+saved coordinates. It passes the normal QC defaults; it contains no patient data.
+
 ## Large saved-job Explore performance (2026-10-05)
 
 The shared scALABLE-web/Discover serving adapter now accepts floating-point RNA
@@ -538,8 +573,8 @@ Open `http://127.0.0.1:8000`. The ASGI target exists because `app.py` ends with
 `app = create_app()`. `dev/restart_app.sh` restarts this exact command and logs to
 `/Users/saljh8/Documents/GitHub/altanalyze3/altanalyze3/components/cellHarmony/webapp/server_8000.log`.
 
-The Chat tab needs a second process, the LungMAP assistant, on port 8001. Without it the chat
-route answers HTTP 503. See Chat below.
+Chat's established queries work locally. General question/figure fallback and AI
+interpretation use the configured `SCALABLE_SUMMARY_*` model service; see Chat below.
 
 ### Environment variables
 
@@ -562,7 +597,7 @@ route answers HTTP 503. See Chat below.
 | `CELLHARMONY_BUNDLE_MIN_CELLS` | `10000` | build a disk-backed serving bundle at/above this size |
 | `CELLHARMONY_EXPORT_APPROX_PDFS` | `false` | write approximate UMAP comparison PDFs |
 | `CELLHARMONY_H5AD_COMPRESSION` | `lzf` | `lzf`, `gzip` or `none` for every h5ad the pipeline writes |
-| `CELLHARMONY_ASSISTANT_URL` | `http://127.0.0.1:8001/api/assistant/viewer-intent` | the chat intent router |
+| `CELLHARMONY_ASSISTANT_URL` | unset | optional external Chat intent router; built-in routing is used by default |
 | `CELLHARMONY_ENABLE_FASTCNV` | `false` | run fastCNV clone analysis after fastComm |
 | `CELLHARMONY_FASTCNV_EXPORT_PDF` | `true` | write the fastCNV clone PDF |
 
@@ -961,29 +996,61 @@ joined by `__`.
 
 ### Architecture
 
-Neither the web app nor the viewer contains a language model. `POST /api/jobs/{job_id}/chat`
-sends the question, the cell-state names, the completed contrast label, the groupable covariate
-names, and the modality ids to the intent router at `CELLHARMONY_ASSISTANT_URL`. The router
-runs inside the LungMAP site process at
-`/Users/saljh8/Dropbox/LungMAP/refactored_website/app/lungmap/assistant/viewer.py`.
-Three passes read each question:
+Chat first uses the included regulatory, multimodal and protocol routers to read a
+question into a supported query. These paths run locally with no external intent service.
+Their executors read the uploaded job's own results; reported numbers do not come from a model.
+If a question remains ambiguous, the configured `SCALABLE_SUMMARY_*` service can select
+an intent and exact dataset slots. Its output is checked against the offered cell states,
+genes, covariates and modalities before dispatch. Without a configured model, Chat asks
+for clarification with dataset choices instead of failing with a connection error.
 
-| Pass | Method | Model called |
-| --- | --- | --- |
-| 1 | deterministic slot extraction of genes, cell states, contrasts, covariates | no |
-| 2 | scoring against a weighted cue table of 17 protocols | no |
-| 3 | only when passes 1 and 2 return `clarify` or `unsupported` and the sentence names something in the dataset | yes |
+`CELLHARMONY_ASSISTANT_URL` is an optional explicit integration for deployments that
+already operate another intent router. Its failure falls back to the included routing
+path. No external site's source checkout or author-specific file path is required.
+AI summary interpretation uses the same configured model service on first section
+expansion; deterministic evidence, model interpretation and literature evidence remain labelled separately.
 
-The model in pass 3 is Qwen2.5-1.5B-Instruct quantised to Q4_K_M, 1.07 GB, run on CPU through
-`llama_cpp` in a worker subprocess, with `temperature 0.0`, `max_tokens 160`, a JSON schema, and
-a 6-second cap. The prompt contains the protocol menu and the dataset's names only. The model
-never sees a value and never states a number. The web app then computes every figure and
-statistic from the job's h5ad. When the router does not answer after two attempts, the route
-returns HTTP 503.
+When the standard search cannot answer, Chat invokes a general, read-only data
+assistant using that same model service. It inspects the job's actual obs/var/layer/
+embedding schema, completed comparison configuration and registered result tables.
+Generic tools retrieve/filter/group saved data, compute exact set memberships and
+reuse established plots. A model-selected native view is returned directly, without
+a second model call to serialize an already prepared plot. Alternatively the model composes a Plotly specification;
+its numerical trace values reference retrieved tables and are resolved by the server.
+Existing plot types take priority: UMAP/t-SNE, violin, dot plot, CombPlot, cell
+frequency, MarkerHeatmap, differential heatmap/volcano, integrated pathways and
+regulatory networks reuse the established builders, cached endpoints and viewers.
+The fallback cannot generate replacement Python/Plotly code for these requests.
+Saved differential views require an explicit completed comparison and cell state;
+they retain that comparison's modality and annotation layer. The LLM may resolve
+the request into those native parameters; it does not recreate the plotting method.
+
+New graphics do not require a new intent or a plot-specific executor. For diagrams,
+the model can write plotting code using Matplotlib, seaborn and matplotlib-venn.
+A restricted Python AST interpreter exposes only plotting capabilities and complete,
+read-only retrieved tables/sets. It runs in a separate process with time, canvas and
+memory bounds; it offers no general Python execution, files, network or new analyses.
+Standard plotting libraries calculate geometry and numerical labels. Validation
+feedback includes the installed function signature/documentation and bound data
+variables; repeated errors trigger a fresh draft. Isolated workers reuse native
+font-cache JSON and terminate their process group on timeout. Generated SVGs
+are downloadable. Install the updated web extras/Docker requirements together with
+the code; they include matplotlib-venn. The model cannot change source data.
+Native feature IDs and verified aliases remain distinct and recorded; limited
+previews never limit the data used in calculations. Ambiguous requests receive a
+specific clarification, and model/service failures are reported explicitly.
+
+The browser requests newline-delimited progress/results (`stream: true` on the
+existing Chat endpoint), displays retrieval/generation status, and opens generated
+figures immediately, including answers without a table. Existing API clients retain
+the ordinary JSON response. A fallback has a 180-second/10-turn budget. It adds no
+model startup to page loads and does not query the model for successful standard
+answers. Deploy Python and static assets together; the configured model service
+and weights are still required for this fallback.
 
 ### Protocols and executors
 
-The router returns one of 17 protocol ids. `_CHAT_PROTOCOL_ALIAS` maps them onto the web app's
+The routers return supported protocol ids. `_CHAT_PROTOCOL_ALIAS` maps them onto the web app's
 executors.
 
 | Protocol | Executor | Answer |

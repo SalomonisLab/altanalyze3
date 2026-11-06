@@ -187,13 +187,25 @@ def plot(args) -> None:
               .rename(columns={"label": "donor"}))
     frames = [counts]
     sub = None
-    if args.subclusters:
+    if getattr(args, "subcluster_dir", None) and args.subclusters:
+        raise ValueError("pass --subcluster-dir or --subclusters, not both")
+    if getattr(args, "subcluster_dir", None):
+        from altanalyze3.components.visualization.subcluster_labels import labels_for_state
+        table, row = labels_for_state(Path(args.subcluster_dir), args.labels, lambda m: print(m))
+        names = [c for c in table.columns if c != "uid"]
+        sub = pd.DataFrame({"uid": table["uid"].astype(str),
+                            "subcluster": table[names[-1]].astype(str)})
+        print(f"[labels] {args.subcluster_dir}: method {args.labels}; moved by SVM "
+              f"{row['n_moved_svm']}, by centroid {row['n_moved_centroid']}; "
+              f"{row['n_undecidable']} cells had no variance")
+    elif args.subclusters:
         sub = pd.read_csv(args.subclusters, sep="\t", dtype=str)
         if "V1" in sub.columns:
             sub = sub[["uid", "V1"]].rename(columns={"V1": "subcluster"})
         else:
             sub = pd.read_csv(args.subclusters, sep="\t", header=None, dtype=str,
                               names=["uid", "V0", "subcluster"])[["uid", "subcluster"]]
+    if sub is not None:
         cells = cells.merge(sub, on="uid", how="left")
         n_nosub = int(cells["subcluster"].isna().sum())
         if n_nosub:
@@ -304,6 +316,191 @@ def _read_list(value: Optional[str]) -> Optional[List[str]]:
     return [v.strip() for v in value.split(",") if v.strip()]
 
 
+def _panel_labels(cells: pd.DataFrame, group_order: Sequence[str],
+                  group_labels: Sequence[str]) -> List[dict]:
+    """One entry per sub-cluster: where to write it, its age name, and the minority count.
+
+    Each k=2 sub-cluster is named for the age group that dominates it. The cells of the other group
+    inside it are the ones that look out of place on the embedding, so their count is written under
+    the name, as `aged (n=2)`. With no sub-cluster column the labels fall back to the age groups.
+    """
+    names = dict(zip(group_order, group_labels))
+    out: List[dict] = []
+    if "subcluster" in cells.columns:
+        subs = sorted(cells["subcluster"].unique())
+        second = group_order[1]
+        share = {sub: float((cells.loc[cells["subcluster"] == sub, "group"] == second).mean())
+                 for sub in subs}
+        # With two sub-clusters the name says which group is enriched in it RELATIVE to the other,
+        # not which one is the majority. Multilin-2 is mostly young cells in both sub-clusters, and
+        # calling both of them "Young" would tell the reader nothing.
+        enriched = max(share, key=share.get) if len(subs) == 2 else None
+        for sub in subs:
+            m = cells["subcluster"] == sub
+            counts = cells.loc[m, "group"].value_counts()
+            if enriched is not None:
+                dominant = second if sub == enriched else group_order[0]
+            else:
+                dominant = counts.idxmax()
+            minority = [g for g in group_order if g != dominant]
+            n_minor = int(counts.get(minority[0], 0)) if minority else 0
+            out.append({"x": float(cells.loc[m, "x"].median()),
+                        "y": float(cells.loc[m, "y"].median()),
+                        "top": float(cells.loc[m, "y"].max()),
+                        "bottom": float(cells.loc[m, "y"].min()),
+                        "name": names[dominant],
+                        "minor": f"{names[minority[0]].lower()} (n={n_minor})" if n_minor else "",
+                        "subcluster": str(sub), "n_cells": int(m.sum()),
+                        "frac_second_group": round(share[sub], 4)})
+        return out
+    for grp in group_order:
+        m = cells["group"] == grp
+        if m.any():
+            out.append({"x": float(cells.loc[m, "x"].median()),
+                        "y": float(cells.loc[m, "y"].median()),
+                        "top": float(cells.loc[m, "y"].max()),
+                        "bottom": float(cells.loc[m, "y"].min()),
+                        "name": names[grp], "minor": "", "subcluster": "",
+                        "n_cells": int(m.sum())})
+    return out
+
+
+def combined(args) -> None:
+    """One row of donor-coloured UMAP panels sharing a single donor legend.
+
+    The panel set, and the per-state coordinates and sub-cluster folder, come from a tab file so the
+    figure is reproducible from one argument. Each panel names its two sub-clusters by the age group
+    that dominates them and writes the count of the other group underneath.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from altanalyze3.components.visualization.subcluster_labels import labels_for_state
+
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    stem = out.with_suffix("")
+    panels = pd.read_csv(args.panels, sep="\t", dtype=str).fillna("")
+    # an optional point_size column sets the circle diameter of one panel
+    for col in ("title", "coordinates"):
+        if col not in panels.columns:
+            raise ValueError(f"{args.panels} lacks column {col!r}; columns are {list(panels.columns)}")
+    if not len(panels):
+        raise ValueError(f"{args.panels} holds no panels")
+    groups = _read_groups(Path(args.groups), args.uid_col, args.donor_col, args.group_col)
+    group_order = [g.strip() for g in args.group_order.split(",")]
+    group_labels = [g.strip() for g in args.group_labels.split(",")]
+    donor_order = _read_list(args.donor_order)
+
+    frames, per_panel = [], []
+    for _, row in panels.iterrows():
+        coords = read_umap_scores(Path(row["coordinates"]))
+        cells = coords.merge(groups, on="uid", how="left")
+        missing = int(cells["group"].isna().sum())
+        if missing:
+            raise ValueError(f"{row['title']}: {missing} of {len(cells)} cells have no groups row")
+        cells["label"] = cells["donor"].map(short_donor) if args.short_donor else cells["donor"]
+        sub_dir = row.get("subcluster_dir", "")
+        if sub_dir:
+            table, info = labels_for_state(Path(sub_dir), args.labels, lambda m: print(m))
+            names = [c for c in table.columns if c != "uid"]
+            lab = pd.DataFrame({"uid": table["uid"].astype(str),
+                                "subcluster": table[names[-1]].astype(int).astype(str)})
+            cells = cells.merge(lab, on="uid", how="left")
+            n_nosub = int(cells["subcluster"].isna().sum())
+            if n_nosub:
+                raise ValueError(f"{row['title']}: {n_nosub} of {len(cells)} cells have no label")
+            print(f"[labels] {row['title']}: {args.labels}; moved by SVM {info['n_moved_svm']}, "
+                  f"by centroid {info['n_moved_centroid']}; {info['n_undecidable']} with no variance")
+        size = float(row["point_size"]) if str(row.get("point_size", "")).strip() else args.point_size
+        per_panel.append((row["title"], cells, size))
+        frames.append(cells.assign(panel=row["title"]))
+    allcells = pd.concat(frames, ignore_index=True)
+    colours = donor_colours(allcells, group_order, donor_order)
+
+    counts = (allcells.groupby(["panel", "subcluster", "group", "label"], dropna=False)
+              .size().rename("n_cells").reset_index()
+              if "subcluster" in allcells.columns else
+              allcells.groupby(["panel", "group", "label"]).size().rename("n_cells").reset_index())
+    counts.to_csv(f"{stem}_cell_counts.tsv", sep="\t", index=False)
+    pd.DataFrame({"donor": list(colours), "color": list(colours.values())}
+                 ).to_csv(f"{stem}_colors.tsv", sep="\t", index=False)
+
+    apply_rcparams(7)
+    n = len(per_panel)
+    fig, axes = plt.subplots(1, n, figsize=(args.panel_size * n + 1.6, args.panel_size + 0.3))
+    axes = np.atleast_1d(axes)
+    rng = np.random.default_rng(args.seed)
+    label_rows = []
+    for ax, (title, cells, size) in zip(axes, per_panel):
+        cells = cells.copy()
+        cells["color"] = cells["label"].map(colours)
+        order = rng.permutation(len(cells))
+        vector_circles(ax, cells["x"].to_numpy()[order], cells["y"].to_numpy()[order],
+                       size, cells["color"].to_numpy()[order], alpha=1.0)
+        pad_x = 0.08 * (cells["x"].max() - cells["x"].min())
+        pad_y = 0.08 * (cells["y"].max() - cells["y"].min())
+        ax.set_xlim(cells["x"].min() - pad_x, cells["x"].max() + pad_x)
+        ax.set_title(title, fontsize=8, fontweight="bold")
+        ax.set_xlabel("UMAP-X")
+        ax.set_ylabel("UMAP-Y")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        if args.aspect == "equal":
+            ax.set_aspect("equal", adjustable="box")
+        # Labels sit in the margin outside the cloud they name, above it for an upper sub-cluster
+        # and below it for a lower one, so they need no white halo. A halo is drawn as a stroked
+        # glyph outline, which turns the label into paths and stops it being editable text.
+        span = cells["y"].max() - cells["y"].min()
+        gap, line = 0.035 * span, 0.075 * span
+        mid = (cells["y"].max() + cells["y"].min()) / 2
+        label_ys = []
+        for lab in _panel_labels(cells, group_order, group_labels):
+            above = lab["y"] >= mid
+            y_name = lab["top"] + gap if above else lab["bottom"] - gap
+            y_minor = y_name + line if above else y_name - line
+            va_name = "bottom" if above else "top"
+            ax.text(lab["x"], y_name, lab["name"], ha="center", va=va_name, fontsize=7,
+                    color="#000000", zorder=5)
+            label_ys += [y_name, y_name + (line if above else -line)]
+            if lab["minor"]:
+                ax.text(lab["x"], y_minor, lab["minor"], ha="center", va=va_name, fontsize=6,
+                        color="#C0392B", zorder=5)
+                label_ys.append(y_minor + (line if above else -line))
+            label_rows.append(dict(panel=title, **lab))
+        lo = min([cells["y"].min() - pad_y] + label_ys)
+        hi = max([cells["y"].max() + pad_y] + label_ys)
+        ax.set_ylim(lo - 0.02 * span, hi + 0.02 * span)
+    pd.DataFrame(label_rows).to_csv(f"{stem}_panel_labels.tsv", sep="\t", index=False)
+
+    legend_groups = ([g.strip() for g in args.legend_group_order.split(",")]
+                     if args.legend_group_order else group_order)
+    handles = []
+    for grp in legend_groups:
+        for d in [d for d in colours if allcells.loc[allcells["label"] == d, "group"].iloc[0] == grp]:
+            handles.append(Line2D([0], [0], marker="o", linestyle="none", markersize=4,
+                                  markerfacecolor=colours[d], markeredgecolor="none", label=d))
+    axes[-1].legend(handles=handles, loc="center left", bbox_to_anchor=(1.03, 0.5), frameon=False,
+                    fontsize=6, handletextpad=0.4, borderaxespad=0.0)
+    fig.tight_layout()
+    strip_masks(fig)
+    fig.savefig(out, format="pdf")
+    plt.close(fig)
+    report = pdf_vector_report(out)
+    print(f"[pdf] {out}: raster stamps {report['raster_images']}, "
+          f"embedded TrueType fonts {report['truetype_fonts']}, {report['bytes']} bytes")
+    params = {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()
+              if k != "func"}
+    params.update({"n_panels": n, "panels": list(panels["title"]), "pdf": report,
+                   "point_size_by_panel": {t: sz for t, _, sz in per_panel}})
+    with open(f"{stem}_parameters.json", "w") as fh:
+        json.dump(params, fh, indent=2)
+    print(f"[write] {out}")
+    print(f"[write] {stem}_cell_counts.tsv")
+    print(f"[write] {stem}_panel_labels.tsv")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sp = p.add_subparsers(dest="command", required=True)
@@ -334,7 +531,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="comma list or file: donor labels light to dark within each group")
     b.add_argument("--short-donor", action=argparse.BooleanOptionalAction, default=True)
     b.add_argument("--subclusters", default=None,
-                   help="round1Metadata*.txt or FinalGroups-CellTypesFull.txt: adds a subcluster panel and counts")
+                   help="a label file (round1Metadata*.txt, FinalGroups-CellTypesFull.txt, or a "
+                        "uid/V0/V1 table): adds a subcluster panel and counts")
+    b.add_argument("--subcluster-dir", default=None,
+                   help="a cell-state folder of an ICGS2 k=2 run; labels are derived with --labels "
+                        "instead of read from a file")
+    b.add_argument("--labels", default="svm+centroid", choices=["nmf", "svm", "svm+centroid"],
+                   help="with --subcluster-dir: nmf is the run's round-1 membership, svm is the "
+                        "supervised re-assignment, svm+centroid (the default) adds nearest-centroid "
+                        "passes over the MarkerFinder genes")
     b.add_argument("--title", default=None)
     b.add_argument("--label-groups", action=argparse.BooleanOptionalAction, default=False,
                    help="write each group's display name at the median of its cells")
@@ -344,6 +549,32 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--panel-size", type=float, default=2.6, help="panel side in inches")
     b.add_argument("--seed", type=int, default=0, help="seed of the drawing-order shuffle")
     b.set_defaults(func=plot)
+
+    c = sp.add_parser("combined", help="one row of donor-coloured UMAP panels with a shared legend")
+    c.add_argument("--panels", required=True,
+                   help="tab file with columns title, coordinates and optional subcluster_dir")
+    c.add_argument("--groups", required=True, help="tab file with uid, donor and group columns")
+    c.add_argument("--out", required=True, help="output PDF path")
+    c.add_argument("--uid-col", default="uid")
+    c.add_argument("--donor-col", default="donor")
+    c.add_argument("--group-col", default="age-group")
+    c.add_argument("--group-order", default="young,old", help="two group values: blue, then red")
+    c.add_argument("--group-labels", default="Young,Aged", help="display names for --group-order")
+    c.add_argument("--legend-group-order", default=None,
+                   help="group order in the shared legend; the default follows --group-order")
+    c.add_argument("--donor-order", default=None,
+                   help="comma list or file: donor labels light to dark within each group")
+    c.add_argument("--short-donor", action=argparse.BooleanOptionalAction, default=True)
+    c.add_argument("--labels", default="svm+centroid", choices=["nmf", "svm", "svm+centroid"],
+                   help="method for the sub-cluster labels of each panel's subcluster_dir")
+    c.add_argument("--aspect", choices=["equal", "auto"], default="auto",
+                   help="auto fills each panel; equal keeps the embedding geometry")
+    c.add_argument("--point-size", type=float, default=1.1,
+                   help="circle diameter in points; a panels-file column named point_size overrides "
+                        "it for that panel, which MPP-1 uses because its two islands are narrow")
+    c.add_argument("--panel-size", type=float, default=2.2, help="panel side in inches")
+    c.add_argument("--seed", type=int, default=0, help="seed of the drawing-order shuffle")
+    c.set_defaults(func=combined)
     return p
 
 

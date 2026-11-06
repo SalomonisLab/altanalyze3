@@ -113,3 +113,17 @@ def test_differential_working_copy_retains_test_inputs():
     assert set(working.obsm) == {'X_umap'}
     assert 'imputed_modalities' not in working.uns
     assert 'soupx_raw' in a.layers and 'X_lipid' in a.obsm
+
+
+@pytest.mark.parametrize('task',['pipeline','differential'])
+def test_inherited_execution_lease_prevents_false_recovery(saved_job,task):
+    from altanalyze3.components.cellHarmony.flask.job_control import execution_lease
+    store,runner,job,_=saved_job
+    if task=='pipeline':store.update_job(job,status='processing',worker_pid=None)
+    lease=execution_lease(store,job)
+    try:
+        meta=getattr(runner,'recover_interrupted_'+task)(job)
+        assert (meta if task=='pipeline' else meta['differential'])['status']=='processing'
+    finally:lease.close()
+    meta=getattr(runner,'recover_interrupted_'+task)(job)
+    assert (meta if task=='pipeline' else meta['differential'])['status']=='failed'

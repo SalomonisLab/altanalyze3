@@ -125,7 +125,7 @@ explorePayloadCache.onClear = () => {
   currentDifferentialInteraction = null;
   delete crossPathwayContexts.marker;
   delete crossPathwayContexts.differential;
-  clearChatOutput();
+  clearChatOutput(true);
   VISUALIZATION_PANELS.forEach(panel => {
     panelVisualizationRequest[panel] += 1;
     resetVisualizationSurface(panel);
@@ -5061,16 +5061,18 @@ function jumpToDifferentialVolcano(population) {
   loadDifferentialVisualization();
 }
 
-function renderDifferentialHeatmap(payload, geneFilter = null) {
-  destroyDifferentialNetwork();
-  const plot = document.getElementById("differential-plot-area");
+function renderDifferentialHeatmap(payload, geneFilter = null, options = {}) {
+  const detached = Boolean(options.targetId);
+  if (!detached) destroyDifferentialNetwork();
+  const plot = document.getElementById(options.targetId || "differential-plot-area");
   const allRows = payload.rows || [];
   const rows = geneFilter ? allRows.filter((row) => geneFilter.genes.has(String(row.gene))) : allRows;
-  setDifferentialGeneFilterNote(
+  if (!detached) setDifferentialGeneFilterNote(
     describeDifferentialGeneFilter(geneFilter, payload.population, rows.length, allRows.length, "rows"),
   );
-  markDifferentialGeneFilterMatched(rows.length > 0);
+  if (!detached) markDifferentialGeneFilterMatched(rows.length > 0);
   if (!rows.length) {
+    if (detached) {plot.textContent = `No rows were retained for ${payload.population}.`; return;}
     renderDifferentialEmpty(
       geneFilter
         ? `No heatmap row for ${geneFilter.gene} or its interacting genes in ${payload.population}.`
@@ -5096,7 +5098,7 @@ function renderDifferentialHeatmap(payload, geneFilter = null) {
   }
   const colorMin = -colorExtent;
   const colorMax = colorExtent;
-  const modality = differentialFeatureModality();
+  const modality = options.modality || differentialFeatureModality();
   const hover = rows.map(row => payload.columns.map(() => featureHover(row.gene, modality)));
   const y = rows.map((row) => row.gene);
   const directions = rows.map((row) => payload.columns.map(() => row.direction));
@@ -5104,7 +5106,7 @@ function renderDifferentialHeatmap(payload, geneFilter = null) {
   const tickStep = Math.max(1, Math.ceil(rows.length / ((figureHeight - 180) / 16)));
   const tickGenes = y.filter((_, i) => i % tickStep === 0);
   plot.classList.remove("hidden");
-  document.getElementById("differential-plot-empty").classList.add("hidden");
+  if (!detached) document.getElementById("differential-plot-empty").classList.add("hidden");
   Plotly.newPlot(
     plot,
     [
@@ -5159,17 +5161,18 @@ function renderDifferentialHeatmap(payload, geneFilter = null) {
   );
   plot.on("plotly_click", (event) => {
     const gene = event?.points?.[0]?.y;
-    if (gene) {
+    if (gene && !detached) {
       currentDifferentialGene = gene;
       loadDifferentialGeneDetail(gene, payload.population);
     }
   });
 }
 
-function renderDifferentialVolcano(payload, geneFilter = null) {
-  destroyDifferentialNetwork();
-  const plot = document.getElementById("differential-plot-area");
-  const modality = differentialFeatureModality();
+function renderDifferentialVolcano(payload, geneFilter = null, options = {}) {
+  const detached = Boolean(options.targetId);
+  if (!detached) destroyDifferentialNetwork();
+  const plot = document.getElementById(options.targetId || "differential-plot-area");
+  const modality = options.modality || differentialFeatureModality();
   const statisticLabel = payload.statistic_label || "FDR";
   // A comparison with no replicates carries no p-value, so the y axis shows the
   // effect itself. Writing -log10(effect size) there would be a false label.
@@ -5179,11 +5182,12 @@ function renderDifferentialVolcano(payload, geneFilter = null) {
   const points = geneFilter
     ? allPoints.filter((point) => geneFilter.genes.has(String(point.gene)))
     : allPoints;
-  setDifferentialGeneFilterNote(
+  if (!detached) setDifferentialGeneFilterNote(
     describeDifferentialGeneFilter(geneFilter, payload.population, points.length, allPoints.length, "genes"),
   );
-  markDifferentialGeneFilterMatched(points.length > 0);
+  if (!detached) markDifferentialGeneFilterMatched(points.length > 0);
   if (!points.length) {
+    if (detached) {plot.textContent = `No points were retained for ${payload.population}.`; return;}
     renderDifferentialEmpty(
       geneFilter
         ? `No volcano point for ${geneFilter.gene} or its interacting genes in ${payload.population}.`
@@ -5198,7 +5202,7 @@ function renderDifferentialVolcano(payload, geneFilter = null) {
   // A filtered volcano holds few enough points to name every one of them on the plot.
   const pointMode = geneFilter && points.length <= 60 ? "markers+text" : "markers";
   plot.classList.remove("hidden");
-  document.getElementById("differential-plot-empty").classList.add("hidden");
+  if (!detached) document.getElementById("differential-plot-empty").classList.add("hidden");
   Plotly.newPlot(
     plot,
     [
@@ -5245,7 +5249,7 @@ function renderDifferentialVolcano(payload, geneFilter = null) {
   );
   plot.on("plotly_click", (event) => {
     const gene = event?.points?.[0]?.customdata?.[0];
-    if (gene) {
+    if (gene && !detached) {
       currentDifferentialGene = gene;
       loadDifferentialGeneDetail(gene, payload.population);
     }
@@ -6753,8 +6757,9 @@ function setUmapPanelSummary(panelKey, umapData) {
   }
 }
 
-function renderPanelUmap(panelKey, umapData, mode, dotScale) {
-  updateBaselineFilterSummaries(panelKey);
+function renderPanelUmap(panelKey, umapData, mode, dotScale, targetId = "") {
+  const plotTarget = targetId || panelPlotId(panelKey);
+  if (!targetId) updateBaselineFilterSummaries(panelKey);
   const traces = [];
   const layout = {
     paper_bgcolor: "rgba(0,0,0,0)",
@@ -6769,7 +6774,7 @@ function renderPanelUmap(panelKey, umapData, mode, dotScale) {
     const sampleField = String(umapData.sample_field || "sample").trim() || "sample";
     const queryPoints = (umapData.frequency_counts || umapData.query || []).filter((point) => String(point.sample || "").trim());
     if (!queryPoints.length) {
-      Plotly.newPlot(panelPlotId(panelKey), [], {
+      Plotly.newPlot(plotTarget, [], {
         ...layout,
         title: "Cell frequency",
         xaxis: { visible: false },
@@ -6838,7 +6843,7 @@ function renderPanelUmap(panelKey, umapData, mode, dotScale) {
     // "Alveolar macrophages sub-cluster 1_c13" need about 5.6 px per character at 9 px.
     const leftMargin = Math.max(70, Math.min(360, 24 + maxLabelLength * 5.6));
 
-    Plotly.newPlot(panelPlotId(panelKey), [
+    Plotly.newPlot(plotTarget, [
       {
         type: "bar",
         orientation: "h",
@@ -6901,16 +6906,16 @@ function renderPanelUmap(panelKey, umapData, mode, dotScale) {
     });
     layout.legend = { orientation: "h" };
     Object.assign(layout, buildParentUmapAxes(umapData, [...umapData.reference,...umapData.query]));
-    Plotly.newPlot(panelPlotId(panelKey), traces, layout);
+    Plotly.newPlot(plotTarget, traces, layout);
     return;
   }
-  setUmapPanelSummary(panelKey, umapData);
+  if (!targetId) setUmapPanelSummary(panelKey, umapData);
   const populations = buildStableUmapPopulationOrder(umapData);
   const colorMap = buildPlotPopulationColors(umapData);
   const labelPoints = relaxReferencePreviewLabels(
     buildPopulationCentroids(umapData.query),
     umapData.query,
-    document.getElementById(panelPlotId(panelKey))
+    document.getElementById(plotTarget)
   );
   traces.push({
     x: umapData.reference.map((p) => p.x),
@@ -6965,14 +6970,17 @@ function renderPanelUmap(panelKey, umapData, mode, dotScale) {
   } else {
     Object.assign(layout, buildParentUmapAxes(umapData, [...umapData.reference,...umapData.query]));
   }
-  Plotly.newPlot(panelPlotId(panelKey), traces, layout);
+  Plotly.newPlot(plotTarget, traces, layout);
 }
 
-function renderPanelExpression(panelKey, expressionData, mode, dotScale) {
-  updateBaselineFilterSummaries(panelKey);
+function renderPanelExpression(panelKey, expressionData, mode, dotScale, targetId = "") {
+  const plotTarget = targetId || panelPlotId(panelKey);
+  const resetSurface = () => targetId ? Plotly.purge(plotTarget) : resetVisualizationSurface(panelKey);
+  if (!targetId) updateBaselineFilterSummaries(panelKey);
   const displayGene = featureDisplayName(expressionData?.gene, expressionData?.modality);
   const valueLabel = measurementLabel(expressionData?.modality);
   if (!expressionData?.umap?.length && !expressionData?.violin?.length) {
+    if (targetId) { document.getElementById(targetId).textContent = expressionData?.message || "No values available for this selection."; return; }
     renderVisualizationMessage(
       panelKey,
       expressionData?.message || `Gene '${expressionData?.requested_gene || expressionData?.gene || ""}' was not found.`,
@@ -6981,7 +6989,7 @@ function renderPanelExpression(panelKey, expressionData, mode, dotScale) {
     return;
   }
   if (mode === "violin") {
-    resetVisualizationSurface(panelKey);
+    resetSurface();
     if (expressionData.source === "reference") {
       const trace = {
         type: "bar",
@@ -6989,7 +6997,7 @@ function renderPanelExpression(panelKey, expressionData, mode, dotScale) {
         y: expressionData.violin.map((entry) => entry.mean),
         marker: { color: "#475569", opacity: 0.85 },
       };
-      Plotly.newPlot(panelPlotId(panelKey), [trace], {
+      Plotly.newPlot(plotTarget, [trace], {
         title: `${displayGene} (reference centroid expression, top 10 states)`,
         paper_bgcolor: "rgba(0,0,0,0)",
         plot_bgcolor: "rgba(255,255,255,0.9)",
@@ -7019,7 +7027,7 @@ function renderPanelExpression(panelKey, expressionData, mode, dotScale) {
       pointpos: 0,
       marker: { size: 3 * dotScale, opacity: 0.55 },
     }));
-    Plotly.newPlot(panelPlotId(panelKey), violinTraces, {
+    Plotly.newPlot(plotTarget, violinTraces, {
       title: `${displayGene} (top 10 states by mean)`,
       paper_bgcolor: "rgba(0,0,0,0)",
       plot_bgcolor: "rgba(255,255,255,0.9)",
@@ -7126,8 +7134,8 @@ function renderPanelExpression(panelKey, expressionData, mode, dotScale) {
     });
   }
   Object.assign(expressionLayout, buildParentUmapAxes(expressionData, expressionData.umap));
-  resetVisualizationSurface(panelKey);
-  Plotly.newPlot(panelPlotId(panelKey), traces, expressionLayout);
+  resetSurface();
+  Plotly.newPlot(plotTarget, traces, expressionLayout);
 }
 
 function renderVisualizationPanel(panelKey) {
@@ -7614,6 +7622,7 @@ let chatLastResult = null;
 let chatRequest = 0;
 let chatPlotRequest = 0;
 let chatController = null;
+let chatPendingRequest = null;
 
 function ensureBiologySummaryButton() {
   const ask=document.querySelector(".chat-ask");
@@ -7720,7 +7729,8 @@ function releaseChatVisualization() {
   releaseVisualizationResources("chat", document.getElementById("chat-plot"));
 }
 
-function clearChatOutput() {
+function clearChatOutput(preservePending = false) {
+  if (!preservePending) chatPendingRequest = null;
   chatRequest += 1;
   chatPlotRequest += 1;
   chatController?.abort();
@@ -7742,7 +7752,8 @@ function clearChatOutput() {
   const views = document.getElementById("chat-views");
   if (views) views.classList.add("hidden");
   const status = document.getElementById("chat-status");
-  if (status) status.textContent = "";
+  if (status) status.textContent = chatPendingRequest && chatPendingRequest.jobId === getResultsJobId()
+    && chatPendingRequest.session === jobSessionGeneration ? "Loading the dataset before answering…" : "";
 }
 
 async function askChat() {
@@ -7751,26 +7762,67 @@ async function askChat() {
   const jobId = jobIdField ? jobIdField.value.trim() : "";
   const status = document.getElementById("chat-status");
   if (!question) return;
+  // A saved job can clear its initial Explore cache while it restores. Keep
+  // this explicit user question pending until that restore has completed.
+  const pending = {jobId, session:jobSessionGeneration};
+  chatPendingRequest = pending;
+  if (jobId && currentJobStatus === "completed" && !areExploreResultsReady(jobId)) {
+    clearChatOutput(true);
+    status.textContent = "Loading the dataset before answering…";
+    try {
+      let ready = false;
+      for (let attempt = 0; attempt < 3 && !ready; attempt++) {
+        ready = await ensureExploreResultsReady(jobId);
+        if (chatPendingRequest !== pending || pending.session !== jobSessionGeneration || jobId !== getResultsJobId()) return;
+      }
+      if (!ready) throw new Error("Dataset loading did not finish. Please retry your question.");
+    } catch (error) {
+      if (chatPendingRequest === pending) status.textContent = error.message;
+      return;
+    }
+  }
+  if (chatPendingRequest !== pending) return;
+  chatPendingRequest = null;
   // Clear before the request, not after it, so the old figure goes at the click
   // rather than when the answer arrives.
   clearChatOutput();
   if (!jobId) { status.textContent = "Load a dataset first."; return; }
   const request = chatRequest;
-  const generation = explorePayloadCache.generation;
+  let generation = explorePayloadCache.generation;
   const controller = new AbortController();
   chatController = controller;
   const isCurrent = () => request === chatRequest && generation === explorePayloadCache.generation && jobId === getResultsJobId();
+  status.textContent = "Loading dataset annotations…";
   await ensureFeatureAnnotations(jobId);
-  if (!isCurrent()) return;
+  if (request !== chatRequest || jobId !== getResultsJobId()) return;
+  generation = explorePayloadCache.generation;
   status.textContent = "Working...";
   try {
     const response = await fetch(apiPath(`/api/jobs/${jobId}/chat`), {
       method: "POST",
       signal: controller.signal,
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question }),
+      body: JSON.stringify({ question, stream: true }),
     });
-    const data = await response.json();
+    let data;
+    if ((response.headers.get("content-type") || "").includes("application/x-ndjson")) {
+      const reader = response.body.getReader(), decoder = new TextDecoder();
+      let pending = "";
+      const receive = line => {
+        if (!line.trim() || !isCurrent()) return;
+        const event = JSON.parse(line);
+        if (event.type === "progress") status.textContent = event.message;
+        if (event.type === "result") data = event.result;
+      };
+      while (true) {
+        const {value, done} = await reader.read();
+        pending += decoder.decode(value || new Uint8Array(), {stream: !done});
+        const lines = pending.split("\n"); pending = lines.pop();
+        lines.forEach(receive);
+        if (done) { receive(pending); break; }
+      }
+      if (!data) throw new Error("The data assistant disconnected before returning an answer. Please retry.");
+    } else data = await response.json();
     if (!isCurrent()) return;
     if (!response.ok) throw new Error(data.detail || `chat failed (${response.status})`);
     chatLastResult = data;
@@ -7802,6 +7854,15 @@ function renderChatAnswer(data) {
   document.getElementById("chat-answer").innerHTML =
     `<p>${escapeHtml(data.answer || "")}</p><p class="panel-copy">Read as <b>${escapeHtml(data.intent)}</b>`
     + (bits.length ? `, ${bits.join(", ")}.` : ".") + "</p>";
+  if (data.caption) {
+    const caption = document.createElement("p"); caption.className = "panel-copy";
+    caption.textContent = data.caption; document.getElementById("chat-answer").appendChild(caption);
+  }
+  if (data.table_display_truncated) {
+    const note = document.createElement("p"); note.className = "panel-copy";
+    note.textContent = `Showing 5,000 of ${data.table_total_rows} retrieved rows. Calculations use the complete selection.`;
+    document.getElementById("chat-answer").appendChild(note);
+  }
 
   // Follow-up questions: each is answerable by this dataset, so a click never
   // lands on a protocol with no recipe.
@@ -7828,17 +7889,25 @@ function renderChatAnswer(data) {
 
   const table = data.table;
   const views = document.getElementById("chat-views");
-  if (!table || !(table.rows || []).length) { views.classList.add("hidden"); return; }
+  const hasTable = Boolean(table && (table.rows || []).length);
+  if (!hasTable && !data.plot) { views.classList.add("hidden"); return; }
   views.classList.remove("hidden");
-  initChatResultControls(data);
-  document.getElementById("chat-table").classList.remove("hidden");
+  if (hasTable) initChatResultControls(data);
+  else {
+    chatResultState = null;
+    document.getElementById("chat-result-controls")?.classList.add("hidden");
+  }
+  views.querySelectorAll("button").forEach(b => b.classList.toggle("hidden", b.dataset.view === "table" && !hasTable));
+  document.getElementById("chat-table").classList.toggle("hidden", !hasTable);
   document.getElementById("chat-plot").classList.add("hidden");
   views.querySelectorAll("button").forEach((b, i) => b.classList.toggle("active", i === 0));
-  if (["cross_modal", "modality_markers"].includes(data.plot?.kind)) {
+  if (["cross_modal", "modality_markers", "agent_figure", "agent_svg", "existing_view"].includes(data.plot?.kind) || (!hasTable && data.plot)) {
     document.getElementById("chat-table").classList.add("hidden");
     document.getElementById("chat-plot").classList.remove("hidden");
     views.querySelectorAll("button").forEach(b => b.classList.toggle("active", b.dataset.view === "plot"));
-    drawChatPlot();
+    drawChatPlot().catch(err => {
+      document.getElementById("chat-plot").textContent = `Unable to display this figure: ${err.message}`;
+    });
   }
 }
 
@@ -8618,6 +8687,60 @@ async function drawChatPlot() {
   const generation = explorePayloadCache.generation;
   const isCurrent = () => request === chatPlotRequest && result === chatLastResult
     && generation === explorePayloadCache.generation && jobId === getResultsJobId();
+
+  if (spec.kind === "agent_figure") {
+    await Plotly.newPlot(host, spec.figure.data || [], spec.figure.layout || {}, {responsive:true, displaylogo:false});
+    return;
+  }
+  if (spec.kind === "agent_svg") {
+    const source = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(spec.svg);
+    const image = document.createElement("img"); image.src = source;
+    image.alt = spec.caption || "Diagram from retrieved dataset results";
+    image.style.width = "100%"; image.style.maxHeight = "800px";
+    const download = document.createElement("a"); download.href = source;
+    download.download = "scalable-chat-diagram.svg"; download.textContent = "Download SVG";
+    download.className = "ghost-btn"; host.append(image, download);
+    return;
+  }
+  if (spec.kind === "existing_view") {
+    if (spec.view === "dotplot") renderDotPlotFigure("chat-plot", spec.payload);
+    else if (spec.view === "frequency") renderPanelUmap(null, spec.payload, "frequency", getPlotDotScale(), "chat-plot");
+    else if (spec.view === "umap_states") renderPanelUmap(null, expandPlotColumns(spec.payload), "cluster", getPlotDotScale(), "chat-plot");
+    else if (spec.view === "umap" || spec.view === "violin") {
+      renderPanelExpression(null, spec.payload, spec.view, getPlotDotScale(), "chat-plot");
+    } else if (spec.view === "combplot") {
+      const params = new URLSearchParams({genes:spec.genes.join(","), modality:spec.modality, deferred:"true", unit:"cells"});
+      if (spec.group_by) params.set("group_by", spec.group_by);
+      const payload = await explorePayloadCache.fetch(apiPath(`/api/jobs/${jobId}/combplot?${params}`),
+        message => {if (isCurrent()) host.textContent = message;});
+      if (isCurrent()) renderCombPlotFigure("chat-plot", payload);
+    } else if (spec.view === "volcano" || spec.view === "differential_heatmap") {
+      const draw = spec.view === "volcano" ? renderDifferentialVolcano : renderDifferentialHeatmap;
+      draw(spec.payload, null, {targetId:"chat-plot", modality:spec.modality});
+    } else if (spec.view === "network" || spec.view === "pathway") {
+      await ScalableIntegrated.mount(host, {...integratedOptions(jobId,
+        spec.view === "network" ? "integrated_network" : "integrated_pathway",
+        spec.cell_state, spec.modality, spec.source), contrast:spec.contrast,
+        features:spec.features, id:spec.id, externalPdf:false});
+    } else if (spec.view === "marker_heatmap") {
+      host.textContent = "Loading the existing interactive marker heatmap…";
+      const params = new URLSearchParams({modality:spec.modality, compact:"true", cells_per_sample:String(panelCellsPerSample("chat"))});
+      if (spec.state_layer) params.set("state_layer", spec.state_layer);
+      const url = withRootPath(`/jobs/${jobId}/marker/heatmap/viewer?${params}`);
+      const response = await fetch(url, {signal:chatController?.signal});
+      if (!response.ok) throw new Error(`Marker heatmap returned HTTP ${response.status}.`);
+      const html = await response.text();
+      if (!isCurrent()) return;
+      const frame = document.createElement("iframe");
+      frame.className = "morpheus-frame"; frame.title = "Interactive marker heatmap";
+      frame.style.height = "650px"; frame.style.width = "100%";
+      frame.referrerPolicy = "no-referrer";
+      const base = document.createElement("base"); base.href = new URL(url, window.location.href).href;
+      frame.srcdoc = html.replace(/<head>/i, `<head>${base.outerHTML}`);
+      host.replaceChildren(frame);
+    }
+    return;
+  }
 
   if (spec.kind === "cross_pathways") {
     const all=filteredChatRows(), limit=chatResultState.limit || Math.max(1,all.length);

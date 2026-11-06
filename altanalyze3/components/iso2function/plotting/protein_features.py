@@ -193,8 +193,9 @@ def _coalesce_same_essential_class(display, audit_by_id):
             kept.extend(reps)
     # Second pass on the B side: an essential row that has no A coordinate but sits on B inside a kept row
     # of the same class (a PROSITE C2H2 profile next to the curated UniProt zinc finger of the other isoform,
-    # GFI1B 2026-10-24) is the same feature and is folded into it; otherwise it would be drawn as an extra
-    # unnumbered bar on B and listed as "not in this protein" on A.
+    # GFI1B 2026-10-24) is the same feature and is folded into it on B; otherwise it would be drawn as an extra
+    # unnumbered bar on B. The row stays in the display, flagged folded_into_B_bar, so A still lists it as
+    # unplaced (it has no A coordinate whatever the partner is).
     placed_by_class = defaultdict(list)
     for f in kept:
         if f.get('essential_class') and f['A_start'] != '' and f.get('B_native_start') not in ('', None):
@@ -212,7 +213,10 @@ def _coalesce_same_essential_class(display, audit_by_id):
                 target.setdefault('coalesced_providers', []).append(f['provider'] + ':' + f['description'])
                 for fid in f['source_feature_ids']:
                     audit_by_id[fid]['display_role'] = 'coalesced_same_essential_class'
-                continue
+                # The fold is a B-side presentation only. The row still has no A coordinate, so A keeps listing it
+                # as unplaced; otherwise A's unplaced list depends on its partner and a multi-isoform ISV overlay
+                # becomes ambiguous (Nathan, 2026-11-03: RUNX1 ENSP00000382184 Runt_dom on ENST00000300305).
+                f['folded_into_B_bar'] = True
         final.append(f)
     return final
 
@@ -604,6 +608,8 @@ def architecture_features(features, side):
             segments=[] if f['A_start']=='' else [(f['A_start'],f['A_end'])]
             uncertain=f['A_start']==''
         else:
+            # Folded into a same-class B bar (_coalesce_same_essential_class): that bar already shows it on B.
+            if f.get('folded_into_B_bar'):continue
             uncertain=f['status'] in ('ambiguous_placement','projection_disagreement','unplaced_annotation')
             mapped=f['B_native_segments']
             # A domain architecture shows the best mapped native interval,
@@ -983,7 +989,8 @@ def run_protein_impact_plots(args):
                         isoform_id=plan['pair']['isoform_'+side],feature_id=f['feature_id'],
                         feature_type=f['feature_type'],description=f['description'],provider=f['provider'],
                         native_start=segments[0][0] if segments else '',native_end=segments[-1][1] if segments else '',
-                        placement='unplaced' if f['display_id'] in unplaced else 'partial' if item and item['partial'] else 'mapped' if item else 'absent'))
+                        placement='unplaced' if f['display_id'] in unplaced else 'partial' if item and item['partial'] else 'mapped' if item
+                                  else 'folded_into_same_class_bar' if side=='B' and f.get('folded_into_B_bar') else 'absent'))
         write(out/'native_architecture_coordinates.tsv',native_rows)
         if exon_root:
             selected={p['pair']['isoform_'+s] for p in plans for s in ('A','B')}
