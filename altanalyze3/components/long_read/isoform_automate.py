@@ -1166,3 +1166,9 @@ def combine_h5ad_files(sample_h5ads, output_file='combined.h5ad'):
     combined_adata.write_h5ad(output_file, compression='gzip')
     
     return combined_adata
+
+
+def run_integrated_workflow(config_path):
+    """Complete source-preserving workflow; all three noncanonical modalities default on."""
+    from .noncanonical.pipeline import main
+    return main(['--config', str(config_path), '--stage', 'all'])

@@ -23,6 +23,7 @@ dependencies = [
     "numpy>=1.23.5,<2",
     "pandas>=1.5.2,<3",
     "pysam==0.22.0",
+    "mappy==2.30",
     "pytest==8.3.3",
     "requests==2.32.3",
     "scanpy==1.10.3",
@@ -39,6 +40,7 @@ dependencies = [
 altanalyze3-neo = "altanalyze3.components.neoantigen.cli:main"
 
 [project.optional-dependencies]
+noncanonical-sequence = ["edlib==1.3.9.post1"]
 iso2function = ["igraph>=0.11,<1.1", "adjustText>=0.8,<2"]
 biology-summary = ["llama-cpp-python>=0.3.34,<0.4"]
 web = ["fastapi>=0.110,<1", "uvicorn[standard]>=0.30,<1", "python-multipart>=0.0.9,<1", "jinja2>=3.1,<4", "flask>=3,<4", "plotly>=6,<7", "igraph>=0.11,<1.1", "cairocffi>=1.7,<2", "matplotlib-venn>=1.1,<2"]
@@ -73,8 +75,11 @@ exclude = ["*.jobs", "*.jobs.*", "altanalyze3.tmp", "altanalyze3.tmp.*"]
 "altanalyze3.components.rna2adt.mouse" = ["configs/adt_mgi_map.tsv"]
 "altanalyze3.components.fastCNV" = ["resources/*.tsv"]
 "altanalyze3.components.fastComm" = ["resources/*.tsv", "resources/*/*.tsv", "resources/*/*.json", "configs/*.json"]
-"altanalyze3.components.long_read" = ["resources/*.gz"]
+"altanalyze3.components.long_read" = ["resources/*.gz", "*.sh"]
 "altanalyze3.components.snaf" = ["docs/*.md", "BayesTS/*.tsv.gz", "data/*.json", "HLA_Allele_frequency_21_populations.csv", "surface/data/*.json", "surface/data/SURFY_SurfaceGenie_union/*", "surface/data/SURFY_SurfaceGenie_union/sources/*", "surface/TMHMM2.0.model", "nextflow/*.nf", "nextflow/*.json", "nextflow/tests/*.config", "nextflow/tests/*.nf", "nextflow/tests/*.py", "nextflow/tests/*.sh", "nextflow/tests/data/*", "nextflow/tests/data/snaf_db/*", "nextflow/*.config", "nextflow/conf/*", "nextflow/assets/*", "nextflow/modules/local/*/*"]
 
 "altanalyze3.components.bam.bam2hla" = ["build/signatures_*.json.gz", "data/HLA_Allele_frequency_21_populations.csv"]
 "altanalyze3.components.snaf.deepimmuno" = ["data/*.txt", "models/cnn_model_331_3_7/*", "models/cnn_model_331_3_7/.*"]
+
+"altanalyze3.components.long_read.noncanonical" = ["SOURCE_PROVENANCE.json", "README.md"]
+"altanalyze3.components.long_read.noncanonical.oncofusion" = ["*.txt", "*.gff3"]

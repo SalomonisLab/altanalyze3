@@ -1,0 +1,246 @@
+{
+  "source_root": "isoform_final_20261016/analysis/extra-chr-trans-splicing",
+  "records": [
+    {
+      "source": "forked_altanalyze3/altanalyze3/components/bam/isoform_structure_extract.py",
+      "destination": "altanalyze3/components/bam/isoform_structure_extract.py",
+      "sha256": "8e6d3cb8fe62ebbec108671edfe58980f6c9a6b54a5ccd145f1a227ccb4d4b9e",
+      "ported_sha256": "4d7e24d5eff30f6b6ec77ad03df85637dc5ef88865310cc19dd2ab7a1a77a278"
+    },
+    {
+      "source": "forked_altanalyze3/altanalyze3/components/long_read/gff_process.py",
+      "destination": "altanalyze3/components/long_read/gff_process.py",
+      "sha256": "ab7793407aa76e35687e7f6c722dd813b958317d92e0d68251cd3afaf4756338",
+      "ported_sha256": "4185a295c6ce831a5daf4463cdcdad695a1f1f628ec525240a4917330be8771f"
+    },
+    {
+      "source": "forked_altanalyze3/altanalyze3/components/long_read/isoform_translation.py",
+      "destination": "altanalyze3/components/long_read/isoform_translation.py",
+      "sha256": "024057383220712bcd790ae3537f065514d9a8fab7014f46d806d58f8c9b23b6",
+      "ported_sha256": "024057383220712bcd790ae3537f065514d9a8fab7014f46d806d58f8c9b23b6"
+    },
+    {
+      "source": "forked_altanalyze3/altanalyze3/components/bam/noncolinear_rna.py",
+      "destination": "altanalyze3/components/bam/noncolinear_rna.py",
+      "sha256": "7a2079418c5a82f95a4e98fc4c3764f4a72f5609ec357677af36d3a1f5e1a740",
+      "ported_sha256": "ce767347d8e4a57471c2e7244a6777d4f692910145db363c501dcc5809d46033"
+    },
+    {
+      "source": "forked_altanalyze3/altanalyze3/components/bam/cross_chromosome_rules.py",
+      "destination": "altanalyze3/components/bam/cross_chromosome_rules.py",
+      "sha256": "8fd16cc66b4617c122825b063aab94966a90feb15efb420818407d4a8ec7ddbf",
+      "ported_sha256": "8fd16cc66b4617c122825b063aab94966a90feb15efb420818407d4a8ec7ddbf"
+    },
+    {
+      "source": "forked_altanalyze3/altanalyze3/components/bam/noncolinear_evidence.py",
+      "destination": "altanalyze3/components/bam/noncolinear_evidence.py",
+      "sha256": "1bd6cb9a4de7cda1f594c8ba33eb53350d1d661241e0365646ca381e4c21270a",
+      "ported_sha256": "1bd6cb9a4de7cda1f594c8ba33eb53350d1d661241e0365646ca381e4c21270a"
+    },
+    {
+      "source": "forked_altanalyze3/altanalyze3/components/bam/circRNA_native_statistics.py",
+      "destination": "altanalyze3/components/bam/circRNA_native_statistics.py",
+      "sha256": "091976fce067898c2a330dd3fdc30b78c697564b700c90b31111667c6559e040",
+      "ported_sha256": "091976fce067898c2a330dd3fdc30b78c697564b700c90b31111667c6559e040"
+    },
+    {
+      "source": "aml_mds_oncofusion_flt3_scan_20261110/scripts/scan_bam.py",
+      "destination": "altanalyze3/components/long_read/noncanonical/oncofusion/scan_bam.py",
+      "sha256": "182f29a4d08774b21a414fbd730b7744f1c97e910aa00a4380efdf389c57f928",
+      "ported_sha256": "182f29a4d08774b21a414fbd730b7744f1c97e910aa00a4380efdf389c57f928"
+    },
+    {
+      "source": "aml_mds_oncofusion_flt3_scan_20261110/scripts/combine.py",
+      "destination": "altanalyze3/components/long_read/noncanonical/oncofusion/combine.py",
+      "sha256": "179ca41c839fa60f8bf52e8b0bf277cae21a2cee7c54b701a76eb88af5cab795",
+      "ported_sha256": "7adc53cfe78f9a3ef3f5aeff47a1d3d594ffde18736193af1deb7b8022bdcdc7"
+    },
+    {
+      "source": "aml_mds_oncofusion_flt3_scan_20261110/scripts/export_lesion_read_ids_v2.py",
+      "destination": "altanalyze3/components/long_read/noncanonical/oncofusion/export_lesion_read_ids_v2.py",
+      "sha256": "580a9be4a0b4a9b28a989fedae24761a36fd195a74440ff0914c9d706a48a330",
+      "ported_sha256": "580a9be4a0b4a9b28a989fedae24761a36fd195a74440ff0914c9d706a48a330"
+    },
+    {
+      "source": "aml_mds_oncofusion_flt3_scan_20261110/scripts/kmt2a_ptd_vs_circrna_v3.py",
+      "destination": "altanalyze3/components/long_read/noncanonical/oncofusion/kmt2a_ptd_vs_circrna_v3.py",
+      "sha256": "a9fb96163a3b4a7823c64eacce4751907c865bc9c2a360785d7048cb1b406fef",
+      "ported_sha256": "a9fb96163a3b4a7823c64eacce4751907c865bc9c2a360785d7048cb1b406fef"
+    },
+    {
+      "source": "aml_mds_oncofusion_flt3_scan_20261110/scripts/aml_mds_fusion_genes.txt",
+      "destination": "altanalyze3/components/long_read/noncanonical/oncofusion/aml_mds_fusion_genes.txt",
+      "sha256": "17cb6dd4c348ddce7010f5e3f1aa2740dc420e657d84bcfcde4cc49b73ce416a",
+      "ported_sha256": "17cb6dd4c348ddce7010f5e3f1aa2740dc420e657d84bcfcde4cc49b73ce416a"
+    },
+    {
+      "source": "aml_mds_oncofusion_flt3_scan_20261110/scripts/MANE_exons_CBFB_MYH11_KMT2A_FLT3_gencode_v45.gff3",
+      "destination": "altanalyze3/components/long_read/noncanonical/oncofusion/MANE_exons_CBFB_MYH11_KMT2A_FLT3_gencode_v45.gff3",
+      "sha256": "f5bb33077daee7c00676ae1a5a591d6fb85337b2856fc433a3c09542117e2cab",
+      "ported_sha256": "f5bb33077daee7c00676ae1a5a591d6fb85337b2856fc433a3c09542117e2cab"
+    },
+    {
+      "source": "aml_mds_oncofusion_flt3_scan_20261110/scripts/GENCODE_v45_KMT2A_all_exons.gff3",
+      "destination": "altanalyze3/components/long_read/noncanonical/oncofusion/GENCODE_v45_KMT2A_all_exons.gff3",
+      "sha256": "f466f3c303dc8e3bc70ecbb5b6a0bb59f20cb436169c31afa9c5e1edab625c97",
+      "ported_sha256": "f466f3c303dc8e3bc70ecbb5b6a0bb59f20cb436169c31afa9c5e1edab625c97"
+    },
+    {
+      "source": "scripts/report_stream.py",
+      "destination": "altanalyze3/components/long_read/noncanonical/xchr/report_stream.py",
+      "sha256": "794acdb1fbc93d68ddda576fb3cc794459bd5b979e9c6304aaffffe3d048e003",
+      "ported_sha256": "8d49654d0e9e503cfb45ffc48f35a1ba16c9e0932fb55a5f7e71df8dce682b92"
+    },
+    {
+      "source": "scripts/classify_joints.py",
+      "destination": "altanalyze3/components/long_read/noncanonical/xchr/classify_joints.py",
+      "sha256": "558ac42beb61a341103ae05e36491899e0eacca7057bc300bd5dbc3237d3c593",
+      "ported_sha256": "41535a5c06f198a655283d57c7506a2a6e61625f619ea0da93b56e4262844d73"
+    },
+    {
+      "source": "scripts/joint_expression.py",
+      "destination": "altanalyze3/components/long_read/noncanonical/xchr/joint_expression.py",
+      "sha256": "be9228431ee23649798ef047a380104981a77389f95fdbdf2241f1da27efb970",
+      "ported_sha256": "526eceb3d908b0ebcd685b3270a4563a68e533f229828e8a93c4c97ff0a8cf5d"
+    },
+    {
+      "source": "scripts/xchr_rules.py",
+      "destination": "altanalyze3/components/long_read/noncanonical/xchr/xchr_rules.py",
+      "sha256": "b40977e69308e628615e55f7d9022d65fd7828adfedda811f09e745d89468c6a",
+      "ported_sha256": "b40977e69308e628615e55f7d9022d65fd7828adfedda811f09e745d89468c6a"
+    },
+    {
+      "source": "forked_altanalyze3/circRNA_exact_backend_v2/circRNA_admit_event_models_v2.py",
+      "destination": "altanalyze3/components/long_read/noncanonical/circrna_validation/circRNA_admit_event_models_v2.py",
+      "sha256": "64e4d26b01962b2f9df92f63c3a79bb18581e0356905cdd064f623d8dbf5abdc",
+      "ported_sha256": "ef2f4ba33eb95d9478a2bab45cfb8451189f93e714bb59d59421434ededaace0"
+    },
+    {
+      "source": "forked_altanalyze3/circRNA_exact_backend_v2/circRNA_merge_exact_partitions_v3.py",
+      "destination": "altanalyze3/components/long_read/noncanonical/circrna_validation/circRNA_merge_exact_partitions_v3.py",
+      "sha256": "663f66a796570b333f75f1d6fedd869250c868986cdeb1bae7f36a735b945a16",
+      "ported_sha256": "663f66a796570b333f75f1d6fedd869250c868986cdeb1bae7f36a735b945a16"
+    },
+    {
+      "source": "forked_altanalyze3/circRNA_exact_backend_v2/circRNA_verify_serial_partial_v3.py",
+      "destination": "altanalyze3/components/long_read/noncanonical/circrna_validation/circRNA_verify_serial_partial_v3.py",
+      "sha256": "9ac610449af6d753d075f9036e0b7e6c4e2459c3bbeb938464f42d04f963bd49",
+      "ported_sha256": "f70ddc0a177ea64fb945edfb32e590b00897066381c4fcf3502f318b7000bdc2"
+    },
+    {
+      "source": "forked_altanalyze3/circRNA_exact_backend_v2/circRNA_merge_exact_partitions_v4.py",
+      "destination": "altanalyze3/components/long_read/noncanonical/circrna_validation/circRNA_merge_exact_partitions_v4.py",
+      "sha256": "16b8465229b155b6e1a3c464fca72fd734c26976107b1b1a941158bc01b4a451",
+      "ported_sha256": "16b8465229b155b6e1a3c464fca72fd734c26976107b1b1a941158bc01b4a451"
+    },
+    {
+      "source": "forked_altanalyze3/circRNA_exact_backend_v2/circRNA_full_query_validation_v2.py",
+      "destination": "altanalyze3/components/long_read/noncanonical/circrna_validation/circRNA_full_query_validation_v2.py",
+      "sha256": "ecc9cbd97763be0552dcfa878d3512e73c2f2a79a671444e0338b85145a77a98",
+      "ported_sha256": "ecc9cbd97763be0552dcfa878d3512e73c2f2a79a671444e0338b85145a77a98"
+    },
+    {
+      "source": "forked_altanalyze3/circRNA_exact_backend_v2/circRNA_semiglobal_partition_v3.py",
+      "destination": "altanalyze3/components/long_read/noncanonical/circrna_validation/circRNA_semiglobal_partition_v3.py",
+      "sha256": "6be1403cb4f68c6110f6b09045d331f8ae7dded5474e5f4378f523345fd5795b",
+      "ported_sha256": "48b08ddff838bd2209b9aba0a0e34d7e91d17baf4861810661643a0bf740ad87"
+    },
+    {
+      "source": "forked_altanalyze3/circRNA_exact_backend_v2/circRNA_semiglobal_v2.py",
+      "destination": "altanalyze3/components/long_read/noncanonical/circrna_validation/circRNA_semiglobal_v2.py",
+      "sha256": "2b843c18abcf8ab351500ac1ae6b71a042991704cdd6d2014758e7464d809966",
+      "ported_sha256": "f2d24dc9c7189dc5d93042c5faf7d66dc66ced1755e2ef6a64134e6a82052c68"
+    },
+    {
+      "source": "forked_altanalyze3/circRNA_exact_backend_v2/circRNA_semiglobal_event_v2.py",
+      "destination": "altanalyze3/components/long_read/noncanonical/circrna_validation/circRNA_semiglobal_event_v2.py",
+      "sha256": "439524accb8692271dbfc89dfb5f6f73b9283bbb90acad8d9ae0e08d4d388033",
+      "ported_sha256": "5ee5c11d1fafb08fcfe9202b3508f7409f2f8cfae773e7abcd51984149ed66bd"
+    },
+    {
+      "source": "forked_altanalyze3/circRNA_exact_backend_v2/circRNA_microhomology_equivalent_exact_v1.py",
+      "destination": "altanalyze3/components/long_read/noncanonical/circrna_validation/circRNA_microhomology_equivalent_exact_v1.py",
+      "sha256": "7be4c38018a0a9b4925a5bafc5853e70c93f4b583eb3df4dbd1622726ee6c4a7",
+      "ported_sha256": "c6c2477d21e6e5bdf288a44c360ae1d089a93857a9452ddce383229553c08e7b"
+    },
+    {
+      "source": "forked_altanalyze3/circRNA_exact_backend_v2/circRNA_candidate_models_v2.py",
+      "destination": "altanalyze3/components/long_read/noncanonical/circrna_validation/circRNA_candidate_models_v2.py",
+      "sha256": "55dbc1c38f11e860518abbcb1bfbdea2aabb7a466816ce768c14148919d3725d",
+      "ported_sha256": "b50adf62b457221acb7049228cefde448d8ae315204bfd2392b0c978d171b3dd"
+    },
+    {
+      "source": "forked_altanalyze3/circRNA_exact_backend_v2/circRNA_microhomology_equivalent_preparation_v1.py",
+      "destination": "altanalyze3/components/long_read/noncanonical/circrna_validation/circRNA_microhomology_equivalent_preparation_v1.py",
+      "sha256": "d5d3336c98222e32a7e7ed96653dfabe842c75a544d3e2eba98bed61b8823bce",
+      "ported_sha256": "9839da38c533c8c36d19d8fcbda996f5848aeaf4c42832404152133df965b269"
+    },
+    {
+      "source": "forked_altanalyze3/circRNA_exact_backend_v2/circRNA_validate_event_v2.py",
+      "destination": "altanalyze3/components/long_read/noncanonical/circrna_validation/circRNA_validate_event_v2.py",
+      "sha256": "f527bb060fe0eddffd99ec63e79af93b5ee645b4e7fa263456ae49110ff29fb0",
+      "ported_sha256": "a934cf54d0686dd82ac9b244522352230609e35b6e21ebd18a4806647fad2019"
+    },
+    {
+      "source": "forked_altanalyze3/altanalyze3/components/bam/circRNA_cohort_pipeline.py",
+      "destination": "altanalyze3/components/bam/circRNA_cohort_pipeline.py",
+      "sha256": "949afc5b759b131f41497af0af800a557e1a0f880cb69453ffa7f566d2669fd6",
+      "ported_sha256": "949afc5b759b131f41497af0af800a557e1a0f880cb69453ffa7f566d2669fd6"
+    },
+    {
+      "source": "forked_altanalyze3/altanalyze3/components/visualization/isv_web/isv_web_remote.py",
+      "destination": "altanalyze3/components/visualization/isv_web/isv_web_remote.py",
+      "sha256": "6a750dce5de1a4386d25ff079c498aaf17f6a3a5ea5060ae0bc81a52b601abe9",
+      "ported_sha256": "6a750dce5de1a4386d25ff079c498aaf17f6a3a5ea5060ae0bc81a52b601abe9"
+    },
+    {
+      "source": "forked_altanalyze3/altanalyze3/components/visualization/isv_web/circular_overlay.py",
+      "destination": "altanalyze3/components/visualization/isv_web/circular_overlay.py",
+      "sha256": "43274df14f306668b6ae4eb109741dacd404012e724b9a2e5697964c39ad9195",
+      "ported_sha256": "43274df14f306668b6ae4eb109741dacd404012e724b9a2e5697964c39ad9195"
+    },
+    {
+      "source": "forked_altanalyze3/altanalyze3/components/visualization/isv_web/circular_read_level_demo.py",
+      "destination": "altanalyze3/components/visualization/isv_web/circular_read_level_demo.py",
+      "sha256": "ac5727a8c4e781edbc5e73a6252606a12d34d12a76148479f6c7bc884bf0559e",
+      "ported_sha256": "ac5727a8c4e781edbc5e73a6252606a12d34d12a76148479f6c7bc884bf0559e"
+    },
+    {
+      "source": "forked_altanalyze3/altanalyze3/components/visualization/isv_web/circular_repeat_isv.py",
+      "destination": "altanalyze3/components/visualization/isv_web/circular_repeat_isv.py",
+      "sha256": "a0a4ed91ef80c6b18d7600a996842b67543977206fb31f8bdd408d6a1ba196bf",
+      "ported_sha256": "a0a4ed91ef80c6b18d7600a996842b67543977206fb31f8bdd408d6a1ba196bf"
+    },
+    {
+      "source": "forked_altanalyze3/altanalyze3/components/visualization/isv_web/circular_isv_storage.py",
+      "destination": "altanalyze3/components/visualization/isv_web/circular_isv_storage.py",
+      "sha256": "806c626e4b53e03ecd7dc208533ea78c60e2c5daca2c95740eeda0b68bb3f3da",
+      "ported_sha256": "806c626e4b53e03ecd7dc208533ea78c60e2c5daca2c95740eeda0b68bb3f3da"
+    },
+    {
+      "source": "forked_altanalyze3/altanalyze3/components/visualization/isv_web/circular_isv_membership.py",
+      "destination": "altanalyze3/components/visualization/isv_web/circular_isv_membership.py",
+      "sha256": "36763b2c2d1e4a280a90dc7cbb0ce335e8b30de103b81b98ba5f1f5326a4341c",
+      "ported_sha256": "36763b2c2d1e4a280a90dc7cbb0ce335e8b30de103b81b98ba5f1f5326a4341c"
+    },
+    {
+      "source": "forked_altanalyze3/altanalyze3/components/visualization/isv_web/circular_isv_npz_stream.py",
+      "destination": "altanalyze3/components/visualization/isv_web/circular_isv_npz_stream.py",
+      "sha256": "b1cd2efdf90b46c33f23bb8649fc59a530fe3161e65c1b18592017f6d0a664e6",
+      "ported_sha256": "b1cd2efdf90b46c33f23bb8649fc59a530fe3161e65c1b18592017f6d0a664e6"
+    }
+  ],
+  "port_policy": "Preserve source algorithms; changes are explicit infrastructure adapters or regression-tested bug fixes.",
+  "official_base_commit": "2c43c5890357dae71096132ea3ade7cfa32d734c",
+  "port_notes": [
+    "Package-qualified imports replace project sys.path assumptions.",
+    "Reporting resource and output paths are explicit configuration.",
+    "Final-transcript segment-aware GFF flush is covered by a regression test.",
+    "Oncofusion aggregation preserves original uid__library grouping; raw scans preserve physical source IDs.",
+    "Empty oncofusion gene-pair tables retain their schema.",
+    "PTD callable adapter is checked against saved v2/v3 read identities and evidence; ITD cluster membership is checked against all archived groups.",
+    "Deep sequence-validation utilities retain their original gates; discovery does not imply that these utilities assessed every event.",
+    "Official barcode recognizer now accepts an existing numeric lane suffix, so reverse=TRUE is applied to standard 10x BAM barcodes; raw counts and bulk identities remain unchanged. Standard regression baseline uses a separately recorded identical one-line compatibility fix.",
+    "Raw annotation writer is explicitly closed before compression; regression cases reproduce and prevent loss of buffered rows, preserving complete raw/native source rosters. Standard comparison records this identical one-line I/O fix in the preserved official baseline."
+  ]
+}

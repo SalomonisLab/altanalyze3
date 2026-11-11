@@ -19,6 +19,16 @@
 #   bash submit_longread_cluster.sh
 # =====================================================================
 
+# Complete runs default to all modalities; phase commands remain independently usable.
+# A pinned manifest carries the additional genome/reference/source identities.
+if [[ "${LEGACY_ONLY:-0}" != "1" ]]; then
+    if [[ -z "${NONCANONICAL_CONFIG:-}" ]]; then
+        echo "Set NONCANONICAL_CONFIG to the pinned complete-workflow manifest (or LEGACY_ONLY=1 for the established standard-only launcher)." >&2
+        exit 2
+    fi
+    exec "${AA3_PYTHON:-python3}" -m altanalyze3.components.long_read.noncanonical.submit --config "$NONCANONICAL_CONFIG"
+fi
+
 # ---- HARD-CODED PATHS (edit these) ----
 METADATA="/data/salomonis-archive/LabFiles/Nathan/Revio/MDS-AML-KINNEX-2/mds_metadata_bam_revised.txt"
 SPECIES="human"                       # human | mouse

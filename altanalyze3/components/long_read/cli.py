@@ -214,6 +214,9 @@ def run_sclr(args):
     if getattr(args, "cellHarmony_ref", None) and getattr(args, "cell_annot", None):
         raise ValueError("--cellHarmony_ref and --cell_annot are mutually exclusive.")
 
+    from .noncanonical.cli import phase1 as noncanonical_phase1
+    noncanonical_phase1(args)
+
     # Step 1: BAM -> molecule-level h5ad + gff (per-sample junction h5ad written by extraction path).
     # import_metadata extracts inline while parsing EVERY row, so to process a single --sample we
     # hand it a one-uid metadata file (otherwise all samples would be extracted).
