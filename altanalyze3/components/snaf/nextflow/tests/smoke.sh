@@ -8,7 +8,7 @@ cd "$work"
 nf=${NEXTFLOW_BIN:-nextflow}
 "$nf" run "$here/../main.nf" -ansi-log false \
   --mode bam --input "$work/data/samples.csv" --gtf "$work/data/reference.gtf" \
-  --stop_after_counts --outdir "$work/counts" "$@"
+  --stop_after_counts --outdir "$work/counts" --max_cpus 2 --max_memory 8.GB "$@"
 python3 - "$work" <<'PY'
 import csv,sys
 from pathlib import Path
@@ -23,5 +23,5 @@ PY
 "$nf" run "$here/../main.nf" -ansi-log false -stub-run \
   --mode bam --input "$work/data/samples.csv" --gtf "$work/data/reference.gtf" \
   --db_dir "$work/data/snaf_db" --infer_hla --hla "$work/data/hla.tsv" \
-  --outdir "$work/full_stub" "$@"
+  --outdir "$work/full_stub" --max_cpus 2 --max_memory 8.GB "$@"
 printf 'Validation artifacts: %s\n' "$work"
