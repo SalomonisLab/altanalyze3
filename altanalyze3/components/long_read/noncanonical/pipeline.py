@@ -169,6 +169,8 @@ def finalize(config):
     if 'trans-splicing' in config['modalities']:proofs.extend([root/'trans_splicing/CATALOG_COMPLETE.json',root/'trans_splicing/REPORT_COMPLETE.json',root/'trans_splicing/CLASSIFICATION_COMPLETE.json'])
     if 'standard' in config['modalities']:
         proofs += [root/'compatibility/STANDARD_COMPLETE.json',root/'integrated/standard/STANDARD_COMPLETE.json']
+    if all(m in config['modalities'] for m in SUMMARY_MODALITIES):
+        proofs.append(root/'integrated/summary/COMPLETE.json')
     for path in proofs:verify_receipt(path,config)
     receipt(root/'COMPLETE.json',config,{},proofs,status='COMPLETE_REQUESTED_DETECTION_AND_COUNTING',
         modalities=config['modalities'],
@@ -198,6 +200,21 @@ def main(argv=None):
     if args.stage in ('all','standard'):
         from .event_counts import run as event_counts
         event_counts(config)
+        summarize(config)
         finalize(config)
+
+
+SUMMARY_MODALITIES=('standard','circrna','trans-splicing')
+
+def summarize(config):
+    """Catalog flow tables and diagram (integrated/summary/); needs the standard, circRNA and trans-splicing branches."""
+    missing=[m for m in SUMMARY_MODALITIES if m not in config['modalities']]
+    out=Path(config['output'])/'integrated/summary'
+    if missing:
+        out.mkdir(parents=True,exist_ok=True)
+        atomic_json(out/'NOT_APPLICABLE.json',dict(reason='catalog flow requires these modalities',missing=missing))
+        return None
+    from .catalog_flow import run as catalog_flow
+    return catalog_flow(config)
 
 if __name__=='__main__':main()

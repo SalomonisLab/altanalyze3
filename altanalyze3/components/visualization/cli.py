@@ -16,6 +16,10 @@ def add_arguments(parser):
     from .psi_boxplot_grid import add_arguments as add_grid_arguments
     add_grid_arguments(grid)
     grid.set_defaults(func=run_psi_grid)
+    flow = commands.add_parser("catalog-flow", help="Linear/chimeric catalog flow diagram from a box/value table")
+    from .catalog_flow import add_arguments as add_flow_arguments
+    add_flow_arguments(flow)
+    flow.set_defaults(func=run_catalog_flow)
 
 
 def run_isv(args):
@@ -30,4 +34,9 @@ def run_psi(args):
 
 def run_psi_grid(args):
     from .psi_boxplot_grid import run
+    return run(args)
+
+
+def run_catalog_flow(args):
+    from .catalog_flow import run
     return run(args)

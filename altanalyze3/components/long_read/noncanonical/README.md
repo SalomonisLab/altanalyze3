@@ -40,6 +40,23 @@ The validated oncofusion profile remains the 68-gene AML/MDS panel and FLT3 exon
 - `integrated/standard/`: reconciled native standard analyses on the complete compatibility catalog. Raw matrices retain `legacy_counts`; isoform ratios retain compatibility gene denominators and the original filtered ratio feature universe.
 - `integrated/events/`: complete declared annotated cells plus observed source/barcode identities, UID/cell-state event-count matrices, status layers and unresolved cell mappings. Annotated cells with no observed reads remain explicit zero rows. Features and cells are retained when their integrated standard count is zero.
 
+- `integrated/summary/` (stage `summarize`, after the event counts; requires the standard, circRNA and trans-splicing branches):
+  - `CATALOG_FLOW_VALUES.tsv`: the values of the catalog flow diagram, one `box`/`value` row per box.
+  - `catalog_flow.pdf` and `.png`: the diagram, drawn by `python -m altanalyze3 visualize catalog-flow --values CATALOG_FLOW_VALUES.tsv --out-prefix <prefix>`.
+  - `CATALOG_FLOW.json`: every value, the read partition and the definitions.
+  - `CHIMERIC_EVENTS.tsv`: one row per circRNA junction, inter-chromosomal junction and intra-chromosomal trans-splicing isoform.
+  - `REARRANGEMENT_EVENTS.tsv`: oncofusion, PTD and ITD events with distinct reads per source. These events are not part of the flow.
+
+  Linear reads exclude every chimeric read, as follows:
+  - circRNA reads: `catalog_flow.circrna_classes`, default `backsplice_registered_canonical`, status kept;
+  - inter-chromosomal trans-splicing reads: classification `trans_splicing_candidate`, status kept;
+  - reads of intra-chromosomal trans-splicing catalog isoforms: native distinct-locus candidates, novel, with `min_total` or more reads.
+
+  The Known, Novel, Collapsed and protein-coding boxes are recounted from linear reads through the read-to-isoform trace (`tier1/*.mol2struct.tsv`). The collapse now also writes `FINAL_structure_to_exemplar_prefilter.tsv.gz`, which makes the linear Collapsed count exact. The stage stops with an error unless:
+  - the traced reads reproduce the catalog totals of every isoform;
+  - the ledger's inter-chromosomal read counts equal the classification's molecule and kept-molecule counts;
+  - the linear and chimeric reads add up to the UMI total.
+
 Each event counts distinct `(source_id, query_name)` support. Repeated crossings are retained as evidence rows but count once per event. Matrices overlap intentionally; their totals must not be summed as unique-read totals. Original native oncofusion reports retain their historical counting semantics separately.
 
 The first routing policy subtracts a conventional whole-read contribution once when kept cross-chromosome evidence receives a native fusion or trans-splicing candidate classification. Compatible variant identities and unresolved PTD/circle evidence retain their conventional contribution. Ordinary local splice-junction and gene-expression products retain the compatibility counting view. Every subtraction must match the exact original barcode/feature count; otherwise execution stops with an identity diagnostic.
