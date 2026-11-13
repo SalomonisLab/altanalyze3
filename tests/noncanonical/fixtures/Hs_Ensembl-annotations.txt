@@ -1,0 +1,4 @@
+ENSG00000159216	RUNX1	runt related transcription factor 1 [Source:HGNC Symbol;Acc:HGNC:10471]	
+ENSG00000135387	CAPRIN1	cell cycle associated protein 1 [Source:HGNC Symbol;Acc:HGNC:6743]	
+ENSG00000110422	HIPK3	homeodomain interacting protein kinase 3 [Source:HGNC Symbol;Acc:HGNC:4915]	
+ENSG00000168769	TET2	tet methylcytosine dioxygenase 2 [Source:HGNC Symbol;Acc:HGNC:25941]	

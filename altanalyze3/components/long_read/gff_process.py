@@ -848,6 +848,41 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse", gene
                 except Exception:
                     pass
 
+    def process_cross_chromosome_isoform(exon_meta, exons, info, file, source='bam'):
+        """EXPERIMENTAL FORK (extra-chr-trans-splicing). A molecule whose exon lines carry more than
+        one (chromosome, strand, segment): each segment is annotated by exonAnnotate on its own
+        chromosome/strand, then the tokens are joined in transcript order. The TA row, junction_db,
+        gene_db and strand_db are written exactly as process_isoform writes them. No
+        structure_coords.sqlite record is written, because that store holds one chromosome per
+        structure; collapse then reads these coordinates from the read GFF itself."""
+        if gene_id is not None and gene_id not in info:
+            return
+        transcript_id = info.split(';')[ti].split(td)[1]
+        segments = []
+        for (seg_chr, seg_strand, seg_id), exon in zip(exon_meta, exons):
+            if segments and segments[-1][3] == (seg_chr, seg_strand, seg_id):
+                segments[-1][2].append(exon)
+            else:
+                segments.append([seg_chr, seg_strand, [exon], (seg_chr, seg_strand, seg_id)])
+        gene, exonIDs, genes, _ = annotate_cross_chromosome_segments(
+            [(c, s, e) for c, s, e, _ in segments], transcript_id)
+        filtered_exonIDs_str, filtered_exonIDs = exon_str(list(exonIDs))
+        strand = segments[0][1]
+        if len(genes) > 2:
+            trans_spliced_isoforms[filtered_exonIDs_str] = []
+        eo.write('\t'.join([gene, strand, filtered_exonIDs_str, transcript_id, file]) + '\n')
+        eor.write('\t'.join([gene, strand, "|".join(exonIDs), transcript_id, file]) + '\n')
+        if 'UNK' not in gene:
+            junction_key = filtered_exonIDs_str
+            junction_db.setdefault((gene, junction_key), []).append((file, info))
+            gene_db.setdefault(gene, [])
+            if junction_key not in gene_db[gene]:
+                gene_db[gene].append(junction_key)
+            strand_db[gene] = strand
+
+    def _segment_of(info):
+        return info.split('segment "', 1)[1].split('"', 1)[0] if 'segment "' in info else None
+
     gff_organization={}
     for file in files:
         if os.path.exists(file):
@@ -858,6 +893,7 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse", gene
         file = file.split('.g')[0]
         firstRow = True
         exons = []
+        exon_meta = []  # EXPERIMENTAL FORK: per-exon (chromosome, strand, segment)
         isoforms = 2
         open_func = gzip.open if fn.endswith('.gz') else open
         with open_func(fn, 'rt') as filepath:
@@ -891,22 +927,31 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse", gene
                     if type == 'transcript':
                         isoforms += 1
                         chr, strand, info, src_iso = gene_info
-                        process_isoform(chr, strand, info, exons, file, source=src_iso)
+                        if len(set(exon_meta)) > 1:
+                            process_cross_chromosome_isoform(exon_meta, exons, info, file, source=src_iso)
+                        else:
+                            process_isoform(chr, strand, info, exons, file, source=src_iso)
                         exons = []
+                        exon_meta = []
                     elif type != 'transcript' and type != 'exon':
                         pass
                     else:
                         exons.append((pos1, pos2))
+                        exon_meta.append((chr, strand, _segment_of(info)))
                         gene_info = chr, strand, info, src_col
-        # for the last isoform in the file
+        # Flush the final transcript through the same segment-aware path as all others.
         chr, strand, info, src_iso = gene_info
-        try:
-            process_isoform(chr, strand, info, exons, file, source=src_iso)
-        except:
-            continue
+        if len(set(exon_meta)) > 1:
+            process_cross_chromosome_isoform(exon_meta, exons, info, file, source=src_iso)
+        else:
+            try:
+                process_isoform(chr, strand, info, exons, file, source=src_iso)
+            except:
+                continue
         print(file, '...', isoforms, 'isoforms')
 
     eo.close()
+    eor.close()  # Flush every raw annotation before compression removes the text file.
     if struct_writer is not None:
         try:
             struct_writer.close()
@@ -1084,6 +1129,30 @@ def consolidateLongReadGFFs(directory, exon_reference_dir, mode="collapse", gene
         except:
             print ('sort error')
         return combined_dir
+
+def annotate_cross_chromosome_segments(segments, transcript_id):
+    """EXPERIMENTAL FORK (extra-chr-trans-splicing). segments: [(chromosome, strand, exons)] in
+    transcript order, exons as genomic (start, end) tuples. Each segment is annotated by exonAnnotate
+    on its own chromosome and strand. The first segment's gene names the molecule; tokens of a later
+    segment from another gene take that gene as prefix ("GENE:E5.1"), the convention exonAnnotate
+    already uses for a second gene inside one transcript. Returns (gene, exonIDs, genes, segment_genes)."""
+    gene = None
+    exonIDs = []
+    genes = []
+    segment_genes = []
+    for seg_chr, seg_strand, seg_exons in segments:
+        seg_gene, seg_ids, _, seg_genes = exonAnnotate(seg_chr, sorted(seg_exons), seg_strand, transcript_id)
+        if gene is None:
+            gene = seg_gene
+        elif seg_gene != gene:
+            seg_ids = [x if ':' in x else seg_gene + ':' + x for x in seg_ids]
+        exonIDs.extend(seg_ids)
+        segment_genes.append(seg_gene)
+        for g in list(seg_genes) + [seg_gene]:
+            if g not in genes:
+                genes.append(g)
+    return gene, exonIDs, genes, segment_genes
+
 
 def importEnsemblGenes(exon_file,include_introns=False):
     global exonCoordinates

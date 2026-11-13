@@ -12,6 +12,9 @@ import csv
 import gzip
 import sqlite3
 import heapq
+import itertools
+import json
+import re
 
 import anndata as ad
 import numpy as np
@@ -20,7 +23,7 @@ import pysam
 from scipy.sparse import coo_matrix
 
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), '..'))
-from long_read import gff_process
+from altanalyze3.components.long_read import gff_process
 
 _EXON_MODEL_PATH = None
 _COUNTS_AGGREGATOR = os.environ.get('ISOFORM_COUNTS_AGG', 'sort-merge')
@@ -994,6 +997,444 @@ class _Tee:
             stream.flush()
 
 
+# ------------------------------------------------------------------------------------------------
+# EXPERIMENTAL FORK: extra-chr-trans-splicing (2026-10-29). NOT validated altanalyze3 code.
+# The validated extractors above skip supplementary alignments (is_supplementary -> continue), so a
+# molecule whose alignment is split across chromosomes keeps only its primary piece. This mode
+# rebuilds every aligned piece of such a molecule from the primary record and its SA tag, and writes
+# ONLY cross-chromosome molecules to the read GFF and the molecule h5ad. Exon annotation, barcodes,
+# molecule ids and the GFF/h5ad formats are the validated functions above.
+# ------------------------------------------------------------------------------------------------
+_CIGAR_RE = re.compile(r'(\d+)([MIDNSHP=X])')
+_CIGAR_CODES = {'M': 0, 'I': 1, 'D': 2, 'N': 3, 'S': 4, 'H': 5, 'P': 6, '=': 7, 'X': 8}
+_COMPLEMENT = str.maketrans('ACGTNacgtn', 'TGCANtgcan')
+
+
+def _cigar_from_string(cigar):
+    parts = _CIGAR_RE.findall(cigar)
+    if ''.join(n + op for n, op in parts) != cigar:
+        raise ValueError(f'Unparsed SA CIGAR: {cigar}')
+    return [(_CIGAR_CODES[op], int(n)) for n, op in parts]
+
+
+def _exons_from_cigar(reference_start, cigartuples):
+    """extract_exons(read) arithmetic for an alignment given as (0-based start, CIGAR tuples)."""
+    exons = []
+    ref_pos = reference_start
+    exon_start = None
+    for op, length in cigartuples:
+        if op in (0, 7, 8, 2):
+            if exon_start is None:
+                exon_start = ref_pos
+            ref_pos += length
+        elif op == 3:
+            if exon_start is not None:
+                if ref_pos >= exon_start + 1:
+                    exons.append((exon_start + 1, ref_pos))
+                exon_start = None
+            ref_pos += length
+    if exon_start is not None and ref_pos >= exon_start + 1:
+        exons.append((exon_start + 1, ref_pos))
+    return exons
+
+
+def _query_interval(cigartuples, is_reverse):
+    """0-based half-open interval of the aligned query bases in the ORIGINAL read orientation."""
+    lead = 0
+    for op, length in cigartuples:
+        if op in (4, 5):
+            lead += length
+        else:
+            break
+    aligned = sum(length for op, length in cigartuples if op in (0, 1, 7, 8))
+    total = sum(length for op, length in cigartuples if op in (0, 1, 4, 5, 7, 8))
+    start, end = lead, lead + aligned
+    if is_reverse:
+        start, end = total - end, total - start
+    return start, end, total
+
+
+def _alignment_segments(read, sa_entries, ts_read_relative, exon_coordinates):
+    primary_exons = extract_exons(read)
+    if _exons_from_cigar(read.reference_start, read.cigartuples) != primary_exons:
+        raise ValueError(f'SA exon arithmetic differs from extract_exons for {read.query_name}')
+    qs, qe, total = _query_interval(read.cigartuples, read.is_reverse)
+    segments = [dict(chrom=normalize_chrom(read.reference_name, exon_coordinates),
+                     strand=get_read_strand(read, ts_read_relative=ts_read_relative),
+                     orientation='-' if read.is_reverse else '+', mapq=read.mapping_quality,
+                     nm=read.get_tag('NM') if read.has_tag('NM') else '', cigar=read.cigarstring,
+                     exons=primary_exons, primary=True, qstart=qs, qend=qe, read_length=total)]
+    for entry in sa_entries:
+        chrom, pos, strand, cigar, mapq, nm = entry.split(',')
+        tuples = _cigar_from_string(cigar)
+        qs, qe, total = _query_interval(tuples, strand == '-')
+        segments.append(dict(chrom=normalize_chrom(chrom, exon_coordinates), strand=strand, orientation=strand,
+                             mapq=int(mapq), nm=int(nm), cigar=cigar,
+                             exons=_exons_from_cigar(int(pos) - 1, tuples), primary=False,
+                             qstart=qs, qend=qe, read_length=total))
+    segments.sort(key=lambda s: (s['qstart'], s['qend']))
+    return segments
+
+
+def _boundary_annotation(hit, gene_region_counts):
+    if hit is None:
+        return '', '', ''
+    gene, exon, index = hit
+    return f'{gene}:{exon}', index == 0, index == gene_region_counts[gene] - 1
+
+
+def _segment_junction(a, b, exon_coordinates):
+    """Breakpoint between read-adjacent segments a (5') and b (3'). When the two alignments overlap
+    on the read by k bases, the k+1 possible split points are tested and the one with the most
+    registered exon boundaries (donor = region end key 2, acceptor = region start key 1, the keys
+    exonAnnotate uses) is kept; ties keep the smallest shift. Each shift assumes no indel inside the
+    overlap."""
+    gap = b['qstart'] - a['qend']
+    overlap = max(0, -gap)
+    a_last = a['exons'][-1] if a['strand'] == '+' else a['exons'][0]
+    b_first = b['exons'][0] if b['strand'] == '+' else b['exons'][-1]
+    donor0 = a_last[1] if a['strand'] == '+' else a_last[0]
+    acceptor0 = b_first[0] if b['strand'] == '+' else b_first[1]
+    step_a = 1 if a['strand'] == '+' else -1
+    step_b = 1 if b['strand'] == '+' else -1
+    best = None
+    for shift in range(overlap + 1):
+        if shift >= a_last[1] - a_last[0] + 1 or overlap - shift >= b_first[1] - b_first[0] + 1:
+            continue
+        donor = donor0 - shift * step_a
+        acceptor = acceptor0 + (overlap - shift) * step_b
+        donor_hit = exon_coordinates.get((a['chrom'], donor, a['strand'], 2))
+        acceptor_hit = exon_coordinates.get((b['chrom'], acceptor, b['strand'], 1))
+        score = (donor_hit is not None) + (acceptor_hit is not None)
+        if best is None or score > best[0]:
+            best = (score, shift, donor, acceptor, donor_hit, acceptor_hit)
+    if best is None:
+        return dict(gap=gap, overlap=overlap, shift='', donor=donor0, acceptor=acceptor0,
+                    donor_hit=None, acceptor_hit=None, resolved=False)
+    _, shift, donor, acceptor, donor_hit, acceptor_hit = best
+    return dict(gap=gap, overlap=overlap, shift=shift, donor=donor, acceptor=acceptor,
+                donor_hit=donor_hit, acceptor_hit=acceptor_hit, resolved=True)
+
+
+def _trim_to_junction(a, b, junction):
+    """Move the a 3' end to the donor and the b 5' end to the acceptor (removes the read overlap)."""
+    if not junction['resolved']:
+        return
+    a_exons = list(a['exons']); b_exons = list(b['exons'])
+    if a['strand'] == '+':
+        a_exons[-1] = (a_exons[-1][0], junction['donor'])
+    else:
+        a_exons[0] = (junction['donor'], a_exons[0][1])
+    if b['strand'] == '+':
+        b_exons[0] = (junction['acceptor'], b_exons[0][1])
+    else:
+        b_exons[-1] = (b_exons[-1][0], junction['acceptor'])
+    a['exons'] = a_exons; b['exons'] = b_exons
+
+
+def _oriented_sequence(read, read_length):
+    seq = read.query_sequence
+    if not seq or len(seq) != read_length:
+        return ''
+    return seq.translate(_COMPLEMENT)[::-1] if read.is_reverse else seq
+
+
+def _primary_for_supplementary(lookup, read):
+    for entry in read.get_tag('SA').rstrip(';').split(';'):
+        chrom, pos = entry.split(',')[:2]
+        for candidate in lookup.fetch(chrom, int(pos) - 1, int(pos)):
+            if (candidate.query_name == read.query_name and not candidate.is_supplementary
+                    and not candidate.is_secondary):
+                return candidate
+    return None
+
+
+def _sa_records_match(lookup, read, sa_entries):
+    """Region-mode check: every SA entry must equal a real supplementary record of the same read."""
+    matched = 0
+    for entry in sa_entries:
+        chrom, pos, strand, cigar = entry.split(',')[:4]
+        for candidate in lookup.fetch(chrom, int(pos) - 1, int(pos)):
+            if (candidate.query_name == read.query_name and candidate.is_supplementary
+                    and candidate.reference_start == int(pos) - 1 and candidate.cigarstring == cigar
+                    and ('-' if candidate.is_reverse else '+') == strand):
+                matched += 1
+                break
+    return matched
+
+
+def _write_cross_chromosome_gff(handle, segments, isoform_id, gene, source, first_in_file=False):
+    """first_in_file: gff_process.consolidateLongReadGFFs uses the first non-comment line of a file
+    only to locate transcript_id and never appends it as an exon (gff_process.py:878-888), so the
+    first molecule written natively loses its first exon. Writing that molecule's transcript line
+    once more at the top of the file keeps all of its exons; every reader ignores transcript lines
+    except as the end-of-record marker."""
+    transcript_id = isoform_id.split(':', 1)[1] if ':' in isoform_id else isoform_id
+    if transcript_id.startswith('molecule/'):
+        transcript_id = transcript_id.split('molecule/', 1)[1]
+    lines = []
+    for index, segment in enumerate(segments, 1):
+        info = f'gene_id "{gene}";transcript_id "{transcript_id}";segment "{index}";'
+        for exon_start, exon_end in sorted(segment['exons']):
+            lines.append(f"{segment['chrom']}\t{source}\texon\t{exon_start}\t{exon_end}\t.\t{segment['strand']}\t.\t{info}\n")
+    last = segments[-1]
+    lines.append(f"{last['chrom']}\t{source}\ttranscript\t{min(s for s, _ in last['exons'])}\t"
+                 f"{max(e for _, e in last['exons'])}\t.\t{last['strand']}\t.\t{info}\n")
+    if first_in_file:
+        lines.insert(0, lines[-1])
+    handle.write(''.join(lines))
+    return lines[-1]
+
+
+_JUNCTION_COLUMNS = [
+    'library', 'molecule_id', 'query_name', 'barcode', 'umi', 'status', 'isoform_id', 'read_length',
+    'n_segments', 'pair_index', 'cross_chromosome', 'gene_a', 'gene_b',
+    'a_chrom', 'a_strand', 'a_qstart', 'a_qend', 'a_mapq', 'a_nm', 'a_primary', 'a_cigar', 'a_exons',
+    'b_chrom', 'b_strand', 'b_qstart', 'b_qend', 'b_mapq', 'b_nm', 'b_primary', 'b_cigar', 'b_exons',
+    'query_gap', 'overlap_nt', 'shift_nt', 'donor', 'acceptor', 'donor_annotation',
+    'donor_is_gene_first_region', 'donor_is_gene_last_region', 'acceptor_annotation',
+    'acceptor_is_gene_first_region', 'acceptor_is_gene_last_region', 'junction_read_context',
+    'structure_untrimmed', 'blacklist_membership', 'duplicated_sequence_near_partner']
+
+
+def _fasta_name(chrom, names):
+    bare = chrom[3:] if chrom.startswith('chr') else chrom
+    if bare in names:
+        return bare
+    if chrom in names:
+        return chrom
+    return 'MT' if chrom == 'chrM' and 'MT' in names else chrom
+
+
+def _hit_chrom(ctg):
+    if ctg.startswith('chr'):
+        return ctg
+    return 'chrM' if ctg == 'MT' else 'chr' + ctg
+
+
+def _duplicated_near_partner(segments, junctions, aligner, genome, window, min_identity, min_cover, cache):
+    """Blacklist rule: a segment whose reference sequence also aligns, at >= min_identity over
+    >= min_cover of its length, on the partner segment's chromosome within window bases of the
+    partner. Such a joint can be one colinear transcript from duplicated sequence (paralog, orphon,
+    segmental duplication) placed on two chromosomes. Returns a detail string or ''."""
+    names = set(genome.references)
+    for (a, b), junction in zip(zip(segments[:-1], segments[1:]), junctions):
+        if not junction['cross']:
+            continue
+        for query, partner, label in ((b, a, 'b_near_a'), (a, b, 'a_near_b')):
+            key = (query['chrom'], tuple(query['exons']))
+            if key not in cache:
+                c = _fasta_name(query['chrom'], names)
+                seq = ''.join(genome.fetch(c, x - 1, y) for x, y in query['exons']) if c in names else ''
+                cache[key] = (len(seq), [(_hit_chrom(h.ctg), h.r_st, h.r_en, h.mlen, h.blen, h.q_st, h.q_en)
+                                         for h in aligner.map(seq)] if len(seq) >= 30 else [])
+            qlen, hits = cache[key]
+            p_lo = min(x for x, _ in partner['exons']) - window
+            p_hi = max(y for _, y in partner['exons']) + window
+            for ctg, r_st, r_en, mlen, blen, q_st, q_en in hits:
+                identity, cover = mlen / blen if blen else 0.0, (q_en - q_st) / qlen if qlen else 0.0
+                if ctg == partner['chrom'] and r_en >= p_lo and r_st <= p_hi and identity >= min_identity and cover >= min_cover:
+                    return f'{label}:{ctg}:{r_st + 1}-{r_en}:identity={identity:.3f}:cover={cover:.3f}'
+    return ''
+
+
+def extract_cross_chromosome_isoforms(bam_path, exon_file, output_prefix, library, min_mapq=1,
+                                      barcode_tags=None, molecule_tag='zm', source='bam',
+                                      require_known_splice=True, default_barcode=None,
+                                      ts_read_relative=False, regions=None, molecule_prefix='',
+                                      blacklist_members=None, genome_index=None, genome_fasta=None,
+                                      dup_window=2000000, dup_min_identity=0.9, dup_min_cover=0.5):
+    """EXPERIMENTAL FORK. Writes <prefix>.gff.gz and <prefix>.h5ad holding ONLY molecules aligned to
+    two or more chromosomes, plus <prefix>.cross_chromosome_junctions.tsv.gz (every cross-chromosome
+    primary read, kept or not, one row per read-adjacent segment pair) and
+    <prefix>.cross_chromosome_stats.json.
+
+    require_known_splice mirrors the validated rule (at least one registered splice site) at the
+    cross-chromosome joint: at least one side of one cross-chromosome joint must be a registered
+    exon boundary. regions (list of (chrom, start0, end)) restricts the scan for demonstrations.
+    molecule_prefix is prepended to every molecule id so ids stay unique across libraries: the reused
+    collapse copies exemplar GFF lines with their bare molecule id into combined.gff, and
+    gff_translate keys transcripts by that id, so a repeated id would merge two molecules.
+    blacklist_members (reference/blacklist_members.tsv) and genome_index (minimap2 splice index of
+    genome_fasta) enable the blacklist: chrM, unplaced contigs, rRNA/mitochondrial-RNA genes,
+    IG/TR orphons, and duplicated sequence near the partner. A blacklisted molecule keeps its row in
+    the junction table (status blacklist_*) and is not written to the GFF or h5ad."""
+    if barcode_tags is None:
+        barcode_tags = ['CB', 'CR', 'BC', 'BX']
+    started = time.time()
+    output_prefix = Path(output_prefix)
+    gff_path = output_prefix.with_suffix('.gff')
+    h5ad_path = output_prefix.with_suffix('.h5ad')
+    table_path = Path(str(output_prefix) + '.cross_chromosome_junctions.tsv.gz')
+    stats_path = Path(str(output_prefix) + '.cross_chromosome_stats.json')
+    for path in (gff_path, Path(str(gff_path) + '.gz'), h5ad_path, table_path, stats_path):
+        if path.exists():
+            raise FileExistsError(f'Refusing to overwrite an existing output: {path}')
+    output_prefix.parent.mkdir(parents=True, exist_ok=True)
+    _set_pysam_verbosity()
+    exon_coordinates, gene_data, _ = gff_process.importEnsemblGenes(exon_file)
+    gene_region_counts = {gene: len(regions_) for gene, regions_ in gene_data.items()}
+    blacklist_index = None
+    if blacklist_members:
+        from altanalyze3.components.bam import cross_chromosome_rules
+        members = []
+        with open(blacklist_members) as handle:
+            next(handle)
+            for line in handle:
+                c, s, e, _gid, name, _gtype, reason = line.rstrip('\n').split('\t')
+                members.append((c, int(s), int(e), (reason, name)))
+        blacklist_index = cross_chromosome_rules.IntervalIndex(members)
+    aligner = genome = None
+    dup_cache = {}
+    if genome_index:
+        import mappy
+        aligner = mappy.Aligner(fn_idx_in=str(genome_index), preset='splice', best_n=10)
+        if not aligner:
+            raise RuntimeError(f'Could not load the genome index {genome_index}')
+        genome = pysam.FastaFile(str(genome_fasta))
+    bam = pysam.AlignmentFile(bam_path, 'rb')
+    lookup = pysam.AlignmentFile(bam_path, 'rb') if regions else None
+    if regions:
+        records = itertools.chain.from_iterable(bam.fetch(c, s, e) for c, s, e in regions)
+    else:
+        records = bam.fetch(until_eof=True)
+    stats = defaultdict(int)
+    rows, cols, data, barcodes, isoforms = [], [], [], [], []
+    barcode_index, isoform_index, isoform_gene = {}, {}, {}
+    seen_queries = set()
+    with open(gff_path, 'w') as gff_handle, gzip.open(table_path, 'wt') as table:
+        table.write('\t'.join(_JUNCTION_COLUMNS) + '\n')
+        for read in records:
+            stats['records_scanned'] += 1
+            if read.is_unmapped or read.is_secondary:
+                continue
+            if read.is_supplementary:
+                if not regions:
+                    continue
+                stats['region_supplementary_records'] += 1
+                if not read.has_tag('SA'):
+                    continue
+                primary = _primary_for_supplementary(lookup, read)
+                if primary is None:
+                    stats['region_primary_not_found'] += 1
+                    continue
+                read = primary
+            if regions:
+                if read.query_name in seen_queries:
+                    continue
+                seen_queries.add(read.query_name)
+            stats['primary_records'] += 1
+            if not read.has_tag('SA'):
+                continue
+            stats['primary_records_with_SA'] += 1
+            sa_entries = read.get_tag('SA').rstrip(';').split(';')
+            if len({read.reference_name} | {e.split(',', 1)[0] for e in sa_entries}) < 2:
+                stats['SA_same_chromosome_only'] += 1
+                continue
+            stats['cross_chromosome_reads'] += 1
+            if regions:
+                stats['SA_entries_checked'] += len(sa_entries)
+                stats['SA_entries_matching_supplementary_record'] += _sa_records_match(lookup, read, sa_entries)
+            segments = _alignment_segments(read, sa_entries, ts_read_relative, exon_coordinates)
+            status = 'kept'
+            primary_segment = next(s for s in segments if s['primary'])
+            if primary_segment['strand'] != primary_segment['orientation']:
+                status = 'strand_tag_differs_from_alignment'
+            elif len({s['read_length'] for s in segments}) != 1:
+                status = 'read_length_mismatch_between_alignments'
+            barcode = resolve_barcode(read, barcode_tags, default_barcode=default_barcode)
+            if status == 'kept' and not barcode:
+                status = 'no_barcode'
+            if status == 'kept' and min(s['mapq'] for s in segments) < min_mapq:
+                status = 'mapq_below_min'
+            untrimmed = [list(s['exons']) for s in segments]
+            junctions = []
+            for a, b in zip(segments[:-1], segments[1:]):
+                junction = _segment_junction(a, b, exon_coordinates)
+                junction['cross'] = a['chrom'] != b['chrom']
+                junctions.append(junction)
+            if status == 'kept' and require_known_splice and not any(
+                    j['cross'] and (j['donor_hit'] is not None or j['acceptor_hit'] is not None)
+                    for j in junctions):
+                status = 'no_registered_boundary_at_cross_chromosome_joint'
+            for (a, b), junction in zip(zip(segments[:-1], segments[1:]), junctions):
+                _trim_to_junction(a, b, junction)
+            membership = cross_chromosome_rules.segment_blacklist(segments, blacklist_index) if blacklist_index else None
+            if membership:
+                stats['blacklist_membership_all_reads:' + membership[0]] += 1
+            if status == 'kept' and membership:
+                status = membership[0]
+            duplicated = ''
+            if status == 'kept' and aligner is not None:
+                duplicated = _duplicated_near_partner(segments, junctions, aligner, genome, dup_window,
+                                                      dup_min_identity, dup_min_cover, dup_cache)
+                if duplicated:
+                    status = 'blacklist_duplicated_sequence_near_partner'
+            gene, exon_ids, _, segment_genes = gff_process.annotate_cross_chromosome_segments(
+                [(s['chrom'], s['strand'], s['exons']) for s in segments], read.query_name)
+            _, raw_ids, _, _ = gff_process.annotate_cross_chromosome_segments(
+                [(s['chrom'], s['strand'], e) for s, e in zip(segments, untrimmed)], read.query_name)
+            molecule_id = sanitize_gff_value(resolve_molecule_id(read, molecule_tag))
+            molecule_core = molecule_id.split('molecule/', 1)[1] if molecule_id.startswith('molecule/') else molecule_id
+            isoform_id = sanitize_gff_value(f"{gene}:{molecule_prefix}{molecule_core}")
+            if status == 'kept' and isoform_id in isoform_index:
+                status = 'duplicate_isoform_id_in_library'
+            stats['status:' + status] += 1
+            if status == 'kept':
+                _write_cross_chromosome_gff(gff_handle, segments, isoform_id, gene, source,
+                                            first_in_file=not isoforms)
+                rows.append(get_index(barcode, barcode_index, barcodes))
+                cols.append(get_index(isoform_id, isoform_index, isoforms))
+                data.append(1)
+                isoform_gene[isoform_id] = gene
+            sequence = _oriented_sequence(read, segments[0]['read_length'])
+            for index, ((a, b), junction) in enumerate(zip(zip(segments[:-1], segments[1:]), junctions), 1):
+                if junction['cross']:
+                    stats['cross_chromosome_joints'] += 1
+                d_ann, d_first, d_last = _boundary_annotation(junction['donor_hit'], gene_region_counts)
+                a_ann, a_first, a_last = _boundary_annotation(junction['acceptor_hit'], gene_region_counts)
+                context = ''
+                if sequence:
+                    left_end = a['qend'] - (junction['shift'] or 0) if junction['overlap'] else a['qend']
+                    right_start = left_end if junction['overlap'] else b['qstart']
+                    context = (sequence[max(0, left_end - 20):left_end] + '|' +
+                               sequence[left_end:right_start].lower() + '|' + sequence[right_start:right_start + 20])
+                values = [library, molecule_id, read.query_name, barcode or '',
+                          read.get_tag('XM') if read.has_tag('XM') else '', status,
+                          isoform_id if status == 'kept' else '', a['read_length'], len(segments), index,
+                          junction['cross'], segment_genes[index - 1], segment_genes[index]]
+                for s in (a, b):
+                    values += [s['chrom'], s['strand'], s['qstart'], s['qend'], s['mapq'], s['nm'], s['primary'],
+                               s['cigar'], ','.join(f'{x}-{y}' for x, y in s['exons'])]
+                values += [junction['gap'], junction['overlap'], junction['shift'], junction['donor'],
+                           junction['acceptor'], d_ann, d_first, d_last, a_ann, a_first, a_last, context,
+                           '|'.join(raw_ids), f'{membership[0]}:{membership[1]}' if membership else '', duplicated]
+                table.write('\t'.join(str(v) for v in values) + '\n')
+    bam.close()
+    if lookup is not None:
+        lookup.close()
+    stats['kept_molecules'] = len(isoforms)
+    stats['kept_barcodes'] = len(barcodes)
+    if isoforms:
+        matrix = coo_matrix((data, (rows, cols)), shape=(len(barcodes), len(isoforms)), dtype=np.int32).tocsr()
+        adata = ad.AnnData(X=matrix, obs=pd.DataFrame(index=barcodes), var=pd.DataFrame(index=isoforms))
+        adata.var['gene'] = [isoform_gene.get(isoform, '') for isoform in isoforms]
+        adata.write_h5ad(h5ad_path, compression='gzip')
+    gff_gz = _gzip_file(gff_path)
+    stats_out = dict(stats)
+    stats_out.update(bam=str(bam_path), library=library, exon_file=str(exon_file), regions=regions,
+                     min_mapq=min_mapq, molecule_tag=molecule_tag, barcode_tags=barcode_tags,
+                     require_known_splice=require_known_splice, molecule_prefix=molecule_prefix,
+                     blacklist_members=str(blacklist_members) if blacklist_members else None,
+                     genome_index=str(genome_index) if genome_index else None,
+                     dup_window=dup_window, dup_min_identity=dup_min_identity, dup_min_cover=dup_min_cover,
+                     dup_segments_mapped=len(dup_cache), gff=str(gff_gz),
+                     h5ad=str(h5ad_path) if isoforms else None, junction_table=str(table_path),
+                     elapsed_seconds=round(time.time() - started, 1))
+    stats_path.write_text(json.dumps(stats_out, indent=1, default=str) + '\n')
+    return gff_gz, (h5ad_path if isoforms else None), stats_out
+
+
 def _init_logging(output_prefix):
     output_prefix = Path(output_prefix).expanduser()
     output_dir = output_prefix.parent if output_prefix.parent.as_posix() else Path('.')
@@ -1044,6 +1485,21 @@ def main():
                         help='Disable parallel chromosome/strand processing when no gene is provided.')
     parser.add_argument('--max-processes', dest='max_processes', type=int, default=None,
                         help='Maximum parallel workers (default: cpu_count-1).')
+    parser.add_argument('--cross-chromosome-only', dest='cross_chromosome_only', action='store_true',
+                        help='EXPERIMENTAL FORK: write only molecules aligned to two or more chromosomes '
+                             '(primary + SA-tag alignments).')
+    parser.add_argument('--library', dest='library', default=None,
+                        help='Library name recorded in the cross-chromosome junction table.')
+    parser.add_argument('--molecule-id-prefix', dest='molecule_prefix', default='',
+                        help='Cross-chromosome mode: prefix added to molecule ids (unique across libraries).')
+    parser.add_argument('--blacklist-members', dest='blacklist_members', default=None,
+                        help='Cross-chromosome mode: reference/blacklist_members.tsv (enables the blacklist).')
+    parser.add_argument('--genome-index', dest='genome_index', default=None,
+                        help='Cross-chromosome mode: minimap2 splice index for the duplicated-sequence rule.')
+    parser.add_argument('--genome-fasta', dest='genome_fasta', default=None,
+                        help='Cross-chromosome mode: genome FASTA matching --genome-index.')
+    parser.add_argument('--regions', dest='regions', default=None,
+                        help='Cross-chromosome demo only: comma-separated chrom:start-end (1-based) windows.')
     args = parser.parse_args()
 
     start_time = time.time()
@@ -1057,7 +1513,26 @@ def main():
         print("Command:", " ".join(sys.argv))
         print(f"Log file: {log_path}")
         barcode_tags = [tag.strip() for tag in args.barcode_tags.split(',') if tag.strip()]
-        if args.gene is None:
+        if args.cross_chromosome_only:
+            regions = None
+            if args.regions:
+                regions = []
+                for window in args.regions.split(','):
+                    chrom, span = window.rsplit(':', 1)
+                    start, end = span.split('-')
+                    regions.append((chrom, int(start) - 1, int(end)))
+            gff_path, h5ad_path, stats = extract_cross_chromosome_isoforms(
+                args.bam_file, args.gene_model, args.output_prefix,
+                library=args.library or Path(args.output_prefix).name,
+                min_mapq=args.min_mapq, barcode_tags=barcode_tags, molecule_tag=args.molecule_tag,
+                source=args.source, require_known_splice=args.require_known_splice,
+                default_barcode=args.bulk_barcode, ts_read_relative=args.ts_read_relative,
+                regions=regions, molecule_prefix=args.molecule_prefix, blacklist_members=args.blacklist_members,
+                genome_index=args.genome_index, genome_fasta=args.genome_fasta)
+            print("Processing mode: EXPERIMENTAL cross-chromosome only (single process)")
+            for key in sorted(stats):
+                print(f"{key}: {stats[key]}")
+        elif args.gene is None:
             if args.no_parallel:
                 gff_path, h5ad_path, stats, used_processes, chunk_count = parallel_extract_isoform_structures(
                     args.bam_file,

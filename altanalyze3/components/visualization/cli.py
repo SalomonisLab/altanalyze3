@@ -16,6 +16,15 @@ def add_arguments(parser):
     from .psi_boxplot_grid import add_arguments as add_grid_arguments
     add_grid_arguments(grid)
     grid.set_defaults(func=run_psi_grid)
+    flow = commands.add_parser("catalog-flow", help="Linear/chimeric catalog flow diagram from a box/value table")
+    from .catalog_flow import add_arguments as add_flow_arguments
+    add_flow_arguments(flow)
+    flow.set_defaults(func=run_catalog_flow)
+    ideo = commands.add_parser("chromosome-ideogram",
+                               help="Banded GRCh38 ideograms (SVG) of a trans-splicing junction and its best DNA contact")
+    from .chromosome_ideogram import add_arguments as add_ideogram_arguments
+    add_ideogram_arguments(ideo)
+    ideo.set_defaults(func=run_ideogram)
 
 
 def run_isv(args):
@@ -30,4 +39,14 @@ def run_psi(args):
 
 def run_psi_grid(args):
     from .psi_boxplot_grid import run
+    return run(args)
+
+
+def run_ideogram(args):
+    from .chromosome_ideogram import run
+    return run(args)
+
+
+def run_catalog_flow(args):
+    from .catalog_flow import run
     return run(args)

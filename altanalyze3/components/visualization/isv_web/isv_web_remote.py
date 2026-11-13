@@ -405,7 +405,13 @@ def prepare_locus_coordinates(response, intron_scale, trim_to_reads, isoform_tra
     frames, transforms, by_gene_frame = [], {}, {}
     # Equal-width sections are explicitly separate loci, never genomic distance.
     slot, gap = 1_000_000.0, 120_000.0
-    for i, genes in enumerate(locus_axis_groups([models[g] for g in parts])):
+    axis_groups = locus_axis_groups([models[g] for g in parts])
+    # In a negative-strand two-copy path the native gene axis reads right to
+    # left. Place traversal 1 on the right so its donor and traversal 2's
+    # acceptor meet across the central gap rather than opposite page edges.
+    if res.get("circular_repeat_view") and models[primary]["strand"] == "-":
+        axis_groups = list(reversed(axis_groups))
+    for i, genes in enumerate(axis_groups):
         segments = [s for g in genes for s in parts[g]]
         bounds = [(min(s["start"], s["end"]), max(s["start"], s["end"])) for s in segments]
         lo, hi = min(a for a, b in bounds), max(b for a, b in bounds)
@@ -484,6 +490,11 @@ def prepare_locus_coordinates(response, intron_scale, trim_to_reads, isoform_tra
     for s in segments.values():
         s["genomic_start"], s["genomic_end"] = s["start"], s["end"]
         s["start"], s["end"] = transforms[s["gene"]](s["start"]), transforms[s["gene"]](s["end"])
+    for panel in res.get("panels", []):
+        link = panel.get("repeat_path_link")
+        if link:
+            link["donor_axis"] = transforms[link["donor_gene"]](link["donor"])
+            link["acceptor_axis"] = transforms[link["acceptor_gene"]](link["acceptor"])
     for m in records:
         reg = m.get("registered_exon_segments")
         if reg:
@@ -524,7 +535,7 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
            title_gene=None, title_event=None, show_read_counts=True, show_structure_header=True,
            label_protein_length=True, dense_exon_labels=False, structure_labels_above=False,
            region=None, iso_order="length", caption=None, hide_bleeding_reads=False, bleed_tolerance=0,
-           protein_features=None, equal_panel_heights=False):
+           protein_features=None, equal_panel_heights=False, fit_height=900.0):
     """Render query_reads() panels as the drawReads molecule pileup to a single-page vector PDF.
     intron_scale<1.0 shrinks intron display spans (enlarging exons); 1.0 = true genomic scale.
     font_scale multiplies EVERY font size and the label margins and header heights that depend on them,
@@ -547,6 +558,8 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
     are dropped, and segments outside it are not drawn. It overrides trim_to_reads, whose axis is the union
     of every plotted molecule and therefore hides an event that sits in a small part of a long gene."""
     from .locus_view import is_trans_splicing_view
+    from .circular_overlay import validate_circular_payload, draw_circular_markers
+    validate_circular_payload(res)
     if protein_features and not isoform_track:
         raise ValueError('Protein architecture requires the registered isoform structure track')
     if protein_features or equal_panel_heights:
@@ -775,7 +788,7 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
     # viewers cut off the lower panels. If the figure would exceed one screenful, shrink ALL panel bodies
     # + their rows uniformly so the whole thing fits, keeping the shared genomic x-axis. Only shrinks;
     # figures that already fit are untouched.
-    _FIT_H = 900.0
+    _FIT_H = float(fit_height) if fit_height is not None else float("inf")
     reference_height = (RULER_H_ + REF_H + EXON_LBL_H) * (max(1, len(locus_frames)) if stack_reference_loci else 1)
     _ov = 10 + TITLE_H + 2 + reference_height + len(panels) * (HDR_ + PAD + PANEL_GAP)
     _budget = _FIT_H - _ov
@@ -907,7 +920,8 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
                             color="#b8c0ca", linewidth=0.45, zorder=1)
                 ax.text(LEFT_ - 8, p["_y"] + ly,
                         isoform_label(m, label_protein_length, id_max=26),
-                        fontsize=8 * FS, ha="right", va="center", color=(KNOWN if m.get("known") else NOVEL))
+                        fontsize=8 * FS, ha="right", va="center",
+                        color=colof(m) if m.get("use_track_color_label") else (KNOWN if m.get("known") else NOVEL))
         for r in p["_rows"]:
             m = r["m"]
             y_top = p["_y"] + r["dy"]
@@ -933,6 +947,34 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
             for s in ins + exs:
                 xa, xb = xz(s["a"]), xz(s["b"])
                 rect(xa, ey, max(1.0, xb - xa), eh, color)
+            draw_circular_markers(ax, m, xz, y_top + r["h"] / 2, eh, lo, hi)
+            if m.get("read_bsj_link"):
+                from matplotlib.patches import Circle
+                joins = m.get("_exon_segments_joins") or []
+                if len(joins) != 1:
+                    raise ValueError("Read-level BSJ view requires one verified cross-copy alignment join")
+                donor_axis, acceptor_axis = joins[0]
+                cy = y_top + r["h"] / 2
+                dx, axx = xz(donor_axis), xz(acceptor_axis)
+                ax.plot([dx, axx], [cy, cy], color="#c62828", linewidth=1.5, zorder=9)
+                for px in (dx, axx):
+                    ax.add_patch(Circle((px, cy), radius=eh / 2,
+                                        facecolor="white", edgecolor="#c62828",
+                                        linewidth=1.2, zorder=10))
+        link = p.get("repeat_path_link")
+        if link:
+            from matplotlib.patches import Circle
+            by_name = {r["m"].get("isoform_id"): r for r in p["_rows"]}
+            donor_row = by_name[link["donor_row"]]
+            acceptor_row = by_name[link["acceptor_row"]]
+            dy = p["_y"] + donor_row["dy"] + donor_row["h"] / 2
+            ay = p["_y"] + acceptor_row["dy"] + acceptor_row["h"] / 2
+            dx, axx = xz(link["donor_axis"]), xz(link["acceptor_axis"])
+            ax.plot([dx, axx], [dy, ay], color="#c62828", linewidth=2.0, zorder=9)
+            for px, py, row in ((dx, dy, donor_row), (axx, ay, acceptor_row)):
+                ax.add_patch(Circle((px, py), radius=max(row["h"] / 2, 3.0),
+                                    facecolor="white", edgecolor="#c62828",
+                                    linewidth=1.5, zorder=10))
 
     # ---- Native reference track, repeated for each partner locus on the SAME pileup axis. ----
     _full_lo, _full_hi, _full_gm = lo, hi, gm
@@ -1117,6 +1159,7 @@ def parse_group_spec(spec):
 
 
 _REC_FIELDS = ("isoform_id", "final_isoform_id", "known", "cluster_index", "color_index",
+               "circular_junctions", "circular_evidence",
                "exon_segments", "protein_length", "nmd_status", "annotation_tokens",
                "cds_min", "cds_max", "cds_chrom",
                "gene_path", "locus_genes", "locus_status", "locus_joins", "trans_splicing_candidate")

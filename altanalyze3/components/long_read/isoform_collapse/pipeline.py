@@ -1359,9 +1359,32 @@ def run_pipeline(samples, outdir, nproc=8, min_total=3, ref=DEFAULT_REF, write_h
         for g, s2e in kept.items():
             for struct, ex in s2e.items():
                 o.write(f"{g}\t{struct}\t{ex}\n")
+    # Pre-filter map: every structure class and the collapsed isoform it joined BEFORE the min_total
+    # filter, with that isoform's deciding total and retention. Output-only (nothing reads it back
+    # here); it lets downstream summaries recount collapsed isoforms exactly after removing reads.
+    # Sum of distinct prefilter_isoform_id == n_final (the 'before_min_total' count).
+    prepath = os.path.join(outdir, "FINAL_structure_to_exemplar_prefilter.tsv")
+    n_prefilter_without_total = 0
+    with open(prepath, 'w') as o:
+        o.write("gene\tstructure\tprefilter_isoform_id\tisoform_total_reads\tknown\tretained\n")
+        for g, r in gene_results.items():
+            decide = r.get('exemplar_hardtotal', r['exemplar_total'])
+            known_map = r.get('exemplar_known', {})
+            kept_ids = set(kept.get(g, {}).values())
+            for struct, ex in r['struct2exemplar'].items():
+                total = decide.get(ex)
+                if total is None:
+                    n_prefilter_without_total += 1
+                    total = 'NA'
+                o.write(f"{g}\t{struct}\t{ex}\t{total}\t{'known' if known_map.get(ex) else 'novel'}\t"
+                        f"{int(ex in kept_ids)}\n")
+    if n_prefilter_without_total:
+        log(f"[stage2] WARNING: {n_prefilter_without_total:,} prefilter map rows name an isoform without a "
+            f"deciding total (written as NA)")
     catpath = _io.compress(catpath, log=log)
     mappath = _io.compress(mappath, log=log)
-    log(f"[stage2] wrote {catpath} and {mappath}")
+    prepath = _io.compress(prepath, log=log)
+    log(f"[stage2] wrote {catpath}, {mappath} and {prepath}")
     if gene_evidence is not None and molecule_candidates is not None:
         persist_molecule_candidates(outdir, molecule_candidates)
     if streamed_context is not None:

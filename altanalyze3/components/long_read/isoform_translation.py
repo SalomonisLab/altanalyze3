@@ -74,6 +74,9 @@ def parse_gff(gff_file):
                         transcripts[transcript_id] = {"exons": [], "gene_id": gene_id}
                     normalized_chr = normalize_chromosome_name(parts[0])
                     transcripts[transcript_id]["exons"].append((normalized_chr, int(parts[3]), int(parts[4]), parts[6]))
+                    # EXPERIMENTAL FORK: read-segment label of cross-chromosome molecules (None otherwise)
+                    segment = re.search(r'segment[ =]"?([^";]+)"?', attributes)
+                    transcripts[transcript_id].setdefault("segments", []).append(segment.group(1) if segment else None)
     print(f"{len(transcripts)} transcripts imported from the GFF")
     return transcripts
 
@@ -130,6 +133,100 @@ def _tx_pos_to_genomic(exons_sorted, strand, tx_pos):
     return last[2] if strand == '+' else last[1]                              # clamp to the 3' end
 
 
+def _transcript_order_segments(exons, segments):
+    """EXPERIMENTAL FORK. Group exons into read segments in file order (a new group starts when the
+    chromosome, strand or segment label changes) and order each group 5'->3'."""
+    labels = segments if len(segments) == len(exons) else [None] * len(exons)
+    groups = []
+    for exon, label in zip(exons, labels):
+        key = (exon[0], exon[3], label)
+        if groups and groups[-1][0] == key:
+            groups[-1][1].append(exon)
+        else:
+            groups.append([key, [exon]])
+    ordered = []
+    for (_, strand, _), group in groups:
+        group = sorted(group, key=lambda x: x[1])
+        ordered.extend(group if strand == '+' else group[::-1])
+    return ordered
+
+
+def _ordered_tx_pos_to_genomic(ordered, tx_pos):
+    """EXPERIMENTAL FORK. 0-based transcript position -> (chromosome, 1-based position) over exons
+    already in transcript order, each with its own chromosome and strand."""
+    tx_pos = max(0, int(tx_pos))
+    cum = 0
+    for chrom, s, e, strand in ordered:
+        elen = e - s + 1
+        if tx_pos < cum + elen:
+            off = tx_pos - cum
+            return chrom, (s + off) if strand == '+' else (e - off), strand
+        cum += elen
+    chrom, s, e, strand = ordered[-1]
+    return chrom, (e if strand == '+' else s), strand
+
+
+def _cross_chromosome_cds_and_protein(transcript_id, exons, segments, gene_id, genome_seq, ref_first_exons):
+    """EXPERIMENTAL FORK. The extract_cds_and_protein steps (reference first-CDS-exon start, else the
+    longest ORF; the same is_nmd rule) for a transcript whose exons lie on more than one chromosome.
+    The reference start is searched on the first segment's chromosome and strand, which belong to the
+    gene that names the molecule."""
+    ordered = _transcript_order_segments(exons, segments)
+    pieces = []
+    for chrom, s, e, strand in ordered:
+        piece = genome_seq[chrom].seq[s - 1:e]
+        pieces.append(str(piece) if strand == '+' else str(piece.reverse_complement()))
+    transcript_seq = ''.join(pieces)
+    first_chrom, first_strand = ordered[0][0], ordered[0][3]
+    orf_seq = None
+    if gene_id in ref_first_exons:
+        candidates = []
+        for (ref_cds_start, ref_cds_end) in ref_first_exons[gene_id]:
+            instance = genome_seq[first_chrom].seq[ref_cds_start - 1:ref_cds_end]
+            instance = str(instance.reverse_complement()) if first_strand == '-' else str(instance)
+            if len(instance) >= 10 and instance in transcript_seq:
+                orf_start = transcript_seq.find(instance)
+                orf = str(Seq(transcript_seq[orf_start:]).translate(to_stop=True))
+                candidates.append((len(orf), orf_start, orf))
+        if candidates:
+            candidates.sort()
+            candidates.reverse()
+            _, orf_start, orf_seq = candidates[0]
+    if orf_seq is None:
+        orf_seq, orf_start = get_longest_orf(Seq(transcript_seq))
+    if not orf_seq:
+        return None, None, None, None
+    cds_seq = transcript_seq[orf_start:orf_start + len(orf_seq) * 3]
+    cds_record = SeqRecord(Seq(cds_seq), id=transcript_id,
+                           description=f";CDS;gene_id:{gene_id}" if gene_id else "CDS")
+    transcript_record = SeqRecord(Seq(transcript_seq), id=transcript_id,
+                                  description=f";transcript;gene_id:{gene_id}" if gene_id else "CDS")
+    stop_codon_pos = orf_start + len(orf_seq) * 3
+    last_exon_length = ordered[-1][2] - ordered[-1][1] + 1
+    penultimate_exon_length = ordered[-2][2] - ordered[-2][1] + 1 if len(ordered) > 1 else 0
+    last_exon_start_relative = len(transcript_seq) - last_exon_length
+    penultimate_exon_start_relative = last_exon_start_relative - penultimate_exon_length
+    nmd_annotation = ";(NMD)" if is_nmd(transcript_seq, stop_codon_pos, last_exon_start_relative, orf_start,
+                                        penultimate_exon_start_relative) else ""
+    protein_description = f";Protein;gene_id:{gene_id}{nmd_annotation}" if gene_id else f"Protein{nmd_annotation}"
+    protein_record = SeqRecord(Seq(orf_seq), id=transcript_id, description=protein_description.replace(" ", ""))
+    cds_end_tx = min(stop_codon_pos + 2, len(transcript_seq) - 1)
+    start_chrom, cds_g_start, start_strand = _ordered_tx_pos_to_genomic(ordered, orf_start)
+    end_chrom, cds_g_end, end_strand = _ordered_tx_pos_to_genomic(ordered, cds_end_tx)
+    same = start_chrom == end_chrom
+    coding_record = {
+        "transcript_id": transcript_id, "gene_id": gene_id,
+        "chromosome": start_chrom if same else f"{start_chrom}>{end_chrom}",
+        "strand": start_strand if same and start_strand == end_strand else f"{start_strand}>{end_strand}",
+        "cds_start_genomic": cds_g_start, "cds_end_genomic": cds_g_end,
+        "cds_genomic_min": min(cds_g_start, cds_g_end) if same else cds_g_start,
+        "cds_genomic_max": max(cds_g_start, cds_g_end) if same else cds_g_end,
+        "protein_length": len(orf_seq), "transcript_length": len(transcript_seq),
+        "nmd_status": "Potential-NMD" if nmd_annotation else "Not-NMD",
+    }
+    return cds_record, transcript_record, protein_record, coding_record
+
+
 def extract_cds_and_protein(transcripts, genome_fasta, ref_first_exons=None, query_transcript_to_gene={}):
     genome_seq = load_genome_dict(genome_fasta)
     cds_records = []
@@ -142,6 +239,19 @@ def extract_cds_and_protein(transcripts, genome_fasta, ref_first_exons=None, que
         gene_id = data["gene_id"]
         if transcript_id in query_transcript_to_gene:
             gene_id = query_transcript_to_gene[transcript_id]
+        segments = data.get("segments") or []
+        if len({(e[0], e[3]) for e in exons}) > 1 or len(set(segments)) > 1:
+            # EXPERIMENTAL FORK: exons on more than one chromosome/strand keep transcript order.
+            try:
+                records = _cross_chromosome_cds_and_protein(transcript_id, exons, segments, gene_id,
+                                                            genome_seq, ref_first_exons or {})
+            except KeyError as e:
+                print(f"Error: {e}. Check if chromosome identifiers match between GFF and genome FASTA.")
+                continue
+            for target, record in zip((cds_records, transcript_records, protein_records, coding_records), records):
+                if record is not None:
+                    target.append(record)
+            continue
         exons.sort(key=lambda x: x[1])
         try:
             if exons[0][3] == '+':

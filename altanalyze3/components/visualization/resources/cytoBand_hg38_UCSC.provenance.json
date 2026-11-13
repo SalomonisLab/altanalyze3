@@ -1,0 +1,11 @@
+{
+ "file": "cytoBand_hg38_UCSC.txt.gz",
+ "url": "https://hgdownload.soe.ucsc.edu/goldenPath/hg38/database/cytoBand.txt.gz",
+ "server_last_modified": "Sat, 29 Oct 2022 04:15:53 GMT",
+ "downloaded_utc": "2026-11-10",
+ "bytes": 12118,
+ "md5": "6677dd50caf19b0c3626b99ce67ca073",
+ "rows": 1549,
+ "columns": ["chrom", "chromStart (0-based)", "chromEnd", "name", "gieStain"],
+ "approved_by": "Nathan Salomonis, 2026-11-10, for the trans-splicing chromosome ideograms"
+}

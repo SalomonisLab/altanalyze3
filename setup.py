@@ -17,6 +17,8 @@ setup(
     license="Apache-2.0",
     include_package_data=True,
     package_data={
+        "altanalyze3.components.long_read.noncanonical": ["SOURCE_PROVENANCE.json", "README.md"],
+        "altanalyze3.components.long_read.noncanonical.oncofusion": ["*.txt", "*.gff3"],
         "altanalyze3.components.visualization.isv_web": ["templates/*.html", "static/*.js", "static/*.css", "*.md"],
         "altanalyze3.components.cellHarmony.webapp": ["templates/*.html", "static/*.js", "static/*.css", "static/*.gif", "static/*.png", "*.md"],
         "altanalyze3.components.cellHarmony": ["resources/biology/*.json", "resources/biology/*.md", "resources/biology/*.py", "discover_resources/source_manifest.json"],
@@ -25,11 +27,11 @@ setup(
         "altanalyze3.components.snaf": ["docs/*.md", "surface/data/*.json"],
         "altanalyze3.components.fastCNV": ["resources/*.tsv"],
         "altanalyze3.components.fastComm": ["resources/*.tsv", "resources/*/*.tsv", "resources/*/*.json", "configs/*.json"],
-        "altanalyze3.components.long_read": ["resources/*.gz"],
+        "altanalyze3.components.long_read": ["resources/*.gz", "*.sh"],
     },
     packages=find_packages(exclude=["docs", "tests", "cwls", "tmp"]),
     install_requires=parse_requirements(),
-    extras_require={"iso2function": ["igraph>=0.11,<1.1", "adjustText>=0.8,<2"]},
+    extras_require={"noncanonical-sequence": ["edlib==1.3.9.post1"], "iso2function": ["igraph>=0.11,<1.1", "adjustText>=0.8,<2"]},
     scripts=["altanalyze3/bin/altanalyze3"],
     classifiers=[
         "Environment :: Console",

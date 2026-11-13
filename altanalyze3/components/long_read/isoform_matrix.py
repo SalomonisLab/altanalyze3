@@ -171,7 +171,7 @@ def mtx_to_adata(int_folder, gene_is_index, feature, feature_col, barcode, barco
 #: nucleotide string; appending ``-1`` to it, or reverse-complementing it, produces an identifier
 #: that matches no annotation. The minimum length keeps a short library name that happens to spell
 #: nucleotides (say a sample called "ACGT") out of the 10x namespace too.
-_TENX_BARCODE = re.compile(r'^[ACGTNacgtn]{8,}$')
+_TENX_BARCODE = re.compile(r'^[ACGTNacgtn]{8,}(?:-[0-9]+)?$')
 
 
 def is_cell_barcode(barcode):
