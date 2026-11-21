@@ -201,3 +201,37 @@ labels/order only; native scores, original winners, features and samples remain
 unchanged. `--legacy-manifest` accepts `pattern_precedence` for fitting/replay.
 
 Saved heatmap annotation can use `render_heatmap_from_cache(..., label_shared_introns=True, callout_color="#d62728", sample_labels={sample: sample for sample in cache.obs_names}, show_pattern_labels=True)`. Exon/intron matching remains gene-specific and uses parent region blocks from either event arm; it does not imply exact event or directional replication. Defaults preserve exon-only black callouts. Long sample labels receive additional footer space.
+
+## Evidence rings (`evidence-rings`, added 2026-11-13)
+
+`evidence_rings.py` draws three concentric rings per panel. Ring 1 holds the direct calls of each item. Ring 2 holds
+direct plus imputed calls, and a pale band joins the two arcs of an item. Ring 3 holds one thin shell per evidence
+type over the imputed calls. Colour in two shells at one angle marks calls supported by both evidence types.
+
+```bash
+python -m altanalyze3 visualize evidence-rings \
+  --calls calls.tsv --items items.tsv --shells shells.tsv \
+  --ring1 centered --band sweep --top-labels 18 \
+  --legend legend.txt --counts-out counts_drawn.tsv --out evidence_rings.pdf
+```
+
+| Input | Columns |
+|---|---|
+| `--calls` | `panel`, `item`, `direct` (1 or 0), `evidence` (codes joined by `+`, empty for a direct call), optional `count` |
+| `--items` (optional) | `panel`, `item`, and any of `label_suffix`, `label_detail`, `color` |
+| `--shells` (optional) | `code`, `color`, `name`; ring-3 shells from inside to outside |
+
+| `--ring1` | Ring 1 |
+|---|---|
+| `aligned` | arc at the clockwise start of its ring-2 arc; one degree is one call in every ring |
+| `centered` (default) | arc centred under its ring-2 arc; one degree is one call in every ring |
+| `full` | full circle on its own scale, so an arc is the item's share of the direct calls |
+
+The module refuses an imputed call without an evidence code and an evidence code without a shell. The Python entry
+point is `plot_evidence_rings(calls, out, ...)`; it returns the counts drawn per panel. The PDF is vector only.
+Tests: `tests/test_evidence_rings.py` (6 tests).
+
+
+## Default clone figure workflows
+
+See [CLONE_FIGURES.md](CLONE_FIGURES.md) for the integrated compact heatmap, configurable alluvial, exact UMAP mapping, native AltAnalyze2 export, evidence-ring workflow and Figure 4 manifest runner.

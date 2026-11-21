@@ -1,0 +1,20 @@
+{
+  "commit": "edb1ddb1beb1bf977d44aede4c50e6bf985e06a8",
+  "license": "MIT; copied source retains its LICENSE",
+  "files": {
+    "run_BnpC.py": "23cf34ae19f3c2b7a51bd1b5ffc999a47f4d5f0a0d05a1af1de7f863cbc2b32d",
+    "LICENSE": "82616734a86f39d10f88eafdbe2ef1e8e24f4ea928a5dcffc39c8dfd5d7c576e",
+    "requirements.txt": "cdfa0be06923186133e6349e3c9e01475af0584732a9b5e340b76e2d40fd885f",
+    "README.md": "b58ceacb6b4ef9d026afddfc2567e5bb06d74dcee2eec0e02a0099e3f94418e8",
+    ".gitignore": "540f9c534fb7576d94c6035c8cfe3f8c1bf10f14a2b14fceb5fb729f1ed12e88",
+    "example_data/data_params.txt": "c66c796511f720c8b653b33d2c45121f6e254d2691bf7965e4637578bdfef2ea",
+    "example_data/data.csv": "5f87966c3bba8c29642d75d983048b838202f0f1123be8b3a0efb81b3707cad9",
+    "libs/plotting.py": "06e46ef1578884d2c3b1c207e32dc3f932ec709f5ac3649cb580f59e5bfb953e",
+    "libs/CRP.py": "2957e3dd9caf19f624295ef49b77963228439e32a7d5761d5383f75212856a78",
+    "libs/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "libs/CRP_learning_errors.py": "555ec66006b7b66b274da60ffe2e2348a901fefeecaba7cf81f53e00fd8b0bad",
+    "libs/MCMC.py": "dbc1de0557072e6b47ddb47fe543e11b4ad59a0931d924a3df91a3500338c8c8",
+    "libs/utils.py": "2807b616cceb1e5e2685d4eb85101f2206f76cdc6e462a9f32a44850d033e141",
+    "libs/dpmmIO.py": "b06d900567a8038ae48f636e26a2b77a18445ede0e87b868470bbfdec4d36c9f"
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "workflow_name": "final-revised-1",
+  "created_date": "2026-11-18",
+  "status": "candidate_not_promoted",
+  "based_on": "original_tree_crosscheck",
+  "analysis": "Original saved tree and posterior preserved; minimum supported lineage reporting from accepted positive calls. No positive calls = WT; incompatible or incomparable lineage evidence = U. Not a new model fit.",
+  "reporting_limitation": "Minimum supported lineage frequencies are not exclusive complete-genotype frequencies.",
+  "tree_style": "5801-approved-compact",
+  "default_analysis_changed": false,
+  "patients": [
+    "5801",
+    "AM75",
+    "WF78",
+    "GATA2-TET2-ASXL1",
+    "MDS-U2AF1-RAS",
+    "pAML-TET2-NPM1-IDH1"
+  ],
+  "frozen_bundle": "/Users/saljh8/Documents/Codex/2026-11-14/in-the-following-session-we-have/outputs/final-revised-1",
+  "manifest_sha256": "66d19f7d5a4f8d4200c660fdac52f2fee190924216ac570e94983600ce0338c1",
+  "display_revision": "2026-11-18_U-excluded_half-letter-layout",
+  "display_revision_manifest_sha256": "b099cce2f26c0a273973a28ec77ea1fbbfa96753077e410a1e09a679775e1c64",
+  "baseline_manifest_sha256": "ea30d0b346aeb467be493fb8cf4ce5a9d6607f5649cb0a147d589dd6e8d8e1f0"
+}

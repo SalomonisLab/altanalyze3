@@ -17,6 +17,8 @@ setup(
     license="Apache-2.0",
     include_package_data=True,
     package_data={
+        "altanalyze3.components.visualization": ["presets/*.json", "CLONE_FIGURES.md"],
+        "altanalyze3.components.bam.clonal_inference": ["*.json", "README.md"],
         "altanalyze3.components.long_read.noncanonical": ["SOURCE_PROVENANCE.json", "README.md"],
         "altanalyze3.components.long_read.noncanonical.oncofusion": ["*.txt", "*.gff3"],
         "altanalyze3.components.visualization.isv_web": ["templates/*.html", "static/*.js", "static/*.css", "*.md"],

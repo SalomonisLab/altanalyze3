@@ -298,7 +298,120 @@ def row_sort_key(m):
     deterministic and does not depend on dict iteration.
     """
     lo, hi, span = m.get("_span") or mol_extent(m.get("merged"))
-    return (group_key(m), -span, lo, hi, str(m.get("isoform_id")))
+    # _variant_rank is set only by --variant_sort; otherwise the term is the constant 0 and the order is unchanged.
+    return (group_key(m), m.get("_variant_rank", 0), -span, lo, hi, str(m.get("isoform_id")))
+
+
+# ---- known-variant allele per read (--variant_alleles, from altanalyze3.components.bam.read_alleles) ----
+# Black and white stay legible on every isoform fill; white carries a black edge. The classes are
+# the read_alleles allele_class values; a molecule absent from the table, or NOT_SPANNED, draws no mark.
+# A mark takes the IGV colour of the base the read carries. IGV desktop defaults, igvteam/igv main,
+# src/main/java/org/igv/renderer/SequenceRenderer.java (read 2026-11-19): A (0,150,0), G (209,113,5), T red,
+# N gray, C Globals.DARK_MODE_BLUE (0,150,255). A read spliced or deleted at the site draws a hollow black box.
+IGV_BASE_COLORS = {"A": "#009600", "C": "#0096FF", "G": "#D17105", "T": "#FF0000", "N": "#808080"}
+# Isoform fills while a variant is drawn. The base colours are blacklisted: every fill here lies at least
+# CIE76 deltaE 40 from all five IGV base colours (A 41-148, C 41-89, G 40-113, T 49-143, N 41-75), so a mark
+# never shares a hue with the read it sits on. Order: greedy maximum separation from the existing purple.
+VARIANT_SAFE_ISOFORM_COLORS = ["#7a4fb5", "#bcbd22", "#17becf", "#e7298a", "#1b1b3a", "#8a2f52", "#de77ae", "#40004b"]
+VARIANT_COLORS = IGV_BASE_COLORS
+VARIANT_DRAWN = ("REF", "ALT", "OTHER", "SPLICE", "DEL")
+VARIANT_CALLED = ("REF", "ALT", "OTHER")
+
+
+def load_variant_alleles(path, variant_id=None, colors=None):
+    """read_alleles.tsv -> variant dict carrying {molecule_id: allele_class} and {molecule_id: base}.
+
+    One class per molecule. A molecule with several alignment rows keeps its primary row; two primary
+    rows that disagree stop the run. A table with more than one variant needs variant_id."""
+    import csv
+    rows = {}
+    meta = {}
+    with open(path) as fh:
+        for r in csv.DictReader(fh, delimiter="\t"):
+            meta.setdefault(r["variant_id"], dict(id=r["variant_id"], chrom=r["chrom"], pos=int(r["pos"]),
+                                                  ref=r["ref"], alt=r["alt"]))
+            if variant_id is not None and r["variant_id"] != variant_id:
+                continue
+            rows.setdefault(r["variant_id"], []).append(r)
+    if variant_id is None:
+        if len(meta) != 1:
+            raise ValueError("--variant_alleles holds {} variants {}; name one with --variant_id".format(
+                len(meta), sorted(meta)))
+        variant_id = next(iter(meta))
+    if variant_id not in rows:
+        raise ValueError("--variant_id {} not in {} (has {})".format(variant_id, path, sorted(meta)))
+    calls, n_secondary, n_dupe = {}, 0, 0
+    for r in rows[variant_id]:
+        primary = r.get("secondary", "0") == "0" and r.get("supplementary", "0") == "0"
+        mid = r["molecule_id"]
+        if not primary:
+            n_secondary += 1
+            calls.setdefault(mid, (r["allele_class"], False, r.get("base", "")))
+            continue
+        prev = calls.get(mid)
+        if prev and prev[1]:
+            n_dupe += 1
+            if prev[0] != r["allele_class"]:
+                raise ValueError("molecule {} has two primary rows with classes {} and {}".format(
+                    mid, prev[0], r["allele_class"]))
+        calls[mid] = (r["allele_class"], True, r.get("base", ""))
+    v = dict(meta[variant_id])
+    v["calls"] = {k: c for k, (c, _p, _b) in calls.items()}
+    v["bases"] = {k: b.upper() for k, (_c, _p, b) in calls.items() if b}
+    v["colors"] = dict(VARIANT_COLORS, **(colors or {}))
+    v["source"] = str(path)
+    print("[isv_web_remote] variant {} {}:{:,} {}>{}: {:,} molecules from {} ({} secondary/supplementary rows, "
+          "{} duplicate primary rows)".format(v["id"], v["chrom"], v["pos"], v["ref"], v["alt"], len(v["calls"]),
+                                              path, n_secondary, n_dupe), flush=True)
+    return v
+
+
+def parse_variant_colors(text):
+    """'A=#009600,G=#D17105' -> {base: hex}, overriding IGV_BASE_COLORS. Only #RRGGBB values are accepted."""
+    import re
+    out = {}
+    for part in (text or "").split(","):
+        if not part.strip():
+            continue
+        k, _, val = part.partition("=")
+        k, val = k.strip().upper(), val.strip()
+        if k not in VARIANT_COLORS or not re.fullmatch(r"#[0-9A-Fa-f]{6}", val):
+            raise ValueError("--variant_colors expects BASE=#RRGGBB with BASE in {}, got {!r}".format(
+                sorted(VARIANT_COLORS), part))
+        out[k] = val
+    return out
+
+
+def attach_variant_alleles(res, variant, sort_by_allele=False):
+    """Stamp every panel molecule with variant_class (None when the table has no row for it).
+    Returns {panel condition: Counter of classes}; 'absent' counts molecules with no row."""
+    from collections import Counter
+    rank = {c: i for i, c in enumerate(VARIANT_DRAWN + ("NOT_SPANNED",))}
+    stats = OrderedDict()
+    for p in res.get("panels", []):
+        c = Counter()
+        for m in p.get("molecules", []):
+            cls = variant["calls"].get(str(m.get("isoform_id")))
+            m["variant_class"] = cls
+            m["variant_base"] = variant.get("bases", {}).get(str(m.get("isoform_id")))
+            c[cls or "absent"] += 1
+            if sort_by_allele:
+                m["_variant_rank"] = rank.get(cls, len(rank))
+        stats[p.get("condition")] = c
+    return stats
+
+
+def variant_panel_report(res, variant, label):
+    """Print allele classes per panel and per isoform."""
+    from collections import Counter
+    for p in res.get("panels", []):
+        by_iso = OrderedDict()
+        for m in p.get("molecules", []):
+            k = str(m.get("final_isoform_id") or m.get("isoform_id"))
+            by_iso.setdefault(k, Counter())[m.get("variant_class") or "absent"] += float(m.get("count") or 0)
+        print("[isv_web_remote] variant {} {} | {}: ".format(variant["id"], label, p.get("condition"))
+              + "; ".join("{} {}".format(k, ", ".join("{} {:g}".format(c, n) for c, n in sorted(v.items())))
+                          for k, v in by_iso.items()), flush=True)
 
 
 def segs_in_window(segs, lo, hi):
@@ -535,7 +648,7 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
            title_gene=None, title_event=None, show_read_counts=True, show_structure_header=True,
            label_protein_length=True, dense_exon_labels=False, structure_labels_above=False,
            region=None, iso_order="length", caption=None, hide_bleeding_reads=False, bleed_tolerance=0,
-           protein_features=None, equal_panel_heights=False, fit_height=900.0):
+           protein_features=None, equal_panel_heights=False, fit_height=900.0, variant=None):
     """Render query_reads() panels as the drawReads molecule pileup to a single-page vector PDF.
     intron_scale<1.0 shrinks intron display spans (enlarging exons); 1.0 = true genomic scale.
     font_scale multiplies EVERY font size and the label margins and header heights that depend on them,
@@ -556,7 +669,10 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
     track the left margin collapses and the panels take the full width.
     region=(lo, hi) draws ONLY that genomic window: the x-axis is the window, reads that do not overlap it
     are dropped, and segments outside it are not drawn. It overrides trim_to_reads, whose axis is the union
-    of every plotted molecule and therefore hides an event that sits in a small part of a long gene."""
+    of every plotted molecule and therefore hides an event that sits in a small part of a long gene.
+    variant (from load_variant_alleles) draws one mark per read at the variant position, filled by the
+    read's allele class; molecules must carry variant_class (attach_variant_alleles). A legend line sits
+    under the title and each panel header gives its allele counts. None leaves the figure unchanged."""
     from .locus_view import is_trans_splicing_view
     from .circular_overlay import validate_circular_payload, draw_circular_markers
     validate_circular_payload(res)
@@ -589,6 +705,8 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
             raise ValueError("Multi-locus ISV requires separate locus windows; a single --region is ambiguous")
         res, locus_frames = prepare_locus_coordinates(res, intron_scale, trim_to_reads, isoform_track)
         intron_scale = 1.0  # each locus was compressed independently, once
+    if variant and locus_frames:
+        raise ValueError("--variant_alleles is not supported on a multi-locus ISV")
     panels = [p for p in res.get("panels", []) if p.get("n_molecules", 0) > 0]
     gm = res.get("gene_model") or {}
     if not panels:
@@ -662,6 +780,9 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
     _t_gene_h = (15.0 * FS) if title_gene else 0.0
     _t_event_h = (12.0 * FS) if title_event else 0.0
     TITLE_H = (_t_gene_h + _t_event_h + 6.0 * FS) if (title_gene or title_event) else 0.0
+    _t_var_h = (13.0 * FS) if variant else 0.0           # allele legend line, only when a variant is drawn
+    _t_var_y = 10.0 + TITLE_H + _t_var_h * 0.55
+    TITLE_H += _t_var_h
     # trim_to_reads: ignore the gene model extent so the axis spans only what the reads cover.
     # region: the caller fixed the window, so neither the reads nor the gene model may widen it.
     lo, hi = _region if _region else extent_of(all_mol, {} if trim_to_reads else gm)
@@ -674,8 +795,17 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
     _ckeys = sorted({color_key(m) for m in all_mol + extra_models})
     _palette = {2: TWO_ISOFORM_COLORS, 3: THREE_ISOFORM_COLORS}.get(len(_ckeys), [])
     _auto_colors = dict(zip(_ckeys, _palette))
+    if variant:
+        # base colours are blacklisted for isoforms: every isoform takes a VARIANT_SAFE fill, caller colours included
+        _n = len(VARIANT_SAFE_ISOFORM_COLORS)
+        _auto_colors = {k: VARIANT_SAFE_ISOFORM_COLORS[i % _n] for i, k in enumerate(_ckeys)}
+        if len(_ckeys) > _n:
+            print("[isv_web_remote] WARNING: {} isoforms share {} variant-safe fills; fills repeat".format(
+                len(_ckeys), _n), flush=True)
 
     def colof(m):
+        if variant:
+            return _auto_colors[color_key(m)]
         return m.get("display_color") or _auto_colors.get(color_key(m)) or color_for(m)
 
     # unique plotted isoforms (one structure row each) for the optional bottom structure track.
@@ -749,6 +879,15 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
         for e in m["struct_merged"]["exons"]:
             exon_ivs.append((min(e["a"], e["b"]), max(e["a"], e["b"])))
     xz = build_xz(_merge_ivs(exon_ivs), lo, hi, max(0.01, float(intron_scale)), track_x0, track_x1)
+    if variant:
+        _vchrom, _gchrom = str(variant["chrom"]), str(gm.get("chrom") or "")
+        if _gchrom and _vchrom.replace("chr", "", 1) != _gchrom.replace("chr", "", 1):
+            raise ValueError("variant {} is on {}, the gene model on {}".format(variant["id"], _vchrom, _gchrom))
+        if not lo <= int(variant["pos"]) <= hi:
+            raise ValueError("variant {} at {:,} lies outside the drawn window {:,}-{:,}".format(
+                variant["id"], int(variant["pos"]), lo, hi))
+        _vx = xz(int(variant["pos"]))
+        _vw = max(2.5, 1.8 * FS)                          # mark width in points; one base is far narrower
 
     for p in panels:
         raw = [min(ROW_CAP, max(ROW_MIN, m.get("count", 0) * READ_PX)) for m in p["mol"]]
@@ -885,16 +1024,55 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
     if title_event:
         ax.text(_tx, 10.0 + _t_gene_h + _t_event_h * 0.62, str(title_event), fontsize=8.5 * FS,
                 ha="center", va="center", color="#39434f")
+    if variant:
+        # legend: IGV base colours, ref and alt first, then the other two bases; spliced/deleted is a hollow box
+        _ref, _alt = variant["ref"].upper(), variant["alt"].upper()
+        _items = [("{} {}:{:,} {}>{}".format(variant["id"], variant["chrom"], int(variant["pos"]), _ref, _alt), None)]
+        _items += [("{} (ref)".format(_ref), _ref), ("{} (alt)".format(_alt), _alt)]
+        _items += [(b, b) for b in "ACGT" if b not in (_ref, _alt)]
+        _items += [("spliced/deleted at site", "SPLICE"), ("no mark: read stops before the site", None)]
+        # the legend is one line across the track; its font shrinks until that line fits
+        _unit = sum(0.58 * len(t) + (1.6 if k else 0.0) for t, k in _items) + 1.2 * (len(_items) - 1)
+        _vfs = min(7.5 * FS, (track_x1 - track_x0) / _unit)
+        _widths = [0.58 * _vfs * len(t) + (1.6 * _vfs if k else 0.0) for t, k in _items]
+        _gap = 1.2 * _vfs
+        _x = _tx - (sum(_widths) + _gap * (len(_items) - 1)) / 2.0
+        for (t, k), w in zip(_items, _widths):
+            if k:
+                if k == "SPLICE":
+                    rect(_x, _t_var_y - 0.4 * _vfs, 0.8 * _vfs, 0.8 * _vfs, "none", ec="#000000", lw=0.6)
+                else:
+                    rect(_x, _t_var_y - 0.4 * _vfs, 0.8 * _vfs, 0.8 * _vfs, variant["colors"][k])
+                ax.text(_x + 1.1 * _vfs, _t_var_y, t, fontsize=_vfs, ha="left", va="center", color="#1a2230")
+            else:
+                ax.text(_x, _t_var_y, t, fontsize=_vfs, ha="left", va="center", color="#39434f")
+            _x += w + _gap
 
     for p in panels:
         top = p["_top"]
         box_h = HDR_ + p["_bodyH"] + PAD
         rect(6, top, width - 12, box_h, "#ffffff", ec="#d4d9e0", lw=0.8)
         rect(6, top, width - 12, HDR_, "#eef1f5")
+        if variant:
+            from collections import Counter as _Counter
+            _vc = _Counter()
+            for _r in p["_rows"]:
+                _vc[_r["m"].get("variant_class") or "none"] += float(_r["m"].get("count") or 0)
+            _parts = ["{} {:g}".format(variant[k.lower()], _vc[k]) for k in ("REF", "ALT")]
+            if _vc["OTHER"]:
+                _parts.append("other {:g}".format(_vc["OTHER"]))
+            _parts.append("spliced/del {:g}".format(_vc["SPLICE"] + _vc["DEL"]))
+            _parts.append("no site {:g}".format(_vc["NOT_SPANNED"] + _vc["none"]))
+            ax.text(width - 16, top + 15 * FS, "{}: ".format(variant["id"]) + " · ".join(_parts),
+                    fontsize=6.5 * FS, ha="right", va="center", color="#39434f")
+            ax.plot([_vx, _vx], [p["_y"], p["_y"] + p["_bodyH"]], color="#5a6675", linewidth=0.5,
+                    linestyle=(0, (2, 2)), zorder=0.5)
         if structure_labels_above:        # figure preset: italic, centred in the header band
-            ax.text((track_x0 + track_x1) / 2.0, top + 15 * FS, f"{p['condition']}", fontsize=11 * FS,
+            # with allele counts on the right the title moves to the left edge, so the two never collide
+            ax.text(16 if variant else (track_x0 + track_x1) / 2.0, top + 15 * FS, f"{p['condition']}",
+                    fontsize=11 * FS, ha="left" if variant else "center",
                     weight="normal" if protein_layout else "bold", style="normal" if protein_layout else "italic",
-                    fontfamily=ITALIC_FAMILY, ha="center", va="center",
+                    fontfamily=ITALIC_FAMILY, va="center",
                     color="#1a2230")
         else:
             ax.text(16, top + 15 * FS, f"{p['condition']}", fontsize=11 * FS, weight="bold", va="center", color="#1a2230")
@@ -948,6 +1126,14 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
                 xa, xb = xz(s["a"]), xz(s["b"])
                 rect(xa, ey, max(1.0, xb - xa), eh, color)
             draw_circular_markers(ax, m, xz, y_top + r["h"] / 2, eh, lo, hi)
+            if variant and m.get("variant_class") in VARIANT_CALLED:
+                # IGV style: the base the read carries, in its IGV colour, filling the read height
+                _b = (m.get("variant_base") or "N").upper()
+                ax.add_patch(Rectangle((_vx - _vw / 2.0, ey), _vw, eh, facecolor=variant["colors"].get(_b, variant["colors"]["N"]),
+                                       edgecolor="none", linewidth=0, zorder=6))
+            elif variant and m.get("variant_class") in ("SPLICE", "DEL"):
+                ax.add_patch(Rectangle((_vx - _vw / 2.0, ey), _vw, eh, facecolor="none", edgecolor="#000000",
+                                       linewidth=min(0.6, max(0.15, eh * 0.2)), zorder=6))
             if m.get("read_bsj_link"):
                 from matplotlib.patches import Circle
                 joins = m.get("_exon_segments_joins") or []
@@ -1054,6 +1240,9 @@ def render(res, out_path, width=1100, intron_scale=1.0, isoform_track=False,
         ystruct = struct_top + (16 if show_structure_header else 4) * FS
         ISO_EXH_ = ISO_EXH * FS
         _geo, _ = struct_rows_geometry(len(iso_rows), FS, structure_labels_above, y0=ystruct)
+        if variant:                                   # the same guide through the structures shows which carry the site
+            ax.plot([_vx, _vx], [ystruct, _geo[-1][0] + ISO_EXH * FS / 2.0 + 2.0], color="#5a6675",
+                    linewidth=0.5, linestyle=(0, (2, 2)), zorder=0.5)
         for _idx, m in enumerate(iso_rows):
             color = colof(m)
             merged = m.get("struct_merged") or m["merged"]
@@ -1386,6 +1575,24 @@ def build_arg_parser():
                     help="ALSO write a TSV of (molecule_id, final_isoform_id, cell_state, sample, count) for "
                          "EVERY molecule in the selection (UNCAPPED, ignores --max_isoforms) to this path -- "
                          "for reconciliation against the raw reads.db index and the source pseudobulk counts.")
+    ap.add_argument("--variant_alleles", "--variant-alleles", dest="variant_alleles", default=None,
+                    help="read_alleles.tsv from altanalyze3.components.bam.read_alleles: draw one mark per read at the "
+                         "variant position in the IGV colour of the base the read carries (A #009600, C #0096FF, "
+                         "G #D17105, T #FF0000, N #808080); a read spliced or deleted at the site draws a hollow box, "
+                         "and a read with no row, or one that stops before the site, draws no mark. Isoforms then take "
+                         "fills from VARIANT_SAFE_ISOFORM_COLORS, which exclude the base colours. Each panel header "
+                         "gives its allele counts.")
+    ap.add_argument("--variant_id", "--variant-id", dest="variant_id", default=None,
+                    help="which variant of --variant_alleles to draw (needed when the table holds several)")
+    ap.add_argument("--variant_sort", "--variant-sort", dest="variant_sort", action="store_true",
+                    help="inside each isoform group, order reads by allele (REF, ALT, other, spliced, deleted, no "
+                         "site) before the usual longest-first order")
+    ap.add_argument("--variant_spanning_only", "--variant-spanning-only", dest="variant_spanning_only",
+                    action="store_true",
+                    help="display filter: keep only reads with a base call at the variant (REF, ALT or other). "
+                         "Applied after isoform selection and before --max_reads")
+    ap.add_argument("--variant_colors", "--variant-colors", dest="variant_colors", default=None,
+                    help="override IGV base colours, e.g. 'A=#00C800,C=#0000C8' (bases A, C, G, T, N)")
     return ap
 
 
@@ -1459,7 +1666,20 @@ def _render_selected(a, res, out, region):
                   protein_features=a.protein_features,
                   equal_panel_heights=getattr(a, 'equal_panel_heights', False),
                   caption=(Path(a.caption_file).read_text().strip()
-                           if getattr(a, 'caption_file', None) else None))
+                           if getattr(a, 'caption_file', None) else None),
+                  variant=getattr(a, '_variant', None))
+
+
+def _prepare_variant(a):
+    """Load --variant_alleles once into a._variant; a._variant stays None without it."""
+    a._variant = None
+    if not getattr(a, 'variant_alleles', None):
+        for flag in ('variant_id', 'variant_sort', 'variant_spanning_only', 'variant_colors'):
+            if getattr(a, flag, None):
+                sys.exit('--{} requires --variant_alleles'.format(flag))
+        return None
+    a._variant = load_variant_alleles(a.variant_alleles, a.variant_id, parse_variant_colors(a.variant_colors))
+    return a._variant
 
 
 def main(argv=None):
@@ -1478,12 +1698,17 @@ def run_from_args(a):
         _region = parse_region(a.region)
     except ValueError as exc:
         sys.exit("[isv_web_remote] {}".format(exc))
+    try:                                  # fail on a bad allele table before the read query runs
+        _prepare_variant(a)
+    except ValueError as exc:
+        sys.exit("[isv_web_remote] {}".format(exc))
     if a.render_input:
         import gzip, json
         conflicting = [name for name in ('cell_states', 'cell_groups', 'condition_groups', 'conditions',
                        'isoforms', 'isoform_filter', 'top_isoforms', 'top_per_filter', 'max_reads',
-                       'max_reads_per_isoform', 'hide_bleeding_reads', 'min_isoform_pct', 'export_molecules')
-                       if getattr(a, name)]
+                       'max_reads_per_isoform', 'hide_bleeding_reads', 'min_isoform_pct', 'export_molecules',
+                       'variant_spanning_only')
+                       if getattr(a, name, None)]
         if conflicting:
             sys.exit('--render-input is already selected; query/filter options cannot be applied: ' + ', '.join(conflicting))
         if a.max_isoforms != 1_000_000:
@@ -1498,6 +1723,11 @@ def run_from_args(a):
             res = json.load(fh)
         if a.gene not in (res.get('gene'), res.get('symbol')):
             sys.exit('--render-input gene does not match --gene')
+        if a._variant:
+            stats = attach_variant_alleles(res, a._variant, a.variant_sort)
+            print("[isv_web_remote] variant {} classes per panel: {}".format(
+                a._variant["id"], {k: dict(v) for k, v in stats.items()}), flush=True)
+            variant_panel_report(res, a._variant, "drawn")
         out = a.out or os.path.join(a.run_dir, 'ISV_' + a.gene + '_protein_architecture.pdf')
         sys.exit(0 if _render_selected(a, res, out, _region) else 2)
     from . import data_api as da
@@ -1601,6 +1831,11 @@ def run_from_args(a):
                               max_isoforms=10**9, panel_by="cell_type", isoform_filter=a.isoform_filter)
         _export_molecule_tsv(full, a.export_molecules)
 
+    if a._variant:
+        stats = attach_variant_alleles(res, a._variant, a.variant_sort)
+        print("[isv_web_remote] variant {} classes per panel before isoform selection: {}".format(
+            a._variant["id"], {k: dict(v) for k, v in stats.items()}), flush=True)
+
     if a.isoform_filter:
         print(f"[isv_web_remote] isoform_filter={a.isoform_filter}: panel reads "
               + ", ".join(f"{p['condition']}:{int(round(sum(m['count'] for m in p['molecules'])))}"
@@ -1658,6 +1893,15 @@ def run_from_args(a):
               + ", ".join(f"{k} ({present[k]:.0f} reads)" for k in want)
               + f" of {len(present)} isoforms with reads; panel reads "
               + ", ".join(f"{p['condition']}:{p['n_molecules']}" for p in res.get("panels", [])), flush=True)
+    if a._variant:
+        variant_panel_report(res, a._variant, "selected, before any read cap")
+    if a._variant and a.variant_spanning_only:
+        for p in res.get("panels", []):
+            before = len(p.get("molecules", []))
+            p["molecules"] = [m for m in p.get("molecules", []) if m.get("variant_class") in VARIANT_CALLED]
+            p["n_molecules"] = int(round(sum(float(m.get("count") or 0) for m in p["molecules"])))
+            print("[isv_web_remote] variant_spanning_only: {} keeps {} of {} molecules".format(
+                p.get("condition"), len(p["molecules"]), before), flush=True)
     if a.max_reads and not a.hide_bleeding_reads:
         res, cap = cap_panel_reads(res, a.max_reads, a.seed)
         print(f"[isv_web_remote] max_reads={a.max_reads} -> cap {cap}: panel reads "
@@ -1746,6 +1990,8 @@ def run_from_args(a):
     if a.figure_mode or a.font_scale is not None:
         print(f"[isv_web_remote] figure_mode={a.figure_mode} font_scale={fs} ruler={not a.figure_mode} "
               f"read_labels={not a.figure_mode} trim_to_reads={a.figure_mode} region={_region}", flush=True)
+    if a._variant:
+        variant_panel_report(res, a._variant, "drawn")
     sys.exit(0 if _render_selected(a, res, out, _region) else 2)
 
 

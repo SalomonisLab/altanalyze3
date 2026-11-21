@@ -40,6 +40,7 @@ dependencies = [
 altanalyze3-neo = "altanalyze3.components.neoantigen.cli:main"
 
 [project.optional-dependencies]
+clonal-inference = ["Bottleneck==1.3.8"]
 noncanonical-sequence = ["edlib==1.3.9.post1"]
 iso2function = ["igraph>=0.11,<1.1", "adjustText>=0.8,<2"]
 biology-summary = ["llama-cpp-python>=0.3.34,<0.4"]
@@ -62,6 +63,7 @@ include = ["altanalyze3*"]
 exclude = ["*.jobs", "*.jobs.*", "altanalyze3.tmp", "altanalyze3.tmp.*"]
 
 [tool.setuptools.package-data]
+"altanalyze3.components.visualization" = ["presets/*.json", "CLONE_FIGURES.md"]
 "altanalyze3.components.neoantigen" = ["data/*.json"]
 "altanalyze3.components.cellHarmony" = ["resources/pathways/*.json", "resources/pathways/*.md", "resources/biology/*.json", "resources/biology/*.md", "resources/biology/*.py", "discover_resources/source_manifest.json"]
 "altanalyze3.components.cellHarmony.webapp" = ["templates/*.html", "static/*.js", "static/*.css", "static/*.gif", "static/*.png", "*.md", "requirements.docker.txt"]
@@ -83,3 +85,5 @@ exclude = ["*.jobs", "*.jobs.*", "altanalyze3.tmp", "altanalyze3.tmp.*"]
 
 "altanalyze3.components.long_read.noncanonical" = ["SOURCE_PROVENANCE.json", "README.md"]
 "altanalyze3.components.long_read.noncanonical.oncofusion" = ["*.txt", "*.gff3"]
+
+"altanalyze3.components.bam.clonal_inference" = ["bnpc_source_manifest.json", "README.md"]

@@ -25,6 +25,7 @@ import anndata as ad
 from scipy.sparse import issparse
 
 from altanalyze3.components.cellHarmony.cellHarmony_lite import normalize_adata
+from altanalyze3.components.bam import variant_evidence_defaults as _ved   # standard cutoffs (one source for every default)
 from altanalyze3.components.visualization.marker_heatmap_h5ad import (
     generate_marker_heatmap_from_adata, _build_heatmap, _plot_heatmap)
 
@@ -489,6 +490,161 @@ def _pca_from_heatmap(heatmap_df, column_clusters, cluster_order, out_path, titl
     return out_path
 
 
+# Single-cell classification PCA (added 2026-11-14; _pca_from_heatmap above is unchanged).
+# Same matrix and same SVD as plot 5. Read-genotyped cells are drawn on top of classified cells, and a cell
+# of the matrix with no label is grey. Colours as hex, points as vector circles (Illustrator-ready).
+CLASSIFICATION_PCA_GROUPS = [("not classified", "#BDBDBD", 2.2), ("classified wild-type", "#9AC2E5", 2.2),
+                             ("classified mutant", "#F08C7D", 3.0), ("read-genotyped wild-type", "#1F5A9D", 3.6),
+                             ("read-genotyped mutant", "#B2182B", 5.0)]
+
+
+def render_classification_pca(unit_dir, tag, out_pdf, title="", extra_labels=None, project_groups=None):
+    """PCA of one saved classifier unit, one point per cell, from `<tag>_3_combined_heatmap_matrix.tsv`.
+
+    Labels: read-genotyped cells from the header of `<tag>_marker_heatmap_fold_matrix.tsv` (MUT:<barcode>,
+    WT:<barcode>); classified cells from `<tag>_imputed.csv`. `extra_labels` ({barcode: group}) replaces the label
+    of the listed cells, for example "not classified". Writes the PDF and `<out_pdf>.tsv` (cell, group, PC1, PC2).
+    `project_groups` (group names): cells of these groups do not enter the centring or the principal axes; they are
+    placed on the axes of the other cells. With None every cell enters the fit (the earlier behaviour).
+    Returns {group: n cells}."""
+    import csv
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    plt.rcParams["font.family"] = "sans-serif"
+    plt.rcParams["font.sans-serif"] = ["Arial", "Helvetica", "DejaVu Sans"]
+    plt.rcParams["pdf.fonttype"] = 42
+    plt.rcParams["ps.fonttype"] = 42
+    plt.rcParams.update({"font.size": 7, "axes.titlesize": 8, "axes.labelsize": 7, "xtick.labelsize": 7, "ytick.labelsize": 7})
+
+    lab = {}
+    with open(os.path.join(unit_dir, tag + "_marker_heatmap_fold_matrix.tsv")) as fh:
+        for h in fh.readline().rstrip("\n").split("\t")[1:]:
+            g, b = h.split(":", 1)
+            if g not in ("MUT", "WT"):
+                raise ValueError(f"unexpected training group in header: {h}")
+            lab[b] = "read-genotyped mutant" if g == "MUT" else "read-genotyped wild-type"
+    with open(os.path.join(unit_dir, tag + "_imputed.csv")) as fh:
+        for r in csv.DictReader(fh):
+            if r["imputed"] not in ("MUT", "WT"):
+                raise ValueError(f"unexpected imputed value: {r}")
+            if r["barcode"] not in lab:
+                lab[r["barcode"]] = "classified mutant" if r["imputed"] == "MUT" else "classified wild-type"
+    if extra_labels:
+        lab.update(extra_labels)
+    rows, feats = [], []
+    with open(os.path.join(unit_dir, tag + "_3_combined_heatmap_matrix.tsv")) as fh:
+        cells = fh.readline().rstrip("\n").split("\t")[1:]
+        for line in fh:
+            p = line.rstrip("\n").split("\t")
+            feats.append(p[0])
+            rows.append(np.asarray(p[1:], dtype=np.float32))
+    M = np.vstack(rows)
+    n_bad = int((~np.isfinite(M)).sum())
+    X = np.nan_to_num(M.T.astype(np.float64), nan=0.0, posinf=0.0, neginf=0.0)      # cells x markers, as plot 5
+    grp = np.asarray([lab.get(c, "not classified") for c in cells])
+    fit = ~np.isin(grp, list(project_groups)) if project_groups else np.ones(len(cells), dtype=bool)
+    if int(fit.sum()) < 3:
+        raise ValueError("fewer than 3 cells enter the PCA fit")
+    X = X - X[fit].mean(axis=0, keepdims=True)
+    _, S, Vt = np.linalg.svd(X[fit], full_matrices=False)
+    pc = X @ Vt[:2].T
+    ev = (S ** 2) / max(float((S ** 2).sum()), 1e-12) * 100.0
+    logger.info("classification PCA %s: %d cells, %d markers, %d non-finite values set to 0", tag, len(cells), len(feats), n_bad)
+
+    from matplotlib.path import Path
+    from matplotlib.patches import PathPatch, Circle
+    fig, ax = plt.subplots(figsize=(6.4, 5.6))
+    fig.subplots_adjust(left=0.12, right=0.97, top=0.92, bottom=0.26)
+    pad = 0.04 * (pc.max(0) - pc.min(0))
+    ax.set_xlim(pc[:, 0].min() - pad[0], pc[:, 0].max() + pad[0])
+    ax.set_ylim(pc[:, 1].min() - pad[1], pc[:, 1].max() + pad[1])
+    # one compound path of circles per group (a collection of equal markers is written as stamped forms)
+    box = ax.get_position()
+    w_pt, h_pt = box.width * fig.get_figwidth() * 72.0, box.height * fig.get_figheight() * 72.0
+    x_per_pt = (ax.get_xlim()[1] - ax.get_xlim()[0]) / w_pt
+    y_per_pt = (ax.get_ylim()[1] - ax.get_ylim()[0]) / h_pt
+    uc = Path.unit_circle()
+    handles, counts = [], {}
+    for name, col, size in CLASSIFICATION_PCA_GROUPS:
+        m = grp == name
+        counts[name] = int(m.sum())
+        if not m.any():
+            continue
+        r = size / 2.0
+        v = uc.vertices[None, :, :] * np.array([r * x_per_pt, r * y_per_pt])[None, None, :] + pc[m][:, None, :]
+        patch = PathPatch(Path(v.reshape(-1, 2), np.tile(uc.codes, int(m.sum()))), facecolor=col, edgecolor="none", linewidth=0)
+        patch.set_clip_on(False)
+        ax.add_patch(patch)
+        handles.append((Circle((0, 0), 1, facecolor=col, edgecolor="none"), f"{name} (n = {int(m.sum())})"))
+    ax.set_xlabel(f"PC1 ({ev[0]:.1f}% of variance)")
+    ax.set_ylabel(f"PC2 ({ev[1]:.1f}% of variance)")
+    ax.set_title(title or tag, loc="left", fontsize=8)
+    for s in ("top", "right"):
+        ax.spines[s].set_visible(False)
+    ax.patch.set_visible(False)
+    fig.patch.set_visible(False)
+    fig.legend([h for h, _ in handles][::-1], [t for _, t in handles][::-1], loc="lower left",
+               bbox_to_anchor=(0.1, 0.01), frameon=False, fontsize=7, ncol=2)
+    import textwrap
+    note = (f"One point per cell. PCA of the {len(feats)} marker features of the classifier unit "
+            f"(centred expression; {n_bad} non-finite values set to 0)."
+            + (f" Axes from the {int(fit.sum())} read-genotyped and classified cells; the "
+               f"{int((~fit).sum())} other cells are placed on these axes." if project_groups else ""))
+    fig.text(0.01, 0.185, "\n".join(textwrap.wrap(note, 150)), fontsize=6, va="top")
+    fig.savefig(out_pdf, format="pdf")
+    plt.close(fig)
+    pd.DataFrame({"cell": cells, "group": grp, "PC1": pc[:, 0], "PC2": pc[:, 1]}).to_csv(
+        os.path.splitext(out_pdf)[0] + ".tsv", sep="\t", index=False)
+    return counts
+
+
+def render_combined_heatmap_subset(unit_dir, tag, row_labels, row_classes, out_pdf, species="human",
+                                   control_first=True, figure_title=None, caption=None):
+    """Four-group heat map (plot 3) of one saved classifier unit for a SUBSET of its marker features, with new row
+    labels, drawn by the MarkerFinder heat map code (_plot_heatmap), added 2026-11-14.
+
+    Values are the rows of `<tag>_3_combined_heatmap_matrix.tsv` unchanged; no value is recomputed.
+    row_labels   {feature id in the matrix: row label}. A label `ENSG...:E1.2-E2.1` (or several joined by `|`) is
+                 printed by the heat map code as `SYMBOL:E1.2-E2.1`.
+    row_classes  {feature id: "MUT" or "WT"}, the class the feature marks.
+    control_first  columns WT read-genotyped, WT predicted, MUT read-genotyped, MUT predicted; WT-marker rows on top.
+    Returns the plotted DataFrame (also written beside the PDF as .tsv)."""
+    import csv
+    hm = pd.read_csv(os.path.join(unit_dir, tag + "_3_combined_heatmap_matrix.tsv"), sep="\t", index_col=0)
+    hm.index = hm.index.astype(str)
+    missing = [f for f in row_labels if f not in hm.index]
+    if missing:
+        raise ValueError(f"{len(missing)} features are not rows of the unit matrix, e.g. {missing[:3]}")
+    grp = {}
+    with open(os.path.join(unit_dir, tag + "_marker_heatmap_fold_matrix.tsv")) as fh:
+        for h in fh.readline().rstrip("\n").split("\t")[1:]:
+            g, b = h.split(":", 1)
+            grp[b] = G_TRAIN_MUT if g == "MUT" else G_TRAIN_WT
+    with open(os.path.join(unit_dir, tag + "_imputed.csv")) as fh:
+        for r in csv.DictReader(fh):
+            if r["barcode"] not in grp:
+                grp[r["barcode"]] = G_PRED_MUT if r["imputed"] == "MUT" else G_PRED_WT
+    unlabelled = [c for c in hm.columns if c not in grp]
+    if unlabelled:
+        raise ValueError(f"{len(unlabelled)} matrix cells have no group")
+    order = [G_TRAIN_WT, G_PRED_WT, G_TRAIN_MUT, G_PRED_MUT] if control_first else list(GROUP_ORDER4)
+    cols = [c for g in order for c in hm.columns if grp[c] == g]
+    classes = ["WT", "MUT"] if control_first else ["MUT", "WT"]
+    rows = [f for k in classes for f in hm.index if f in row_labels and row_classes[f] == k]
+    sub = hm.loc[rows, cols].copy()
+    sub.index = [row_labels[f] for f in rows]
+    if not sub.index.is_unique:
+        raise ValueError("row labels are not unique")
+    counts = [(g, sum(1 for c in cols if grp[c] == g)) for g in order]
+    counts = [(g, n) for g, n in counts if n]
+    row_clusters = [G_TRAIN_MUT if row_classes[f] == "MUT" else G_TRAIN_WT for f in rows]
+    _plot_heatmap(sub, out_pdf, counts, [g for g, _ in counts], [grp[c] for c in cols], row_clusters,
+                  species=species, figure_title=figure_title, caption=caption)
+    sub.to_csv(os.path.splitext(out_pdf)[0] + ".tsv", sep="\t")
+    return sub
+
+
 # ---- differential expression + volcano (cellHarmony_differential moderated t-test) ----------
 VOLCANO_FOLD = 1.2                     # NON-LOG fold-change threshold (user spec): 1.2x
 VOLCANO_LOG2FC = float(np.log2(VOLCANO_FOLD))  # = 0.263 on the log2 axis (|log2FC| >= log2(1.2))
@@ -763,7 +919,7 @@ def _predicted_and_combined_panels(base, mut_cells, wt_cells, imp, markers, out_
 
 
 # ---- accuracy gate (>=85% re-classification of the ORIGINAL calls) ----
-ACCURACY_MIN = 0.85
+ACCURACY_MIN = _ved.CLASSIFIER_MIN_ACCURACY   # 0.85
 
 
 def _write_verification(res, out_dir, tag):
@@ -1542,12 +1698,22 @@ def _write_supervised_hits_table(annotated_paths, matrix_dir, out_path):
         except Exception:
             return (0.0, 0.0)
     rows.sort(key=_rk)
+    # A marker within SELF_MARKER_MAX_DISTANCE_BP of its own driver is the driver re-found by the discovery callers
+    # (for example the NPM1c insertion), not a passenger. Such rows go to a separate table and are not hits.
+    selfm = [r for r in rows if _ved.is_self_marker(r["driver"], r["marker"])]
+    rows = [r for r in rows if not _ved.is_self_marker(r["driver"], r["marker"])]
     with open(out_path, "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=cols, delimiter="\t")
         w.writeheader()
         for r in rows:
             w.writerow(r)
-    logger.info("wrote %s (%d hits)", out_path, len(rows))
+    self_path = out_path[:-4] + "__driver_as_own_marker_excluded.tsv" if out_path.endswith(".tsv") else out_path + ".driver_as_own_marker_excluded"
+    with open(self_path, "w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=cols, delimiter="\t")
+        w.writeheader()
+        for r in selfm:
+            w.writerow(r)
+    logger.info("wrote %s (%d hits; %d rows where the driver is its own marker -> %s)", out_path, len(rows), len(selfm), self_path)
     return rows
 
 
@@ -1599,7 +1765,7 @@ def run_supervised_passenger_association(args):
     os.makedirs(matrix_dir, exist_ok=True)
     drv, drv_keys = _driver_panel(args.driver_variants)
     only = set(getattr(args, "samples", None) or [])
-    mapq = getattr(args, "min_mapq", None) or 1
+    mapq = getattr(args, "min_mapq", None) or _ved.PASSENGER_MIN_MAPQ
     iwin = getattr(args, "indel_window", 5)
     rve = getattr(args, "results_extraction", None)
     built = []
@@ -1631,9 +1797,9 @@ def run_supervised_passenger_association(args):
                for h in _glob.glob(os.path.join(matrix_dir, "*_cell_feature_matrix.h5ad"))]
     if not samples:
         raise SystemExit("no matrices to nominate on: %s" % matrix_dir)
-    min_mut = getattr(args, "nominate_min_mut", None) or 10
-    max_q = getattr(args, "max_q", 0.05)
-    max_bg = getattr(args, "max_background", 0.15)
+    min_mut = getattr(args, "nominate_min_mut", None) or _ved.PASSENGER_MIN_MUT_CELLS
+    max_q = getattr(args, "max_q", _ved.PASSENGER_MAX_Q)
+    max_bg = getattr(args, "max_background", _ved.NUCLEAR_PASSENGER_MAX_BACKGROUND)
     mtv.driver_genotype_summary(matrix_dir, samples, out_root)
     mtv.nominate_presence_fdr(matrix_dir, {s: [s] for s in samples}, out_root, level="sample",
                               min_mut=min_mut, max_q=max_q, max_background=max_bg)
@@ -2458,9 +2624,10 @@ def main(argv=None):
     ap.add_argument("--patient-map", dest="patient_map", default=None)
     ap.add_argument("--min-mapq", dest="min_mapq", default=None, type=int)
     ap.add_argument("--indel-window", dest="indel_window", default=5, type=int)
-    ap.add_argument("--max-q", dest="max_q", default=0.05, type=float)
-    ap.add_argument("--max-background", dest="max_background", default=0.15, type=float)
-    ap.add_argument("--nominate-min-mut", dest="nominate_min_mut", default=10, type=int)
+    # defaults = variant_evidence_defaults.py (results of record of MDS-AML-KINNEX-5)
+    ap.add_argument("--max-q", dest="max_q", default=_ved.PASSENGER_MAX_Q, type=float)
+    ap.add_argument("--max-background", dest="max_background", default=_ved.NUCLEAR_PASSENGER_MAX_BACKGROUND, type=float)
+    ap.add_argument("--nominate-min-mut", dest="nominate_min_mut", default=_ved.PASSENGER_MIN_MUT_CELLS, type=int)
     ap.add_argument("--limit-markers", dest="limit_markers", default=None, type=int, help="test only: genotype the first N passengers per sample")
     ap.add_argument("--export-patient", dest="export_patient", action="store_true", help="Per patient: combined driver+passenger h5ad + per-prediction cell-barcode TSVs (needs --matrix-dir, --patient-map, --hits-table, --h5ad-dir, --tsv-dir).")
     ap.add_argument("--matrix-dir", dest="matrix_dir", default=None)
@@ -2475,8 +2642,8 @@ def main(argv=None):
     ap.add_argument("--require-cosmic-clinvar", dest="require_cosmic_clinvar", action="store_true", help="functional-driver nomination: keep only variants with COSMIC or ClinVar support.")
     ap.add_argument("--mut-min", dest="mut_min", default=1, type=int)
     ap.add_argument("--wt-min", dest="wt_min", default=2, type=int)
-    ap.add_argument("--min-cells", dest="min_cells", default=20, type=int)
-    ap.add_argument("--top-n", dest="top_n", default=50, type=int)
+    ap.add_argument("--min-cells", dest="min_cells", default=_ved.CLASSIFIER_MIN_CELLS_PER_CLASS, type=int)   # 15; was 20 before 2026-11-14
+    ap.add_argument("--top-n", dest="top_n", default=_ved.CLASSIFIER_TOP_MARKERS, type=int)
     ap.add_argument("--impute", action="store_true")
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")

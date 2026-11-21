@@ -3104,10 +3104,15 @@ def parse_arguments():
                     help="Minimum mutant cells for a driver variant to be tested. Default 5")
     ap.add_argument("--min-recall", type=float, default=0.90,
                     help="Fraction of mutant cells the variant must mark. Default 0.90")
-    ap.add_argument("--max-background", type=float, default=0.10,
+    ap.add_argument("--max-background", type=float, default=None,
                     help="Maximum carrier rate among non-mutant cells; above this a high overlap "
-                         "is explained by the variant simply being common. Default 0.10")
-    return ap.parse_args()
+                         "is explained by the variant simply being common. Default 0.15 for --nominate-fdr "
+                         "(variant_evidence_defaults.MT_PASSENGER_MAX_BACKGROUND) and 0.10 for every other mode")
+    a = ap.parse_args()
+    if a.max_background is None:
+        from altanalyze3.components.bam import variant_evidence_defaults as _ved
+        a.max_background = _ved.MT_PASSENGER_MAX_BACKGROUND if a.nominate_fdr else 0.10
+    return a
 
 
 def main():
