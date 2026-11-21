@@ -172,7 +172,7 @@ def build_manifest(meta, job_dir):
             for line in handle:
                 if any(token in line for token in ("[params]", "[ICGS3] parameters:", "[ICGS3] cli equivalent:")):
                     evidence.append({"log": path.relative_to(job_dir).as_posix(), "text": line.rstrip()})
-                if any(token in line for token in ("[scale]", "[ambient]", "skipping QC", "[qc]", "[qc-only]",
+                if any(token in line for token in ("[scale]", "[ambient]", "[marker-recovery]", "skipping QC", "[qc]", "[qc-only]",
                         "[mem]", "QC filter", "Cells remaining after", "Auto-selected rho",
                         "Ambient RNA correction", "ambient RNA correction", "Starting library",
                         "Normalization steps:", "adata shape:", "[INFO] Applied min_alignment_score")):
@@ -290,6 +290,9 @@ def _preprocessing_methods(m):
         lines.append("Count-based QC filtering was skipped because the input was already normalized and log-transformed.")
     if 'using verified layers' in evidence and 'scale_data=True through the standard MarkerFinder hook' in evidence:
         lines.append("Imported expression failed the strict MarkerFinder constant-depth validation on the supplied gene panel. MarkerFinder therefore used the verified counts layer through its standard scale_data=True route (log2 depth normalization with the native median cell-total scale factor). The supplied RNA expression and saved embedding were retained, and scaling validation remained enabled.")
+    recovery = (m.get('marker_analysis') or {}).get('input_recovery') or {}
+    if recovery.get('method') == 'processed_abundance_log_inverse':
+        lines.append(f"For MarkerFinder (altanalyze3), imported RNA failed strict constant-depth validation. A separate working matrix was converted to processed linear abundances using log base {recovery['log_base']:.8g} ({recovery['scale_evidence']}). The native median-cell-total normalization and log2 transformation were then applied, with strict RNA scaling validation enabled. These abundances are not reconstructed raw counts. The supplied expression, complete cell and gene axes, and saved coordinates were retained. Recovery diagnostics and normalization parameters are included in the reproducibility record.")
     if 'verified raw.X counts' in evidence:
         lines.append("Raw counts were recovered from the supplied AnnData .raw matrix after confirming the complete matching RNA gene panel; the source raw matrix and normalized RNA were retained.")
     if 'Mitochondrial filtering unavailable' in evidence:

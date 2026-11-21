@@ -273,8 +273,10 @@ def detect_input_scaling(matrix, *, sample_rows=20000, seed=0, tol=1e-3):
         # ambient correction enabled.
         #
         # A log-transformed matrix that was never depth-normalized still falls through to
-        # 'unknown' below and is still refused, because its values sit under the ceiling. That
-        # case cannot be repaired: no counts are recoverable from it. Note that such a matrix
+        # 'unknown' below and is still refused, because its values sit under the ceiling.
+        # Raw counts cannot be inferred from it. scALABLE may separately prepare processed
+        # abundances from supported log-scale evidence before calling the validated hook.
+        # Note that such a matrix
         # can report best_transform == 'identity', because taking a log compresses depth
         # variation, so the transform name must NOT be used to make this decision.
         report["status"] = "counts_like"
@@ -286,7 +288,7 @@ def detect_input_scaling(matrix, *, sample_rows=20000, seed=0, tol=1e-3):
     return report
 
 
-def scale_expression_matrix(matrix, *, scale_factor=None):
+def scale_expression_matrix(matrix, *, scale_factor=None, workspace=None):
     """Apply ``log2(counts / total_counts_per_cell * scale_factor + 1)``.
 
     ``scale_factor`` defaults to the median cell total, which matches the scanpy
@@ -295,9 +297,57 @@ def scale_expression_matrix(matrix, *, scale_factor=None):
     median total, and the transform then collapses towards a binary detected / not-detected
     matrix (Pearson 0.9877 against binary, against 0.8694 at the median).
 
-    Returns ``(scaled_matrix, info)``.
+    Returns ``(scaled_matrix, info)``. An optional disk-backed ``workspace``
+    bounds preparation buffers without changing the normalization formula.
     """
     is_sparse = sparse.issparse(matrix)
+    if workspace is not None and (not is_sparse or (matrix.format == 'csr' and matrix.has_canonical_format)):
+        # Same native transform on a private disk-backed array. Bound temporary
+        # buffers by stored entries, rather than materializing another full RNA
+        # matrix while preparing imported scALABLE expression.
+        work = workspace.copy_matrix(matrix, dtype=np.float64)
+        totals = np.zeros(work.shape[0], dtype=np.float64)
+        step = max(1, 4_000_000 // max(1, work.shape[1]))
+        ranges = []
+        start = 0
+        while start < work.shape[0]:
+            stop = (min(work.shape[0], max(start + 1, int(np.searchsorted(
+                work.indptr, int(work.indptr[start]) + 4_000_000, side='right') - 1)))
+                    if is_sparse else min(work.shape[0], start + step))
+            ranges.append((start, stop))
+            totals[start:stop] = np.asarray(work[start:stop].sum(axis=1)).ravel()
+            if is_sparse:
+                workspace.release_range(work.data, int(work.indptr[start]), int(work.indptr[stop]))
+                workspace.release_range(work.indices, int(work.indptr[start]), int(work.indptr[stop]))
+            else:
+                workspace.release_pages()
+            start = stop
+        positive = totals > 0
+        if not np.any(positive):
+            raise MarkerFinderInputError("Every cell total is zero; cannot depth-normalize.")
+        median = float(np.median(totals[positive]))
+        factor = median if scale_factor is None else float(scale_factor)
+        if not np.isfinite(factor) or factor <= 0:
+            raise MarkerFinderInputError("scale_factor must be positive and finite, got %r." % factor)
+        inverse = np.zeros_like(totals)
+        inverse[positive] = factor / totals[positive]
+        for start, stop in ranges:
+            if is_sparse:
+                lo, hi = int(work.indptr[start]), int(work.indptr[stop])
+                values = work.data[lo:hi]
+                values *= np.repeat(inverse[start:stop], np.diff(work.indptr[start:stop + 1]))
+            else:
+                values = work[start:stop]
+                values *= inverse[start:stop, None]
+            np.add(values, 1.0, out=values)
+            np.log2(values, out=values)
+            if is_sparse:
+                workspace.release_range(work.data, lo, hi, write=True)
+            else:
+                workspace.release_pages()
+        return work, {"scale_factor": factor,
+                      "scale_factor_source": "median cell total" if scale_factor is None else "user-supplied",
+                      "median_cell_total": median, "n_cells_zero_total": int((~positive).sum())}
     work = matrix.tocsr().astype(np.float64) if is_sparse else np.asarray(matrix, dtype=np.float64).copy()
 
     totals = np.asarray(work.sum(axis=1)).ravel()

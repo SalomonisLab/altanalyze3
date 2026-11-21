@@ -417,7 +417,7 @@ def test_imported_normalization_mismatch_uses_standard_counts_route_and_preserve
     assert Path(store.get_job(job)['marker_analysis']['heatmap_cache']).is_file()
 
 
-def test_imported_normalization_mismatch_without_counts_still_requires_real_counts(tmp_path):
+def test_imported_normalization_mismatch_without_counts_recovers_processed_abundance(tmp_path):
     path=tmp_path/'input.h5ad'; source=fixture(path,True)
     values=source.X.toarray()
     source.X=sp.csr_matrix(np.log1p(np.expm1(values)/(1+np.linspace(0,.008,source.n_obs)[:,None])))
@@ -426,6 +426,13 @@ def test_imported_normalization_mismatch_without_counts_still_requires_real_coun
     store.update_job(job,analysis_mode='existing',files=[{'filename':str(path),'sample_name':'a'}],qc={
         'analysis_mode':'existing','existing_state_column':'cell_type','existing_embedding_key':'X_umap',
         'min_genes':1,'min_counts':0,'min_cells':0,'mit_percent':100,'impute_modalities':[]})
-    with pytest.raises(P.marker_mod._load_marker_finder().MarkerFinderInputError):
-        run_analysis_workflow(job,store,tmp_path/'unused.json')
+    artifacts = run_analysis_workflow(job,store,tmp_path/'unused.json')
+    result = ad.read_h5ad(artifacts['combined_h5ad'])
+    np.testing.assert_array_equal(result.X.toarray(), source.X[:-1].toarray())
+    np.testing.assert_array_equal(result.obsm['X_umap'], source.obsm['X_umap'][:-1])
+    assert result.var_names.equals(source.var_names)
+    record = store.get_job(job)['marker_analysis']
+    assert record['input_recovery']['method'] == 'processed_abundance_log_inverse'
+    assert record['input_recovery']['raw_counts_reconstructed'] is False
+    assert Path(record['markers_tsv']).is_file() and Path(record['heatmap_cache']).is_file()
     assert source.n_obs==40 and source.n_vars==30

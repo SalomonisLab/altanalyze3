@@ -17,6 +17,7 @@ from scipy import stats
 import scipy.sparse as sp
 
 from altanalyze3.components.cellHarmony import cellHarmony_differential, cellHarmony_lite
+from altanalyze3.components.cellHarmony.marker_input_recovery import prepare_marker_input, RecoveryUnavailable
 from altanalyze3.components.fastComm.api import FastCommParams, run_fastcomm
 from altanalyze3.components.fastComm.benchmark import FastCommBenchmarkParams, run_benchmark as run_fastcomm_benchmark
 from altanalyze3.components.fastComm.reporting import ExemplarReportParams, write_exemplar_report
@@ -2043,6 +2044,7 @@ def run_cellharmony_pipeline(
     marker_dir = outputs_dir / "marker_heatmap"
     marker_dir.mkdir(parents=True, exist_ok=True)
     marker_input_options = {}
+    marker_input_recovery = {}
     marker_call_options = dict(
         cluster_key=query_cluster_key,
         out=str(marker_dir / "cell_state_marker_heatmap.pdf"),
@@ -2054,19 +2056,33 @@ def run_cellharmony_pipeline(
     try:
         try:
             marker_outputs = marker_mod.generate_marker_heatmap_from_adata(combined_adata, **marker_call_options)
-        except marker_mod._load_marker_finder().MarkerFinderInputError:
-            # Imported RNA can have been normalized over an upstream gene panel,
-            # making the strict constant-total check fail on its supplied panel.
-            # Keep that gate enabled: the public hook already supports genuine
-            # counts + scale_data, exactly as in the canonical ICGS3 heatmap.
-            if not existing or "counts" not in combined_adata.layers or not combined_adata.uns.get("scalable_count_source"):
+        except marker_mod._load_marker_finder().MarkerFinderInputError as original_error:
+            try:
+                marker_input, marker_input_options, marker_input_recovery = prepare_marker_input(combined_adata)
+            except RecoveryUnavailable as recovery_error:
+                store.append_log(job_id, f"[marker-recovery] Original validation: {original_error}")
+                store.append_log(job_id, f"[marker-recovery] {recovery_error}")
                 raise
-            marker_input_options = {"layer": "counts", "scale_data": True}
-            store.append_log(job_id, '[existing] [qc] Imported X failed MarkerFinder scaling validation; '
-                "using verified layers['counts'] with scale_data=True through the standard MarkerFinder hook. "
-                'Supplied X, source matrices and saved coordinates are retained; RNA scaling validation stays enabled.')
+            if marker_input_recovery['method'] == 'verified_linear_source':
+                store.append_log(job_id, '[qc] Imported X failed MarkerFinder scaling validation; '
+                    f"using verified {marker_input_recovery['source']} with scale_data=True through the standard MarkerFinder hook. "
+                    'Supplied X, source matrices and saved coordinates are retained; RNA scaling validation stays enabled.')
+            else:
+                store.append_log(job_id, '[marker-recovery] Imported X failed MarkerFinder scaling validation; '
+                    f"a separate processed-abundance working matrix was recovered using log base {marker_input_recovery['log_base']:.8g} "
+                    f"({marker_input_recovery['scale_evidence']}) and native MarkerFinder median-total log2 normalization. "
+                    'Raw counts were not reconstructed. Supplied RNA, genes, cells and coordinates are retained; scaling validation stays enabled.')
+            # AnnData cannot serialize a heterogeneous list of diagnostic dicts.
+            # Keep the complete record as JSON, as well as structured job metadata.
+            combined_adata.uns['scalable_marker_input_recovery'] = json.dumps(marker_input_recovery)
             marker_outputs = marker_mod.generate_marker_heatmap_from_adata(
-                combined_adata, **marker_call_options, **marker_input_options)
+                marker_input, **marker_call_options, **marker_input_options)
+    except RecoveryUnavailable as error:
+        marker_outputs = None
+        marker_analysis = {
+            "enabled": False, "cluster_key": query_cluster_key, "status": "needs_verified_expression_scale",
+            "message": str(error),
+        }
     except marker_mod.NoMarkersSelectedError:
         marker_outputs = None
         marker_analysis = {
@@ -2092,6 +2108,7 @@ def run_cellharmony_pipeline(
             "networks": marker_outputs.get("networks", []),
             "output_options": marker_output_options,
             "input_options": marker_input_options,
+            "input_recovery": marker_input_recovery,
             "timings": marker_outputs.get("timings", {}),
         }
         if marker_outputs.get("pdf"):
@@ -2103,7 +2120,8 @@ def run_cellharmony_pipeline(
         if marker_outputs.get("heatmap_column_tsv"):
             marker_analysis["expression_tsv"] = str(marker_outputs["heatmap_column_tsv"])
     marker_analysis_by_modality["rna"] = dict(marker_analysis)
-    store.append_log(job_id, "Cell-state marker gene export complete.")
+    store.append_log(job_id, "Cell-state marker gene export complete." if marker_outputs is not None else
+                     f"[warning] MarkerFinder unavailable: {marker_analysis['message']}")
 
     resolved_h5ad_compression = _normalize_h5ad_compression(h5ad_compression)
     if existing:
