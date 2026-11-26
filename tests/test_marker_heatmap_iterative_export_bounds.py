@@ -58,3 +58,29 @@ def test_large_matrix_keeps_high_dpi_raster_path(tmp_path,monkeypatch):
         assert calls==[(True,2400),(True,2400)]
         assert image.get_rasterized() is True
     finally:plt.close(fig)
+
+
+def test_small_tight_export_bounds_long_callout_canvas_and_keeps_text(tmp_path,monkeypatch):
+    import matplotlib.pyplot as plt
+    import matplotlib.backends.backend_agg as agg
+    import numpy as np
+    from pypdf import PdfReader
+    fig,ax=plt.subplots(figsize=(2,2))
+    image=ax.imshow(np.zeros((2,6)),interpolation='none')
+    image.set_rasterized(True)
+    label='long-junction-identifier-'*80
+    ax.text(1.1,.5,label,transform=ax.transAxes,fontsize=8)
+    init=agg.RendererAgg.__init__
+    allocations=[]
+    def guard(self,width,height,dpi):
+        allocations.append(width*height*4)
+        assert allocations[-1] < 70*1024**2
+        init(self,width,height,dpi)
+    monkeypatch.setattr(agg.RendererAgg,'__init__',guard)
+    try:
+        out=tmp_path/'long-small.pdf'
+        mh._save_figure(fig,str(out),dpi=2400,bbox_inches='tight')
+        assert label in PdfReader(out).pages[0].extract_text()
+        assert label in out.with_suffix('.svg').read_text()
+        assert image.get_rasterized() and allocations
+    finally:plt.close(fig)

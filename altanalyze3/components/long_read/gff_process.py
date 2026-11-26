@@ -14,8 +14,17 @@ import gzip
 # structure string is first formed) so the collapse pipeline can build combined.gff.gz by point
 # lookup instead of re-scanning every source GFF. On by default; set ISOFORM_STRUCT_COORDS=0 to skip.
 try:
-    sys.path.insert(1, os.path.join(os.path.dirname(__file__), '..'))
-    from bam import coord_store as _coord_store
+    if __package__:
+        from ..bam import coord_store as _coord_store
+    else:
+        # Preserve direct-script use from an uninstalled checkout without
+        # exposing components/sparse as a top-level optional dependency.
+        _checkout = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+        sys.path.insert(0, _checkout)
+        try:
+            from altanalyze3.components.bam import coord_store as _coord_store
+        finally:
+            sys.path.remove(_checkout)
 except Exception:
     _coord_store = None
 _STRUCT_COORDS = os.environ.get('ISOFORM_STRUCT_COORDS', '1') not in ('0', 'false', 'False', '')

@@ -151,8 +151,11 @@ shared-exon exclusions. Without `--psi`, output is unchanged (marker table byte-
 Keep the hook's rasterized heatmap PDF for PSI. Nathan rejected a `--no-rasterize` (one pixel per cell) render on
 2026-10-11.
 Small rasterized matrices also retain page-resolution images: a native one-pixel-per-cell
-PDF can be blurred by the viewer. Their export DPI is capped at600 to bound the
-mixed-mode buffer; large-matrix export retains the requested DPI.
+PDF can be blurred by the viewer. Their export DPI adapts to the matrix dimensions
+(a 100-DPI page-resolution target for tiny matrices, rising with row/column density,
+up to 600 DPI and never above the requested DPI). Tight exports with long callouts
+also bound the mixed-mode RGBA canvas to 64 MiB. Labels remain vector; large-matrix
+export retains the requested DPI.
 For an explicitly requested median-imputed display of existing assignments, use
 `render_consolidated_marker_heatmap(..., missing_psi='row_median', normalization='row_zscore')`.
 This fills PSI before display scaling, preserves source PSI and an imputation mask in

@@ -1973,14 +1973,32 @@ def _save_figure(fig, output_path, dpi=None, write_svg=True, bbox_inches=None):
     # (one pixel per cell) PDF images are smoothed by some PDF viewers despite
     # interpolation='none', blurring measured cells and categorical strips.
     # Bound the small-matrix mixed-mode buffer instead of disabling it; large
-    # single-cell matrices retain the existing requested-DPI path.
+    # single-cell matrices retain the existing requested-DPI path. A 600-dpi
+    # ceiling alone still expands a 2 x 6 heatmap into thousands of pixels.
     from matplotlib.image import AxesImage
     images = fig.findobj(AxesImage)
     native_small = (images and sum(image.get_array().size for image in images) <= 1_000_000
                     and all(image.get_interpolation() == 'none' for image in images)
                     and os.path.splitext(str(output_path))[1].lower() in {'.pdf', '.svg'})
     if native_small:
-        dpi = min(dpi, 600.)
+        fig.canvas.draw()  # resolve axes dividers at the ordinary screen DPI
+        required_dpi = 100.
+        for image in images:
+            rows, cols = image.get_array().shape[:2]
+            bounds = image.axes.get_window_extent()
+            required_dpi = max(required_dpi, 2 * rows * fig.dpi / max(bounds.height, 1.),
+                               2 * cols * fig.dpi / max(bounds.width, 1.))
+        # Two pixels per source row/column when possible, with a page-resolution
+        # floor for tiny matrices. Text remains vector at every export DPI.
+        dpi = min(dpi, 600., required_dpi)
+        page_area = float(np.prod(fig.get_size_inches()))
+        if bbox_inches == 'tight':
+            tight = fig.get_tightbbox(fig.canvas.get_renderer())
+            padding = 2 * float(plt.rcParams['savefig.pad_inches'])
+            page_area = max(page_area, (tight.width + padding) * (tight.height + padding))
+        # Long literal callouts can widen the tight export far beyond the
+        # original page. Bound that mixed-mode RGBA canvas as well (64 MiB).
+        dpi = min(dpi, np.sqrt(64 * 1024**2 / (4 * max(page_area, 1.))))
     fig.savefig(output_path, facecolor="white", transparent=False, dpi=dpi, bbox_inches=bbox_inches)
     base, ext = os.path.splitext(output_path)
     svg_path = base + ".svg"
@@ -1999,23 +2017,12 @@ def _save_figure(fig, output_path, dpi=None, write_svg=True, bbox_inches=None):
 
 
 def _load_marker_finder():
-    try:
-        from cellHarmony import markerFinder as ch_marker_finder
-
-        return ch_marker_finder
-    except ImportError:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        components_dir = os.path.dirname(script_dir)
-        if components_dir not in sys.path:
-            sys.path.insert(0, components_dir)
-        try:
-            from cellHarmony import markerFinder as ch_marker_finder
-
-            return ch_marker_finder
-        except ImportError as exc:
-            raise ImportError(
-                "Unable to import cellHarmony.markerFinder. Ensure the altanalyze3 components directory is on PYTHONPATH."
-            ) from exc
+    # Never add components/ to sys.path: its sparse/ namespace can shadow the
+    # optional pydata/sparse dependency imported by dask/anndata. A canonical
+    # import also keeps MarkerFinder exception identities consistent across
+    # the web pipeline, recovery code and this public hook.
+    from altanalyze3.components.cellHarmony import markerFinder
+    return markerFinder
 
 
 def _markerfinder_stats(adata, cluster_key, use_raw, layer, scale_data=False,
