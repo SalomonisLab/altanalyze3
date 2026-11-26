@@ -1103,7 +1103,7 @@ def calculate_psi(path_to_count,ensg,outdir):
         uid,coords = item.split('=')
         chrom, coords = coords.split(':')
         start, end = coords.split('-')
-        strand = '+' if start < end else '-'
+        strand = '+' if int(start) < int(end) else '-'
         gene = uid.split(':')[0]
         col_uid.append(uid)
         col_gene.append(gene)
